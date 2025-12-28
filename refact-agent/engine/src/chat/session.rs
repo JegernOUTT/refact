@@ -370,18 +370,28 @@ pub async fn get_or_create_session_with_trajectory(
         }
     }
 
-    let session = if let Some(loaded) = super::trajectories::load_trajectory_for_chat(gcx, chat_id).await {
+    let (session, is_new) = if let Some(loaded) = super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id).await {
         info!("Loaded trajectory for chat {} with {} messages", chat_id, loaded.messages.len());
-        ChatSession::new_with_trajectory(chat_id.to_string(), loaded.messages, loaded.thread, loaded.created_at)
+        (ChatSession::new_with_trajectory(chat_id.to_string(), loaded.messages, loaded.thread, loaded.created_at), false)
     } else {
-        ChatSession::new(chat_id.to_string())
+        let mut s = ChatSession::new(chat_id.to_string());
+        s.increment_version();
+        (s, true)
     };
 
-    let mut sessions_write = sessions.write().await;
-    sessions_write
-        .entry(chat_id.to_string())
-        .or_insert_with(|| Arc::new(AMutex::new(session)))
-        .clone()
+    let session_arc = {
+        let mut sessions_write = sessions.write().await;
+        sessions_write
+            .entry(chat_id.to_string())
+            .or_insert_with(|| Arc::new(AMutex::new(session)))
+            .clone()
+    };
+
+    if is_new {
+        super::trajectories::maybe_save_trajectory(gcx, session_arc.clone()).await;
+    }
+
+    session_arc
 }
 
 pub fn start_session_cleanup_task(gcx: Arc<ARwLock<GlobalContext>>) {
