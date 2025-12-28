@@ -2,7 +2,6 @@ use std::io::Cursor;
 use image::ImageReader;
 use regex::Regex;
 use serde_json::Value;
-use crate::call_validation::{ChatToolCall, ContextFile};
 use crate::postprocessing::pp_context_files::RESERVE_FOR_QUESTION_AND_FOLLOWUP;
 
 pub struct HasRagResults {
@@ -42,42 +41,6 @@ pub fn parse_image_b64_from_image_url_openai(image_url: &str) -> Option<(String,
         let value = captures.get(3)?.as_str().to_string();
         Some((image_type, encoding, value))
     })
-}
-
-#[allow(dead_code)] // Reserved for future RAG token calculation
-pub fn max_tokens_for_rag_chat_by_tools(
-    tools: &Vec<ChatToolCall>,
-    context_files: &Vec<ContextFile>,
-    n_ctx: usize,
-    maxgen: usize,
-) -> usize {
-    let base_limit = n_ctx.saturating_sub(maxgen).saturating_sub(RESERVE_FOR_QUESTION_AND_FOLLOWUP);
-    if tools.is_empty() {
-        return base_limit.min(4096);
-    }
-    let context_files_len = context_files.len().min(crate::constants::CHAT_TOP_N);
-    let mut overall_tool_limit: usize = 0;
-    for tool in tools {
-        let is_cat_with_lines = if tool.function.name == "cat" {
-            // Look for patterns like "filename:10-20" in the arguments
-            let re = Regex::new(r":[0-9]+-[0-9]+").unwrap();
-            re.is_match(&tool.function.arguments)
-        } else {
-            false
-        };
-        
-        let tool_limit = match tool.function.name.as_str() {
-            "search_semantic" | "search_pattern" | "search_symbol_definition" | "search_symbol_usages" | "cat" if is_cat_with_lines => {
-                (4096 * context_files_len).min(base_limit / 2).max(4096)
-            },
-            "cat" => (8192 * context_files_len).min(base_limit / 2).max(8192),
-            "deep_research" | "strategic_planning" => 32000,
-            _ => (4096 * context_files_len).min(base_limit / 2).max(4096)
-        };
-        
-        overall_tool_limit += tool_limit;
-    }
-    base_limit.min(overall_tool_limit)
 }
 
 pub fn max_tokens_for_rag_chat(n_ctx: usize, maxgen: usize) -> usize {

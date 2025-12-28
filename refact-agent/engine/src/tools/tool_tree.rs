@@ -79,7 +79,7 @@ impl Tool for ToolTree {
                 let file_candidates = correct_to_nearest_filename(gcx.clone(), &path, false, 10).await;
                 let dir_candidates = correct_to_nearest_dir_path(gcx.clone(), &path, false, 10).await;
                 if dir_candidates.is_empty() && !file_candidates.is_empty() {
-                    return Err("Cannot execute tree() because 'path' provided refers to a file.".to_string());
+                    return Err(format!("⚠️ '{}' is a file, not a directory. 💡 Use cat('{}') to read it, or tree() without path for project root", path, path));
                 }
 
                 let project_dirs = get_project_dirs(gcx.clone()).await;
@@ -90,7 +90,7 @@ impl Tool for ToolTree {
 
                 let is_within_project_dirs = project_dirs.iter().any(|p| true_path.starts_with(&p));
                 if !is_within_project_dirs && !gcx.read().await.cmdline.inside_container {
-                    return Err(format!("Cannot execute tree(), '{path}' is not within the project directories."));
+                    return Err(format!("⚠️ '{}' is outside project directories. 💡 Use tree() without path to see project root", path));
                 }
 
                 let indexing_everywhere = crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await;

@@ -21,7 +21,7 @@ fn parse_output_filter(args: &HashMap<String, Value>) -> OutputFilter {
     let output_filter = args.get("output_filter").and_then(|v| v.as_str()).unwrap_or("");
     let output_limit = args.get("output_limit").and_then(|v| v.as_str()).unwrap_or("");
 
-    let is_unlimited = output_limit.eq_ignore_ascii_case("all");
+    let is_unlimited = output_limit.eq_ignore_ascii_case("all") || output_limit.eq_ignore_ascii_case("full");
 
     let limit_lines = if is_unlimited {
         usize::MAX
@@ -36,7 +36,8 @@ fn parse_output_filter(args: &HashMap<String, Value>) -> OutputFilter {
         grep: output_filter.to_string(),
         grep_context_lines: 3,
         remove_from_output: "".to_string(),
-        limit_tokens: if is_unlimited { None } else { Some(limit_lines * 50) },
+        limit_tokens: if is_unlimited { None } else { Some(limit_lines.saturating_mul(50)) },
+        skip: false,
     }
 }
 

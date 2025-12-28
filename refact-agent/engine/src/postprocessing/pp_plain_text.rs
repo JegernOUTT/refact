@@ -44,7 +44,7 @@ pub async fn postprocess_plain_text(
 
     for mut msg in plain_text_messages.into_iter() {
         if let Some(ref filter) = msg.output_filter {
-            if filter.limit_lines < usize::MAX || filter.limit_chars < usize::MAX || !filter.grep.is_empty() {
+            if filter.limit_lines < usize::MAX || filter.limit_chars < usize::MAX || !filter.grep.is_empty() || !filter.remove_from_output.is_empty() {
                 msg.content = match msg.content {
                     ChatContent::SimpleText(text) => {
                         ChatContent::SimpleText(output_mini_postprocessing(filter, &text))

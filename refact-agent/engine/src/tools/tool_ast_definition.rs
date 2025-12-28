@@ -83,7 +83,10 @@ impl Tool for ToolAstDefinition {
                     }).collect();
 
                     if defs.len() > DEFS_LIMIT {
-                        tool_message.push_str(&format!("...and {} more\n", defs.len() - DEFS_LIMIT));
+                        tool_message.push_str(&format!(
+                            "⚠️ {} more definitions not shown (limit: {}). 💡 Use more specific symbol name\n",
+                            defs.len() - DEFS_LIMIT, DEFS_LIMIT
+                        ));
                     }
 
                     all_messages.push(tool_message);
@@ -148,10 +151,13 @@ pub async fn there_are_definitions_with_similar_names_though(
 
     let tool_message = if fuzzy_matches.is_empty() {
         let counters = fetch_counters(ast_index).unwrap_or_else(trace_and_default);
-        format!("No definitions with name `{}` found in the workspace, and no similar names were found among {} definitions in the AST tree.\n", symbol, counters.counter_defs)
+        format!(
+            "⚠️ No definitions for '{}' found ({} total in AST). 💡 Check spelling or use search_pattern() to find\n",
+            symbol, counters.counter_defs
+        )
     } else {
         let mut msg = format!(
-            "No definitions with name `{}` found in the workspace, there are definitions with similar names though:\n",
+            "⚠️ No exact match for '{}'. 💡 Similar definitions found:\n",
             symbol
         );
         for line in fuzzy_matches {

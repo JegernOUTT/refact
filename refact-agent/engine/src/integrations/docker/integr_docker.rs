@@ -11,6 +11,8 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon, IntegrationConfirmation};
 use crate::integrations::process_io_utils::AnsiStrippable;
+use crate::postprocessing::pp_row_limiter::RowLimiter;
+use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use crate::integrations::docker::docker_ssh_tunnel_utils::{SshConfig, forward_remote_docker_if_needed};
 use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num};
@@ -175,12 +177,15 @@ impl Tool for ToolDocker {
 
         let (stdout, _) = self.command_execute(&command, gcx.clone(), true, false).await?;
 
+        let limited_output = RowLimiter::new(100, 200).limit_text_rows(&stdout);
+
         Ok((false, vec![
             ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText(stdout),
+                content: ChatContent::SimpleText(limited_output),
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
+                output_filter: Some(OutputFilter::no_limits()),
                 ..Default::default()
             }),
         ]))

@@ -76,7 +76,7 @@ impl Tool for ToolAstReference {
                                 usage_lines.push(format!("{}:{}", short_path, uline));
                             }
                             let more_usages = if usage_count > USAGES_LIMIT {
-                                format!("...and {} more", usage_count - USAGES_LIMIT)
+                                format!("⚠️ {} more usages not shown (limit: {}). 💡 Use cat() to explore specific files", usage_count - USAGES_LIMIT, USAGES_LIMIT)
                             } else {
                                 String::new()
                             };
@@ -109,7 +109,10 @@ impl Tool for ToolAstReference {
                     }
 
                     if defs.len() > DEFS_LIMIT {
-                        symbol_messages.push(format!("There are {} more symbol definitions that match the query, skipped", defs.len() - DEFS_LIMIT));
+                        symbol_messages.push(format!(
+                            "⚠️ {} more definitions skipped (limit: {}). 💡 Use more specific symbol name",
+                            defs.len() - DEFS_LIMIT, DEFS_LIMIT
+                        ));
                     }
                 } else {
                     corrections = true;

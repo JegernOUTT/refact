@@ -68,7 +68,7 @@ fn collect_lines_from_files(
             }
             if s.symbol_type == SymbolType::CommentDefinition {
                 let useful = settings.useful_symbol_default;
-                colorize_if_more_useful(lines, s.full_line1() - 1, s.full_line2(), "comment".to_string(), useful);
+                colorize_if_more_useful(lines, s.full_line1().saturating_sub(1), s.full_line2(), "comment".to_string(), useful);
             } else {
                 let mut useful = settings.useful_symbol_default;
                 if s.symbol_type == SymbolType::StructDeclaration {
@@ -77,7 +77,7 @@ fn collect_lines_from_files(
                 if s.symbol_type == SymbolType::FunctionDeclaration {
                     useful = 55.0;
                 }
-                colorize_if_more_useful(lines, s.full_line1() - 1, s.full_line2(), format!("{}", s.path()), useful);
+                colorize_if_more_useful(lines, s.full_line1().saturating_sub(1), s.full_line2(), format!("{}", s.path()), useful);
             }
         }
         colorize_if_more_useful(lines, 0, lines.len(), "empty".to_string(), settings.useful_background);
@@ -146,7 +146,7 @@ async fn convert_input_into_usefullness(
                 if DEBUG >= 1 {
                     info!("+ search result {} {:?} {:.2}", s.path(), s.symbol_type, msg.usefulness);
                 }
-                colorize_if_more_useful(lines, s.full_line1() - 1, s.full_line2(), format!("{}", s.path()), msg.usefulness);
+                colorize_if_more_useful(lines, s.full_line1().saturating_sub(1), s.full_line2(), format!("{}", s.path()), msg.usefulness);
                 let mut parent_path = s.official_path.clone();
                 if parent_path.len() > 1 {
                     // MyClass::f  ->  MyClass
@@ -257,6 +257,9 @@ async fn pp_limit_and_merge(
     // Convert line_content to tokens up to the limit
     let mut tokens_count = 0;
     let mut lines_take_cnt = 0;
+    let mut lines_skipped_by_budget = 0;
+    let mut files_skipped_by_limit = 0;
+    let mut budget_exceeded = false;
     let mut files_mentioned_set = HashSet::new();
     let mut files_mentioned_sequence = vec![];
     for line_ref in lines_by_useful.iter_mut() {
@@ -267,6 +270,7 @@ async fn pp_limit_and_merge(
 
         if !files_mentioned_set.contains(&line_ref.file_ref.cpath) {
             if files_mentioned_set.len() >= settings.max_files_n {
+                files_skipped_by_limit += 1;
                 continue;
             }
             files_mentioned_set.insert(line_ref.file_ref.cpath.clone());
@@ -277,7 +281,9 @@ async fn pp_limit_and_merge(
             }
         }
         if tokens_count + ntokens > tokens_limit {
-            break;
+            budget_exceeded = true;
+            lines_skipped_by_budget += 1;
+            continue;
         }
         tokens_count += ntokens;
         line_ref.take = true;
@@ -357,6 +363,30 @@ async fn pp_limit_and_merge(
             skip_pp: false,
         });
     }
+
+    if budget_exceeded || files_skipped_by_limit > 0 {
+        let mut truncation_note = String::new();
+        if lines_skipped_by_budget > 0 {
+            truncation_note.push_str(&format!("⚠️ {} lines skipped due to token budget", lines_skipped_by_budget));
+        }
+        if files_skipped_by_limit > 0 {
+            if !truncation_note.is_empty() {
+                truncation_note.push_str("; ");
+            }
+            truncation_note.push_str(&format!("⚠️ {} files skipped due to max files limit", files_skipped_by_limit));
+        }
+        context_files_merged.push(ContextFile {
+            file_name: "".to_string(),
+            file_content: truncation_note,
+            line1: 0,
+            line2: 0,
+            symbols: vec![],
+            gradient_type: -1,
+            usefulness: 0.0,
+            skip_pp: true,
+        });
+    }
+
     context_files_merged
 }
 

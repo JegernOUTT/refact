@@ -156,11 +156,14 @@ async fn smart_compress_results(
     }
     if file_paths.len() > used_files.len() {
         let remaining_files = file_paths.len() - used_files.len();
-        content.push_str(&format!("... and {} more files with matches (not shown due to size limit)\n", remaining_files));
+        content.push_str(&format!(
+            "⚠️ {} more files not shown (4KB limit). 💡 Use narrower scope or more specific pattern\n",
+            remaining_files
+        ));
     }
     if estimated_size > MAX_OUTPUT_SIZE {
         info!("Compressing `search_pattern` output: estimated {} bytes (exceeds 4KB limit)", estimated_size);
-        content.push_str("\nNote: Output has been compressed. Use more specific pattern or scope for detailed results.");
+        content.push_str("\n⚠️ Output compressed due to size. 💡 Use cat('file:line') to see specific matches\n");
     }
     content
 }
@@ -228,7 +231,7 @@ impl Tool for ToolRegexSearch {
         // 1. Path matches
         let regex = match Regex::new(&pattern) {
             Ok(r) => r,
-            Err(e) => return Err(format!("Invalid regex pattern '{}': {}. Please check your syntax.", pattern, e)),
+            Err(e) => return Err(format!("⚠️ Invalid regex '{}': {}. 💡 Use (?i) for case-insensitive, escape special chars with \\", pattern, e)),
         };
         let mut path_matches: Vec<String> = files_in_scope
             .iter()

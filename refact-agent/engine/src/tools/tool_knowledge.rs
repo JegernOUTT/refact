@@ -11,6 +11,7 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, Too
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::memories::memories_search;
 use crate::knowledge_graph::build_knowledge_graph;
+use crate::postprocessing::pp_command_output::OutputFilter;
 
 pub struct ToolGetKnowledge {
     pub config_path: String,
@@ -135,6 +136,7 @@ impl Tool for ToolGetKnowledge {
             content: ChatContent::SimpleText(memories_str),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         })]))
     }

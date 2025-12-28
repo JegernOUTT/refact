@@ -104,7 +104,7 @@ impl Tool for ToolSearch {
             info!("att-search: vector_of_context_file={:?}", vector_of_context_file);
 
             if vector_of_context_file.is_empty() {
-                all_content.push_str("No results found for this query.\n");
+                all_content.push_str("⚠️ No results for this query. 💡 Try different keywords or broaden scope to 'workspace'\n");
                 continue;
             }
 
@@ -130,7 +130,7 @@ impl Tool for ToolSearch {
         }
 
         if all_context_files.is_empty() {
-            return Err("All searches produced no results, adjust the queries or try a different scope.".to_string());
+            return Err("⚠️ All searches produced no results. 💡 Try different keywords, broaden scope to 'workspace', or use search_pattern() for regex search".to_string());
         }
 
         let mut results = vec_context_file_to_context_tools(all_context_files);

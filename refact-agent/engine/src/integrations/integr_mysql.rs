@@ -14,6 +14,8 @@ use crate::call_validation::{ChatContent, ChatMessage, ChatUsage};
 use crate::integrations::go_to_configuration_message;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation, IntegrationTrait};
+use crate::postprocessing::pp_row_limiter::RowLimiter;
+use crate::postprocessing::pp_command_output::OutputFilter;
 
 use super::process_io_utils::AnsiStrippable;
 
@@ -69,45 +71,52 @@ impl IntegrationTrait for ToolMysql {
     }
 }
 
+const MAX_ROWS: usize = 100;
+const MAX_CELL_CHARS: usize = 200;
+const QUERY_TIMEOUT_SECS: u64 = 10;
+
 impl ToolMysql {
-  async fn run_mysql_command(&self, query: &str) -> Result<String, String> {
-      let mut mysql_command = self.settings_mysql.mysql_binary_path.clone();
-      if mysql_command.is_empty() {
-          mysql_command = "mysql".to_string();
-      }
-      let output_future = Command::new(mysql_command)
-          .arg("-h")
-          .arg(&self.settings_mysql.host)
-          .arg("-P")
-          .arg(&self.settings_mysql.port)
-          .arg("-u")
-          .arg(&self.settings_mysql.user)
-          .arg(format!("-p{}", &self.settings_mysql.password))
-          .arg(&self.settings_mysql.database)
-          .arg("-e")
-          .arg(query)
-          .stdin(std::process::Stdio::null())
-          .output();
-      if let Ok(output) = tokio::time::timeout(tokio::time::Duration::from_millis(10_000), output_future).await {
-          if output.is_err() {
-              let err_text = format!("{}", output.unwrap_err());
-              tracing::error!("mysql didn't work:\n{}\n{}", query, err_text);
-              return Err(format!("{}, mysql failed:\n{}", go_to_configuration_message("mysql"), err_text));
-          }
-          let output = output.unwrap();
-          if output.status.success() {
-              Ok(output.stdout.to_string_lossy_and_strip_ansi())
-          } else {
-              // XXX: limit stderr, can be infinite
-              let stderr_string = output.stderr.to_string_lossy_and_strip_ansi();
-              tracing::error!("mysql didn't work:\n{}\n{}", query, stderr_string);
-              Err(format!("{}, mysql failed:\n{}", go_to_configuration_message("mysql"), stderr_string))
-          }
-      } else {
-          tracing::error!("mysql timed out:\n{}", query);
-          Err("mysql command timed out".to_string())
-      }
-  }
+    async fn run_mysql_command(&self, query: &str) -> Result<String, String> {
+        let mut mysql_command = self.settings_mysql.mysql_binary_path.clone();
+        if mysql_command.is_empty() {
+            mysql_command = "mysql".to_string();
+        }
+        let output_future = Command::new(mysql_command)
+            .arg("-h")
+            .arg(&self.settings_mysql.host)
+            .arg("-P")
+            .arg(&self.settings_mysql.port)
+            .arg("-u")
+            .arg(&self.settings_mysql.user)
+            .arg(format!("-p{}", &self.settings_mysql.password))
+            .arg(&self.settings_mysql.database)
+            .arg("-e")
+            .arg(query)
+            .stdin(std::process::Stdio::null())
+            .output();
+        if let Ok(output) = tokio::time::timeout(tokio::time::Duration::from_secs(QUERY_TIMEOUT_SECS), output_future).await {
+            if output.is_err() {
+                let err_text = format!("{}", output.unwrap_err());
+                tracing::error!("mysql didn't work:\n{}\n{}", query, err_text);
+                return Err(format!("{}, mysql failed:\n{}", go_to_configuration_message("mysql"), err_text));
+            }
+            let output = output.unwrap();
+            if output.status.success() {
+                let raw_output = output.stdout.to_string_lossy_and_strip_ansi();
+                let limiter = RowLimiter::new(MAX_ROWS, MAX_CELL_CHARS);
+                Ok(limiter.limit_text_rows(&raw_output))
+            } else {
+                let stderr_string = output.stderr.to_string_lossy_and_strip_ansi();
+                let limiter = RowLimiter::new(MAX_ROWS, MAX_CELL_CHARS);
+                let limited_stderr = limiter.limit_text_rows(&stderr_string);
+                tracing::error!("mysql didn't work:\n{}\n{}", query, limited_stderr);
+                Err(format!("{}, mysql failed:\n{}", go_to_configuration_message("mysql"), limited_stderr))
+            }
+        } else {
+            tracing::error!("mysql timed out:\n{}", query);
+            Err(format!("⚠️ mysql timed out after {}s. 💡 Add LIMIT to query or check connection", QUERY_TIMEOUT_SECS))
+        }
+    }
 }
 
 #[async_trait]
@@ -156,6 +165,7 @@ impl Tool for ToolMysql {
             content: ChatContent::SimpleText(serde_json::to_string(&result).unwrap()),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         }));
         Ok((true, results))

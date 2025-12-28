@@ -280,6 +280,7 @@ impl Tool for ToolCmdline {
             content: ChatContent::SimpleText(tool_output),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         })];
 

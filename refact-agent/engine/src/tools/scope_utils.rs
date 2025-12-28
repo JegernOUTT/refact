@@ -166,7 +166,10 @@ pub fn validate_scope_files(
     scope: &str,
 ) -> Result<Vec<String>, String> {
     if files.is_empty() {
-        Err(format!("No files found in scope: {}", scope))
+        Err(format!(
+            "⚠️ No files found in scope '{}'. 💡 Use 'workspace' for all files, 'dir/' (trailing slash) for directories, or check path exists",
+            scope
+        ))
     } else {
         Ok(files)
     }

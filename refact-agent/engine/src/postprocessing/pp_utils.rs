@@ -246,6 +246,9 @@ pub fn colorize_minus_one(lines: &mut Vec<FileLine>, line1: usize, line2: usize)
 }
 
 pub fn colorize_comments_up(lines: &mut Vec<FileLine>, settings: &PostprocessSettings) {
+    if lines.len() < 2 {
+        return;
+    }
     for i in (0 .. lines.len() - 1).rev() {
         let next_line = lines.get(i+1).map(|x|x.clone());
         let this_line = lines.get_mut(i);

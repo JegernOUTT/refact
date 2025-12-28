@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
@@ -75,6 +76,99 @@ pub async fn postprocess_tool_results(
     result
 }
 
+fn deduplicate_and_merge_context_files(
+    context_files: Vec<ContextFile>,
+    existing_messages: &[ChatMessage],
+) -> Vec<ContextFile> {
+    let mut file_groups: HashMap<String, Vec<ContextFile>> = HashMap::new();
+
+    for cf in context_files {
+        let canonical = canonical_path(&cf.file_name).to_string_lossy().to_string();
+        file_groups.entry(canonical).or_default().push(cf);
+    }
+
+    let mut result = Vec::new();
+
+    for (_canonical, mut files) in file_groups {
+        if files.len() == 1 {
+            let cf = files.remove(0);
+            if !is_covered_by_history(&cf, existing_messages) {
+                result.push(cf);
+            }
+            continue;
+        }
+
+        files.sort_by_key(|f| f.line1);
+        let merged = merge_overlapping_ranges(files);
+
+        for cf in merged {
+            if !is_covered_by_history(&cf, existing_messages) {
+                result.push(cf);
+            }
+        }
+    }
+
+    result
+}
+
+fn merge_overlapping_ranges(mut files: Vec<ContextFile>) -> Vec<ContextFile> {
+    if files.is_empty() {
+        return files;
+    }
+
+    let mut result = Vec::new();
+    let mut current = files.remove(0);
+
+    for next in files {
+        let curr_start = if current.line1 == 0 { 1 } else { current.line1 };
+        let curr_end = if current.line2 == 0 { usize::MAX } else { current.line2 };
+        let next_start = if next.line1 == 0 { 1 } else { next.line1 };
+        let next_end = if next.line2 == 0 { usize::MAX } else { next.line2 };
+
+        if curr_end == usize::MAX || next_start <= curr_end.saturating_add(1) {
+            current.line1 = curr_start.min(next_start);
+            current.line2 = if curr_end == usize::MAX || next_end == usize::MAX { 0 } else { curr_end.max(next_end) };
+            current.usefulness = current.usefulness.max(next.usefulness);
+            for sym in next.symbols {
+                if !current.symbols.contains(&sym) {
+                    current.symbols.push(sym);
+                }
+            }
+        } else {
+            result.push(current);
+            current = next;
+        }
+    }
+    result.push(current);
+    result
+}
+
+fn is_covered_by_history(cf: &ContextFile, messages: &[ChatMessage]) -> bool {
+    let cf_canonical = canonical_path(&cf.file_name);
+    let cf_start = if cf.line1 == 0 { 1 } else { cf.line1 };
+    let cf_end = if cf.line2 == 0 { usize::MAX } else { cf.line2 };
+
+    for msg in messages {
+        if msg.role != "context_file" {
+            continue;
+        }
+        if let ChatContent::ContextFiles(files) = &msg.content {
+            for existing in files {
+                let existing_canonical = canonical_path(&existing.file_name);
+                if existing_canonical != cf_canonical {
+                    continue;
+                }
+                let ex_start = if existing.line1 == 0 { 1 } else { existing.line1 };
+                let ex_end = if existing.line2 == 0 { usize::MAX } else { existing.line2 };
+                if ex_start <= cf_start && ex_end >= cf_end {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 async fn postprocess_context_file_results(
     gcx: Arc<ARwLock<GlobalContext>>,
     tokenizer: Option<Arc<Tokenizer>>,
@@ -83,7 +177,9 @@ async fn postprocess_context_file_results(
     mut pp_settings: PostprocessSettings,
     existing_messages: &[ChatMessage],
 ) -> Option<ChatMessage> {
-    let (skip_pp_files, mut pp_files): (Vec<_>, Vec<_>) = context_files
+    let deduped_files = deduplicate_and_merge_context_files(context_files, existing_messages);
+
+    let (skip_pp_files, mut pp_files): (Vec<_>, Vec<_>) = deduped_files
         .into_iter()
         .partition(|cf| cf.skip_pp);
 
@@ -127,6 +223,8 @@ async fn postprocess_context_file_results(
     })
 }
 
+const MIN_PER_FILE_BUDGET: usize = 50;
+
 async fn fill_skip_pp_files_with_budget(
     gcx: Arc<ARwLock<GlobalContext>>,
     tokenizer: Option<Arc<Tokenizer>>,
@@ -138,8 +236,28 @@ async fn fill_skip_pp_files_with_budget(
         return vec![];
     }
 
-    let per_file_budget = tokens_limit / files.len().max(1);
+    let max_files_by_budget = (tokens_limit / MIN_PER_FILE_BUDGET).max(1);
+    let files_to_skip = if files.len() > max_files_by_budget {
+        files.len() - max_files_by_budget
+    } else {
+        0
+    };
+    let files: Vec<_> = files.into_iter().take(max_files_by_budget).collect();
+    let per_file_budget = (tokens_limit / files.len().max(1)).max(MIN_PER_FILE_BUDGET);
     let mut result = Vec::new();
+
+    if files_to_skip > 0 {
+        result.push(ContextFile {
+            file_name: "".to_string(),
+            file_content: format!("⚠️ {} files skipped due to token budget constraints", files_to_skip),
+            line1: 0,
+            line2: 0,
+            symbols: vec![],
+            gradient_type: -1,
+            usefulness: 0.0,
+            skip_pp: true,
+        });
+    }
 
     for mut cf in files {
         if let Some(dup_info) = find_duplicate_in_history(&cf, existing_messages) {
@@ -243,10 +361,13 @@ fn find_tool_name_for_context(messages: &[ChatMessage], context_idx: usize) -> S
 }
 
 fn normalize_line_start(line1: usize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
     if line1 == 0 {
         0
     } else {
-        (line1.saturating_sub(1)).min(total)
+        (line1.saturating_sub(1)).min(total.saturating_sub(1))
     }
 }
 
@@ -387,7 +508,8 @@ mod tests {
         assert_eq!(normalize_line_start(0, 100), 0);
         assert_eq!(normalize_line_start(1, 100), 0);
         assert_eq!(normalize_line_start(10, 100), 9);
-        assert_eq!(normalize_line_start(200, 100), 100);
+        assert_eq!(normalize_line_start(200, 100), 99); // clamp to last valid index
+        assert_eq!(normalize_line_start(5, 0), 0); // empty file edge case
     }
 
     #[test]
@@ -580,5 +702,89 @@ mod tests {
         ];
         let name = find_tool_name_for_context(&messages, 2);
         assert_eq!(name, "tree");
+    }
+
+    #[test]
+    fn test_merge_overlapping_ranges() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+            make_context_file("test.rs", 40, 100),
+        ];
+        let merged = merge_overlapping_ranges(files);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].line1, 1);
+        assert_eq!(merged[0].line2, 100);
+    }
+
+    #[test]
+    fn test_merge_adjacent_ranges() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+            make_context_file("test.rs", 51, 100),
+        ];
+        let merged = merge_overlapping_ranges(files);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].line1, 1);
+        assert_eq!(merged[0].line2, 100);
+    }
+
+    #[test]
+    fn test_merge_non_overlapping_ranges() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+            make_context_file("test.rs", 100, 150),
+        ];
+        let merged = merge_overlapping_ranges(files);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn test_deduplicate_same_file_different_tools() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+            make_context_file("test.rs", 40, 100),
+            make_context_file("other.rs", 1, 20),
+        ];
+        let result = deduplicate_and_merge_context_files(files, &[]);
+        assert_eq!(result.len(), 2);
+        let test_file = result.iter().find(|f| f.file_name == "test.rs").unwrap();
+        assert_eq!(test_file.line1, 1);
+        assert_eq!(test_file.line2, 100);
+    }
+
+    #[test]
+    fn test_deduplicate_against_history() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+        ];
+        let history = vec![
+            make_context_file_message(vec![make_context_file("test.rs", 1, 100)]),
+        ];
+        let result = deduplicate_and_merge_context_files(files, &history);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_deduplicate_partial_coverage() {
+        let files = vec![
+            make_context_file("test.rs", 80, 150),
+        ];
+        let history = vec![
+            make_context_file_message(vec![make_context_file("test.rs", 1, 100)]),
+        ];
+        let result = deduplicate_and_merge_context_files(files, &history);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_is_covered_by_history() {
+        let cf = make_context_file("test.rs", 10, 50);
+        let history = vec![
+            make_context_file_message(vec![make_context_file("test.rs", 1, 100)]),
+        ];
+        assert!(is_covered_by_history(&cf, &history));
+
+        let cf2 = make_context_file("test.rs", 10, 150);
+        assert!(!is_covered_by_history(&cf2, &history));
     }
 }
