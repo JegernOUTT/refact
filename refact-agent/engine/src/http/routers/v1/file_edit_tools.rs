@@ -33,7 +33,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
             format!("JSON problem: {}", e),
         )
     })?;
-    let (file_before, file_after, chunks) = match post.tool_name.as_str() {
+    let (file_before, file_after, chunks, _summary) = match post.tool_name.as_str() {
         "create_textdoc" => {
             crate::tools::file_edit::tool_create_textdoc::tool_create_text_doc_exec(
                 global_context.clone(),

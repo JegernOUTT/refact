@@ -1,13 +1,119 @@
 use crate::ast::ast_indexer_thread::{ast_indexer_block_until_finished, ast_indexer_enqueue_files};
+use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
 use crate::call_validation::DiffChunk;
+use crate::files_correction::{canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config, correct_to_nearest_dir_path, get_project_dirs, preprocess_path_for_normalization};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
+use crate::privacy::{check_file_privacy, FilePrivacyLevel, PrivacySettings};
 use regex::{Match, Regex};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
+
+pub async fn parse_path_for_update(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    args: &HashMap<String, Value>,
+    privacy_settings: Arc<PrivacySettings>,
+) -> Result<PathBuf, String> {
+    let s = parse_string_arg(args, "path", "Provide absolute path to file")?;
+    let raw_path = preprocess_path_for_normalization(s.trim().to_string());
+    let candidates = file_repair_candidates(gcx.clone(), &raw_path, 3, false).await;
+    let path = return_one_candidate_or_a_good_error(
+        gcx.clone(),
+        &raw_path,
+        &candidates,
+        &get_project_dirs(gcx.clone()).await,
+        false,
+    ).await.map(|f| canonicalize_normalized_path(PathBuf::from(f)))?;
+
+    if check_file_privacy(privacy_settings, &path, &FilePrivacyLevel::AllowToSendAnywhere).is_err() {
+        return Err(format!("⚠️ Cannot update {:?} due to privacy settings", path));
+    }
+    if !path.exists() {
+        return Err(format!("⚠️ File {:?} not found. 💡 Use create_textdoc() for new files", path));
+    }
+    Ok(path)
+}
+
+pub async fn parse_path_for_create(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    args: &HashMap<String, Value>,
+    privacy_settings: Arc<PrivacySettings>,
+) -> Result<PathBuf, String> {
+    let s = parse_string_arg(args, "path", "Provide absolute path for new file")?;
+    let raw_path = PathBuf::from(preprocess_path_for_normalization(s.trim().to_string()));
+
+    let filename = raw_path.file_name()
+        .ok_or_else(|| format!("⚠️ Path '{}' has no filename. 💡 Include filename: /path/to/file.ext", s.trim()))?
+        .to_string_lossy()
+        .to_string();
+
+    let path = if !raw_path.is_absolute() {
+        if let Some(parent) = raw_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let parent_str = parent.to_string_lossy().to_string();
+            let candidates = correct_to_nearest_dir_path(gcx.clone(), &parent_str, false, 3).await;
+            let parent_dir = return_one_candidate_or_a_good_error(
+                gcx.clone(),
+                &parent_str,
+                &candidates,
+                &get_project_dirs(gcx.clone()).await,
+                true,
+            ).await?;
+            canonicalize_normalized_path(PathBuf::from(parent_dir).join(&filename))
+        } else {
+            return Err(format!("⚠️ Path '{}' is not absolute. 💡 Use full path like /project/src/file.ext", s.trim()));
+        }
+    } else {
+        let path = canonicalize_normalized_path(raw_path);
+        check_if_its_inside_a_workspace_or_config(gcx.clone(), &path).await?;
+        path
+    };
+
+    if check_file_privacy(privacy_settings, &path, &FilePrivacyLevel::AllowToSendAnywhere).is_err() {
+        return Err(format!("⚠️ Cannot create {:?} due to privacy settings", path));
+    }
+    Ok(path)
+}
+
+pub fn parse_string_arg(args: &HashMap<String, Value>, name: &str, hint: &str) -> Result<String, String> {
+    match args.get(name) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(v) => Err(format!("⚠️ '{}' must be a string, got: {:?}", name, v)),
+        None => Err(format!("⚠️ Missing '{}'. 💡 {}", name, hint)),
+    }
+}
+
+pub fn parse_bool_arg(args: &HashMap<String, Value>, name: &str, default: bool) -> Result<bool, String> {
+    match args.get(name) {
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(Value::String(s)) => match s.to_lowercase().as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(format!("⚠️ '{}' must be true/false, got: {}", name, s)),
+        },
+        Some(v) => Err(format!("⚠️ '{}' must be a boolean, got: {:?}", name, v)),
+        None => Ok(default),
+    }
+}
+
+pub fn edit_result_summary(before: &str, after: &str, path: &PathBuf) -> String {
+    let before_lines = before.lines().count();
+    let after_lines = after.lines().count();
+    let diff = after_lines as i64 - before_lines as i64;
+    let sign = if diff >= 0 { "+" } else { "" };
+    format!(
+        "✅ Updated {:?}: {} → {} lines ({}{})",
+        path.file_name().unwrap_or_default(),
+        before_lines,
+        after_lines,
+        sign,
+        diff
+    )
+}
 
 pub fn convert_edit_to_diffchunks(
     path: PathBuf,

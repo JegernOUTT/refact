@@ -1,119 +1,64 @@
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, DiffChunk};
+use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
-use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel, PrivacySettings};
-use crate::tools::file_edit::auxiliary::{await_ast_indexing, convert_edit_to_diffchunks, str_replace_regex, sync_documents_ast};
+use crate::privacy::load_privacy_if_needed;
+use crate::tools::file_edit::auxiliary::{
+    await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary,
+    parse_bool_arg, parse_path_for_update, parse_string_arg, str_replace_regex, sync_documents_ast,
+};
 use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use async_trait::async_trait;
+use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use regex::Regex;
 use tokio::sync::Mutex as AMutex;
-use crate::files_correction::{canonicalize_normalized_path, get_project_dirs, preprocess_path_for_normalization};
 use tokio::sync::RwLock as ARwLock;
-use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
-use crate::global_context::GlobalContext;
 
-struct ToolUpdateTextDocRegexArgs {
+pub struct ToolUpdateTextDocRegex {
+    pub config_path: String,
+}
+
+struct Args {
     path: PathBuf,
     pattern: Regex,
     replacement: String,
     multiple: bool,
 }
 
-pub struct ToolUpdateTextDocRegex {
-    pub config_path: String,
-}
-
 async fn parse_args(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    privacy_settings: Arc<PrivacySettings>
-) -> Result<ToolUpdateTextDocRegexArgs, String> {
-    let path = match args.get("path") {
-        Some(Value::String(s)) => {
-            let raw_path = preprocess_path_for_normalization(s.trim().to_string());
-            let candidates_file = file_repair_candidates(gcx.clone(), &raw_path, 3, false).await;
-            let path = match return_one_candidate_or_a_good_error(gcx.clone(), &raw_path, &candidates_file, &get_project_dirs(gcx.clone()).await, false).await {
-                Ok(f) => canonicalize_normalized_path(PathBuf::from(f)),
-                Err(e) => return Err(e),
-            };
-            if check_file_privacy(privacy_settings, &path, &FilePrivacyLevel::AllowToSendAnywhere).is_err() {
-                return Err(format!(
-                    "Error: Cannot update the file '{:?}' due to privacy settings.",
-                    s.trim()
-                ));
-            }
-            if !path.exists() {
-                return Err(format!("⚠️ File {:?} not found. 💡 Use tree() to find path", path));
-            }
-            path
-        }
-        Some(v) => return Err(format!("⚠️ 'path' must be a string, got: {:?}", v)),
-        None => return Err("⚠️ Missing 'path'. 💡 Provide absolute path to file".to_string()),
-    };
-    let pattern = match args.get("pattern") {
-        Some(Value::String(s)) => {
-            match Regex::new(s) {
-                Ok(r) => r,
-                Err(err) => {
-                    return Err(format!(
-                        "⚠️ Invalid regex: {}. 💡 Check syntax, escape special chars with \\",
-                        err
-                    ));
-                }
-            }
-        },
-        Some(v) => return Err(format!("⚠️ 'pattern' must be a string, got: {:?}", v)),
-        None => return Err("⚠️ Missing 'pattern'. 💡 Provide regex pattern to match".to_string())
-    };
-    let replacement = match args.get("replacement") {
-        Some(Value::String(s)) => s.to_string(),
-        Some(v) => return Err(format!("⚠️ 'replacement' must be a string, got: {:?}", v)),
-        None => return Err("⚠️ Missing 'replacement'. 💡 Provide the new text".to_string())
-    };
-    let multiple = match args.get("multiple") {
-        Some(Value::Bool(b)) => b.clone(),
-        Some(Value::String(v)) => match v.to_lowercase().as_str() {
-            "false" => false,
-            "true" => true,
-            _ => {
-                return Err(format!("argument 'multiple' should be a boolean: {:?}", v))
-            }
-        },
-        Some(v) => return Err(format!("Error: The 'multiple' argument must be a boolean (true/false) indicating whether to replace all occurrences, but received: {:?}", v)),
-        None => false,
-    };
-
-    Ok(ToolUpdateTextDocRegexArgs {
-        path,
-        pattern,
-        replacement,
-        multiple
-    })
+) -> Result<Args, String> {
+    let privacy = load_privacy_if_needed(gcx.clone()).await;
+    let path = parse_path_for_update(gcx, args, privacy).await?;
+    let pattern_str = parse_string_arg(args, "pattern", "Provide regex pattern to match")?;
+    let pattern = Regex::new(&pattern_str)
+        .map_err(|e| format!("⚠️ Invalid regex: {}. 💡 Check syntax, escape special chars with \\", e))?;
+    let replacement = parse_string_arg(args, "replacement", "Provide the new text")?;
+    let multiple = parse_bool_arg(args, "multiple", false)?;
+    Ok(Args { path, pattern, replacement, multiple })
 }
 
 pub async fn tool_update_text_doc_regex_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    dry: bool
-) -> Result<(String, String, Vec<DiffChunk>), String> {
-    let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
-    let args = parse_args(gcx.clone(), args, privacy_settings).await?;
+    dry: bool,
+) -> Result<(String, String, Vec<DiffChunk>, String), String> {
+    let a = parse_args(gcx.clone(), args).await?;
     await_ast_indexing(gcx.clone()).await?;
-    let (before_text, after_text) = str_replace_regex(gcx.clone(), &args.path, &args.pattern, &args.replacement, args.multiple, dry).await?;
-    sync_documents_ast(gcx.clone(), &args.path).await?;
-    let diff_chunks = convert_edit_to_diffchunks(args.path.clone(), &before_text, &after_text)?;
-    Ok((before_text, after_text, diff_chunks))
+    let (before, after) = str_replace_regex(gcx.clone(), &a.path, &a.pattern, &a.replacement, a.multiple, dry).await?;
+    sync_documents_ast(gcx.clone(), &a.path).await?;
+    let chunks = convert_edit_to_diffchunks(a.path.clone(), &before, &after)?;
+    let summary = edit_result_summary(&before, &after, &a.path);
+    Ok((before, after, chunks, summary))
 }
 
 #[async_trait]
 impl Tool for ToolUpdateTextDocRegex {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    fn as_any(&self) -> &dyn std::any::Any { self }
 
     async fn tool_execute(
         &mut self,
@@ -122,19 +67,14 @@ impl Tool for ToolUpdateTextDocRegex {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let gcx = ccx.lock().await.global_context.clone();
-        let (_, _, diff_chunks) = tool_update_text_doc_regex_exec(gcx.clone(), args, false).await?;
-        let results = vec![ChatMessage {
+        let (_, _, chunks, _summary) = tool_update_text_doc_regex_exec(gcx, args, false).await?;
+        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "diff".to_string(),
-            content: ChatContent::SimpleText(json!(diff_chunks).to_string()),
+            content: ChatContent::SimpleText(json!(chunks).to_string()),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
-            usage: None,
             ..Default::default()
-        }]
-        .into_iter()
-        .map(|x| ContextEnum::ChatMessage(x))
-        .collect::<Vec<_>>();
-        Ok((false, results))
+        })]))
     }
 
     async fn match_against_confirm_deny(
@@ -143,25 +83,14 @@ impl Tool for ToolUpdateTextDocRegex {
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
         let gcx = ccx.lock().await.global_context.clone();
-        let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
-
-        async fn can_execute_tool_edit(gcx: Arc<ARwLock<GlobalContext>>, args: &HashMap<String, Value>, privacy_settings: Arc<PrivacySettings>) -> Result<(), String> {
-            let _ = parse_args(gcx.clone(), args, privacy_settings).await?;
-            Ok(())
-        }
-
+        let can_exec = parse_args(gcx, args).await.is_ok();
         let msgs_len = ccx.lock().await.messages.len();
-
-        // workaround: if messages weren't passed by ToolsPermissionCheckPost, legacy
-        if msgs_len != 0 {
-            // if we cannot execute apply_edit, there's no need for confirmation
-            if let Err(_) = can_execute_tool_edit(gcx.clone(), args, privacy_settings).await {
-                return Ok(MatchConfirmDeny {
-                    result: MatchConfirmDenyResult::PASS,
-                    command: "update_textdoc_regex".to_string(),
-                    rule: "".to_string(),
-                });
-            }
+        if msgs_len != 0 && !can_exec {
+            return Ok(MatchConfirmDeny {
+                result: MatchConfirmDenyResult::PASS,
+                command: "update_textdoc_regex".to_string(),
+                rule: "".to_string(),
+            });
         }
         Ok(MatchConfirmDeny {
             result: MatchConfirmDenyResult::CONFIRMATION,
@@ -184,14 +113,14 @@ impl Tool for ToolUpdateTextDocRegex {
             deny: vec![],
         })
     }
-    
+
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "update_textdoc_regex".to_string(),
             display_name: "Update Text Document with Regex".to_string(),
-            source: ToolSource { 
-                source_type: ToolSourceType::Builtin, 
-                config_path: self.config_path.clone(), 
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
             },
             agentic: false,
             experimental: false,
@@ -216,7 +145,7 @@ impl Tool for ToolUpdateTextDocRegex {
                     name: "multiple".to_string(),
                     description: "If true, applies the replacement to all occurrences; if false, only the first occurrence is replaced.".to_string(),
                     param_type: "boolean".to_string(),
-                }
+                },
             ],
             parameters_required: vec!["path".to_string(), "pattern".to_string(), "replacement".to_string()],
         }

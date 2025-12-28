@@ -1,9 +1,11 @@
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, DiffChunk};
+use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
-use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel, PrivacySettings};
+use crate::privacy::load_privacy_if_needed;
 use crate::tools::file_edit::auxiliary::{
-    await_ast_indexing, convert_edit_to_diffchunks, sync_documents_ast, write_file,
+    await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary,
+    parse_path_for_create, parse_string_arg, sync_documents_ast, write_file,
 };
 use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use async_trait::async_trait;
@@ -12,15 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
-use crate::files_correction::{canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config, correct_to_nearest_dir_path, get_project_dirs, preprocess_path_for_normalization};
-use crate::global_context::GlobalContext;
 use tokio::sync::RwLock as ARwLock;
-use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
-
-struct ToolCreateTextDocArgs {
-    path: PathBuf,
-    content: String,
-}
 
 pub struct ToolCreateTextDoc {
     pub config_path: String,
@@ -29,85 +23,37 @@ pub struct ToolCreateTextDoc {
 async fn parse_args(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    privacy_settings: Arc<PrivacySettings>
-) -> Result<ToolCreateTextDocArgs, String> {
-    let path = match args.get("path") {
-        Some(Value::String(s)) => {
-            let raw_path = PathBuf::from(preprocess_path_for_normalization(s.trim().to_string()));
-            let filename_str = if let Some(filename) = raw_path.file_name() {
-                filename.to_string_lossy().to_string()
-            } else {
-                return Err(format!(
-                    "⚠️ Path '{}' has no filename. 💡 Include filename: /path/to/file.ext",
-                    s.trim()
-                ));
-            };
-            let path = if !raw_path.is_absolute() {
-                if let Some(parent) = raw_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                    let parent_str = parent.to_string_lossy().to_string();
-                    let candidates_dir = correct_to_nearest_dir_path(gcx.clone(), &parent_str, false, 3).await;
-                    let candidate_parent_dir = match return_one_candidate_or_a_good_error(gcx.clone(), &parent_str, &candidates_dir, &get_project_dirs(gcx.clone()).await, true).await {
-                        Ok(f) => f,
-                        Err(e) => return Err(e)
-                    };
-                    canonicalize_normalized_path(PathBuf::from(candidate_parent_dir).join(filename_str))
-                } else {
-                    return Err(format!(
-                        "⚠️ Path '{}' is not absolute. 💡 Use full path like /project/src/file.ext",
-                        s.trim()
-                    ));
-                }
-            } else {
-                let path = canonicalize_normalized_path(raw_path);
-                check_if_its_inside_a_workspace_or_config(gcx.clone(), &path).await?;
-                path
-            };
-            if check_file_privacy(privacy_settings, &path, &FilePrivacyLevel::AllowToSendAnywhere).is_err() {
-                return Err(format!(
-                    "Error: Cannot create the file '{:?}' due to privacy settings.",
-                    s.trim()
-                ));
-            }
-            path
-        }
-        Some(v) => return Err(format!("⚠️ 'path' must be a string, got: {:?}", v)),
-        None => return Err("⚠️ Missing 'path'. 💡 Provide absolute path for new file".to_string()),
-    };
-    let content = match args.get("content") {
-        Some(Value::String(s)) => s,
-        Some(v) => return Err(format!("⚠️ 'content' must be a string, got: {:?}", v)),
-        None => return Err("⚠️ Missing 'content'. 💡 Provide the file content".to_string())
-    };
-
-    let mut final_content = content.clone();
-    if !final_content.ends_with('\n') {
-        final_content.push('\n');
+) -> Result<(PathBuf, String), String> {
+    let privacy = load_privacy_if_needed(gcx.clone()).await;
+    let path = parse_path_for_create(gcx, args, privacy).await?;
+    let mut content = parse_string_arg(args, "content", "Provide the file content")?;
+    if !content.ends_with('\n') {
+        content.push('\n');
     }
-    Ok(ToolCreateTextDocArgs {
-        path,
-        content: final_content,
-    })
+    Ok((path, content))
 }
 
 pub async fn tool_create_text_doc_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    dry: bool
-) -> Result<(String, String, Vec<DiffChunk>), String> {
-    let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
-    let args = parse_args(gcx.clone(), args, privacy_settings).await?;
+    dry: bool,
+) -> Result<(String, String, Vec<DiffChunk>, String), String> {
+    let (path, content) = parse_args(gcx.clone(), args).await?;
     await_ast_indexing(gcx.clone()).await?;
-    let (before_text, after_text) = write_file(gcx.clone(), &args.path, &args.content, dry).await?;
-    sync_documents_ast(gcx.clone(), &args.path).await?;
-    let diff_chunks = convert_edit_to_diffchunks(args.path.clone(), &before_text, &after_text)?;
-    Ok((before_text, after_text, diff_chunks))
+    let (before, after) = write_file(gcx.clone(), &path, &content, dry).await?;
+    sync_documents_ast(gcx.clone(), &path).await?;
+    let chunks = convert_edit_to_diffchunks(path.clone(), &before, &after)?;
+    let summary = if before.is_empty() {
+        format!("✅ Created {:?}: {} lines", path.file_name().unwrap_or_default(), after.lines().count())
+    } else {
+        edit_result_summary(&before, &after, &path)
+    };
+    Ok((before, after, chunks, summary))
 }
 
 #[async_trait]
 impl Tool for ToolCreateTextDoc {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    fn as_any(&self) -> &dyn std::any::Any { self }
 
     async fn tool_execute(
         &mut self,
@@ -116,19 +62,14 @@ impl Tool for ToolCreateTextDoc {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let gcx = ccx.lock().await.global_context.clone();
-        let (_, _, diff_chunks) = tool_create_text_doc_exec(gcx.clone(), args, false).await?;
-        let results = vec![ChatMessage {
+        let (_, _, chunks, _summary) = tool_create_text_doc_exec(gcx, args, false).await?;
+        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "diff".to_string(),
-            content: ChatContent::SimpleText(json!(diff_chunks).to_string()),
+            content: ChatContent::SimpleText(json!(chunks).to_string()),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
-            usage: None,
             ..Default::default()
-        }]
-        .into_iter()
-        .map(|x| ContextEnum::ChatMessage(x))
-        .collect::<Vec<_>>();
-        Ok((false, results))
+        })]))
     }
 
     async fn match_against_confirm_deny(
@@ -137,25 +78,14 @@ impl Tool for ToolCreateTextDoc {
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
         let gcx = ccx.lock().await.global_context.clone();
-        let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
-
-        async fn can_execute_tool_edit(gcx: Arc<ARwLock<GlobalContext>>, args: &HashMap<String, Value>, privacy_settings: Arc<PrivacySettings>) -> Result<(), String> {
-            let _ = parse_args(gcx.clone(), args, privacy_settings).await?;
-            Ok(())
-        }
-
+        let can_exec = parse_args(gcx, args).await.is_ok();
         let msgs_len = ccx.lock().await.messages.len();
-
-        // workaround: if messages weren't passed by ToolsPermissionCheckPost, legacy
-        if msgs_len != 0 {
-            // if we cannot execute apply_edit, there's no need for confirmation
-            if let Err(_) = can_execute_tool_edit(gcx.clone(), args, privacy_settings).await {
-                return Ok(MatchConfirmDeny {
-                    result: MatchConfirmDenyResult::PASS,
-                    command: "create_textdoc".to_string(),
-                    rule: "".to_string(),
-                });
-            }
+        if msgs_len != 0 && !can_exec {
+            return Ok(MatchConfirmDeny {
+                result: MatchConfirmDenyResult::PASS,
+                command: "create_textdoc".to_string(),
+                rule: "".to_string(),
+            });
         }
         Ok(MatchConfirmDeny {
             result: MatchConfirmDenyResult::CONFIRMATION,
@@ -178,7 +108,7 @@ impl Tool for ToolCreateTextDoc {
             deny: vec![],
         })
     }
-    
+
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "create_textdoc".to_string(),
@@ -200,7 +130,7 @@ impl Tool for ToolCreateTextDoc {
                     name: "content".to_string(),
                     description: "The initial text or code.".to_string(),
                     param_type: "string".to_string(),
-                }
+                },
             ],
             parameters_required: vec!["path".to_string(), "content".to_string()],
         }
