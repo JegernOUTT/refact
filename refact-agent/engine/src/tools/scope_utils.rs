@@ -50,9 +50,14 @@ pub async fn resolve_scope(
             true,
         ).await?;
         
+        let dir_path_with_sep = if dir_path.ends_with(std::path::MAIN_SEPARATOR) {
+            dir_path.clone()
+        } else {
+            format!("{}{}", dir_path, std::path::MAIN_SEPARATOR)
+        };
         let workspace_files = gcx.read().await.documents_state.workspace_files.lock().unwrap().clone();
         return Ok(workspace_files.into_iter()
-            .filter(|f| f.starts_with(&dir_path))
+            .filter(|f| f.to_string_lossy().starts_with(&dir_path_with_sep) || f.to_string_lossy() == dir_path)
             .map(|f| f.to_string_lossy().to_string())
             .collect::<Vec<_>>());
     }
@@ -79,9 +84,14 @@ pub async fn resolve_scope(
             ).await {
                 // Directory found
                 Ok(dir_path) => {
+                    let dir_path_with_sep = if dir_path.ends_with(std::path::MAIN_SEPARATOR) {
+                        dir_path.clone()
+                    } else {
+                        format!("{}{}", dir_path, std::path::MAIN_SEPARATOR)
+                    };
                     let workspace_files = gcx.read().await.documents_state.workspace_files.lock().unwrap().clone();
                     Ok(workspace_files.into_iter()
-                        .filter(|f| f.starts_with(&dir_path))
+                        .filter(|f| f.to_string_lossy().starts_with(&dir_path_with_sep) || f.to_string_lossy() == dir_path)
                         .map(|f| f.to_string_lossy().to_string())
                         .collect::<Vec<_>>())
                 },
@@ -124,7 +134,12 @@ pub async fn create_scope_filter(
             true,
         ).await?;
         
-        return Ok(Some(format!("(scope LIKE '{}%')", dir_path)));
+        let dir_path_with_sep = if dir_path.ends_with(std::path::MAIN_SEPARATOR) {
+            dir_path.clone()
+        } else {
+            format!("{}{}", dir_path, std::path::MAIN_SEPARATOR)
+        };
+        return Ok(Some(format!("(scope LIKE '{}%')", dir_path_with_sep)));
     }
     
     match return_one_candidate_or_a_good_error(
@@ -143,7 +158,14 @@ pub async fn create_scope_filter(
                 &get_project_dirs(gcx.clone()).await,
                 true,
             ).await {
-                Ok(dir_path) => Ok(Some(format!("(scope LIKE '{}%')", dir_path))),
+                Ok(dir_path) => {
+                    let dir_path_with_sep = if dir_path.ends_with(std::path::MAIN_SEPARATOR) {
+                        dir_path.clone()
+                    } else {
+                        format!("{}{}", dir_path, std::path::MAIN_SEPARATOR)
+                    };
+                    Ok(Some(format!("(scope LIKE '{}%')", dir_path_with_sep)))
+                },
                 Err(_) => Err(file_err),
             }
         },

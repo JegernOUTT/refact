@@ -63,20 +63,24 @@ impl Tool for ToolTrajectoryContext {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let trajectory_id = match args.get("trajectory_id") {
             Some(Value::String(s)) => s.clone(),
-            _ => return Err("Missing argument `trajectory_id`".to_string())
+            _ => return Err("⚠️ Missing trajectory_id. 💡 Check .refact/trajectories/ for available IDs".to_string())
         };
 
         let msg_start: usize = match args.get("message_start") {
-            Some(Value::String(s)) => s.parse().map_err(|_| "Invalid message_start")?,
-            Some(Value::Number(n)) => n.as_u64().ok_or("Invalid message_start")? as usize,
-            _ => return Err("Missing argument `message_start`".to_string())
+            Some(Value::String(s)) => s.parse().map_err(|_| "⚠️ message_start must be a number. 💡 Use 0 for first message")?,
+            Some(Value::Number(n)) => n.as_u64().ok_or("⚠️ message_start must be a positive number")? as usize,
+            _ => return Err("⚠️ Missing message_start. 💡 Use 0 for first message".to_string())
         };
 
         let msg_end: usize = match args.get("message_end") {
-            Some(Value::String(s)) => s.parse().map_err(|_| "Invalid message_end")?,
-            Some(Value::Number(n)) => n.as_u64().ok_or("Invalid message_end")? as usize,
-            _ => return Err("Missing argument `message_end`".to_string())
+            Some(Value::String(s)) => s.parse().map_err(|_| "⚠️ message_end must be a number")?,
+            Some(Value::Number(n)) => n.as_u64().ok_or("⚠️ message_end must be a positive number")? as usize,
+            _ => return Err("⚠️ Missing message_end. 💡 Use knowledge() to find relevant message ranges".to_string())
         };
+
+        if msg_start > msg_end {
+            return Err(format!("⚠️ message_start ({}) > message_end ({}). 💡 Swap values or adjust range", msg_start, msg_end));
+        }
 
         let expand_by: usize = match args.get("expand_by") {
             Some(Value::String(s)) => s.parse().unwrap_or(3),
@@ -90,7 +94,7 @@ impl Tool for ToolTrajectoryContext {
         let traj_path = workspace_root.join(".refact/trajectories").join(format!("{}.json", trajectory_id));
 
         if !traj_path.exists() {
-            return Err(format!("Trajectory not found: {}", trajectory_id));
+            return Err(format!("⚠️ Trajectory '{}' not found. 💡 Check .refact/trajectories/ or use knowledge() to search", trajectory_id));
         }
 
         let content = fs::read_to_string(&traj_path).await
@@ -101,7 +105,15 @@ impl Tool for ToolTrajectoryContext {
 
         let messages = trajectory.get("messages")
             .and_then(|v| v.as_array())
-            .ok_or("No messages in trajectory")?;
+            .ok_or("⚠️ No messages in trajectory. 💡 This trajectory may be empty or corrupted")?;
+
+        if messages.is_empty() {
+            return Err("⚠️ Trajectory has no messages. 💡 Try a different trajectory".to_string());
+        }
+
+        if msg_start >= messages.len() {
+            return Err(format!("⚠️ message_start ({}) >= total messages ({}). 💡 Use range 0-{}", msg_start, messages.len(), messages.len().saturating_sub(1)));
+        }
 
         let title = trajectory.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
         let actual_start = msg_start.saturating_sub(expand_by);

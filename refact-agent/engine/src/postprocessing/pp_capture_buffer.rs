@@ -15,7 +15,6 @@ fn truncate_to_byte_boundary(s: &str, max_bytes: usize) -> String {
 pub enum KeepStrategy {
     #[default]
     Head,
-    Tail,
     HeadAndTail,
 }
 
@@ -65,16 +64,6 @@ impl CaptureBuffer {
                     self.truncated = true;
                 }
             }
-            KeepStrategy::Tail => {
-                self.tail.push_back(line);
-                self.tail_bytes += line_bytes;
-                while self.tail_bytes > self.max_bytes {
-                    if let Some(removed) = self.tail.pop_front() {
-                        self.tail_bytes -= removed.len() + 1;
-                        self.truncated = true;
-                    }
-                }
-            }
             KeepStrategy::HeadAndTail => {
                 let head_limit = self.max_bytes * 80 / 100;
                 let tail_limit = self.max_bytes * 20 / 100;
@@ -96,6 +85,7 @@ impl CaptureBuffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn finish(self) -> String {
         self.build_result()
     }
@@ -121,7 +111,6 @@ impl CaptureBuffer {
             }
             let strategy_name = match self.strategy {
                 KeepStrategy::Head => "head",
-                KeepStrategy::Tail => "tail",
                 KeepStrategy::HeadAndTail => "head+tail",
             };
             let limit_kb = self.max_bytes / 1024;
@@ -148,13 +137,6 @@ impl CaptureBuffer {
         result
     }
 
-    pub fn is_truncated(&self) -> bool {
-        self.truncated
-    }
-
-    pub fn total_lines(&self) -> usize {
-        self.total_lines
-    }
 }
 
 #[cfg(test)]
@@ -172,17 +154,6 @@ mod tests {
         assert!(result.starts_with("line1"));
         assert!(result.contains("⚠️"));
         assert!(result.contains("truncated"));
-    }
-
-    #[test]
-    fn test_tail_strategy() {
-        let mut buf = CaptureBuffer::new(20, KeepStrategy::Tail);
-        buf.push_line("line1".into());
-        buf.push_line("line2".into());
-        buf.push_line("line3".into());
-        buf.push_line("line4".into());
-        let result = buf.finish();
-        assert!(result.contains("line4"));
     }
 
     #[test]

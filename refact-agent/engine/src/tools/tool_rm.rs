@@ -21,7 +21,8 @@ pub struct ToolRm {
 
 impl ToolRm {
     fn preformat_path(path: &String) -> String {
-        path.trim_end_matches(&['/', '\\'][..]).to_string()
+        let trimmed = path.trim_end_matches(&['/', '\\'][..]);
+        if trimmed.is_empty() { path.clone() } else { trimmed.to_string() }
     }
 
     fn parse_recursive(args: &HashMap<String, Value>) -> Result<(bool, Option<u32>, bool), String> {
@@ -102,12 +103,20 @@ impl Tool for ToolRm {
         };
         let path_str = preprocess_path_for_normalization(path_str);
 
-        // Reject if wildcards are present, '?' is allowed if preceeded by '\' or '/' only, like \\?\C:\Some\Path
-        if path_str.contains('*') || path_str.contains('[') ||
-            path_str.chars().enumerate().any(|(i, c)| {
-                c == '?' && !path_str[..i].chars().all(|ch| ch == '/' || ch == '\\')
-            }) {
-            return Err("Wildcards and shell patterns are not supported".to_string());
+        let has_wildcard = path_str.contains('*') || path_str.contains('[') || {
+            let mut only_slashes_before = true;
+            for c in path_str.chars() {
+                if c == '?' && !only_slashes_before {
+                    break;
+                }
+                if c != '/' && c != '\\' {
+                    only_slashes_before = false;
+                }
+            }
+            path_str.chars().any(|c| c == '?') && !only_slashes_before
+        };
+        if has_wildcard {
+            return Err("⚠️ Wildcards not supported. 💡 Use exact path (use tree() to find files)".to_string());
         }
 
         let (recursive, _max_depth, dry_run) = Self::parse_recursive(args)?;
@@ -134,7 +143,7 @@ impl Tool for ToolRm {
                 true
             ).await?
         } else {
-            return Err(format!("Path '{}' not found", path_str));
+            return Err(format!("⚠️ Path '{}' not found. 💡 Use tree() to explore or check spelling", path_str));
         };
 
         let true_path = canonical_path(&corrected_path);
@@ -151,7 +160,7 @@ impl Tool for ToolRm {
         // Check that the true_path is within project directories.
         let is_within_project = project_dirs.iter().any(|p| true_path.starts_with(p));
         if !is_within_project && !gcx.read().await.cmdline.inside_container {
-            return Err(format!("Cannot execute rm(): '{}' is not within the project directories.", path_str));
+            return Err(format!("⚠️ '{}' is outside project directories. 💡 rm() only works within workspace", path_str));
         }
 
         // Check if path exists.
@@ -188,7 +197,7 @@ impl Tool for ToolRm {
         let corrections = path_str != corrected_path;
         if is_dir {
             if !recursive {
-                return Err(format!("Cannot remove directory '{}' without recursive=true", corrected_path));
+                return Err(format!("⚠️ '{}' is a directory. 💡 Use rm(path:'{}', recursive:true)", corrected_path, corrected_path));
             }
             if dry_run {
                 messages.push(ContextEnum::ChatMessage(ChatMessage {

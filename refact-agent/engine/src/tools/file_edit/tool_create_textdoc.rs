@@ -38,7 +38,7 @@ async fn parse_args(
                 filename.to_string_lossy().to_string()
             } else {
                 return Err(format!(
-                    "Error: The provided path '{}' doesn't contain a filename. Please provide an absolute path with a filename.",
+                    "⚠️ Path '{}' has no filename. 💡 Include filename: /path/to/file.ext",
                     s.trim()
                 ));
             };
@@ -53,7 +53,7 @@ async fn parse_args(
                     canonicalize_normalized_path(PathBuf::from(candidate_parent_dir).join(filename_str))
                 } else {
                     return Err(format!(
-                        "Error: The provided path '{}' is not absolute. Please provide a full path starting from the root directory.",
+                        "⚠️ Path '{}' is not absolute. 💡 Use full path like /project/src/file.ext",
                         s.trim()
                     ));
                 }
@@ -70,18 +70,13 @@ async fn parse_args(
             }
             path
         }
-        Some(v) => return Err(format!("Error: The 'path' argument must be a string, but received: {:?}", v)),
-        None => return Err("Error: The 'path' argument is required but was not provided.".to_string()),
+        Some(v) => return Err(format!("⚠️ 'path' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'path'. 💡 Provide absolute path for new file".to_string()),
     };
     let content = match args.get("content") {
         Some(Value::String(s)) => s,
-        Some(v) => return Err(format!("Error: The 'content' argument must be a string containing the initial file content, but received: {:?}", v)),
-        None => {
-            return Err(format!(
-                "Error: The 'content' argument is required. Please provide the initial content for the new file at '{:?}'.",
-                path
-            ))
-        }
+        Some(v) => return Err(format!("⚠️ 'content' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'content'. 💡 Provide the file content".to_string())
     };
 
     let mut final_content = content.clone();

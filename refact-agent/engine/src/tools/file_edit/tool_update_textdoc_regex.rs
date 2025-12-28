@@ -47,12 +47,12 @@ async fn parse_args(
                 ));
             }
             if !path.exists() {
-                return Err(format!("argument 'path' doesn't exists: {:?}", path));
+                return Err(format!("⚠️ File {:?} not found. 💡 Use tree() to find path", path));
             }
             path
         }
-        Some(v) => return Err(format!("argument 'path' should be a string: {:?}", v)),
-        None => return Err("argument 'path' is required".to_string()),
+        Some(v) => return Err(format!("⚠️ 'path' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'path'. 💡 Provide absolute path to file".to_string()),
     };
     let pattern = match args.get("pattern") {
         Some(Value::String(s)) => {
@@ -60,19 +60,19 @@ async fn parse_args(
                 Ok(r) => r,
                 Err(err) => {
                     return Err(format!(
-                        "Error: The provided regex pattern is invalid. Details: {}. Please check your regular expression syntax.",
+                        "⚠️ Invalid regex: {}. 💡 Check syntax, escape special chars with \\",
                         err
                     ));
                 }
             }
         },
-        Some(v) => return Err(format!("Error: The 'pattern' argument must be a string containing a valid regular expression, but received: {:?}", v)),
-        None => return Err("Error: The 'pattern' argument is required. Please provide a regular expression pattern to match the text that needs to be updated.".to_string())
+        Some(v) => return Err(format!("⚠️ 'pattern' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'pattern'. 💡 Provide regex pattern to match".to_string())
     };
     let replacement = match args.get("replacement") {
         Some(Value::String(s)) => s.to_string(),
-        Some(v) => return Err(format!("argument 'replacement' should be a string: {:?}", v)),
-        None => return Err("argument 'replacement' is required".to_string())
+        Some(v) => return Err(format!("⚠️ 'replacement' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'replacement'. 💡 Provide the new text".to_string())
     };
     let multiple = match args.get("multiple") {
         Some(Value::Bool(b)) => b.clone(),

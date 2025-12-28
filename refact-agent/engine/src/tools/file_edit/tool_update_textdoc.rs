@@ -47,24 +47,24 @@ async fn parse_args(
             }
             if !path.exists() {
                 return Err(format!(
-                    "Error: The file '{:?}' does not exist. Please check if the path is correct and the file exists.",
+                    "⚠️ File {:?} not found. 💡 Use create_textdoc() for new files, or tree() to find path",
                     path
                 ));
             }
             path
         }
-        Some(v) => return Err(format!("Error: The 'path' argument must be a string, but received: {:?}", v)),
-        None => return Err("Error: The 'path' argument is required but was not provided.".to_string()),
+        Some(v) => return Err(format!("⚠️ 'path' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'path'. 💡 Provide absolute path to file".to_string()),
     };
     let old_str = match args.get("old_str") {
         Some(Value::String(s)) => s.to_string(),
-        Some(v) => return Err(format!("Error: The 'old_str' argument must be a string containing the text to replace, but received: {:?}", v)),
-        None => return Err("Error: The 'old_str' argument is required. Please provide the text that needs to be replaced.".to_string())
+        Some(v) => return Err(format!("⚠️ 'old_str' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'old_str'. 💡 Use cat() to find exact text to replace".to_string())
     };
     let replacement = match args.get("replacement") {
         Some(Value::String(s)) => s.to_string(),
-        Some(v) => return Err(format!("Error: The 'replacement' argument must be a string containing the new text, but received: {:?}", v)),
-        None => return Err("Error: The 'replacement' argument is required. Please provide the new text that will replace the old text.".to_string())
+        Some(v) => return Err(format!("⚠️ 'replacement' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'replacement'. 💡 Provide the new text".to_string())
     };
     let multiple = match args.get("multiple") {
         Some(Value::Bool(b)) => b.clone(),

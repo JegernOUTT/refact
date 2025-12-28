@@ -1,5 +1,6 @@
 pub struct RowLimiter {
     pub max_rows: usize,
+    #[allow(dead_code)]
     pub max_cell_chars: usize,
 }
 
@@ -32,6 +33,7 @@ impl RowLimiter {
         )
     }
 
+    #[allow(dead_code)]
     pub fn truncate_cell(&self, cell: &str) -> String {
         let char_count = cell.chars().count();
         if char_count <= self.max_cell_chars {
@@ -42,6 +44,7 @@ impl RowLimiter {
         }
     }
 
+    #[allow(dead_code)]
     pub fn format_table(&self, headers: &[String], rows: Vec<Vec<String>>, total_rows: usize) -> String {
         let mut result = String::new();
 

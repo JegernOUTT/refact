@@ -382,11 +382,11 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
 
         if f_type.starts_with("image/") {
             filenames_present.push(p.clone());
-            if image_counter == CAT_MAX_IMAGES_CNT {
-                not_found_messages.push("Cat() shows only 1 image per call to avoid token overflow, call several cat() in parallel to see more images.".to_string());
-            }
             image_counter += 1;
             if image_counter > CAT_MAX_IMAGES_CNT {
+                if image_counter == CAT_MAX_IMAGES_CNT + 1 {
+                    not_found_messages.push(format!("⚠️ showing 1 of {} images (limit: 1). 💡 Call cat() separately for each image", unique_paths.iter().filter(|x| get_file_type(&PathBuf::from(*x)).starts_with("image/")).count()));
+                }
                 continue
             }
             match load_image(p, &f_type).await {
@@ -402,13 +402,13 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                     let (start_line, end_line) = match line_range {
                         Some((start, end)) => {
                             let start = start.max(1);
-                            let end = end.min(total_lines);
-                            if start > end {
+                            let end = end.min(total_lines).max(start);
+                            if start > total_lines {
                                 not_found_messages.push(format!(
-                                    "Requested line range {}-{} is outside file bounds (file has {} lines)", 
-                                    start, end, total_lines
+                                    "⚠️ line {} is beyond file end ({} lines). 💡 Use cat('{}:1-{}')",
+                                    start, total_lines, p, total_lines
                                 ));
-                                (1, total_lines)
+                                (1, total_lines.min(100))
                             } else {
                                 (start, end)
                             }

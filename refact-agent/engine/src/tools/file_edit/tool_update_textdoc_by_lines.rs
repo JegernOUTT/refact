@@ -46,30 +46,30 @@ async fn parse_args(
             }
             if !path.exists() {
                 return Err(format!(
-                    "Error: The file '{:?}' does not exist. Please check if the path is correct and the file exists.",
+                    "⚠️ File {:?} not found. 💡 Use create_textdoc() for new files",
                     path
                 ));
             }
             path
         }
-        Some(v) => return Err(format!("Error: The 'path' argument must be a string, but received: {:?}", v)),
-        None => return Err("Error: The 'path' argument is required but was not provided.".to_string()),
+        Some(v) => return Err(format!("⚠️ 'path' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'path'. 💡 Provide absolute path to file".to_string()),
     };
 
     let content = match args.get("content") {
         Some(Value::String(s)) => s.to_string(),
-        Some(v) => return Err(format!("Error: The 'content' argument must be a string containing the new text, but received: {:?}", v)),
-        None => return Err("Error: The 'content' argument is required. Please provide the new text that will replace the specified lines.".to_string())
+        Some(v) => return Err(format!("⚠️ 'content' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'content'. 💡 Provide the new text for the line range".to_string())
     };
 
     let ranges = match args.get("ranges") {
         Some(Value::String(s)) => s.trim().to_string(),
-        Some(v) => return Err(format!("Error: The 'ranges' argument must be a string, but received: {:?}", v)),
-        None => return Err("Error: The 'ranges' argument is required. Format: ':3' (lines 1-3), '40:50' (lines 40-50), '100:' (line 100 to end), or combine with commas like ':3,40:50,100:'.".to_string())
+        Some(v) => return Err(format!("⚠️ 'ranges' must be a string, got: {:?}", v)),
+        None => return Err("⚠️ Missing 'ranges'. 💡 Format: '10:20' or ':5' or '100:' or '5'".to_string())
     };
 
     if ranges.is_empty() {
-        return Err("Error: The 'ranges' argument cannot be empty.".to_string());
+        return Err("⚠️ 'ranges' cannot be empty. 💡 Format: '10:20' or ':5' or '100:'".to_string());
     }
 
     Ok(ToolUpdateTextDocByLinesArgs {

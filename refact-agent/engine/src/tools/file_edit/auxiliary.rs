@@ -184,6 +184,9 @@ pub async fn str_replace(
     replace_multiple: bool,
     dry: bool,
 ) -> Result<(String, String), String> {
+    if old_str.is_empty() {
+        return Err("⚠️ old_str cannot be empty. 💡 Provide the exact text to replace".to_string());
+    }
     let file_content = get_file_text_from_memory_or_disk(gcx.clone(), path).await?;
 
     let has_crlf = file_content.contains("\r\n");
@@ -194,7 +197,7 @@ pub async fn str_replace(
     let occurrences = normalized_content.matches(&normalized_old_str).count();
     if occurrences == 0 {
         return Err(format!(
-            "No replacement was performed, `old_str` did not appear verbatim in {:?}. Check the file content using `cat()`",
+            "⚠️ old_str not found in {:?}. 💡 Use cat() to check file content, ensure exact match including whitespace",
             path
         ));
     }
@@ -206,8 +209,8 @@ pub async fn str_replace(
             .map(|(idx, _)| idx + 1)
             .collect();
         return Err(format!(
-            "No replacement was performed. Multiple occurrences of `old_str` in lines {:?}. Please ensure it is unique or set `replace_multiple` to true.",
-            lines
+            "⚠️ {} occurrences found at lines {:?}. 💡 Use more context to make unique, or set multiple:true",
+            occurrences, lines
         ));
     }
 
@@ -374,14 +377,15 @@ pub async fn str_replace_regex(
     let occurrences = matches.len();
     if occurrences == 0 {
         return Err(format!(
-            "No replacement was performed, `pattern` did not appear verbatim in {:?}. Check the file content using `cat()`",
+            "⚠️ pattern not found in {:?}. 💡 Use cat() to check content, verify regex syntax",
             path
         ));
     }
     if !multiple && occurrences > 1 {
-        return Err(
-            "No replacement was performed. Multiple occurrences of `pattern`. Please ensure the `pattern` is unique or set `multiple` to true.".to_string()
-        );
+        return Err(format!(
+            "⚠️ {} matches found. 💡 Make pattern more specific, or set multiple:true",
+            occurrences
+        ));
     }
     let new_content = if multiple && occurrences > 1 {
         pattern

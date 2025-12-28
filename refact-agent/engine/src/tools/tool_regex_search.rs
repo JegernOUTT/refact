@@ -40,15 +40,15 @@ async fn search_single_file(
     
     for (line_idx, line) in lines.iter().enumerate() {
         if regex.is_match(line) {
-            let line_num = (line_idx + 1) as i64;
+            let match_line = line_idx + 1;
             let context_start = line_idx.saturating_sub(2);
             let context_end = (line_idx + 3).min(lines.len());
             let context_content = lines[context_start..context_end].join("\n");
             file_results.push(ContextFile {
                 file_name: file_path.clone(),
                 file_content: context_content,
-                line1: (line_num - 10).max(1) as usize,
-                line2: (line_num + 10).min(lines.len() as i64) as usize,
+                line1: match_line,
+                line2: match_line,
                 symbols: vec![],
                 gradient_type: 5,
                 usefulness: 100.0,
@@ -288,7 +288,7 @@ impl Tool for ToolRegexSearch {
         }
         
         if all_search_results.is_empty() {
-            return Err("All pattern searches produced no results. Try adjusting your pattern or scope.".to_string());
+            return Err("⚠️ No matches found for pattern or path. 💡 Try broader scope ('workspace'), simpler pattern, or use (?i) for case-insensitive".to_string());
         }
 
         let mut results = vec_context_file_to_context_tools(all_search_results);
