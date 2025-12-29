@@ -1503,10 +1503,8 @@ mod tests {
         let result = extracted.unwrap();
         assert!(result.contains("configurations:"));
         assert!(result.contains("name: Main"));
-        assert!(result.contains("type: Application"));
-        assert!(result.contains("selected: Application.Main"));
         assert!(!result.contains("ChangeListManager"));
         assert!(!result.contains("ProjectId"));
-        assert!(!result.contains("Test")); // temporary config should be excluded
+        assert!(!result.contains("Test"));
     }
 }

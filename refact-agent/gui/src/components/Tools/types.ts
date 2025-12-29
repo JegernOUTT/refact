@@ -179,7 +179,8 @@ export const isUpdateTextDocByLinesToolCall = (
   return true;
 };
 
-export interface UpdateTextDocAnchoredToolCall extends ParsedRawTextDocToolCall {
+export interface UpdateTextDocAnchoredToolCall
+  extends ParsedRawTextDocToolCall {
   function: {
     name: "update_textdoc_anchored";
     arguments: {

@@ -14,7 +14,8 @@ import {
 type MockRequestInit = { body?: string; headers?: Record<string, string> };
 type MockCall = [string, MockRequestInit];
 
-const mockFetch = vi.fn<(url: string, init: MockRequestInit) => Promise<Response>>();
+const mockFetch =
+  vi.fn<(url: string, init: MockRequestInit) => Promise<Response>>();
 
 function getRequestBody(call: MockCall): Record<string, unknown> {
   return JSON.parse(call[1].body ?? "{}") as Record<string, unknown>;
@@ -65,10 +66,15 @@ describe("chatCommands", () => {
     it("should include authorization header when apiKey provided", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
-      await sendChatCommand("test", 8001, "test-key", { type: "abort" as const });
+      await sendChatCommand("test", 8001, "test-key", {
+        type: "abort" as const,
+      });
 
       const call = mockFetch.mock.calls[0] as MockCall;
-      expect(call[1].headers).toHaveProperty("Authorization", "Bearer test-key");
+      expect(call[1].headers).toHaveProperty(
+        "Authorization",
+        "Bearer test-key",
+      );
     });
 
     it("should throw on HTTP error", async () => {
@@ -101,7 +107,10 @@ describe("chatCommands", () => {
 
       const content = [
         { type: "text" as const, text: "What is this?" },
-        { type: "image_url" as const, image_url: { url: "data:image/png;base64,..." } },
+        {
+          type: "image_url" as const,
+          image_url: { url: "data:image/png;base64,..." },
+        },
       ];
 
       await sendUserMessage("test-chat", content, 8001);
@@ -117,7 +126,11 @@ describe("chatCommands", () => {
     it("should send set_params command", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
-      await updateChatParams("test-chat", { model: "gpt-4", mode: "AGENT" }, 8001);
+      await updateChatParams(
+        "test-chat",
+        { model: "gpt-4", mode: "AGENT" },
+        8001,
+      );
 
       const calledBody = getRequestBody(mockFetch.mock.calls[0] as MockCall);
       expect(calledBody.type).toBe("set_params");
@@ -203,7 +216,14 @@ describe("chatCommands", () => {
     it("should send update_message with regenerate flag", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
-      await updateMessage("test-chat", "msg_5", "Updated text", 8001, undefined, true);
+      await updateMessage(
+        "test-chat",
+        "msg_5",
+        "Updated text",
+        8001,
+        undefined,
+        true,
+      );
 
       const calledBody = getRequestBody(mockFetch.mock.calls[0] as MockCall);
       expect(calledBody.type).toBe("update_message");
@@ -275,7 +295,7 @@ describe("Command Types", () => {
   });
 
   it("should correctly type abort command", () => {
-    const command: ChatCommand = { 
+    const command: ChatCommand = {
       type: "abort",
       client_request_id: "test-id",
     };

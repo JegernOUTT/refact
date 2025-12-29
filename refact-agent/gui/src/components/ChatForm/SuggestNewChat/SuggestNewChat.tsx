@@ -78,7 +78,13 @@ export const SuggestNewChat = ({
   const onCreateNewChat = useCallback(() => {
     dispatch(newChatAction());
     dispatch(clearThreadPauseReasons({ id: chatId }));
-    dispatch(setThreadConfirmationStatus({ id: chatId, wasInteracted: false, confirmationStatus: true }));
+    dispatch(
+      setThreadConfirmationStatus({
+        id: chatId,
+        wasInteracted: false,
+        confirmationStatus: true,
+      }),
+    );
     dispatch(popBackTo({ name: "history" }));
     dispatch(push({ name: "chat" }));
     void sendTelemetryEvent({

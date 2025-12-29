@@ -110,7 +110,9 @@ describe.skipIf(!(await isServerAvailable()))(
         const chatId = generateChatId("test-abort");
 
         await expect(
-          sendChatCommand(chatId, LSP_PORT, undefined, { type: "abort" as const })
+          sendChatCommand(chatId, LSP_PORT, undefined, {
+            type: "abort" as const,
+          }),
         ).resolves.toBeUndefined();
       });
 
@@ -122,7 +124,7 @@ describe.skipIf(!(await isServerAvailable()))(
             chatId,
             { model: "refact/gpt-4.1-nano", mode: "NO_TOOLS" },
             LSP_PORT,
-          )
+          ),
         ).resolves.toBeUndefined();
       });
 
@@ -136,11 +138,7 @@ describe.skipIf(!(await isServerAvailable()))(
         );
 
         await expect(
-          sendUserMessage(
-            chatId,
-            "Hello, test!",
-            LSP_PORT,
-          )
+          sendUserMessage(chatId, "Hello, test!", LSP_PORT),
         ).resolves.toBeUndefined();
       });
 
@@ -219,7 +217,9 @@ describe.skipIf(!(await isServerAvailable()))(
         const events = await eventsPromise;
 
         // Check we got expected events
-        const eventTypes = events.map((e: unknown) => (e as { type: string }).type);
+        const eventTypes = events.map(
+          (e: unknown) => (e as { type: string }).type,
+        );
 
         expect(eventTypes).toContain("snapshot");
         expect(eventTypes).toContain("ack"); // Command acknowledgments
@@ -243,7 +243,9 @@ describe.skipIf(!(await isServerAvailable()))(
         await sendUserMessage(chatId, "Say hello", LSP_PORT);
 
         const events = await eventsPromise;
-        const eventTypes = events.map((e: unknown) => (e as { type: string }).type);
+        const eventTypes = events.map(
+          (e: unknown) => (e as { type: string }).type,
+        );
 
         // Should have streaming events
         expect(eventTypes).toContain("snapshot");
@@ -284,7 +286,9 @@ describe.skipIf(!(await isServerAvailable()))(
         await abortGeneration(chatId, LSP_PORT);
 
         const events = await eventsPromise;
-        const eventTypes = events.map((e: unknown) => (e as { type: string }).type);
+        const eventTypes = events.map(
+          (e: unknown) => (e as { type: string }).type,
+        );
 
         // Debug: eventTypes contains abort test events
 
@@ -329,8 +333,12 @@ describe.skipIf(!(await isServerAvailable()))(
         ]);
 
         // Each should only have events for its own chat
-        const chat1Ids = events1.map((e: unknown) => (e as { chat_id: string }).chat_id);
-        const chat2Ids = events2.map((e: unknown) => (e as { chat_id: string }).chat_id);
+        const chat1Ids = events1.map(
+          (e: unknown) => (e as { chat_id: string }).chat_id,
+        );
+        const chat2Ids = events2.map(
+          (e: unknown) => (e as { chat_id: string }).chat_id,
+        );
 
         expect(chat1Ids.every((id: string) => id === chatId1)).toBe(true);
         expect(chat2Ids.every((id: string) => id === chatId2)).toBe(true);

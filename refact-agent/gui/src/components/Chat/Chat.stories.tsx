@@ -162,7 +162,6 @@ export const Knowledge: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-
       ],
     },
   },
@@ -204,7 +203,6 @@ export const EmptySpaceAtBottom: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-
       ],
     },
   },
@@ -285,7 +283,6 @@ export const UserMessageEmptySpaceAtBottom: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-
       ],
     },
   },
@@ -368,7 +365,6 @@ export const CompressButton: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-
       ],
     },
   },

@@ -38,7 +38,10 @@ export type TrajectoryEvent = {
   title?: string;
 };
 
-export function chatThreadToTrajectoryData(thread: ChatThread, createdAt?: string): TrajectoryData {
+export function chatThreadToTrajectoryData(
+  thread: ChatThread,
+  createdAt?: string,
+): TrajectoryData {
   const now = new Date().toISOString();
   return {
     id: thread.id,

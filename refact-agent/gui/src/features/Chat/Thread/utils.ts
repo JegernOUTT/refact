@@ -167,8 +167,6 @@ export function lastIndexOf<T>(arr: T[], predicate: (a: T) => boolean): number {
   return index;
 }
 
-
-
 export function formatMessagesForLsp(messages: ChatMessages): LspChatMessage[] {
   return messages.reduce<LspChatMessage[]>((acc, message) => {
     if (isUserMessage(message)) {

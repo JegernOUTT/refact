@@ -27,7 +27,7 @@ describe("useChatSubscription", () => {
   it("should return disconnected status when disabled", () => {
     const { result } = renderHook(
       () => useChatSubscription("test-chat", { enabled: false }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(result.current.status).toBe("disconnected");
@@ -38,7 +38,7 @@ describe("useChatSubscription", () => {
   it("should return disconnected status when chatId is null", () => {
     const { result } = renderHook(
       () => useChatSubscription(null, { enabled: true }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(result.current.status).toBe("disconnected");
@@ -47,7 +47,7 @@ describe("useChatSubscription", () => {
   it("should return disconnected status when chatId is undefined", () => {
     const { result } = renderHook(
       () => useChatSubscription(undefined, { enabled: true }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(result.current.status).toBe("disconnected");
@@ -56,7 +56,7 @@ describe("useChatSubscription", () => {
   it("should have connect and disconnect functions", () => {
     const { result } = renderHook(
       () => useChatSubscription("test-chat", { enabled: false }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(typeof result.current.connect).toBe("function");
@@ -66,7 +66,7 @@ describe("useChatSubscription", () => {
   it("should have lastSeq as string", () => {
     const { result } = renderHook(
       () => useChatSubscription("test-chat", { enabled: false }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(typeof result.current.lastSeq).toBe("string");
@@ -76,7 +76,7 @@ describe("useChatSubscription", () => {
   it("should have null error initially", () => {
     const { result } = renderHook(
       () => useChatSubscription("test-chat", { enabled: false }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(result.current.error).toBeNull();

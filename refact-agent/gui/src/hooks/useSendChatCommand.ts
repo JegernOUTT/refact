@@ -11,10 +11,7 @@ export function useSendChatCommand() {
   const apiKey = useAppSelector(selectApiKey);
 
   return useCallback(
-    async (
-      chatId: string,
-      command: ChatCommandBase,
-    ) => {
+    async (chatId: string, command: ChatCommandBase) => {
       await sendChatCommand(chatId, port, apiKey ?? undefined, command);
     },
     [port, apiKey],

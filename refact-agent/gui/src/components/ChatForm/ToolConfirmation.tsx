@@ -1,9 +1,5 @@
 import React, { useCallback, useMemo } from "react";
-import {
-  useAppDispatch,
-  useAppSelector,
-  useChatActions,
-} from "../../hooks";
+import { useAppDispatch, useAppSelector, useChatActions } from "../../hooks";
 import { Card, Button, Text, Flex } from "@radix-ui/themes";
 import { Markdown } from "../Markdown";
 import { Link } from "../Link";
@@ -89,12 +85,18 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   const { respondToTools } = useChatActions();
 
   const confirmToolUsage = useCallback(() => {
-    const decisions = toolCallIds.map((id) => ({ tool_call_id: id, accepted: true }));
+    const decisions = toolCallIds.map((id) => ({
+      tool_call_id: id,
+      accepted: true,
+    }));
     void respondToTools(decisions);
   }, [respondToTools, toolCallIds]);
 
   const rejectToolUsage = useCallback(() => {
-    const decisions = toolCallIds.map((id) => ({ tool_call_id: id, accepted: false }));
+    const decisions = toolCallIds.map((id) => ({
+      tool_call_id: id,
+      accepted: false,
+    }));
     void respondToTools(decisions);
   }, [respondToTools, toolCallIds]);
 
@@ -215,7 +217,9 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
   const messageForPatch = useMemo(() => {
     if (!toolCalls || toolCalls.length === 0) return "Apply changes";
     try {
-      const parsed = JSON.parse(toolCalls[0].function.arguments) as { path?: string };
+      const parsed = JSON.parse(toolCalls[0].function.arguments) as {
+        path?: string;
+      };
       if (!parsed.path) return "Apply changes";
       const parts = parsed.path.split(/[/\\]/);
       return "Patch `" + parts[parts.length - 1] + "`";

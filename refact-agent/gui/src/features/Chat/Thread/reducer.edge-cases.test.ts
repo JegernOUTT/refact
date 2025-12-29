@@ -37,16 +37,17 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       paused: false,
       error: null,
       queue_size: 0,
-          pause_reasons: [],
+      pause_reasons: [],
     },
     messages,
   });
 
   describe("preserve streaming fields on final message_added", () => {
     test("should keep reasoning_content from streaming when message_added arrives", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Hello" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([{ role: "user", content: "Hello" }])),
+      );
 
       const streamStart: ChatEventEnvelope = {
         chat_id: chatId,
@@ -87,14 +88,17 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       expect(assistantMsg.role).toBe("assistant");
       expect(assistantMsg.content).toBe("Here is my answer");
       if (assistantMsg.role === "assistant") {
-        expect(assistantMsg.reasoning_content).toBe("Let me think about this...");
+        expect(assistantMsg.reasoning_content).toBe(
+          "Let me think about this...",
+        );
       }
     });
 
     test("should keep thinking_blocks from streaming when message_added arrives", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Hello" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([{ role: "user", content: "Hello" }])),
+      );
 
       const streamStart: ChatEventEnvelope = {
         chat_id: chatId,
@@ -110,7 +114,10 @@ describe("Chat Thread Reducer - Edge Cases", () => {
         type: "stream_delta",
         message_id: "msg-456",
         ops: [
-          { op: "set_thinking_blocks", blocks: [{ type: "thinking", thinking: "Deep thought" }] },
+          {
+            op: "set_thinking_blocks",
+            blocks: [{ type: "thinking", thinking: "Deep thought" }],
+          },
           { op: "append_content", text: "Answer" },
         ],
       };
@@ -140,9 +147,10 @@ describe("Chat Thread Reducer - Edge Cases", () => {
     });
 
     test("should keep usage from streaming when message_added arrives", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Hello" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([{ role: "user", content: "Hello" }])),
+      );
 
       const streamStart: ChatEventEnvelope = {
         chat_id: chatId,
@@ -159,7 +167,14 @@ describe("Chat Thread Reducer - Edge Cases", () => {
         message_id: "msg-789",
         ops: [
           { op: "append_content", text: "Response" },
-          { op: "set_usage", usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } },
+          {
+            op: "set_usage",
+            usage: {
+              prompt_tokens: 100,
+              completion_tokens: 50,
+              total_tokens: 150,
+            },
+          },
         ],
       };
       state = chatReducer(state, applyChatEvent(deltaWithUsage));
@@ -190,10 +205,15 @@ describe("Chat Thread Reducer - Edge Cases", () => {
 
   describe("empty snapshot handling", () => {
     test("should accept empty snapshot as source of truth (backend may clear/truncate)", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Hello" },
-        { role: "assistant", content: "Hi there!" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(
+          createSnapshot([
+            { role: "user", content: "Hello" },
+            { role: "assistant", content: "Hi there!" },
+          ]),
+        ),
+      );
 
       const runtime1 = state.threads[chatId]!;
       expect(runtime1.thread.messages).toHaveLength(2);
@@ -219,7 +239,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -232,9 +252,10 @@ describe("Chat Thread Reducer - Edge Cases", () => {
     });
 
     test("should update thread params even with empty snapshot", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Hello" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([{ role: "user", content: "Hello" }])),
+      );
 
       const emptySnapshot: ChatEventEnvelope = {
         chat_id: chatId,
@@ -257,7 +278,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
           paused: false,
           error: null,
           queue_size: 1,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -276,9 +297,10 @@ describe("Chat Thread Reducer - Edge Cases", () => {
 
   describe("merge_extra safety", () => {
     test("should merge extra fields incrementally", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Hello" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([{ role: "user", content: "Hello" }])),
+      );
 
       const streamStart: ChatEventEnvelope = {
         chat_id: chatId,
@@ -293,9 +315,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
         seq: "3",
         type: "stream_delta",
         message_id: "msg-extra",
-        ops: [
-          { op: "merge_extra", extra: { metering_a: 100 } },
-        ],
+        ops: [{ op: "merge_extra", extra: { metering_a: 100 } }],
       };
       state = chatReducer(state, applyChatEvent(delta1));
 
@@ -304,9 +324,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
         seq: "4",
         type: "stream_delta",
         message_id: "msg-extra",
-        ops: [
-          { op: "merge_extra", extra: { metering_b: 200 } },
-        ],
+        ops: [{ op: "merge_extra", extra: { metering_b: 200 } }],
       };
       state = chatReducer(state, applyChatEvent(delta2));
 
@@ -315,14 +333,14 @@ describe("Chat Thread Reducer - Edge Cases", () => {
         seq: "5",
         type: "stream_delta",
         message_id: "msg-extra",
-        ops: [
-          { op: "merge_extra", extra: { metering_a: 150 } },
-        ],
+        ops: [{ op: "merge_extra", extra: { metering_a: 150 } }],
       };
       state = chatReducer(state, applyChatEvent(delta3));
 
       const runtime = state.threads[chatId]!;
-      const msg = runtime.thread.messages.find(m => m.message_id === "msg-extra") as Record<string, unknown> | undefined;
+      const msg = runtime.thread.messages.find(
+        (m) => m.message_id === "msg-extra",
+      ) as Record<string, unknown> | undefined;
 
       expect((msg?.extra as any)?.metering_a).toBe(150);
       expect((msg?.extra as any)?.metering_b).toBe(200);
@@ -331,9 +349,10 @@ describe("Chat Thread Reducer - Edge Cases", () => {
 
   describe("abort event sequence", () => {
     test("should handle stream_finished with abort reason", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Hello" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([{ role: "user", content: "Hello" }])),
+      );
 
       const streamStart: ChatEventEnvelope = {
         chat_id: chatId,
@@ -382,9 +401,12 @@ describe("Chat Thread Reducer - Edge Cases", () => {
 
   describe("pause lifecycle events", () => {
     test("should handle pause_required event", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Run shell command" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(
+          createSnapshot([{ role: "user", content: "Run shell command" }]),
+        ),
+      );
 
       const pauseRequired: ChatEventEnvelope = {
         chat_id: chatId,
@@ -414,7 +436,15 @@ describe("Chat Thread Reducer - Edge Cases", () => {
         chat_id: chatId,
         seq: "2",
         type: "pause_required",
-        reasons: [{ type: "confirmation", command: "shell", rule: "deny_all", tool_call_id: "tc-1", integr_config_path: null }],
+        reasons: [
+          {
+            type: "confirmation",
+            command: "shell",
+            rule: "deny_all",
+            tool_call_id: "tc-1",
+            integr_config_path: null,
+          },
+        ],
       };
       state = chatReducer(state, applyChatEvent(pauseRequired));
       expect(state.threads[chatId]!.confirmation.pause).toBe(true);
@@ -433,9 +463,10 @@ describe("Chat Thread Reducer - Edge Cases", () => {
 
   describe("error state handling", () => {
     test("should handle error without content (message_removed path)", () => {
-      let state = chatReducer(initialState, applyChatEvent(createSnapshot([
-        { role: "user", content: "Hello" },
-      ])));
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([{ role: "user", content: "Hello" }])),
+      );
 
       const streamStart: ChatEventEnvelope = {
         chat_id: chatId,

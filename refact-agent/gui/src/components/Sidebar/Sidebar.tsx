@@ -47,7 +47,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
   const onHistoryItemClick = useCallback(
     (thread: ChatHistoryItem) => {
       // Fetch fresh data from backend before restoring
-      void dispatch(restoreChatFromBackend({ id: thread.id, fallback: thread }));
+      void dispatch(
+        restoreChatFromBackend({ id: thread.id, fallback: thread }),
+      );
       dispatch(push({ name: "chat" }));
     },
     [dispatch],

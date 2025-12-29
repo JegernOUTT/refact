@@ -117,7 +117,9 @@ export const historySlice = createSlice({
           b.updatedAt.localeCompare(a.updatedAt),
         );
         const idsToKeep = new Set(sorted.slice(0, 100).map((c) => c.id));
-        const idsToRemove = Object.keys(state).filter((id) => !idsToKeep.has(id));
+        const idsToRemove = Object.keys(state).filter(
+          (id) => !idsToKeep.has(id),
+        );
         for (const id of idsToRemove) {
           // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
           delete state[id];
@@ -214,7 +216,8 @@ startHistoryListening({
   effect: (action, listenerApi) => {
     const event = action.payload;
     if (event.type !== "stream_finished") return;
-    if (event.finish_reason === "abort" || event.finish_reason === "error") return;
+    if (event.finish_reason === "abort" || event.finish_reason === "error")
+      return;
 
     const state = listenerApi.getState();
     const runtime = state.chat.threads[event.chat_id];
@@ -241,8 +244,6 @@ startHistoryListening({
     listenerApi.dispatch(saveChat(toSave));
   },
 });
-
-
 
 startHistoryListening({
   actionCreator: restoreChat,

@@ -19,7 +19,10 @@ export const coinBallanceSlice = createSlice({
     builder.addCase(applyChatEvent, (state, action) => {
       const event = action.payload;
       // Check for metering_balance in runtime_updated or message events
-      if ("metering_balance" in event && typeof event.metering_balance === "number") {
+      if (
+        "metering_balance" in event &&
+        typeof event.metering_balance === "number"
+      ) {
         state.balance = event.metering_balance;
       }
     });

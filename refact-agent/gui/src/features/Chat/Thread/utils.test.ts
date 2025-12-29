@@ -1,12 +1,6 @@
 import { describe, expect, test } from "vitest";
-import {
-  ChatMessages,
-  type ToolCall,
-} from "../../../services/refact";
-import {
-  mergeToolCalls,
-  postProcessMessagesAfterStreaming,
-} from "./utils";
+import { ChatMessages, type ToolCall } from "../../../services/refact";
+import { mergeToolCalls, postProcessMessagesAfterStreaming } from "./utils";
 
 describe("mergeToolCalls", () => {
   test("combines two tool calls", () => {

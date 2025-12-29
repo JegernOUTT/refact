@@ -39,8 +39,12 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
 
   it("should handle JSON split across chunks", async () => {
     const encoder = new TextEncoder();
-    const fullEvent = `data: ${JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" })}\n\n`;
-    
+    const fullEvent = `data: ${JSON.stringify({
+      chat_id: "test",
+      seq: "1",
+      type: "pause_cleared",
+    })}\n\n`;
+
     const chunk1 = encoder.encode(fullEvent.substring(0, 30));
     const chunk2 = encoder.encode(fullEvent.substring(30));
 
@@ -61,8 +65,12 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
 
   it("should handle delimiter split across chunks", async () => {
     const encoder = new TextEncoder();
-    const event = JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" });
-    
+    const event = JSON.stringify({
+      chat_id: "test",
+      seq: "1",
+      type: "pause_cleared",
+    });
+
     const chunk1 = encoder.encode(`data: ${event}\n`);
     const chunk2 = encoder.encode(`\n`);
 
@@ -83,8 +91,12 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
 
   it("should handle CRLF split across chunks", async () => {
     const encoder = new TextEncoder();
-    const event = JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" });
-    
+    const event = JSON.stringify({
+      chat_id: "test",
+      seq: "1",
+      type: "pause_cleared",
+    });
+
     const chunk1 = encoder.encode(`data: ${event}\r`);
     const chunk2 = encoder.encode(`\n\r\n`);
 
@@ -105,8 +117,12 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
 
   it("should handle CR-only line endings", async () => {
     const encoder = new TextEncoder();
-    const event = JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" });
-    
+    const event = JSON.stringify({
+      chat_id: "test",
+      seq: "1",
+      type: "pause_cleared",
+    });
+
     const chunk = encoder.encode(`data: ${event}\r\r`);
 
     const events: any[] = [];
@@ -126,9 +142,17 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
 
   it("should handle multiple events in one chunk", async () => {
     const encoder = new TextEncoder();
-    const event1 = JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" });
-    const event2 = JSON.stringify({ chat_id: "test", seq: "2", type: "pause_cleared" });
-    
+    const event1 = JSON.stringify({
+      chat_id: "test",
+      seq: "1",
+      type: "pause_cleared",
+    });
+    const event2 = JSON.stringify({
+      chat_id: "test",
+      seq: "2",
+      type: "pause_cleared",
+    });
+
     const chunk = encoder.encode(`data: ${event1}\n\ndata: ${event2}\n\n`);
 
     const events: any[] = [];
@@ -149,8 +173,12 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
 
   it("should handle empty lines between events", async () => {
     const encoder = new TextEncoder();
-    const event = JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" });
-    
+    const event = JSON.stringify({
+      chat_id: "test",
+      seq: "1",
+      type: "pause_cleared",
+    });
+
     const chunk = encoder.encode(`\n\ndata: ${event}\n\n\n\n`);
 
     const events: any[] = [];
@@ -171,15 +199,15 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
   it("should handle large payload across many chunks", async () => {
     const encoder = new TextEncoder();
     const largeContent = "x".repeat(10000);
-    const event = JSON.stringify({ 
-      chat_id: "test", 
-      seq: "1", 
+    const event = JSON.stringify({
+      chat_id: "test",
+      seq: "1",
       type: "stream_delta",
       message_id: "msg-1",
-      ops: [{ op: "append_content", text: largeContent }]
+      ops: [{ op: "append_content", text: largeContent }],
     });
     const fullEvent = `data: ${event}\n\n`;
-    
+
     const chunkSize = 100;
     const chunks: Uint8Array[] = [];
     for (let i = 0; i < fullEvent.length; i += chunkSize) {
@@ -245,7 +273,9 @@ describe("SSE Protocol - Message Variations", () => {
     };
 
     const events: any[] = [];
-    const mockFetch = createMockFetch([encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`)]);
+    const mockFetch = createMockFetch([
+      encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`),
+    ]);
     global.fetch = mockFetch;
 
     subscribeToChatEvents("test", 8001, {
@@ -293,7 +323,11 @@ describe("SSE Protocol - Message Variations", () => {
           reasoning_content: "Let me think...",
           thinking_blocks: [{ thinking: "Step 1", signature: "sig1" }],
           citations: [{ url: "http://example.com", title: "Example" }],
-          usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+          },
           extra: { custom_field: "value" },
           finish_reason: "stop",
         },
@@ -301,7 +335,9 @@ describe("SSE Protocol - Message Variations", () => {
     };
 
     const events: any[] = [];
-    const mockFetch = createMockFetch([encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`)]);
+    const mockFetch = createMockFetch([
+      encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`),
+    ]);
     global.fetch = mockFetch;
 
     subscribeToChatEvents("test", 8001, {
@@ -321,7 +357,7 @@ describe("SSE Protocol - Message Variations", () => {
 
   it("should handle tool message with tool_failed variations", async () => {
     const encoder = new TextEncoder();
-    
+
     for (const toolFailed of [true, false, null, undefined]) {
       const snapshot = {
         chat_id: "test",
@@ -358,7 +394,9 @@ describe("SSE Protocol - Message Variations", () => {
       };
 
       const events: any[] = [];
-      const mockFetch = createMockFetch([encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`)]);
+      const mockFetch = createMockFetch([
+        encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`),
+      ]);
       global.fetch = mockFetch;
 
       subscribeToChatEvents("test", 8001, {
@@ -411,7 +449,9 @@ describe("SSE Protocol - Message Variations", () => {
     };
 
     const events: any[] = [];
-    const mockFetch = createMockFetch([encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`)]);
+    const mockFetch = createMockFetch([
+      encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`),
+    ]);
     global.fetch = mockFetch;
 
     subscribeToChatEvents("test", 8001, {
@@ -432,9 +472,15 @@ describe("SSE Protocol - Disconnect Handling", () => {
   it("should call onDisconnected on normal EOF", async () => {
     const onDisconnected = vi.fn();
     const encoder = new TextEncoder();
-    
+
     const mockFetch = createMockFetch([
-      encoder.encode(`data: ${JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" })}\n\n`),
+      encoder.encode(
+        `data: ${JSON.stringify({
+          chat_id: "test",
+          seq: "1",
+          type: "pause_cleared",
+        })}\n\n`,
+      ),
     ]);
     global.fetch = mockFetch;
 
@@ -451,7 +497,7 @@ describe("SSE Protocol - Disconnect Handling", () => {
 
   it("should call onError on fetch error", async () => {
     const onError = vi.fn();
-    
+
     const mockFetch = vi.fn().mockRejectedValue(new Error("Network error"));
     global.fetch = mockFetch;
 
@@ -468,11 +514,11 @@ describe("SSE Protocol - Disconnect Handling", () => {
   it("should not call onDisconnected on abort", async () => {
     const onDisconnected = vi.fn();
     const encoder = new TextEncoder();
-    
+
     const _abortFn: (() => void) | null = null;
     const mockFetch = vi.fn().mockImplementation((url, options) => {
       const abortController = options.signal;
-      
+
       return Promise.resolve({
         ok: true,
         body: {
@@ -482,7 +528,16 @@ describe("SSE Protocol - Disconnect Handling", () => {
                 throw new DOMException("Aborted", "AbortError");
               }
               await new Promise((resolve) => setTimeout(resolve, 100));
-              return { done: false, value: encoder.encode(`data: ${JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" })}\n\n`) };
+              return {
+                done: false,
+                value: encoder.encode(
+                  `data: ${JSON.stringify({
+                    chat_id: "test",
+                    seq: "1",
+                    type: "pause_cleared",
+                  })}\n\n`,
+                ),
+              };
             }),
           }),
         },

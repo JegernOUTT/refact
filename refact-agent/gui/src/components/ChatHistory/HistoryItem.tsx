@@ -34,7 +34,9 @@ export const HistoryItem: React.FC<{
     );
   }, [historyItem.messages]);
 
-  const threadRuntime = threads[historyItem.id] as { streaming: boolean; waiting_for_response: boolean } | undefined;
+  const threadRuntime = threads[historyItem.id] as
+    | { streaming: boolean; waiting_for_response: boolean }
+    | undefined;
   const isStreaming = threadRuntime?.streaming ?? false;
   const isWaiting = threadRuntime?.waiting_for_response ?? false;
   const isBusy = isStreaming || isWaiting;

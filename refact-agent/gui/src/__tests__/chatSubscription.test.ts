@@ -146,7 +146,9 @@ describe("chatSubscription", () => {
         { op: "append_reasoning", text: "thinking..." },
         {
           op: "set_tool_calls",
-          tool_calls: [{ id: "1", function: { name: "test", arguments: "{}" } }],
+          tool_calls: [
+            { id: "1", function: { name: "test", arguments: "{}" } },
+          ],
         },
       ];
 
@@ -181,26 +183,32 @@ describe("chatSubscription", () => {
         },
       });
 
-      subscribeToChatEvents(chatId, port, {
-        onEvent: vi.fn(),
-        onError: vi.fn(),
-      }, apiKey);
+      subscribeToChatEvents(
+        chatId,
+        port,
+        {
+          onEvent: vi.fn(),
+          onError: vi.fn(),
+        },
+        apiKey,
+      );
 
       expect(mockFetch).toHaveBeenCalledWith(
         `http://127.0.0.1:${port}/v1/chats/subscribe?chat_id=${chatId}`,
         expect.objectContaining({
           method: "GET",
-          headers: { "Authorization": "Bearer test-key" },
-        })
+          headers: { Authorization: "Bearer test-key" },
+        }),
       );
     });
 
     it("should normalize CRLF line endings", async () => {
       const onEvent = vi.fn();
       const encoder = new TextEncoder();
-      
-      const events = 'data: {"type":"snapshot","seq":"1","chat_id":"test"}\r\n\r\n';
-      
+
+      const events =
+        'data: {"type":"snapshot","seq":"1","chat_id":"test"}\r\n\r\n';
+
       mockFetch.mockResolvedValueOnce({
         ok: true,
         body: {
@@ -222,10 +230,10 @@ describe("chatSubscription", () => {
         onError: vi.fn(),
       });
 
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(onEvent).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "snapshot" })
+        expect.objectContaining({ type: "snapshot" }),
       );
     });
 
@@ -247,11 +255,9 @@ describe("chatSubscription", () => {
         onDisconnected,
       });
 
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(onDisconnected).toHaveBeenCalled();
     });
   });
 });
-
-

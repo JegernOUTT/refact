@@ -37,7 +37,10 @@ import { telemetryApi } from "../../services/refact/telemetry";
 import { PlaceHolderText } from "./PlaceHolderText";
 
 import { QueuedMessage } from "./QueuedMessage";
-import { selectThreadConfirmation, selectThreadPause } from "../../features/Chat";
+import {
+  selectThreadConfirmation,
+  selectThreadPause,
+} from "../../features/Chat";
 
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
 
@@ -224,12 +227,19 @@ function renderMessages(
         skipCount++;
         tempTail = tempTail.slice(1);
       } else if (isChatContextFileMessage(nextMsg)) {
-        if (nextMsg.tool_call_id === "knowledge_enrichment" || nextMsg.tool_call_id === "project_context") {
+        if (
+          nextMsg.tool_call_id === "knowledge_enrichment" ||
+          nextMsg.tool_call_id === "project_context"
+        ) {
           break;
         }
         const ctxKey = "context-file-" + (index + 1 + skipCount);
         contextFilesAfter.push(
-          <ContextFiles key={ctxKey} files={nextMsg.content} toolCallId={nextMsg.tool_call_id} />
+          <ContextFiles
+            key={ctxKey}
+            files={nextMsg.content}
+            toolCallId={nextMsg.tool_call_id}
+          />,
         );
         skipCount++;
         tempTail = tempTail.slice(1);
@@ -257,9 +267,9 @@ function renderMessages(
       />,
       ...contextFilesAfter,
       // Render diff messages before usage info so coins appear after diffs
-      ...(diffMessagesAfter.length > 0 ? [
-        <GroupedDiffs key={`diffs-${key}`} diffs={diffMessagesAfter} />
-      ] : []),
+      ...(diffMessagesAfter.length > 0
+        ? [<GroupedDiffs key={`diffs-${key}`} diffs={diffMessagesAfter} />]
+        : []),
       <MessageUsageInfo
         key={`usage-${key}`}
         usage={head.usage}
@@ -272,7 +282,13 @@ function renderMessages(
 
     // Skip the tool, context_file, and diff messages we already processed
     const newTail = tail.slice(skipCount);
-    return renderMessages(newTail, onRetry, waiting, nextMemo, index + 1 + skipCount);
+    return renderMessages(
+      newTail,
+      onRetry,
+      waiting,
+      nextMemo,
+      index + 1 + skipCount,
+    );
   }
 
   if (head.role === "user") {
@@ -297,13 +313,23 @@ function renderMessages(
 
   if (isChatContextFileMessage(head)) {
     const key = "context-file-" + index;
-    const nextMemo = [...memo, <ContextFiles key={key} files={head.content} toolCallId={head.tool_call_id} />];
+    const nextMemo = [
+      ...memo,
+      <ContextFiles
+        key={key}
+        files={head.content}
+        toolCallId={head.tool_call_id}
+      />,
+    ];
     return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
   }
 
   if (isSystemMessage(head)) {
     const key = "system-" + index;
-    const nextMemo = [...memo, <SystemPrompt key={key} content={head.content} />];
+    const nextMemo = [
+      ...memo,
+      <SystemPrompt key={key} content={head.content} />,
+    ];
     return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
   }
 

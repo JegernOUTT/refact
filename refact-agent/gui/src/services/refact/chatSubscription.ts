@@ -1,11 +1,11 @@
 import type { ChatMessage } from "./types";
 
-export type SessionState = 
-  | "idle" 
-  | "generating" 
-  | "executing_tools" 
-  | "paused" 
-  | "waiting_ide" 
+export type SessionState =
+  | "idle"
+  | "generating"
+  | "executing_tools"
+  | "paused"
+  | "waiting_ide"
   | "error";
 
 export type ThreadParams = {
@@ -46,7 +46,7 @@ export type DeltaOp =
   | { op: "set_usage"; usage: unknown }
   | { op: "merge_extra"; extra: Record<string, unknown> };
 
-export type EventEnvelope = 
+export type EventEnvelope =
   | {
       chat_id: string;
       seq: string;
@@ -178,7 +178,9 @@ export function subscribeToChatEvents(
   callbacks: ChatSubscriptionCallbacks,
   apiKey?: string,
 ): () => void {
-  const url = `http://127.0.0.1:${port}/v1/chats/subscribe?chat_id=${encodeURIComponent(chatId)}`;
+  const url = `http://127.0.0.1:${port}/v1/chats/subscribe?chat_id=${encodeURIComponent(
+    chatId,
+  )}`;
 
   const abortController = new AbortController();
   const state = { connected: false };
@@ -323,8 +325,7 @@ export function applyDeltaOps(
         break;
 
       case "append_reasoning":
-        updated.reasoning_content =
-          (updated.reasoning_content ?? "") + op.text;
+        updated.reasoning_content = (updated.reasoning_content ?? "") + op.text;
         break;
 
       case "set_tool_calls":

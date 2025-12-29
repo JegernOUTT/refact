@@ -7,7 +7,12 @@ import {
   type CommandCompletionResponse,
   commandsApi,
 } from "../../services/refact/commands";
-import { ChatContextFile, ChatMeta, UserMessage, UserMessageContentWithImage } from "../../services/refact/types";
+import {
+  ChatContextFile,
+  ChatMeta,
+  UserMessage,
+  UserMessageContentWithImage,
+} from "../../services/refact/types";
 import type { LspChatMessage } from "../../services/refact";
 import {
   getSelectedChatModel,

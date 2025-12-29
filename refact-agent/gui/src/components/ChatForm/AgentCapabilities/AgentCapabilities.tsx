@@ -104,7 +104,9 @@ export const AgentCapabilities = () => {
             <Flex gap="2" direction="column">
               {agenticFeatures.map((feature) => {
                 if ("hide" in feature && feature.hide) return null;
-                return <Fragment key={feature.name}>{feature.switcher}</Fragment>;
+                return (
+                  <Fragment key={feature.name}>{feature.switcher}</Fragment>
+                );
               })}
               <Separator size="4" mt="2" mb="1" />
               <ToolGroups />

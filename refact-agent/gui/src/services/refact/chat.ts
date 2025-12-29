@@ -1,10 +1,23 @@
-import { ChatRole, ThinkingBlock, ToolCall, ToolResult, UserMessage, isToolContent } from "./types";
+import {
+  ChatRole,
+  ThinkingBlock,
+  ToolCall,
+  ToolResult,
+  UserMessage,
+  isToolContent,
+} from "./types";
 
 export type LspChatMessage =
   | {
       role: ChatRole;
       content: string | null;
-      finish_reason?: "stop" | "length" | "abort" | "tool_calls" | "error" | null;
+      finish_reason?:
+        | "stop"
+        | "length"
+        | "abort"
+        | "tool_calls"
+        | "error"
+        | null;
       thinking_blocks?: ThinkingBlock[];
       tool_calls?: ToolCall[];
       tool_call_id?: string;
@@ -18,25 +31,25 @@ export function isLspChatMessage(json: unknown): json is LspChatMessage {
   if (typeof json !== "object") return false;
   if (!("role" in json)) return false;
   if (typeof json.role !== "string") return false;
-  
+
   const role = json.role;
-  
+
   if (role === "tool") {
     if (!("tool_call_id" in json)) return false;
     if (!("content" in json)) return false;
     return isToolContent(json.content);
   }
-  
+
   if (role === "diff") {
     if (!("content" in json)) return false;
     return Array.isArray(json.content);
   }
-  
+
   if (!("content" in json)) return false;
   if (json.content === null) return true;
   if (typeof json.content === "string") return true;
   if (Array.isArray(json.content)) return true;
-  
+
   return false;
 }
 
@@ -67,5 +80,3 @@ export type Usage = {
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
 };
-
-

@@ -4,9 +4,16 @@ import { isAbsolutePath } from "../utils/isAbsolutePath";
 import { useAppDispatch } from "./useAppDispatch";
 import { popBackTo, push } from "../features/Pages/pagesSlice";
 import { useAppSelector } from "./useAppSelector";
-import { selectIntegration, selectChatId } from "../features/Chat/Thread/selectors";
+import {
+  selectIntegration,
+  selectChatId,
+} from "../features/Chat/Thread/selectors";
 import { debugIntegrations } from "../debugConfig";
-import { newChatAction, clearThreadPauseReasons, setThreadConfirmationStatus } from "../features/Chat/Thread/actions";
+import {
+  newChatAction,
+  clearThreadPauseReasons,
+  setThreadConfirmationStatus,
+} from "../features/Chat/Thread/actions";
 
 export function useGoToLink() {
   const dispatch = useAppDispatch();
@@ -56,7 +63,13 @@ export function useGoToLink() {
         case "newchat": {
           dispatch(newChatAction());
           dispatch(clearThreadPauseReasons({ id: chatId }));
-          dispatch(setThreadConfirmationStatus({ id: chatId, wasInteracted: false, confirmationStatus: true }));
+          dispatch(
+            setThreadConfirmationStatus({
+              id: chatId,
+              wasInteracted: false,
+              confirmationStatus: true,
+            }),
+          );
           dispatch(popBackTo({ name: "history" }));
           dispatch(push({ name: "chat" }));
           return;

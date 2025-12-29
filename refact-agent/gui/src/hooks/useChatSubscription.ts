@@ -56,7 +56,12 @@ export function useChatSubscription(
   const [error, setError] = useState<Error | null>(null);
 
   const lastSeqRef = useRef<bigint>(0n);
-  const callbacksRef = useRef({ onEvent, onConnected, onDisconnected, onError });
+  const callbacksRef = useRef({
+    onEvent,
+    onConnected,
+    onDisconnected,
+    onError,
+  });
   callbacksRef.current = { onEvent, onConnected, onDisconnected, onError };
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
@@ -79,17 +84,20 @@ export function useChatSubscription(
     connectingRef.current = false;
   }, []);
 
-  const scheduleReconnect = useCallback((delayMs: number) => {
-    if (!autoReconnect || !enabled || !chatId || !port) return;
+  const scheduleReconnect = useCallback(
+    (delayMs: number) => {
+      if (!autoReconnect || !enabled || !chatId || !port) return;
 
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-    }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
 
-    reconnectTimeoutRef.current = setTimeout(() => {
-      connectRef.current();
-    }, delayMs);
-  }, [autoReconnect, enabled, chatId, port]);
+      reconnectTimeoutRef.current = setTimeout(() => {
+        connectRef.current();
+      }, delayMs);
+    },
+    [autoReconnect, enabled, chatId, port],
+  );
 
   const connect = useCallback(() => {
     if (!chatId || !port || !enabled) return;
@@ -101,51 +109,58 @@ export function useChatSubscription(
     setStatus("connecting");
     setError(null);
 
-    unsubscribeRef.current = subscribeToChatEvents(chatId, port, {
-      onEvent: (envelope) => {
-        try {
-          const seq = BigInt(envelope.seq);
-          if (envelope.type === "snapshot") {
-            lastSeqRef.current = seq;
-          } else {
-            if (seq <= lastSeqRef.current) {
-              return;
+    unsubscribeRef.current = subscribeToChatEvents(
+      chatId,
+      port,
+      {
+        onEvent: (envelope) => {
+          try {
+            const seq = BigInt(envelope.seq);
+            if (envelope.type === "snapshot") {
+              lastSeqRef.current = seq;
+            } else {
+              if (seq <= lastSeqRef.current) {
+                return;
+              }
+              if (seq > lastSeqRef.current + 1n) {
+                cleanup();
+                setStatus("disconnected");
+                scheduleReconnect(0);
+                return;
+              }
+              lastSeqRef.current = seq;
             }
-            if (seq > lastSeqRef.current + 1n) {
-              cleanup();
-              setStatus("disconnected");
-              scheduleReconnect(0);
-              return;
-            }
-            lastSeqRef.current = seq;
+            dispatch(applyChatEvent(envelope));
+            callbacksRef.current.onEvent?.(envelope);
+          } catch (err) {
+            // Error processing event - likely malformed data
+            callbacksRef.current.onError?.(
+              err instanceof Error ? err : new Error(String(err)),
+            );
           }
-          dispatch(applyChatEvent(envelope));
-          callbacksRef.current.onEvent?.(envelope);
-        } catch (err) {
-          // Error processing event - likely malformed data
-          callbacksRef.current.onError?.(err instanceof Error ? err : new Error(String(err)));
-        }
+        },
+        onConnected: () => {
+          connectingRef.current = false;
+          setStatus("connected");
+          setError(null);
+          callbacksRef.current.onConnected?.();
+        },
+        onDisconnected: () => {
+          connectingRef.current = false;
+          setStatus("disconnected");
+          callbacksRef.current.onDisconnected?.();
+        },
+        onError: (err) => {
+          connectingRef.current = false;
+          setStatus("disconnected");
+          setError(err);
+          callbacksRef.current.onError?.(err);
+          cleanup();
+          scheduleReconnect(reconnectDelay);
+        },
       },
-      onConnected: () => {
-        connectingRef.current = false;
-        setStatus("connected");
-        setError(null);
-        callbacksRef.current.onConnected?.();
-      },
-      onDisconnected: () => {
-        connectingRef.current = false;
-        setStatus("disconnected");
-        callbacksRef.current.onDisconnected?.();
-      },
-      onError: (err) => {
-        connectingRef.current = false;
-        setStatus("disconnected");
-        setError(err);
-        callbacksRef.current.onError?.(err);
-        cleanup();
-        scheduleReconnect(reconnectDelay);
-      },
-    }, apiKey ?? undefined);
+      apiKey ?? undefined,
+    );
   }, [
     chatId,
     port,

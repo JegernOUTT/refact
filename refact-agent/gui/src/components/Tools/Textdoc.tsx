@@ -421,7 +421,11 @@ const ApplyPatch: React.FC<{
   return (
     <Box className={styles.textdoc}>
       <TextDocHeader toolCall={toolCall} ref={ref} />
-      <Reveal isRevealingCode defaultOpen={lineCount < 15} onClose={handleClose}>
+      <Reveal
+        isRevealingCode
+        defaultOpen={lineCount < 15}
+        onClose={handleClose}
+      >
         <MarkdownCodeBlock className="language-diff">
           {toolCall.function.arguments.patch}
         </MarkdownCodeBlock>

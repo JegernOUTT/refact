@@ -163,21 +163,35 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const onCreateNewChat = useCallback(() => {
     setRenamingTabId(null);
 
-    const currentThread = allThreads[currentChatId] as { thread: { messages: unknown[] } } | undefined;
+    const currentThread = allThreads[currentChatId] as
+      | { thread: { messages: unknown[] } }
+      | undefined;
     if (currentThread && currentThread.thread.messages.length === 0) {
       dispatch(closeThread({ id: currentChatId }));
     }
 
     dispatch(newChatAction());
     dispatch(clearThreadPauseReasons({ id: currentChatId }));
-    dispatch(setThreadConfirmationStatus({ id: currentChatId, wasInteracted: false, confirmationStatus: true }));
+    dispatch(
+      setThreadConfirmationStatus({
+        id: currentChatId,
+        wasInteracted: false,
+        confirmationStatus: true,
+      }),
+    );
     handleNavigation("chat");
     void sendTelemetryEvent({
       scope: `openNewChat`,
       success: true,
       error_message: "",
     });
-  }, [dispatch, currentChatId, allThreads, sendTelemetryEvent, handleNavigation]);
+  }, [
+    dispatch,
+    currentChatId,
+    allThreads,
+    sendTelemetryEvent,
+    handleNavigation,
+  ]);
 
   const goToTab = useCallback(
     (tab: Tab) => {
@@ -249,13 +263,16 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     return tabNavWidth < totalWidth;
   }, [tabNavWidth, tabs.length, windowWidth]);
 
-  const handleChatThreadDeletion = useCallback((tabId: string) => {
-    dispatch(deleteChatById(tabId));
-    dispatch(closeThread({ id: tabId }));
-    if (activeTab.type === "chat" && activeTab.id === tabId) {
-      goToTab({ type: "dashboard" });
-    }
-  }, [dispatch, activeTab, goToTab]);
+  const handleChatThreadDeletion = useCallback(
+    (tabId: string) => {
+      dispatch(deleteChatById(tabId));
+      dispatch(closeThread({ id: tabId }));
+      if (activeTab.type === "chat" && activeTab.id === tabId) {
+        goToTab({ type: "dashboard" });
+      }
+    },
+    [dispatch, activeTab, goToTab],
+  );
 
   const handleChatThreadRenaming = useCallback((tabId: string) => {
     setRenamingTabId(tabId);
@@ -286,19 +303,22 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     setNewTitle(event.target.value);
   };
 
-  const handleCloseTab = useCallback((event: MouseEvent, tabId: string) => {
-    event.stopPropagation();
-    event.preventDefault();
-    dispatch(closeThread({ id: tabId }));
-    if (activeTab.type === "chat" && activeTab.id === tabId) {
-      const remainingTabs = tabs.filter((t) => t.id !== tabId);
-      if (remainingTabs.length > 0) {
-        goToTab({ type: "chat", id: remainingTabs[0].id });
-      } else {
-        goToTab({ type: "dashboard" });
+  const handleCloseTab = useCallback(
+    (event: MouseEvent, tabId: string) => {
+      event.stopPropagation();
+      event.preventDefault();
+      dispatch(closeThread({ id: tabId }));
+      if (activeTab.type === "chat" && activeTab.id === tabId) {
+        const remainingTabs = tabs.filter((t) => t.id !== tabId);
+        if (remainingTabs.length > 0) {
+          goToTab({ type: "chat", id: remainingTabs[0].id });
+        } else {
+          goToTab({ type: "dashboard" });
+        }
       }
-    }
-  }, [dispatch, activeTab, tabs, goToTab]);
+    },
+    [dispatch, activeTab, tabs, goToTab],
+  );
 
   return (
     <Flex align="center" m="4px" gap="4px" style={{ alignSelf: "stretch" }}>
@@ -345,7 +365,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                 title={tab.title}
               >
                 {(tab.streaming || tab.waiting) && <Spinner mr="1" />}
-                {!tab.streaming && !tab.waiting && tab.read === false && <DotFilledIcon />}
+                {!tab.streaming && !tab.waiting && tab.read === false && (
+                  <DotFilledIcon />
+                )}
                 <Flex gap="2" align="center">
                   <TruncateLeft
                     style={{
@@ -373,7 +395,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                         align="end"
                         style={{ minWidth: 110 }}
                       >
-                        <DropdownMenu.Item onClick={() => handleChatThreadRenaming(tab.id)}>
+                        <DropdownMenu.Item
+                          onClick={() => handleChatThreadRenaming(tab.id)}
+                        >
                           Rename
                         </DropdownMenu.Item>
                         <DropdownMenu.Item

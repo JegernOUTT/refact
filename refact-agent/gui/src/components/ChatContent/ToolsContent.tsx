@@ -310,14 +310,20 @@ function processToolCalls(
 
   if (result && head.function.name === "search_trajectories") {
     const elem = (
-      <Trajectories key={`trajectories-tool-${processed.length}`} toolCall={head} />
+      <Trajectories
+        key={`trajectories-tool-${processed.length}`}
+        toolCall={head}
+      />
     );
     return processToolCalls(tail, toolResults, features, [...processed, elem]);
   }
 
   if (result && head.function.name === "get_trajectory_context") {
     const elem = (
-      <TrajectoryContext key={`trajectory-context-tool-${processed.length}`} toolCall={head} />
+      <TrajectoryContext
+        key={`trajectory-context-tool-${processed.length}`}
+        toolCall={head}
+      />
     );
     return processToolCalls(tail, toolResults, features, [...processed, elem]);
   }
@@ -688,7 +694,9 @@ const Memory: React.FC<{ memory: MemoryEntry }> = ({ memory }) => {
           </Text>
         </Flex>
         <Separator size="4" />
-        <Text size="2" style={{ whiteSpace: "pre-wrap" }}>{memory.content}</Text>
+        <Text size="2" style={{ whiteSpace: "pre-wrap" }}>
+          {memory.content}
+        </Text>
       </Flex>
     </Card>
   );
@@ -726,7 +734,9 @@ function splitMemories(text: string): MemoryEntry[] {
 
 function extractReadableName(path: string): string {
   const fileName = path.split("/").pop() ?? path;
-  const memoryMatch = fileName.match(/^\d{4}-\d{2}-\d{2}_\d{6}_[a-f0-9]+_(.+)\.md$/);
+  const memoryMatch = fileName.match(
+    /^\d{4}-\d{2}-\d{2}_\d{6}_[a-f0-9]+_(.+)\.md$/,
+  );
   if (memoryMatch) {
     return memoryMatch[1].replace(/-/g, " ");
   }
@@ -878,7 +888,8 @@ const TrajectoryContext: React.FC<{ toolCall: ToolCall }> = ({ toolCall }) => {
   }, [toolCall.function.arguments]);
 
   const { header, messages } = useMemo(() => {
-    if (typeof maybeResult?.content !== "string") return { header: null, messages: [] };
+    if (typeof maybeResult?.content !== "string")
+      return { header: null, messages: [] };
     return parseTrajectoryContext(maybeResult.content);
   }, [maybeResult?.content]);
 
@@ -919,23 +930,42 @@ const TrajectoryContext: React.FC<{ toolCall: ToolCall }> = ({ toolCall }) => {
             {header && (
               <Card my="2">
                 <Flex direction="column" gap="1">
-                  <Text size="1" weight="medium">📁 {header.id}</Text>
-                  <Text size="2" weight="medium">{header.title}</Text>
-                  <Text size="1" color="gray">{header.range}</Text>
+                  <Text size="1" weight="medium">
+                    📁 {header.id}
+                  </Text>
+                  <Text size="2" weight="medium">
+                    {header.title}
+                  </Text>
+                  <Text size="1" color="gray">
+                    {header.range}
+                  </Text>
                 </Flex>
               </Card>
             )}
             <Flex gap="3" direction="column" py="2">
               {messages.map((msg, idx) => (
-                <Card key={idx} style={{ borderLeft: msg.highlighted ? "3px solid var(--accent-9)" : undefined }}>
+                <Card
+                  key={idx}
+                  style={{
+                    borderLeft: msg.highlighted
+                      ? "3px solid var(--accent-9)"
+                      : undefined,
+                  }}
+                >
                   <Flex direction="column" gap="1">
                     <Flex gap="2" align="center">
                       <Text size="1">{msg.icon}</Text>
-                      <Text size="1" weight="medium" color={msg.highlighted ? "blue" : undefined}>
+                      <Text
+                        size="1"
+                        weight="medium"
+                        color={msg.highlighted ? "blue" : undefined}
+                      >
                         [{msg.index}] {msg.role}
                       </Text>
                     </Flex>
-                    <Text size="2" style={{ whiteSpace: "pre-wrap" }}>{msg.content}</Text>
+                    <Text size="2" style={{ whiteSpace: "pre-wrap" }}>
+                      {msg.content}
+                    </Text>
                   </Flex>
                 </Card>
               ))}
@@ -964,7 +994,10 @@ interface TrajectoryMessage {
   highlighted: boolean;
 }
 
-function parseTrajectoryContext(text: string): { header: TrajectoryHeader | null; messages: TrajectoryMessage[] } {
+function parseTrajectoryContext(text: string): {
+  header: TrajectoryHeader | null;
+  messages: TrajectoryMessage[];
+} {
   const lines = text.split("\n");
   let header: TrajectoryHeader | null = null;
   const messages: TrajectoryMessage[] = [];
@@ -998,7 +1031,12 @@ function parseTrajectoryContext(text: string): { header: TrajectoryHeader | null
           highlighted,
         };
       }
-    } else if (currentMsg && !line.startsWith("╭") && !line.startsWith("╰") && !line.startsWith("│")) {
+    } else if (
+      currentMsg &&
+      !line.startsWith("╭") &&
+      !line.startsWith("╰") &&
+      !line.startsWith("│")
+    ) {
       contentLines.push(line);
     }
   }
@@ -1020,7 +1058,9 @@ interface ParsedTrajectory {
 }
 
 function splitTrajectories(text: string): ParsedTrajectory[] {
-  const entries = text.split("───────────────────────────────────────\n").filter((part) => part.trim() && part.includes("📁"));
+  const entries = text
+    .split("───────────────────────────────────────\n")
+    .filter((part) => part.trim() && part.includes("📁"));
 
   return entries.map((entry) => {
     const lines = entry.split("\n");
@@ -1049,6 +1089,12 @@ function splitTrajectories(text: string): ParsedTrajectory[] {
       }
     }
 
-    return { id, title, relevance, messageRange, preview: previewLines.join("\n").trim() };
+    return {
+      id,
+      title,
+      relevance,
+      messageRange,
+      preview: previewLines.join("\n").trim(),
+    };
   });
 }

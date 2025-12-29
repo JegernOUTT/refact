@@ -2,7 +2,11 @@ import React, { useCallback, useMemo } from "react";
 import { Markdown } from "../Markdown";
 
 import { Container, Box, Flex, Text, Link, Card } from "@radix-ui/themes";
-import { ThinkingBlock, ToolCall, WebSearchCitation } from "../../services/refact";
+import {
+  ThinkingBlock,
+  ToolCall,
+  WebSearchCitation,
+} from "../../services/refact";
 import { ToolContent } from "./ToolsContent";
 import { fallbackCopying } from "../../utils/fallbackCopying";
 import { telemetryApi } from "../../services/refact/telemetry";

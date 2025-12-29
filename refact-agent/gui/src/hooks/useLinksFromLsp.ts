@@ -259,14 +259,16 @@ export function useLinksFromLsp() {
           }),
         );
         debugRefact(`[DEBUG]: link messages: `, link.link_payload.messages);
-        const lastMsg = link.link_payload.messages[link.link_payload.messages.length - 1];
+        const lastMsg =
+          link.link_payload.messages[link.link_payload.messages.length - 1];
         if (lastMsg.role === "user") {
-          const content = typeof lastMsg.content === "string"
-            ? lastMsg.content
-            : "";
-          void setParams({ mode: link.link_payload.chat_meta.chat_mode }).then(() => {
-            void submit(content);
-          });
+          const content =
+            typeof lastMsg.content === "string" ? lastMsg.content : "";
+          void setParams({ mode: link.link_payload.chat_meta.chat_mode }).then(
+            () => {
+              void submit(content);
+            },
+          );
         }
         return;
       }

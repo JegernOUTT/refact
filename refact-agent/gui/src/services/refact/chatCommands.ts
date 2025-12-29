@@ -67,7 +67,9 @@ export async function sendChatCommand(
     client_request_id: uuidv4(),
   };
 
-  const url = `http://127.0.0.1:${port}/v1/chats/${encodeURIComponent(chatId)}/commands`;
+  const url = `http://127.0.0.1:${port}/v1/chats/${encodeURIComponent(
+    chatId,
+  )}/commands`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

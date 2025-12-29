@@ -10,7 +10,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/require-await, @typescript-eslint/ban-ts-comment */
 // @ts-nocheck - Testing runtime behavior with discriminated unions
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { subscribeToChatEvents, applyDeltaOps, type EventEnvelope, type DeltaOp } from "../services/refact/chatSubscription";
+import {
+  subscribeToChatEvents,
+  applyDeltaOps,
+  type EventEnvelope,
+  type DeltaOp,
+} from "../services/refact/chatSubscription";
 import type { ChatMessage } from "../services/refact/types";
 
 const createMockReader = (chunks: string[]) => {
@@ -170,10 +175,18 @@ describe("SSE Protocol - Event Types", () => {
         ops: [
           { op: "append_content", text: "Hello" },
           { op: "append_reasoning", text: "thinking..." },
-          { op: "set_tool_calls", tool_calls: [{ id: "call_1", function: { name: "test", arguments: "{}" } }] },
+          {
+            op: "set_tool_calls",
+            tool_calls: [
+              { id: "call_1", function: { name: "test", arguments: "{}" } },
+            ],
+          },
           { op: "set_thinking_blocks", blocks: [{ thinking: "step 1" }] },
           { op: "add_citation", citation: { url: "http://example.com" } },
-          { op: "set_usage", usage: { prompt_tokens: 100, completion_tokens: 50 } },
+          {
+            op: "set_usage",
+            usage: { prompt_tokens: 100, completion_tokens: 50 },
+          },
           { op: "merge_extra", extra: { custom_field: "value" } },
         ],
       };
@@ -208,7 +221,9 @@ describe("SSE Protocol - Event Types", () => {
         };
 
         const events: EventEnvelope[] = [];
-        const mockFetch = createMockFetch([`data: ${JSON.stringify(event)}\n\n`]);
+        const mockFetch = createMockFetch([
+          `data: ${JSON.stringify(event)}\n\n`,
+        ]);
         global.fetch = mockFetch;
 
         subscribeToChatEvents("test-123", 8001, {
@@ -256,7 +271,11 @@ describe("SSE Protocol - Event Types", () => {
         seq: "5",
         type: "message_updated",
         message_id: "msg-3",
-        message: { role: "user", content: "Updated content", message_id: "msg-3" },
+        message: {
+          role: "user",
+          content: "Updated content",
+          message_id: "msg-3",
+        },
       };
 
       const events: EventEnvelope[] = [];
@@ -347,7 +366,14 @@ describe("SSE Protocol - Event Types", () => {
     });
 
     it("should parse runtime_updated with all states", async () => {
-      const states = ["idle", "generating", "executing_tools", "paused", "waiting_ide", "error"];
+      const states = [
+        "idle",
+        "generating",
+        "executing_tools",
+        "paused",
+        "waiting_ide",
+        "error",
+      ];
 
       for (const state of states) {
         const event: EventEnvelope = {
@@ -361,7 +387,9 @@ describe("SSE Protocol - Event Types", () => {
         };
 
         const events: EventEnvelope[] = [];
-        const mockFetch = createMockFetch([`data: ${JSON.stringify(event)}\n\n`]);
+        const mockFetch = createMockFetch([
+          `data: ${JSON.stringify(event)}\n\n`,
+        ]);
         global.fetch = mockFetch;
 
         subscribeToChatEvents("test-123", 8001, {
@@ -587,9 +615,21 @@ describe("SSE Protocol - Sequence Numbers", () => {
   it("should handle monotonically increasing sequences", async () => {
     const events: EventEnvelope[] = [];
     const mockFetch = createMockFetch([
-      `data: ${JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" })}\n\n`,
-      `data: ${JSON.stringify({ chat_id: "test", seq: "2", type: "pause_cleared" })}\n\n`,
-      `data: ${JSON.stringify({ chat_id: "test", seq: "3", type: "pause_cleared" })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "1",
+        type: "pause_cleared",
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "2",
+        type: "pause_cleared",
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "3",
+        type: "pause_cleared",
+      })}\n\n`,
     ]);
     global.fetch = mockFetch;
 
@@ -645,7 +685,9 @@ describe("SSE Protocol - Field Variations", () => {
       };
 
       const events: EventEnvelope[] = [];
-      const mockFetch = createMockFetch([`data: ${JSON.stringify(snapshot)}\n\n`]);
+      const mockFetch = createMockFetch([
+        `data: ${JSON.stringify(snapshot)}\n\n`,
+      ]);
       global.fetch = mockFetch;
 
       subscribeToChatEvents("test-123", 8001, {
@@ -687,7 +729,9 @@ describe("SSE Protocol - Field Variations", () => {
       };
 
       const events: EventEnvelope[] = [];
-      const mockFetch = createMockFetch([`data: ${JSON.stringify(snapshot)}\n\n`]);
+      const mockFetch = createMockFetch([
+        `data: ${JSON.stringify(snapshot)}\n\n`,
+      ]);
       global.fetch = mockFetch;
 
       subscribeToChatEvents("test-123", 8001, {
@@ -729,7 +773,9 @@ describe("SSE Protocol - Field Variations", () => {
       };
 
       const events: EventEnvelope[] = [];
-      const mockFetch = createMockFetch([`data: ${JSON.stringify(snapshot)}\n\n`]);
+      const mockFetch = createMockFetch([
+        `data: ${JSON.stringify(snapshot)}\n\n`,
+      ]);
       global.fetch = mockFetch;
 
       subscribeToChatEvents("test-123", 8001, {
@@ -772,7 +818,9 @@ describe("SSE Protocol - Field Variations", () => {
       };
 
       const events: EventEnvelope[] = [];
-      const mockFetch = createMockFetch([`data: ${JSON.stringify(snapshot)}\n\n`]);
+      const mockFetch = createMockFetch([
+        `data: ${JSON.stringify(snapshot)}\n\n`,
+      ]);
       global.fetch = mockFetch;
 
       subscribeToChatEvents("test-123", 8001, {
@@ -820,7 +868,9 @@ describe("SSE Protocol - Field Variations", () => {
         };
 
         const events: EventEnvelope[] = [];
-        const mockFetch = createMockFetch([`data: ${JSON.stringify(snapshot)}\n\n`]);
+        const mockFetch = createMockFetch([
+          `data: ${JSON.stringify(snapshot)}\n\n`,
+        ]);
         global.fetch = mockFetch;
 
         subscribeToChatEvents("test-123", 8001, {
@@ -863,7 +913,9 @@ describe("SSE Protocol - Field Variations", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      expect(events[0].reasons[0].integr_config_path).toBe("/path/to/config.yaml");
+      expect(events[0].reasons[0].integr_config_path).toBe(
+        "/path/to/config.yaml",
+      );
     });
 
     it("should handle multiple pause_reasons", async () => {
@@ -936,7 +988,9 @@ describe("SSE Protocol - Edge Cases", () => {
     };
 
     const events: EventEnvelope[] = [];
-    const mockFetch = createMockFetch([`data: ${JSON.stringify(snapshot)}\n\n`]);
+    const mockFetch = createMockFetch([
+      `data: ${JSON.stringify(snapshot)}\n\n`,
+    ]);
     global.fetch = mockFetch;
 
     subscribeToChatEvents("test-123", 8001, {
@@ -997,7 +1051,11 @@ describe("SSE Protocol - Edge Cases", () => {
   it("should skip [DONE] marker", async () => {
     const events: EventEnvelope[] = [];
     const mockFetch = createMockFetch([
-      `data: ${JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "1",
+        type: "pause_cleared",
+      })}\n\n`,
       `data: [DONE]\n\n`,
     ]);
     global.fetch = mockFetch;
@@ -1017,7 +1075,11 @@ describe("SSE Protocol - Edge Cases", () => {
     const errors: Error[] = [];
     const mockFetch = createMockFetch([
       `data: {invalid json}\n\n`,
-      `data: ${JSON.stringify({ chat_id: "test", seq: "1", type: "pause_cleared" })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "1",
+        type: "pause_cleared",
+      })}\n\n`,
     ]);
     global.fetch = mockFetch;
 
@@ -1087,7 +1149,9 @@ describe("SSE Protocol - Edge Cases", () => {
     };
 
     const events: EventEnvelope[] = [];
-    const mockFetch = createMockFetch([`data: ${JSON.stringify(snapshot)}\n\n`]);
+    const mockFetch = createMockFetch([
+      `data: ${JSON.stringify(snapshot)}\n\n`,
+    ]);
     global.fetch = mockFetch;
 
     subscribeToChatEvents("test-123", 8001, {
@@ -1132,7 +1196,10 @@ describe("SSE Protocol - Edge Cases", () => {
           role: "user",
           content: [
             { type: "text", text: "What's in this image?" },
-            { type: "image_url", image_url: { url: "data:image/png;base64,..." } },
+            {
+              type: "image_url",
+              image_url: { url: "data:image/png;base64,..." },
+            },
           ],
           message_id: "msg-1",
         },
@@ -1140,7 +1207,9 @@ describe("SSE Protocol - Edge Cases", () => {
     };
 
     const events: EventEnvelope[] = [];
-    const mockFetch = createMockFetch([`data: ${JSON.stringify(snapshot)}\n\n`]);
+    const mockFetch = createMockFetch([
+      `data: ${JSON.stringify(snapshot)}\n\n`,
+    ]);
     global.fetch = mockFetch;
 
     subscribeToChatEvents("test-123", 8001, {
@@ -1253,10 +1322,33 @@ describe("SSE Protocol - Edge Cases", () => {
   it("should handle rapid event sequence", async () => {
     const events: EventEnvelope[] = [];
     const mockFetch = createMockFetch([
-      `data: ${JSON.stringify({ chat_id: "test", seq: "1", type: "stream_started", message_id: "msg-1" })}\n\n`,
-      `data: ${JSON.stringify({ chat_id: "test", seq: "2", type: "stream_delta", message_id: "msg-1", ops: [{ op: "append_content", text: "H" }] })}\n\n`,
-      `data: ${JSON.stringify({ chat_id: "test", seq: "3", type: "stream_delta", message_id: "msg-1", ops: [{ op: "append_content", text: "i" }] })}\n\n`,
-      `data: ${JSON.stringify({ chat_id: "test", seq: "4", type: "stream_finished", message_id: "msg-1", finish_reason: "stop" })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "1",
+        type: "stream_started",
+        message_id: "msg-1",
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "2",
+        type: "stream_delta",
+        message_id: "msg-1",
+        ops: [{ op: "append_content", text: "H" }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "3",
+        type: "stream_delta",
+        message_id: "msg-1",
+        ops: [{ op: "append_content", text: "i" }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        chat_id: "test",
+        seq: "4",
+        type: "stream_finished",
+        message_id: "msg-1",
+        finish_reason: "stop",
+      })}\n\n`,
     ]);
     global.fetch = mockFetch;
 
@@ -1283,9 +1375,7 @@ describe("DeltaOp Application - merge_extra", () => {
       message_id: "msg-1",
     };
 
-    const ops: DeltaOp[] = [
-      { op: "merge_extra", extra: { metering_a: 100 } },
-    ];
+    const ops: DeltaOp[] = [{ op: "merge_extra", extra: { metering_a: 100 } }];
 
     const result = applyDeltaOps(message, ops) as any;
     expect(result.extra).toEqual({ metering_a: 100 });

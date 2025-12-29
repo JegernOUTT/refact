@@ -47,43 +47,86 @@ const FilesContent: React.FC<{
   if (files.length === 0) return null;
 
   if (variant === "enrichment") {
-    const memories = files.filter(f => f.file_name.includes("/.refact/memories/"));
-    const trajectories = files.filter(f => f.file_name.includes("/.refact/trajectories/"));
-    const other = files.filter(f =>
-      !f.file_name.includes("/.refact/memories/") &&
-      !f.file_name.includes("/.refact/trajectories/")
+    const memories = files.filter((f) =>
+      f.file_name.includes("/.refact/memories/"),
+    );
+    const trajectories = files.filter((f) =>
+      f.file_name.includes("/.refact/trajectories/"),
+    );
+    const other = files.filter(
+      (f) =>
+        !f.file_name.includes("/.refact/memories/") &&
+        !f.file_name.includes("/.refact/trajectories/"),
     );
 
     return (
       <Flex direction="column" gap="2">
         {memories.length > 0 && (
-          <FileSection icon="📝" title="Knowledge" files={memories} onOpenFile={onOpenFile} variant={variant} />
+          <FileSection
+            icon="📝"
+            title="Knowledge"
+            files={memories}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
         )}
         {trajectories.length > 0 && (
-          <FileSection icon="💬" title="Past Conversations" files={trajectories} onOpenFile={onOpenFile} variant={variant} />
+          <FileSection
+            icon="💬"
+            title="Past Conversations"
+            files={trajectories}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
         )}
         {other.length > 0 && (
-          <FileSection icon="📄" title="Related" files={other} onOpenFile={onOpenFile} variant={variant} />
+          <FileSection
+            icon="📄"
+            title="Related"
+            files={other}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
         )}
       </Flex>
     );
   }
 
   if (variant === "project_context") {
-    const instructions = files.filter(f => isInstructionFile(f.file_name));
-    const ideSettings = files.filter(f => isIdeSettingFile(f.file_name));
-    const other = files.filter(f => !isInstructionFile(f.file_name) && !isIdeSettingFile(f.file_name));
+    const instructions = files.filter((f) => isInstructionFile(f.file_name));
+    const ideSettings = files.filter((f) => isIdeSettingFile(f.file_name));
+    const other = files.filter(
+      (f) => !isInstructionFile(f.file_name) && !isIdeSettingFile(f.file_name),
+    );
 
     return (
       <Flex direction="column" gap="2">
         {instructions.length > 0 && (
-          <FileSection icon="📝" title="Instructions" files={instructions} onOpenFile={onOpenFile} variant={variant} />
+          <FileSection
+            icon="📝"
+            title="Instructions"
+            files={instructions}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
         )}
         {ideSettings.length > 0 && (
-          <FileSection icon="⚙️" title="IDE Settings" files={ideSettings} onOpenFile={onOpenFile} variant={variant} />
+          <FileSection
+            icon="⚙️"
+            title="IDE Settings"
+            files={ideSettings}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
         )}
         {other.length > 0 && (
-          <FileSection icon="📄" title="Other" files={other} onOpenFile={onOpenFile} variant={variant} />
+          <FileSection
+            icon="📄"
+            title="Other"
+            files={other}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
         )}
       </Flex>
     );
@@ -143,19 +186,25 @@ export const ContextFiles: React.FC<{
   if (!Array.isArray(files) || files.length === 0) return null;
 
   const variant: ContextVariant =
-    toolCallId === "knowledge_enrichment" ? "enrichment" :
-    toolCallId === "project_context" ? "project_context" :
-    "default";
+    toolCallId === "knowledge_enrichment"
+      ? "enrichment"
+      : toolCallId === "project_context"
+        ? "project_context"
+        : "default";
 
   const icon =
-    variant === "enrichment" ? "🧠" :
-    variant === "project_context" ? "📁" :
-    "📎";
+    variant === "enrichment"
+      ? "🧠"
+      : variant === "project_context"
+        ? "📁"
+        : "📎";
 
   const label =
-    variant === "enrichment" ? `${files.length} memories` :
-    variant === "project_context" ? `Project context (${files.length})` :
-    `${files.length} file${files.length > 1 ? "s" : ""}`;
+    variant === "enrichment"
+      ? `${files.length} memories`
+      : variant === "project_context"
+        ? `Project context (${files.length})`
+        : `${files.length} file${files.length > 1 ? "s" : ""}`;
 
   return (
     <Container>
@@ -216,12 +265,15 @@ const FileCard: React.FC<{
   const start = file.line1 || 1;
 
   const displayName =
-    variant === "enrichment" ? extractEnrichmentDisplayName(file.file_name) :
-    variant === "project_context" ? extractProjectContextDisplayName(file.file_name) :
-    formatFileName(file.file_name, file.line1, file.line2);
+    variant === "enrichment"
+      ? extractEnrichmentDisplayName(file.file_name)
+      : variant === "project_context"
+        ? extractProjectContextDisplayName(file.file_name)
+        : formatFileName(file.file_name, file.line1, file.line2);
   const relevance = file.usefulness ? Math.round(file.usefulness) : null;
 
-  const preview = file.file_content.slice(0, 100).replace(/\n/g, " ") +
+  const preview =
+    file.file_content.slice(0, 100).replace(/\n/g, " ") +
     (file.file_content.length > 100 ? "..." : "");
 
   return (
@@ -232,7 +284,10 @@ const FileCard: React.FC<{
             <Link
               onClick={(e) => {
                 e.preventDefault();
-                void onOpenFile({ file_path: file.file_name, line: file.line1 });
+                void onOpenFile({
+                  file_path: file.file_name,
+                  line: file.line1,
+                });
               }}
               style={{ cursor: "pointer" }}
             >
@@ -268,7 +323,11 @@ const FileCard: React.FC<{
   );
 };
 
-function formatFileName(filePath: string, line1?: number, line2?: number): string {
+function formatFileName(
+  filePath: string,
+  line1?: number,
+  line2?: number,
+): string {
   const name = filename(filePath);
   if (line1 && line2 && line1 !== 0 && line2 !== 0) {
     return `${name}:${line1}-${line2}`;
@@ -281,7 +340,9 @@ function extractEnrichmentDisplayName(filePath: string): string {
 
   // Memory files: 2025-12-26_230536_3fe00894_servicebobpy-is-a-standalone-fastapi.md
   // Extract the readable part after the hash
-  const memoryMatch = fileName.match(/^\d{4}-\d{2}-\d{2}_\d{6}_[a-f0-9]+_(.+)\.md$/);
+  const memoryMatch = fileName.match(
+    /^\d{4}-\d{2}-\d{2}_\d{6}_[a-f0-9]+_(.+)\.md$/,
+  );
   if (memoryMatch) {
     return memoryMatch[1].replace(/-/g, " ");
   }
@@ -303,7 +364,17 @@ function extractProjectContextDisplayName(filePath: string): string {
   const parts = filePath.split("/");
 
   // Find common project markers and take path from there
-  const markers = [".vscode", ".idea", ".cursor", ".windsurf", ".github", ".refact", ".zed", ".fleet", ".claude"];
+  const markers = [
+    ".vscode",
+    ".idea",
+    ".cursor",
+    ".windsurf",
+    ".github",
+    ".refact",
+    ".zed",
+    ".fleet",
+    ".claude",
+  ];
   for (let i = 0; i < parts.length; i++) {
     if (markers.includes(parts[i])) {
       return parts.slice(i).join("/");
@@ -312,8 +383,19 @@ function extractProjectContextDisplayName(filePath: string): string {
 
   // For instruction files at root, just show the filename
   const fileName = filename(filePath);
-  const instructionFiles = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", "REFACT.md", ".cursorrules", "global_rules.md", "copilot-instructions.md", ".aider.conf.yml"];
-  if (instructionFiles.some(f => fileName.toLowerCase() === f.toLowerCase())) {
+  const instructionFiles = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "REFACT.md",
+    ".cursorrules",
+    "global_rules.md",
+    "copilot-instructions.md",
+    ".aider.conf.yml",
+  ];
+  if (
+    instructionFiles.some((f) => fileName.toLowerCase() === f.toLowerCase())
+  ) {
     return fileName;
   }
 

@@ -190,7 +190,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     (sendPolicy: SendPolicy = "after_flow") => {
       const trimmedValue = value.trim();
       const hasImages = attachedImages.length > 0;
-      const canSubmit = (trimmedValue.length > 0 || hasImages) && isOnline && !allDisabled;
+      const canSubmit =
+        (trimmedValue.length > 0 || hasImages) && isOnline && !allDisabled;
 
       if (canSubmit) {
         const valueWithFiles = attachedFiles.addFilesToInput(trimmedValue);
@@ -452,7 +453,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 <ResendButton />
                 <SendButtonWithDropdown
                   disabled={
-                    !isOnline || allDisabled || (value.trim().length === 0 && attachedImages.length === 0)
+                    !isOnline ||
+                    allDisabled ||
+                    (value.trim().length === 0 && attachedImages.length === 0)
                   }
                   isStreaming={isStreaming || isWaiting}
                   queuedCount={queuedMessages.length}

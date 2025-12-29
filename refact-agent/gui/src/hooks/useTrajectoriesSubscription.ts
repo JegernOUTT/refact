@@ -7,7 +7,11 @@ import {
   chatThreadToTrajectoryData,
   trajectoryDataToChatThread,
 } from "../services/refact/trajectories";
-import { hydrateHistory, deleteChatById, ChatHistoryItem } from "../features/History/historySlice";
+import {
+  hydrateHistory,
+  deleteChatById,
+  ChatHistoryItem,
+} from "../features/History/historySlice";
 import { updateOpenThread, closeThread } from "../features/Chat/Thread";
 
 const MIGRATION_KEY = "refact-trajectories-migrated";
@@ -20,7 +24,10 @@ function getLegacyHistory(): ChatHistoryItem[] {
     const parsed = JSON.parse(raw) as Record<string, string>;
     if (!parsed.history) return [];
 
-    const historyState = JSON.parse(parsed.history) as Record<string, ChatHistoryItem>;
+    const historyState = JSON.parse(parsed.history) as Record<
+      string,
+      ChatHistoryItem
+    >;
     return Object.values(historyState);
   } catch {
     return [];
@@ -52,7 +59,9 @@ export function useTrajectoriesSubscription() {
   const dispatch = useAppDispatch();
   const config = useConfig();
   const eventSourceRef = useRef<EventSource | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   const connect = useCallback(() => {
     if (typeof EventSource === "undefined") return;
@@ -85,13 +94,15 @@ export function useTrajectoriesSubscription() {
               .then((trajectory) => {
                 dispatch(hydrateHistory([trajectory]));
                 const thread = trajectoryDataToChatThread(trajectory);
-                dispatch(updateOpenThread({
-                  id: data.id,
-                  thread: {
-                    title: thread.title,
-                    isTitleGenerated: thread.isTitleGenerated,
-                  },
-                }));
+                dispatch(
+                  updateOpenThread({
+                    id: data.id,
+                    thread: {
+                      title: thread.title,
+                      isTitleGenerated: thread.isTitleGenerated,
+                    },
+                  }),
+                );
               })
               .catch(() => undefined);
           }
@@ -130,7 +141,9 @@ export function useTrajectoriesSubscription() {
         const trajectoryData = chatThreadToTrajectoryData(
           {
             ...chat,
-            new_chat_suggested: chat.new_chat_suggested ?? { wasSuggested: false },
+            new_chat_suggested: chat.new_chat_suggested ?? {
+              wasSuggested: false,
+            },
           },
           chat.createdAt,
         );

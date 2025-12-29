@@ -68,7 +68,10 @@ describe("Chat Validation Fixes", () => {
         role: "user",
         content: [
           { type: "text", text: "What is this?" },
-          { type: "image_url", image_url: { url: "data:image/png;base64,..." } },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,..." },
+          },
         ],
       };
       expect(isLspChatMessage(msg)).toBe(true);
@@ -80,7 +83,13 @@ describe("Chat Validation Fixes", () => {
       const msg = {
         role: "assistant",
         content: null,
-        tool_calls: [{ id: "call_1", function: { name: "test", arguments: "{}" }, index: 0 }],
+        tool_calls: [
+          {
+            id: "call_1",
+            function: { name: "test", arguments: "{}" },
+            index: 0,
+          },
+        ],
       };
       expect(isLspChatMessage(msg)).toBe(true);
     });
@@ -149,9 +158,7 @@ describe("applyDeltaOps - merge_extra", () => {
       message_id: "msg_1",
     };
 
-    const result = applyDeltaOps(message, [
-      { op: "unknown_op" } as any,
-    ]);
+    const result = applyDeltaOps(message, [{ op: "unknown_op" } as any]);
 
     expect(result).toBeDefined();
     expect(result.content).toBe("test");

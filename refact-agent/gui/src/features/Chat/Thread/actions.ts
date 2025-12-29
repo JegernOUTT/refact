@@ -53,7 +53,9 @@ export const backUpMessages = createAction<
 
 export const setChatModel = createAction<string>("chatThread/setChatModel");
 export const getSelectedChatModel = (state: RootState) => {
-  const runtime = state.chat.threads[state.chat.current_thread_id] as { thread: { model: string } } | undefined;
+  const runtime = state.chat.threads[state.chat.current_thread_id] as
+    | { thread: { model: string } }
+    | undefined;
   return runtime?.thread.model ?? "";
 };
 
@@ -172,9 +174,10 @@ export const setIntegrationData = createAction<Partial<IntegrationMeta> | null>(
   "chatThread/setIntegrationData",
 );
 
-export const setIsWaitingForResponse = createAction<{ id: string; value: boolean }>(
-  "chatThread/setIsWaiting",
-);
+export const setIsWaitingForResponse = createAction<{
+  id: string;
+  value: boolean;
+}>("chatThread/setIsWaiting");
 
 export const setMaxNewTokens = createAction<number>(
   "chatThread/setMaxNewTokens",
@@ -204,32 +207,31 @@ export const restoreChatFromBackend = createAsyncThunk<
   undefined,
   { id: string; fallback: ChatHistoryItem },
   { dispatch: AppDispatch; state: RootState }
->(
-  "chatThread/restoreChatFromBackend",
-  async ({ id, fallback }, thunkApi) => {
-    try {
-      const result = await thunkApi.dispatch(
+>("chatThread/restoreChatFromBackend", async ({ id, fallback }, thunkApi) => {
+  try {
+    const result = await thunkApi
+      .dispatch(
         trajectoriesApi.endpoints.getTrajectory.initiate(id, {
           forceRefetch: true,
         }),
-      ).unwrap();
+      )
+      .unwrap();
 
-      const thread = trajectoryDataToChatThread(result);
-      const historyItem: ChatHistoryItem = {
-        ...thread,
-        createdAt: result.created_at,
-        updatedAt: result.updated_at,
-        title: result.title,
-        isTitleGenerated: result.isTitleGenerated,
-      };
+    const thread = trajectoryDataToChatThread(result);
+    const historyItem: ChatHistoryItem = {
+      ...thread,
+      createdAt: result.created_at,
+      updatedAt: result.updated_at,
+      title: result.title,
+      isTitleGenerated: result.isTitleGenerated,
+    };
 
-      thunkApi.dispatch(restoreChat(historyItem));
-    } catch {
-      thunkApi.dispatch(restoreChat(fallback));
-    }
-    return undefined;
-  },
-);
+    thunkApi.dispatch(restoreChat(historyItem));
+  } catch {
+    thunkApi.dispatch(restoreChat(fallback));
+  }
+  return undefined;
+});
 
 import type { ChatEventEnvelope } from "../../../services/refact/chatSubscription";
 

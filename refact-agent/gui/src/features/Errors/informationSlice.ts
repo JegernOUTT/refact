@@ -44,7 +44,10 @@ export const informationSlice = createSlice({
     builder.addCase(applyChatEvent, (state, action) => {
       const event = action.payload;
       // Check for metering_balance in SSE events
-      if ("metering_balance" in event && typeof event.metering_balance === "number") {
+      if (
+        "metering_balance" in event &&
+        typeof event.metering_balance === "number"
+      ) {
         const balance = event.metering_balance;
         if (state.dismissed && balance > 2000) {
           state.dismissed = false;

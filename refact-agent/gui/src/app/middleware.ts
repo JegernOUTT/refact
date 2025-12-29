@@ -32,10 +32,7 @@ import { dockerApi } from "../services/refact/docker";
 import { capsApi, isCapsErrorResponse } from "../services/refact/caps";
 import { promptsApi } from "../services/refact/prompts";
 import { toolsApi } from "../services/refact/tools";
-import {
-  commandsApi,
-  isDetailMessage,
-} from "../services/refact/commands";
+import { commandsApi, isDetailMessage } from "../services/refact/commands";
 import { pathApi } from "../services/refact/path";
 import { pingApi } from "../services/refact/ping";
 import {
@@ -52,7 +49,12 @@ import {
   ideForceReloadProjectTreeFiles,
 } from "../hooks/useEventBusForIDE";
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
-import { isToolMessage, isDiffMessage, modelsApi, providersApi } from "../services/refact";
+import {
+  isToolMessage,
+  isDiffMessage,
+  modelsApi,
+  providersApi,
+} from "../services/refact";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -81,7 +83,13 @@ startListening({
 
     listenerApi.dispatch(resetThreadImages({ id: chatId }));
     listenerApi.dispatch(clearThreadPauseReasons({ id: chatId }));
-    listenerApi.dispatch(setThreadConfirmationStatus({ id: chatId, wasInteracted: false, confirmationStatus: true }));
+    listenerApi.dispatch(
+      setThreadConfirmationStatus({
+        id: chatId,
+        wasInteracted: false,
+        confirmationStatus: true,
+      }),
+    );
     listenerApi.dispatch(clearError());
   },
 });
@@ -440,11 +448,16 @@ startListening({
     const apiKey = state.config.apiKey;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "ide_tool_result",
         tool_call_id: toolCallId,
-        content: accepted === true ? "Tool executed successfully" : "Tool execution rejected",
+        content:
+          accepted === true
+            ? "Tool executed successfully"
+            : "Tool execution rejected",
         tool_failed: accepted !== true,
       });
     } catch {
@@ -496,7 +509,9 @@ startListening({
     if (!port || !chatId) return;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
         patch: { title, is_title_generated: isTitleGenerated },
@@ -529,12 +544,14 @@ startListening({
   effect: (action, listenerApi) => {
     const event = action.payload;
     if (event.type === "ide_tool_required") {
-      listenerApi.dispatch(ideToolRequired({
-        chatId: event.chat_id,
-        toolCallId: event.tool_call_id,
-        toolName: event.tool_name,
-        args: event.args,
-      }));
+      listenerApi.dispatch(
+        ideToolRequired({
+          chatId: event.chat_id,
+          toolCallId: event.tool_call_id,
+          toolName: event.tool_name,
+          args: event.args,
+        }),
+      );
     }
   },
 });
@@ -551,7 +568,9 @@ startListening({
     if (!port || !chatId) return;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
         patch: { boost_reasoning: action.payload.value },
@@ -573,7 +592,9 @@ startListening({
     if (!port || !chatId) return;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
         patch: { include_project_info: action.payload.value },
@@ -595,7 +616,9 @@ startListening({
     if (!port || !chatId) return;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
         patch: { context_tokens_cap: action.payload.value },
@@ -617,7 +640,9 @@ startListening({
     if (!port || !chatId) return;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
         patch: { checkpoints_enabled: action.payload },
@@ -639,7 +664,9 @@ startListening({
     if (!port || !chatId) return;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
         patch: { tool_use: action.payload },
@@ -661,7 +688,9 @@ startListening({
     if (!port || !chatId) return;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
         patch: { mode: action.payload },
@@ -683,7 +712,9 @@ startListening({
     if (!port || !chatId) return;
 
     try {
-      const { sendChatCommand } = await import("../services/refact/chatCommands");
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
         patch: { model: action.payload },

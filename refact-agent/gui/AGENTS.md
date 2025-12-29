@@ -2428,16 +2428,18 @@ type ToolStatus =
 
 Each chat thread has **two layers of state**:
 
-| Layer | Type | Storage | Contents |
-|-------|------|---------|----------|
-| **Thread data** | `ChatThread` | `state.chat.threads[id].thread` | title, messages, model, mode, checkpoints |
-| **Runtime** | `ChatThreadRuntime` | `state.chat.threads[id]` | streaming, waiting, queue, confirmation, errors, attached_images |
+| Layer           | Type                | Storage                         | Contents                                                         |
+| --------------- | ------------------- | ------------------------------- | ---------------------------------------------------------------- |
+| **Thread data** | `ChatThread`        | `state.chat.threads[id].thread` | title, messages, model, mode, checkpoints                        |
+| **Runtime**     | `ChatThreadRuntime` | `state.chat.threads[id]`        | streaming, waiting, queue, confirmation, errors, attached_images |
 
 **Visibility modes**:
+
 - **Open tab**: `id ∈ state.chat.open_thread_ids` (visible in toolbar)
 - **Background runtime**: in `state.chat.threads` but not in `open_thread_ids`
 
 **Key files**:
+
 - Types: `src/features/Chat/Thread/types.ts`
 - Reducers: `src/features/Chat/Thread/reducer.ts`
 - Selectors: `src/features/Chat/Thread/selectors.ts`
@@ -2460,6 +2462,7 @@ Each chat thread has **two layers of state**:
 ```
 
 **State flags per runtime**:
+
 ```typescript
 {
   streaming: boolean,           // Currently receiving chunks
@@ -2480,6 +2483,7 @@ Each chat thread has **two layers of state**:
 ### Complete Chat Flow
 
 #### 1. User Sends Message
+
 ```
 ChatForm.onSubmit
   → useSendChatRequest.submit()                    [hooks/useSendChatRequest.ts]
@@ -2492,6 +2496,7 @@ ChatForm.onSubmit
 ```
 
 #### 2. Streaming Response
+
 ```
 chatAskQuestionThunk                              [actions.ts]
   → sendChat(stream: true)                        [services/refact/chat.ts]
@@ -2505,6 +2510,7 @@ chatAskQuestionThunk                              [actions.ts]
 ```
 
 #### 3. Auto-Continuation (Middleware)
+
 ```
 doneStreaming listener                            [middleware.ts:346-393]
   → resetThreadImages (if current thread)
@@ -2522,6 +2528,7 @@ doneStreaming listener                            [middleware.ts:346-393]
 ```
 
 #### 4. Tool Confirmation Flow
+
 ```
 setThreadPauseReasons                             [reducer.ts:567-577]
   → pause = true
@@ -2546,21 +2553,27 @@ User clicks Confirm → confirmToolUsage()          [useSendChatRequest.ts:303-3
 ### Background Thread Handling
 
 #### Background Continuation (Option B)
+
 Chats continue processing even without an open tab:
 
 ```typescript
 // closeThread preserves busy runtimes
 builder.addCase(closeThread, (state, action) => {
-  state.open_thread_ids = state.open_thread_ids.filter(tid => tid !== id);
+  state.open_thread_ids = state.open_thread_ids.filter((tid) => tid !== id);
   const rt = state.threads[id];
   // Only delete if safe (not streaming, waiting, or paused)
-  if (rt && (force || (!rt.streaming && !rt.waiting_for_response && !rt.confirmation.pause))) {
+  if (
+    rt &&
+    (force ||
+      (!rt.streaming && !rt.waiting_for_response && !rt.confirmation.pause))
+  ) {
     delete state.threads[id];
   }
 });
 ```
 
 #### Auto-Switch on Confirmation
+
 When a background thread needs confirmation, user is auto-switched:
 
 ```typescript
@@ -2577,6 +2590,7 @@ startListening({
 ```
 
 #### Restoring Background Threads
+
 When user clicks a history item that has a background runtime:
 
 ```typescript
@@ -2602,7 +2616,7 @@ Backend sends trajectory updates via Server-Sent Events:
 // useTrajectoriesSubscription.ts
 eventSource.onmessage = (event) => {
   const data: TrajectoryEvent = JSON.parse(event.data);
-  
+
   if (data.type === "deleted") {
     dispatch(deleteChatById(data.id));
     dispatch(closeThread({ id: data.id, force: true }));
@@ -2610,14 +2624,16 @@ eventSource.onmessage = (event) => {
     // Fetch full trajectory and update
     dispatch(hydrateHistory([trajectory]));
     // IMPORTANT: Only sync metadata, NOT messages
-    dispatch(updateOpenThread({
-      id: data.id,
-      thread: {
-        title: thread.title,
-        isTitleGenerated: thread.isTitleGenerated,
-        // NO messages - they are local-authoritative
-      },
-    }));
+    dispatch(
+      updateOpenThread({
+        id: data.id,
+        thread: {
+          title: thread.title,
+          isTitleGenerated: thread.isTitleGenerated,
+          // NO messages - they are local-authoritative
+        },
+      }),
+    );
   }
 };
 ```
@@ -2632,24 +2648,29 @@ Handles automatic continuation and queue flushing:
 // useSendChatRequest.ts:351-462
 const stopForToolConfirmation = useMemo(() => {
   if (isIntegration) return false;
-  if (isPaused) return true;  // Hard stop when paused
+  if (isPaused) return true; // Hard stop when paused
   return !wasInteracted && !areToolsConfirmed;
 }, [isIntegration, isPaused, wasInteracted, areToolsConfirmed]);
 
 // Queue flushing
-useEffect(() => {
-  if (queuedMessages.length === 0) return;
-  const nextQueued = queuedMessages[0];
-  const isPriority = nextQueued.priority;
-  
-  // Priority: flush after streaming ends
-  // Regular: flush only when fully idle (no tools pending)
-  const canFlush = isPriority ? canFlushBase : isFullyIdle;
-  if (!canFlush) return;
-  
-  dispatch(dequeueUserMessage({ queuedId: nextQueued.id }));
-  void sendMessages([...currentMessages, nextQueued.message]);
-}, [/* deps */]);
+useEffect(
+  () => {
+    if (queuedMessages.length === 0) return;
+    const nextQueued = queuedMessages[0];
+    const isPriority = nextQueued.priority;
+
+    // Priority: flush after streaming ends
+    // Regular: flush only when fully idle (no tools pending)
+    const canFlush = isPriority ? canFlushBase : isFullyIdle;
+    if (!canFlush) return;
+
+    dispatch(dequeueUserMessage({ queuedId: nextQueued.id }));
+    void sendMessages([...currentMessages, nextQueued.message]);
+  },
+  [
+    /* deps */
+  ],
+);
 ```
 
 ### Tab UI Indicators
@@ -2679,43 +2700,45 @@ const isBusy = runtime?.streaming || runtime?.waiting_for_response;
 
 ### File Reference Map
 
-| Concern | Primary File(s) |
-|---------|-----------------|
-| State types | `features/Chat/Thread/types.ts` |
-| Actions | `features/Chat/Thread/actions.ts` |
-| Reducers | `features/Chat/Thread/reducer.ts` |
-| Selectors | `features/Chat/Thread/selectors.ts` |
-| Send logic & hooks | `hooks/useSendChatRequest.ts` |
-| Auto-continuation | `app/middleware.ts` (doneStreaming listener) |
-| Background switch | `app/middleware.ts` (setThreadPauseReasons listener) |
-| IDE tool handling | `app/middleware.ts` (ideToolCallResponse listener) |
-| Tab UI | `components/Toolbar/Toolbar.tsx` |
-| Chat form | `components/ChatForm/ChatForm.tsx` |
-| Stop button | `components/ChatContent/ChatContent.tsx` |
-| Confirmation UI | `components/ChatForm/ToolConfirmation.tsx` |
-| SSE sync | `hooks/useTrajectoriesSubscription.ts` |
-| History list | `components/ChatHistory/HistoryItem.tsx` |
+| Concern            | Primary File(s)                                      |
+| ------------------ | ---------------------------------------------------- |
+| State types        | `features/Chat/Thread/types.ts`                      |
+| Actions            | `features/Chat/Thread/actions.ts`                    |
+| Reducers           | `features/Chat/Thread/reducer.ts`                    |
+| Selectors          | `features/Chat/Thread/selectors.ts`                  |
+| Send logic & hooks | `hooks/useSendChatRequest.ts`                        |
+| Auto-continuation  | `app/middleware.ts` (doneStreaming listener)         |
+| Background switch  | `app/middleware.ts` (setThreadPauseReasons listener) |
+| IDE tool handling  | `app/middleware.ts` (ideToolCallResponse listener)   |
+| Tab UI             | `components/Toolbar/Toolbar.tsx`                     |
+| Chat form          | `components/ChatForm/ChatForm.tsx`                   |
+| Stop button        | `components/ChatContent/ChatContent.tsx`             |
+| Confirmation UI    | `components/ChatForm/ToolConfirmation.tsx`           |
+| SSE sync           | `hooks/useTrajectoriesSubscription.ts`               |
+| History list       | `components/ChatHistory/HistoryItem.tsx`             |
 
 ### Critical Invariants
 
 ```typescript
 // Chat can proceed if ALL true:
-!runtime.streaming
-!runtime.waiting_for_response
-!runtime.prevent_send
-!runtime.error
-!runtime.confirmation.pause
-!selectHasUncalledTools(state, chatId)
+!runtime.streaming;
+!runtime.waiting_for_response;
+!runtime.prevent_send;
+!runtime.error;
+!runtime.confirmation.pause;
+!selectHasUncalledTools(state, chatId);
 
 // Confirmation blocks everything when:
-runtime.confirmation.pause === true
+runtime.confirmation.pause === true;
 // This sets confirmationStatus=false, which makes stopForToolConfirmation=true
 
 // Thread is safe to delete when:
-!runtime.streaming && !runtime.waiting_for_response && !runtime.confirmation.pause
+!runtime.streaming &&
+  !runtime.waiting_for_response &&
+  !runtime.confirmation.pause;
 
 // Auto-send is blocked when:
-isPaused || (!wasInteracted && !areToolsConfirmed)
+isPaused || (!wasInteracted && !areToolsConfirmed);
 ```
 
 ---

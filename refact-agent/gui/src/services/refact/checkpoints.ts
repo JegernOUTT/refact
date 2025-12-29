@@ -36,7 +36,9 @@ export const checkpointsApi = createApi({
         const port = state.config.lspPort;
         const url = `http://127.0.0.1:${port}${PREVIEW_CHECKPOINTS}`;
 
-        const runtime = state.chat.threads[state.chat.current_thread_id] as { thread: { id: string; mode?: string } } | undefined;
+        const runtime = state.chat.threads[state.chat.current_thread_id] as
+          | { thread: { id: string; mode?: string } }
+          | undefined;
         const chat_id = runtime?.thread.id ?? "";
         const mode = runtime?.thread.mode;
 
@@ -79,7 +81,9 @@ export const checkpointsApi = createApi({
         const port = state.config.lspPort;
         const url = `http://127.0.0.1:${port}${RESTORE_CHECKPOINTS}`;
 
-        const runtime = state.chat.threads[state.chat.current_thread_id] as { thread: { id: string; mode?: string } } | undefined;
+        const runtime = state.chat.threads[state.chat.current_thread_id] as
+          | { thread: { id: string; mode?: string } }
+          | undefined;
         const chat_id = runtime?.thread.id ?? "";
         const mode = runtime?.thread.mode;
 

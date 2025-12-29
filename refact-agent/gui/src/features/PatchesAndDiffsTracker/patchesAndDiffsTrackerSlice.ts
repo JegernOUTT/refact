@@ -53,7 +53,8 @@ export const patchesAndDiffsTrackerSlice = createSlice({
       if (event.type === "message_added") {
         const msg = event.message;
         if (isDiffMessage(msg)) {
-          const tool_call_id = "tool_call_id" in msg ? msg.tool_call_id : undefined;
+          const tool_call_id =
+            "tool_call_id" in msg ? msg.tool_call_id : undefined;
           if (tool_call_id) {
             const next = state.patches.map((patchMeta) => {
               if (patchMeta.chatId !== chat_id) return patchMeta;

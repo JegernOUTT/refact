@@ -2,10 +2,7 @@ import { http, HttpResponse, type HttpHandler } from "msw";
 import { EMPTY_CAPS_RESPONSE, STUB_CAPS_RESPONSE } from "./caps";
 import { SYSTEM_PROMPTS } from "./prompts";
 import { STUB_LINKS_FOR_CHAT_RESPONSE } from "./chat_links_response";
-import {
-  TOOLS,
-  CHAT_LINKS_URL,
-} from "../services/refact/consts";
+import { TOOLS, CHAT_LINKS_URL } from "../services/refact/consts";
 import { STUB_TOOL_RESPONSE } from "./tools_response";
 import { GoodPollingResponse } from "../services/smallcloud/types";
 import type { LinksForChatResponse } from "../services/refact/links";
@@ -133,8 +130,6 @@ export const goodTools: HttpHandler = http.get(
     return HttpResponse.json(STUB_TOOL_RESPONSE);
   },
 );
-
-
 
 export const loginPollingGood: HttpHandler = http.get(
   "https://www.smallcloud.ai/v1/streamlined-login-recall-ticket",
@@ -270,7 +265,7 @@ export const chatSessionSubscribe: HttpHandler = http.get(
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
+        Connection: "keep-alive",
       },
     });
   },

@@ -79,7 +79,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -113,7 +113,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: true,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -142,11 +142,11 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           is_title_generated: false,
         },
         runtime: {
-          state: "error",  // Must be "error" state for prevent_send to be true
+          state: "error", // Must be "error" state for prevent_send to be true
           paused: false,
           error: "Something went wrong",
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -184,11 +184,9 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
-        messages: [
-          { role: "user", content: "Hello" },
-        ],
+        messages: [{ role: "user", content: "Hello" }],
       };
 
       let state = chatReducer(initialState, applyChatEvent(snapshotEvent));
@@ -209,14 +207,13 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
         seq: "3",
         type: "stream_delta",
         message_id: "msg-1",
-        ops: [
-          { op: "append_content", text: "Hi there!" },
-        ],
+        ops: [{ op: "append_content", text: "Hi there!" }],
       };
 
       state = chatReducer(state, applyChatEvent(deltaEvent));
       const runtime = state.threads[chatId]!;
-      const lastMessage = runtime.thread.messages[runtime.thread.messages.length - 1];
+      const lastMessage =
+        runtime.thread.messages[runtime.thread.messages.length - 1];
 
       expect(lastMessage.content).toBe("Hi there!");
     });
@@ -243,11 +240,9 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
-        messages: [
-          { role: "user", content: "Explain" },
-        ],
+        messages: [{ role: "user", content: "Explain" }],
       };
 
       let state = chatReducer(initialState, applyChatEvent(snapshotEvent));
@@ -267,16 +262,18 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
         seq: "3",
         type: "stream_delta",
         message_id: "msg-1",
-        ops: [
-          { op: "append_reasoning", text: "Let me think about this..." },
-        ],
+        ops: [{ op: "append_reasoning", text: "Let me think about this..." }],
       };
 
       state = chatReducer(state, applyChatEvent(deltaEvent));
       const runtime = state.threads[chatId]!;
-      const lastMessage = runtime.thread.messages[runtime.thread.messages.length - 1];
+      const lastMessage =
+        runtime.thread.messages[runtime.thread.messages.length - 1];
 
-      expect(lastMessage).toHaveProperty("reasoning_content", "Let me think about this...");
+      expect(lastMessage).toHaveProperty(
+        "reasoning_content",
+        "Let me think about this...",
+      );
     });
   });
 
@@ -303,7 +300,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -349,7 +346,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -397,7 +394,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [{ role: "user", content: "Hello" }],
       };
@@ -441,7 +438,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [{ role: "user", content: "Hello" }],
       };
@@ -513,7 +510,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -540,7 +537,9 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
 
       expect(runtime.confirmation.pause).toBe(true);
       expect(runtime.confirmation.pause_reasons).toHaveLength(1);
-      expect(runtime.confirmation.pause_reasons[0].tool_call_id).toBe("call_123");
+      expect(runtime.confirmation.pause_reasons[0].tool_call_id).toBe(
+        "call_123",
+      );
       // Note: streaming state is controlled by runtime_updated, not pause_required
     });
   });
@@ -568,7 +567,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -618,7 +617,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -663,7 +662,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [
           { role: "user", content: "Original", message_id: "msg-user-1" },
@@ -677,7 +676,11 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
         seq: "2",
         type: "message_updated",
         message_id: "msg-user-1",
-        message: { role: "user", content: "Updated content", message_id: "msg-user-1" },
+        message: {
+          role: "user",
+          content: "Updated content",
+          message_id: "msg-user-1",
+        },
       };
 
       state = chatReducer(state, applyChatEvent(updateEvent));
@@ -709,7 +712,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [
           { role: "user", content: "First", message_id: "msg-1" },
@@ -725,7 +728,11 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
         seq: "2",
         type: "message_updated",
         message_id: "msg-2",
-        message: { role: "assistant", content: "Updated response", message_id: "msg-2" },
+        message: {
+          role: "assistant",
+          content: "Updated response",
+          message_id: "msg-2",
+        },
       };
 
       state = chatReducer(state, applyChatEvent(updateEvent));
@@ -761,7 +768,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [
           { role: "user", content: "Hello", message_id: "msg-1" },
@@ -807,11 +814,9 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
-        messages: [
-          { role: "user", content: "Hello", message_id: "msg-1" },
-        ],
+        messages: [{ role: "user", content: "Hello", message_id: "msg-1" }],
       };
 
       let state = chatReducer(initialState, applyChatEvent(snapshotEvent));
@@ -853,7 +858,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [
           { role: "user", content: "First", message_id: "msg-1" },
@@ -902,7 +907,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [
           { role: "user", content: "Hello", message_id: "msg-1" },
@@ -949,7 +954,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [],
       };
@@ -1014,7 +1019,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           paused: false,
           error: null,
           queue_size: 0,
-        pause_reasons: [],
+          pause_reasons: [],
         },
         messages: [{ role: "user", content: "Hi" }],
       };
@@ -1023,13 +1028,44 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
 
       // Process sequence of events (using correct event types)
       const events: ChatEventEnvelope[] = [
-        { chat_id: chatId, seq: "2", type: "runtime_updated", state: "generating", paused: false, error: null, queue_size: 0 },
-        { chat_id: chatId, seq: "3", type: "stream_started", message_id: "msg-1" },
-        { chat_id: chatId, seq: "4", type: "stream_delta", message_id: "msg-1", ops: [
-          { op: "append_content", text: "Hello!" },
-        ]},
-        { chat_id: chatId, seq: "5", type: "stream_finished", message_id: "msg-1", finish_reason: "stop" },
-        { chat_id: chatId, seq: "6", type: "runtime_updated", state: "idle", paused: false, error: null, queue_size: 0 },
+        {
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "generating",
+          paused: false,
+          error: null,
+          queue_size: 0,
+        },
+        {
+          chat_id: chatId,
+          seq: "3",
+          type: "stream_started",
+          message_id: "msg-1",
+        },
+        {
+          chat_id: chatId,
+          seq: "4",
+          type: "stream_delta",
+          message_id: "msg-1",
+          ops: [{ op: "append_content", text: "Hello!" }],
+        },
+        {
+          chat_id: chatId,
+          seq: "5",
+          type: "stream_finished",
+          message_id: "msg-1",
+          finish_reason: "stop",
+        },
+        {
+          chat_id: chatId,
+          seq: "6",
+          type: "runtime_updated",
+          state: "idle",
+          paused: false,
+          error: null,
+          queue_size: 0,
+        },
       ];
 
       for (const event of events) {

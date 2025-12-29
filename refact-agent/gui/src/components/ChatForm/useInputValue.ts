@@ -1,9 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  useAppDispatch,
-  useAppSelector,
-  useChatActions,
-} from "../../hooks";
+import { useAppDispatch, useAppSelector, useChatActions } from "../../hooks";
 import { selectPages, change, ChatPage } from "../../features/Pages/pagesSlice";
 import { setInputValue, addInputValue } from "./actions";
 import { debugRefact } from "../../debugConfig";
@@ -52,7 +48,10 @@ export function useInputValue(
             } else if (Array.isArray(lastMsg.content)) {
               const textItem = lastMsg.content.find(
                 (c: unknown): c is { type: "text"; text: string } =>
-                  typeof c === "object" && c !== null && "type" in c && c.type === "text"
+                  typeof c === "object" &&
+                  c !== null &&
+                  "type" in c &&
+                  c.type === "text",
               );
               content = textItem?.text ?? "";
             }
