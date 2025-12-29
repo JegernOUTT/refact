@@ -123,12 +123,19 @@ pub async fn vecdb_background_reload(
 
 impl VecDb {
     pub async fn init(
-        cache_dir: &PathBuf,
+        vecdb_dir: &PathBuf,
+        legacy_cache_dir: &PathBuf,
         cmdline: CommandLine,
         constants: VecdbConstants,
     ) -> Result<VecDb, String> {
         let emb_table_name = crate::vecdb::vdb_emb_aux::create_emb_table_name(&vec![cmdline.workspace_folder]);
-        let handler = VecDBSqlite::init(cache_dir, &constants.embedding_model.base.name, constants.embedding_model.embedding_size, &emb_table_name).await?;
+        let handler = VecDBSqlite::init(
+            vecdb_dir,
+            legacy_cache_dir,
+            &constants.embedding_model.base.name,
+            constants.embedding_model.embedding_size,
+            &emb_table_name,
+        ).await?;
         let vecdb_handler = Arc::new(AMutex::new(handler));
         let vectorizer_service = Arc::new(AMutex::new(FileVectorizerService::new(
             vecdb_handler.clone(),

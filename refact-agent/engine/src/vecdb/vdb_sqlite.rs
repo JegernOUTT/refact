@@ -2,7 +2,7 @@ use rusqlite::{OpenFlags, Result};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio_rusqlite::Connection;
 use tracing::info;
@@ -29,28 +29,75 @@ struct DataColumn {
     type_: String,
 }
 
-pub async fn get_db_path(cache_dir: &PathBuf, model_name: &String, embedding_size: i32) -> Result<String, String> {
-    let old_path = cache_dir
-        .join("refact_vecdb_cache")
-        .join(format!("model_{}_esize_{}.sqlite",
-                      model_name.replace("/", "_"),
-                      embedding_size
-        ));
-    let new_path = cache_dir
-        .join(format!("vecdb_model_{}_esize_{}.sqlite",
-                      model_name.replace("/", "_"),
-                      embedding_size
-        ));
-    if old_path.exists() && !new_path.exists() {
-        match fs::rename(&old_path, &new_path).await {
-            Ok(_) => {
-                Ok(new_path.to_string_lossy().to_string())
-            }
-            Err(e) => Err(format!("{:?}", e))
+fn db_filename(model_name: &str, embedding_size: i32) -> String {
+    format!("vecdb_model_{}_esize_{}.sqlite", model_name.replace("/", "_"), embedding_size)
+}
+
+async fn move_file_with_fallback(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match fs::rename(src, dst).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices
+               || e.raw_os_error() == Some(18) => {
+            fs::copy(src, dst).await?;
+            fs::remove_file(src).await?;
+            Ok(())
         }
-    } else {
-        Ok(new_path.to_string_lossy().to_string())
+        Err(e) => Err(e),
     }
+}
+
+async fn migrate_sqlite_files(src: &Path, dst: &Path) -> std::io::Result<()> {
+    move_file_with_fallback(src, dst).await?;
+    for suffix in ["-wal", "-shm"] {
+        let src_side = PathBuf::from(format!("{}{}", src.display(), suffix));
+        let dst_side = PathBuf::from(format!("{}{}", dst.display(), suffix));
+        if src_side.exists() {
+            let _ = move_file_with_fallback(&src_side, &dst_side).await;
+        }
+    }
+    Ok(())
+}
+
+pub async fn get_db_path(
+    dest_dir: &PathBuf,
+    legacy_cache_dir: &PathBuf,
+    model_name: &str,
+    embedding_size: i32,
+) -> Result<PathBuf, String> {
+    let filename = db_filename(model_name, embedding_size);
+    let dest_path = dest_dir.join(&filename);
+
+    if dest_path.exists() {
+        return Ok(dest_path);
+    }
+
+    let legacy_locations = [
+        legacy_cache_dir.join(&filename),
+        legacy_cache_dir.join("refact_vecdb_cache").join(format!(
+            "model_{}_esize_{}.sqlite",
+            model_name.replace("/", "_"),
+            embedding_size
+        )),
+    ];
+
+    for legacy_path in &legacy_locations {
+        if legacy_path.exists() {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+            }
+            match migrate_sqlite_files(legacy_path, &dest_path).await {
+                Ok(_) => {
+                    info!("migrated vecdb from {:?} to {:?}", legacy_path, dest_path);
+                    return Ok(dest_path);
+                }
+                Err(e) => {
+                    info!("failed to migrate vecdb from {:?}: {}", legacy_path, e);
+                }
+            }
+        }
+    }
+
+    Ok(dest_path)
 }
 
 async fn migrate_202406(conn: &Connection) -> tokio_rusqlite::Result<()> {
@@ -113,10 +160,19 @@ async fn migrate_202501(conn: &Connection, embedding_size: i32, emb_table_name: 
 }
 
 impl VecDBSqlite {
-    pub async fn init(cache_dir: &PathBuf, model_name: &String, embedding_size: i32, emb_table_name: &String) -> Result<VecDBSqlite, String> {
-        let db_path = get_db_path(cache_dir, model_name, embedding_size).await?;
+    pub async fn init(
+        dest_dir: &PathBuf,
+        legacy_cache_dir: &PathBuf,
+        model_name: &str,
+        embedding_size: i32,
+        emb_table_name: &str,
+    ) -> Result<VecDBSqlite, String> {
+        let db_path = get_db_path(dest_dir, legacy_cache_dir, model_name, embedding_size).await?;
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        }
         let conn = match Connection::open_with_flags(
-            db_path, OpenFlags::SQLITE_OPEN_READ_WRITE
+            &db_path, OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_URI).await {
@@ -128,11 +184,11 @@ impl VecDBSqlite {
             Ok(())
         }).await.map_err(|e| e.to_string())?;
         migrate_202406(&conn).await.map_err(|e| e.to_string())?;
-        migrate_202501(&conn, embedding_size, emb_table_name.clone()).await.map_err(|e| e.to_string())?;
+        migrate_202501(&conn, embedding_size, emb_table_name.to_string()).await.map_err(|e| e.to_string())?;
         crate::vecdb::vdb_emb_aux::cleanup_old_emb_tables(&conn, 7, 10).await?;
 
-        info!("vecdb initialized");
-        Ok(VecDBSqlite { conn, emb_table_name: emb_table_name.clone() })
+        info!("vecdb initialized at {:?}", db_path);
+        Ok(VecDBSqlite { conn, emb_table_name: emb_table_name.to_string() })
     }
 
     pub async fn fetch_vectors_from_cache(&mut self, splits: &Vec<SplitResult>) -> Result<Vec<Option<Vec<f32>>>, String> {

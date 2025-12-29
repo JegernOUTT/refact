@@ -5,11 +5,17 @@ use tokio::sync::Mutex as AMutex;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
+use crate::files_correction::get_project_dirs;
 use crate::global_context::{CommandLine, GlobalContext};
 use crate::vecdb::vdb_highlev::VecDb;
 use crate::vecdb::vdb_structs::{VecdbConstants, VecdbSearch};
 use crate::background_tasks::BackgroundTasksHolder;
 use tokio::sync::RwLock as ARwLock;
+
+async fn get_default_vecdb_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Option<PathBuf> {
+    let project_dirs = get_project_dirs(gcx).await;
+    project_dirs.first().map(|root| root.join(".refact").join("vecdb"))
+}
 
 pub struct VecDbInitConfig {
     pub max_attempts: usize,
@@ -47,19 +53,20 @@ impl std::fmt::Display for VecDbInitError {
 }
 
 pub async fn init_vecdb_fail_safe(
-    cache_dir: &PathBuf,
+    vecdb_dir: &PathBuf,
+    legacy_cache_dir: &PathBuf,
     cmdline: CommandLine,
     constants: VecdbConstants,
     init_config: VecDbInitConfig,
 ) -> Result<VecDb, VecDbInitError> {
     let mut attempt: usize = 0;
     let mut delay = Duration::from_millis(init_config.initial_delay_ms);
-    
+
     loop {
         attempt += 1;
         info!("VecDb init attempt {}/{}", attempt, init_config.max_attempts);
-        
-        match VecDb::init(cache_dir, cmdline.clone(), constants.clone()).await {
+
+        match VecDb::init(vecdb_dir, legacy_cache_dir, cmdline.clone(), constants.clone()).await {
             Ok(vecdb) => {
                 info!("Successfully initialized VecDb on attempt {}", attempt);
                 
@@ -115,20 +122,23 @@ pub async fn initialize_vecdb_with_context(
     constants: VecdbConstants,
     init_config: Option<VecDbInitConfig>,
 ) -> Result<(), VecDbInitError> {
-    
-    let (cache_dir, cmdline) = {
+    let (legacy_cache_dir, cmdline) = {
         let gcx_locked = gcx.read().await;
         (gcx_locked.cache_dir.clone(), gcx_locked.cmdline.clone())
     };
-    
-    let base_dir_cache = match cmdline.vecdb_force_path.as_str() {
-        "" => cache_dir,
-        path => PathBuf::from(path),
+
+    let vecdb_dir = if !cmdline.vecdb_force_path.is_empty() {
+        PathBuf::from(&cmdline.vecdb_force_path)
+    } else if let Some(dir) = get_default_vecdb_dir(gcx.clone()).await {
+        dir
+    } else {
+        legacy_cache_dir.join("vecdb")
     };
-    
+
     let config = init_config.unwrap_or_default();
     let vec_db = init_vecdb_fail_safe(
-        &base_dir_cache,
+        &vecdb_dir,
+        &legacy_cache_dir,
         cmdline.clone(),
         constants,
         config,
