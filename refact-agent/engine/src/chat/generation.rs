@@ -15,10 +15,12 @@ use crate::http::routers::v1::knowledge_enrichment::enrich_messages_with_knowled
 
 use super::types::*;
 use super::trajectories::{maybe_save_trajectory, check_external_reload_pending};
-use super::tools::check_tool_calls_and_continue;
+use super::tools::{process_tool_calls_once, ToolStepOutcome};
 use super::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
 use super::stream_core::{run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call};
+
+pub const MAX_AGENT_CYCLES: usize = 50;
 
 pub fn parse_chat_mode(mode: &str) -> ChatMode {
     match mode.to_uppercase().as_str() {
@@ -36,49 +38,78 @@ pub fn start_generation(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
-        let (messages, thread, chat_id) = {
-            let session = session_arc.lock().await;
-            (
-                session.messages.clone(),
-                session.thread.clone(),
-                session.chat_id.clone(),
-            )
-        };
-
-        let abort_flag = {
-            let mut session = session_arc.lock().await;
-            match session.start_stream() {
-                Some((_message_id, abort_flag)) => abort_flag,
-                None => {
-                    warn!(
-                        "Cannot start generation for {}: already generating",
-                        chat_id
-                    );
-                    return;
+        for cycle in 0..MAX_AGENT_CYCLES {
+            let (messages, thread, chat_id) = {
+                let session = session_arc.lock().await;
+                if session.abort_flag.load(Ordering::SeqCst) {
+                    break;
                 }
-            }
-        };
+                (
+                    session.messages.clone(),
+                    session.thread.clone(),
+                    session.chat_id.clone(),
+                )
+            };
 
-        if let Err(e) = run_llm_generation(
-            gcx.clone(),
-            session_arc.clone(),
-            messages,
-            thread,
-            chat_id.clone(),
-            abort_flag,
-        )
-        .await
-        {
-            let mut session = session_arc.lock().await;
-            if !session.abort_flag.load(Ordering::SeqCst) {
-                session.finish_stream_with_error(e);
+            let abort_flag = {
+                let mut session = session_arc.lock().await;
+                match session.start_stream() {
+                    Some((_message_id, abort_flag)) => abort_flag,
+                    None => {
+                        warn!(
+                            "Cannot start generation for {}: already generating",
+                            chat_id
+                        );
+                        break;
+                    }
+                }
+            };
+
+            let generation_result = run_llm_generation(
+                gcx.clone(),
+                session_arc.clone(),
+                messages,
+                thread,
+                chat_id.clone(),
+                abort_flag.clone(),
+            )
+            .await;
+
+            if let Err(e) = generation_result {
+                let mut session = session_arc.lock().await;
+                if !session.abort_flag.load(Ordering::SeqCst) {
+                    session.finish_stream_with_error(e);
+                }
+                break;
+            }
+
+            if abort_flag.load(Ordering::SeqCst) {
+                break;
+            }
+
+            maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+
+            let chat_mode = {
+                let session = session_arc.lock().await;
+                parse_chat_mode(&session.thread.mode)
+            };
+
+            match process_tool_calls_once(gcx.clone(), session_arc.clone(), chat_mode).await {
+                ToolStepOutcome::NoToolCalls => break,
+                ToolStepOutcome::Paused => break,
+                ToolStepOutcome::Continue => {
+                    if cycle == MAX_AGENT_CYCLES - 1 {
+                        warn!("Agent reached max cycles ({}), stopping", MAX_AGENT_CYCLES);
+                    }
+                }
             }
         }
 
-        maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+        check_external_reload_pending(gcx.clone(), session_arc.clone()).await;
 
         {
             let session = session_arc.lock().await;
+            session.abort_flag.store(false, Ordering::SeqCst);
             session.queue_notify.notify_one();
         }
     })
@@ -405,9 +436,6 @@ async fn run_streaming_generation(
 
         session.finish_stream(result.finish_reason);
     }
-
-    check_tool_calls_and_continue(gcx.clone(), session_arc.clone(), chat_mode).await;
-    check_external_reload_pending(gcx, session_arc).await;
 
     Ok(())
 }

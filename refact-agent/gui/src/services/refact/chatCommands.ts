@@ -52,6 +52,9 @@ export type ChatCommandBase =
       type: "remove_message";
       message_id: string;
       regenerate?: boolean;
+    }
+  | {
+      type: "regenerate";
     };
 
 export type ChatCommand = ChatCommandBase & { client_request_id: string };
@@ -116,6 +119,16 @@ export async function retryFromIndex(
     type: "retry_from_index",
     index,
     content,
+  } as ChatCommandBase);
+}
+
+export async function regenerate(
+  chatId: string,
+  port: number,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, port, apiKey, {
+    type: "regenerate",
   } as ChatCommandBase);
 }
 

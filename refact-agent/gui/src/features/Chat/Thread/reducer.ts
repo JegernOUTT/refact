@@ -465,9 +465,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(enqueueUserMessage, (state, action) => {
-    const rt = getCurrentRuntime(state);
+    const rt = getRuntime(state, action.payload.chatId);
     if (!rt) return;
-    const { priority, ...rest } = action.payload;
+    const { chatId: _, priority, ...rest } = action.payload;
     const messagePayload = { ...rest, priority };
     if (priority) {
       const insertAt = rt.queued_messages.findIndex((m) => !m.priority);
@@ -482,7 +482,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(dequeueUserMessage, (state, action) => {
-    const rt = getCurrentRuntime(state);
+    const rt = getRuntime(state, action.payload.chatId);
     if (rt) {
       rt.queued_messages = rt.queued_messages.filter(
         (q) => q.id !== action.payload.queuedId,
@@ -490,8 +490,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
     }
   });
 
-  builder.addCase(clearQueuedMessages, (state) => {
-    const rt = getCurrentRuntime(state);
+  builder.addCase(clearQueuedMessages, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
     if (rt) rt.queued_messages = [];
   });
 
@@ -890,7 +890,20 @@ export const chatReducer = createReducer(initialState, (builder) => {
           if (!isAssistantMessage(msg) || !msg.tool_calls) continue;
           const tc = msg.tool_calls.find((t) => t.id === event.tool_call_id);
           if (tc) {
-            tc.subchat = event.subchat_id;
+            if (event.subchat_id === "") {
+              tc.subchat = undefined;
+              tc.subchat_log = [];
+              tc.attached_files = [];
+            } else {
+              tc.subchat = event.subchat_id;
+              const isToolNotification = event.subchat_id.includes("/tool:");
+              if (!isToolNotification) {
+                const prev = tc.subchat_log ?? [];
+                if (prev[prev.length - 1] !== event.subchat_id) {
+                  tc.subchat_log = [...prev, event.subchat_id].slice(-50);
+                }
+              }
+            }
             if (event.attached_files && event.attached_files.length > 0) {
               tc.attached_files = [
                 ...(tc.attached_files ?? []),

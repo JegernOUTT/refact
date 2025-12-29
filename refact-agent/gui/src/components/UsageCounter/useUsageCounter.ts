@@ -1,9 +1,5 @@
-import { useMemo } from "react";
-import {
-  selectIsStreaming,
-  selectIsWaiting,
-  selectMessages,
-} from "../../features/Chat";
+import { useMemo, useRef } from "react";
+import { selectMessages } from "../../features/Chat";
 import { useAppSelector, useLastSentCompressionStop } from "../../hooks";
 import {
   calculateUsageInputTokens,
@@ -12,8 +8,6 @@ import {
 import { isAssistantMessage } from "../../services/refact";
 
 export function useUsageCounter() {
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
   const compressionStop = useLastSentCompressionStop();
   const messages = useAppSelector(selectMessages);
   const assistantMessages = messages.filter(isAssistantMessage);
@@ -36,9 +30,12 @@ export function useUsageCounter() {
     });
   }, [currentThreadUsage]);
 
-  const currentSessionTokens = useMemo(() => {
-    return lastUsage?.prompt_tokens ?? 0;
-  }, [lastUsage]);
+  const lastKnownTokensRef = useRef(0);
+  const rawTokens = lastUsage?.prompt_tokens ?? 0;
+  if (rawTokens > 0) {
+    lastKnownTokensRef.current = rawTokens;
+  }
+  const currentSessionTokens = rawTokens > 0 ? rawTokens : lastKnownTokensRef.current;
 
   const isOverflown = useMemo(() => {
     if (compressionStop.strength === "low") return true;
@@ -54,8 +51,8 @@ export function useUsageCounter() {
   }, [compressionStop.strength]);
 
   const shouldShow = useMemo(() => {
-    return messages.length > 0 && !isStreaming && !isWaiting;
-  }, [messages.length, isStreaming, isWaiting]);
+    return messages.length > 0;
+  }, [messages.length]);
 
   return {
     shouldShow,

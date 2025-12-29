@@ -1,6 +1,7 @@
 use std::sync::Arc;
+use std::collections::HashSet;
 use tokio::sync::Mutex as AMutex;
-use serde_json::json;
+use serde_json::{json, Value};
 use tracing::info;
 use uuid::Uuid;
 
@@ -22,6 +23,56 @@ use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
 use crate::chat::types::ThreadParams;
 
 const MAX_NEW_TOKENS: usize = 4096;
+
+fn truncate_text(s: &str, max_chars: usize) -> String {
+    let s = s.trim().replace('\n', " ");
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}…", truncated)
+    }
+}
+
+fn extract_paths_from_tool_args(tool_name: &str, args_json: &str) -> Vec<String> {
+    let v: Value = match serde_json::from_str(args_json) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let keys: &[&str] = match tool_name {
+        "cat" => &["paths"],
+        "tree" => &["path"],
+        "search_semantic" | "search_pattern" => &["scope"],
+        "create_textdoc" | "update_textdoc" | "update_textdoc_regex" | "update_textdoc_by_lines" => &["path"],
+        "mv" => &["source", "destination"],
+        "rm" => &["path"],
+        _ => &[],
+    };
+
+    let mut out = Vec::new();
+    for k in keys {
+        if let Some(val) = v.get(*k) {
+            if let Some(s) = val.as_str() {
+                if *k == "paths" {
+                    for part in s.split(',') {
+                        let p = part.trim().split(':').next().unwrap_or("").trim();
+                        if !p.is_empty() && p != "workspace" {
+                            out.push(p.to_string());
+                        }
+                    }
+                } else if s != "workspace" && !s.is_empty() {
+                    out.push(s.to_string());
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
+}
 
 async fn execute_pending_tool_calls(
     ccx: Arc<AMutex<AtCommandsContext>>,
@@ -72,13 +123,15 @@ async fn execute_pending_tool_calls(
     if let (Some(tx_toolid), Some(tx_chatid)) = (&tx_toolid_mb, &tx_chatid_mb) {
         let subchat_tx = ccx.lock().await.subchat_tx.clone();
         for tc in &allowed {
+            let paths = extract_paths_from_tool_args(&tc.function.name, &tc.function.arguments);
             let tool_msg = json!({
                 "tool_call_id": tx_toolid,
                 "subchat_id": format!("{}/tool:{}", tx_chatid, tc.function.name),
                 "tool_call": {
                     "name": tc.function.name,
                     "arguments": tc.function.arguments
-                }
+                },
+                "attached_files": paths
             });
             let _ = subchat_tx.lock().await.send(tool_msg);
         }
@@ -434,6 +487,33 @@ pub async fn subchat(
             )
             .await?[0]
                 .clone();
+            let assistant_msg = messages.iter().rev()
+                .find(|m| m.role == "assistant")
+                .unwrap();
+            let content = if let Some(tool_calls) = &assistant_msg.tool_calls {
+                let items: Vec<String> = tool_calls.iter()
+                    .map(|tc| {
+                        let args_short = truncate_text(&tc.function.arguments, 50);
+                        format!("{}({})", tc.function.name, args_short)
+                    })
+                    .collect();
+                items.join("\n")
+            } else {
+                let text = assistant_msg.content.content_text_only();
+                format!("🤖 {}", truncate_text(&text, 50))
+            };
+            let tx_chatid = format!("{}/{}: {}", step_n + 1, wrap_up_depth, content);
+            info!("subchat progress: {tx_chatid}");
+            tx_chatid_mb = Some(tx_chatid.clone());
+
+            if let Some(tx_toolid) = &tx_toolid_mb {
+                let subchat_tx = ccx.lock().await.subchat_tx.clone();
+                let _ = subchat_tx.lock().await.send(json!({
+                    "tool_call_id": tx_toolid,
+                    "subchat_id": tx_chatid,
+                }));
+            }
+
             messages = execute_pending_tool_calls(
                 ccx.clone(),
                 model_id,
@@ -443,19 +523,6 @@ pub async fn subchat(
                 tx_chatid_mb.clone(),
             )
             .await?;
-            let last_message = messages.last().unwrap();
-            let mut content = format!("🤖:\n{}", &last_message.content.content_text_only());
-            if let Some(tool_calls) = &last_message.tool_calls {
-                if let Some(tool_call) = tool_calls.get(0) {
-                    content = format!(
-                        "{}\n{}({})",
-                        content, tool_call.function.name, tool_call.function.arguments
-                    );
-                }
-            }
-            let tx_chatid = format!("{step_n}/{wrap_up_depth}: {content}");
-            info!("subchat request {tx_chatid}");
-            tx_chatid_mb = Some(tx_chatid);
             step_n += 1;
         }
         // result => session
@@ -490,8 +557,16 @@ pub async fn subchat(
         tx_chatid_mb.clone(),
     )
     .await?;
-    // if let Some(last_message) = messages.last_mut() {
-    //     last_message.usage = Some(usage_collector);
-    // }
+
+    if let Some(tx_toolid) = &tx_toolid_mb {
+        let subchat_tx = ccx.lock().await.subchat_tx.clone();
+        let reset_msg = json!({
+            "tool_call_id": tx_toolid,
+            "subchat_id": "",
+            "finished": true
+        });
+        let _ = subchat_tx.lock().await.send(reset_msg);
+    }
+
     Ok(choices)
 }

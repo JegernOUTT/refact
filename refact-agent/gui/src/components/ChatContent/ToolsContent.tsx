@@ -225,15 +225,13 @@ export const SingleModelToolContent: React.FC<{
     };
   });
 
-  const subchat: string | undefined = toolCalls
-    .map((toolCall) => toolCall.subchat)
-    .filter((x) => x)[0];
+  const subchatLog: string[] = toolCalls
+    .flatMap((tc) => tc.subchat_log ?? []);
   const attachedFiles = toolCalls
-    .map((toolCall) => toolCall.attached_files)
-    .filter((x) => x)
-    .flat();
-  const shownAttachedFiles = attachedFiles.slice(-4);
-  const hiddenFiles = attachedFiles.length - 4;
+    .flatMap((tc) => tc.attached_files ?? [])
+    .filter((f, i, arr) => arr.indexOf(f) === i);
+  const shownAttachedFiles = attachedFiles.slice(-6);
+  const hiddenFiles = Math.max(0, attachedFiles.length - 6);
 
   // Use this for single tool result
   return (
@@ -245,7 +243,7 @@ export const SingleModelToolContent: React.FC<{
             toolUsageAmount={toolUsageAmount}
             hiddenFiles={hiddenFiles}
             shownAttachedFiles={shownAttachedFiles}
-            subchat={subchat}
+            subchatLog={subchatLog}
             open={open}
             onClick={() => setOpen((prev) => !prev)}
             waiting={busy}
@@ -531,12 +529,28 @@ const MultiModalToolContent: React.FC<{
 type ToolUsageSummaryProps = {
   toolUsageAmount: ToolUsage[];
   hiddenFiles?: number;
-  shownAttachedFiles?: (string | undefined)[];
-  subchat?: string;
+  shownAttachedFiles?: string[];
+  subchatLog?: string[];
   open: boolean;
   onClick?: () => void;
   waiting: boolean;
 };
+
+function getFileIcon(path: string): string {
+  if (path.endsWith("/") || !path.includes(".")) return "📂";
+  return "📄";
+}
+
+function truncatePath(path: string, maxLen = 50): string {
+  if (path.length <= maxLen) return path;
+  const parts = path.split("/");
+  if (parts.length <= 2) return "…" + path.slice(-maxLen + 1);
+  const filename = parts[parts.length - 1];
+  const dir = parts[parts.length - 2];
+  const short = `…/${dir}/${filename}`;
+  if (short.length <= maxLen) return short;
+  return "…" + path.slice(-maxLen + 1);
+}
 
 const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
   (
@@ -544,13 +558,25 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
       toolUsageAmount,
       hiddenFiles,
       shownAttachedFiles,
-      subchat,
+      subchatLog,
       open,
       onClick,
       waiting,
     },
     ref,
   ) => {
+    const currentStep = (subchatLog ?? []).slice(-1)[0];
+
+    const parseStep = (
+      entry: string,
+    ): { step: string; lines: string[] } | null => {
+      const match = entry.match(/^(\d+\/\d+): ([\s\S]+)$/);
+      if (!match) return null;
+      const [, step, content] = match;
+      const lines = content.split("\n").filter((l) => l.trim());
+      return { step, lines };
+    };
+
     return (
       <AnimatedText as="div" weight="light" size="1" animating={waiting}>
         <Flex gap="2" align="end" onClick={onClick} ref={ref} my="2">
@@ -561,7 +587,7 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
             style={{ cursor: "pointer" }}
           >
             <Flex gap="2" align="center" justify="center">
-              {waiting ? <Spinner /> : "🔨"} {/* 🔨{" "} */}
+              {waiting ? <Spinner /> : "🔨"}
               {toolUsageAmount.map(({ functionName, amountOfCalls }, index) => (
                 <span key={functionName}>
                   <ToolUsageDisplay
@@ -573,28 +599,35 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
               ))}
             </Flex>
 
-            {hiddenFiles && hiddenFiles > 0 && (
+            {hiddenFiles !== undefined && hiddenFiles > 0 && (
               <Text weight="light" size="1" ml="4">
-                {`🔎 <${hiddenFiles} files hidden>`}
+                {`<+${hiddenFiles} more files>`}
               </Text>
             )}
-            {shownAttachedFiles?.map((file, index) => {
-              if (!file) return null;
-
+            {shownAttachedFiles?.map((file, index) => (
+              <Text weight="light" size="1" key={index} ml="4">
+                {getFileIcon(file)} {truncatePath(file)}
+              </Text>
+            ))}
+            {currentStep && (() => {
+              const parsed = parseStep(currentStep);
+              if (!parsed) return null;
               return (
-                <Text weight="light" size="1" key={index} ml="4">
-                  🔎 {file}
-                </Text>
+                <Flex direction="column" gap="1" ml="4" mt="1">
+                  <Flex align="center" gap="1">
+                    {waiting && <Spinner size="1" />}
+                    <Text weight="light" size="1">
+                      {parsed.step}:
+                    </Text>
+                  </Flex>
+                  {parsed.lines.map((line, i) => (
+                    <Text key={i} weight="light" size="1" ml="4">
+                      🔨 {line}
+                    </Text>
+                  ))}
+                </Flex>
               );
-            })}
-            {subchat && (
-              <Flex ml="4">
-                {waiting && <Spinner />}
-                <Text weight="light" size="1" ml="4px">
-                  {subchat}
-                </Text>
-              </Flex>
-            )}
+            })()}
           </Flex>
           <Chevron open={open} />
         </Flex>

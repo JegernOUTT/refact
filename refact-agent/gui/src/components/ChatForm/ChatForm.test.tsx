@@ -62,7 +62,7 @@ describe("ChatForm", () => {
     expect(fakeOnSubmit).toHaveBeenCalled();
   });
 
-  test("when I hole shift and push enter it should not call onSubmit", async () => {
+  test("when I hold shift and push enter it should not call onSubmit", async () => {
     const fakeOnSubmit = vi.fn();
 
     const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />);
@@ -111,7 +111,7 @@ describe("ChatForm", () => {
 
   test.each([
     "{Shift>}{enter>}{/enter}{/Shift}", // hold shift, hold enter, release enter, release shift,
-    "{Shift>}{enter>}{/Shift}{/enter}", // hold shift,  hold enter, release enter, release shift,
+    "{Shift>}{enter>}{/Shift}{/enter}", // hold shift, hold enter, release enter, release shift,
   ])("when pressing %s, it should not submit", async (a) => {
     const fakeOnSubmit = vi.fn();
 

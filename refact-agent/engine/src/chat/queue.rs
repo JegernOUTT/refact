@@ -330,6 +330,9 @@ pub async fn process_command_queue(
                     }
                 }
             }
+            ChatCommand::Regenerate {} => {
+                start_generation(gcx.clone(), session_arc.clone()).await;
+            }
         }
     }
 }
@@ -408,7 +411,16 @@ async fn handle_tool_decisions(
         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
     }
 
-    start_generation(gcx, session_arc).await;
+    let any_accepted = decisions.iter().any(|d| d.accepted);
+    if any_accepted {
+        start_generation(gcx, session_arc).await;
+    } else {
+        {
+            let mut session = session_arc.lock().await;
+            session.set_runtime_state(SessionState::Idle, None);
+        }
+        maybe_save_trajectory(gcx, session_arc).await;
+    }
 }
 
 async fn create_checkpoint_for_message(

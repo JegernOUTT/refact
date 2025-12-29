@@ -1150,4 +1150,257 @@ mod tests {
         assert_eq!(prompt_tool_names.len(), 2);
         assert!(prompt_tool_names.contains("tool_a"));
     }
+
+    #[test]
+    fn test_tool_step_outcome_variants() {
+        use crate::chat::tools::ToolStepOutcome;
+
+        let no_tools = ToolStepOutcome::NoToolCalls;
+        let paused = ToolStepOutcome::Paused;
+        let cont = ToolStepOutcome::Continue;
+
+        assert!(matches!(no_tools, ToolStepOutcome::NoToolCalls));
+        assert!(matches!(paused, ToolStepOutcome::Paused));
+        assert!(matches!(cont, ToolStepOutcome::Continue));
+    }
+
+    #[test]
+    fn test_tool_step_outcome_in_match() {
+        use crate::chat::tools::ToolStepOutcome;
+
+        fn should_continue(outcome: ToolStepOutcome) -> bool {
+            match outcome {
+                ToolStepOutcome::NoToolCalls => false,
+                ToolStepOutcome::Paused => false,
+                ToolStepOutcome::Continue => true,
+            }
+        }
+
+        assert!(!should_continue(ToolStepOutcome::NoToolCalls));
+        assert!(!should_continue(ToolStepOutcome::Paused));
+        assert!(should_continue(ToolStepOutcome::Continue));
+    }
+
+    #[test]
+    fn test_max_agent_cycles_constant() {
+        use crate::chat::generation::MAX_AGENT_CYCLES;
+
+        assert!(MAX_AGENT_CYCLES > 0);
+        assert!(MAX_AGENT_CYCLES <= 100);
+        assert_eq!(MAX_AGENT_CYCLES, 50);
+    }
+
+    #[test]
+    fn test_iterative_loop_simulation() {
+        use crate::chat::tools::ToolStepOutcome;
+
+        const MAX_CYCLES: usize = 50;
+
+        fn simulate_agent_loop(outcomes: &[ToolStepOutcome]) -> usize {
+            let mut cycles = 0;
+            for cycle in 0..MAX_CYCLES {
+                cycles = cycle + 1;
+                if cycle >= outcomes.len() {
+                    break;
+                }
+                match &outcomes[cycle] {
+                    ToolStepOutcome::NoToolCalls => break,
+                    ToolStepOutcome::Paused => break,
+                    ToolStepOutcome::Continue => continue,
+                }
+            }
+            cycles
+        }
+
+        assert_eq!(simulate_agent_loop(&[ToolStepOutcome::NoToolCalls]), 1);
+        assert_eq!(simulate_agent_loop(&[ToolStepOutcome::Paused]), 1);
+        assert_eq!(simulate_agent_loop(&[
+            ToolStepOutcome::Continue,
+            ToolStepOutcome::NoToolCalls
+        ]), 2);
+        assert_eq!(simulate_agent_loop(&[
+            ToolStepOutcome::Continue,
+            ToolStepOutcome::Continue,
+            ToolStepOutcome::Continue,
+            ToolStepOutcome::Paused
+        ]), 4);
+
+        let many_continues: Vec<_> = (0..100).map(|_| ToolStepOutcome::Continue).collect();
+        assert_eq!(simulate_agent_loop(&many_continues), MAX_CYCLES);
+    }
+
+    #[test]
+    fn test_abort_breaks_loop_simulation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        const MAX_CYCLES: usize = 50;
+
+        fn simulate_with_abort(abort_at: Option<usize>) -> usize {
+            let abort_flag = Arc::new(AtomicBool::new(false));
+            let mut cycles = 0;
+
+            for cycle in 0..MAX_CYCLES {
+                if abort_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                cycles = cycle + 1;
+
+                if Some(cycle) == abort_at {
+                    abort_flag.store(true, Ordering::SeqCst);
+                }
+            }
+            cycles
+        }
+
+        assert_eq!(simulate_with_abort(None), MAX_CYCLES);
+        assert_eq!(simulate_with_abort(Some(0)), 1);
+        assert_eq!(simulate_with_abort(Some(5)), 6);
+        assert_eq!(simulate_with_abort(Some(10)), 11);
+    }
+
+    #[test]
+    fn test_server_executed_tool_filtering() {
+        fn is_server_executed_tool(tool_call_id: &str) -> bool {
+            tool_call_id.starts_with("srvtoolu_")
+        }
+
+        let tool_calls = vec![
+            ("call_abc123", false),
+            ("srvtoolu_xyz789", true),
+            ("toolu_def456", false),
+            ("srvtoolu_", true),
+        ];
+
+        for (id, expected) in tool_calls {
+            assert_eq!(is_server_executed_tool(id), expected, "Failed for id: {}", id);
+        }
+
+        let all_calls = vec!["call_1", "srvtoolu_2", "call_3", "srvtoolu_4"];
+        let client_calls: Vec<_> = all_calls
+            .into_iter()
+            .filter(|id| !is_server_executed_tool(id))
+            .collect();
+
+        assert_eq!(client_calls, vec!["call_1", "call_3"]);
+    }
+
+    #[test]
+    fn test_no_tool_calls_when_last_message_not_assistant() {
+        let messages = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::SimpleText("Hello".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let last_msg = messages.last();
+        let has_tool_calls = match last_msg {
+            Some(m) if m.role == "assistant" && m.tool_calls.is_some() => true,
+            _ => false,
+        };
+
+        assert!(!has_tool_calls);
+    }
+
+    #[test]
+    fn test_no_tool_calls_when_assistant_has_none() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Hello".to_string()),
+                tool_calls: None,
+                ..Default::default()
+            },
+        ];
+
+        let last_msg = messages.last();
+        let has_tool_calls = match last_msg {
+            Some(m) if m.role == "assistant" && m.tool_calls.is_some() => true,
+            _ => false,
+        };
+
+        assert!(!has_tool_calls);
+    }
+
+    #[test]
+    fn test_has_tool_calls_when_assistant_has_calls() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Let me help".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_123".to_string(),
+                    index: Some(0),
+                    function: ChatToolFunction {
+                        name: "test_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    tool_type: "function".to_string(),
+                }]),
+                ..Default::default()
+            },
+        ];
+
+        let last_msg = messages.last();
+        let has_tool_calls = match last_msg {
+            Some(m) if m.role == "assistant" && m.tool_calls.is_some() => true,
+            _ => false,
+        };
+
+        assert!(has_tool_calls);
+    }
+
+    #[test]
+    fn test_empty_tool_calls_after_server_filter() {
+        fn is_server_executed_tool(id: &str) -> bool {
+            id.starts_with("srvtoolu_")
+        }
+
+        let tool_calls = vec![
+            ChatToolCall {
+                id: "srvtoolu_1".to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "server_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+            },
+            ChatToolCall {
+                id: "srvtoolu_2".to_string(),
+                index: Some(1),
+                function: ChatToolFunction {
+                    name: "another_server_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+            },
+        ];
+
+        let client_calls: Vec<_> = tool_calls
+            .iter()
+            .filter(|tc| !is_server_executed_tool(&tc.id))
+            .collect();
+
+        assert!(client_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_chat_mode() {
+        use crate::chat::generation::parse_chat_mode;
+        use crate::call_validation::ChatMode;
+
+        assert!(matches!(parse_chat_mode("AGENT"), ChatMode::AGENT));
+        assert!(matches!(parse_chat_mode("agent"), ChatMode::AGENT));
+        assert!(matches!(parse_chat_mode("Agent"), ChatMode::AGENT));
+        assert!(matches!(parse_chat_mode("NO_TOOLS"), ChatMode::NO_TOOLS));
+        assert!(matches!(parse_chat_mode("no_tools"), ChatMode::NO_TOOLS));
+        assert!(matches!(parse_chat_mode("EXPLORE"), ChatMode::EXPLORE));
+        assert!(matches!(parse_chat_mode("CONFIGURE"), ChatMode::CONFIGURE));
+        assert!(matches!(parse_chat_mode("PROJECT_SUMMARY"), ChatMode::PROJECT_SUMMARY));
+        assert!(matches!(parse_chat_mode("unknown"), ChatMode::AGENT));
+        assert!(matches!(parse_chat_mode(""), ChatMode::AGENT));
+    }
 }

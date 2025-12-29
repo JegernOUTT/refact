@@ -33,6 +33,7 @@ export type ToolCall = {
   id?: string;
   attached_files?: string[];
   subchat?: string;
+  subchat_log?: string[];
 };
 
 export type ToolUsage = {

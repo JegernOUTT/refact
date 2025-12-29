@@ -7,6 +7,7 @@ import {
   useAppDispatch,
   useChatSubscription,
   useChatActions,
+  useQueueAutoFlush,
 } from "../../hooks";
 import { type Config } from "../../features/Config/configSlice";
 import {
@@ -52,8 +53,8 @@ export const Chat: React.FC<ChatProps> = ({
     enabled: true,
   });
 
-  // Actions for sending commands to the engine
   const { submit, abort, retryFromIndex } = useChatActions();
+  useQueueAutoFlush();
 
   const chatToolUse = useAppSelector(getSelectedToolUse);
   const threadNewChatSuggested = useAppSelector(selectThreadNewChatSuggested);

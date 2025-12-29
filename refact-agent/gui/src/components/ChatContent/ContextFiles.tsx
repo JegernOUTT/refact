@@ -204,7 +204,7 @@ export const ContextFiles: React.FC<{
       ? `${files.length} memories`
       : variant === "project_context"
         ? `Project context (${files.length})`
-        : `${files.length} file${files.length > 1 ? "s" : ""}`;
+        : files.map((f) => formatFileName(f.file_name, f.line1, f.line2)).join(", ");
 
   return (
     <Container>

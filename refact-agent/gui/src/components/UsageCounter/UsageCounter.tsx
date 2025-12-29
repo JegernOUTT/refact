@@ -245,7 +245,7 @@ const DefaultHoverTriggerContent: React.FC<{
   coinsCacheCreation,
 }) => {
   const hasContent =
-    (totalCoins !== undefined && totalCoins > 0) || currentSessionTokens !== 0;
+    (totalCoins !== undefined && totalCoins > 0) || maxContextTokens > 0;
 
   if (!hasContent) return null;
 
@@ -270,7 +270,7 @@ const DefaultHoverTriggerContent: React.FC<{
           </HoverCard.Content>
         </HoverCard.Root>
       )}
-      {currentSessionTokens !== 0 && maxContextTokens > 0 && (
+      {maxContextTokens > 0 && (
         <HoverCard.Root>
           <HoverCard.Trigger>
             <Flex align="center" gap="1" style={{ cursor: "default" }}>

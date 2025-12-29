@@ -21,8 +21,13 @@ pub struct ExecuteToolsOptions {
     pub postprocess_settings: Option<PostprocessSettings>,
 }
 
+pub enum ToolStepOutcome {
+    NoToolCalls,
+    Paused,
+    Continue,
+}
+
 use super::types::*;
-use super::generation::start_generation;
 use super::trajectories::maybe_save_trajectory;
 
 async fn get_effective_n_ctx(gcx: Arc<ARwLock<GlobalContext>>, thread: &ThreadParams) -> usize {
@@ -72,7 +77,17 @@ fn spawn_subchat_bridge(
                             continue;
                         }
 
-                        let attached_files = value
+                        let mut attached_files: Vec<String> = value
+                            .get("attached_files")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let files_from_add_message: Vec<String> = value
                             .get("add_message")
                             .and_then(|am| am.get("content"))
                             .and_then(|c| c.as_array())
@@ -82,9 +97,15 @@ fn spawn_subchat_bridge(
                                         item.get("file_name").and_then(|f| f.as_str())
                                     })
                                     .map(|s| s.to_string())
-                                    .collect::<Vec<_>>()
+                                    .collect()
                             })
                             .unwrap_or_default();
+
+                        for f in files_from_add_message {
+                            if !attached_files.contains(&f) {
+                                attached_files.push(f);
+                            }
+                        }
 
                         let mut session = session_arc.lock().await;
                         session.emit(ChatEvent::SubchatUpdate {
@@ -136,11 +157,11 @@ mod tests {
     }
 }
 
-pub async fn check_tool_calls_and_continue(
+pub async fn process_tool_calls_once(
     gcx: Arc<ARwLock<GlobalContext>>,
     session_arc: Arc<AMutex<ChatSession>>,
     chat_mode: ChatMode,
-) {
+) -> ToolStepOutcome {
     let (tool_calls, messages, thread) = {
         let session = session_arc.lock().await;
         let last_msg = session.messages.last();
@@ -157,21 +178,16 @@ pub async fn check_tool_calls_and_continue(
                     session.thread.clone(),
                 )
             }
-            _ => {
-                session.queue_notify.notify_one();
-                return;
-            }
+            _ => return ToolStepOutcome::NoToolCalls,
         }
     };
 
     if tool_calls.is_empty() {
-        let session = session_arc.lock().await;
-        session.queue_notify.notify_one();
-        return;
+        return ToolStepOutcome::NoToolCalls;
     }
 
     info!(
-        "check_tool_calls_and_continue: {} tool calls to process",
+        "process_tool_calls_once: {} tool calls to process",
         tool_calls.len()
     );
 
@@ -197,7 +213,7 @@ pub async fn check_tool_calls_and_continue(
     if !confirmations.is_empty() {
         let mut session = session_arc.lock().await;
         session.set_paused_with_reasons(confirmations);
-        return;
+        return ToolStepOutcome::Paused;
     }
 
     let tools_to_execute: Vec<_> = tool_calls
@@ -207,8 +223,7 @@ pub async fn check_tool_calls_and_continue(
         .collect();
 
     if tools_to_execute.is_empty() {
-        start_generation(gcx, session_arc).await;
-        return;
+        return ToolStepOutcome::Continue;
     }
 
     {
@@ -236,7 +251,7 @@ pub async fn check_tool_calls_and_continue(
     }
 
     maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-    start_generation(gcx, session_arc).await;
+    ToolStepOutcome::Continue
 }
 
 pub async fn check_tools_confirmation(

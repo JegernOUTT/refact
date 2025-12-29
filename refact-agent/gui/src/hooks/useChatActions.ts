@@ -1,22 +1,26 @@
-/**
- * Chat Actions Hook
- *
- * Provides actions for the stateless chat system using the commands API.
- * All state comes from the SSE subscription - this hook only sends commands.
- */
-
 import { useCallback } from "react";
+import { v4 as uuidv4 } from "uuid";
 import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
 import {
   selectChatId,
   selectThreadImages,
+  selectIsWaiting,
+  selectIsStreaming,
+  selectPreventSend,
+  selectThreadPause,
+  selectSendImmediately,
 } from "../features/Chat/Thread/selectors";
-import { resetThreadImages } from "../features/Chat/Thread";
+import {
+  resetThreadImages,
+  enqueueUserMessage,
+  setSendImmediately,
+} from "../features/Chat/Thread";
 import {
   sendUserMessage,
   retryFromIndex as retryFromIndexApi,
+  regenerate as regenerateApi,
   updateChatParams,
   abortGeneration,
   respondToToolConfirmation,
@@ -69,6 +73,11 @@ export function useChatActions() {
   const apiKey = useAppSelector(selectApiKey);
   const chatId = useAppSelector(selectChatId);
   const attachedImages = useAppSelector(selectThreadImages);
+  const isWaiting = useAppSelector(selectIsWaiting);
+  const isStreaming = useAppSelector(selectIsStreaming);
+  const preventSend = useAppSelector(selectPreventSend);
+  const isPaused = useAppSelector(selectThreadPause);
+  const sendImmediately = useAppSelector(selectSendImmediately);
 
   /**
    * Build message content with attached images if any.
@@ -103,18 +112,50 @@ export function useChatActions() {
     [attachedImages],
   );
 
-  /**
-   * Submit a user message to the chat.
-   */
   const submit = useCallback(
     async (question: string) => {
       if (!chatId || !port) return;
 
       const content = buildMessageContent(question);
+      const isEmpty =
+        typeof content === "string"
+          ? content.trim().length === 0
+          : content.length === 0;
+      if (isEmpty) return;
+
+      const busy = isWaiting || isStreaming || isPaused || preventSend;
+
+      if (busy) {
+        dispatch(
+          enqueueUserMessage({
+            chatId,
+            id: uuidv4(),
+            createdAt: Date.now(),
+            message: { role: "user", content } as UserMessage,
+            priority: sendImmediately,
+          }),
+        );
+        dispatch(resetThreadImages({ id: chatId }));
+        dispatch(setSendImmediately(false));
+        return;
+      }
+
       await sendUserMessage(chatId, content, port, apiKey ?? undefined);
       dispatch(resetThreadImages({ id: chatId }));
+      dispatch(setSendImmediately(false));
     },
-    [chatId, port, apiKey, buildMessageContent, dispatch],
+    [
+      chatId,
+      port,
+      apiKey,
+      buildMessageContent,
+      dispatch,
+      isWaiting,
+      isStreaming,
+      isPaused,
+      preventSend,
+      sendImmediately,
+    ],
   );
 
   /**
@@ -227,6 +268,11 @@ export function useChatActions() {
     [chatId, port, apiKey],
   );
 
+  const regenerate = useCallback(async () => {
+    if (!chatId || !port) return;
+    await regenerateApi(chatId, port, apiKey ?? undefined);
+  }, [chatId, port, apiKey]);
+
   return {
     submit,
     abort,
@@ -236,6 +282,7 @@ export function useChatActions() {
     retryFromIndex,
     updateMessage,
     removeMessage,
+    regenerate,
   };
 }
 

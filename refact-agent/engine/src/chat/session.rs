@@ -109,9 +109,11 @@ impl ChatSession {
                 messages.push(draft.clone());
             }
         }
+        let mut runtime = self.runtime.clone();
+        runtime.queue_size = self.command_queue.len();
         ChatEvent::Snapshot {
             thread: self.thread.clone(),
-            runtime: self.runtime.clone(),
+            runtime,
             messages,
         }
     }
@@ -217,7 +219,6 @@ impl ChatSession {
             warn!("Attempted to start stream while already generating/executing");
             return None;
         }
-        self.abort_flag.store(false, Ordering::SeqCst);
         let message_id = Uuid::new_v4().to_string();
         self.draft_message = Some(ChatMessage {
             message_id: message_id.clone(),
@@ -342,6 +343,7 @@ impl ChatSession {
         self.draft_usage = None;
         self.set_runtime_state(SessionState::Idle, None);
         self.touch();
+        self.queue_notify.notify_one();
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {

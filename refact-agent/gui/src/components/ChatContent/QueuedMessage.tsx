@@ -5,8 +5,9 @@ import {
   ClockIcon,
   LightningBoltIcon,
 } from "@radix-ui/react-icons";
-import { useAppDispatch } from "../../hooks";
+import { useAppDispatch, useAppSelector } from "../../hooks";
 import { dequeueUserMessage, QueuedUserMessage } from "../../features/Chat";
+import { selectChatId } from "../../features/Chat/Thread/selectors";
 import styles from "./ChatContent.module.css";
 import classNames from "classnames";
 
@@ -34,11 +35,13 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
   position,
 }) => {
   const dispatch = useAppDispatch();
+  const chatId = useAppSelector(selectChatId);
   const isPriority = queuedMessage.priority;
 
   const handleCancel = useCallback(() => {
-    dispatch(dequeueUserMessage({ queuedId: queuedMessage.id }));
-  }, [dispatch, queuedMessage.id]);
+    if (!chatId) return;
+    dispatch(dequeueUserMessage({ chatId, queuedId: queuedMessage.id }));
+  }, [dispatch, chatId, queuedMessage.id]);
 
   const preview = getMessagePreview(queuedMessage.message);
 

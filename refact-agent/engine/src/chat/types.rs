@@ -270,6 +270,7 @@ pub enum ChatCommand {
         #[serde(default)]
         regenerate: bool,
     },
+    Regenerate {},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
