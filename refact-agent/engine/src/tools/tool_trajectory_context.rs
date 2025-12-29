@@ -90,12 +90,10 @@ impl Tool for ToolTrajectoryContext {
 
         let gcx = ccx.lock().await.global_context.clone();
         let project_dirs = get_project_dirs(gcx.clone()).await;
-        let workspace_root = project_dirs.first().ok_or("No workspace folder")?;
-        let traj_path = workspace_root.join(".refact/trajectories").join(format!("{}.json", trajectory_id));
-
-        if !traj_path.exists() {
-            return Err(format!("⚠️ Trajectory '{}' not found. 💡 Check .refact/trajectories/ or use knowledge() to search", trajectory_id));
-        }
+        let traj_path = project_dirs.iter()
+            .map(|dir| dir.join(".refact/trajectories").join(format!("{}.json", trajectory_id)))
+            .find(|p| p.exists())
+            .ok_or(format!("⚠️ Trajectory '{}' not found. 💡 Check .refact/trajectories/ or use knowledge() to search", trajectory_id))?;
 
         let content = fs::read_to_string(&traj_path).await
             .map_err(|e| format!("Failed to read trajectory: {}", e))?;

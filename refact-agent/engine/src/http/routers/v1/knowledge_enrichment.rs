@@ -16,29 +16,29 @@ const MAX_QUERY_LENGTH: usize = 2000;
 pub async fn enrich_messages_with_knowledge(
     gcx: Arc<ARwLock<GlobalContext>>,
     messages: &mut Vec<ChatMessage>,
-) -> Option<Vec<serde_json::Value>> {
-    let last_user_idx = messages.iter().rposition(|m| m.role == "user")?;
+) {
+    let last_user_idx = match messages.iter().rposition(|m| m.role == "user") {
+        Some(idx) => idx,
+        None => return,
+    };
     let query_raw = messages[last_user_idx].content.content_text_only();
 
     if has_knowledge_enrichment_near(messages, last_user_idx) {
-        return None;
+        return;
     }
 
     let query_normalized = normalize_query(&query_raw);
 
     if !should_enrich(messages, &query_raw, &query_normalized) {
-        return None;
+        return;
     }
 
     let existing_paths = get_existing_context_file_paths(messages);
 
-    if let Some((knowledge_context, ui_context)) = create_knowledge_context(gcx, &query_normalized, &existing_paths).await {
+    if let Some(knowledge_context) = create_knowledge_context(gcx, &query_normalized, &existing_paths).await {
         messages.insert(last_user_idx, knowledge_context);
         tracing::info!("Injected knowledge context before user message at position {}", last_user_idx);
-        return Some(vec![ui_context]);
     }
-
-    None
 }
 
 fn normalize_query(query: &str) -> String {
@@ -161,9 +161,8 @@ async fn create_knowledge_context(
     gcx: Arc<ARwLock<GlobalContext>>,
     query_text: &str,
     existing_paths: &HashSet<String>,
-) -> Option<(ChatMessage, serde_json::Value)> {
-
-    let memories = memories_search(gcx.clone(), &query_text, KNOWLEDGE_TOP_N, TRAJECTORY_TOP_N).await.ok()?;
+) -> Option<ChatMessage> {
+    let memories = memories_search(gcx.clone(), query_text, KNOWLEDGE_TOP_N, TRAJECTORY_TOP_N).await.ok()?;
 
     let high_score_memories: Vec<_> = memories
         .into_iter()
@@ -183,58 +182,34 @@ async fn create_knowledge_context(
 
     tracing::info!("Knowledge enrichment: {} memories passed threshold {}", high_score_memories.len(), KNOWLEDGE_SCORE_THRESHOLD);
 
-    let context_files_for_llm: Vec<ContextFile> = high_score_memories
+    let context_files: Vec<ContextFile> = high_score_memories
         .iter()
         .filter_map(|memo| {
             let file_path = memo.file_path.as_ref()?;
-            let (line1, line2) = memo.line_range.unwrap_or((1, 50));
+            let line_count = memo.content.lines().count().max(1);
             Some(ContextFile {
                 file_name: file_path.to_string_lossy().to_string(),
-                file_content: String::new(),
-                line1: line1 as usize,
-                line2: line2 as usize,
+                file_content: memo.content.clone(),
+                line1: 1,
+                line2: line_count,
                 symbols: vec![],
                 gradient_type: -1,
                 usefulness: 80.0 + (memo.score.unwrap_or(0.75) * 20.0),
-                skip_pp: false,
+                skip_pp: true,
             })
         })
         .collect();
 
-    if context_files_for_llm.is_empty() {
+    if context_files.is_empty() {
         return None;
     }
 
-    let context_files_for_ui: Vec<serde_json::Value> = high_score_memories
-        .iter()
-        .filter_map(|memo| {
-            let file_path = memo.file_path.as_ref()?;
-            let (line1, line2) = memo.line_range.unwrap_or((1, 50));
-            Some(serde_json::json!({
-                "file_name": file_path.to_string_lossy().to_string(),
-                "file_content": memo.content.clone(),
-                "line1": line1,
-                "line2": line2,
-            }))
-        })
-        .collect();
-
-    let content = serde_json::to_string(&context_files_for_llm).ok()?;
-    let chat_message = ChatMessage {
+    Some(ChatMessage {
         role: "context_file".to_string(),
-        content: ChatContent::SimpleText(content),
+        content: ChatContent::ContextFiles(context_files),
         tool_call_id: KNOWLEDGE_ENRICHMENT_MARKER.to_string(),
         ..Default::default()
-    };
-
-    let ui_content_str = serde_json::to_string(&context_files_for_ui).unwrap_or_default();
-    let ui_message = serde_json::json!({
-        "role": "context_file",
-        "content": ui_content_str,
-        "tool_call_id": KNOWLEDGE_ENRICHMENT_MARKER,
-    });
-
-    Some((chat_message, ui_message))
+    })
 }
 
 fn has_knowledge_enrichment_near(messages: &[ChatMessage], user_idx: usize) -> bool {

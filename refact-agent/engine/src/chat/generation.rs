@@ -163,7 +163,7 @@ pub async fn run_llm_generation(
     let last_is_user = messages.last().map(|m| m.role == "user").unwrap_or(false);
     if chat_mode == ChatMode::AGENT && last_is_user {
         let msg_count_before = messages.len();
-        let _ = enrich_messages_with_knowledge(gcx.clone(), &mut messages).await;
+        enrich_messages_with_knowledge(gcx.clone(), &mut messages).await;
         if messages.len() > msg_count_before {
             let mut session = session_arc.lock().await;
             let session_last_user_idx = session.messages.iter().rposition(|m| m.role == "user").unwrap_or(0);

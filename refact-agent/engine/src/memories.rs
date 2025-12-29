@@ -92,7 +92,15 @@ pub fn create_frontmatter(
     }
 }
 
-async fn get_knowledge_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
+async fn get_all_knowledge_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+    get_project_dirs(gcx).await
+        .into_iter()
+        .map(|p| p.join(KNOWLEDGE_FOLDER_NAME))
+        .filter(|p| p.exists())
+        .collect()
+}
+
+async fn get_first_knowledge_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
     Ok(workspace_root.join(KNOWLEDGE_FOLDER_NAME))
@@ -103,7 +111,7 @@ pub async fn memories_add(
     frontmatter: &KnowledgeFrontmatter,
     content: &str,
 ) -> Result<PathBuf, String> {
-    let knowledge_dir = get_knowledge_dir(gcx.clone()).await?;
+    let knowledge_dir = get_first_knowledge_dir(gcx.clone()).await?;
     fs::create_dir_all(&knowledge_dir).await.map_err(|e| format!("Failed to create knowledge dir: {}", e))?;
 
     let filename = generate_filename(content);
@@ -133,7 +141,7 @@ pub async fn memories_search(
     top_n_memories: usize,
     top_n_trajectories: usize,
 ) -> Result<Vec<MemoRecord>, String> {
-    let knowledge_dir = get_knowledge_dir(gcx.clone()).await?;
+    let knowledge_dirs = get_all_knowledge_dirs(gcx.clone()).await;
 
     let vecdb_arc = {
         let gcx_read = gcx.read().await;
@@ -143,7 +151,7 @@ pub async fn memories_search(
     let vecdb_guard = vecdb_arc.lock().await;
     if vecdb_guard.is_none() {
         drop(vecdb_guard);
-        return memories_search_fallback(gcx, query, top_n_memories, &knowledge_dir).await;
+        return memories_search_fallback(gcx, query, top_n_memories, &knowledge_dirs).await;
     }
 
     let vecdb = vecdb_guard.as_ref().unwrap();
@@ -306,24 +314,28 @@ pub async fn memories_search(
         return Ok(records);
     }
 
-    memories_search_fallback(gcx, query, top_n_memories, &knowledge_dir).await
+    memories_search_fallback(gcx, query, top_n_memories, &knowledge_dirs).await
 }
 
 async fn memories_search_fallback(
     gcx: Arc<ARwLock<GlobalContext>>,
     query: &str,
     top_n: usize,
-    knowledge_dir: &PathBuf,
+    knowledge_dirs: &[PathBuf],
 ) -> Result<Vec<MemoRecord>, String> {
     let query_lower = query.to_lowercase();
     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
     let mut scored_results: Vec<(usize, MemoRecord)> = Vec::new();
 
-    if !knowledge_dir.exists() {
+    if knowledge_dirs.is_empty() {
         return Ok(vec![]);
     }
 
-    for entry in WalkDir::new(knowledge_dir).into_iter().filter_map(|e| e.ok()) {
+    for knowledge_dir in knowledge_dirs {
+        if !knowledge_dir.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(knowledge_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -369,6 +381,7 @@ async fn memories_search_fallback(
             kind: frontmatter.kind,
             score: Some(normalized_score),
         }));
+        }
     }
 
     scored_results.sort_by(|a, b| b.0.cmp(&a.0));
@@ -408,7 +421,7 @@ pub async fn deprecate_document(
 }
 
 pub async fn archive_document(gcx: Arc<ARwLock<GlobalContext>>, doc_path: &PathBuf) -> Result<PathBuf, String> {
-    let knowledge_dir = get_knowledge_dir(gcx.clone()).await?;
+    let knowledge_dir = get_first_knowledge_dir(gcx.clone()).await?;
     let archive_dir = knowledge_dir.join("archive");
     fs::create_dir_all(&archive_dir).await.map_err(|e| format!("Failed to create archive dir: {}", e))?;
 

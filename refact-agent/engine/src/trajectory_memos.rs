@@ -59,29 +59,30 @@ pub async fn trajectory_memos_background_task(gcx: Arc<ARwLock<GlobalContext>>) 
 
 async fn process_abandoned_trajectories(gcx: Arc<ARwLock<GlobalContext>>) -> Result<(), String> {
     let project_dirs = get_project_dirs(gcx.clone()).await;
-    let workspace_root = match project_dirs.first() {
-        Some(root) => root.clone(),
-        None => return Ok(()),
-    };
-
-    let trajectories_dir = workspace_root.join(TRAJECTORIES_FOLDER);
-    if !trajectories_dir.exists() {
+    if project_dirs.is_empty() {
         return Ok(());
     }
 
     let now = Utc::now();
     let threshold = now - Duration::hours(ABANDONED_THRESHOLD_HOURS);
 
-    for entry in WalkDir::new(&trajectories_dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if !path.is_file() || path.extension().map(|e| e != "json").unwrap_or(true) {
+    for workspace_root in project_dirs {
+        let trajectories_dir = workspace_root.join(TRAJECTORIES_FOLDER);
+        if !trajectories_dir.exists() {
             continue;
         }
 
-        match process_single_trajectory(gcx.clone(), path.to_path_buf(), &threshold).await {
-            Ok(true) => info!("trajectory_memos: extracted memos from {}", path.display()),
-            Ok(false) => {},
-            Err(e) => warn!("trajectory_memos: failed to process {}: {}", path.display(), e),
+        for entry in WalkDir::new(&trajectories_dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_file() || path.extension().map(|e| e != "json").unwrap_or(true) {
+                continue;
+            }
+
+            match process_single_trajectory(gcx.clone(), path.to_path_buf(), &threshold).await {
+                Ok(true) => info!("trajectory_memos: extracted memos from {}", path.display()),
+                Ok(false) => {},
+                Err(e) => warn!("trajectory_memos: failed to process {}: {}", path.display(), e),
+            }
         }
     }
 

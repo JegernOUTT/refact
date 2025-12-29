@@ -108,6 +108,14 @@ pub async fn get_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Pa
     Ok(workspace_root.join(".refact").join("trajectories"))
 }
 
+pub async fn get_all_trajectories_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+    get_project_dirs(gcx).await
+        .into_iter()
+        .map(|p| p.join(".refact").join("trajectories"))
+        .filter(|p| p.exists())
+        .collect()
+}
+
 async fn get_trajectories_dir_from_weak(gcx_weak: &Weak<ARwLock<GlobalContext>>) -> Option<PathBuf> {
     let gcx = gcx_weak.upgrade()?;
     get_trajectories_dir(gcx).await.ok()
@@ -129,13 +137,10 @@ pub async fn load_trajectory_for_chat(
     gcx: Arc<ARwLock<GlobalContext>>,
     chat_id: &str,
 ) -> Option<LoadedTrajectory> {
-    let workspace_dirs = get_project_dirs(gcx).await;
-    let workspace_root = workspace_dirs.first()?;
-
-    let traj_path = workspace_root.join(".refact").join("trajectories").join(format!("{}.json", chat_id));
-    if !traj_path.exists() {
-        return None;
-    }
+    let traj_dirs = get_all_trajectories_dirs(gcx).await;
+    let traj_path = traj_dirs.iter()
+        .map(|dir| dir.join(format!("{}.json", chat_id)))
+        .find(|p| p.exists())?;
 
     let content = tokio::fs::read_to_string(&traj_path).await.ok()?;
     let t: serde_json::Value = serde_json::from_str(&content).ok()?;
