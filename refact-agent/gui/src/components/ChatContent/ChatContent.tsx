@@ -1,6 +1,7 @@
 import React, { useCallback, useMemo } from "react";
 import {
   ChatMessages,
+  DiffMessage,
   isChatContextFileMessage,
   isDiffMessage,
   isToolMessage,
@@ -207,12 +208,13 @@ function renderMessages(
   if (head.role === "assistant") {
     const key = "assistant-input-" + index;
 
-    // Find context_file messages that follow this assistant message (skipping tool messages)
+    // Find context_file, tool, and diff messages that follow this assistant message
     const contextFilesAfter: React.ReactNode[] = [];
+    const diffMessagesAfter: DiffMessage[] = [];
     let skipCount = 0;
     let tempTail = tail;
 
-    // Skip tool messages and collect context_file messages until we hit another message type
+    // Skip tool messages and collect context_file/diff messages until we hit another message type
     while (tempTail.length > 0) {
       const nextMsg = tempTail[0];
       if (isToolMessage(nextMsg)) {
@@ -223,6 +225,11 @@ function renderMessages(
         // Collect context_file messages to render after assistant
         const ctxKey = "context-file-" + (index + 1 + skipCount);
         contextFilesAfter.push(<ContextFiles key={ctxKey} files={nextMsg.content} />);
+        skipCount++;
+        tempTail = tempTail.slice(1);
+      } else if (isDiffMessage(nextMsg)) {
+        // Collect diff messages to render after assistant (before usage info)
+        diffMessagesAfter.push(nextMsg);
         skipCount++;
         tempTail = tempTail.slice(1);
       } else {
@@ -243,6 +250,10 @@ function renderMessages(
         citations={head.citations}
       />,
       ...contextFilesAfter,
+      // Render diff messages before usage info so coins appear after diffs
+      ...(diffMessagesAfter.length > 0 ? [
+        <GroupedDiffs key={`diffs-${key}`} diffs={diffMessagesAfter} />
+      ] : []),
       <MessageUsageInfo
         key={`usage-${key}`}
         usage={head.usage}
@@ -253,7 +264,7 @@ function renderMessages(
       />,
     ];
 
-    // Skip the tool and context_file messages we already processed
+    // Skip the tool, context_file, and diff messages we already processed
     const newTail = tail.slice(skipCount);
     return renderMessages(newTail, onRetry, waiting, nextMemo, index + 1 + skipCount);
   }

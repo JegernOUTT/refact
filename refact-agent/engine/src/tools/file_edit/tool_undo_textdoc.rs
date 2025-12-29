@@ -110,10 +110,10 @@ impl Tool for ToolUndoTextDoc {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let gcx = ccx.lock().await.global_context.clone();
-        let (_, _, chunks, summary) = tool_undo_text_doc_exec(gcx, args).await?;
+        let (_, _, chunks, _summary) = tool_undo_text_doc_exec(gcx, args).await?;
         Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "diff".to_string(),
-            content: ChatContent::SimpleText(json!({"chunks": chunks, "summary": summary}).to_string()),
+            content: ChatContent::SimpleText(json!(chunks).to_string()),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             ..Default::default()
