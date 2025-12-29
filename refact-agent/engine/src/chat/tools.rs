@@ -22,6 +22,24 @@ use super::types::*;
 use super::generation::start_generation;
 use super::trajectories::maybe_save_trajectory;
 
+async fn get_effective_n_ctx(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    thread: &ThreadParams,
+) -> usize {
+    if let Some(cap) = thread.context_tokens_cap {
+        return cap;
+    }
+    match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
+        Ok(caps) => {
+            match crate::caps::resolve_chat_model(caps, &thread.model) {
+                Ok(model_rec) => model_rec.base.n_ctx,
+                Err(_) => 128000,
+            }
+        }
+        Err(_) => 128000,
+    }
+}
+
 fn is_server_executed_tool(tool_call_id: &str) -> bool {
     tool_call_id.starts_with("srvtoolu_")
 }
@@ -311,7 +329,7 @@ pub async fn execute_tools_with_session(
         return (vec![], false);
     }
 
-    let n_ctx = thread.context_tokens_cap.unwrap_or(8192);
+    let n_ctx = get_effective_n_ctx(gcx.clone(), thread).await;
     let budget = match ToolBudget::try_from_n_ctx(n_ctx) {
         Ok(b) => b,
         Err(e) => {
@@ -472,7 +490,7 @@ pub async fn execute_tools(
         return (vec![], false);
     }
 
-    let n_ctx = thread.context_tokens_cap.unwrap_or(8192);
+    let n_ctx = get_effective_n_ctx(gcx.clone(), thread).await;
     let budget = match ToolBudget::try_from_n_ctx(n_ctx) {
         Ok(b) => b,
         Err(e) => {

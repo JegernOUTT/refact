@@ -28,8 +28,8 @@ impl ToolBudget {
         }
         let total = (n_ctx / 2).max(4096);
         Ok(Self {
-            tokens_for_code: total * 80 / 100,
-            tokens_for_text: total * 20 / 100,
+            tokens_for_code: total,
+            tokens_for_text: total * 30 / 100,
         })
     }
 }
@@ -51,36 +51,46 @@ pub async fn postprocess_tool_results(
 
     result.extend(diff_messages);
 
-    let (file_message, notes) = if !context_files.is_empty() {
+    let total_budget = budget.tokens_for_code;
+    let text_budget = if context_files.is_empty() {
+        total_budget
+    } else if other_messages.is_empty() {
+        0
+    } else {
+        budget.tokens_for_text
+    };
+
+    let (text_messages, text_remaining) = postprocess_plain_text(
+        other_messages,
+        tokenizer.clone(),
+        text_budget,
+        &None,
+    ).await;
+    result.extend(text_messages);
+
+    let code_budget = total_budget.saturating_sub(text_budget) + text_remaining;
+
+    let (file_message, notes, _code_used) = if !context_files.is_empty() {
         postprocess_context_file_results(
             gcx,
             tokenizer.clone(),
             context_files,
-            budget.tokens_for_code,
+            code_budget,
             pp_settings,
             existing_messages,
         ).await
     } else {
-        (None, vec![])
+        (None, vec![], 0)
     };
 
-    let mut text_messages_with_notes = other_messages;
     if !notes.is_empty() {
-        text_messages_with_notes.push(ChatMessage {
+        result.push(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(notes.join("\n")),
             tool_call_id: "context_notes".to_string(),
             ..Default::default()
         });
     }
-
-    let (text_messages, _) = postprocess_plain_text(
-        text_messages_with_notes,
-        tokenizer,
-        budget.tokens_for_text,
-        &None,
-    ).await;
-    result.extend(text_messages);
 
     if let Some(msg) = file_message {
         result.push(msg);
@@ -189,7 +199,7 @@ async fn postprocess_context_file_results(
     tokens_limit: usize,
     mut pp_settings: PostprocessSettings,
     existing_messages: &[ChatMessage],
-) -> (Option<ChatMessage>, Vec<String>) {
+) -> (Option<ChatMessage>, Vec<String>, usize) {
     let deduped_files = deduplicate_and_merge_context_files(context_files, existing_messages);
 
     let (skip_pp_files, mut pp_files): (Vec<_>, Vec<_>) = deduped_files
@@ -231,14 +241,18 @@ async fn postprocess_context_file_results(
         .collect();
 
     if all_files.is_empty() {
-        return (None, notes);
+        return (None, notes, 0);
     }
+
+    let tokens_used: usize = all_files.iter()
+        .map(|cf| count_text_tokens_with_fallback(tokenizer.clone(), &cf.file_content))
+        .sum();
 
     (Some(ChatMessage {
         role: "context_file".to_string(),
         content: ChatContent::ContextFiles(all_files),
         ..Default::default()
-    }), notes)
+    }), notes, tokens_used)
 }
 
 const MIN_PER_FILE_BUDGET: usize = 50;
@@ -504,16 +518,16 @@ mod tests {
     #[test]
     fn test_tool_budget_from_n_ctx() {
         let budget = ToolBudget::try_from_n_ctx(8192).unwrap();
-        assert_eq!(budget.tokens_for_code, 3276);
-        assert_eq!(budget.tokens_for_text, 819);
+        assert_eq!(budget.tokens_for_code, 4096);
+        assert_eq!(budget.tokens_for_text, 1228);
 
         let budget_small = ToolBudget::try_from_n_ctx(1000);
         assert!(budget_small.is_err());
         assert!(budget_small.unwrap_err().contains("below minimum"));
 
         let budget_large = ToolBudget::try_from_n_ctx(128000).unwrap();
-        assert_eq!(budget_large.tokens_for_code, 51200);
-        assert_eq!(budget_large.tokens_for_text, 12800);
+        assert_eq!(budget_large.tokens_for_code, 64000);
+        assert_eq!(budget_large.tokens_for_text, 19200);
     }
 
     #[test]
