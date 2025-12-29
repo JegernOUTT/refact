@@ -633,7 +633,7 @@ async fn generate_title_llm(
     }
 }
 
-async fn spawn_title_generation_task(
+fn spawn_title_generation_task(
     gcx: Arc<ARwLock<GlobalContext>>,
     id: String,
     messages: Vec<serde_json::Value>,
@@ -815,7 +815,7 @@ pub async fn handle_v1_trajectories_save(
             id.clone(),
             data.messages.clone(),
             trajectories_dir,
-        ).await;
+        );
     }
     Ok(Response::builder()
         .status(StatusCode::OK)
