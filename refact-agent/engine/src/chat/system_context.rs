@@ -7,8 +7,10 @@ use regex::Regex;
 use git2::Repository;
 
 use crate::at_commands::at_tree::TreeNode;
-use crate::call_validation::{ChatMessage, ContextFile};
+use crate::call_validation::{ChatMessage, ChatContent, ContextFile};
 use crate::files_correction::{get_project_dirs, paths_from_anywhere};
+
+pub const PROJECT_CONTEXT_MARKER: &str = "project_context";
 use crate::files_in_workspace::detect_vcs_for_a_file_path;
 use crate::global_context::GlobalContext;
 use crate::git::operations::{get_git_remotes, get_diff_statuses};
@@ -523,6 +525,8 @@ fn check_env_active(env_type: &str, marker_path: &Path) -> bool {
     }
 }
 
+const MAX_WORKSPACE_XML_CHARS: usize = 15_000;
+
 fn extract_workspace_xml_important_parts(content: &str) -> Option<String> {
     let mut configs = Vec::new();
 
@@ -534,11 +538,6 @@ fn extract_workspace_xml_important_parts(content: &str) -> Option<String> {
 
     if let Some(run_manager_match) = re.find(content) {
         let run_manager_xml = run_manager_match.as_str();
-
-        let selected = Regex::new(r#"selected="([^"]*)""#).ok()
-            .and_then(|r| r.captures(run_manager_xml))
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().to_string());
 
         let config_pattern = r#"<configuration[^>]*>[\s\S]*?</configuration>"#;
         if let Ok(config_re) = Regex::new(config_pattern) {
@@ -559,32 +558,38 @@ fn extract_workspace_xml_important_parts(content: &str) -> Option<String> {
             return None;
         }
 
-        let mut result = String::from("# IDE Run Configurations\n");
-        if let Some(sel) = selected {
-            result.push_str(&format!("selected: {}\n", sel));
-        }
-        result.push_str("configurations:\n");
+        let mut result = String::from("# IDE Run Configurations\nconfigurations:\n");
 
-        for cfg in configs {
+        for cfg in &configs {
+            if result.len() >= MAX_WORKSPACE_XML_CHARS {
+                result.push_str(&format!("  # ... and {} more configurations\n", configs.len() - configs.iter().position(|c| c.name == cfg.name).unwrap_or(0)));
+                break;
+            }
+
             result.push_str(&format!("  - name: {}\n", cfg.name));
-            result.push_str(&format!("    type: {}\n", cfg.config_type));
-            if !cfg.command.is_empty() {
-                result.push_str(&format!("    command: {}\n", cfg.command));
+
+            let env_prefix: String = cfg.envs.iter()
+                .filter(|(k, _)| k != "PYTHONUNBUFFERED")
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            let command = if !env_prefix.is_empty() && !cfg.command.is_empty() {
+                format!("{} {}", env_prefix, cfg.command)
+            } else if !env_prefix.is_empty() {
+                env_prefix
+            } else {
+                cfg.command.clone()
+            };
+
+            if !command.is_empty() {
+                result.push_str(&format!("    command: {}\n", command));
             }
-            if !cfg.workdir.is_empty() {
-                result.push_str(&format!("    workdir: {}\n", cfg.workdir));
-            }
-            if !cfg.envs.is_empty() {
-                result.push_str("    env:\n");
-                for (k, v) in &cfg.envs {
-                    result.push_str(&format!("      {}: {}\n", k, v));
-                }
-            }
-            if !cfg.extra.is_empty() {
-                for (k, v) in &cfg.extra {
-                    result.push_str(&format!("    {}: {}\n", k, v));
-                }
-            }
+        }
+
+        if result.len() > MAX_WORKSPACE_XML_CHARS {
+            result.truncate(MAX_WORKSPACE_XML_CHARS);
+            result.push_str("\n# [truncated]\n");
         }
 
         return Some(result);
@@ -595,11 +600,8 @@ fn extract_workspace_xml_important_parts(content: &str) -> Option<String> {
 
 struct RunConfig {
     name: String,
-    config_type: String,
     command: String,
-    workdir: String,
     envs: Vec<(String, String)>,
-    extra: Vec<(String, String)>,
 }
 
 fn parse_run_configuration(config_xml: &str) -> Option<RunConfig> {
@@ -607,18 +609,10 @@ fn parse_run_configuration(config_xml: &str) -> Option<RunConfig> {
     let config_type = extract_xml_attr(config_xml, "type").unwrap_or_default();
 
     let mut command = String::new();
-    let mut workdir = String::new();
     let mut envs = Vec::new();
-    let mut extra = Vec::new();
 
     if let Some(cmd) = extract_option_value(config_xml, "command") {
         command = cmd;
-    }
-
-    if let Some(wd) = extract_option_value(config_xml, "workingDirectory") {
-        workdir = wd;
-    } else if let Some(wd) = extract_option_value(config_xml, "WORKING_DIRECTORY") {
-        workdir = wd;
     }
 
     if let Ok(env_re) = Regex::new(r#"<env\s+name="([^"]*)"\s+value="([^"]*)"\s*/>"#) {
@@ -637,19 +631,6 @@ fn parse_run_configuration(config_xml: &str) -> Option<RunConfig> {
                         envs.push((k.as_str().to_string(), v.as_str().to_string()));
                     }
                 }
-            }
-        }
-    }
-
-    if config_type.contains("Cargo") {
-        if let Some(channel) = extract_option_value(config_xml, "channel") {
-            if channel != "DEFAULT" {
-                extra.push(("channel".to_string(), channel));
-            }
-        }
-        if let Some(bt) = extract_option_value(config_xml, "backtrace") {
-            if bt != "SHORT" {
-                extra.push(("backtrace".to_string(), bt));
             }
         }
     }
@@ -673,11 +654,8 @@ fn parse_run_configuration(config_xml: &str) -> Option<RunConfig> {
 
     Some(RunConfig {
         name,
-        config_type,
         command,
-        workdir,
         envs,
-        extra,
     })
 }
 
@@ -971,6 +949,7 @@ pub async fn gather_git_info(project_dirs: &[PathBuf]) -> Vec<GitInfo> {
 
                     let staged_files: Vec<String> = staged.iter()
                         .map(|f| f.relative_path.to_string_lossy().to_string())
+                        .filter(|p| !path_starts_with_hidden(p))
                         .collect();
 
                     let mut modified_files = Vec::new();
@@ -978,6 +957,9 @@ pub async fn gather_git_info(project_dirs: &[PathBuf]) -> Vec<GitInfo> {
 
                     for file in &unstaged {
                         let path_str = file.relative_path.to_string_lossy().to_string();
+                        if path_starts_with_hidden(&path_str) {
+                            continue;
+                        }
                         match file.status {
                             crate::git::FileChangeStatus::ADDED => untracked_files.push(path_str),
                             _ => modified_files.push(path_str),
@@ -1157,6 +1139,8 @@ pub fn generate_environment_instructions(environments: &[DetectedEnvironment]) -
     instructions.join("\n")
 }
 
+const MAX_TREE_CHARS: usize = 16_000; // ~4K tokens
+
 pub async fn generate_compact_project_tree(
     gcx: Arc<ARwLock<GlobalContext>>,
     max_depth: usize,
@@ -1172,10 +1156,12 @@ pub async fn generate_compact_project_tree(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| project_dir.to_string_lossy().to_string());
 
+        // Filter out paths that start with hidden directories
         let relative_paths: Vec<PathBuf> = paths
             .iter()
             .filter(|path| path.starts_with(project_dir))
             .filter_map(|path| path.strip_prefix(project_dir).ok())
+            .filter(|path| !path_has_skip_component(path))
             .map(|p| p.to_path_buf())
             .collect();
 
@@ -1184,65 +1170,144 @@ pub async fn generate_compact_project_tree(
         }
 
         let tree = TreeNode::build(&relative_paths);
-        let tree_str = print_compact_tree(&tree, &project_name, max_depth);
+        let tree_str = print_compact_tree(&tree, &project_name, max_depth, MAX_TREE_CHARS.saturating_sub(result.len()));
+
+        if result.len() + tree_str.len() > MAX_TREE_CHARS {
+            if result.is_empty() {
+                result.push_str(&tree_str);
+            }
+            result.push_str("\n[Tree truncated due to size limit]\n");
+            break;
+        }
+
         result.push_str(&tree_str);
     }
 
     Ok(result)
 }
 
-fn print_compact_tree(tree: &TreeNode, project_name: &str, max_depth: usize) -> String {
+const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", ".git", ".svn", ".hg", "target", "dist", "build", ".next", ".nuxt"];
+
+fn path_has_skip_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        if let std::path::Component::Normal(name) = c {
+            let n = name.to_string_lossy();
+            n.starts_with('.') || SKIP_DIRS.contains(&n.as_ref())
+        } else {
+            false
+        }
+    })
+}
+
+fn should_skip_name(name: &str) -> bool {
+    name.starts_with('.') || SKIP_DIRS.contains(&name)
+}
+
+fn path_starts_with_hidden(path: &str) -> bool {
+    path.starts_with('.') || path.contains("/.")
+}
+
+fn print_compact_tree(tree: &TreeNode, project_name: &str, max_depth: usize, max_chars: usize) -> String {
+    fn count_extensions(node: &TreeNode) -> std::collections::HashMap<String, usize> {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (name, child) in &node.children {
+            if should_skip_name(name) {
+                continue;
+            }
+            if child.is_dir() {
+                for (ext, count) in count_extensions(child) {
+                    *counts.entry(ext).or_insert(0) += count;
+                }
+            } else {
+                let ext = name.rfind('.')
+                    .map(|i| name[i..].to_string())
+                    .unwrap_or_else(|| "(no ext)".to_string());
+                *counts.entry(ext).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    fn format_extensions(counts: &std::collections::HashMap<String, usize>) -> String {
+        if counts.is_empty() {
+            return String::new();
+        }
+        let mut sorted: Vec<_> = counts.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        let parts: Vec<String> = sorted.iter()
+            .take(5)
+            .map(|(ext, count)| format!("{} {}", count, ext))
+            .collect();
+        let extra = if sorted.len() > 5 {
+            format!(", +{} more", sorted.len() - 5)
+        } else {
+            String::new()
+        };
+        format!(" [{}{}]", parts.join(", "), extra)
+    }
+
     fn traverse(
         node: &TreeNode,
         name: &str,
         depth: usize,
         max_depth: usize,
         output: &mut String,
+        max_chars: usize,
+        truncated: &mut bool,
     ) {
-        if depth > max_depth {
+        if depth > max_depth || output.len() >= max_chars {
+            if output.len() >= max_chars && !*truncated {
+                *truncated = true;
+            }
+            return;
+        }
+
+        if should_skip_name(name) {
             return;
         }
 
         let indent = "  ".repeat(depth);
 
         if node.is_dir() {
-            output.push_str(&format!("{}{}/\n", indent, name));
+            let ext_counts = count_extensions(node);
+            let ext_summary = format_extensions(&ext_counts);
+            output.push_str(&format!("{}{}/{}\n", indent, name, ext_summary));
 
-            let mut entries: Vec<_> = node.children.iter().collect();
-            entries.sort_by(|a, b| {
-                let a_is_dir = a.1.is_dir();
-                let b_is_dir = b.1.is_dir();
-                match (a_is_dir, b_is_dir) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.0.cmp(b.0),
+            let mut subdirs: Vec<_> = node.children.iter()
+                .filter(|(n, child)| !should_skip_name(n) && child.is_dir())
+                .collect();
+            subdirs.sort_by(|a, b| a.0.cmp(b.0));
+
+            for (child_name, child) in subdirs {
+                if output.len() >= max_chars {
+                    break;
                 }
-            });
-
-            for (child_name, child) in entries {
-                traverse(child, child_name, depth + 1, max_depth, output);
+                traverse(child, child_name, depth + 1, max_depth, output, max_chars, truncated);
             }
-        } else {
-            output.push_str(&format!("{}{}\n", indent, name));
         }
     }
 
     let mut result = String::new();
-    result.push_str(&format!("{}/\n", project_name));
 
-    let mut entries: Vec<_> = tree.children.iter().collect();
-    entries.sort_by(|a, b| {
-        let a_is_dir = a.1.is_dir();
-        let b_is_dir = b.1.is_dir();
-        match (a_is_dir, b_is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.0.cmp(b.0),
-        }
-    });
+    let root_ext_counts = count_extensions(tree);
+    let root_ext_summary = format_extensions(&root_ext_counts);
+    result.push_str(&format!("{}/{}\n", project_name, root_ext_summary));
 
+    let mut entries: Vec<_> = tree.children.iter()
+        .filter(|(n, child)| !should_skip_name(n) && child.is_dir())
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut truncated = false;
     for (name, node) in entries {
-        traverse(node, name, 1, max_depth, &mut result);
+        if result.len() >= max_chars {
+            break;
+        }
+        traverse(node, name, 1, max_depth, &mut result, max_chars, &mut truncated);
+    }
+
+    if truncated {
+        result.push_str("...\n");
     }
 
     result
@@ -1308,32 +1373,33 @@ pub async fn create_instruction_files_message(
         };
 
         let content_len = content.len();
-        let (final_content, was_truncated) = if content_len > MAX_FILE_SIZE {
+        let (mut final_content, was_truncated) = if content_len > MAX_FILE_SIZE {
             let truncated = content.chars().take(MAX_FILE_SIZE).collect::<String>();
             (truncated, true)
         } else {
             (content, false)
         };
 
-        let mut display_name = instr_file.file_path.clone();
+        // Add notes about filtering/truncation inside the content, not the file_name
+        // This keeps file_name as the real path so "open file" works in UI
         if instr_file.processed_content.is_some() {
-            display_name = format!("{} (filtered)", display_name);
+            final_content = format!("# Filtered content\n\n{}", final_content);
         }
         if was_truncated {
-            display_name = format!("{} (truncated)", display_name);
+            final_content.push_str("\n\n[TRUNCATED]");
             tracing::info!("Truncated instruction file {} from {} to {} chars",
                 instr_file.file_path, content_len, MAX_FILE_SIZE);
         }
 
         context_files.push(ContextFile {
-            file_name: display_name,
+            file_name: instr_file.file_path.clone(),
             file_content: final_content.clone(),
             line1: 1,
             line2: final_content.lines().count().max(1),
             symbols: vec![],
             gradient_type: 0,
             usefulness: 100.0,
-            skip_pp: false,
+            skip_pp: true,
         });
     }
 
@@ -1351,7 +1417,7 @@ pub async fn create_instruction_files_message(
             symbols: vec![],
             gradient_type: 0,
             usefulness: 50.0,
-            skip_pp: false,
+            skip_pp: true,
         });
         tracing::info!("Listed {} additional instruction files as paths only", paths_only.len());
     }
@@ -1361,15 +1427,17 @@ pub async fn create_instruction_files_message(
     }
 
     tracing::info!(
-        "Created instruction files message: {} full files, {} paths only",
+        "Created project context message: {} full files, {} paths only",
         context_files.len().saturating_sub(if paths_only.is_empty() { 0 } else { 1 }),
         paths_only.len()
     );
 
-    let context_files_json = serde_json::to_string(&context_files)
-        .map_err(|e| format!("Failed to serialize context files: {}", e))?;
-
-    Ok(ChatMessage::new("cd_instruction".to_string(), context_files_json))
+    Ok(ChatMessage {
+        role: "context_file".to_string(),
+        content: ChatContent::ContextFiles(context_files),
+        tool_call_id: PROJECT_CONTEXT_MARKER.to_string(),
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]

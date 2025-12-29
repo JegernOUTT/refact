@@ -37,14 +37,16 @@ function getExtensionFromName(name: string): string {
   return name.substring(dot + 1).replace(/:\d*-\d*/, "");
 }
 
+type ContextVariant = "default" | "enrichment" | "project_context";
+
 const FilesContent: React.FC<{
   files: ChatContextFile[];
   onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
-  isEnrichment?: boolean;
-}> = ({ files, onOpenFile, isEnrichment = false }) => {
+  variant: ContextVariant;
+}> = ({ files, onOpenFile, variant }) => {
   if (files.length === 0) return null;
 
-  if (isEnrichment) {
+  if (variant === "enrichment") {
     const memories = files.filter(f => f.file_name.includes("/.refact/memories/"));
     const trajectories = files.filter(f => f.file_name.includes("/.refact/trajectories/"));
     const other = files.filter(f =>
@@ -55,13 +57,33 @@ const FilesContent: React.FC<{
     return (
       <Flex direction="column" gap="2">
         {memories.length > 0 && (
-          <FileSection icon="📝" title="Knowledge" files={memories} onOpenFile={onOpenFile} isEnrichment />
+          <FileSection icon="📝" title="Knowledge" files={memories} onOpenFile={onOpenFile} variant={variant} />
         )}
         {trajectories.length > 0 && (
-          <FileSection icon="💬" title="Past Conversations" files={trajectories} onOpenFile={onOpenFile} isEnrichment />
+          <FileSection icon="💬" title="Past Conversations" files={trajectories} onOpenFile={onOpenFile} variant={variant} />
         )}
         {other.length > 0 && (
-          <FileSection icon="📄" title="Related" files={other} onOpenFile={onOpenFile} isEnrichment />
+          <FileSection icon="📄" title="Related" files={other} onOpenFile={onOpenFile} variant={variant} />
+        )}
+      </Flex>
+    );
+  }
+
+  if (variant === "project_context") {
+    const instructions = files.filter(f => isInstructionFile(f.file_name));
+    const ideSettings = files.filter(f => isIdeSettingFile(f.file_name));
+    const other = files.filter(f => !isInstructionFile(f.file_name) && !isIdeSettingFile(f.file_name));
+
+    return (
+      <Flex direction="column" gap="2">
+        {instructions.length > 0 && (
+          <FileSection icon="📝" title="Instructions" files={instructions} onOpenFile={onOpenFile} variant={variant} />
+        )}
+        {ideSettings.length > 0 && (
+          <FileSection icon="⚙️" title="IDE Settings" files={ideSettings} onOpenFile={onOpenFile} variant={variant} />
+        )}
+        {other.length > 0 && (
+          <FileSection icon="📄" title="Other" files={other} onOpenFile={onOpenFile} variant={variant} />
         )}
       </Flex>
     );
@@ -74,26 +96,66 @@ const FilesContent: React.FC<{
           key={file.file_name + index}
           file={file}
           onOpenFile={onOpenFile}
-          isEnrichment={false}
+          variant="default"
         />
       ))}
     </Flex>
   );
 };
 
+function isInstructionFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return (
+    lower.includes("agents.md") ||
+    lower.includes("claude.md") ||
+    lower.includes("gemini.md") ||
+    lower.includes("refact.md") ||
+    lower.includes(".cursorrules") ||
+    lower.includes(".cursor/rules") ||
+    lower.includes("global_rules.md") ||
+    lower.includes(".windsurf/rules") ||
+    lower.includes("copilot-instructions") ||
+    lower.includes(".github/instructions") ||
+    lower.includes(".aider.conf") ||
+    lower.includes(".refact/project_summary") ||
+    lower.includes(".refact/instructions")
+  );
+}
+
+function isIdeSettingFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return (
+    lower.includes(".vscode/") ||
+    lower.includes(".idea/") ||
+    lower.includes(".zed/") ||
+    lower.includes(".fleet/") ||
+    lower.includes(".claude/")
+  );
+}
+
 export const ContextFiles: React.FC<{
   files: ChatContextFile[];
-  isEnrichment?: boolean;
-}> = ({ files, isEnrichment = false }) => {
+  toolCallId?: string;
+}> = ({ files, toolCallId }) => {
   const [open, setOpen] = React.useState(false);
   const { queryPathThenOpenFile } = useEventsBusForIDE();
 
   if (!Array.isArray(files) || files.length === 0) return null;
 
-  const icon = isEnrichment ? "🧠" : "📎";
-  const label = isEnrichment
-    ? `${files.length} memories`
-    : `${files.length} file${files.length > 1 ? "s" : ""}`;
+  const variant: ContextVariant =
+    toolCallId === "knowledge_enrichment" ? "enrichment" :
+    toolCallId === "project_context" ? "project_context" :
+    "default";
+
+  const icon =
+    variant === "enrichment" ? "🧠" :
+    variant === "project_context" ? "📁" :
+    "📎";
+
+  const label =
+    variant === "enrichment" ? `${files.length} memories` :
+    variant === "project_context" ? `Project context (${files.length})` :
+    `${files.length} file${files.length > 1 ? "s" : ""}`;
 
   return (
     <Container>
@@ -110,7 +172,7 @@ export const ContextFiles: React.FC<{
           <FilesContent
             files={files}
             onOpenFile={queryPathThenOpenFile}
-            isEnrichment={isEnrichment}
+            variant={variant}
           />
         </Collapsible.Content>
       </Collapsible.Root>
@@ -123,8 +185,8 @@ const FileSection: React.FC<{
   title: string;
   files: ChatContextFile[];
   onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
-  isEnrichment?: boolean;
-}> = ({ icon, title, files, onOpenFile, isEnrichment }) => {
+  variant: ContextVariant;
+}> = ({ icon, title, files, onOpenFile, variant }) => {
   return (
     <Box>
       <Text size="1" weight="light" style={{ color: "var(--gray-9)" }}>
@@ -136,7 +198,7 @@ const FileSection: React.FC<{
             key={file.file_name + index}
             file={file}
             onOpenFile={onOpenFile}
-            isEnrichment={isEnrichment}
+            variant={variant}
           />
         ))}
       </Flex>
@@ -147,15 +209,16 @@ const FileSection: React.FC<{
 const FileCard: React.FC<{
   file: ChatContextFile;
   onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
-  isEnrichment?: boolean;
-}> = ({ file, onOpenFile, isEnrichment }) => {
+  variant: ContextVariant;
+}> = ({ file, onOpenFile, variant }) => {
   const [showContent, setShowContent] = React.useState(false);
   const extension = getExtensionFromName(file.file_name);
   const start = file.line1 || 1;
 
-  const displayName = isEnrichment
-    ? extractEnrichmentDisplayName(file.file_name)
-    : formatFileName(file.file_name, file.line1, file.line2);
+  const displayName =
+    variant === "enrichment" ? extractEnrichmentDisplayName(file.file_name) :
+    variant === "project_context" ? extractProjectContextDisplayName(file.file_name) :
+    formatFileName(file.file_name, file.line1, file.line2);
   const relevance = file.usefulness ? Math.round(file.usefulness) : null;
 
   const preview = file.file_content.slice(0, 100).replace(/\n/g, " ") +
@@ -227,6 +290,36 @@ function extractEnrichmentDisplayName(filePath: string): string {
   const trajectoryMatch = fileName.match(/^[a-f0-9-]{36}\.json$/);
   if (trajectoryMatch) {
     return "Past conversation";
+  }
+
+  return fileName;
+}
+
+function extractProjectContextDisplayName(filePath: string): string {
+  // For project context files, show relative path from project root
+  // e.g., "/path/to/project/.vscode/settings.json" -> ".vscode/settings.json"
+  // or "/path/to/project/AGENTS.md" -> "AGENTS.md"
+
+  const parts = filePath.split("/");
+
+  // Find common project markers and take path from there
+  const markers = [".vscode", ".idea", ".cursor", ".windsurf", ".github", ".refact", ".zed", ".fleet", ".claude"];
+  for (let i = 0; i < parts.length; i++) {
+    if (markers.includes(parts[i])) {
+      return parts.slice(i).join("/");
+    }
+  }
+
+  // For instruction files at root, just show the filename
+  const fileName = filename(filePath);
+  const instructionFiles = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", "REFACT.md", ".cursorrules", "global_rules.md", "copilot-instructions.md", ".aider.conf.yml"];
+  if (instructionFiles.some(f => fileName.toLowerCase() === f.toLowerCase())) {
+    return fileName;
+  }
+
+  // Fallback: show last 2 path components
+  if (parts.length >= 2) {
+    return parts.slice(-2).join("/");
   }
 
   return fileName;

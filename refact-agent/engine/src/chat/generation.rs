@@ -105,14 +105,16 @@ pub async fn run_llm_generation(
 
     let mut messages = messages;
 
-    let (session_has_system, session_has_cd_instruction) = {
+    let (session_has_system, session_has_project_context) = {
         let session = session_arc.lock().await;
         let has_system = session.messages.first().map(|m| m.role == "system").unwrap_or(false);
-        let has_cd = session.messages.iter().any(|m| m.role == "cd_instruction");
-        (has_system, has_cd)
+        let has_project_ctx = session.messages.iter().any(|m|
+            m.role == "context_file" && m.tool_call_id == crate::chat::system_context::PROJECT_CONTEXT_MARKER
+        );
+        (has_system, has_project_ctx)
     };
 
-    let needs_preamble = !session_has_system || (!session_has_cd_instruction && thread.include_project_info);
+    let needs_preamble = !session_has_system || (!session_has_project_context && thread.include_project_info);
 
     if needs_preamble {
         let tool_names: std::collections::HashSet<String> = tools.iter()

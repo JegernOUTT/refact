@@ -725,7 +725,7 @@ function splitMemories(text: string): MemoryEntry[] {
 }
 
 function extractReadableName(path: string): string {
-  const fileName = path.split("/").pop() || path;
+  const fileName = path.split("/").pop() ?? path;
   const memoryMatch = fileName.match(/^\d{4}-\d{2}-\d{2}_\d{6}_[a-f0-9]+_(.+)\.md$/);
   if (memoryMatch) {
     return memoryMatch[1].replace(/-/g, " ");
@@ -988,7 +988,7 @@ function parseTrajectoryContext(text: string): { header: TrajectoryHeader | null
         contentLines = [];
       }
       const highlighted = line.startsWith("┏━");
-      const match = line.match(/([👤🤖🔧💬]) \[(\d+)\] (\w+)/);
+      const match = line.match(/([👤🤖🔧💬]) \[(\d+)\] (\w+)/u);
       if (match) {
         currentMsg = {
           icon: match[1],

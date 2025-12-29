@@ -6,6 +6,7 @@ import {
   isDiffMessage,
   isToolMessage,
   isUserMessage,
+  isSystemMessage,
   UserMessage,
 } from "../../services/refact";
 import { UserInput } from "./UserInput";
@@ -13,6 +14,7 @@ import { ScrollArea, ScrollAreaWithAnchor } from "../ScrollArea";
 import { Flex, Container, Button, Box } from "@radix-ui/themes";
 import styles from "./ChatContent.module.css";
 import { ContextFiles } from "./ContextFiles";
+import { SystemPrompt } from "./SystemPrompt";
 import { AssistantInput } from "./AssistantInput";
 
 import { PlainText } from "./PlainText";
@@ -222,12 +224,12 @@ function renderMessages(
         skipCount++;
         tempTail = tempTail.slice(1);
       } else if (isChatContextFileMessage(nextMsg)) {
-        if (nextMsg.tool_call_id === "knowledge_enrichment") {
+        if (nextMsg.tool_call_id === "knowledge_enrichment" || nextMsg.tool_call_id === "project_context") {
           break;
         }
         const ctxKey = "context-file-" + (index + 1 + skipCount);
         contextFilesAfter.push(
-          <ContextFiles key={ctxKey} files={nextMsg.content} />
+          <ContextFiles key={ctxKey} files={nextMsg.content} toolCallId={nextMsg.tool_call_id} />
         );
         skipCount++;
         tempTail = tempTail.slice(1);
@@ -295,8 +297,13 @@ function renderMessages(
 
   if (isChatContextFileMessage(head)) {
     const key = "context-file-" + index;
-    const isEnrichment = head.tool_call_id === "knowledge_enrichment";
-    const nextMemo = [...memo, <ContextFiles key={key} files={head.content} isEnrichment={isEnrichment} />];
+    const nextMemo = [...memo, <ContextFiles key={key} files={head.content} toolCallId={head.tool_call_id} />];
+    return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
+  }
+
+  if (isSystemMessage(head)) {
+    const key = "system-" + index;
+    const nextMemo = [...memo, <SystemPrompt key={key} content={head.content} />];
     return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
   }
 

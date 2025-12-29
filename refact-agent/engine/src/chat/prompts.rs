@@ -13,7 +13,7 @@ use crate::integrations::docker::docker_container_manager::docker_container_get_
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use super::system_context::{
     self, create_instruction_files_message, gather_system_context, generate_git_info_prompt,
-    gather_git_info
+    gather_git_info, PROJECT_CONTEXT_MARKER,
 };
 use crate::call_validation::{ChatMessage, ChatContent, ChatMode};
 
@@ -297,7 +297,9 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
     }
 
     let have_system = messages.first().map(|m| m.role == "system").unwrap_or(false);
-    let have_cd_instruction = messages.iter().any(|m| m.role == "cd_instruction");
+    let have_project_context = messages.iter().any(|m|
+        m.role == "context_file" && m.tool_call_id == PROJECT_CONTEXT_MARKER
+    );
 
     let is_inside_container = gcx.read().await.cmdline.inside_container;
     if chat_meta.chat_remote && !is_inside_container {
@@ -347,7 +349,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         }
     }
 
-    if chat_meta.include_project_info && !have_cd_instruction {
+    if chat_meta.include_project_info && !have_project_context {
         match gather_and_inject_system_context(&gcx, &mut messages, stream_back_to_user).await {
             Ok(()) => {},
             Err(e) => {
