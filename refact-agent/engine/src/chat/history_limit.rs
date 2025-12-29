@@ -224,7 +224,8 @@ fn remove_invalid_tool_calls_and_tool_calls_results(messages: &mut Vec<ChatMessa
         .map(|x| x.id)
         .collect();
     messages.retain(|m| {
-        if !m.tool_call_id.is_empty() && !tool_call_ids.contains(&m.tool_call_id) {
+        let is_tool_result = m.role == "tool" || m.role == "diff";
+        if is_tool_result && !m.tool_call_id.is_empty() && !tool_call_ids.contains(&m.tool_call_id) {
             tracing::warn!("removing tool result with no tool_call: {:?}", m);
             false
         } else {
@@ -645,7 +646,7 @@ pub fn fix_and_limit_messages_history(
             stage1_end,
             "Stage 1: Compressing ContextFile messages before the last user message",
             model_id,
-            |i, msg, _| i != 0 && msg.role == "context_file" && !preserve_in_later_stages[i],
+            |i, msg, _| i != 0 && msg.role == "context_file" && !preserve_in_later_stages[i] && msg.tool_call_id != "knowledge_enrichment",
             true
         )?;
         
@@ -813,7 +814,7 @@ pub fn fix_and_limit_messages_history(
             msg_len,
             "Stage 5: Compressing ContextFile messages after the last user message (last resort)",
             model_id,
-            |_, msg, _| msg.role == "context_file",
+            |_, msg, _| msg.role == "context_file" && msg.tool_call_id != "knowledge_enrichment",
             true
         )?;
         
