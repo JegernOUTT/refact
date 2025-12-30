@@ -11,8 +11,8 @@ use crate::call_validation::{ChatMessage, ChatUsage};
 pub const MAX_QUEUE_SIZE: usize = 100;
 pub const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 pub const SESSION_CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-pub const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-pub const STREAM_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+pub const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+pub const STREAM_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 pub const STREAM_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
