@@ -239,7 +239,23 @@ export const chatReducer = createReducer(initialState, (builder) => {
     }
 
     if (action.payload?.messages) {
-      newRuntime.thread.messages = action.payload.messages;
+      const nonUserMessages: ChatMessages = [];
+      for (const msg of action.payload.messages) {
+        if (isUserMessage(msg)) {
+          newRuntime.queued_messages.push({
+            id: uuidv4(),
+            message: msg,
+            createdAt: Date.now(),
+          });
+        } else {
+          nonUserMessages.push(msg);
+        }
+      }
+      newRuntime.thread.messages = nonUserMessages;
+    }
+
+    if (action.payload?.title) {
+      newRuntime.thread.title = action.payload.title;
     }
 
     const newId = newRuntime.thread.id;
