@@ -15,8 +15,10 @@ async fn get_task_id(ccx: &Arc<AMutex<AtCommandsContext>>, args: &HashMap<String
         return Ok(id.to_string());
     }
     let ccx_lock = ccx.lock().await;
-    ccx_lock.task_meta.as_ref()
-        .map(|m| m.task_id.clone())
+    if let Some(ref meta) = ccx_lock.task_meta {
+        return Ok(meta.task_id.clone());
+    }
+    storage::infer_task_id_from_chat_id(&ccx_lock.chat_id)
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
 }
 

@@ -148,6 +148,10 @@ pub async fn handle_v1_chat_command(
             accepted: true,
             result: Some(serde_json::json!({"applied": true})),
         });
+        drop(session);
+        if changed {
+            super::trajectories::maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+        }
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")

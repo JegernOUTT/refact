@@ -275,7 +275,7 @@ pub async fn save_trajectory_snapshot(
     gcx: Arc<ARwLock<GlobalContext>>,
     snapshot: TrajectorySnapshot,
 ) -> Result<(), String> {
-    if snapshot.messages.is_empty() {
+    if snapshot.messages.is_empty() && snapshot.task_meta.is_none() {
         return Ok(());
     }
 

@@ -21,6 +21,12 @@ export type ThreadParams = {
   is_title_generated: boolean;
   use_compression?: boolean;
   automatic_patch?: boolean;
+  task_meta?: {
+    task_id: string;
+    role: string;
+    agent_id?: string;
+    card_id?: string;
+  };
 };
 
 export type PauseReason = {

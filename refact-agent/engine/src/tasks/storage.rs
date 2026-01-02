@@ -311,6 +311,24 @@ pub async fn get_orchestrator_chat_id(
     Ok(format!("orch-{}", task_id))
 }
 
+pub fn infer_task_id_from_chat_id(chat_id: &str) -> Option<String> {
+    if let Some(id) = chat_id.strip_prefix("orch-") {
+        return Some(id.to_string());
+    }
+    if let Some(id) = chat_id.strip_prefix("plan-") {
+        return Some(id.to_string());
+    }
+    if let Some(rest) = chat_id.strip_prefix("planner-") {
+        if let Some((task_id, suffix)) = rest.rsplit_once('-') {
+            if !task_id.is_empty() && !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                return Some(task_id.to_string());
+            }
+        }
+        return Some(rest.to_string());
+    }
+    None
+}
+
 pub async fn get_planner_chat_id(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,

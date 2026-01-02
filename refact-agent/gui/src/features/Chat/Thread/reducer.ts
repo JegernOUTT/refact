@@ -684,6 +684,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           increase_max_tokens: existing?.increase_max_tokens ?? false,
           new_chat_suggested: { wasSuggested: false },
           is_task_chat: isTaskChat,
+          task_meta: event.thread.task_meta ?? existing?.task_meta,
         };
 
         const defaultConfirmationStatus = event.runtime.paused
@@ -769,6 +770,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
           typeof params.automatic_patch === "boolean"
         )
           rt.thread.automatic_patch = params.automatic_patch;
+        if ("task_meta" in params && params.task_meta != null)
+          rt.thread.task_meta = params.task_meta as ChatThread["task_meta"];
         break;
       }
 

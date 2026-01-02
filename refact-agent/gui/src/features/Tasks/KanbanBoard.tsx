@@ -1,4 +1,3 @@
-/* eslint-disable react/prop-types */
 import React, { useCallback } from "react";
 import { Flex, Box, Text, Card, Badge, Heading, Tooltip } from "@radix-ui/themes";
 import type { TaskBoard, BoardCard, BoardColumn } from "../../services/refact/tasks";
