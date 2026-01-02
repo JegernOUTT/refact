@@ -30,6 +30,9 @@ pub fn parse_chat_mode(mode: &str) -> ChatMode {
         "EXPLORE" => ChatMode::EXPLORE,
         "CONFIGURE" => ChatMode::CONFIGURE,
         "PROJECT_SUMMARY" => ChatMode::PROJECT_SUMMARY,
+        "TASK_PLANNER" => ChatMode::TASK_PLANNER,
+        "TASK_ORCHESTRATOR" => ChatMode::TASK_ORCHESTRATOR,
+        "TASK_AGENT" => ChatMode::TASK_AGENT,
         _ => ChatMode::AGENT,
     }
 }
@@ -297,6 +300,7 @@ pub async fn run_llm_generation(
         chat_id.clone(),
         false,
         model_rec.base.id.clone(),
+        thread.task_meta.clone(),
     )
     .await;
     let ccx_arc = Arc::new(AMutex::new(ccx));

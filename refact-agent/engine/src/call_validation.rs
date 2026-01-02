@@ -323,6 +323,9 @@ pub enum ChatMode {
     AGENT,
     CONFIGURE,
     PROJECT_SUMMARY,
+    TASK_PLANNER,
+    TASK_ORCHESTRATOR,
+    TASK_AGENT,
 }
 
 impl ChatMode {
@@ -333,18 +336,28 @@ impl ChatMode {
             ChatMode::AGENT
             | ChatMode::CONFIGURE
             | ChatMode::PROJECT_SUMMARY
-            | ChatMode::EXPLORE => true,
+            | ChatMode::EXPLORE
+            | ChatMode::TASK_PLANNER
+            | ChatMode::TASK_ORCHESTRATOR
+            | ChatMode::TASK_AGENT => true,
         }
     }
 
     pub fn is_agentic(self) -> bool {
         match self {
-            ChatMode::AGENT => true,
+            ChatMode::AGENT
+            | ChatMode::TASK_PLANNER
+            | ChatMode::TASK_ORCHESTRATOR
+            | ChatMode::TASK_AGENT => true,
             ChatMode::NO_TOOLS
             | ChatMode::EXPLORE
             | ChatMode::CONFIGURE
             | ChatMode::PROJECT_SUMMARY => false,
         }
+    }
+
+    pub fn is_task_chat(self) -> bool {
+        matches!(self, ChatMode::TASK_PLANNER | ChatMode::TASK_ORCHESTRATOR | ChatMode::TASK_AGENT)
     }
 }
 

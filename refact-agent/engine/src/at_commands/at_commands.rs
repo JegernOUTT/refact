@@ -10,6 +10,7 @@ use tokio::sync::RwLock as ARwLock;
 use crate::call_validation::{
     ChatMessage, ContextFile, ContextEnum, SubchatParameters, PostprocessSettings,
 };
+use crate::chat::types::TaskMeta;
 use crate::global_context::GlobalContext;
 
 use crate::at_commands::at_file::AtFile;
@@ -28,17 +29,18 @@ pub struct AtCommandsContext {
     #[allow(dead_code)]
     pub is_preview: bool,
     pub pp_skeleton: bool,
-    #[allow(dead_code)] // Reserved for future use
-    pub correction_only_up_to_step: usize, // suppresses context_file messages, writes a correction message instead
+    #[allow(dead_code)]
+    pub correction_only_up_to_step: usize,
     pub chat_id: String,
     pub current_model: String,
     pub should_execute_remotely: bool,
+    pub task_meta: Option<TaskMeta>,
 
-    pub at_commands: HashMap<String, Arc<dyn AtCommand + Send>>, // a copy from static constant
+    pub at_commands: HashMap<String, Arc<dyn AtCommand + Send>>,
     pub subchat_tool_parameters: IndexMap<String, SubchatParameters>,
     pub postprocess_parameters: PostprocessSettings,
 
-    pub subchat_tx: Arc<AMutex<mpsc::UnboundedSender<serde_json::Value>>>, // one and only supported format for now {"tool_call_id": xx, "subchat_id": xx, "add_message": {...}}
+    pub subchat_tx: Arc<AMutex<mpsc::UnboundedSender<serde_json::Value>>>,
     pub subchat_rx: Arc<AMutex<mpsc::UnboundedReceiver<serde_json::Value>>>,
 }
 
@@ -52,6 +54,7 @@ impl AtCommandsContext {
         chat_id: String,
         should_execute_remotely: bool,
         current_model: String,
+        task_meta: Option<TaskMeta>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<serde_json::Value>();
         AtCommandsContext {
@@ -66,11 +69,10 @@ impl AtCommandsContext {
             chat_id,
             current_model,
             should_execute_remotely,
-
+            task_meta,
             at_commands: at_commands_dict(global_context.clone()).await,
             subchat_tool_parameters: IndexMap::new(),
             postprocess_parameters: PostprocessSettings::new(),
-
             subchat_tx: Arc::new(AMutex::new(tx)),
             subchat_rx: Arc::new(AMutex::new(rx)),
         }

@@ -32,6 +32,16 @@ impl Default for SessionState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskMeta {
+    pub task_id: String,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadParams {
     pub id: String,
@@ -49,6 +59,8 @@ pub struct ThreadParams {
     pub is_title_generated: bool,
     #[serde(default)]
     pub automatic_patch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_meta: Option<TaskMeta>,
 }
 
 fn default_use_compression() -> bool {
@@ -70,6 +82,7 @@ impl Default for ThreadParams {
             use_compression: false,
             is_title_generated: false,
             automatic_patch: false,
+            task_meta: None,
         }
     }
 }

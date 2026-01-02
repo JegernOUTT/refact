@@ -40,6 +40,7 @@ export const ChatHistory = memo(
             align={sortedHistory.length > 0 ? "center" : "start"}
             pl="2"
             pr="2"
+            gap="2"
             direction="column"
           >
             {sortedHistory.length !== 0 ? (

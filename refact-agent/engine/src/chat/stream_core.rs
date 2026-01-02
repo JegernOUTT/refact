@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use futures::StreamExt;
-use reqwest_eventsource::Event;
+use reqwest_eventsource::{Event, Error as EventSourceError};
 use serde_json::json;
 use tokio::sync::RwLock as ARwLock;
 
@@ -169,7 +169,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 }
             }
             Err(e) => {
-                return Err(format!("Stream error: {}", e));
+                return Err(format_stream_error(e).await);
             }
         }
     }
@@ -381,4 +381,26 @@ pub fn normalize_tool_call(tc: &serde_json::Value) -> Option<crate::call_validat
         },
         tool_type,
     })
+}
+
+async fn format_stream_error(err: EventSourceError) -> String {
+    match err {
+        EventSourceError::InvalidStatusCode(status, response) => {
+            let text = response.text().await.unwrap_or_default();
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(detail) = json.get("detail") {
+                    return format!("LLM error ({}): {}", status, detail);
+                }
+                if let Some(msg) = json.pointer("/error/message") {
+                    return format!("LLM error ({}): {}", status, msg);
+                }
+                if let Some(err_obj) = json.get("error") {
+                    return format!("LLM error ({}): {}", status, err_obj);
+                }
+            }
+            let preview = if text.len() > 500 { &text[..500] } else { &text };
+            format!("LLM error ({}): {}", status, preview)
+        }
+        other => format!("Stream error: {}", other),
+    }
 }

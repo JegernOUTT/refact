@@ -61,6 +61,21 @@ export const newChatAction = createAction<Partial<ChatThread> | undefined>(
   "chatThread/new",
 );
 
+export interface TaskMeta {
+  task_id: string;
+  role: string;
+  agent_id?: string;
+  card_id?: string;
+}
+
+export const createChatWithId = createAction<{
+  id: string;
+  title?: string;
+  isTaskChat?: boolean;
+  mode?: string;
+  taskMeta?: TaskMeta;
+}>("chatThread/createWithId");
+
 export const newChatWithInitialMessages = createAsyncThunk(
   "chatThread/newChatWithInitialMessages",
   async (
@@ -137,7 +152,7 @@ export const updateOpenThread = createAction<{
   thread: Partial<ChatThread>;
 }>("chatThread/updateOpenThread");
 
-export const switchToThread = createAction<PayloadWithId>(
+export const switchToThread = createAction<PayloadWithId & { openTab?: boolean }>(
   "chatThread/switchToThread",
 );
 

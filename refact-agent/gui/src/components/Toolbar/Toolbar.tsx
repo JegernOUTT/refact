@@ -15,10 +15,17 @@ import {
   DotsVerticalIcon,
   HomeIcon,
   PlusIcon,
+  CheckboxIcon,
 } from "@radix-ui/react-icons";
 import { newChatAction } from "../../events";
 import { restart, useTourRefs } from "../../features/Tour";
 import { popBackTo, push } from "../../features/Pages/pagesSlice";
+import { useCreateTaskMutation } from "../../services/refact/tasks";
+import {
+  selectOpenTasksFromRoot,
+  openTask,
+  closeTask,
+} from "../../features/Tasks";
 import {
   ChangeEvent,
   KeyboardEvent,
@@ -72,7 +79,17 @@ function isChatTab(tab: Tab): tab is ChatTab {
   return tab.type === "chat";
 }
 
-export type Tab = DashboardTab | ChatTab;
+export type TaskTab = {
+  type: "task";
+  taskId: string;
+  taskName: string;
+};
+
+function isTaskTab(tab: Tab): tab is TaskTab {
+  return tab.type === "task";
+}
+
+export type Tab = DashboardTab | ChatTab | TaskTab;
 
 export type ToolbarProps = {
   activeTab: Tab;
@@ -92,9 +109,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const openThreadIds = useAppSelector(selectOpenThreadIds);
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
+  const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const { newChatEnabled } = useActiveTeamsGroup();
 
   const { openSettings, openHotKeys } = useEventsBusForIDE();
+  const [createTask] = useCreateTaskMutation();
 
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState<string | null>(null);
@@ -193,6 +212,21 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     handleNavigation,
   ]);
 
+  const onCreateNewTask = useCallback(() => {
+    createTask({ name: "New Task" })
+      .unwrap()
+      .then((task) => {
+        dispatch(openTask({ id: task.id, name: task.name }));
+        dispatch(push({ name: "task workspace", taskId: task.id }));
+        void sendTelemetryEvent({
+          scope: `openNewTask`,
+          success: true,
+          error_message: "",
+        });
+      })
+      .catch(() => { /* handled by RTK Query */ });
+  }, [createTask, dispatch, sendTelemetryEvent]);
+
   const goToTab = useCallback(
     (tab: Tab) => {
       // Auto-close empty chat tab when navigating away
@@ -210,6 +244,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       if (tab.type === "dashboard") {
         dispatch(popBackTo({ name: "history" }));
+      } else if (tab.type === "task") {
+        dispatch(popBackTo({ name: "history" }));
+        dispatch(push({ name: "task workspace", taskId: tab.taskId }));
       } else {
         dispatch(switchToThread({ id: tab.id }));
         dispatch(popBackTo({ name: "history" }));
@@ -222,6 +259,18 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       });
     },
     [dispatch, sendTelemetryEvent, activeTab, allThreads],
+  );
+
+  const handleCloseTaskTab = useCallback(
+    (event: MouseEvent, taskId: string) => {
+      event.stopPropagation();
+      event.preventDefault();
+      dispatch(closeTask(taskId));
+      if (isTaskTab(activeTab) && activeTab.taskId === taskId) {
+        goToTab({ type: "dashboard" });
+      }
+    },
+    [dispatch, activeTab, goToTab],
   );
 
   useEffect(() => {
@@ -259,9 +308,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
   const shouldCollapse = useMemo(() => {
     const dashboardWidth = windowWidth < 400 ? 47 : 70;
-    const totalWidth = dashboardWidth + 140 * tabs.length;
+    const totalWidth = dashboardWidth + 140 * (tabs.length + openTasks.length);
     return tabNavWidth < totalWidth;
-  }, [tabNavWidth, tabs.length, windowWidth]);
+  }, [tabNavWidth, tabs.length, openTasks.length, windowWidth]);
 
   const handleChatThreadDeletion = useCallback(
     (tabId: string) => {
@@ -335,6 +384,39 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           >
             {windowWidth < 400 || shouldCollapse ? <HomeIcon /> : "Home"}
           </TabNav.Link>
+          {openTasks.map((task) => {
+            const isActive = isTaskTab(activeTab) && activeTab.taskId === task.id;
+            const taskName = task.name.trim() || "Task";
+            return (
+              <TabNav.Link
+                active={isActive}
+                key={`task-${task.id}`}
+                onClick={() => goToTab({ type: "task", taskId: task.id, taskName })}
+                style={{ minWidth: 0, maxWidth: "150px", cursor: "pointer" }}
+                title={taskName}
+              >
+                <Flex gap="2" align="center">
+                  <CheckboxIcon />
+                  <TruncateLeft
+                    style={{
+                      maxWidth: shouldCollapse ? "25px" : "80px",
+                    }}
+                  >
+                    {taskName}
+                  </TruncateLeft>
+                  <IconButton
+                    size="1"
+                    variant="ghost"
+                    color="gray"
+                    title="Close task tab"
+                    onClick={(e) => handleCloseTaskTab(e, task.id)}
+                  >
+                    <Cross1Icon />
+                  </IconButton>
+                </Flex>
+              </TabNav.Link>
+            );
+          })}
           {tabs.map((tab) => {
             const isActive = isChatTab(activeTab) && activeTab.id === tab.id;
             const isRenaming = renamingTabId === tab.id;
@@ -425,23 +507,41 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         </TabNav.Root>
       </Flex>
       {windowWidth < 400 ? (
-        <IconButton
-          variant="outline"
-          ref={(x) => refs.setNewChat(x)}
-          onClick={onCreateNewChat}
-        >
-          <PlusIcon />
-        </IconButton>
+        <>
+          <IconButton
+            variant="outline"
+            onClick={onCreateNewTask}
+            title="New Task"
+          >
+            <CheckboxIcon />
+          </IconButton>
+          <IconButton
+            variant="outline"
+            ref={(x) => refs.setNewChat(x)}
+            onClick={onCreateNewChat}
+          >
+            <PlusIcon />
+          </IconButton>
+        </>
       ) : (
-        <Button
-          variant="outline"
-          ref={(x) => refs.setNewChat(x)}
-          onClick={onCreateNewChat}
-          disabled={!newChatEnabled}
-        >
-          <PlusIcon />
-          <Text>New chat</Text>
-        </Button>
+        <>
+          <Button
+            variant="outline"
+            onClick={onCreateNewTask}
+          >
+            <CheckboxIcon />
+            <Text>New Task</Text>
+          </Button>
+          <Button
+            variant="outline"
+            ref={(x) => refs.setNewChat(x)}
+            onClick={onCreateNewChat}
+            disabled={!newChatEnabled}
+          >
+            <PlusIcon />
+            <Text>New chat</Text>
+          </Button>
+        </>
       )}
       <Dropdown handleNavigation={handleNavigation} />
     </Flex>

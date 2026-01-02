@@ -296,3 +296,4 @@ dist
 **/refact/bin/refact-lsp
 
 .refact_knowledge*/
+.refact*/

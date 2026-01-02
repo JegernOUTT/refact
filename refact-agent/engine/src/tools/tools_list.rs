@@ -189,6 +189,26 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
         ),
     ];
 
+    let task_tools: Vec<Box<dyn Tool + Send>> = vec![
+        Box::new(crate::tools::tool_task_init::ToolTaskInit::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskBoardGet::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskBoardCreateCard::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskBoardUpdateCard::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskBoardMoveCard::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskBoardDeleteCard::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskReadyCards::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskSetOrchestratorInstructions::new()),
+        Box::new(crate::tools::tool_task_agent::ToolTaskAgentUpdate::new()),
+        Box::new(crate::tools::tool_task_agent::ToolTaskAgentComplete::new()),
+        Box::new(crate::tools::tool_task_agent::ToolTaskAgentFail::new()),
+        Box::new(crate::tools::tool_task_agent::ToolTaskAssignAgent::new()),
+        Box::new(crate::tools::tool_task_spawn_agent::ToolTaskSpawnAgent::new()),
+        Box::new(crate::tools::tool_task_check_agents::ToolTaskCheckAgents::new()),
+        Box::new(crate::tools::tool_task_agent_finish::ToolTaskAgentFinish::new()),
+        Box::new(crate::tools::tool_task_mark_card::ToolTaskMarkCardDone::new()),
+        Box::new(crate::tools::tool_task_mark_card::ToolTaskMarkCardFailed::new()),
+    ];
+
     let mut tool_groups = vec![
         ToolGroup {
             name: "Codebase Search".to_string(),
@@ -219,6 +239,12 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
             description: "Knowledge tools".to_string(),
             category: ToolGroupCategory::Builtin,
             tools: knowledge_tools,
+        },
+        ToolGroup {
+            name: "Task Management".to_string(),
+            description: "Task workspace and kanban board tools".to_string(),
+            category: ToolGroupCategory::Builtin,
+            tools: task_tools,
         },
     ];
 
@@ -314,7 +340,45 @@ pub async fn get_available_tools_by_chat_mode(
         ChatMode::EXPLORE => tools
             .filter(|tool| !tool.tool_description().agentic)
             .collect(),
+        ChatMode::TASK_PLANNER => {
+            let planner_whitelist = [
+                "tree", "cat", "search_pattern", "search_symbol_definition", "search_semantic",
+                "knowledge", "search_trajectories", "get_trajectory_context", "web",
+                "shell", "subagent", "deep_research", "strategic_planning",
+                "task_board_get", "task_board_create_card", "task_board_update_card",
+                "task_board_delete_card", "task_ready_cards",
+                "task_set_orchestrator_instructions",
+            ];
+            tools
+                .filter(|tool| planner_whitelist.contains(&tool.tool_description().name.as_str()))
+                .collect()
+        }
+        ChatMode::TASK_ORCHESTRATOR => {
+            let orchestrator_whitelist = [
+                "knowledge",
+                "task_board_get", "task_ready_cards", "task_board_move_card",
+                "task_spawn_agent", "task_check_agents",
+                "task_mark_card_done", "task_mark_card_failed",
+                "subagent",
+            ];
+            tools
+                .filter(|tool| orchestrator_whitelist.contains(&tool.tool_description().name.as_str()))
+                .collect()
+        }
         ChatMode::AGENT => tools.collect(),
+        ChatMode::TASK_AGENT => {
+            let agent_blacklist = [
+                "deep_research", "strategic_planning",
+                "task_init", "task_board_get", "task_board_create_card", "task_board_update_card",
+                "task_board_move_card", "task_board_delete_card",
+                "task_ready_cards", "task_set_orchestrator_instructions", "task_spawn_agent",
+                "task_agent_update", "task_agent_complete", "task_agent_fail", "task_assign_agent",
+                "task_check_agents", "task_mark_card_done", "task_mark_card_failed",
+            ];
+            tools
+                .filter(|tool| !agent_blacklist.contains(&tool.tool_description().name.as_str()))
+                .collect()
+        }
         ChatMode::CONFIGURE => {
             let blacklist = ["tree", "knowledge", "search"];
             tools

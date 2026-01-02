@@ -103,6 +103,7 @@ pub async fn handle_v1_command_completion(
             "".to_string(),
             false,
             "".to_string(),
+            None,
         )
         .await,
     ));
@@ -228,6 +229,7 @@ pub async fn handle_v1_command_preview(
             "".to_string(),
             false,
             model_rec.base.id.clone(),
+            None,
         )
         .await,
     ));
@@ -346,6 +348,7 @@ pub async fn handle_v1_at_command_execute(
         "".to_string(),
         false,
         model_rec.base.id.clone(),
+        None,
     )
     .await;
     ccx.subchat_tool_parameters = post.subchat_tool_parameters.clone();

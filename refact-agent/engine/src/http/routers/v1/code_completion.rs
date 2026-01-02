@@ -88,6 +88,7 @@ pub async fn handle_v1_code_completion(
             "".to_string(),
             false,
             model_rec.base.id.clone(),
+            None,
         )
         .await,
     ));
@@ -178,6 +179,7 @@ pub async fn handle_v1_code_completion_prompt(
             "".to_string(),
             false,
             model_rec.base.id.clone(),
+            None,
         )
         .await,
     ));

@@ -42,6 +42,22 @@ export interface ProvidersPage {
   name: "providers page";
 }
 
+export interface TasksListPage {
+  name: "tasks list";
+}
+
+export interface TaskWorkspacePage {
+  name: "task workspace";
+  taskId: string;
+}
+
+export interface TaskAgentPage {
+  name: "task agent";
+  taskId: string;
+  agentId: string;
+  chatId: string;
+}
+
 export interface IntegrationsSetupPage {
   name: "integrations page";
   projectPath?: string;
@@ -62,7 +78,10 @@ export type Page =
   | ChatThreadHistoryPage
   | IntegrationsSetupPage
   | ProvidersPage
-  | LoginPage;
+  | LoginPage
+  | TasksListPage
+  | TaskWorkspacePage
+  | TaskAgentPage;
 
 export function isIntegrationSetupPage(
   page: Page,

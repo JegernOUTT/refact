@@ -172,6 +172,14 @@ pub fn apply_setparams_patch(
             changed = true;
         }
     }
+    if let Some(task_meta_value) = patch.get("task_meta") {
+        if !task_meta_value.is_null() {
+            if let Ok(task_meta) = serde_json::from_value::<super::types::TaskMeta>(task_meta_value.clone()) {
+                thread.task_meta = Some(task_meta);
+                changed = true;
+            }
+        }
+    }
 
     let mut sanitized_patch = patch.clone();
     if let Some(obj) = sanitized_patch.as_object_mut() {

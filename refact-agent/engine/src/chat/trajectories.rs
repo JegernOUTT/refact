@@ -82,6 +82,7 @@ pub struct TrajectorySnapshot {
     pub use_compression: bool,
     pub automatic_patch: bool,
     pub version: u64,
+    pub task_meta: Option<super::types::TaskMeta>,
 }
 
 impl TrajectorySnapshot {
@@ -102,6 +103,7 @@ impl TrajectorySnapshot {
             use_compression: session.thread.use_compression,
             automatic_patch: session.thread.automatic_patch,
             version: session.trajectory_version,
+            task_meta: session.thread.task_meta.clone(),
         }
     }
 }
@@ -140,16 +142,56 @@ fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
     }
 }
 
+async fn find_trajectory_path(gcx: Arc<ARwLock<GlobalContext>>, chat_id: &str) -> Option<PathBuf> {
+    let traj_dirs = get_all_trajectories_dirs(gcx.clone()).await;
+    if let Some(path) = traj_dirs
+        .iter()
+        .map(|dir| dir.join(format!("{}.json", chat_id)))
+        .find(|p| p.exists())
+    {
+        return Some(path);
+    }
+
+    if let Ok(tasks_dir) = crate::tasks::storage::get_tasks_dir(gcx.clone()).await {
+        if tasks_dir.exists() {
+            if let Ok(mut entries) = tokio::fs::read_dir(&tasks_dir).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let task_dir = entry.path();
+                    if task_dir.is_dir() {
+                        let traj_base = task_dir.join("trajectories");
+                        for role in &["planner", "orchestrator", "agents"] {
+                            let role_dir = traj_base.join(role);
+                            if role_dir.exists() {
+                                let direct = role_dir.join(format!("{}.json", chat_id));
+                                if direct.exists() {
+                                    return Some(direct);
+                                }
+                                if let Ok(mut sub_entries) = tokio::fs::read_dir(&role_dir).await {
+                                    while let Ok(Some(sub_entry)) = sub_entries.next_entry().await {
+                                        let sub_path = sub_entry.path();
+                                        if sub_path.is_dir() {
+                                            let nested = sub_path.join(format!("{}.json", chat_id));
+                                            if nested.exists() {
+                                                return Some(nested);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub async fn load_trajectory_for_chat(
     gcx: Arc<ARwLock<GlobalContext>>,
     chat_id: &str,
 ) -> Option<LoadedTrajectory> {
-    let traj_dirs = get_all_trajectories_dirs(gcx).await;
-    let traj_path = traj_dirs
-        .iter()
-        .map(|dir| dir.join(format!("{}.json", chat_id)))
-        .find(|p| p.exists())?;
-
+    let traj_path = find_trajectory_path(gcx, chat_id).await?;
     let content = tokio::fs::read_to_string(&traj_path).await.ok()?;
     let t: serde_json::Value = serde_json::from_str(&content).ok()?;
 
@@ -158,6 +200,10 @@ pub async fn load_trajectory_for_chat(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
     fix_tool_call_indexes(&mut messages);
+
+    let task_meta: Option<super::types::TaskMeta> = t
+        .get("task_meta")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let thread = ThreadParams {
         id: chat_id.to_string(),
@@ -209,6 +255,7 @@ pub async fn load_trajectory_for_chat(
             .get("automatic_patch")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        task_meta,
     };
 
     let created_at = t
@@ -232,21 +279,14 @@ pub async fn save_trajectory_snapshot(
         return Ok(());
     }
 
-    let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
-    tokio::fs::create_dir_all(&trajectories_dir)
-        .await
-        .map_err(|e| format!("Failed to create trajectories dir: {}", e))?;
-
-    let file_path = trajectories_dir.join(format!("{}.json", snapshot.chat_id));
     let now = chrono::Utc::now().to_rfc3339();
-
     let messages_json: Vec<serde_json::Value> = snapshot
         .messages
         .iter()
         .map(|m| serde_json::to_value(m).unwrap_or_default())
         .collect();
 
-    let trajectory = json!({
+    let mut trajectory = json!({
         "id": snapshot.chat_id,
         "title": snapshot.title,
         "model": snapshot.model,
@@ -264,6 +304,29 @@ pub async fn save_trajectory_snapshot(
         "automatic_patch": snapshot.automatic_patch,
     });
 
+    if let Some(ref task_meta) = snapshot.task_meta {
+        trajectory["task_meta"] = serde_json::to_value(task_meta).unwrap_or_default();
+    }
+
+    let file_path = if let Some(ref task_meta) = snapshot.task_meta {
+        let task_dir = crate::tasks::storage::get_task_dir(gcx.clone(), &task_meta.task_id).await?;
+        let traj_dir = crate::tasks::storage::get_task_trajectory_dir(
+            &task_dir,
+            &task_meta.role,
+            task_meta.agent_id.as_deref(),
+        );
+        tokio::fs::create_dir_all(&traj_dir)
+            .await
+            .map_err(|e| format!("Failed to create task trajectories dir: {}", e))?;
+        traj_dir.join(format!("{}.json", snapshot.chat_id))
+    } else {
+        let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
+        tokio::fs::create_dir_all(&trajectories_dir)
+            .await
+            .map_err(|e| format!("Failed to create trajectories dir: {}", e))?;
+        trajectories_dir.join(format!("{}.json", snapshot.chat_id))
+    };
+
     let tmp_path = file_path.with_extension("json.tmp");
     let json_str = serde_json::to_string_pretty(&trajectory)
         .map_err(|e| format!("Failed to serialize trajectory: {}", e))?;
@@ -275,9 +338,10 @@ pub async fn save_trajectory_snapshot(
         .map_err(|e| format!("Failed to rename trajectory: {}", e))?;
 
     info!(
-        "Saved trajectory for chat {} ({} messages)",
+        "Saved trajectory for chat {} ({} messages) to {:?}",
         snapshot.chat_id,
-        snapshot.messages.len()
+        snapshot.messages.len(),
+        file_path
     );
 
     if let Some(vecdb) = gcx.read().await.vec_db.lock().await.as_ref() {
@@ -286,27 +350,30 @@ pub async fn save_trajectory_snapshot(
             .await;
     }
 
-    if let Some(tx) = &gcx.read().await.trajectory_events_tx {
-        let event = TrajectoryEvent {
-            event_type: "updated".to_string(),
-            id: snapshot.chat_id.clone(),
-            updated_at: Some(now),
-            title: Some(snapshot.title.clone()),
-        };
-        let _ = tx.send(event);
-    }
+    if snapshot.task_meta.is_none() {
+        if let Some(tx) = &gcx.read().await.trajectory_events_tx {
+            let event = TrajectoryEvent {
+                event_type: "updated".to_string(),
+                id: snapshot.chat_id.clone(),
+                updated_at: Some(now),
+                title: Some(snapshot.title.clone()),
+            };
+            let _ = tx.send(event);
+        }
 
-    let should_generate_title = is_placeholder_title(&snapshot.title)
-        && !snapshot.is_title_generated
-        && !snapshot.messages.is_empty();
+        let should_generate_title = is_placeholder_title(&snapshot.title)
+            && !snapshot.is_title_generated
+            && !snapshot.messages.is_empty();
 
-    if should_generate_title {
-        let _ = spawn_title_generation_task(
-            gcx.clone(),
-            snapshot.chat_id.clone(),
-            messages_json,
-            trajectories_dir,
-        );
+        if should_generate_title {
+            let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
+            let _ = spawn_title_generation_task(
+                gcx.clone(),
+                snapshot.chat_id.clone(),
+                messages_json,
+                trajectories_dir,
+            );
+        }
     }
 
     Ok(())
@@ -712,6 +779,7 @@ async fn generate_title_llm(
             "title-generation".to_string(),
             false,
             model_id.clone(),
+            None,
         )
         .await,
     ));
@@ -1341,6 +1409,7 @@ mod tests {
                 use_compression: true,
                 is_title_generated: true,
                 automatic_patch: false,
+                task_meta: None,
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
             runtime: super::super::types::RuntimeState::default(),

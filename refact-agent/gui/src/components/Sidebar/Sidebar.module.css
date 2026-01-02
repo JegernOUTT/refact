@@ -24,3 +24,7 @@
 .popup_ide {
   width: calc(100vw - var(--space-2) * 2);
 }
+
+.taskItem:hover {
+  background: var(--gray-4);
+}

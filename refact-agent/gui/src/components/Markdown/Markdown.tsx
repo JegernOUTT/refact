@@ -29,6 +29,7 @@ import { useLinksFromLsp } from "../../hooks";
 
 import { ChatLinkButton } from "../ChatLinks";
 import { extractLinkFromPuzzle } from "../../utils/extractLinkFromPuzzle";
+import { useInternalLinkHandler } from "../../contexts/InternalLinkContext";
 
 export type MarkdownProps = Pick<
   React.ComponentProps<typeof ReactMarkdown>,
@@ -88,6 +89,8 @@ const _Markdown: React.FC<MarkdownProps> = ({
   color,
   ...rest
 }) => {
+  const internalLinkContext = useInternalLinkHandler();
+
   const components: Partial<Components> = useMemo(() => {
     return {
       ol(props) {
@@ -137,9 +140,25 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <Kbd {...props} />;
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
+        const href = props.href ?? "";
+        const isInternalLink = href.startsWith("refact://");
         const shouldTargetBeBlank =
-          props.href &&
-          (props.href.startsWith("http") || props.href.startsWith("https"));
+          href.startsWith("http://") || href.startsWith("https://");
+
+        if (isInternalLink) {
+          return (
+            <Link
+              {...props}
+              onClick={(e: React.MouseEvent) => {
+                if (internalLinkContext?.handleInternalLink(href)) {
+                  e.preventDefault();
+                }
+              }}
+              style={{ cursor: "pointer" }}
+            />
+          );
+        }
+
         return (
           <Link
             {...props}
@@ -178,7 +197,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <Table.Cell {...props} />;
       },
     };
-  }, [rest, canHaveInteractiveElements, color]);
+  }, [rest, canHaveInteractiveElements, color, internalLinkContext]);
   return (
     <ReactMarkdown
       className={styles.markdown}

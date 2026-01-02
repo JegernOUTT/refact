@@ -19,6 +19,7 @@ import {
   setChatModel,
   setSystemPrompt,
   newChatAction,
+  createChatWithId,
   backUpMessages,
   removeChatFromCache,
   restoreChat,
@@ -252,6 +253,62 @@ export const chatReducer = createReducer(initialState, (builder) => {
     state.current_thread_id = newId;
   });
 
+  builder.addCase(createChatWithId, (state, action) => {
+    const { id, title, isTaskChat, mode, taskMeta } = action.payload;
+    const existingRt = state.threads[id];
+
+    if (existingRt) {
+      if (isTaskChat) {
+        existingRt.thread.is_task_chat = true;
+        state.open_thread_ids = state.open_thread_ids.filter((tid) => tid !== id);
+      }
+      if (title && !existingRt.thread.title) {
+        existingRt.thread.title = title;
+      }
+      if (mode) {
+        existingRt.thread.mode = mode as LspChatMode;
+      }
+      if (taskMeta) {
+        existingRt.thread.task_meta = taskMeta;
+      }
+      state.current_thread_id = id;
+      return;
+    }
+
+    const currentRt = getCurrentRuntime(state);
+    const lastParams = getLastThreadParams();
+
+    const defaultMode = getThreadMode({
+      tool_use: "agent",
+      maybeMode: (mode ?? "AGENT") as LspChatMode,
+    });
+    const newRuntime = createThreadRuntime("agent", null, defaultMode);
+
+    newRuntime.thread.id = id;
+    newRuntime.thread.model = lastParams.model ?? currentRt?.thread.model ?? "";
+    newRuntime.thread.boost_reasoning = lastParams.boost_reasoning ?? currentRt?.thread.boost_reasoning ?? false;
+    newRuntime.thread.automatic_patch = lastParams.automatic_patch ?? currentRt?.thread.automatic_patch ?? false;
+    newRuntime.thread.increase_max_tokens = lastParams.increase_max_tokens ?? currentRt?.thread.increase_max_tokens ?? false;
+    newRuntime.thread.include_project_info = lastParams.include_project_info ?? currentRt?.thread.include_project_info ?? true;
+    newRuntime.thread.context_tokens_cap = lastParams.context_tokens_cap ?? currentRt?.thread.context_tokens_cap;
+
+    if (title) {
+      newRuntime.thread.title = title;
+    }
+    if (isTaskChat) {
+      newRuntime.thread.is_task_chat = true;
+    }
+    if (taskMeta) {
+      newRuntime.thread.task_meta = taskMeta;
+    }
+
+    state.threads[id] = newRuntime;
+    if (!isTaskChat) {
+      state.open_thread_ids.push(id);
+    }
+    state.current_thread_id = id;
+  });
+
   builder.addCase(backUpMessages, (state, action) => {
     const rt = getRuntime(state, action.payload.id);
     if (rt) {
@@ -377,15 +434,18 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(switchToThread, (state, action) => {
-    const id = action.payload.id;
+    const { id, openTab } = action.payload;
     const existingRt = getRuntime(state, id);
     if (existingRt) {
-      if (!state.open_thread_ids.includes(id)) {
+      const shouldOpenTab = openTab !== false && !existingRt.thread.is_task_chat;
+      if (shouldOpenTab && !state.open_thread_ids.includes(id)) {
         state.open_thread_ids.push(id);
+      }
+      if (state.current_thread_id !== id) {
+        existingRt.snapshot_received = false;
       }
       state.current_thread_id = id;
       existingRt.thread.read = true;
-      existingRt.snapshot_received = false;
     }
   });
 
@@ -597,6 +657,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const backendToolUse = event.thread.tool_use;
         const backendMode = event.thread.mode;
 
+        // Preserve is_task_chat flag from existing thread
+        const isTaskChat = existing?.is_task_chat ?? false;
+
         const thread: ChatThread = {
           id: event.thread.id,
           messages: snapshotMessages,
@@ -620,6 +683,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           automatic_patch: event.thread.automatic_patch ?? existing?.automatic_patch ?? false,
           increase_max_tokens: existing?.increase_max_tokens ?? false,
           new_chat_suggested: { wasSuggested: false },
+          is_task_chat: isTaskChat,
         };
 
         const defaultConfirmationStatus = event.runtime.paused
@@ -647,7 +711,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
         state.threads[chat_id] = newRt;
 
-        if (!state.open_thread_ids.includes(chat_id)) {
+        // Only add to open tabs if not a task chat
+        if (!isTaskChat && !state.open_thread_ids.includes(chat_id)) {
           state.open_thread_ids.push(chat_id);
         }
         if (!state.current_thread_id) {

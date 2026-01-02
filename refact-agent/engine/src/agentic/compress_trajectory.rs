@@ -129,6 +129,7 @@ pub async fn compress_trajectory(
             "".to_string(),
             false,
             model_id.clone(),
+            None,
         )
         .await,
     ));

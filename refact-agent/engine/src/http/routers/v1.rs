@@ -71,6 +71,12 @@ use crate::chat::{
 use crate::http::routers::v1::voice::{
     handle_v1_voice_transcribe, handle_v1_voice_download, handle_v1_voice_status,
 };
+use crate::http::routers::v1::tasks::{
+    handle_list_tasks, handle_create_task, handle_get_task, handle_delete_task,
+    handle_get_board, handle_patch_board, handle_get_orchestrator_instructions,
+    handle_set_orchestrator_instructions, handle_get_ready_cards, handle_update_task_status,
+    handle_list_task_trajectories,
+};
 
 mod ast;
 pub mod at_commands;
@@ -102,6 +108,7 @@ mod v1_integrations;
 pub mod vecdb;
 pub mod voice;
 mod workspace;
+pub mod tasks;
 
 pub fn make_v1_router() -> Router {
     let builder = Router::new()
@@ -227,7 +234,18 @@ pub fn make_v1_router() -> Router {
         .route("/chats/:chat_id/queue/:client_request_id", delete(handle_v1_chat_cancel_queued))
         .route("/voice/transcribe", post(handle_v1_voice_transcribe))
         .route("/voice/download", post(handle_v1_voice_download))
-        .route("/voice/status", get(handle_v1_voice_status));
+        .route("/voice/status", get(handle_v1_voice_status))
+        .route("/tasks", get(handle_list_tasks))
+        .route("/tasks", post(handle_create_task))
+        .route("/tasks/:task_id", get(handle_get_task))
+        .route("/tasks/:task_id", delete(handle_delete_task))
+        .route("/tasks/:task_id/status", post(handle_update_task_status))
+        .route("/tasks/:task_id/board", get(handle_get_board))
+        .route("/tasks/:task_id/board", post(handle_patch_board))
+        .route("/tasks/:task_id/board/ready", get(handle_get_ready_cards))
+        .route("/tasks/:task_id/orchestrator-instructions", get(handle_get_orchestrator_instructions))
+        .route("/tasks/:task_id/orchestrator-instructions", put(handle_set_orchestrator_instructions))
+        .route("/tasks/:task_id/trajectories/:role", get(handle_list_task_trajectories));
 
     builder
         .layer(axum::middleware::from_fn(telemetry_middleware))

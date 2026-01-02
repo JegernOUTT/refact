@@ -51,6 +51,15 @@ export type ChatThread = {
   include_project_info?: boolean;
   context_tokens_cap?: number;
   checkpoints_enabled?: boolean;
+  /** If true, this chat belongs to a task workspace and should not appear in regular chat tabs */
+  is_task_chat?: boolean;
+  /** Task metadata for task-related chats */
+  task_meta?: {
+    task_id: string;
+    role: string;
+    agent_id?: string;
+    card_id?: string;
+  };
 };
 
 export type SuggestedChat = {

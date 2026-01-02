@@ -96,6 +96,7 @@ pub async fn generate_code_edit(
             "".to_string(),
             false,
             model_id.clone(),
+            None,
         )
         .await,
     ));

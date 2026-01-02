@@ -16,10 +16,11 @@ pub mod tools;
 mod trajectories;
 pub mod types;
 
-pub use session::{SessionsMap, create_sessions_map, start_session_cleanup_task};
+pub use session::{SessionsMap, create_sessions_map, start_session_cleanup_task, get_or_create_session_with_trajectory};
+pub use queue::process_command_queue;
 pub use trajectories::{
     start_trajectory_watcher, TrajectoryEvent, handle_v1_trajectories_list,
     handle_v1_trajectories_get, handle_v1_trajectories_save, handle_v1_trajectories_delete,
-    handle_v1_trajectories_subscribe,
+    handle_v1_trajectories_subscribe, maybe_save_trajectory,
 };
 pub use handlers::{handle_v1_chat_subscribe, handle_v1_chat_command, handle_v1_chat_cancel_queued};

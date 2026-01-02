@@ -27,6 +27,7 @@ import {
   modelsApi,
   teamsApi,
   trajectoriesApi,
+  tasksApi,
 } from "../services/refact";
 import { smallCloudApi } from "../services/smallcloud";
 import { reducer as fimReducer } from "../features/FIM/reducer";
@@ -55,6 +56,7 @@ import { checkpointsSlice } from "../features/Checkpoints/checkpointsSlice";
 import { checkpointsApi } from "../services/refact/checkpoints";
 import { patchesAndDiffsTrackerSlice } from "../features/PatchesAndDiffsTracker/patchesAndDiffsTrackerSlice";
 import { coinBallanceSlice } from "../features/CoinBalance";
+import { tasksSlice } from "../features/Tasks";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -96,6 +98,7 @@ const rootReducer = combineSlices(
     [providersApi.reducerPath]: providersApi.reducer,
     [modelsApi.reducerPath]: modelsApi.reducer,
     [trajectoriesApi.reducerPath]: trajectoriesApi.reducer,
+    [tasksApi.reducerPath]: tasksApi.reducer,
   },
   historySlice,
   errorSlice,
@@ -109,6 +112,7 @@ const rootReducer = combineSlices(
   checkpointsSlice,
   patchesAndDiffsTrackerSlice,
   coinBallanceSlice,
+  tasksSlice,
 );
 
 const rootPersistConfig = {
@@ -179,6 +183,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
             modelsApi.middleware,
             teamsApi.middleware,
             trajectoriesApi.middleware,
+            tasksApi.middleware,
           )
           .prepend(historyMiddleware.middleware)
           // .prepend(errorMiddleware.middleware)

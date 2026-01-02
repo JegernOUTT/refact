@@ -323,6 +323,7 @@ pub async fn check_tools_confirmation(
             String::new(),
             false,
             String::new(),
+            None,
         )
         .await,
     ));
@@ -449,6 +450,7 @@ pub async fn execute_tools_with_session(
             thread.id.clone(),
             false,
             thread.model.clone(),
+            thread.task_meta.clone(),
         )
         .await,
     ));
@@ -647,6 +649,7 @@ pub async fn execute_tools(
             thread.id.clone(),
             false,
             thread.model.clone(),
+            thread.task_meta.clone(),
         )
         .await,
     ));

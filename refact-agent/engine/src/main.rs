@@ -68,6 +68,7 @@ mod integrations;
 mod knowledge_graph;
 mod memories;
 mod privacy;
+mod tasks;
 mod trajectory_memos;
 mod voice;
 

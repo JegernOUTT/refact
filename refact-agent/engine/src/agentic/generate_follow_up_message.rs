@@ -88,6 +88,7 @@ pub async fn generate_follow_up_message(
             chat_id.to_string(),
             false,
             model_id.to_string(),
+            None,
         )
         .await,
     ));

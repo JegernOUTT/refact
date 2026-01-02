@@ -19,3 +19,4 @@ export * from "./teams";
 export * from "./trajectories";
 export * from "./chatSubscription";
 export * from "./chatCommands";
+export * from "./tasks";
