@@ -217,6 +217,7 @@ pub async fn run_at_commands_locally(
     (new_messages, any_context_produced)
 }
 
+#[allow(dead_code)]
 pub async fn run_at_commands_remotely(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,

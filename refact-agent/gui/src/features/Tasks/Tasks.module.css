@@ -64,7 +64,8 @@
   gap: var(--space-3);
   padding: var(--space-3);
   border-bottom: 1px solid var(--gray-5);
-  max-height: 200px;
+  min-height: 180px;
+  max-height: 280px;
   overflow: hidden;
 }
 

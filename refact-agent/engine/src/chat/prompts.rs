@@ -38,7 +38,6 @@ pub async fn get_default_system_prompt(
         ChatMode::CONFIGURE => "configurator",
         ChatMode::PROJECT_SUMMARY => "project_summary",
         ChatMode::TASK_PLANNER => "task_planner",
-        ChatMode::TASK_ORCHESTRATOR => "task_orchestrator",
         ChatMode::TASK_AGENT => "task_agent",
     };
     let system_prompt = tconfig.system_prompts.get(prompt_key).map_or_else(
@@ -362,7 +361,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
     if !have_system {
         match chat_meta.chat_mode {
             ChatMode::EXPLORE | ChatMode::AGENT | ChatMode::NO_TOOLS
-            | ChatMode::TASK_PLANNER | ChatMode::TASK_ORCHESTRATOR | ChatMode::TASK_AGENT => {
+            | ChatMode::TASK_PLANNER | ChatMode::TASK_AGENT => {
                 let system_message_content = system_prompt_add_extra_instructions(
                     gcx.clone(),
                     get_default_system_prompt(gcx.clone(), chat_meta.chat_mode.clone()).await,

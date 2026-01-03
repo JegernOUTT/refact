@@ -89,6 +89,7 @@ pub async fn handle_v1_code_completion(
             false,
             model_rec.base.id.clone(),
             None,
+            None,
         )
         .await,
     ));
@@ -179,6 +180,7 @@ pub async fn handle_v1_code_completion_prompt(
             "".to_string(),
             false,
             model_rec.base.id.clone(),
+            None,
             None,
         )
         .await,

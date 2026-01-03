@@ -16,6 +16,7 @@ use crate::tasks::types::StatusUpdate;
 use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
 use crate::chat::types::{ThreadParams, TaskMeta, CommandRequest, ChatCommand};
 use crate::chat::{get_or_create_session_with_trajectory, process_command_queue};
+use crate::git::operations;
 
 async fn get_task_id(ccx: &Arc<AMutex<AtCommandsContext>>, args: &HashMap<String, Value>) -> Result<String, String> {
     if let Some(id) = args.get("task_id").and_then(|v| v.as_str()) {
@@ -29,7 +30,17 @@ async fn get_task_id(ccx: &Arc<AMutex<AtCommandsContext>>, args: &HashMap<String
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
 }
 
-async fn resolve_agent_model(gcx: Arc<ARwLock<GlobalContext>>, current_model: &str) -> Result<String, String> {
+async fn resolve_agent_model(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    task_default_model: Option<&str>,
+    current_model: &str,
+) -> Result<String, String> {
+    if let Some(model) = task_default_model {
+        if !model.is_empty() {
+            return Ok(model.to_string());
+        }
+    }
+
     if !current_model.is_empty() {
         return Ok(current_model.to_string());
     }
@@ -42,7 +53,73 @@ async fn resolve_agent_model(gcx: Arc<ARwLock<GlobalContext>>, current_model: &s
         return Ok(default_model.clone());
     }
 
-    Err("No model available: current_model is empty and no default model configured".to_string())
+    Err("No model available: task default, current_model, and global default are all empty".to_string())
+}
+
+async fn setup_agent_worktree(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    task_id: &str,
+    agent_id: &str,
+    card_id: &str,
+) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
+    let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
+
+    let repo = match git2::Repository::open(workspace_root) {
+        Ok(r) => r,
+        Err(_) => {
+            tracing::warn!("Workspace is not a git repository, skipping worktree creation");
+            return Ok((None, None, None));
+        }
+    };
+
+    if operations::has_uncommitted_changes(&repo)? {
+        return Err("Please commit or stash changes before spawning agents".to_string());
+    }
+
+    let mut task_meta = storage::load_task_meta(gcx.clone(), task_id).await?;
+
+    if task_meta.base_branch.is_none() || task_meta.base_commit.is_none() {
+        let base_branch = operations::get_current_branch(&repo)?;
+        let base_commit = operations::get_head_commit(&repo)?;
+        task_meta.base_branch = Some(base_branch);
+        task_meta.base_commit = Some(base_commit);
+        storage::save_task_meta(gcx.clone(), task_id, &task_meta).await?;
+    }
+
+    let base_commit = task_meta.base_commit.as_ref().ok_or("No base commit found")?;
+    let agent_id_short = &agent_id[..agent_id.len().min(8)];
+    let branch_name = format!("refact/task/{}/card/{}/{}", task_id, card_id, agent_id_short);
+    let worktree_name = format!("{}-{}-{}", task_id, card_id, agent_id_short);
+    let worktree_path = workspace_root
+        .join(".refact")
+        .join("tasks")
+        .join(task_id)
+        .join("worktrees")
+        .join(agent_id_short);
+
+    tokio::fs::create_dir_all(worktree_path.parent().unwrap())
+        .await
+        .map_err(|e| format!("Failed to create worktree parent dir: {}", e))?;
+
+    operations::create_worktree(&repo, &worktree_path, &worktree_name, &branch_name, base_commit)?;
+
+    let card_id_owned = card_id.to_string();
+    let branch_name_clone = branch_name.clone();
+    let worktree_name_clone = worktree_name.clone();
+    let worktree_path_str = worktree_path.to_string_lossy().to_string();
+    let worktree_path_clone = worktree_path_str.clone();
+
+    storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+        if let Some(card) = board.get_card_mut(&card_id_owned) {
+            card.agent_branch = Some(branch_name_clone.clone());
+            card.agent_worktree = Some(worktree_path_clone.clone());
+            card.agent_worktree_name = Some(worktree_name_clone.clone());
+        }
+        Ok(())
+    }).await?;
+
+    Ok((Some(branch_name), Some(worktree_path_str), Some(worktree_name)))
 }
 
 pub struct ToolTaskSpawnAgent;
@@ -114,6 +191,21 @@ impl Tool for ToolTaskSpawnAgent {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let ccx_lock = ccx.lock().await;
+        
+        let is_planner = ccx_lock.task_meta.as_ref()
+            .map(|m| m.role == "planner")
+            .unwrap_or(false);
+
+        if !is_planner {
+            return Err(
+                "task_spawn_agent can only be called by the task planner. \
+                 Switch to the planner chat to spawn agents.".to_string()
+            );
+        }
+        
+        drop(ccx_lock);
+        
         let task_id = get_task_id(&ccx, args).await?;
         let card_id = args.get("card_id").and_then(|v| v.as_str())
             .ok_or("Missing 'card_id'")?;
@@ -127,7 +219,10 @@ impl Tool for ToolTaskSpawnAgent {
         let gcx = ccx.lock().await.global_context.clone();
         let current_model = ccx.lock().await.current_model.clone();
 
-        let model = resolve_agent_model(gcx.clone(), &current_model).await?;
+        let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
+        let task_default_model = task_meta.default_agent_model.as_deref();
+
+        let model = resolve_agent_model(gcx.clone(), task_default_model, &current_model).await?;
 
         let agent_id = Uuid::new_v4().to_string();
         let agent_chat_id = format!("agent-{}-{}", card_id, &agent_id[..8]);
@@ -137,7 +232,7 @@ impl Tool for ToolTaskSpawnAgent {
             let agent_id_clone = agent_id.clone();
             let agent_chat_id_clone = agent_chat_id.clone();
 
-            let board = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            let (board, _) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                 let card = board.get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found", card_id_owned))?;
 
@@ -179,6 +274,22 @@ impl Tool for ToolTaskSpawnAgent {
                 .map(|(title, report)| format!("### {}\n{}", title, report))
                 .collect::<Vec<_>>()
                 .join("\n\n");
+
+            let (_agent_branch, _agent_worktree, _agent_worktree_name) = match setup_agent_worktree(
+                gcx.clone(),
+                &task_id,
+                &agent_id,
+                card_id,
+            ).await {
+                Ok(result) => result,
+                Err(e) if e.contains("not a git repository") || e.contains("No workspace folder") => {
+                    tracing::warn!("Workspace is not a git repo, agent will work in main directory: {}", e);
+                    (None, None, None)
+                }
+                Err(e) => {
+                    return Err(format!("Cannot spawn agent: {}", e));
+                }
+            };
 
             (card.title.clone(), card.instructions.clone(), dep_context)
         };

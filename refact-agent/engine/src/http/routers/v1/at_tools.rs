@@ -218,6 +218,7 @@ pub async fn handle_v1_tools_check_if_confirmation_needed(
             false,
             "".to_string(),
             None,
+            None,
         )
         .await,
     )); // used only for should_confirm

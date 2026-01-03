@@ -469,6 +469,7 @@ pub async fn generate_commit_message_by_diff(
             false,
             model_id.clone(),
             None,
+            None,
         )
         .await,
     ));

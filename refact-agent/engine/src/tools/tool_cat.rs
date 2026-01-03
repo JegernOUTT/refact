@@ -4,6 +4,36 @@ use std::sync::Arc;
 use serde_json::Value;
 use itertools::Itertools;
 
+fn resolve_path_with_workdir(path: &PathBuf, code_workdir: &Option<PathBuf>) -> PathBuf {
+    let Some(workdir) = code_workdir else {
+        return path.clone();
+    };
+
+    if !path.is_absolute() {
+        return workdir.join(path);
+    }
+
+    if path.starts_with(&workdir) {
+        return path.clone();
+    }
+
+    if let Some(workspace_root) = workdir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+    {
+        if path.starts_with(&workspace_root) {
+            if let Ok(relative) = path.strip_prefix(&workspace_root) {
+                return workdir.join(relative);
+            }
+        }
+    }
+
+    workdir.join(path.file_name().unwrap_or_default())
+}
+
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 use resvg::{tiny_skia, usvg};
@@ -148,8 +178,9 @@ impl Tool for ToolCat {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let mut corrections = false;
         let (paths, path_line_ranges, symbols) = parse_cat_args(args)?;
+        let code_workdir = ccx.lock().await.code_workdir.clone();
         let (filenames_present, symbols_not_found, not_found_messages, context_enums, multimodal) =
-            paths_and_symbols_to_cat_with_path_ranges(ccx.clone(), paths, path_line_ranges, symbols)
+            paths_and_symbols_to_cat_with_path_ranges(ccx.clone(), paths, path_line_ranges, symbols, &code_workdir)
                 .await;
 
         let mut content = "".to_string();
@@ -314,6 +345,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
     paths: Vec<String>,
     path_line_ranges: HashMap<String, Option<(usize, usize)>>,
     arg_symbols: Vec<String>,
+    code_workdir: &Option<PathBuf>,
 ) -> (
     Vec<String>,
     Vec<String>,
@@ -338,14 +370,17 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
             preprocess_path_for_normalization(p)
         };
 
+        let resolved_path = resolve_path_with_workdir(&PathBuf::from(&path), code_workdir);
+        let resolved_path_str = resolved_path.to_string_lossy().to_string();
+
         // both not fuzzy
-        let candidates_file = file_repair_candidates(gcx.clone(), &path, top_n, false).await;
-        let candidates_dir = correct_to_nearest_dir_path(gcx.clone(), &path, false, top_n).await;
+        let candidates_file = file_repair_candidates(gcx.clone(), &resolved_path_str, top_n, false).await;
+        let candidates_dir = correct_to_nearest_dir_path(gcx.clone(), &resolved_path_str, false, top_n).await;
 
         if !candidates_file.is_empty() || candidates_dir.is_empty() {
             let file_path = match return_one_candidate_or_a_good_error(
                 gcx.clone(),
-                &path,
+                &resolved_path_str,
                 &candidates_file,
                 &get_project_dirs(gcx.clone()).await,
                 false,
@@ -363,7 +398,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
         } else {
             let candidate = match return_one_candidate_or_a_good_error(
                 gcx.clone(),
-                &path,
+                &resolved_path_str,
                 &candidates_dir,
                 &get_project_dirs(gcx.clone()).await,
                 true,

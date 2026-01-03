@@ -31,9 +31,10 @@ struct Args {
 async fn parse_args(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
+    code_workdir: &Option<std::path::PathBuf>,
 ) -> Result<Args, String> {
     let privacy = load_privacy_if_needed(gcx.clone()).await;
-    let path = parse_path_for_update(gcx, args, privacy).await?;
+    let path = parse_path_for_update(gcx, args, privacy, code_workdir).await?;
     let patch = parse_string_arg(args, "patch", "Provide unified diff patch")?;
     Ok(Args { path, patch })
 }
@@ -201,8 +202,9 @@ pub async fn tool_apply_patch_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     dry: bool,
+    code_workdir: &Option<std::path::PathBuf>,
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
-    let a = parse_args(gcx.clone(), args).await?;
+    let a = parse_args(gcx.clone(), args, code_workdir).await?;
     await_ast_indexing(gcx.clone()).await?;
 
     let file_content = get_file_text_from_memory_or_disk(gcx.clone(), &a.path).await?;
@@ -237,8 +239,11 @@ impl Tool for ToolApplyPatch {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let (_, _, chunks, _) = tool_apply_patch_exec(gcx, args, false).await?;
+        let (gcx, code_workdir) = {
+            let ccx_locked = ccx.lock().await;
+            (ccx_locked.global_context.clone(), ccx_locked.code_workdir.clone())
+        };
+        let (_, _, chunks, _) = tool_apply_patch_exec(gcx, args, false, &code_workdir).await?;
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
@@ -256,8 +261,11 @@ impl Tool for ToolApplyPatch {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let can_exec = parse_args(gcx, args).await.is_ok();
+        let (gcx, code_workdir) = {
+            let ccx_locked = ccx.lock().await;
+            (ccx_locked.global_context.clone(), ccx_locked.code_workdir.clone())
+        };
+        let can_exec = parse_args(gcx, args, &code_workdir).await.is_ok();
         let msgs_len = ccx.lock().await.messages.len();
         if msgs_len != 0 && !can_exec {
             return Ok(MatchConfirmDeny {

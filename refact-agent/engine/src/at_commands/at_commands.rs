@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -35,6 +36,7 @@ pub struct AtCommandsContext {
     pub current_model: String,
     pub should_execute_remotely: bool,
     pub task_meta: Option<TaskMeta>,
+    pub code_workdir: Option<PathBuf>,
 
     pub at_commands: HashMap<String, Arc<dyn AtCommand + Send>>,
     pub subchat_tool_parameters: IndexMap<String, SubchatParameters>,
@@ -55,6 +57,7 @@ impl AtCommandsContext {
         should_execute_remotely: bool,
         current_model: String,
         task_meta: Option<TaskMeta>,
+        code_workdir: Option<PathBuf>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<serde_json::Value>();
         AtCommandsContext {
@@ -70,6 +73,7 @@ impl AtCommandsContext {
             current_model,
             should_execute_remotely,
             task_meta,
+            code_workdir,
             at_commands: at_commands_dict(global_context.clone()).await,
             subchat_tool_parameters: IndexMap::new(),
             postprocess_parameters: PostprocessSettings::new(),

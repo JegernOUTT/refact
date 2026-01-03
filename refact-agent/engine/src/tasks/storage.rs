@@ -123,36 +123,37 @@ pub async fn save_board(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str, board: 
     fs::rename(&tmp_path, &board_path).await.map_err(|e| e.to_string())
 }
 
-pub async fn update_board_atomic<F>(
+pub async fn update_board_atomic<F, T>(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,
     mut updater: F,
-) -> Result<TaskBoard, String>
+) -> Result<(TaskBoard, T), String>
 where
-    F: FnMut(&mut TaskBoard) -> Result<(), String>,
+    F: FnMut(&mut TaskBoard) -> Result<T, String>,
+    T: Default,
 {
     let lock = get_board_lock(task_id).await;
     let _guard = lock.lock().await;
 
     let mut board = load_board(gcx.clone(), task_id).await?;
-    updater(&mut board)?;
+    let result = updater(&mut board)?;
     board.rev += 1;
     save_board(gcx, task_id, &board).await?;
-    Ok(board)
+    Ok((board, result))
 }
 
-pub async fn load_orchestrator_instructions(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str) -> Result<String, String> {
+pub async fn load_planner_instructions(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str) -> Result<String, String> {
     let task_dir = get_task_dir(gcx, task_id).await?;
-    let path = task_dir.join("orchestrator_instructions.md");
+    let path = task_dir.join("planner_instructions.md");
     if !path.exists() {
         return Ok(String::new());
     }
     fs::read_to_string(&path).await.map_err(|e| e.to_string())
 }
 
-pub async fn save_orchestrator_instructions(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str, content: &str) -> Result<(), String> {
+pub async fn save_planner_instructions(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str, content: &str) -> Result<(), String> {
     let task_dir = get_task_dir(gcx, task_id).await?;
-    let path = task_dir.join("orchestrator_instructions.md");
+    let path = task_dir.join("planner_instructions.md");
     fs::write(&path, content).await.map_err(|e| e.to_string())
 }
 
@@ -163,7 +164,6 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
 
     fs::create_dir_all(&task_dir).await.map_err(|e| e.to_string())?;
     fs::create_dir_all(task_dir.join("trajectories").join("planner")).await.map_err(|e| e.to_string())?;
-    fs::create_dir_all(task_dir.join("trajectories").join("orchestrator")).await.map_err(|e| e.to_string())?;
     fs::create_dir_all(task_dir.join("trajectories").join("agents")).await.map_err(|e| e.to_string())?;
 
     let now = Utc::now().to_rfc3339();
@@ -178,11 +178,17 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
         cards_done: 0,
         cards_failed: 0,
         agents_active: 0,
+        base_branch: None,
+        base_commit: None,
+        default_agent_model: None,
     };
 
     save_task_meta(gcx.clone(), &task_id, &meta).await?;
     save_board(gcx.clone(), &task_id, &TaskBoard::default()).await?;
-    save_orchestrator_instructions(gcx, &task_id, "").await?;
+    save_planner_instructions(gcx.clone(), &task_id, "").await?;
+
+    let planner_chat_id = format!("planner-{}-1", task_id);
+    crate::chat::trajectories::save_initial_planner_trajectory(gcx, &task_id, &planner_chat_id).await?;
 
     Ok(meta)
 }
@@ -217,63 +223,6 @@ pub fn get_task_trajectory_dir(task_dir: &PathBuf, role: &str, agent_id: Option<
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct TaskTrajectoryMeta {
-    pub task_id: String,
-    pub role: String,
-    pub agent_id: Option<String>,
-    pub card_id: Option<String>,
-}
-
-pub async fn save_task_trajectory(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    task_id: &str,
-    role: &str,
-    agent_id: Option<&str>,
-    card_id: Option<&str>,
-    chat_id: &str,
-    messages: &[crate::call_validation::ChatMessage],
-    title: &str,
-    model: &str,
-) -> Result<PathBuf, String> {
-    let task_dir = get_task_dir(gcx.clone(), task_id).await?;
-    let traj_dir = get_task_trajectory_dir(&task_dir, role, agent_id);
-    fs::create_dir_all(&traj_dir).await.map_err(|e| e.to_string())?;
-
-    let file_path = traj_dir.join(format!("{}.json", chat_id));
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let messages_json: Vec<serde_json::Value> = messages
-        .iter()
-        .filter_map(|m| serde_json::to_value(m).ok())
-        .collect();
-
-    let trajectory = serde_json::json!({
-        "id": chat_id,
-        "title": title,
-        "model": model,
-        "mode": "AGENT",
-        "tool_use": "agent",
-        "messages": messages_json,
-        "created_at": now,
-        "updated_at": now,
-        "task_meta": TaskTrajectoryMeta {
-            task_id: task_id.to_string(),
-            role: role.to_string(),
-            agent_id: agent_id.map(|s| s.to_string()),
-            card_id: card_id.map(|s| s.to_string()),
-        },
-    });
-
-    let tmp_path = file_path.with_extension("json.tmp");
-    let json_str = serde_json::to_string_pretty(&trajectory)
-        .map_err(|e| format!("Failed to serialize: {}", e))?;
-    fs::write(&tmp_path, &json_str).await.map_err(|e| e.to_string())?;
-    fs::rename(&tmp_path, &file_path).await.map_err(|e| e.to_string())?;
-
-    Ok(file_path)
-}
-
 pub async fn list_task_trajectories(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,
@@ -298,17 +247,6 @@ pub async fn list_task_trajectories(
         }
     }
     Ok(ids)
-}
-
-pub async fn get_orchestrator_chat_id(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    task_id: &str,
-) -> Result<String, String> {
-    let existing = list_task_trajectories(gcx.clone(), task_id, "orchestrator", None).await?;
-    if let Some(id) = existing.first() {
-        return Ok(id.clone());
-    }
-    Ok(format!("orch-{}", task_id))
 }
 
 pub fn infer_task_id_from_chat_id(chat_id: &str) -> Option<String> {

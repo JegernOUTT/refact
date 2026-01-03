@@ -310,6 +310,7 @@ async fn extract_memos_and_meta(
             false,
             model_id.clone(),
             None,
+            None,
         )
         .await,
     ));

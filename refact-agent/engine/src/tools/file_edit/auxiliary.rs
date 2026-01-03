@@ -17,10 +17,42 @@ use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 
+fn resolve_path_with_workdir(path: &PathBuf, code_workdir: &Option<PathBuf>) -> PathBuf {
+    let Some(workdir) = code_workdir else {
+        return path.clone();
+    };
+
+    if !path.is_absolute() {
+        return workdir.join(path);
+    }
+
+    if path.starts_with(&workdir) {
+        return path.clone();
+    }
+
+    if let Some(workspace_root) = workdir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+    {
+        if path.starts_with(&workspace_root) {
+            if let Ok(relative) = path.strip_prefix(&workspace_root) {
+                return workdir.join(relative);
+            }
+        }
+    }
+
+    warn!("Cannot properly resolve {:?} to worktree, using filename only", path);
+    workdir.join(path.file_name().unwrap_or_default())
+}
+
 pub async fn parse_path_for_update(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     privacy_settings: Arc<PrivacySettings>,
+    code_workdir: &Option<PathBuf>,
 ) -> Result<PathBuf, String> {
     let s = parse_string_arg(args, "path", "Provide absolute path to file")?;
     let raw_path = preprocess_path_for_normalization(s.trim().to_string());
@@ -35,31 +67,34 @@ pub async fn parse_path_for_update(
     .await
     .map(|f| canonicalize_normalized_path(PathBuf::from(f)))?;
 
+    let resolved_path = resolve_path_with_workdir(&path, code_workdir);
+
     if check_file_privacy(
         privacy_settings,
-        &path,
+        &resolved_path,
         &FilePrivacyLevel::AllowToSendAnywhere,
     )
     .is_err()
     {
         return Err(format!(
             "⚠️ Cannot update {:?} (blocked by privacy). 💡 Choose file in allowed directory",
-            path
+            resolved_path
         ));
     }
-    if !path.exists() {
+    if !resolved_path.exists() {
         return Err(format!(
             "⚠️ File {:?} not found. 💡 Use create_textdoc() for new files",
-            path
+            resolved_path
         ));
     }
-    Ok(path)
+    Ok(resolved_path)
 }
 
 pub async fn parse_path_for_create(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     privacy_settings: Arc<PrivacySettings>,
+    code_workdir: &Option<PathBuf>,
 ) -> Result<PathBuf, String> {
     let s = parse_string_arg(args, "path", "Provide absolute path for new file")?;
     let raw_path = PathBuf::from(preprocess_path_for_normalization(s.trim().to_string()));
@@ -100,19 +135,21 @@ pub async fn parse_path_for_create(
         path
     };
 
+    let resolved_path = resolve_path_with_workdir(&path, code_workdir);
+
     if check_file_privacy(
         privacy_settings,
-        &path,
+        &resolved_path,
         &FilePrivacyLevel::AllowToSendAnywhere,
     )
     .is_err()
     {
         return Err(format!(
             "⚠️ Cannot create {:?} (blocked by privacy). 💡 Choose path in allowed directory",
-            path
+            resolved_path
         ));
     }
-    Ok(path)
+    Ok(resolved_path)
 }
 
 pub fn parse_string_arg(

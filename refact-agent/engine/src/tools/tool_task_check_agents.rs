@@ -155,6 +155,21 @@ impl Tool for ToolTaskCheckAgents {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let ccx_lock = ccx.lock().await;
+        
+        let is_planner = ccx_lock.task_meta.as_ref()
+            .map(|m| m.role == "planner")
+            .unwrap_or(false);
+
+        if !is_planner {
+            return Err(
+                "task_check_agents can only be called by the task planner. \
+                 Switch to the planner chat to check agent status.".to_string()
+            );
+        }
+        
+        drop(ccx_lock);
+        
         let task_id = get_task_id(&ccx, args).await?;
         let gcx = ccx.lock().await.global_context.clone();
 

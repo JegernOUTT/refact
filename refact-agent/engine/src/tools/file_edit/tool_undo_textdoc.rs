@@ -31,9 +31,10 @@ struct Args {
 async fn parse_args(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
+    code_workdir: &Option<PathBuf>,
 ) -> Result<Args, String> {
     let privacy = load_privacy_if_needed(gcx.clone()).await;
-    let path = parse_path_for_update(gcx, args, privacy).await?;
+    let path = parse_path_for_update(gcx, args, privacy, code_workdir).await?;
     let steps = match args.get("steps") {
         Some(Value::Number(n)) => n.as_u64().unwrap_or(1) as usize,
         Some(Value::String(s)) => s.parse().unwrap_or(1),
@@ -48,8 +49,9 @@ async fn parse_args(
 pub async fn tool_undo_text_doc_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
+    code_workdir: &Option<PathBuf>,
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
-    let a = parse_args(gcx.clone(), args).await?;
+    let a = parse_args(gcx.clone(), args, code_workdir).await?;
 
     let history = get_undo_history();
     let entries: Vec<UndoEntry> = {
@@ -129,8 +131,11 @@ impl Tool for ToolUndoTextDoc {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let (_, _, chunks, _summary) = tool_undo_text_doc_exec(gcx, args).await?;
+        let (gcx, code_workdir) = {
+            let ccx_locked = ccx.lock().await;
+            (ccx_locked.global_context.clone(), ccx_locked.code_workdir.clone())
+        };
+        let (_, _, chunks, _) = tool_undo_text_doc_exec(gcx, args, &code_workdir).await?;
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
@@ -148,8 +153,11 @@ impl Tool for ToolUndoTextDoc {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let can_exec = parse_args(gcx, args).await.is_ok();
+        let (gcx, code_workdir) = {
+            let ccx_locked = ccx.lock().await;
+            (ccx_locked.global_context.clone(), ccx_locked.code_workdir.clone())
+        };
+        let can_exec = parse_args(gcx, args, &code_workdir).await.is_ok();
         if !can_exec {
             return Ok(MatchConfirmDeny {
                 result: MatchConfirmDenyResult::PASS,

@@ -1,6 +1,6 @@
 use at_tools::handle_v1_post_tools;
 use axum::Router;
-use axum::routing::{get, post, put, delete};
+use axum::routing::{get, post, put, patch, delete};
 use tower_http::cors::CorsLayer;
 
 use crate::http::utils::telemetry_middleware;
@@ -73,9 +73,9 @@ use crate::http::routers::v1::voice::{
 };
 use crate::http::routers::v1::tasks::{
     handle_list_tasks, handle_create_task, handle_get_task, handle_delete_task,
-    handle_get_board, handle_patch_board, handle_get_orchestrator_instructions,
-    handle_set_orchestrator_instructions, handle_get_ready_cards, handle_update_task_status,
-    handle_list_task_trajectories,
+    handle_get_board, handle_patch_board, handle_get_planner_instructions,
+    handle_set_planner_instructions, handle_get_ready_cards, handle_update_task_status,
+    handle_update_task_meta, handle_list_task_trajectories,
 };
 
 mod ast;
@@ -239,12 +239,13 @@ pub fn make_v1_router() -> Router {
         .route("/tasks", post(handle_create_task))
         .route("/tasks/:task_id", get(handle_get_task))
         .route("/tasks/:task_id", delete(handle_delete_task))
-        .route("/tasks/:task_id/status", post(handle_update_task_status))
+         .route("/tasks/:task_id/status", post(handle_update_task_status))
+         .route("/tasks/:task_id/meta", patch(handle_update_task_meta))
         .route("/tasks/:task_id/board", get(handle_get_board))
         .route("/tasks/:task_id/board", post(handle_patch_board))
         .route("/tasks/:task_id/board/ready", get(handle_get_ready_cards))
-        .route("/tasks/:task_id/orchestrator-instructions", get(handle_get_orchestrator_instructions))
-        .route("/tasks/:task_id/orchestrator-instructions", put(handle_set_orchestrator_instructions))
+        .route("/tasks/:task_id/planner-instructions", get(handle_get_planner_instructions))
+        .route("/tasks/:task_id/planner-instructions", put(handle_set_planner_instructions))
         .route("/tasks/:task_id/trajectories/:role", get(handle_list_task_trajectories));
 
     builder

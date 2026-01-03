@@ -9,21 +9,23 @@ import {
   useGetTaskQuery,
   useGetBoardQuery,
   useListTaskTrajectoriesQuery,
+  useUpdateTaskMetaMutation,
   BoardCard,
 } from "../../services/refact/tasks";
+import { ModelSelector } from "../../components/Chat/ModelSelector";
 import styles from "./Tasks.module.css";
 import { Chat } from "../Chat";
 import { selectConfig } from "../Config/configSlice";
 import { createChatWithId, switchToThread } from "../Chat/Thread";
-import { openTask, addPlannerChat, removePlannerChat, selectOpenTasksFromRoot } from "./tasksSlice";
+import { openTask, addPlannerChat, removePlannerChat, selectOpenTasksFromRoot, setTaskActiveChat, selectTaskActiveChat } from "./tasksSlice";
 import { selectThreadById } from "../Chat/Thread";
 import { updateChatParams } from "../../services/refact/chatCommands";
 import { InternalLinkProvider, parseRefactLink } from "../../contexts/InternalLinkContext";
 
 type ActiveChat =
-  | { type: "orchestrator" }
   | { type: "planner"; chatId: string }
-  | { type: "agent"; cardId: string; chatId: string };
+  | { type: "agent"; cardId: string; chatId: string }
+  | null;
 
 interface PlannerPanelProps {
   taskId: string;
@@ -96,7 +98,7 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
                 key={chatId}
                 chatId={chatId}
                 index={idx}
-                isActive={activeChat.type === "planner" && activeChat.chatId === chatId}
+                isActive={activeChat?.type === "planner" && activeChat.chatId === chatId}
                 onSelect={() => onSelectPlanner(chatId)}
                 onRemove={() => onRemovePlanner(chatId)}
               />
@@ -109,13 +111,14 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
 };
 
 interface AgentsPanelProps {
-  taskId: string;
   cards: BoardCard[];
   activeChat: ActiveChat;
   onSelectAgent: (cardId: string, chatId: string) => void;
+  defaultAgentModel?: string;
+  onModelChange?: (model: string) => void;
 }
 
-const AgentsPanel: React.FC<AgentsPanelProps> = ({ cards, activeChat, onSelectAgent }) => {
+const AgentsPanel: React.FC<AgentsPanelProps> = ({ cards, activeChat, onSelectAgent, defaultAgentModel, onModelChange }) => {
   const activeAgents = cards.filter(c => c.column === "doing" && c.agent_chat_id);
   const completedAgents = cards.filter(c => c.column === "done" && c.agent_chat_id);
   const failedAgents = cards.filter(c => c.column === "failed" && c.agent_chat_id);
@@ -124,7 +127,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({ cards, activeChat, onSelectAg
   const done = completedAgents.length;
 
   const renderAgentItem = (card: BoardCard, icon: string, color: "blue" | "green" | "red") => {
-    const isActive = activeChat.type === "agent" && activeChat.cardId === card.id;
+    const isActive = activeChat?.type === "agent" && activeChat.cardId === card.id;
     return (
       <Box
         key={card.id}
@@ -158,6 +161,14 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({ cards, activeChat, onSelectAg
           </Flex>
         </ScrollArea>
       </Box>
+      <Flex p="2" align="center" justify="between" style={{ borderTop: "1px solid var(--gray-4)" }}>
+        <Text size="1" color="gray">Agent model</Text>
+        <ModelSelector
+          value={defaultAgentModel}
+          onValueChange={onModelChange}
+          showLabel={false}
+        />
+      </Flex>
     </Box>
   );
 };
@@ -252,15 +263,16 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     pollingInterval: 2000,
   });
   const { data: savedPlanners } = useListTaskTrajectoriesQuery({ taskId, role: "planner" });
+  const [updateTaskMeta] = useUpdateTaskMetaMutation();
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const currentTaskUI = openTasks.find((t) => t.id === taskId);
   const plannerChats = currentTaskUI?.plannerChats ?? [];
+  const activeChat = useAppSelector((state) => selectTaskActiveChat(state, taskId));
   const [selectedCard, setSelectedCard] = useState<BoardCard | null>(null);
-  const [activeChat, setActiveChat] = useState<ActiveChat>({ type: "orchestrator" });
+  const [notification, setNotification] = useState<string | null>(null);
   const plannerCountRef = React.useRef(plannerChats.length);
   const plannersRestoredRef = React.useRef(false);
-
-  const orchestratorChatId = `orch-${taskId}`;
+  const prevTaskStatusRef = React.useRef<string | undefined>(undefined);
 
   // Open task tab when task data is available
   useEffect(() => {
@@ -268,23 +280,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       dispatch(openTask({ id: taskId, name: task.name }));
     }
   }, [dispatch, taskId, task]);
-
-  // Initialize orchestrator chat (separate effect to avoid re-running on task change)
-  useEffect(() => {
-    dispatch(createChatWithId({
-      id: orchestratorChatId,
-      title: `Orchestrator`,
-      isTaskChat: true,
-      mode: "TASK_ORCHESTRATOR",
-      taskMeta: { task_id: taskId, role: "orchestrator" },
-    }));
-    dispatch(switchToThread({ id: orchestratorChatId, openTab: false }));
-    void updateChatParams(
-      orchestratorChatId,
-      { mode: "TASK_ORCHESTRATOR", task_meta: { task_id: taskId, role: "orchestrator" } },
-      config.lspPort,
-    );
-  }, [dispatch, orchestratorChatId, taskId, config.lspPort]);
 
   useEffect(() => {
     if (!savedPlanners || plannersRestoredRef.current) return;
@@ -311,21 +306,59 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       }
     }
 
-    dispatch(switchToThread({ id: orchestratorChatId, openTab: false }));
-  }, [dispatch, taskId, savedPlanners, plannerChats, orchestratorChatId]);
+    // Auto-select first planner if none active
+    if (savedPlanners.length > 0 && !activeChat) {
+      const firstPlanner = savedPlanners[0];
+      dispatch(setTaskActiveChat({ taskId, activeChat: { type: "planner", chatId: firstPlanner } }));
+    }
+  }, [dispatch, taskId, savedPlanners, plannerChats, activeChat]);
+
+  // Fallback logic: if active planner chat was deleted, switch to first available planner
+  useEffect(() => {
+    if (activeChat?.type === "planner" && !plannerChats.includes(activeChat.chatId)) {
+      if (plannerChats.length > 0) {
+        dispatch(setTaskActiveChat({ taskId, activeChat: { type: "planner", chatId: plannerChats[0] } }));
+      } else {
+        dispatch(setTaskActiveChat({ taskId, activeChat: null }));
+      }
+    }
+  }, [activeChat, plannerChats, dispatch, taskId]);
+
+  // Fallback logic: if active agent card was deleted, switch to first planner
+  useEffect(() => {
+    if (activeChat?.type === "agent" && board) {
+      const cardExists = board.cards.some(c => c.id === activeChat.cardId);
+      if (!cardExists) {
+        if (plannerChats.length > 0) {
+          dispatch(setTaskActiveChat({ taskId, activeChat: { type: "planner", chatId: plannerChats[0] } }));
+        } else {
+          dispatch(setTaskActiveChat({ taskId, activeChat: null }));
+        }
+      }
+    }
+  }, [activeChat, board, dispatch, taskId, plannerChats]);
+
+  // Show notification when task transitions from planning to active
+  useEffect(() => {
+    if (!task) return;
+
+    const prevStatus = prevTaskStatusRef.current;
+    const currentStatus = task.status;
+
+    prevTaskStatusRef.current = currentStatus;
+
+    if (prevStatus === "planning" && currentStatus === "active") {
+      setNotification("Planning complete! You can now spawn agents.");
+      setTimeout(() => setNotification(null), 3000);
+    }
+  }, [task?.status]);
 
   // Switch chat when activeChat changes
   useEffect(() => {
-    let chatId: string;
-    if (activeChat.type === "orchestrator") {
-      chatId = orchestratorChatId;
-    } else if (activeChat.type === "planner") {
-      chatId = activeChat.chatId;
-    } else {
-      chatId = activeChat.chatId;
-    }
+    if (!activeChat) return;
+    const chatId = activeChat.chatId;
     dispatch(switchToThread({ id: chatId, openTab: false }));
-  }, [dispatch, activeChat, orchestratorChatId]);
+  }, [dispatch, activeChat]);
 
   const handleBack = useCallback(() => {
     dispatch(pop());
@@ -346,7 +379,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       taskMeta: { task_id: taskId, role: "planner" },
     }));
     dispatch(addPlannerChat({ taskId, chatId: newChatId }));
-    setActiveChat({ type: "planner", chatId: newChatId });
+    dispatch(setTaskActiveChat({ taskId, activeChat: { type: "planner", chatId: newChatId } }));
     void updateChatParams(
       newChatId,
       { mode: "TASK_PLANNER", task_meta: { task_id: taskId, role: "planner" } },
@@ -356,14 +389,20 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
   const handleRemovePlanner = useCallback((chatId: string) => {
     dispatch(removePlannerChat({ taskId, chatId }));
-    if (activeChat.type === "planner" && activeChat.chatId === chatId) {
-      setActiveChat({ type: "orchestrator" });
+    if (activeChat?.type === "planner" && activeChat.chatId === chatId) {
+      // Switch to another planner or null
+      const remaining = plannerChats.filter(c => c !== chatId);
+      if (remaining.length > 0) {
+        dispatch(setTaskActiveChat({ taskId, activeChat: { type: "planner", chatId: remaining[0] } }));
+      } else {
+        dispatch(setTaskActiveChat({ taskId, activeChat: null }));
+      }
     }
-  }, [dispatch, taskId, activeChat]);
+  }, [dispatch, taskId, activeChat, plannerChats]);
 
   const handleSelectPlanner = useCallback((chatId: string) => {
-    setActiveChat({ type: "planner", chatId });
-  }, []);
+    dispatch(setTaskActiveChat({ taskId, activeChat: { type: "planner", chatId } }));
+  }, [dispatch, taskId]);
 
   const handleSelectAgent = useCallback((cardId: string, chatId: string) => {
     const card = board?.cards.find(c => c.id === cardId);
@@ -374,15 +413,11 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       title: `Agent: ${cardTitle}`,
       isTaskChat: true,
       mode: "TASK_AGENT",
-      taskMeta: { task_id: taskId, role: "agents" },
+       taskMeta: { task_id: taskId, role: "agents", card_id: cardId },
     }));
 
-    setActiveChat({ type: "agent", cardId, chatId });
+    dispatch(setTaskActiveChat({ taskId, activeChat: { type: "agent", cardId, chatId } }));
   }, [board, taskId, dispatch]);
-
-  const handleSwitchToOrchestrator = useCallback(() => {
-    setActiveChat({ type: "orchestrator" });
-  }, []);
 
   const handleInternalLink = useCallback((url: string): boolean => {
     const parsed = parseRefactLink(url);
@@ -410,15 +445,19 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         title: `Agent: ${cardTitle}`,
         isTaskChat: true,
         mode: "TASK_AGENT",
-        taskMeta: { task_id: taskId, role: "agents" },
+         taskMeta: { task_id: taskId, role: "agents", card_id: cardId },
       }));
 
-      setActiveChat({ type: "agent", cardId, chatId });
+      dispatch(setTaskActiveChat({ taskId, activeChat: { type: "agent", cardId, chatId } }));
       return true;
     }
 
     return false;
   }, [board, taskId, dispatch]);
+
+  const handleModelChange = useCallback((model: string) => {
+    void updateTaskMeta({ taskId, defaultAgentModel: model });
+  }, [taskId, updateTaskMeta]);
 
   if (taskLoading || boardLoading || !task || !board) {
     return (
@@ -428,11 +467,15 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     );
   }
 
-  const chatLabel = activeChat.type === "orchestrator"
-    ? "Orchestrator"
+  const chatLabel = !activeChat
+    ? "No chat selected"
     : activeChat.type === "planner"
       ? `Planner`
       : `Agent: ${board.cards.find(c => c.id === activeChat.cardId)?.title ?? ""}`;
+
+  const branchDisplay = activeChat?.type === "agent"
+    ? board.cards.find(c => c.id === activeChat.cardId)?.agent_branch ?? task.base_branch ?? "(unknown)"
+    : task.base_branch ?? "(unknown)";
 
   return (
     <Box className={styles.taskWorkspace}>
@@ -445,6 +488,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           <Badge color={task.status === "active" ? "blue" : task.status === "completed" ? "green" : "gray"}>
             {task.status}
           </Badge>
+          <Badge color="gray">🌿 {branchDisplay}</Badge>
         </Flex>
         <Text size="1" color="gray">
           {task.cards_done}/{task.cards_total} done
@@ -465,38 +509,59 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           onSelectPlanner={handleSelectPlanner}
           onRemovePlanner={handleRemovePlanner}
         />
-        <AgentsPanel
-          taskId={taskId}
-          cards={board.cards}
-          activeChat={activeChat}
-          onSelectAgent={handleSelectAgent}
-        />
+         <AgentsPanel
+           cards={board.cards}
+           activeChat={activeChat}
+           onSelectAgent={handleSelectAgent}
+           defaultAgentModel={task.default_agent_model}
+           onModelChange={handleModelChange}
+         />
       </Flex>
 
       <Box className={styles.chatSection}>
         <Flex className={styles.chatHeader} align="center" gap="2" px="3" py="2">
           <PersonIcon />
           <Text size="2" weight="medium">{chatLabel}</Text>
-          {activeChat.type !== "orchestrator" && (
-            <Button size="1" variant="soft" ml="auto" onClick={handleSwitchToOrchestrator}>
-              ← Back to Orchestrator
-            </Button>
-          )}
         </Flex>
         <Box className={styles.chatContent}>
-          <InternalLinkProvider onInternalLink={handleInternalLink}>
-            <Chat
-              host={config.host}
-              tabbed={false}
-              backFromChat={handleBack}
-            />
-          </InternalLinkProvider>
+          {activeChat ? (
+            <InternalLinkProvider onInternalLink={handleInternalLink}>
+              <Chat
+                host={config.host}
+                tabbed={false}
+                backFromChat={handleBack}
+              />
+            </InternalLinkProvider>
+          ) : (
+            <Flex align="center" justify="center" style={{ height: "100%" }}>
+              <Text color="gray">Create a planner chat to get started</Text>
+            </Flex>
+          )}
         </Box>
       </Box>
 
-      {selectedCard && (
-        <CardDetail card={selectedCard} onClose={() => setSelectedCard(null)} />
-      )}
-    </Box>
-  );
-};
+       {selectedCard && (
+         <CardDetail card={selectedCard} onClose={() => setSelectedCard(null)} />
+       )}
+
+       {notification && (
+         <Box
+           style={{
+             position: "fixed",
+             bottom: "var(--space-4)",
+             left: "50%",
+             transform: "translateX(-50%)",
+             background: "var(--accent-9)",
+             color: "white",
+             padding: "var(--space-3) var(--space-4)",
+             borderRadius: "var(--radius-3)",
+             zIndex: 50,
+             boxShadow: "0 4px 12px rgba(0, 0, 0, 0.15)",
+           }}
+         >
+            <Text size="2">{notification}</Text>
+          </Box>
+        )}
+      </Box>
+    );
+  };

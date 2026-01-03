@@ -10,6 +10,7 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::tasks::storage;
 use crate::tasks::types::StatusUpdate;
+use crate::chat::get_or_create_session_with_trajectory;
 
 async fn get_task_id(ccx: &Arc<AMutex<AtCommandsContext>>) -> Result<String, String> {
     let ccx_lock = ccx.lock().await;
@@ -45,7 +46,7 @@ impl Tool for ToolTaskAgentFinish {
             },
             agentic: false,
             experimental: false,
-            description: "Mark the current card as completed or failed. Task agents MUST call this exactly once when finished. This updates the task board and allows the orchestrator to proceed.".to_string(),
+            description: "Mark the current card as completed or failed. Task agents MUST call this exactly once when finished. This updates the task board and notifies the planner.".to_string(),
             parameters: vec![
                 ToolParam {
                     name: "success".to_string(),
@@ -84,11 +85,14 @@ impl Tool for ToolTaskAgentFinish {
 
         let gcx = ccx.lock().await.global_context.clone();
 
-        let card_title = {
-            let card_id_owned = card_id.clone();
-            let report_clone = report.clone();
+        let card_id_owned = card_id.clone();
+        let report_clone = report.clone();
+        let success_clone = success;
 
-            let board = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+        let (_board, (card_title, agent_branch, all_finished)) = storage::update_board_atomic(
+            gcx.clone(),
+            &task_id,
+            move |board| {
                 let card = board.get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found in task", card_id_owned))?;
 
@@ -99,7 +103,10 @@ impl Tool for ToolTaskAgentFinish {
                     ));
                 }
 
-                if success {
+                let card_title = card.title.clone();
+                let agent_branch = card.agent_branch.clone();
+
+                if success_clone {
                     card.final_report = Some(report_clone.clone());
                     card.column = "done".to_string();
                     card.completed_at = Some(Utc::now().to_rfc3339());
@@ -116,21 +123,26 @@ impl Tool for ToolTaskAgentFinish {
                         message: format!("Agent failed: {}", report_clone),
                     });
                 }
-                Ok(())
-            }).await?;
 
-            storage::update_task_stats(gcx.clone(), &task_id).await?;
-            board.get_card(&card_id).map(|c| c.title.clone()).unwrap_or_default()
-        };
+                let agents_active = board.cards.iter()
+                    .filter(|c| c.column == "doing" && c.assignee.is_some())
+                    .count();
+                let all_finished = agents_active == 0;
+
+                Ok((card_title, agent_branch, all_finished))
+            },
+        ).await?;
+
+        storage::update_task_stats(gcx.clone(), &task_id).await?;
 
         let result_message = if success {
             format!(
-                "✅ **Card Completed: {}**\n\n**Report:**\n{}\n\nThe orchestrator will be notified of completion.",
+                "✅ **Card Completed: {}**\n\n**Report:**\n{}\n\nThe planner will be notified of completion.",
                 card_title, report
             )
         } else {
             format!(
-                "❌ **Card Failed: {}**\n\n**Reason:**\n{}\n\nThe orchestrator will be notified of the failure.",
+                "❌ **Card Failed: {}**\n\n**Reason:**\n{}\n\nThe planner will be notified of the failure.",
                 card_title, report
             )
         };
@@ -142,6 +154,37 @@ impl Tool for ToolTaskAgentFinish {
             if success { "success" } else { "failed" },
             report_preview
         );
+
+        let status_str = if success { "success" } else { "failed" };
+        let branch_str = agent_branch.as_deref().unwrap_or("(no branch)");
+
+        let mut planner_message = format!(
+            "Agent finished card {}:\n**Card:** {}\n**Status:** {}\n**Branch:** {}\n**Report:** {}",
+            card_id, card_title, status_str, branch_str, report_preview
+        );
+
+        if all_finished {
+            planner_message.push_str(
+                "\n\n✅ **All agents have completed.** Run `task_check_agents` or `task_board_get` to review results."
+            );
+        }
+
+        let sessions = {
+            let gcx_locked = gcx.read().await;
+            gcx_locked.chat_sessions.clone()
+        };
+
+        let planner_chat_id = storage::get_planner_chat_id(gcx.clone(), &task_id).await?;
+        let planner_session = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &planner_chat_id).await;
+
+        {
+            let mut session = planner_session.lock().await;
+            session.add_message(ChatMessage {
+                role: "system".to_string(),
+                content: ChatContent::SimpleText(planner_message),
+                ..Default::default()
+            });
+        }
 
         Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),

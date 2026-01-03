@@ -1,10 +1,16 @@
 import { createSlice, PayloadAction } from "@reduxjs/toolkit";
 import { RootState } from "../../app/store";
 
+type ActiveChat =
+  | { type: "planner"; chatId: string }
+  | { type: "agent"; cardId: string; chatId: string }
+  | null; // null means no active chat yet
+
 export interface OpenTask {
   id: string;
   name: string;
   plannerChats: string[];
+  activeChat: ActiveChat;
 }
 
 export interface TasksUIState {
@@ -29,7 +35,12 @@ export const tasksSlice = createSlice({
           existing.name = sanitizedName;
         }
       } else {
-        state.openTasks.push({ id: action.payload.id, name: sanitizedName, plannerChats: [] });
+        state.openTasks.push({
+          id: action.payload.id,
+          name: sanitizedName,
+          plannerChats: [],
+          activeChat: null,
+        });
       }
     },
     closeTask: (state, action: PayloadAction<string>) => {
@@ -53,15 +64,27 @@ export const tasksSlice = createSlice({
         task.plannerChats = task.plannerChats.filter((c) => c !== action.payload.chatId);
       }
     },
+    setTaskActiveChat: (state, action: PayloadAction<{ taskId: string; activeChat: ActiveChat }>) => {
+      const task = state.openTasks.find((t) => t.id === action.payload.taskId);
+      if (task) {
+        task.activeChat = action.payload.activeChat;
+      }
+    },
   },
   selectors: {
     selectOpenTasks: (state) => state.openTasks,
   },
 });
 
-export const { openTask, closeTask, updateTaskName, addPlannerChat, removePlannerChat } = tasksSlice.actions;
+export const { openTask, closeTask, updateTaskName, addPlannerChat, removePlannerChat, setTaskActiveChat } =
+  tasksSlice.actions;
 export const { selectOpenTasks } = tasksSlice.selectors;
 
 // Selector that works with RootState
 export const selectOpenTasksFromRoot = (state: RootState) =>
   state.tasksUI.openTasks;
+
+export const selectTaskActiveChat = (state: RootState, taskId: string): ActiveChat => {
+  const task = state.tasksUI.openTasks.find((t) => t.id === taskId);
+  return task?.activeChat ?? null;
+};

@@ -158,6 +158,9 @@ pub async fn handle_patch_board(
                 created_at: now.clone(),
                 started_at: None,
                 completed_at: None,
+                agent_branch: None,
+                agent_worktree: None,
+                agent_worktree_name: None,
             });
         }
         BoardPatch::UpdateCard { id, title, priority, depends_on, instructions } => {
@@ -219,26 +222,26 @@ pub async fn handle_patch_board(
     Ok(Json(board))
 }
 
-pub async fn handle_get_orchestrator_instructions(
+pub async fn handle_get_planner_instructions(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let content = storage::load_orchestrator_instructions(gcx, &task_id).await
+    let content = storage::load_planner_instructions(gcx, &task_id).await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
     Ok(Json(json!({"content": content})))
 }
 
 #[derive(Deserialize)]
-pub struct SetOrchestratorInstructionsRequest {
+pub struct SetPlannerInstructionsRequest {
     pub content: String,
 }
 
-pub async fn handle_set_orchestrator_instructions(
+pub async fn handle_set_planner_instructions(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     Path(task_id): Path<String>,
-    Json(req): Json<SetOrchestratorInstructionsRequest>,
+    Json(req): Json<SetPlannerInstructionsRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    storage::save_orchestrator_instructions(gcx, &task_id, &req.content).await
+    storage::save_planner_instructions(gcx, &task_id, &req.content).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({"saved": true})))
 }
@@ -270,6 +273,38 @@ pub async fn handle_update_task_status(
 #[derive(Deserialize)]
 pub struct UpdateTaskStatusRequest {
     pub status: TaskStatus,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateTaskMetaRequest {
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    #[serde(default)]
+    pub default_agent_model: Option<String>,
+}
+
+pub async fn handle_update_task_meta(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Path(task_id): Path<String>,
+    Json(req): Json<UpdateTaskMetaRequest>,
+) -> Result<Json<TaskMeta>, (StatusCode, String)> {
+    let mut meta = storage::load_task_meta(gcx.clone(), &task_id).await
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    if let Some(branch) = req.base_branch {
+        meta.base_branch = Some(branch);
+    }
+    if let Some(commit) = req.base_commit {
+        meta.base_commit = Some(commit);
+    }
+    if let Some(model) = req.default_agent_model {
+        meta.default_agent_model = Some(model);
+    }
+    meta.updated_at = Utc::now().to_rfc3339();
+    storage::save_task_meta(gcx, &task_id, &meta).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(meta))
 }
 
 pub async fn handle_list_task_trajectories(

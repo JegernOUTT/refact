@@ -81,7 +81,7 @@ impl Tool for ToolTaskMarkCardDone {
             let card_id_owned = card_id.to_string();
             let report_owned = report.to_string();
 
-            let board = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            let (board, _) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                 let card = board.get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found", card_id_owned))?;
 
@@ -94,7 +94,7 @@ impl Tool for ToolTaskMarkCardDone {
                 card.completed_at = Some(Utc::now().to_rfc3339());
                 card.status_updates.push(StatusUpdate {
                     timestamp: Utc::now().to_rfc3339(),
-                    message: "Manually marked as done by orchestrator".to_string(),
+                    message: "Manually marked as done by planner".to_string(),
                 });
                 Ok(())
             }).await?;
@@ -166,7 +166,7 @@ impl Tool for ToolTaskMarkCardFailed {
             let card_id_owned = card_id.to_string();
             let reason_owned = reason.to_string();
 
-            let board = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            let (board, _) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                 let card = board.get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found", card_id_owned))?;
 

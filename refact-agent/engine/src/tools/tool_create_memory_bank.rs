@@ -425,7 +425,7 @@ impl Tool for ToolCreateMemoryBank {
                 ccx_lock.chat_id.clone(),
                 ccx_lock.should_execute_remotely,
                 ccx_lock.current_model.clone(),
-                ccx_lock.task_meta.clone(),
+                ccx_lock.task_meta.clone(), None,
             )
             .await;
             ctx.subchat_tx = ccx_lock.subchat_tx.clone();

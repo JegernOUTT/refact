@@ -33,7 +33,7 @@ pub struct ToolTaskBoardUpdateCard;
 pub struct ToolTaskBoardMoveCard;
 pub struct ToolTaskBoardDeleteCard;
 pub struct ToolTaskReadyCards;
-pub struct ToolTaskSetOrchestratorInstructions;
+pub struct ToolTaskSetPlannerInstructions;
 
 impl ToolTaskBoardGet { pub fn new() -> Self { Self } }
 
@@ -91,6 +91,19 @@ impl Tool for ToolTaskBoardCreateCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let ccx_lock = ccx.lock().await;
+        
+        let is_planner = ccx_lock.task_meta.as_ref()
+            .map(|m| m.role == "planner")
+            .unwrap_or(false);
+        
+        if !is_planner {
+            return Err(
+                "task_board_create_card can only be called by the task planner. \
+                 Switch to the planner chat to create cards.".to_string()
+            );
+        }
+        
         let task_id = get_task_id(&ccx, args).await?;
         let card_id = args.get("card_id").and_then(|v| v.as_str()).ok_or("Missing 'card_id'")?;
         let title = args.get("title").and_then(|v| v.as_str()).ok_or("Missing 'title'")?;
@@ -122,6 +135,9 @@ impl Tool for ToolTaskBoardCreateCard {
             created_at: Utc::now().to_rfc3339(),
             started_at: None,
             completed_at: None,
+            agent_branch: None,
+            agent_worktree: None,
+            agent_worktree_name: None,
         });
         board.rev += 1;
 
@@ -172,6 +188,19 @@ impl Tool for ToolTaskBoardUpdateCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let ccx_lock = ccx.lock().await;
+        
+        let is_planner = ccx_lock.task_meta.as_ref()
+            .map(|m| m.role == "planner")
+            .unwrap_or(false);
+        
+        if !is_planner {
+            return Err(
+                "task_board_update_card can only be called by the task planner. \
+                 Switch to the planner chat to update cards.".to_string()
+            );
+        }
+        
         let task_id = get_task_id(&ccx, args).await?;
         let card_id = args.get("card_id").and_then(|v| v.as_str()).ok_or("Missing 'card_id'")?;
 
@@ -240,6 +269,19 @@ impl Tool for ToolTaskBoardMoveCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let ccx_lock = ccx.lock().await;
+        
+        let is_planner = ccx_lock.task_meta.as_ref()
+            .map(|m| m.role == "planner")
+            .unwrap_or(false);
+        
+        if !is_planner {
+            return Err(
+                "task_board_move_card can only be called by the task planner. \
+                 Switch to the planner chat to move cards.".to_string()
+            );
+        }
+        
         let task_id = get_task_id(&ccx, args).await?;
         let card_id = args.get("card_id").and_then(|v| v.as_str()).ok_or("Missing 'card_id'")?;
         let column = args.get("column").and_then(|v| v.as_str()).ok_or("Missing 'column'")?;
@@ -309,6 +351,19 @@ impl Tool for ToolTaskBoardDeleteCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let ccx_lock = ccx.lock().await;
+        
+        let is_planner = ccx_lock.task_meta.as_ref()
+            .map(|m| m.role == "planner")
+            .unwrap_or(false);
+        
+        if !is_planner {
+            return Err(
+                "task_board_delete_card can only be called by the task planner. \
+                 Switch to the planner chat to delete cards.".to_string()
+            );
+        }
+        
         let task_id = get_task_id(&ccx, args).await?;
         let card_id = args.get("card_id").and_then(|v| v.as_str()).ok_or("Missing 'card_id'")?;
 
@@ -402,10 +457,10 @@ impl Tool for ToolTaskReadyCards {
     }
 }
 
-impl ToolTaskSetOrchestratorInstructions { pub fn new() -> Self { Self } }
+impl ToolTaskSetPlannerInstructions { pub fn new() -> Self { Self } }
 
 #[async_trait]
-impl Tool for ToolTaskSetOrchestratorInstructions {
+impl Tool for ToolTaskSetPlannerInstructions {
     fn as_any(&self) -> &dyn std::any::Any { self }
 
     async fn tool_execute(
@@ -418,9 +473,9 @@ impl Tool for ToolTaskSetOrchestratorInstructions {
         let content = args.get("content").and_then(|v| v.as_str()).ok_or("Missing 'content'")?;
 
         let gcx = ccx.lock().await.global_context.clone();
-        storage::save_orchestrator_instructions(gcx, &task_id, content).await?;
+        storage::save_planner_instructions(gcx, &task_id, content).await?;
 
-        let result = "Saved orchestrator instructions".to_string();
+        let result = "Saved planner instructions".to_string();
         Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(result),
@@ -434,14 +489,14 @@ impl Tool for ToolTaskSetOrchestratorInstructions {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_set_orchestrator_instructions".to_string(),
-            display_name: "Task Set Orchestrator Instructions".to_string(),
+            name: "task_set_planner_instructions".to_string(),
+            display_name: "Task Set Planner Instructions".to_string(),
             source: make_source(),
             agentic: true,
             experimental: false,
-            description: "Set the orchestrator instructions for the task.".to_string(),
+            description: "Set the planner instructions for the task.".to_string(),
             parameters: vec![
-                ToolParam { name: "content".to_string(), param_type: "string".to_string(), description: "Markdown content for orchestrator guidance".to_string() },
+                ToolParam { name: "content".to_string(), param_type: "string".to_string(), description: "Markdown content for planner guidance".to_string() },
             ],
             parameters_required: vec!["content".to_string()],
         }

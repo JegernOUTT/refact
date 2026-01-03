@@ -8,7 +8,9 @@ export {
   updateTaskName,
   addPlannerChat,
   removePlannerChat,
+  setTaskActiveChat,
   selectOpenTasks,
   selectOpenTasksFromRoot,
+  selectTaskActiveChat,
 } from "./tasksSlice";
 export type { OpenTask, TasksUIState } from "./tasksSlice";

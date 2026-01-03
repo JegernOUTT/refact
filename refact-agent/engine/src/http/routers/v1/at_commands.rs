@@ -104,6 +104,7 @@ pub async fn handle_v1_command_completion(
             false,
             "".to_string(),
             None,
+            None,
         )
         .await,
     ));
@@ -230,6 +231,7 @@ pub async fn handle_v1_command_preview(
             false,
             model_rec.base.id.clone(),
             None,
+            None,
         )
         .await,
     ));
@@ -348,6 +350,7 @@ pub async fn handle_v1_at_command_execute(
         "".to_string(),
         false,
         model_rec.base.id.clone(),
+        None,
         None,
     )
     .await;

@@ -17,6 +17,12 @@ pub struct TaskMeta {
     pub cards_failed: usize,
     #[serde(default)]
     pub agents_active: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent_model: Option<String>,
 }
 
 fn default_schema_version() -> u32 {
@@ -91,6 +97,12 @@ pub struct BoardCard {
     pub created_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_worktree_name: Option<String>,
 }
 
 fn default_priority() -> String {

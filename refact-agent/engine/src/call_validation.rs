@@ -324,7 +324,6 @@ pub enum ChatMode {
     CONFIGURE,
     PROJECT_SUMMARY,
     TASK_PLANNER,
-    TASK_ORCHESTRATOR,
     TASK_AGENT,
 }
 
@@ -338,7 +337,6 @@ impl ChatMode {
             | ChatMode::PROJECT_SUMMARY
             | ChatMode::EXPLORE
             | ChatMode::TASK_PLANNER
-            | ChatMode::TASK_ORCHESTRATOR
             | ChatMode::TASK_AGENT => true,
         }
     }
@@ -347,17 +345,12 @@ impl ChatMode {
         match self {
             ChatMode::AGENT
             | ChatMode::TASK_PLANNER
-            | ChatMode::TASK_ORCHESTRATOR
             | ChatMode::TASK_AGENT => true,
             ChatMode::NO_TOOLS
             | ChatMode::EXPLORE
             | ChatMode::CONFIGURE
             | ChatMode::PROJECT_SUMMARY => false,
         }
-    }
-
-    pub fn is_task_chat(self) -> bool {
-        matches!(self, ChatMode::TASK_PLANNER | ChatMode::TASK_ORCHESTRATOR | ChatMode::TASK_AGENT)
     }
 }
 

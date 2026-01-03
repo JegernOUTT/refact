@@ -11,6 +11,9 @@ export interface TaskMeta {
   cards_done: number;
   cards_failed: number;
   agents_active: number;
+  base_branch?: string;
+  base_commit?: string;
+  default_agent_model?: string;
 }
 
 export interface BoardColumn {
@@ -37,6 +40,8 @@ export interface BoardCard {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  agent_branch?: string;
+  agent_worktree?: string;
 }
 
 export interface TaskBoard {
@@ -216,6 +221,25 @@ export const tasksApi = createApi({
         return { data: result.data as string[] };
       },
     }),
+
+    updateTaskMeta: builder.mutation<TaskMeta, { taskId: string; baseBranch?: string; baseCommit?: string; defaultAgentModel?: string }>({
+      queryFn: async ({ taskId, baseBranch, baseCommit, defaultAgentModel }, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort;
+        const body: Record<string, string> = {};
+        if (baseBranch !== undefined) body.base_branch = baseBranch;
+        if (baseCommit !== undefined) body.base_commit = baseCommit;
+        if (defaultAgentModel !== undefined) body.default_agent_model = defaultAgentModel;
+        const result = await baseQuery({
+          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/meta`,
+          method: "PATCH",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as TaskMeta };
+      },
+      invalidatesTags: (_result, _error, { taskId }) => [{ type: "Tasks", id: taskId }],
+    }),
   }),
 });
 
@@ -225,6 +249,7 @@ export const {
   useGetTaskQuery,
   useDeleteTaskMutation,
   useUpdateTaskStatusMutation,
+  useUpdateTaskMetaMutation,
   useGetBoardQuery,
   usePatchBoardMutation,
   useGetReadyCardsQuery,

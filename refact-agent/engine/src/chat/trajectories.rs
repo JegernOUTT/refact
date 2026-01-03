@@ -13,7 +13,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{info, warn};
 
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::call_validation::ChatMessage;
+use crate::call_validation::{ChatMessage, ChatContent};
 use crate::custom_error::ScratchError;
 use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
 use crate::files_correction::get_project_dirs;
@@ -159,7 +159,7 @@ async fn find_trajectory_path(gcx: Arc<ARwLock<GlobalContext>>, chat_id: &str) -
                     let task_dir = entry.path();
                     if task_dir.is_dir() {
                         let traj_base = task_dir.join("trajectories");
-                        for role in &["planner", "orchestrator", "agents"] {
+                        for role in &["planner", "agents"] {
                             let role_dir = traj_base.join(role);
                             if role_dir.exists() {
                                 let direct = role_dir.join(format!("{}.json", chat_id));
@@ -269,6 +269,106 @@ pub async fn load_trajectory_for_chat(
         thread,
         created_at,
     })
+}
+
+pub async fn save_initial_planner_trajectory(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    task_id: &str,
+    chat_id: &str,
+) -> Result<(), String> {
+    let greeting = "## 🎯 Task Planner
+
+I'm your **Task Planner**. I handle the complete task lifecycle - from investigation to execution.
+
+**Planning Phase:**
+- Analyze the codebase using search and exploration tools
+- Create task cards with clear acceptance criteria
+- Set priorities and dependencies between cards
+
+**Execution Phase:**
+- Spawn agents to work on ready cards (each in isolated git worktree)
+- Monitor agent progress and receive completion notifications
+- Merge successful work back to main branch
+- Handle failures and coordinate retries
+
+**How to use me:**
+1. Describe what you want to accomplish
+2. I'll investigate and create a structured plan (task cards)
+3. When ready, I'll spawn agents to implement each card
+4. I'll notify you as work completes and handle merging
+5. We iterate until the task is done
+
+**Ready when you are!** Tell me what you'd like to build or fix.";
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let greeting_msg = ChatMessage {
+        message_id: String::new(),
+        role: "assistant".to_string(),
+        content: ChatContent::SimpleText(greeting.to_string()),
+        finish_reason: Some("stop".to_string()),
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: String::new(),
+        tool_failed: None,
+        usage: None,
+        checkpoints: vec![],
+        thinking_blocks: None,
+        citations: vec![],
+        extra: serde_json::Map::new(),
+        output_filter: None,
+    };
+
+    let messages_json = vec![serde_json::to_value(&greeting_msg).unwrap_or_default()];
+
+    let task_meta = super::types::TaskMeta {
+        task_id: task_id.to_string(),
+        role: "planner".to_string(),
+        agent_id: None,
+        card_id: None,
+    };
+
+    let trajectory = json!({
+        "id": chat_id,
+        "title": "",
+        "model": "",
+        "mode": "TASK_PLANNER",
+        "tool_use": "agent",
+        "messages": messages_json,
+        "created_at": now.clone(),
+        "updated_at": now,
+        "boost_reasoning": false,
+        "checkpoints_enabled": true,
+        "context_tokens_cap": null,
+        "include_project_info": true,
+        "isTitleGenerated": false,
+        "use_compression": true,
+        "automatic_patch": false,
+        "task_meta": serde_json::to_value(&task_meta).unwrap_or_default(),
+    });
+
+    let task_dir = crate::tasks::storage::get_task_dir(gcx.clone(), task_id).await?;
+    let traj_dir = crate::tasks::storage::get_task_trajectory_dir(&task_dir, "planner", None);
+    tokio::fs::create_dir_all(&traj_dir)
+        .await
+        .map_err(|e| format!("Failed to create task trajectories dir: {}", e))?;
+
+    let file_path = traj_dir.join(format!("{}.json", chat_id));
+    let tmp_path = file_path.with_extension("json.tmp");
+    let json_str = serde_json::to_string_pretty(&trajectory)
+        .map_err(|e| format!("Failed to serialize trajectory: {}", e))?;
+    tokio::fs::write(&tmp_path, &json_str)
+        .await
+        .map_err(|e| format!("Failed to write trajectory: {}", e))?;
+    tokio::fs::rename(&tmp_path, &file_path)
+        .await
+        .map_err(|e| format!("Failed to rename trajectory: {}", e))?;
+
+    info!(
+        "Created initial planner trajectory for task {} at {:?}",
+        task_id, file_path
+    );
+
+    Ok(())
 }
 
 pub async fn save_trajectory_snapshot(
@@ -779,6 +879,7 @@ async fn generate_title_llm(
             "title-generation".to_string(),
             false,
             model_id.clone(),
+            None,
             None,
         )
         .await,

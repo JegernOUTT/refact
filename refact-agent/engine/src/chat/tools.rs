@@ -257,7 +257,9 @@ pub async fn process_tool_calls_once(
     if !confirmations.is_empty() {
         let dominated_by_patch = thread.automatic_patch
             && confirmations.iter().all(|c| is_patch_like_tool(&c.command));
-        if !dominated_by_patch {
+        let autoapprove_all_tools = matches!(chat_mode, ChatMode::TASK_AGENT);
+        
+        if !(dominated_by_patch || autoapprove_all_tools) {
             let mut session = session_arc.lock().await;
             session.set_paused_with_reasons(confirmations);
             return ToolStepOutcome::Paused;
@@ -323,6 +325,7 @@ pub async fn check_tools_confirmation(
             String::new(),
             false,
             String::new(),
+            None,
             None,
         )
         .await,
@@ -440,6 +443,18 @@ pub async fn execute_tools_with_session(
         }
     };
 
+    let code_workdir = if let Some(tm) = thread.task_meta.as_ref() {
+        match crate::tasks::storage::load_board(gcx.clone(), &tm.task_id).await {
+            Ok(board) => {
+                board.get_card(&tm.card_id.as_ref().unwrap_or(&String::new()))
+                    .and_then(|card| card.agent_worktree.as_ref().map(|p| std::path::PathBuf::from(p)))
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new(
             gcx.clone(),
@@ -451,6 +466,7 @@ pub async fn execute_tools_with_session(
             false,
             thread.model.clone(),
             thread.task_meta.clone(),
+            code_workdir,
         )
         .await,
     ));
@@ -639,6 +655,18 @@ pub async fn execute_tools(
         }
     };
 
+    let code_workdir = if let Some(tm) = thread.task_meta.as_ref() {
+        match crate::tasks::storage::load_board(gcx.clone(), &tm.task_id).await {
+            Ok(board) => {
+                board.get_card(&tm.card_id.as_ref().unwrap_or(&String::new()))
+                    .and_then(|card| card.agent_worktree.as_ref().map(|p| std::path::PathBuf::from(p)))
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new(
             gcx.clone(),
@@ -650,6 +678,7 @@ pub async fn execute_tools(
             false,
             thread.model.clone(),
             thread.task_meta.clone(),
+            code_workdir,
         )
         .await,
     ));

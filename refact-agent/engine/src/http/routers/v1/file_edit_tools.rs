@@ -39,6 +39,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
@@ -48,6 +49,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
@@ -57,6 +59,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
@@ -66,6 +69,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
@@ -75,6 +79,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
@@ -84,6 +89,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?

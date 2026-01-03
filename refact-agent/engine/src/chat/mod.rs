@@ -13,7 +13,7 @@ pub mod system_context;
 #[cfg(test)]
 mod tests;
 pub mod tools;
-mod trajectories;
+pub mod trajectories;
 pub mod types;
 
 pub use session::{SessionsMap, create_sessions_map, start_session_cleanup_task, get_or_create_session_with_trajectory};
