@@ -135,7 +135,49 @@ impl Tool for ToolTaskMergeAgent {
             }
         };
 
-        // Checkout base branch
+        let commits_ahead = run_git(&["rev-list", "--count", &format!("{}..{}", base_branch, agent_branch)])
+            .unwrap_or_default()
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(0);
+
+        if commits_ahead == 0 {
+            let worktree_status = if let Some(wt) = card.agent_worktree.as_ref() {
+                Command::new("git")
+                    .args(["status", "--porcelain"])
+                    .current_dir(wt)
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            let main_status = run_git(&["status", "--porcelain"]).unwrap_or_default();
+            let main_dirty = !main_status.trim().is_empty();
+            let worktree_dirty = !worktree_status.is_empty();
+
+            let diagnostic = if main_dirty && !worktree_dirty {
+                "Main workspace has uncommitted changes but agent worktree is clean. Agent likely edited files in the wrong directory."
+            } else if worktree_dirty {
+                "Agent worktree has uncommitted changes. The agent may have forgotten to commit, or task_agent_finish auto-commit failed."
+            } else {
+                "Both main workspace and agent worktree are clean. Agent may not have made any changes."
+            };
+
+            return Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(format!(
+                    "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {}\n**Commits ahead of base:** 0\n\n**Diagnostic:** {}\n\nNo merge performed.",
+                    card_id, agent_branch, diagnostic
+                )),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            })]));
+        }
+
         run_git(&["checkout", base_branch])
             .map_err(|e| format!("Failed to checkout base branch: {}", e))?;
 

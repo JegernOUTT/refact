@@ -10,8 +10,8 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, DiffChunk};
 use crate::files_correction::{
-    canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename, get_project_dirs,
-    preprocess_path_for_normalization,
+    canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename,
+    get_project_dirs_with_code_workdir, preprocess_path_for_normalization,
 };
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::tools::tools_description::{
@@ -76,8 +76,11 @@ impl Tool for ToolMv {
         let dst_str = preprocess_path_for_normalization(dst_str);
         let overwrite = Self::parse_overwrite(args)?;
 
-        let gcx = ccx.lock().await.global_context.clone();
-        let project_dirs = get_project_dirs(gcx.clone()).await;
+        let (gcx, code_workdir) = {
+            let ccx_lock = ccx.lock().await;
+            (ccx_lock.global_context.clone(), ccx_lock.code_workdir.clone())
+        };
+        let project_dirs = get_project_dirs_with_code_workdir(gcx.clone(), &code_workdir).await;
 
         let src_file_candidates =
             correct_to_nearest_filename(gcx.clone(), &src_str, false, ccx.lock().await.top_n).await;

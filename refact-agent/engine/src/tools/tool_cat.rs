@@ -42,7 +42,7 @@ use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_o
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::files_correction::{
-    canonical_path, correct_to_nearest_dir_path, get_project_dirs,
+    canonical_path, correct_to_nearest_dir_path, get_project_dirs_with_code_workdir,
     preprocess_path_for_normalization,
 };
 use crate::files_in_workspace::{get_file_text_from_memory_or_disk, ls_files};
@@ -382,7 +382,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                 gcx.clone(),
                 &resolved_path_str,
                 &candidates_file,
-                &get_project_dirs(gcx.clone()).await,
+                &get_project_dirs_with_code_workdir(gcx.clone(), code_workdir).await,
                 false,
             )
             .await
@@ -400,7 +400,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                 gcx.clone(),
                 &resolved_path_str,
                 &candidates_dir,
-                &get_project_dirs(gcx.clone()).await,
+                &get_project_dirs_with_code_workdir(gcx.clone(), code_workdir).await,
                 true,
             )
             .await

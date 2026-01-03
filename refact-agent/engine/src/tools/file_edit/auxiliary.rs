@@ -3,7 +3,7 @@ use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_o
 use crate::call_validation::DiffChunk;
 use crate::files_correction::{
     canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
-    correct_to_nearest_dir_path, get_project_dirs, preprocess_path_for_normalization,
+    correct_to_nearest_dir_path, get_project_dirs_with_code_workdir, preprocess_path_for_normalization,
 };
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
@@ -61,7 +61,7 @@ pub async fn parse_path_for_update(
         gcx.clone(),
         &raw_path,
         &candidates,
-        &get_project_dirs(gcx.clone()).await,
+        &get_project_dirs_with_code_workdir(gcx.clone(), code_workdir).await,
         false,
     )
     .await
@@ -118,7 +118,7 @@ pub async fn parse_path_for_create(
                 gcx.clone(),
                 &parent_str,
                 &candidates,
-                &get_project_dirs(gcx.clone()).await,
+                &get_project_dirs_with_code_workdir(gcx.clone(), code_workdir).await,
                 true,
             )
             .await?;

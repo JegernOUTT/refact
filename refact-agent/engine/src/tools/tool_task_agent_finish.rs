@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::process::Command;
+use std::path::Path;
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
@@ -27,6 +29,68 @@ async fn get_card_id(ccx: &Arc<AMutex<AtCommandsContext>>) -> Result<String, Str
     ccx_lock.task_meta.as_ref()
         .and_then(|m| m.card_id.clone())
         .ok_or_else(|| "This tool can only be used by task agents (no card_id in task_meta)".to_string())
+}
+
+fn auto_commit_worktree(worktree_path: &Path, card_id: &str, card_title: &str) -> Result<Option<String>, String> {
+    if !worktree_path.exists() {
+        return Ok(None);
+    }
+
+    let git_dir = worktree_path.join(".git");
+    if !git_dir.exists() && !worktree_path.join("..").join(".git").exists() {
+        return Ok(None);
+    }
+
+    let status_output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("Failed to check git status: {}", e))?;
+
+    let status = String::from_utf8_lossy(&status_output.stdout);
+    if status.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let add_output = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("Failed to stage changes: {}", e))?;
+
+    if !add_output.status.success() {
+        return Err(format!("git add failed: {}", String::from_utf8_lossy(&add_output.stderr)));
+    }
+
+    let commit_msg = format!("Card {}: {}", card_id, card_title);
+    let commit_output = Command::new("git")
+        .args([
+            "-c", "user.name=Refact Agent",
+            "-c", "user.email=agent@refact.ai",
+            "commit",
+            "-m", &commit_msg,
+            "--no-gpg-sign",
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("Failed to commit: {}", e))?;
+
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        if stderr.contains("nothing to commit") {
+            return Ok(None);
+        }
+        return Err(format!("git commit failed: {}", stderr));
+    }
+
+    let rev_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("Failed to get commit hash: {}", e))?;
+
+    let commit_hash = String::from_utf8_lossy(&rev_output.stdout).trim().to_string();
+    Ok(Some(commit_hash))
 }
 
 pub struct ToolTaskAgentFinish;
@@ -88,9 +152,33 @@ impl Tool for ToolTaskAgentFinish {
 
         let gcx = ccx.lock().await.global_context.clone();
 
+        let board_pre = storage::load_board(gcx.clone(), &task_id).await?;
+        let card_pre = board_pre.get_card(&card_id)
+            .ok_or(format!("Card {} not found", card_id))?;
+        let worktree_path = card_pre.agent_worktree.clone();
+        let card_title_for_commit = card_pre.title.clone();
+
+        let commit_result = if success {
+            if let Some(ref wt) = worktree_path {
+                let wt_path = Path::new(wt);
+                match auto_commit_worktree(wt_path, &card_id, &card_title_for_commit) {
+                    Ok(hash) => hash,
+                    Err(e) => {
+                        tracing::warn!("Auto-commit failed for card {}: {}", card_id, e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let card_id_owned = card_id.clone();
         let report_clone = report.clone();
         let success_clone = success;
+        let commit_hash = commit_result.clone();
 
         let (board, (card_title, _agent_branch, all_finished)) = storage::update_board_atomic(
             gcx.clone(),
@@ -113,6 +201,12 @@ impl Tool for ToolTaskAgentFinish {
                     card.final_report = Some(report_clone.clone());
                     card.column = "done".to_string();
                     card.completed_at = Some(Utc::now().to_rfc3339());
+                    if let Some(ref hash) = commit_hash {
+                        card.status_updates.push(StatusUpdate {
+                            timestamp: Utc::now().to_rfc3339(),
+                            message: format!("Auto-committed: {}", hash),
+                        });
+                    }
                     card.status_updates.push(StatusUpdate {
                         timestamp: Utc::now().to_rfc3339(),
                         message: "Agent completed successfully".to_string(),

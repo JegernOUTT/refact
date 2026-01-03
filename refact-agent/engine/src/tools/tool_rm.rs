@@ -10,8 +10,8 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, DiffChunk};
 use crate::files_correction::{
-    canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename, get_project_dirs,
-    preprocess_path_for_normalization,
+    canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename,
+    get_project_dirs_with_code_workdir, preprocess_path_for_normalization,
 };
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
@@ -141,8 +141,11 @@ impl Tool for ToolRm {
         }
 
         let (recursive, _max_depth, dry_run) = Self::parse_recursive(args)?;
-        let gcx = ccx.lock().await.global_context.clone();
-        let project_dirs = get_project_dirs(gcx.clone()).await;
+        let (gcx, code_workdir) = {
+            let ccx_lock = ccx.lock().await;
+            (ccx_lock.global_context.clone(), ccx_lock.code_workdir.clone())
+        };
+        let project_dirs = get_project_dirs_with_code_workdir(gcx.clone(), &code_workdir).await;
 
         // Use file correction to get a candidate path.
         let file_candidates =

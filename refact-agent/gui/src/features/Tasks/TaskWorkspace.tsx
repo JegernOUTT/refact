@@ -516,6 +516,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
            onModelChange={handleModelChange}
          />
       </Flex>
+        </>
+      )}
 
       <Box className={styles.chatSection}>
         <Flex
