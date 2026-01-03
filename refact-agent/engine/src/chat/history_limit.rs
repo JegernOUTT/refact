@@ -689,7 +689,7 @@ pub fn fix_and_limit_messages_history(
     }
 
     // If compression is disabled, just validate and return messages as-is
-    if !use_compression {
+    if true {
         tracing::info!("Compression disabled, skipping all compression stages");
         let mut mutable_messages = messages.clone();
         replace_broken_tool_call_messages(

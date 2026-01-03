@@ -15,6 +15,21 @@ fn make_source() -> ToolSource {
     ToolSource { source_type: ToolSourceType::Builtin, config_path: String::new() }
 }
 
+fn parse_depends_on(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(arr)) => {
+            arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+        }
+        Some(Value::String(s)) => {
+            s.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
 async fn get_task_id(ccx: &Arc<AMutex<AtCommandsContext>>, args: &HashMap<String, Value>) -> Result<String, String> {
     if let Some(id) = args.get("task_id").and_then(|v| v.as_str()) {
         return Ok(id.to_string());
@@ -112,10 +127,7 @@ impl Tool for ToolTaskBoardCreateCard {
         let title = args.get("title").and_then(|v| v.as_str()).ok_or("Missing 'title'")?;
         let priority = args.get("priority").and_then(|v| v.as_str()).unwrap_or("P1");
         let instructions = args.get("instructions").and_then(|v| v.as_str()).unwrap_or("");
-        let depends_on: Vec<String> = args.get("depends_on")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
+        let depends_on: Vec<String> = parse_depends_on(args.get("depends_on"));
         let mut board = storage::load_board(gcx.clone(), &task_id).await?;
 
         if board.cards.iter().any(|c| c.id == card_id) {
@@ -170,7 +182,7 @@ impl Tool for ToolTaskBoardCreateCard {
                 ToolParam { name: "title".to_string(), param_type: "string".to_string(), description: "Card title".to_string() },
                 ToolParam { name: "priority".to_string(), param_type: "string".to_string(), description: "Priority: P0, P1, or P2".to_string() },
                 ToolParam { name: "instructions".to_string(), param_type: "string".to_string(), description: "Detailed instructions for the agent".to_string() },
-                ToolParam { name: "depends_on".to_string(), param_type: "array".to_string(), description: "Array of card IDs this card depends on".to_string() },
+                ToolParam { name: "depends_on".to_string(), param_type: "string".to_string(), description: "Comma-separated list of card IDs this card depends on (e.g., \"T-1, T-2\")".to_string() },
             ],
             parameters_required: vec!["card_id".to_string(), "title".to_string()],
         }
@@ -220,8 +232,8 @@ impl Tool for ToolTaskBoardUpdateCard {
         if let Some(instructions) = args.get("instructions").and_then(|v| v.as_str()) {
             card.instructions = instructions.to_string();
         }
-        if let Some(deps) = args.get("depends_on").and_then(|v| v.as_array()) {
-            card.depends_on = deps.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        if args.contains_key("depends_on") {
+            card.depends_on = parse_depends_on(args.get("depends_on"));
         }
 
         board.rev += 1;
@@ -252,7 +264,7 @@ impl Tool for ToolTaskBoardUpdateCard {
                 ToolParam { name: "title".to_string(), param_type: "string".to_string(), description: "New title".to_string() },
                 ToolParam { name: "priority".to_string(), param_type: "string".to_string(), description: "New priority".to_string() },
                 ToolParam { name: "instructions".to_string(), param_type: "string".to_string(), description: "New instructions".to_string() },
-                ToolParam { name: "depends_on".to_string(), param_type: "array".to_string(), description: "New dependencies".to_string() },
+                ToolParam { name: "depends_on".to_string(), param_type: "string".to_string(), description: "Comma-separated list of new dependencies (e.g., \"T-1, T-2\")".to_string() },
             ],
             parameters_required: vec!["card_id".to_string()],
         }
