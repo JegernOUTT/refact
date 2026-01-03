@@ -219,6 +219,15 @@ impl Tool for ToolTaskSpawnAgent {
         let gcx = ccx.lock().await.global_context.clone();
         let current_model = ccx.lock().await.current_model.clone();
 
+        let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
+        if let Some(workspace_root) = project_dirs.first() {
+            if let Ok(repo) = git2::Repository::open(workspace_root) {
+                if operations::has_uncommitted_changes(&repo)? {
+                    return Err("Cannot spawn agent: Please commit or stash changes before spawning agents".to_string());
+                }
+            }
+        }
+
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
         let task_default_model = task_meta.default_agent_model.as_deref();
 
