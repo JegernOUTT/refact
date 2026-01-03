@@ -246,17 +246,8 @@ fn passthrough_messages_to_json(data: &mut serde_json::Value, prompt: &str, mode
     }
 }
 
-pub fn try_get_compression_from_prompt(prompt: &str) -> serde_json::Value {
-    let big_json: serde_json::Value = if prompt.starts_with("PASSTHROUGH ") {
-        serde_json::from_str(&prompt[12..]).unwrap()
-    } else {
-        return json!(CompressionStrength::Absent);
-    };
-    if let Some(compression_strength) = big_json.get("compression_strength") {
-        compression_strength.clone()
-    } else {
-        json!(CompressionStrength::Absent)
-    }
+pub fn try_get_compression_from_prompt(_prompt: &str) -> serde_json::Value {
+    json!(CompressionStrength::Absent)
 }
 
 #[derive(serde::Serialize)]

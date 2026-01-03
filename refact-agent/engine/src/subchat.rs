@@ -202,7 +202,6 @@ async fn subchat_stream(
         context_tokens_cap: Some(model_rec.base.n_ctx),
         include_project_info: true,
         request_attempt_id: Uuid::new_v4().to_string(),
-        use_compression: false,
     };
 
     let mut parameters = SamplingParameters {
@@ -218,7 +217,6 @@ async fn subchat_stream(
         allow_at_commands: false,
         allow_tool_prerun: false,
         supports_tools: model_rec.supports_tools,
-        use_compression: false,
     };
 
     if only_deterministic_messages {

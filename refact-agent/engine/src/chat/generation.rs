@@ -162,7 +162,6 @@ pub async fn run_llm_generation(
         context_tokens_cap: thread.context_tokens_cap,
         include_project_info: thread.include_project_info,
         request_attempt_id: Uuid::new_v4().to_string(),
-        use_compression: thread.use_compression,
     };
 
     let mut messages = messages;
@@ -328,7 +327,6 @@ pub async fn run_llm_generation(
         allow_at_commands: true,
         allow_tool_prerun: true,
         supports_tools: model_rec.supports_tools,
-        use_compression: thread.use_compression,
     };
 
     let prepared = prepare_chat_passthrough(
@@ -373,13 +371,12 @@ async fn run_streaming_generation(
 ) -> Result<(), String> {
     info!("session generation: prompt length = {}", prompt.len());
 
-    let (chat_id, context_tokens_cap, include_project_info, use_compression) = {
+    let (chat_id, context_tokens_cap, include_project_info) = {
         let session = session_arc.lock().await;
         (
             session.chat_id.clone(),
             session.thread.context_tokens_cap,
             session.thread.include_project_info,
-            session.thread.use_compression,
         )
     };
 
@@ -391,7 +388,6 @@ async fn run_streaming_generation(
         context_tokens_cap,
         include_project_info,
         request_attempt_id: Uuid::new_v4().to_string(),
-        use_compression,
     });
 
     let params = StreamRunParams {

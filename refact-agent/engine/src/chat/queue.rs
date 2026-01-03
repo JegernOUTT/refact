@@ -160,12 +160,6 @@ pub fn apply_setparams_patch(
             changed = true;
         }
     }
-    if let Some(compression) = patch.get("use_compression").and_then(|v| v.as_bool()) {
-        if thread.use_compression != compression {
-            thread.use_compression = compression;
-            changed = true;
-        }
-    }
     if let Some(auto_patch) = patch.get("automatic_patch").and_then(|v| v.as_bool()) {
         if thread.automatic_patch != auto_patch {
             thread.automatic_patch = auto_patch;

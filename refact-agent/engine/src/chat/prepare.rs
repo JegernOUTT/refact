@@ -31,7 +31,6 @@ pub struct ChatPrepareOptions {
     pub allow_at_commands: bool,
     pub allow_tool_prerun: bool,
     pub supports_tools: bool,
-    pub use_compression: bool,
 }
 
 impl Default for ChatPrepareOptions {
@@ -41,7 +40,6 @@ impl Default for ChatPrepareOptions {
             allow_at_commands: true,
             allow_tool_prerun: true,
             supports_tools: true,
-            use_compression: true,
         }
     }
 }
@@ -169,14 +167,13 @@ pub async fn prepare_chat_passthrough(
     };
 
     // 7. History limiting with correct token budget
-    let (limited_msgs, compression_strength) = fix_and_limit_messages_history(
+    let limited_msgs = fix_and_limit_messages_history(
         t,
         &messages,
         sampling_parameters,
         effective_n_ctx,
         tools_str_for_limit,
         model_id,
-        options.use_compression,
     )?;
 
     // 8. Strip thinking blocks if thinking is disabled
@@ -188,7 +185,6 @@ pub async fn prepare_chat_passthrough(
         convert_messages_to_openai_format(limited_adapted_msgs.clone(), style, &model_record.base.id);
 
     big_json["messages"] = json!(converted_messages);
-    big_json["compression_strength"] = json!(compression_strength);
 
     // 10. Serialize without panic
     let body =
@@ -519,6 +515,5 @@ mod tests {
         assert!(opts.allow_at_commands);
         assert!(opts.allow_tool_prerun);
         assert!(opts.supports_tools);
-        assert!(opts.use_compression);
     }
 }

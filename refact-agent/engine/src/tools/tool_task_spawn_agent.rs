@@ -323,7 +323,6 @@ impl Tool for ToolTaskSpawnAgent {
                 context_tokens_cap: None,
                 include_project_info: true,
                 checkpoints_enabled: false,
-                use_compression: true,
                 is_title_generated: true,
                 automatic_patch: false,
                 task_meta: Some(TaskMeta {

@@ -677,8 +677,7 @@ pub fn fix_and_limit_messages_history(
     n_ctx: usize,
     tools_description: Option<String>,
     model_id: &str,
-    use_compression: bool,
-) -> Result<(Vec<ChatMessage>, CompressionStrength), String> {
+) -> Result<Vec<ChatMessage>, String> {
     let start_time = Instant::now();
 
     if n_ctx <= sampling_parameters_to_patch.max_new_tokens {
@@ -688,39 +687,13 @@ pub fn fix_and_limit_messages_history(
         ));
     }
 
-    // If compression is disabled, just validate and return messages as-is
-    if true {
-        tracing::info!("Compression disabled, skipping all compression stages");
-        let mut mutable_messages = messages.clone();
-        replace_broken_tool_call_messages(
-            &mut mutable_messages,
-            sampling_parameters_to_patch,
-            16000,
-        );
-        remove_invalid_tool_calls_and_tool_calls_results(&mut mutable_messages);
-        return validate_chat_history(&mutable_messages)
-            .map(|msgs| (msgs, CompressionStrength::Absent));
-    }
-
     let mut mutable_messages = messages.clone();
-    let mut highest_compression_stage = 0;
-
-    // STAGE 0: Compress duplicated ContextFiles
-    // This is done before token calculation to reduce the number of messages that need to be tokenized
-    let mut preserve_in_later_stages = vec![false; mutable_messages.len()];
-
-    let stage0_result = compress_duplicate_context_files(&mut mutable_messages);
-    if let Err(e) = &stage0_result {
-        tracing::warn!("Stage 0 compression failed: {}", e);
-    } else if let Ok((count, preservation_flags)) = stage0_result {
-        tracing::info!(
-            "Stage 0: Compressed {} duplicate ContextFile messages",
-            count
-        );
-        preserve_in_later_stages = preservation_flags;
-    }
-
-    replace_broken_tool_call_messages(&mut mutable_messages, sampling_parameters_to_patch, 16000);
+    replace_broken_tool_call_messages(
+        &mut mutable_messages,
+        sampling_parameters_to_patch,
+        16000,
+    );
+    remove_invalid_tool_calls_and_tool_calls_results(&mut mutable_messages);
 
     let (extra_tokens_per_message, _) = get_model_token_params(model_id);
     let mut token_cache = TokenCountCache::new();
@@ -735,321 +708,7 @@ pub fn fix_and_limit_messages_history(
     } else {
         0
     };
-    let mut undroppable_msg_n = mutable_messages
-        .iter()
-        .rposition(|msg| msg.role == "user")
-        .unwrap_or(0);
-    tracing::info!(
-        "Calculated undroppable_msg_n = {} (last user message)",
-        undroppable_msg_n
-    );
-    let outlier_threshold = 1000;
-    let (mut occupied_tokens, mut tokens_limit) = recalculate_token_limits(
-        &token_counts,
-        tools_description_tokens,
-        n_ctx,
-        sampling_parameters_to_patch.max_new_tokens,
-        model_id,
-    );
-    tracing::info!(
-        "Before compression: occupied_tokens={} vs tokens_limit={}",
-        occupied_tokens,
-        tokens_limit
-    );
 
-    // STAGE 1: Compress ContextFile messages before the last user message
-    if occupied_tokens > tokens_limit {
-        let msg_len = mutable_messages.len();
-        let stage1_end = std::cmp::min(undroppable_msg_n, msg_len);
-        let result = process_compression_stage(
-            t,
-            &mut mutable_messages,
-            &mut token_counts,
-            &mut token_cache,
-            tools_description_tokens,
-            n_ctx,
-            sampling_parameters_to_patch.max_new_tokens,
-            1, // Start from index 1 to preserve the initial message
-            stage1_end,
-            "Stage 1: Compressing ContextFile messages before the last user message",
-            model_id,
-            |i, msg, _| {
-                i != 0
-                    && msg.role == "context_file"
-                    && !preserve_in_later_stages[i]
-                    && msg.tool_call_id != "knowledge_enrichment"
-            },
-            true,
-        )?;
-
-        occupied_tokens = result.0;
-        tokens_limit = result.1;
-        highest_compression_stage = 1;
-
-        if result.2 {
-            // If budget reached
-            tracing::info!("Token budget reached after Stage 1 compression.");
-        }
-    }
-
-    // STAGE 2: Compress Tool Result messages before the last user message
-    if occupied_tokens > tokens_limit {
-        let msg_len = mutable_messages.len();
-        let stage2_end = std::cmp::min(undroppable_msg_n, msg_len);
-        let result = process_compression_stage(
-            t,
-            &mut mutable_messages,
-            &mut token_counts,
-            &mut token_cache,
-            tools_description_tokens,
-            n_ctx,
-            sampling_parameters_to_patch.max_new_tokens,
-            1, // Start from index 1 to preserve the initial message
-            stage2_end,
-            "Stage 2: Compressing Tool Result messages before the last user message",
-            model_id,
-            |i, msg, _| i != 0 && (msg.role == "tool" || msg.role == "diff"),
-            true,
-        )?;
-
-        occupied_tokens = result.0;
-        tokens_limit = result.1;
-        highest_compression_stage = 2;
-
-        if result.2 {
-            // If budget reached
-            tracing::info!("Token budget reached after Stage 2 compression.");
-        }
-    }
-
-    // STAGE 3: Compress "outlier" messages before the last user message
-    if occupied_tokens > tokens_limit {
-        let msg_len = mutable_messages.len();
-        let stage3_end = std::cmp::min(undroppable_msg_n, msg_len);
-        let result = process_compression_stage(
-            t,
-            &mut mutable_messages,
-            &mut token_counts,
-            &mut token_cache,
-            tools_description_tokens,
-            n_ctx,
-            sampling_parameters_to_patch.max_new_tokens,
-            1, // Start from index 1 to preserve the initial message
-            stage3_end,
-            "Stage 3: Compressing outlier messages before the last user message",
-            model_id,
-            |i, msg, token_count| {
-                i != 0
-                    && token_count > outlier_threshold
-                    && msg.role != "context_file"
-                    && msg.role != "tool"
-                    && msg.role != "diff"
-            },
-            true,
-        )?;
-
-        occupied_tokens = result.0;
-        tokens_limit = result.1;
-        highest_compression_stage = 3;
-
-        if result.2 {
-            // If budget reached
-            tracing::info!("Token budget reached after Stage 3 compression.");
-        }
-    }
-
-    // STAGE 4: Drop non-essential messages one by one within each block until budget is reached
-    if occupied_tokens > tokens_limit {
-        tracing::info!("STAGE 4: Iterating conversation blocks to drop non-essential messages");
-        let mut current_occupied_tokens = occupied_tokens;
-        let user_indices: Vec<usize> = mutable_messages
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| if m.role == "user" { Some(i) } else { None })
-            .collect();
-
-        let mut messages_ids_to_filter_out: HashSet<usize> = HashSet::new();
-        for block_idx in 0..user_indices.len().saturating_sub(1) {
-            let start_idx = user_indices[block_idx];
-            let end_idx = user_indices[block_idx + 1];
-            tracing::info!(
-                "Processing block {}: messages {}..{}",
-                block_idx,
-                start_idx,
-                end_idx
-            );
-            if end_idx >= undroppable_msg_n || current_occupied_tokens <= tokens_limit {
-                break;
-            }
-            let mut last_assistant_idx: Option<usize> = None;
-            for i in (start_idx + 1..end_idx).rev() {
-                if mutable_messages[i].role == "assistant" {
-                    last_assistant_idx = Some(i);
-                    break;
-                }
-            }
-
-            for i in start_idx + 1..end_idx {
-                if Some(i) != last_assistant_idx {
-                    messages_ids_to_filter_out.insert(i);
-                    let new_current_occupied_tokens = current_occupied_tokens - token_counts[i];
-                    tracing::info!(
-                        "Dropping message at index {} to stay under token limit: {} -> {}",
-                        i,
-                        current_occupied_tokens,
-                        new_current_occupied_tokens
-                    );
-                    current_occupied_tokens = new_current_occupied_tokens;
-                }
-                if current_occupied_tokens <= tokens_limit {
-                    break;
-                }
-            }
-        }
-
-        occupied_tokens = current_occupied_tokens;
-        mutable_messages = mutable_messages
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| !messages_ids_to_filter_out.contains(i))
-            .map(|(_, x)| x)
-            .collect();
-        token_counts = token_counts
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| !messages_ids_to_filter_out.contains(i))
-            .map(|(_, x)| x)
-            .collect();
-
-        if !messages_ids_to_filter_out.is_empty() {
-            highest_compression_stage = 4;
-        }
-
-        // Recalculate undroppable_msg_n after Stage 4 message removal
-        // The old index is now stale since messages have been removed
-        // NOTE: We update the outer mutable variable, not create a new shadowing one!
-        undroppable_msg_n = mutable_messages
-            .iter()
-            .rposition(|msg| msg.role == "user")
-            .unwrap_or(0);
-        tracing::info!(
-            "Recalculated undroppable_msg_n = {} after Stage 4",
-            undroppable_msg_n
-        );
-
-        tracing::info!(
-            "Stage 4 complete: {} -> {} tokens ({} messages -> {} messages)",
-            occupied_tokens,
-            current_occupied_tokens,
-            mutable_messages.len() + messages_ids_to_filter_out.len(),
-            mutable_messages.len()
-        );
-        if occupied_tokens <= tokens_limit {
-            tracing::info!("Token budget reached after Stage 4 compression.");
-        }
-    }
-
-    // STAGE 5: Compress ContextFile messages after the last user message (last resort)
-    if occupied_tokens > tokens_limit {
-        tracing::warn!("Starting to compress messages in the last conversation block - this is a last resort measure");
-        tracing::warn!("This may affect the quality of responses as we're now modifying the most recent context");
-        let msg_len = mutable_messages.len();
-        let result = process_compression_stage(
-            t,
-            &mut mutable_messages,
-            &mut token_counts,
-            &mut token_cache,
-            tools_description_tokens,
-            n_ctx,
-            sampling_parameters_to_patch.max_new_tokens,
-            undroppable_msg_n,
-            msg_len,
-            "Stage 5: Compressing ContextFile messages after the last user message (last resort)",
-            model_id,
-            |_, msg, _| msg.role == "context_file" && msg.tool_call_id != "knowledge_enrichment",
-            true,
-        )?;
-
-        occupied_tokens = result.0;
-        tokens_limit = result.1;
-        highest_compression_stage = 5;
-
-        if result.2 {
-            // If budget reached
-            tracing::info!("Token budget reached after Stage 5 compression.");
-        }
-    }
-
-    // STAGE 6: Compress Tool Result messages after the last user message (last resort)
-    if occupied_tokens > tokens_limit {
-        let msg_len = mutable_messages.len();
-        let result = process_compression_stage(
-            t,
-            &mut mutable_messages,
-            &mut token_counts,
-            &mut token_cache,
-            tools_description_tokens,
-            n_ctx,
-            sampling_parameters_to_patch.max_new_tokens,
-            undroppable_msg_n,
-            msg_len,
-            "Stage 6: Compressing Tool Result messages after the last user message (last resort)",
-            model_id,
-            |_, msg, _| msg.role == "tool" || msg.role == "diff",
-            true,
-        )?;
-
-        occupied_tokens = result.0;
-        tokens_limit = result.1;
-        highest_compression_stage = 6;
-
-        if result.2 {
-            // If budget reached
-            tracing::info!("Token budget reached after Stage 6 compression.");
-        }
-    }
-
-    // STAGE 7: Compress "outlier" messages after the last user message, including the last user message (last resort)
-    if occupied_tokens > tokens_limit {
-        let msg_len = mutable_messages.len();
-        let result = process_compression_stage(
-            t,
-            &mut mutable_messages,
-            &mut token_counts,
-            &mut token_cache,
-            tools_description_tokens,
-            n_ctx,
-            sampling_parameters_to_patch.max_new_tokens,
-            undroppable_msg_n,
-            msg_len,
-            "Stage 7: Compressing outlier messages in the last conversation block (last resort)",
-            model_id,
-            |i, msg, token_count| {
-                i >= undroppable_msg_n
-                    && token_count > outlier_threshold
-                    && msg.role != "context_file"
-                    && msg.role != "tool"
-                    && msg.role != "diff"
-            },
-            false,
-        )?;
-
-        highest_compression_stage = 7;
-
-        if result.2 {
-            // If budget reached
-            tracing::info!("Token budget reached after Stage 7 compression.");
-        }
-    }
-
-    remove_invalid_tool_calls_and_tool_calls_results(&mut mutable_messages);
-    // Recalculate token counts after removing invalid tool calls, as the message count may have changed
-    let mut token_counts: Vec<i32> = Vec::with_capacity(mutable_messages.len());
-    for msg in &mutable_messages {
-        let count =
-            token_cache.get_token_count(msg, t.tokenizer.clone(), extra_tokens_per_message)?;
-        token_counts.push(count);
-    }
     let (occupied_tokens, tokens_limit) = recalculate_token_limits(
         &token_counts,
         tools_description_tokens,
@@ -1057,15 +716,19 @@ pub fn fix_and_limit_messages_history(
         sampling_parameters_to_patch.max_new_tokens,
         model_id,
     );
+
     tracing::info!(
-        "Final occupied_tokens={} <= tokens_limit={}",
+        "Token check: occupied_tokens={} vs tokens_limit={}",
         occupied_tokens,
         tokens_limit
     );
 
-    // If we're still over the limit after all compression stages, return an error
     if occupied_tokens > tokens_limit {
-        return Err("Cannot compress chat history enough: the mandatory messages still exceed the allowed token budget. Please start the new chat session.".to_string());
+        return Err(format!(
+            "context_overflow: prompt uses {} tokens but limit is {} (n_ctx={}, max_new_tokens={}). \
+            Use the Trajectory panel to compress or start a new chat.",
+            occupied_tokens, tokens_limit, n_ctx, sampling_parameters_to_patch.max_new_tokens
+        ));
     }
 
     let (hits, misses, hit_rate) = token_cache.stats();
@@ -1077,50 +740,9 @@ pub fn fix_and_limit_messages_history(
     );
 
     let total_duration = start_time.elapsed();
-    tracing::info!("Total compression time: {:?}", total_duration);
+    tracing::info!("History validation time: {:?}", total_duration);
 
-    let compression_strength = match highest_compression_stage {
-        0 => CompressionStrength::Absent,
-        1..=3 => CompressionStrength::Low,
-        4 => CompressionStrength::Medium,
-        5..=7 => CompressionStrength::High,
-        _ => CompressionStrength::High,
-    };
-    tracing::info!(
-        "Used compression stage {} resulting in {:?} compression strength",
-        highest_compression_stage,
-        compression_strength
-    );
-
-    // Insert cd_instruction message to instruct the model to prompt the user about compression
-    let compression_notice = match compression_strength {
-        CompressionStrength::Low => Some(
-            "💿 Light compression was applied to fit the context window. \
-            Inform the user that some older context has been summarized and suggest they press the 'Compress Chat' button to save tokens."
-        ),
-        CompressionStrength::Medium => Some(
-            "💿 Medium compression was applied - conversation blocks were dropped. \
-            Strongly recommend to the user that they press the 'Compress Chat' button to create a summary and continue with fresh context. \
-            Explain this will significantly reduce token costs."
-        ),
-        CompressionStrength::High => Some(
-            "💿 Heavy compression was applied affecting recent context quality. \
-            Urgently prompt the user to press the 'Compress Chat' button immediately. \
-            Warn them that continuing without compression will waste tokens and degrade response quality."
-        ),
-        CompressionStrength::Absent => None,
-    };
-
-    if let Some(notice) = compression_notice {
-        let compression_msg = ChatMessage {
-            role: "cd_instruction".to_string(),
-            content: ChatContent::SimpleText(notice.to_string()),
-            ..Default::default()
-        };
-        mutable_messages.push(compression_msg);
-    }
-
-    validate_chat_history(&mutable_messages).map(|msgs| (msgs, compression_strength))
+    validate_chat_history(&mutable_messages)
 }
 
 #[cfg(test)]
@@ -1286,36 +908,6 @@ mod tests {
         remove_invalid_tool_calls_and_tool_calls_results(&mut messages);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].role, "diff");
-    }
-
-    #[test]
-    fn test_compression_strength_serialization() {
-        let strength = CompressionStrength::Medium;
-        let json = serde_json::to_value(&strength).unwrap();
-        assert_eq!(json, "medium");
-
-        let deserialized: CompressionStrength = serde_json::from_value(json).unwrap();
-        assert_eq!(deserialized, CompressionStrength::Medium);
-    }
-
-    #[test]
-    fn test_compression_strength_all_variants() {
-        assert_eq!(
-            serde_json::to_value(&CompressionStrength::Absent).unwrap(),
-            "absent"
-        );
-        assert_eq!(
-            serde_json::to_value(&CompressionStrength::Low).unwrap(),
-            "low"
-        );
-        assert_eq!(
-            serde_json::to_value(&CompressionStrength::Medium).unwrap(),
-            "medium"
-        );
-        assert_eq!(
-            serde_json::to_value(&CompressionStrength::High).unwrap(),
-            "high"
-        );
     }
 
     #[test]
