@@ -116,14 +116,16 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
               <Box className={styles.previewSection}>
                 <Flex className={styles.previewStats}>
                   <Text size="1" color="gray">
-                    Before: {transformPreview.before_tokens} tokens
+                    Before: {transformPreview.stats.before_approx_tokens} tokens
                   </Text>
                   <Text size="1" color="gray">
-                    After: {transformPreview.after_tokens} tokens
+                    After: {transformPreview.stats.after_approx_tokens} tokens
                   </Text>
                 </Flex>
                 <Text size="2" weight="medium">
-                  ~{transformPreview.estimated_reduction_percent}% reduction
+                  ~{transformPreview.stats.before_approx_tokens > 0
+                    ? Math.round(((transformPreview.stats.before_approx_tokens - transformPreview.stats.after_approx_tokens) / transformPreview.stats.before_approx_tokens) * 100)
+                    : 0}% reduction
                 </Text>
                 {transformPreview.actions.length > 0 && (
                   <ul className={styles.actionsList}>
@@ -204,25 +206,17 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
 
             {handoffPreview && (
               <Box className={styles.previewSection}>
-                <Text size="2" weight="medium" mb="1">
-                  {handoffPreview.new_chat_title}
-                </Text>
                 <Text size="1" color="gray" mb="2">
-                  ~{handoffPreview.estimated_tokens} tokens
+                  ~{handoffPreview.stats.after_approx_tokens} tokens
                 </Text>
-                {handoffPreview.key_files.length > 0 && (
-                  <>
-                    <Text size="1" color="gray">
-                      Key files:
-                    </Text>
-                    <ul className={styles.actionsList}>
-                      {handoffPreview.key_files.slice(0, 5).map((file, idx) => (
-                        <li key={idx} className={styles.actionsListItem}>
-                          {file}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
+                {handoffPreview.actions.length > 0 && (
+                  <ul className={styles.actionsList}>
+                    {handoffPreview.actions.map((action, idx) => (
+                      <li key={idx} className={styles.actionsListItem}>
+                        {action}
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </Box>
             )}

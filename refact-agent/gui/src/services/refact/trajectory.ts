@@ -21,28 +21,33 @@ export type HandoffOptions = {
   llm_summary_for_excluded?: boolean;
 };
 
+export type TransformStats = {
+  before_message_count: number;
+  after_message_count: number;
+  before_approx_tokens: number;
+  after_approx_tokens: number;
+  context_messages_modified: number;
+  tool_messages_modified: number;
+};
+
 export type TransformPreviewResponse = {
-  before_tokens: number;
-  after_tokens: number;
+  stats: TransformStats;
   actions: string[];
-  estimated_reduction_percent: number;
 };
 
 export type TransformApplyResponse = {
-  success: boolean;
-  new_token_count: number;
+  stats: TransformStats;
 };
 
 export type HandoffPreviewResponse = {
-  new_chat_title: string;
-  summary: string;
-  key_files: string[];
-  estimated_tokens: number;
+  stats: TransformStats;
+  actions: string[];
+  llm_summary?: string | null;
 };
 
 export type HandoffApplyResponse = {
-  success: boolean;
   new_chat_id: string;
+  stats: TransformStats;
 };
 
 function buildUrl(template: string, chatId: string, port: number): string {

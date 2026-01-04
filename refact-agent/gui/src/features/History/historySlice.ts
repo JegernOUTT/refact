@@ -16,7 +16,6 @@ import {
 import {
   trajectoriesApi,
   TrajectoryData,
-  TrajectoryMeta,
   trajectoryDataToChatThread,
 } from "../../services/refact";
 import { AppDispatch, RootState } from "../../app/store";

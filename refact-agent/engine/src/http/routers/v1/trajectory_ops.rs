@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
-use crate::call_validation::ChatContent;
-use crate::chat::trajectory_ops::{CompressOptions, HandoffOptions, compress_in_place, handoff_select};
+
+use crate::chat::trajectory_ops::{CompressOptions, HandoffOptions, TransformStats, compress_in_place, handoff_select};
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::trajectories::TrajectorySnapshot;
@@ -27,30 +27,27 @@ pub struct HandoffRequest {
 
 #[derive(Serialize)]
 pub struct TransformPreviewResponse {
-    pub before_tokens: usize,
-    pub after_tokens: usize,
-    pub estimated_reduction_percent: usize,
+    pub stats: TransformStats,
     pub actions: Vec<String>,
 }
 
 #[derive(Serialize)]
 pub struct TransformApplyResponse {
-    pub success: bool,
-    pub new_token_count: usize,
+    pub stats: TransformStats,
 }
 
 #[derive(Serialize)]
 pub struct HandoffPreviewResponse {
-    pub new_chat_title: String,
-    pub summary: String,
-    pub key_files: Vec<String>,
-    pub estimated_tokens: usize,
+    pub stats: TransformStats,
+    pub actions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_summary: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct HandoffApplyResponse {
-    pub success: bool,
     pub new_chat_id: String,
+    pub stats: TransformStats,
 }
 
 fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
@@ -60,10 +57,38 @@ fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
     } else if opts.dedup_and_compress_context {
         actions.push("Deduplicate and compress context files".to_string());
     }
+    if opts.drop_all_memories {
+        actions.push("Drop all memory/knowledge context".to_string());
+    }
+    if opts.drop_project_information {
+        actions.push("Drop project information from system messages".to_string());
+    }
     if opts.compress_non_agentic_tools {
-        actions.push("Compress non-agentic tool results".to_string());
+        actions.push("Compress tool results (preserving deep_research, subagent, strategic_planning)".to_string());
     }
     actions.push("Remove invalid tool calls and orphan results".to_string());
+    actions
+}
+
+fn describe_handoff_actions(opts: &HandoffOptions) -> Vec<String> {
+    let mut actions = Vec::new();
+    if opts.include_last_user_plus {
+        actions.push("Include last user message and all following".to_string());
+    } else {
+        actions.push("Include user/assistant/system messages".to_string());
+    }
+    if opts.include_all_opened_context {
+        actions.push("Include all opened context files".to_string());
+    }
+    if opts.include_all_edited_context {
+        actions.push("Include all edited context (diffs)".to_string());
+    }
+    if opts.include_agentic_tools {
+        actions.push("Include agentic tool calls and results".to_string());
+    }
+    if opts.llm_summary_for_excluded {
+        actions.push("Generate LLM summary for excluded content".to_string());
+    }
     actions
 }
 
@@ -88,16 +113,8 @@ pub async fn handle_transform_preview(
     let stats = compress_in_place(&mut messages, &req.options)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let reduction_percent = if stats.before_approx_tokens > 0 {
-        ((stats.before_approx_tokens - stats.after_approx_tokens) * 100) / stats.before_approx_tokens
-    } else {
-        0
-    };
-
     let response = TransformPreviewResponse {
-        before_tokens: stats.before_approx_tokens,
-        after_tokens: stats.after_approx_tokens,
-        estimated_reduction_percent: reduction_percent,
+        stats,
         actions: describe_transform_actions(&req.options),
     };
 
@@ -141,10 +158,7 @@ pub async fn handle_transform_apply(
 
     crate::chat::trajectories::maybe_save_trajectory(gcx.clone(), session_arc).await;
 
-    let response = TransformApplyResponse {
-        success: true,
-        new_token_count: stats.after_approx_tokens,
-    };
+    let response = TransformApplyResponse { stats };
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -174,31 +188,13 @@ pub async fn handle_handoff_preview(
         ..req.options.clone()
     };
 
-    let thread_title = {
-        let session = session_arc.lock().await;
-        session.thread.title.clone()
-    };
-
-    let (selected_messages, stats, _) = handoff_select(&messages, &preview_opts, gcx.clone()).await
+    let (_, stats, _) = handoff_select(&messages, &preview_opts, gcx.clone()).await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let key_files: Vec<String> = selected_messages
-        .iter()
-        .filter(|m| m.role == "context_file")
-        .filter_map(|m| {
-            if let ChatContent::ContextFiles(files) = &m.content {
-                files.first().map(|f| f.file_name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
     let response = HandoffPreviewResponse {
-        new_chat_title: format!("Handoff from: {}", thread_title),
-        summary: String::new(),
-        key_files,
-        estimated_tokens: stats.after_approx_tokens,
+        stats,
+        actions: describe_handoff_actions(&req.options),
+        llm_summary: None,
     };
 
     Ok(Response::builder()
@@ -232,7 +228,7 @@ pub async fn handle_handoff_apply(
         (session.messages.clone(), session.thread.clone(), session.thread.task_meta.clone())
     };
 
-    let (selected_messages, _stats, _) = handoff_select(&messages, &req.options, gcx.clone()).await
+    let (selected_messages, stats, _) = handoff_select(&messages, &req.options, gcx.clone()).await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let new_chat_id = Uuid::new_v4().to_string();
@@ -259,10 +255,7 @@ pub async fn handle_handoff_apply(
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "handoff").await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let response = HandoffApplyResponse {
-        success: true,
-        new_chat_id,
-    };
+    let response = HandoffApplyResponse { new_chat_id, stats };
 
     Ok(Response::builder()
         .status(StatusCode::OK)

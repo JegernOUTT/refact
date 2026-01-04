@@ -42,17 +42,11 @@ export function useTrajectoryOps() {
   const [applyHandoff, { isLoading: isApplyingHandoff }] = useApplyHandoffMutation();
 
   const handlePreviewTransform = useCallback(async () => {
-    if (!chatId) {
-      console.error("[TrajectoryOps] No chatId available");
-      return;
-    }
+    if (!chatId) return;
     try {
-      console.log("[TrajectoryOps] Previewing transform for chat:", chatId, "options:", transformOptions);
       const result = await previewTransform({ chatId, options: transformOptions }).unwrap();
-      console.log("[TrajectoryOps] Transform preview result:", result);
       setTransformPreview(result);
-    } catch (error) {
-      console.error("[TrajectoryOps] Transform preview error:", error);
+    } catch {
       setTransformPreview(null);
     }
   }, [chatId, transformOptions, previewTransform]);
@@ -60,33 +54,21 @@ export function useTrajectoryOps() {
   const handleApplyTransform = useCallback(async () => {
     if (!chatId) return false;
     try {
-      console.log("[TrajectoryOps] Applying transform for chat:", chatId);
-      const result = await applyTransform({ chatId, options: transformOptions }).unwrap();
-      console.log("[TrajectoryOps] Transform apply result:", result);
+      await applyTransform({ chatId, options: transformOptions }).unwrap();
       setTransformPreview(null);
-      if (result.success) {
-        console.log("[TrajectoryOps] Requesting SSE refresh to get updated snapshot");
-        dispatch(requestSseRefresh({ chatId }));
-      }
-      return result.success;
-    } catch (error) {
-      console.error("[TrajectoryOps] Transform apply error:", error);
+      dispatch(requestSseRefresh({ chatId }));
+      return true;
+    } catch {
       return false;
     }
   }, [chatId, transformOptions, applyTransform, dispatch]);
 
   const handlePreviewHandoff = useCallback(async () => {
-    if (!chatId) {
-      console.error("[TrajectoryOps] No chatId available for handoff");
-      return;
-    }
+    if (!chatId) return;
     try {
-      console.log("[TrajectoryOps] Previewing handoff for chat:", chatId, "options:", handoffOptions);
       const result = await previewHandoff({ chatId, options: handoffOptions }).unwrap();
-      console.log("[TrajectoryOps] Handoff preview result:", result);
       setHandoffPreview(result);
-    } catch (error) {
-      console.error("[TrajectoryOps] Handoff preview error:", error);
+    } catch {
       setHandoffPreview(null);
     }
   }, [chatId, handoffOptions, previewHandoff]);
@@ -95,14 +77,11 @@ export function useTrajectoryOps() {
     if (!chatId) return false;
     try {
       const result = await applyHandoff({ chatId, options: handoffOptions }).unwrap();
-      if (result.success && result.new_chat_id) {
-        dispatch(createChatWithId({ id: result.new_chat_id }));
-        dispatch(switchToThread({ id: result.new_chat_id }));
-        dispatch(push({ name: "chat" }));
-        setHandoffPreview(null);
-        return true;
-      }
-      return false;
+      dispatch(createChatWithId({ id: result.new_chat_id }));
+      dispatch(switchToThread({ id: result.new_chat_id }));
+      dispatch(push({ name: "chat" }));
+      setHandoffPreview(null);
+      return true;
     } catch {
       return false;
     }

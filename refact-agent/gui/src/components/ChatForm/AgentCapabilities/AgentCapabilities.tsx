@@ -3,7 +3,6 @@ import {
   QuestionMarkCircledIcon,
 } from "@radix-ui/react-icons";
 import {
-  Box,
   Flex,
   HoverCard,
   IconButton,

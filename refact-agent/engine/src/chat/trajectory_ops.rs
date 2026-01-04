@@ -13,6 +13,10 @@ pub struct CompressOptions {
     pub drop_all_context: bool,
     #[serde(default)]
     pub compress_non_agentic_tools: bool,
+    #[serde(default)]
+    pub drop_all_memories: bool,
+    #[serde(default)]
+    pub drop_project_information: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -46,8 +50,14 @@ const AGENTIC_TOOLS: &[&str] = &[
     "shell", "web", "chrome", "subagent", "knowledge", "create_knowledge",
 ];
 
+const TOOLS_TO_PRESERVE: &[&str] = &["deep_research", "subagent", "strategic_planning"];
+
 fn is_agentic_tool(name: &str) -> bool {
     AGENTIC_TOOLS.iter().any(|t| *t == name)
+}
+
+fn should_preserve_tool(name: &str) -> bool {
+    TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
 }
 
 fn approx_token_count(messages: &[ChatMessage]) -> usize {
@@ -87,14 +97,56 @@ pub fn compress_in_place(
         }
     }
 
+    if opts.drop_all_memories {
+        let mut i = 0;
+        while i < messages.len() {
+            if messages[i].role == "context_file" {
+                let content_text = messages[i].content.content_text_only().to_lowercase();
+                if content_text.contains("memory") || content_text.contains("knowledge") {
+                    messages.remove(i);
+                    context_modified += 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    if opts.drop_project_information {
+        let mut i = 0;
+        while i < messages.len() {
+            if messages[i].role == "system" {
+                let content_text = messages[i].content.content_text_only().to_lowercase();
+                if content_text.contains("project") || content_text.contains("workspace") {
+                    messages.remove(i);
+                    context_modified += 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     if opts.compress_non_agentic_tools {
+        let tool_call_names: std::collections::HashMap<String, String> = messages
+            .iter()
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .map(|tc| (tc.id.clone(), tc.function.name.clone()))
+            .collect();
+
         for msg in messages.iter_mut() {
             if msg.role == "tool" && !msg.tool_call_id.is_empty() {
+                if let Some(name) = tool_call_names.get(&msg.tool_call_id) {
+                    if should_preserve_tool(name) {
+                        continue;
+                    }
+                }
                 let content_text = msg.content.content_text_only();
                 if content_text.len() > 500 {
                     let preview: String = content_text.chars().take(200).collect();
                     msg.content = ChatContent::SimpleText(format!(
-                        "💿 Tool result compressed: {}...",
+                        "Tool result compressed: {}...",
                         preview
                     ));
                     tool_modified += 1;
@@ -105,11 +157,32 @@ pub fn compress_in_place(
 
     super::history_limit::remove_invalid_tool_calls_and_tool_calls_results(messages);
 
+    let after_tokens = approx_token_count(messages);
+    let reduction_percent = if before_tokens > 0 {
+        ((before_tokens.saturating_sub(after_tokens)) * 100) / before_tokens
+    } else {
+        0
+    };
+
+    let instruction = ChatMessage {
+        role: "cd_instruction".to_string(),
+        content: ChatContent::SimpleText(format!(
+            "💿 Chat compressed. {} context files removed, {} tool results truncated. Tokens reduced from ~{} to ~{} (~{}% reduction). You can use the Trajectory panel to further compress or create a handoff.",
+            context_modified,
+            tool_modified,
+            before_tokens,
+            after_tokens,
+            reduction_percent
+        )),
+        ..Default::default()
+    };
+    messages.push(instruction);
+
     Ok(TransformStats {
         before_message_count: before_count,
         after_message_count: messages.len(),
         before_approx_tokens: before_tokens,
-        after_approx_tokens: approx_token_count(messages),
+        after_approx_tokens: after_tokens,
         context_messages_modified: context_modified,
         tool_messages_modified: tool_modified,
     })
@@ -140,17 +213,24 @@ pub async fn handoff_select(
                 "assistant" => true,
                 "system" => true,
                 "context_file" => opts.include_all_opened_context,
-                "tool" | "diff" => {
-                    if opts.include_agentic_tools {
-                        if let Some(tc) = messages.iter()
+                "diff" => {
+                    opts.include_all_edited_context || (opts.include_agentic_tools && {
+                        messages.iter()
                             .filter_map(|m| m.tool_calls.as_ref())
                             .flatten()
                             .find(|tc| tc.id == msg.tool_call_id)
-                        {
-                            is_agentic_tool(&tc.function.name)
-                        } else {
-                            false
-                        }
+                            .map(|tc| is_agentic_tool(&tc.function.name))
+                            .unwrap_or(false)
+                    })
+                }
+                "tool" => {
+                    if opts.include_agentic_tools {
+                        messages.iter()
+                            .filter_map(|m| m.tool_calls.as_ref())
+                            .flatten()
+                            .find(|tc| tc.id == msg.tool_call_id)
+                            .map(|tc| is_agentic_tool(&tc.function.name))
+                            .unwrap_or(false)
                     } else {
                         false
                     }
@@ -290,9 +370,10 @@ mod tests {
         };
         let stats = compress_in_place(&mut messages, &opts).unwrap();
         assert_eq!(stats.before_message_count, 3);
-        assert_eq!(stats.after_message_count, 2);
+        assert_eq!(stats.after_message_count, 3);
         assert_eq!(stats.context_messages_modified, 1);
-        assert!(messages.iter().all(|m| m.role != "context_file"));
+        assert!(messages.iter().filter(|m| m.role != "cd_instruction").all(|m| m.role != "context_file"));
+        assert!(messages.last().unwrap().role == "cd_instruction");
     }
 
     #[test]
@@ -301,6 +382,44 @@ mod tests {
         let mut messages = vec![
             make_user_msg("hello"),
             make_assistant_with_tool_call("tc1", "some_tool"),
+            make_tool_msg("tc1", &long_content),
+        ];
+        let opts = CompressOptions {
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+        let stats = compress_in_place(&mut messages, &opts).unwrap();
+        assert_eq!(stats.tool_messages_modified, 1);
+        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+        assert!(tool_msg.content.content_text_only().contains("compressed"));
+    }
+
+    #[test]
+    fn test_compress_preserves_deep_research_subagent_strategic_planning() {
+        let long_content = "x".repeat(1000);
+        for tool_name in &["deep_research", "subagent", "strategic_planning"] {
+            let mut messages = vec![
+                make_user_msg("hello"),
+                make_assistant_with_tool_call("tc1", tool_name),
+                make_tool_msg("tc1", &long_content),
+            ];
+            let opts = CompressOptions {
+                compress_non_agentic_tools: true,
+                ..Default::default()
+            };
+            let stats = compress_in_place(&mut messages, &opts).unwrap();
+            assert_eq!(stats.tool_messages_modified, 0, "Tool {} should be preserved", tool_name);
+            let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+            assert!(!tool_msg.content.content_text_only().contains("compressed"));
+        }
+    }
+
+    #[test]
+    fn test_compress_compresses_cat_tool() {
+        let long_content = "x".repeat(1000);
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
             make_tool_msg("tc1", &long_content),
         ];
         let opts = CompressOptions {
@@ -361,6 +480,69 @@ mod tests {
         assert!(!opts.dedup_and_compress_context);
         assert!(!opts.drop_all_context);
         assert!(!opts.compress_non_agentic_tools);
+        assert!(!opts.drop_all_memories);
+        assert!(!opts.drop_project_information);
+    }
+
+    #[test]
+    fn test_cd_instruction_added_after_compress() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions::default();
+        compress_in_place(&mut messages, &opts).unwrap();
+        let last_msg = messages.last().unwrap();
+        assert_eq!(last_msg.role, "cd_instruction");
+        assert!(last_msg.content.content_text_only().contains("Chat compressed"));
+    }
+
+    #[test]
+    fn test_drop_all_memories() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_context_file_msg("memory.md", "some memory content"),
+            make_context_file_msg("knowledge.txt", "some knowledge"),
+            make_context_file_msg("regular.rs", "fn main() {}"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_memories: true,
+            ..Default::default()
+        };
+        let stats = compress_in_place(&mut messages, &opts).unwrap();
+        assert_eq!(stats.context_messages_modified, 2);
+        assert!(messages.iter().any(|m| {
+            if let ChatContent::ContextFiles(files) = &m.content {
+                files.first().map(|f| f.file_name == "regular.rs").unwrap_or(false)
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn test_drop_project_information() {
+        let mut messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: ChatContent::SimpleText("Project structure: ...".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "system".to_string(),
+                content: ChatContent::SimpleText("You are an assistant".to_string()),
+                ..Default::default()
+            },
+            make_user_msg("hello"),
+        ];
+        let opts = CompressOptions {
+            drop_project_information: true,
+            ..Default::default()
+        };
+        let stats = compress_in_place(&mut messages, &opts).unwrap();
+        assert_eq!(stats.context_messages_modified, 1);
+        assert!(messages.iter().any(|m| m.role == "system" && m.content.content_text_only().contains("assistant")));
     }
 
     #[test]
@@ -384,9 +566,10 @@ mod tests {
             ..Default::default()
         };
         let stats = compress_in_place(&mut messages, &opts).unwrap();
-        assert_eq!(stats.after_message_count, 2);
+        assert_eq!(stats.after_message_count, 3);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[2].role, "cd_instruction");
     }
 
     #[test]
@@ -395,6 +578,7 @@ mod tests {
         let opts = CompressOptions::default();
         let stats = compress_in_place(&mut messages, &opts).unwrap();
         assert_eq!(stats.before_message_count, 0);
-        assert_eq!(stats.after_message_count, 0);
+        assert_eq!(stats.after_message_count, 1);
+        assert_eq!(messages[0].role, "cd_instruction");
     }
 }
