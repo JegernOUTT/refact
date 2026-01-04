@@ -140,9 +140,17 @@ export const historySlice = createSlice({
       if (action.payload.messages.length === 0) return;
       const chat = chatThreadToHistoryItem(action.payload);
       const existing = state[chat.id];
-      if (existing.isTitleGenerated && !chat.isTitleGenerated) {
-        chat.title = existing.title;
-        chat.isTitleGenerated = true;
+      if (existing) {
+        if (existing.isTitleGenerated && !chat.isTitleGenerated) {
+          chat.title = existing.title;
+          chat.isTitleGenerated = true;
+        }
+        chat.parent_id = existing.parent_id;
+        chat.link_type = existing.link_type;
+        chat.task_id = existing.task_id;
+        chat.task_role = existing.task_role;
+        chat.agent_id = existing.agent_id;
+        chat.card_id = existing.card_id;
       }
       state[chat.id] = chat;
 
@@ -236,7 +244,7 @@ export const historySlice = createSlice({
       ),
 
     getHistoryTree: (state): HistoryTreeNode[] => {
-      const items = Object.values(state);
+      const items = Object.values(state).filter((item) => !item.task_id);
       const itemMap = new Map<string, HistoryTreeNode>();
       const roots: HistoryTreeNode[] = [];
 
@@ -244,10 +252,42 @@ export const historySlice = createSlice({
         itemMap.set(item.id, { ...item, children: [] });
       }
 
+      const assignedAsChild = new Set<string>();
+      const handoffParentIds = new Set<string>();
+
+      for (const item of items) {
+        if (item.link_type === "handoff" && item.parent_id && itemMap.has(item.parent_id)) {
+          handoffParentIds.add(item.parent_id);
+        }
+      }
+
       for (const item of items) {
         const node = itemMap.get(item.id)!;
+
+        if (handoffParentIds.has(item.id)) {
+          continue;
+        }
+
         if (item.parent_id && itemMap.has(item.parent_id)) {
-          itemMap.get(item.parent_id)!.children.push(node);
+          if (assignedAsChild.has(item.id)) {
+            roots.push(node);
+            continue;
+          }
+          const parent = itemMap.get(item.parent_id)!;
+          if (parent.parent_id === item.id) {
+            roots.push(node);
+            continue;
+          }
+
+          if (item.link_type === "handoff") {
+            const parentNode = itemMap.get(item.parent_id)!;
+            node.children.push(parentNode);
+            assignedAsChild.add(item.parent_id);
+            roots.push(node);
+          } else {
+            itemMap.get(item.parent_id)!.children.push(node);
+            assignedAsChild.add(item.id);
+          }
         } else {
           roots.push(node);
         }

@@ -59,6 +59,10 @@ pub struct ThreadParams {
     pub automatic_patch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_meta: Option<TaskMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_type: Option<String>,
 }
 
 impl Default for ThreadParams {
@@ -76,6 +80,8 @@ impl Default for ThreadParams {
             is_title_generated: false,
             automatic_patch: false,
             task_meta: None,
+            parent_id: None,
+            link_type: None,
         }
     }
 }

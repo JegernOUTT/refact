@@ -11,7 +11,8 @@ import {
   TransformPreviewResponse,
   HandoffPreviewResponse,
 } from "../services/refact/trajectory";
-import { createChatWithId, switchToThread, requestSseRefresh } from "../features/Chat/Thread/actions";
+import { trajectoriesApi } from "../services/refact/trajectories";
+import { switchToThread, requestSseRefresh } from "../features/Chat/Thread/actions";
 import { push } from "../features/Pages/pagesSlice";
 
 export type TrajectoryTab = "compress" | "handoff";
@@ -25,6 +26,8 @@ export function useTrajectoryOps() {
     dedup_and_compress_context: true,
     drop_all_context: false,
     compress_non_agentic_tools: true,
+    drop_all_memories: false,
+    drop_project_information: false,
   });
   const [handoffOptions, setHandoffOptions] = useState<HandoffOptions>({
     include_last_user_plus: false,
@@ -77,8 +80,9 @@ export function useTrajectoryOps() {
     if (!chatId) return false;
     try {
       const result = await applyHandoff({ chatId, options: handoffOptions }).unwrap();
-      dispatch(createChatWithId({ id: result.new_chat_id }));
+      await dispatch(trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, { forceRefetch: true }));
       dispatch(switchToThread({ id: result.new_chat_id }));
+      dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
       dispatch(push({ name: "chat" }));
       setHandoffPreview(null);
       return true;

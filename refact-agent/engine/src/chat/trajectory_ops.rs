@@ -192,91 +192,79 @@ pub async fn handoff_select(
     messages: &[ChatMessage],
     opts: &HandoffOptions,
     gcx: Arc<ARwLock<GlobalContext>>,
+    generate_summary: bool,
 ) -> Result<(Vec<ChatMessage>, TransformStats, Option<String>), String> {
     let before_count = messages.len();
     let before_tokens = approx_token_count(messages);
 
-    let mut selected: Vec<ChatMessage> = Vec::new();
+    let mut context_files: Vec<ChatMessage> = Vec::new();
+    let mut conversation: Vec<ChatMessage> = Vec::new();
     let mut llm_summary: Option<String> = None;
 
-    if opts.include_last_user_plus {
-        let last_user_idx = messages.iter().rposition(|m| m.role == "user");
-        if let Some(idx) = last_user_idx {
-            selected = messages[idx..].to_vec();
-        }
+    let start_idx = if opts.include_last_user_plus {
+        messages.iter().rposition(|m| m.role == "user").unwrap_or(0)
     } else {
-        let mut tool_call_ids_to_include: std::collections::HashSet<String> = std::collections::HashSet::new();
+        0
+    };
 
+    let mut agentic_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if opts.include_agentic_tools {
         for msg in messages.iter() {
-            let should_include = match msg.role.as_str() {
-                "user" => true,
-                "assistant" => true,
-                "system" => true,
-                "context_file" => opts.include_all_opened_context,
-                "diff" => {
-                    opts.include_all_edited_context || (opts.include_agentic_tools && {
-                        messages.iter()
-                            .filter_map(|m| m.tool_calls.as_ref())
-                            .flatten()
-                            .find(|tc| tc.id == msg.tool_call_id)
-                            .map(|tc| is_agentic_tool(&tc.function.name))
-                            .unwrap_or(false)
-                    })
-                }
-                "tool" => {
-                    if opts.include_agentic_tools {
-                        messages.iter()
-                            .filter_map(|m| m.tool_calls.as_ref())
-                            .flatten()
-                            .find(|tc| tc.id == msg.tool_call_id)
-                            .map(|tc| is_agentic_tool(&tc.function.name))
-                            .unwrap_or(false)
-                    } else {
-                        false
+            if let Some(ref tool_calls) = msg.tool_calls {
+                for tc in tool_calls {
+                    if is_agentic_tool(&tc.function.name) {
+                        agentic_tool_ids.insert(tc.id.clone());
                     }
                 }
-                _ => false,
-            };
-
-            if should_include {
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    for tc in tool_calls {
-                        tool_call_ids_to_include.insert(tc.id.clone());
-                    }
-                }
-                selected.push(msg.clone());
             }
         }
-
-        selected.retain(|m| {
-            if (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty() {
-                tool_call_ids_to_include.contains(&m.tool_call_id)
-            } else {
-                true
-            }
-        });
     }
+
+    if opts.include_all_opened_context {
+        for msg in messages.iter() {
+            if msg.role == "context_file" {
+                context_files.push(msg.clone());
+            }
+        }
+    }
+
+    for (i, msg) in messages.iter().enumerate() {
+        let should_include = match msg.role.as_str() {
+            "user" | "assistant" | "system" => i >= start_idx,
+            "context_file" => false,
+            "diff" => {
+                (i >= start_idx && opts.include_all_edited_context) ||
+                (opts.include_agentic_tools && agentic_tool_ids.contains(&msg.tool_call_id))
+            }
+            "tool" => opts.include_agentic_tools && agentic_tool_ids.contains(&msg.tool_call_id),
+            _ => i >= start_idx,
+        };
+
+        if should_include {
+            conversation.push(msg.clone());
+        }
+    }
+
+    let mut selected = context_files;
+    selected.extend(conversation);
 
     super::history_limit::remove_invalid_tool_calls_and_tool_calls_results(&mut selected);
 
-    if opts.llm_summary_for_excluded && !opts.include_last_user_plus {
-        let messages_vec = messages.to_vec();
-        match crate::agentic::compress_trajectory::compress_trajectory(gcx, &messages_vec).await {
-            Ok(summary) => {
-                let summary_msg = ChatMessage {
-                    role: "user".to_string(),
-                    content: ChatContent::SimpleText(format!(
-                        "## Previous conversation summary\n\n{}",
-                        summary
-                    )),
-                    ..Default::default()
-                };
-                selected.insert(0, summary_msg);
-                llm_summary = Some(summary);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to generate LLM summary for handoff: {}", e);
-            }
+    if opts.llm_summary_for_excluded && generate_summary {
+        let excluded: Vec<ChatMessage> = if opts.include_last_user_plus && start_idx > 0 {
+            messages[..start_idx].to_vec()
+        } else {
+            messages.to_vec()
+        };
+
+        if let Ok(summary) = crate::agentic::compress_trajectory::compress_trajectory(gcx, &excluded).await {
+            let summary_msg = ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::SimpleText(format!("## Previous conversation summary\n\n{}", summary)),
+                ..Default::default()
+            };
+            selected.insert(0, summary_msg);
+            llm_summary = Some(summary);
         }
     }
 

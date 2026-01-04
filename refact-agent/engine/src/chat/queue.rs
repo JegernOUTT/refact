@@ -14,6 +14,15 @@ use super::generation::start_generation;
 use super::tools::execute_tools;
 use super::trajectories::maybe_save_trajectory;
 
+fn command_triggers_generation(cmd: &ChatCommand) -> bool {
+    matches!(
+        cmd,
+        ChatCommand::UserMessage { .. }
+            | ChatCommand::RetryFromIndex { .. }
+            | ChatCommand::Regenerate {}
+    )
+}
+
 pub async fn inject_priority_messages_if_any(
     gcx: Arc<ARwLock<GlobalContext>>,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -267,6 +276,11 @@ pub async fn process_command_queue(
                 continue;
             } else {
                 let cmd = session.command_queue.pop_front();
+                if let Some(ref req) = cmd {
+                    if command_triggers_generation(&req.command) {
+                        session.runtime.state = SessionState::Generating;
+                    }
+                }
                 session.emit_queue_update();
                 cmd
             }

@@ -331,6 +331,8 @@ impl Tool for ToolTaskSpawnAgent {
                     agent_id: Some(agent_id.clone()),
                     card_id: Some(card_id.to_string()),
                 }),
+                parent_id: None,
+                link_type: None,
             };
 
             let user_prompt = build_agent_prompt(&card_title, &card_instructions, &dependency_context, suggested_steps);

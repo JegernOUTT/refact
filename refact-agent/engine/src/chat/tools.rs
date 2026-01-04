@@ -501,14 +501,11 @@ async fn execute_tools_inner(
 ) -> (Vec<ChatMessage>, bool) {
     const MAX_PARALLEL: usize = 16;
 
-    let all_tools: IndexMap<String, Arc<AMutex<Box<dyn crate::tools::tools_description::Tool + Send>>>> =
+    let available_tool_names: std::collections::HashSet<String> =
         crate::tools::tools_list::get_available_tools_by_chat_mode(gcx.clone(), chat_mode)
             .await
             .into_iter()
-            .map(|tool| {
-                let spec = tool.tool_description();
-                (spec.name, Arc::new(AMutex::new(tool)))
-            })
+            .map(|tool| tool.tool_description().name)
             .collect();
 
     let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL));
@@ -517,16 +514,36 @@ async fn execute_tools_inner(
         .iter()
         .enumerate()
         .map(|(idx, tool_call)| {
+            let gcx = gcx.clone();
             let ccx = ccx.clone();
             let semaphore = semaphore.clone();
-            let all_tools = all_tools.clone();
+            let available_tool_names = available_tool_names.clone();
             let tool_call = tool_call.clone();
 
             async move {
                 let _permit = semaphore.acquire().await.unwrap();
 
-                let tool_arc = match all_tools.get(&tool_call.function.name) {
-                    Some(t) => t.clone(),
+                if !available_tool_names.contains(&tool_call.function.name) {
+                    return (idx, vec![ChatMessage {
+                        message_id: Uuid::new_v4().to_string(),
+                        role: "tool".to_string(),
+                        content: ChatContent::SimpleText(format!(
+                            "Error: tool '{}' not found",
+                            tool_call.function.name
+                        )),
+                        tool_call_id: tool_call.id.clone(),
+                        tool_failed: Some(true),
+                        ..Default::default()
+                    }], vec![]);
+                }
+
+                let tool_opt = crate::tools::tools_list::get_available_tools(gcx.clone())
+                    .await
+                    .into_iter()
+                    .find(|t| t.tool_description().name == tool_call.function.name);
+
+                let mut tool = match tool_opt {
+                    Some(t) => t,
                     None => {
                         return (idx, vec![ChatMessage {
                             message_id: Uuid::new_v4().to_string(),
@@ -559,7 +576,6 @@ async fn execute_tools_inner(
 
                 info!("Executing tool: {}({:?})", tool_call.function.name, args);
 
-                let mut tool = tool_arc.lock().await;
                 match tool.tool_execute(ccx, &tool_call.id, &args).await {
                     Ok((_corrections, results)) => {
                         let mut msgs = Vec::new();

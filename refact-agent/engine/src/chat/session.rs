@@ -234,10 +234,8 @@ impl ChatSession {
     }
 
     pub fn start_stream(&mut self) -> Option<(String, Arc<AtomicBool>)> {
-        if self.runtime.state == SessionState::Generating
-            || self.runtime.state == SessionState::ExecutingTools
-        {
-            warn!("Attempted to start stream while already generating/executing");
+        if self.runtime.state == SessionState::ExecutingTools || self.draft_message.is_some() {
+            warn!("Attempted to start stream while already executing tools or draft exists");
             return None;
         }
         let message_id = Uuid::new_v4().to_string();

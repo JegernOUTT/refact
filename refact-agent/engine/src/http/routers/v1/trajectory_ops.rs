@@ -183,12 +183,7 @@ pub async fn handle_handoff_preview(
         session.messages.clone()
     };
 
-    let preview_opts = HandoffOptions {
-        llm_summary_for_excluded: false,
-        ..req.options.clone()
-    };
-
-    let (_, stats, _) = handoff_select(&messages, &preview_opts, gcx.clone()).await
+    let (_, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), false).await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = HandoffPreviewResponse {
@@ -228,7 +223,7 @@ pub async fn handle_handoff_apply(
         (session.messages.clone(), session.thread.clone(), session.thread.task_meta.clone())
     };
 
-    let (selected_messages, stats, _) = handoff_select(&messages, &req.options, gcx.clone()).await
+    let (selected_messages, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), true).await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let new_chat_id = Uuid::new_v4().to_string();
@@ -250,6 +245,8 @@ pub async fn handle_handoff_apply(
         automatic_patch: thread.automatic_patch,
         version: 1,
         task_meta,
+        parent_id: Some(chat_id.clone()),
+        link_type: Some("handoff".to_string()),
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "handoff").await

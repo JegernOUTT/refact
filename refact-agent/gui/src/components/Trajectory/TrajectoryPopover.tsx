@@ -110,6 +110,28 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
                   Drop all context files
                 </Flex>
               </Text>
+              <Text as="label" size="2">
+                <Flex gap="2" align="center">
+                  <Checkbox
+                    checked={transformOptions.drop_all_memories}
+                    onCheckedChange={(checked) =>
+                      updateTransformOption("drop_all_memories", checked === true)
+                    }
+                  />
+                  Drop all memories
+                </Flex>
+              </Text>
+              <Text as="label" size="2">
+                <Flex gap="2" align="center">
+                  <Checkbox
+                    checked={transformOptions.drop_project_information}
+                    onCheckedChange={(checked) =>
+                      updateTransformOption("drop_project_information", checked === true)
+                    }
+                  />
+                  Drop project information
+                </Flex>
+              </Text>
             </Box>
 
             {transformPreview && (
@@ -208,6 +230,7 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
               <Box className={styles.previewSection}>
                 <Text size="1" color="gray" mb="2">
                   ~{handoffPreview.stats.after_approx_tokens} tokens
+                  {handoffOptions.llm_summary_for_excluded && " (inaccurate, summary will be generated on Create)"}
                 </Text>
                 {handoffPreview.actions.length > 0 && (
                   <ul className={styles.actionsList}>

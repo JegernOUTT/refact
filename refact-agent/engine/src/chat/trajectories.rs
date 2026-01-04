@@ -95,6 +95,8 @@ pub struct TrajectorySnapshot {
     pub automatic_patch: bool,
     pub version: u64,
     pub task_meta: Option<super::types::TaskMeta>,
+    pub parent_id: Option<String>,
+    pub link_type: Option<String>,
 }
 
 impl TrajectorySnapshot {
@@ -115,6 +117,8 @@ impl TrajectorySnapshot {
             automatic_patch: session.thread.automatic_patch,
             version: session.trajectory_version,
             task_meta: session.thread.task_meta.clone(),
+            parent_id: session.thread.parent_id.clone(),
+            link_type: session.thread.link_type.clone(),
         }
     }
 }
@@ -268,6 +272,14 @@ pub async fn load_trajectory_for_chat(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         task_meta,
+        parent_id: t
+            .get("parent_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        link_type: t
+            .get("link_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
     };
 
     let created_at = t
@@ -413,6 +425,13 @@ pub async fn save_trajectory_snapshot(
         "isTitleGenerated": snapshot.is_title_generated,
         "automatic_patch": snapshot.automatic_patch,
     });
+
+    if let Some(ref parent_id) = snapshot.parent_id {
+        trajectory["parent_id"] = serde_json::Value::String(parent_id.clone());
+    }
+    if let Some(ref link_type) = snapshot.link_type {
+        trajectory["link_type"] = serde_json::Value::String(link_type.clone());
+    }
 
     if let Some(ref task_meta) = snapshot.task_meta {
         trajectory["task_meta"] = serde_json::to_value(task_meta).unwrap_or_default();
@@ -1037,6 +1056,13 @@ fn trajectory_data_to_meta(data: &TrajectoryData) -> TrajectoryMeta {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let parent_id = data.extra.get("parent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let link_type = data.extra.get("link_type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     TrajectoryMeta {
         id: data.id.clone(),
         title: data.title.clone(),
@@ -1045,8 +1071,8 @@ fn trajectory_data_to_meta(data: &TrajectoryData) -> TrajectoryMeta {
         model: data.model.clone(),
         mode: data.mode.clone(),
         message_count: data.messages.len(),
-        parent_id: None,
-        link_type: None,
+        parent_id,
+        link_type,
         task_id,
         task_role,
         agent_id,
@@ -1650,6 +1676,8 @@ mod tests {
                 is_title_generated: true,
                 automatic_patch: false,
                 task_meta: None,
+                parent_id: Some("parent-chat-id".to_string()),
+                link_type: Some("subagent".to_string()),
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
             runtime: super::super::types::RuntimeState::default(),

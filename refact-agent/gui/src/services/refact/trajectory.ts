@@ -11,6 +11,8 @@ export type TransformOptions = {
   dedup_and_compress_context?: boolean;
   drop_all_context?: boolean;
   compress_non_agentic_tools?: boolean;
+  drop_all_memories?: boolean;
+  drop_project_information?: boolean;
 };
 
 export type HandoffOptions = {

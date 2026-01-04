@@ -422,9 +422,13 @@ impl Tool for ToolStrategicPlanning {
                 }
                 paths
             }
-            Some(v) => return Err(format!("argument `paths` is not a string: {:?}", v)),
-            None => return Err("Missing argument `paths`".to_string()),
+            Some(v) => return Err(format!("argument `important_paths` is not a string: {:?}", v)),
+            None => return Err("Missing argument `important_paths`".to_string()),
         };
+
+        if important_paths.is_empty() {
+            return Err("No valid files resolved from `important_paths`. Please provide existing file paths.".to_string());
+        }
 
         let log_prefix = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let subchat_params: SubchatParameters =

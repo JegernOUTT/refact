@@ -2,21 +2,37 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use serde_json::Value;
-use tokio::sync::Mutex as AMutex;
-use tokio::sync::RwLock as ARwLock;
+use tokio::sync::{broadcast, Mutex as AMutex};
 use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
-use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
+use crate::call_validation::{ChatMessage, ChatContent, ChatUsage, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
-use crate::chat::types::{ThreadParams, CommandRequest, ChatCommand};
+use crate::chat::types::{ThreadParams, CommandRequest, ChatCommand, SessionState, ChatEvent};
 use crate::chat::{get_or_create_session_with_trajectory, process_command_queue};
+use crate::postprocessing::pp_command_output::OutputFilter;
 
 pub struct ToolSubagent {
     pub config_path: String,
 }
+
+static SUBAGENT_SYSTEM_PROMPT: &str = r#"You are a focused sub-agent executing a specific task. You have been delegated this task by a parent agent.
+
+Your task is clearly defined below. Execute it efficiently and report your findings.
+
+Guidelines:
+- Stay focused on the assigned task only
+- Use the provided tools to accomplish the task
+- Be thorough but efficient - you have a limited step budget
+- Report progress and findings clearly
+- When you achieve the expected result, summarize what you found/did
+- If you cannot complete the task, explain why and what you tried
+
+Do NOT:
+- Deviate from the assigned task
+- Ask clarifying questions - work with what you have
+- Exceed your step budget unnecessarily"#;
 
 fn build_task_prompt(
     task: &str,
@@ -49,24 +65,7 @@ You have access to these tools: {tools_list}
     )
 }
 
-async fn resolve_subagent_model(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    current_model: &str,
-) -> Result<String, String> {
-    if !current_model.is_empty() {
-        return Ok(current_model.to_string());
-    }
 
-    let caps = try_load_caps_quickly_if_not_present(gcx, 0).await
-        .map_err(|e| format!("Failed to load caps for model resolution: {}", e))?;
-
-    let default_model = &caps.defaults.chat_default_model;
-    if !default_model.is_empty() {
-        return Ok(default_model.clone());
-    }
-
-    Err("No model available: current_model and global default are both empty".to_string())
-}
 
 #[async_trait]
 impl Tool for ToolSubagent {
@@ -150,12 +149,14 @@ impl Tool for ToolSubagent {
         };
         let max_steps = max_steps.min(50).max(1);
 
-        let (gcx, current_model) = {
+        let subchat_params = crate::tools::tools_execute::unwrap_subchat_params(ccx.clone(), "subagent").await?;
+
+        let (gcx, parent_chat_id) = {
             let ccx_lock = ccx.lock().await;
-            (ccx_lock.global_context.clone(), ccx_lock.current_model.clone())
+            (ccx_lock.global_context.clone(), ccx_lock.chat_id.clone())
         };
 
-        let model = resolve_subagent_model(gcx.clone(), &current_model).await?;
+        let model = subchat_params.subchat_model.clone();
 
         let subagent_id = Uuid::new_v4().to_string();
         let subagent_chat_id = format!("subagent-{}", &subagent_id[..8]);
@@ -186,16 +187,25 @@ impl Tool for ToolSubagent {
                 id: subagent_chat_id.clone(),
                 title: format!("Subagent: {}", title),
                 model: model.clone(),
-                mode: "AGENT".to_string(),
+                mode: "TASK_AGENT".to_string(),
                 tool_use: if tools.is_empty() { "agent".to_string() } else { tools.join(",") },
                 boost_reasoning: false,
-                context_tokens_cap: None,
+                context_tokens_cap: Some(subchat_params.subchat_n_ctx),
                 include_project_info: true,
                 checkpoints_enabled: false,
                 is_title_generated: true,
                 automatic_patch: false,
                 task_meta: None,
+                parent_id: Some(parent_chat_id),
+                link_type: Some("subagent".to_string()),
             };
+
+            let system_msg = ChatMessage {
+                role: "system".to_string(),
+                content: ChatContent::SimpleText(SUBAGENT_SYSTEM_PROMPT.to_string()),
+                ..Default::default()
+            };
+            session.add_message(system_msg);
 
             let user_prompt = build_task_prompt(&task, &expected_result, &tools, max_steps);
             let user_msg = ChatMessage {
@@ -209,6 +219,11 @@ impl Tool for ToolSubagent {
         }
 
         crate::chat::maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+
+        let mut event_rx = {
+            let session = session_arc.lock().await;
+            session.event_tx.subscribe()
+        };
 
         {
             let mut session = session_arc.lock().await;
@@ -233,23 +248,84 @@ impl Tool for ToolSubagent {
             }
         }
 
-        tracing::info!("Spawned subagent {} for task: {} (model: {})", subagent_id, task, model);
+        tracing::info!("Started subagent {} for task: {} (model: {}), waiting for completion...", subagent_id, task, model);
+
+        let timeout = tokio::time::Duration::from_secs(60 * 30);
+        let start = tokio::time::Instant::now();
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(format!("Subagent {} timed out after 30 minutes", subagent_id));
+            }
+
+            match event_rx.recv().await {
+                Ok(envelope) => {
+                    if let ChatEvent::RuntimeUpdated { state, queue_size, error, .. } = envelope.event {
+                        match state {
+                            SessionState::Idle if queue_size == 0 => {
+                                tracing::info!("Subagent {} completed", subagent_id);
+                                break;
+                            }
+                            SessionState::Paused => {
+                                return Err(format!(
+                                    "Subagent {} requires tool confirmation which is not supported in subagent mode. \
+                                    Consider using tools that don't require confirmation or running the task directly.",
+                                    subagent_id
+                                ));
+                            }
+                            SessionState::WaitingIde => {
+                                return Err(format!(
+                                    "Subagent {} requires IDE tool interaction which is not supported in subagent mode. \
+                                    Consider using non-IDE tools or running the task directly.",
+                                    subagent_id
+                                ));
+                            }
+                            SessionState::Error => {
+                                let err_msg = error.unwrap_or_else(|| "Unknown error".to_string());
+                                return Err(format!("Subagent {} encountered an error: {}", subagent_id, err_msg));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Subagent event receiver lagged by {} messages", n);
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(format!("Subagent {} event channel closed unexpectedly", subagent_id));
+                }
+            }
+        }
+
+        let (result_content, usage) = {
+            let session = session_arc.lock().await;
+            let last_assistant = session.messages.iter().rev()
+                .find(|m| m.role == "assistant")
+                .map(|m| m.content.content_text_only())
+                .unwrap_or_else(|| "Subagent completed but produced no response.".to_string());
+
+            let total_usage = session.messages.iter()
+                .filter_map(|m| m.usage.as_ref())
+                .fold(ChatUsage::default(), |mut acc, u| {
+                    acc.prompt_tokens += u.prompt_tokens;
+                    acc.completion_tokens += u.completion_tokens;
+                    acc
+                });
+
+            (last_assistant, total_usage)
+        };
 
         let result_message = format!(
-            r#"# Subagent Spawned
+            r#"# Subagent Result
 
 **Task:** {}
 
 **Expected Result:** {}
 
-**Subagent ID:** {}
-**Model:** {}
-**Status:** Running in background
+## Response
 
-📎 [View Subagent Chat](refact://chat/{})
-
-The subagent is now working independently. Results will appear in the linked chat when complete."#,
-            task, expected_result, subagent_id, model, subagent_chat_id
+{}"#,
+            task, expected_result, result_content
         );
 
         Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
@@ -257,6 +333,8 @@ The subagent is now working independently. Results will appear in the linked cha
             content: ChatContent::SimpleText(result_message),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            usage: Some(usage),
+            output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         })]))
     }
