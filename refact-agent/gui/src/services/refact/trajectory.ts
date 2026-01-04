@@ -8,15 +8,17 @@ import {
 } from "./consts";
 
 export type TransformOptions = {
-  compress_attachments?: boolean;
-  compress_tool_results?: boolean;
-  summarize_conversation?: boolean;
+  dedup_and_compress_context?: boolean;
+  drop_all_context?: boolean;
+  compress_non_agentic_tools?: boolean;
 };
 
 export type HandoffOptions = {
-  include_summary?: boolean;
-  include_key_files?: boolean;
-  include_recent_context?: boolean;
+  include_last_user_plus?: boolean;
+  include_all_opened_context?: boolean;
+  include_all_edited_context?: boolean;
+  include_agentic_tools?: boolean;
+  llm_summary_for_excluded?: boolean;
 };
 
 export type TransformPreviewResponse = {
@@ -70,7 +72,7 @@ export const trajectoryApi = createApi({
         const result = await baseQuery({
           url,
           method: "POST",
-          body: options,
+          body: { options },
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TransformPreviewResponse };
@@ -88,7 +90,7 @@ export const trajectoryApi = createApi({
         const result = await baseQuery({
           url,
           method: "POST",
-          body: options,
+          body: { options },
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TransformApplyResponse };
@@ -106,7 +108,7 @@ export const trajectoryApi = createApi({
         const result = await baseQuery({
           url,
           method: "POST",
-          body: options,
+          body: { options },
         });
         if (result.error) return { error: result.error };
         return { data: result.data as HandoffPreviewResponse };
@@ -124,7 +126,7 @@ export const trajectoryApi = createApi({
         const result = await baseQuery({
           url,
           method: "POST",
-          body: options,
+          body: { options },
         });
         if (result.error) return { error: result.error };
         return { data: result.data as HandoffApplyResponse };

@@ -67,6 +67,7 @@ const Template: React.FC<{
       max_new_tokens: 4096,
       tool_use: "agent",
       system_prompt: {},
+      sse_refresh_requested: null,
     },
     config,
   });

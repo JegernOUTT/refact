@@ -304,3 +304,11 @@ export type IdeToolRequiredPayload = {
 export const ideToolRequired = createAction<IdeToolRequiredPayload>(
   "chatThread/ideToolRequired",
 );
+
+export const requestSseRefresh = createAction<{ chatId: string }>(
+  "chatThread/requestSseRefresh",
+);
+
+export const clearSseRefreshRequest = createAction(
+  "chatThread/clearSseRefreshRequest",
+);

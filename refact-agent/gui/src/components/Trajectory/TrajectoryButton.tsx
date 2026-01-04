@@ -1,7 +1,7 @@
 import React, { useState } from "react";
-import { IconButton, Tooltip } from "@radix-ui/themes";
+import { IconButton, Popover } from "@radix-ui/themes";
 import { ArchiveIcon } from "@radix-ui/react-icons";
-import { TrajectoryPopover } from "./TrajectoryPopover";
+import { TrajectoryPopoverContent } from "./TrajectoryPopover";
 
 type TrajectoryButtonProps = {
   forceOpen?: boolean;
@@ -24,17 +24,19 @@ export const TrajectoryButton: React.FC<TrajectoryButtonProps> = ({
   };
 
   return (
-    <TrajectoryPopover open={open} onOpenChange={handleOpenChange}>
-      <Tooltip content="Trajectory: Compress or Handoff">
+    <Popover.Root open={open} onOpenChange={handleOpenChange}>
+      <Popover.Trigger>
         <IconButton
           variant="ghost"
           size="1"
+          title="Trajectory: Compress or Handoff"
           data-testid="trajectory-button"
           aria-label="Open trajectory options"
         >
           <ArchiveIcon />
         </IconButton>
-      </Tooltip>
-    </TrajectoryPopover>
+      </Popover.Trigger>
+      <TrajectoryPopoverContent onClose={() => handleOpenChange(false)} />
+    </Popover.Root>
   );
 };

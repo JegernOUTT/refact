@@ -358,84 +358,6 @@ async fn execute_strategic_planning(
     Ok((final_message, usage_collector))
 }
 
-fn spawn_strategic_planning_background(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    ccx_subchat: Arc<AMutex<AtCommandsContext>>,
-    subchat_params: SubchatParameters,
-    important_paths: Vec<PathBuf>,
-    external_messages: Vec<ChatMessage>,
-    tool_call_id: String,
-    log_prefix: String,
-) {
-    tokio::spawn(async move {
-        let subchat_tx = ccx_subchat.lock().await.subchat_tx.clone();
-
-        match execute_strategic_planning(
-            gcx,
-            ccx_subchat,
-            subchat_params,
-            important_paths,
-            external_messages,
-            tool_call_id.clone(),
-            log_prefix,
-        ).await {
-            Ok((final_message, usage_collector)) => {
-                let result_msg = ChatMessage {
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(final_message),
-                    tool_calls: None,
-                    tool_call_id: tool_call_id.clone(),
-                    usage: Some(usage_collector),
-                    output_filter: Some(OutputFilter::no_limits()),
-                    ..Default::default()
-                };
-
-                let guardrails_msg = ChatMessage {
-                    role: "cd_instruction".to_string(),
-                    content: ChatContent::SimpleText(GUARDRAILS_PROMPT.to_string()),
-                    ..Default::default()
-                };
-
-                let completion_msg = json!({
-                    "tool_call_id": tool_call_id,
-                    "subchat_id": "strategic-planning-complete",
-                    "add_message": result_msg,
-                    "finished": true
-                });
-                if let Err(e) = subchat_tx.lock().await.send(completion_msg) {
-                    tracing::error!("Failed to send strategic planning completion: {}", e);
-                }
-
-                let guardrails_notification = json!({
-                    "tool_call_id": tool_call_id,
-                    "subchat_id": "strategic-planning-guardrails",
-                    "add_message": guardrails_msg,
-                });
-                let _ = subchat_tx.lock().await.send(guardrails_notification);
-            }
-            Err(e) => {
-                tracing::error!("Strategic planning failed: {}", e);
-                let error_msg = ChatMessage {
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(format!("❌ Strategic planning failed: {}", e)),
-                    tool_calls: None,
-                    tool_call_id: tool_call_id.clone(),
-                    ..Default::default()
-                };
-                let error_notification = json!({
-                    "tool_call_id": tool_call_id,
-                    "subchat_id": "strategic-planning-error",
-                    "add_message": error_msg,
-                    "finished": true
-                });
-                if let Err(send_err) = subchat_tx.lock().await.send(error_notification) {
-                    tracing::error!("Failed to send strategic planning error notification: {}", send_err);
-                }
-            }
-        }
-    });
-}
-
 #[async_trait]
 impl Tool for ToolStrategicPlanning {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -531,9 +453,9 @@ impl Tool for ToolStrategicPlanning {
             Arc::new(AMutex::new(t))
         };
 
-        tracing::info!("Starting strategic planning (background) for {} files", important_paths.len());
+        tracing::info!("Starting strategic planning for {} files", important_paths.len());
 
-        spawn_strategic_planning_background(
+        let (final_message, usage_collector) = execute_strategic_planning(
             gcx,
             ccx_subchat,
             subchat_params,
@@ -541,36 +463,24 @@ impl Tool for ToolStrategicPlanning {
             external_messages,
             tool_call_id.clone(),
             log_prefix,
-        );
+        ).await?;
 
-        let files_list = important_paths
-            .iter()
-            .take(5)
-            .map(|p| format!("- {}", p.file_name().unwrap_or_default().to_string_lossy()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let files_note = if important_paths.len() > 5 {
-            format!("{}\n- ... and {} more", files_list, important_paths.len() - 5)
-        } else {
-            files_list
-        };
-
-        let starting_message = format!(
-            "🧠 **Strategic Planning Started**\n\n\
-            **Analyzing {} files:**\n{}\n\n\
-            ⏳ This may take several minutes. Progress updates will appear below.\n\n\
-            _The planning is running in the background. You can continue with other tasks._",
-            important_paths.len(),
-            files_note
-        );
-
-        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(starting_message),
-            tool_calls: None,
-            tool_call_id: tool_call_id.clone(),
-            ..Default::default()
-        })]))
+        Ok((false, vec![
+            ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(final_message),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                usage: Some(usage_collector),
+                output_filter: Some(OutputFilter::no_limits()),
+                ..Default::default()
+            }),
+            ContextEnum::ChatMessage(ChatMessage {
+                role: "cd_instruction".to_string(),
+                content: ChatContent::SimpleText(GUARDRAILS_PROMPT.to_string()),
+                ..Default::default()
+            }),
+        ]))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {

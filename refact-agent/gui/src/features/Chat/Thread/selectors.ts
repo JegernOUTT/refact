@@ -293,3 +293,6 @@ export const selectThreadImages = (state: RootState) =>
 
 export const selectThreadImagesById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.attached_images ?? EMPTY_IMAGES;
+
+export const selectSseRefreshRequested = (state: RootState) =>
+  state.chat.sse_refresh_requested;

@@ -12,16 +12,12 @@ import {
 import { useTrajectoryOps } from "../../hooks/useTrajectoryOps";
 import styles from "./TrajectoryPopover.module.css";
 
-type TrajectoryPopoverProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  children: React.ReactNode;
+type TrajectoryPopoverContentProps = {
+  onClose: () => void;
 };
 
-export const TrajectoryPopover: React.FC<TrajectoryPopoverProps> = ({
-  open,
-  onOpenChange,
-  children,
+export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> = ({
+  onClose,
 }) => {
   const {
     activeTab,
@@ -51,21 +47,19 @@ export const TrajectoryPopover: React.FC<TrajectoryPopoverProps> = ({
   const handleApplyTransformClick = async () => {
     const success = await handleApplyTransform();
     if (success) {
-      onOpenChange(false);
+      onClose();
     }
   };
 
   const handleApplyHandoffClick = async () => {
     const success = await handleApplyHandoff();
     if (success) {
-      onOpenChange(false);
+      onClose();
     }
   };
 
   return (
-    <Popover.Root open={open} onOpenChange={onOpenChange}>
-      <Popover.Trigger>{children}</Popover.Trigger>
-      <Popover.Content
+    <Popover.Content
         side="top"
         align="end"
         sideOffset={8}
@@ -86,20 +80,20 @@ export const TrajectoryPopover: React.FC<TrajectoryPopoverProps> = ({
               <Text as="label" size="2">
                 <Flex gap="2" align="center">
                   <Checkbox
-                    checked={transformOptions.compress_attachments}
+                    checked={transformOptions.dedup_and_compress_context}
                     onCheckedChange={(checked) =>
-                      updateTransformOption("compress_attachments", checked === true)
+                      updateTransformOption("dedup_and_compress_context", checked === true)
                     }
                   />
-                  Compress attachments
+                  Deduplicate context files
                 </Flex>
               </Text>
               <Text as="label" size="2">
                 <Flex gap="2" align="center">
                   <Checkbox
-                    checked={transformOptions.compress_tool_results}
+                    checked={transformOptions.compress_non_agentic_tools}
                     onCheckedChange={(checked) =>
-                      updateTransformOption("compress_tool_results", checked === true)
+                      updateTransformOption("compress_non_agentic_tools", checked === true)
                     }
                   />
                   Compress tool results
@@ -108,12 +102,12 @@ export const TrajectoryPopover: React.FC<TrajectoryPopoverProps> = ({
               <Text as="label" size="2">
                 <Flex gap="2" align="center">
                   <Checkbox
-                    checked={transformOptions.summarize_conversation}
+                    checked={transformOptions.drop_all_context}
                     onCheckedChange={(checked) =>
-                      updateTransformOption("summarize_conversation", checked === true)
+                      updateTransformOption("drop_all_context", checked === true)
                     }
                   />
-                  Summarize conversation
+                  Drop all context files
                 </Flex>
               </Text>
             </Box>
@@ -165,34 +159,45 @@ export const TrajectoryPopover: React.FC<TrajectoryPopoverProps> = ({
               <Text as="label" size="2">
                 <Flex gap="2" align="center">
                   <Checkbox
-                    checked={handoffOptions.include_summary}
+                    checked={handoffOptions.include_last_user_plus}
                     onCheckedChange={(checked) =>
-                      updateHandoffOption("include_summary", checked === true)
+                      updateHandoffOption("include_last_user_plus", checked === true)
                     }
                   />
-                  Include summary
+                  From last user message only
                 </Flex>
               </Text>
               <Text as="label" size="2">
                 <Flex gap="2" align="center">
                   <Checkbox
-                    checked={handoffOptions.include_key_files}
+                    checked={handoffOptions.include_all_opened_context}
                     onCheckedChange={(checked) =>
-                      updateHandoffOption("include_key_files", checked === true)
+                      updateHandoffOption("include_all_opened_context", checked === true)
                     }
                   />
-                  Include key files
+                  Include context files
                 </Flex>
               </Text>
               <Text as="label" size="2">
                 <Flex gap="2" align="center">
                   <Checkbox
-                    checked={handoffOptions.include_recent_context}
+                    checked={handoffOptions.include_agentic_tools}
                     onCheckedChange={(checked) =>
-                      updateHandoffOption("include_recent_context", checked === true)
+                      updateHandoffOption("include_agentic_tools", checked === true)
                     }
                   />
-                  Include recent context
+                  Include tool results
+                </Flex>
+              </Text>
+              <Text as="label" size="2">
+                <Flex gap="2" align="center">
+                  <Checkbox
+                    checked={handoffOptions.llm_summary_for_excluded}
+                    onCheckedChange={(checked) =>
+                      updateHandoffOption("llm_summary_for_excluded", checked === true)
+                    }
+                  />
+                  Generate summary
                 </Flex>
               </Text>
             </Box>
@@ -240,6 +245,5 @@ export const TrajectoryPopover: React.FC<TrajectoryPopoverProps> = ({
           </Tabs.Content>
         </Tabs.Root>
       </Popover.Content>
-    </Popover.Root>
   );
 };

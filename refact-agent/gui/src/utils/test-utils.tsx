@@ -56,6 +56,7 @@ export const createDefaultChatState = () => {
     threads: { [runtime.thread.id]: runtime },
     system_prompt: {},
     tool_use: "explore" as const,
+    sse_refresh_requested: null,
   };
 };
 

@@ -72,6 +72,7 @@ const MockedStore: React.FC<{
       max_new_tokens: 4096,
       tool_use: "quick",
       system_prompt: {},
+      sse_refresh_requested: null,
     },
   });
 

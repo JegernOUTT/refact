@@ -520,64 +520,6 @@ async fn execute_memory_bank_exploration(
     Ok((summary, usage_collector))
 }
 
-fn spawn_memory_bank_background(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    ccx_subchat: Arc<AMutex<AtCommandsContext>>,
-    params: SubchatParameters,
-    tool_call_id: String,
-) {
-    tokio::spawn(async move {
-        let subchat_tx = ccx_subchat.lock().await.subchat_tx.clone();
-
-        match execute_memory_bank_exploration(
-            gcx,
-            ccx_subchat,
-            params,
-            tool_call_id.clone(),
-        ).await {
-            Ok((summary, usage_collector)) => {
-                let result_msg = ChatMessage {
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(format!("✅ {}", summary)),
-                    usage: Some(usage_collector),
-                    tool_calls: None,
-                    tool_call_id: tool_call_id.clone(),
-                    ..Default::default()
-                };
-
-                let completion_msg = json!({
-                    "tool_call_id": tool_call_id,
-                    "subchat_id": "memory-bank-complete",
-                    "add_message": result_msg,
-                    "finished": true
-                });
-                if let Err(e) = subchat_tx.lock().await.send(completion_msg) {
-                    tracing::error!("Failed to send memory bank completion: {}", e);
-                }
-            }
-            Err(e) => {
-                tracing::error!("Memory bank creation failed: {}", e);
-                let error_msg = ChatMessage {
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(format!("❌ Memory bank creation failed: {}", e)),
-                    tool_calls: None,
-                    tool_call_id: tool_call_id.clone(),
-                    ..Default::default()
-                };
-                let error_notification = json!({
-                    "tool_call_id": tool_call_id,
-                    "subchat_id": "memory-bank-error",
-                    "add_message": error_msg,
-                    "finished": true
-                });
-                if let Err(send_err) = subchat_tx.lock().await.send(error_notification) {
-                    tracing::error!("Failed to send memory bank error notification: {}", send_err);
-                }
-            }
-        }
-    });
-}
-
 #[async_trait]
 impl Tool for ToolCreateMemoryBank {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -614,31 +556,21 @@ impl Tool for ToolCreateMemoryBank {
             Arc::new(AMutex::new(ctx))
         };
 
-        let state = ExplorationState::new(gcx.clone()).await?;
-        let total_dirs = state.to_explore.len() + state.explored.len();
+        tracing::info!("Starting memory bank creation");
 
-        tracing::info!("Starting memory bank creation (background) for {} directories", total_dirs);
-
-        spawn_memory_bank_background(
+        let (summary, usage_collector) = execute_memory_bank_exploration(
             gcx,
             ccx_subchat,
             params,
             tool_call_id.clone(),
-        );
-
-        let starting_message = format!(
-            "🗃️ **Memory Bank Creation Started**\n\n\
-            **Directories to explore:** {}\n\n\
-            ⏳ This may take a while depending on project size. Progress updates will appear below.\n\n\
-            _The exploration is running in the background. You can continue with other tasks._",
-            total_dirs
-        );
+        ).await?;
 
         Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
-            content: ChatContent::SimpleText(starting_message),
+            content: ChatContent::SimpleText(format!("✅ {}", summary)),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            usage: Some(usage_collector),
             ..Default::default()
         })]))
     }

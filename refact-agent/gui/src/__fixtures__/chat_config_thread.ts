@@ -469,4 +469,5 @@ export const CHAT_CONFIG_THREAD: Chat = {
   max_new_tokens: 4096,
   system_prompt: {},
   tool_use: "agent",
+  sse_refresh_requested: null,
 };

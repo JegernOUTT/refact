@@ -98,6 +98,8 @@ export type Chat = {
   checkpoints_enabled?: boolean;
   follow_ups_enabled?: boolean;
   max_new_tokens?: number;
+  /** When set, useChatSubscription should reconnect to get fresh state */
+  sse_refresh_requested: string | null;
 };
 
 export type PayloadWithId = { id: string };

@@ -6,7 +6,8 @@ import {
   subscribeToChatEvents,
   type ChatEventEnvelope,
 } from "../services/refact/chatSubscription";
-import { applyChatEvent } from "../features/Chat/Thread/actions";
+import { applyChatEvent, clearSseRefreshRequest } from "../features/Chat/Thread/actions";
+import { selectSseRefreshRequested } from "../features/Chat/Thread/selectors";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -117,12 +118,14 @@ export function useChatSubscription(
           try {
             const seq = BigInt(envelope.seq);
             if (envelope.type === "snapshot") {
+              console.log("[SSE] Received snapshot event, seq:", envelope.seq, "messages:", (envelope as { messages?: unknown[] }).messages?.length ?? "?");
               lastSeqRef.current = seq;
             } else {
               if (seq <= lastSeqRef.current) {
                 return;
               }
               if (seq > lastSeqRef.current + 1n) {
+                console.log("[SSE] Sequence gap detected, reconnecting. Expected:", (lastSeqRef.current + 1n).toString(), "Got:", envelope.seq);
                 cleanup();
                 setStatus("disconnected");
                 scheduleReconnect(0);
@@ -180,6 +183,14 @@ export function useChatSubscription(
     setStatus("disconnected");
   }, [cleanup]);
 
+  const reconnect = useCallback(() => {
+    console.log("[SSE] Manual reconnect triggered for chat:", chatId);
+    cleanup();
+    setTimeout(() => {
+      connect();
+    }, 50);
+  }, [cleanup, connect, chatId]);
+
   useEffect(() => {
     if (chatId && enabled) {
       connect();
@@ -197,12 +208,23 @@ export function useChatSubscription(
     }
   }, [port]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Listen for SSE refresh requests (e.g., after trajectory transform)
+  const sseRefreshRequested = useAppSelector(selectSseRefreshRequested);
+  useEffect(() => {
+    if (sseRefreshRequested === chatId && enabled) {
+      console.log("[SSE] Refresh requested for chat:", chatId);
+      dispatch(clearSseRefreshRequest());
+      reconnect();
+    }
+  }, [sseRefreshRequested, chatId, enabled, dispatch, reconnect]);
+
   return {
     status,
     error,
     lastSeq: lastSeqRef.current.toString(),
     connect,
     disconnect,
+    reconnect,
     isConnected: status === "connected",
     isConnecting: status === "connecting",
   };

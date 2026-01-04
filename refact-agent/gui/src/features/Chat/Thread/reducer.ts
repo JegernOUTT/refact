@@ -53,6 +53,8 @@ import {
   removeThreadImageByIndex,
   resetThreadImages,
   applyChatEvent,
+  requestSseRefresh,
+  clearSseRefreshRequest,
 } from "./actions";
 import { applyDeltaOps } from "../../../services/refact/chatSubscription";
 import {
@@ -160,6 +162,7 @@ const createInitialState = (): Chat => {
     tool_use: "agent",
     checkpoints_enabled: true,
     follow_ups_enabled: undefined,
+    sse_refresh_requested: null,
   };
 };
 
@@ -965,6 +968,14 @@ export const chatReducer = createReducer(initialState, (builder) => {
       case "ack":
         break;
     }
+  });
+
+  builder.addCase(requestSseRefresh, (state, action) => {
+    state.sse_refresh_requested = action.payload.chatId;
+  });
+
+  builder.addCase(clearSseRefreshRequest, (state) => {
+    state.sse_refresh_requested = null;
   });
 
   builder.addMatcher(
