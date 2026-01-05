@@ -542,13 +542,13 @@ subchat_tool_parameters:
     subchat_model_type: "thinking"
     subchat_n_ctx: 400000
     subchat_max_new_tokens: 128000
-    subchat_temperature: 0.3
+    subchat_temperature: null
     subchat_tokens_for_rag: 200000
     subchat_reasoning_effort: "high"
   create_memory_bank:
     subchat_model_type: "light"
     subchat_n_ctx: 200000
-    subchat_max_new_tokens: 10000
+    subchat_max_new_tokens: 8192
     subchat_temperature: 0.0
     subchat_tokens_for_rag: 120000
     subchat_reasoning_effort: null
@@ -556,91 +556,91 @@ subchat_tool_parameters:
     subchat_model: "refact/o4-mini-deep-research"
     subchat_n_ctx: 200000
     subchat_max_new_tokens: 100000
-    subchat_temperature: 0.3
+    subchat_temperature: null
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: "medium"
   subagent:
     subchat_model_type: "light"
     subchat_n_ctx: 200000
     subchat_max_new_tokens: 16000
-    subchat_temperature: 0.3
+    subchat_temperature: 0.2
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   task_agent:
     subchat_model_type: "default"
     subchat_n_ctx: 200000
-    subchat_max_new_tokens: 32000
-    subchat_temperature: 0.3
+    subchat_max_new_tokens: 8192
+    subchat_temperature: 0.0
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   kg_enrich:
     subchat_model_type: "light"
-    subchat_n_ctx: 8000
-    subchat_max_new_tokens: 1024
+    subchat_n_ctx: 32000
+    subchat_max_new_tokens: 4096
     subchat_temperature: 0.0
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   kg_deprecate:
     subchat_model_type: "light"
-    subchat_n_ctx: 8000
-    subchat_max_new_tokens: 1024
+    subchat_n_ctx: 32000
+    subchat_max_new_tokens: 4096
     subchat_temperature: 0.0
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   code_edit:
     subchat_model_type: "light"
-    subchat_n_ctx: 32000
-    subchat_max_new_tokens: 8000
-    subchat_temperature: 0.1
-    subchat_tokens_for_rag: 0
-    subchat_reasoning_effort: null
-  compress_trajectory:
-    subchat_model_type: "light"
-    subchat_n_ctx: 128000
+    subchat_n_ctx: 200000
     subchat_max_new_tokens: 16000
     subchat_temperature: 0.0
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
+  compress_trajectory:
+    subchat_model_type: "light"
+    subchat_n_ctx: 200000
+    subchat_max_new_tokens: 16000
+    subchat_temperature: 0.2
+    subchat_tokens_for_rag: 0
+    subchat_reasoning_effort: null
   commit_message:
-    subchat_model_type: "default"
-    subchat_n_ctx: 32000
-    subchat_max_new_tokens: 2048
-    subchat_temperature: 0.5
+    subchat_model_type: "light"
+    subchat_n_ctx: 200000
+    subchat_max_new_tokens: 4096
+    subchat_temperature: 0.2
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   follow_up:
     subchat_model_type: "light"
     subchat_n_ctx: 32000
-    subchat_max_new_tokens: 512
-    subchat_temperature: 0.0
+    subchat_max_new_tokens: 1024
+    subchat_temperature: 0.2
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   http_subchat:
     subchat_model_type: "default"
-    subchat_n_ctx: 32000
-    subchat_max_new_tokens: 4096
-    subchat_temperature: 0.3
+    subchat_n_ctx: 200000
+    subchat_max_new_tokens: 8192
+    subchat_temperature: 0.2
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   http_subchat_single:
     subchat_model_type: "default"
-    subchat_n_ctx: 32000
-    subchat_max_new_tokens: 4096
-    subchat_temperature: 0.3
+    subchat_n_ctx: 200000
+    subchat_max_new_tokens: 8192
+    subchat_temperature: 0.2
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   title_generation:
     subchat_model_type: "light"
-    subchat_n_ctx: 32000
-    subchat_max_new_tokens: 50
-    subchat_temperature: 0.3
+    subchat_n_ctx: 128000
+    subchat_max_new_tokens: 128
+    subchat_temperature: 0.2
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
   memo_extraction:
     subchat_model_type: "light"
-    subchat_n_ctx: 128000
-    subchat_max_new_tokens: 4096
-    subchat_temperature: 0.0
+    subchat_n_ctx: 200000
+    subchat_max_new_tokens: 8192
+    subchat_temperature: 0.2
     subchat_tokens_for_rag: 0
     subchat_reasoning_effort: null
 

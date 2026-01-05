@@ -239,7 +239,7 @@ pub struct SubchatParameters {
     pub subchat_model: String,
     pub subchat_n_ctx: usize,
     pub subchat_max_new_tokens: usize,
-    pub subchat_temperature: f32,
+    pub subchat_temperature: Option<f32>,
     pub subchat_tokens_for_rag: usize,
     pub subchat_reasoning_effort: Option<ReasoningEffort>,
 }

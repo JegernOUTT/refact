@@ -80,7 +80,7 @@ pub struct SubchatConfig {
     pub model: String,
     pub n_ctx: usize,
     pub max_new_tokens: usize,
-    pub temperature: f32,
+    pub temperature: Option<f32>,
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
@@ -650,7 +650,7 @@ async fn subchat_stream(
     messages: Vec<ChatMessage>,
     tools: Vec<ToolDesc>,
     prepend_system_prompt: bool,
-    temperature: f32,
+    temperature: Option<f32>,
     max_new_tokens: usize,
     reasoning_effort: Option<ReasoningEffort>,
     only_deterministic_messages: bool,
@@ -686,7 +686,7 @@ async fn subchat_stream(
 
     let mut parameters = SamplingParameters {
         max_new_tokens,
-        temperature: Some(temperature),
+        temperature,
         n: Some(1),
         reasoning_effort,
         ..Default::default()
@@ -811,7 +811,7 @@ async fn subchat_single_internal(
     messages: Vec<ChatMessage>,
     tools_subset: Option<Vec<String>>,
     only_deterministic_messages: bool,
-    temperature: f32,
+    temperature: Option<f32>,
     max_new_tokens: usize,
     reasoning_effort: Option<ReasoningEffort>,
     prepend_system_prompt: bool,
