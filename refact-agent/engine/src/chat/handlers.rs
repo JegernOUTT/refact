@@ -14,6 +14,7 @@ use super::types::*;
 use super::session::get_or_create_session_with_trajectory;
 use super::content::validate_content_with_attachments;
 use super::queue::process_command_queue;
+use super::trajectory_ops::sanitize_messages_for_model_switch;
 
 pub async fn handle_v1_chat_subscribe(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
@@ -125,7 +126,11 @@ pub async fn handle_v1_chat_command(
     }
 
     if let ChatCommand::SetParams { ref patch } = request.command {
+        let old_model = session.thread.model.clone();
         let (changed, sanitized_patch) = super::queue::apply_setparams_patch(&mut session.thread, patch);
+        if session.thread.model != old_model {
+            sanitize_messages_for_model_switch(&mut session.messages);
+        }
         let title_in_patch = patch.get("title").and_then(|v| v.as_str());
         let is_gen_in_patch = patch.get("is_title_generated").and_then(|v| v.as_bool());
         if let Some(title) = title_in_patch {

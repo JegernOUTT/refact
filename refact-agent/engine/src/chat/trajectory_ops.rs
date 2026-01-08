@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
+use uuid::Uuid;
 
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
@@ -26,6 +28,49 @@ pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
 
 pub fn sanitize_messages_for_new_thread(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
     msgs.iter().map(sanitize_message_for_new_thread).collect()
+}
+
+fn is_valid_tool_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn generate_valid_tool_id() -> String {
+    format!("call_{}", Uuid::new_v4().to_string().replace("-", "")[..24].to_string())
+}
+
+pub fn sanitize_messages_for_model_switch(msgs: &mut [ChatMessage]) {
+    let mut id_mapping: HashMap<String, String> = HashMap::new();
+
+    for msg in msgs.iter() {
+        if let Some(tool_calls) = &msg.tool_calls {
+            for tc in tool_calls {
+                if !is_valid_tool_id(&tc.id) && !id_mapping.contains_key(&tc.id) {
+                    id_mapping.insert(tc.id.clone(), generate_valid_tool_id());
+                }
+            }
+        }
+        if !msg.tool_call_id.is_empty() && !is_valid_tool_id(&msg.tool_call_id) && !id_mapping.contains_key(&msg.tool_call_id) {
+            id_mapping.insert(msg.tool_call_id.clone(), generate_valid_tool_id());
+        }
+    }
+
+    for msg in msgs.iter_mut() {
+        msg.usage = None;
+        msg.extra = serde_json::Map::new();
+        msg.finish_reason = None;
+        msg.reasoning_content = None;
+
+        if let Some(tool_calls) = &mut msg.tool_calls {
+            for tc in tool_calls.iter_mut() {
+                if let Some(new_id) = id_mapping.get(&tc.id) {
+                    tc.id = new_id.clone();
+                }
+            }
+        }
+        if let Some(new_id) = id_mapping.get(&msg.tool_call_id) {
+            msg.tool_call_id = new_id.clone();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1174,5 +1219,177 @@ mod tests {
         assert!(result.is_ok(), "Should succeed when only system messages exist");
         let (_, _, llm_summary) = result.unwrap();
         assert!(llm_summary.is_none(), "No summary should be generated when no conversation exists");
+    }
+
+    #[test]
+    fn test_is_valid_tool_id() {
+        assert!(is_valid_tool_id("call_abc123"));
+        assert!(is_valid_tool_id("toolu_def456"));
+        assert!(is_valid_tool_id("abc-def_123"));
+        assert!(is_valid_tool_id("A"));
+        assert!(!is_valid_tool_id(""));
+        assert!(!is_valid_tool_id("call.123"));
+        assert!(!is_valid_tool_id("call:123"));
+        assert!(!is_valid_tool_id("call/123"));
+        assert!(!is_valid_tool_id("call 123"));
+    }
+
+    #[test]
+    fn test_generate_valid_tool_id() {
+        let id = generate_valid_tool_id();
+        assert!(id.starts_with("call_"));
+        assert!(is_valid_tool_id(&id));
+        assert_eq!(id.len(), 29);
+    }
+
+    #[test]
+    fn test_sanitize_messages_for_model_switch_strips_metadata() {
+        let mut messages = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::SimpleText("hello".to_string()),
+                usage: Some(crate::call_validation::ChatUsage {
+                    prompt_tokens: 100,
+                    completion_tokens: 50,
+                    total_tokens: 150,
+                }),
+                finish_reason: Some("stop".to_string()),
+                reasoning_content: Some("thinking...".to_string()),
+                extra: {
+                    let mut map = serde_json::Map::new();
+                    map.insert("cache".to_string(), serde_json::json!(true));
+                    map
+                },
+                ..Default::default()
+            },
+        ];
+
+        sanitize_messages_for_model_switch(&mut messages);
+
+        assert!(messages[0].usage.is_none());
+        assert!(messages[0].finish_reason.is_none());
+        assert!(messages[0].reasoning_content.is_none());
+        assert!(messages[0].extra.is_empty());
+        assert_eq!(messages[0].content.content_text_only(), "hello");
+    }
+
+    #[test]
+    fn test_sanitize_messages_for_model_switch_normalizes_tool_ids() {
+        let mut messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![
+                    ChatToolCall {
+                        id: "gemini.call.123".to_string(),
+                        index: None,
+                        function: ChatToolFunction {
+                            name: "test".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("result".to_string()),
+                tool_call_id: "gemini.call.123".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        sanitize_messages_for_model_switch(&mut messages);
+
+        let new_id = &messages[0].tool_calls.as_ref().unwrap()[0].id;
+        assert!(is_valid_tool_id(new_id));
+        assert!(new_id.starts_with("call_"));
+        assert_eq!(messages[1].tool_call_id, *new_id);
+    }
+
+    #[test]
+    fn test_sanitize_messages_for_model_switch_preserves_valid_ids() {
+        let mut messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![
+                    ChatToolCall {
+                        id: "call_valid123".to_string(),
+                        index: None,
+                        function: ChatToolFunction {
+                            name: "test".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("result".to_string()),
+                tool_call_id: "call_valid123".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        sanitize_messages_for_model_switch(&mut messages);
+
+        assert_eq!(messages[0].tool_calls.as_ref().unwrap()[0].id, "call_valid123");
+        assert_eq!(messages[1].tool_call_id, "call_valid123");
+    }
+
+    #[test]
+    fn test_sanitize_messages_for_model_switch_multiple_invalid_ids() {
+        let mut messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![
+                    ChatToolCall {
+                        id: "bad:id:1".to_string(),
+                        index: None,
+                        function: ChatToolFunction {
+                            name: "tool1".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    },
+                    ChatToolCall {
+                        id: "bad.id.2".to_string(),
+                        index: None,
+                        function: ChatToolFunction {
+                            name: "tool2".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("result1".to_string()),
+                tool_call_id: "bad:id:1".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("result2".to_string()),
+                tool_call_id: "bad.id.2".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        sanitize_messages_for_model_switch(&mut messages);
+
+        let tc = messages[0].tool_calls.as_ref().unwrap();
+        assert!(is_valid_tool_id(&tc[0].id));
+        assert!(is_valid_tool_id(&tc[1].id));
+        assert_ne!(tc[0].id, tc[1].id);
+        assert_eq!(messages[1].tool_call_id, tc[0].id);
+        assert_eq!(messages[2].tool_call_id, tc[1].id);
     }
 }
