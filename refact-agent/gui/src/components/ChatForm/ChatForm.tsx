@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Flex, Card, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
@@ -67,6 +67,8 @@ import { push } from "../../features/Pages/pagesSlice";
 import { AgentCapabilities } from "./AgentCapabilities/AgentCapabilities";
 import { TokensPreview } from "./TokensPreview";
 import classNames from "classnames";
+import { useUsageCounter } from "../UsageCounter/useUsageCounter";
+import { TrajectoryButton } from "../Trajectory";
 
 export type SendPolicy = "immediate" | "after_flow";
 
@@ -97,7 +99,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [isVoiceActive, setIsVoiceActive] = React.useState(false);
   const [liveTranscript, setLiveTranscript] = React.useState("");
   const [inputResetKey, setInputResetKey] = React.useState(0);
+  const [trajectoryOpen, setTrajectoryOpen] = useState(false);
   const isOnline = useIsOnline();
+  const { isWarning, isContextFull, tokenPercentage, shouldShow: shouldShowUsage } = useUsageCounter();
 
   const threadToolUse = useAppSelector(selectThreadToolUse);
   const messages = useAppSelector(selectMessages);
@@ -126,18 +130,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   });
 
   const disableSend = useMemo(() => {
-    // TODO: if interrupting chat some errors can occur
     if (allDisabled) return true;
-    // if (
-    //   currentThreadMaximumContextTokens &&
-    //   currentThreadUsage?.prompt_tokens &&
-    //   currentThreadUsage.prompt_tokens > currentThreadMaximumContextTokens
-    // )
-    //   return false;
-    // if (arePromptTokensBiggerThanContext) return true;
     if (messages.length === 0) return false;
+    if (isContextFull) return true;
     return isWaiting || isStreaming || !isOnline;
-  }, [allDisabled, messages.length, isWaiting, isStreaming, isOnline]);
+  }, [allDisabled, messages.length, isWaiting, isStreaming, isOnline, isContextFull]);
 
   const isModelSelectVisible = useMemo(() => messages.length < 1, [messages]);
 
@@ -301,6 +298,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     setIsSendImmediately,
   ]);
 
+  useEffect(() => {
+    if (isContextFull && !trajectoryOpen) {
+      setTrajectoryOpen(true);
+    }
+  }, [isContextFull, trajectoryOpen]);
+
   const handleLiveTranscript = useCallback((text: string) => {
     setLiveTranscript(text);
   }, []);
@@ -360,6 +363,19 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       {!isOnline && (
         <Callout type="info" mb="2">
           Oops, seems that connection was lost... Check your internet connection
+        </Callout>
+      )}
+      {shouldShowUsage && isContextFull && (
+        <Flex mb="2" gap="2" align="center">
+          <Callout type="error">
+            Context is full ({Math.round(tokenPercentage)}%). Please compress or handoff to continue.
+          </Callout>
+          <TrajectoryButton forceOpen={trajectoryOpen} onOpenChange={setTrajectoryOpen} />
+        </Flex>
+      )}
+      {shouldShowUsage && isWarning && !isContextFull && (
+        <Callout type="warning" mb="2">
+          Context is almost full ({Math.round(tokenPercentage)}%). Consider compressing or handing off soon.
         </Callout>
       )}
 

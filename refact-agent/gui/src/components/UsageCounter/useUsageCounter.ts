@@ -43,16 +43,20 @@ export function useUsageCounter() {
   }, [currentSessionTokens, maxContextTokens]);
 
   const isWarning = useMemo(() => {
-    return tokenPercentage >= 80;
+    return tokenPercentage >= 85;
   }, [tokenPercentage]);
 
   const isOverflown = useMemo(() => {
-    return tokenPercentage >= 95;
+    return tokenPercentage >= 97;
   }, [tokenPercentage]);
 
   const shouldShow = useMemo(() => {
     return messages.length > 0;
   }, [messages.length]);
+
+  const isContextFull = useMemo(() => {
+    return tokenPercentage >= 97;
+  }, [tokenPercentage]);
 
   return {
     shouldShow,
@@ -61,6 +65,7 @@ export function useUsageCounter() {
     currentSessionTokens,
     isOverflown,
     isWarning,
+    isContextFull,
     tokenPercentage,
   };
 }

@@ -5,6 +5,29 @@ use tokio::sync::RwLock as ARwLock;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
 
+pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
+    ChatMessage {
+        message_id: m.message_id.clone(),
+        role: m.role.clone(),
+        content: m.content.clone(),
+        tool_calls: m.tool_calls.clone(),
+        tool_call_id: m.tool_call_id.clone(),
+        tool_failed: m.tool_failed,
+        finish_reason: None,
+        reasoning_content: None,
+        usage: None,
+        checkpoints: vec![],
+        thinking_blocks: None,
+        citations: vec![],
+        extra: serde_json::Map::new(),
+        output_filter: None,
+    }
+}
+
+pub fn sanitize_messages_for_new_thread(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
+    msgs.iter().map(sanitize_message_for_new_thread).collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CompressOptions {
     #[serde(default)]

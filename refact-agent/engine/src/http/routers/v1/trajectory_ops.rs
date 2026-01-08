@@ -8,7 +8,7 @@ use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
 
-use crate::chat::trajectory_ops::{CompressOptions, HandoffOptions, TransformStats, compress_in_place, handoff_select};
+use crate::chat::trajectory_ops::{CompressOptions, HandoffOptions, TransformStats, compress_in_place, handoff_select, sanitize_messages_for_new_thread};
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::trajectories::TrajectorySnapshot;
@@ -225,6 +225,8 @@ pub async fn handle_handoff_apply(
 
     let (selected_messages, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), true).await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let selected_messages = sanitize_messages_for_new_thread(&selected_messages);
 
     let new_chat_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
