@@ -47,3 +47,9 @@
   opacity: 1;
   font-weight: 600;
 }
+
+.contextPercent.fallback {
+  color: var(--gray-11);
+  opacity: 0.6;
+  font-size: 11px;
+}

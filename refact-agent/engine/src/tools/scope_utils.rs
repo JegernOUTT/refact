@@ -41,6 +41,10 @@ async fn list_files_in_dir(
     code_workdir: &Option<PathBuf>,
     dir_path: &PathBuf,
 ) -> Vec<String> {
+    if code_workdir.is_some() {
+        return list_files_in_dir_simple(dir_path);
+    }
+
     let indexing_everywhere = reload_indexing_everywhere_if_needed(gcx.clone()).await;
     let search_root = code_workdir.as_ref().unwrap_or(dir_path);
 
@@ -50,6 +54,32 @@ async fn list_files_in_dir(
         .filter(|f| f.starts_with(dir_path))
         .map(|f| f.to_string_lossy().to_string())
         .collect()
+}
+
+fn list_files_in_dir_simple(dir_path: &PathBuf) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut dirs_to_visit = vec![dir_path.clone()];
+
+    while let Some(dir) = dirs_to_visit.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.starts_with('.') && !matches!(name, "node_modules" | "target" | "__pycache__" | "venv") {
+                    dirs_to_visit.push(path);
+                }
+            } else if path.is_file() {
+                files.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    files
 }
 
 async fn get_workspace_files(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
