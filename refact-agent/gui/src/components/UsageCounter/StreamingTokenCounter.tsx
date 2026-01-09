@@ -5,11 +5,17 @@ import classNames from "classnames";
 import { useAppSelector } from "../../hooks";
 import {
   selectIsStreaming,
+  selectIsWaiting,
   selectMessages,
   selectThreadMaximumTokens,
 } from "../../features/Chat";
-import { AssistantMessage, isAssistantMessage } from "../../services/refact";
+import {
+  AssistantMessage,
+  isAssistantMessage,
+  isUserMessage,
+} from "../../services/refact";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
+import { useUsageCounter } from "./useUsageCounter";
 
 import styles from "./StreamingTokenCounter.module.css";
 
@@ -26,6 +32,40 @@ function estimateTokens(text: string): number {
 }
 
 /**
+ * Find last index matching predicate
+ */
+function findLastIndex<T>(arr: T[], pred: (x: T) => boolean): number {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (pred(arr[i])) return i;
+  }
+  return -1;
+}
+
+/**
+ * Extract all text content from assistant message
+ */
+function extractAllText(message: AssistantMessage | null): string {
+  if (!message) return "";
+
+  let text = message.content ?? "";
+
+  // Add reasoning content if present
+  if (message.reasoning_content) {
+    text += message.reasoning_content;
+  }
+
+  // Add thinking blocks if present
+  if (message.thinking_blocks) {
+    for (const block of message.thinking_blocks) {
+      if (block.thinking) text += block.thinking;
+      if (block.signature) text += block.signature;
+    }
+  }
+
+  return text;
+}
+
+/**
  * StreamingTokenCounter - Compact live token counter for use inside Stop button
  *
  * Shows estimated output tokens during streaming based on content length.
@@ -34,97 +74,124 @@ function estimateTokens(text: string): number {
  * Note: Most providers (OpenAI, Anthropic) only send usage data at stream END.
  * xAI/Grok sends incremental usage. We estimate tokens during streaming for
  * providers that don't support incremental usage reporting.
+ *
+ * ALWAYS shows counter when Stop button is visible (isWaiting || isStreaming),
+ * even before first assistant message arrives. Shows "…" placeholder with
+ * gray fallback context percentage in this case.
  */
 export const StreamingTokenCounter: React.FC = () => {
   const isStreaming = useAppSelector(selectIsStreaming);
+  const isWaiting = useAppSelector(selectIsWaiting);
   const messages = useAppSelector(selectMessages);
   const maxContextTokens = useAppSelector(selectThreadMaximumTokens) ?? 0;
 
-  // Track for animation
+  const { currentSessionTokens } = useUsageCounter();
+
+  const [visible, setVisible] = useState(() => isStreaming || isWaiting);
+
   const [displayTokens, setDisplayTokens] = useState(0);
+  const [pulseKey, setPulseKey] = useState(0);
   const prevTokensRef = useRef(0);
 
-  // Get the last assistant message (the one being streamed)
-  const lastAssistantMessage = useMemo((): AssistantMessage | null => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      if (isAssistantMessage(msg)) {
-        return msg;
-      }
-    }
-    return null;
-  }, [messages]);
+  const lastAssistantIdx = useMemo(
+    () => findLastIndex(messages, isAssistantMessage),
+    [messages],
+  );
+  const lastUserIdx = useMemo(
+    () => findLastIndex(messages, isUserMessage),
+    [messages],
+  );
 
-  const usage = lastAssistantMessage?.usage;
-  const content = lastAssistantMessage?.content ?? "";
+  const waitingForNewAssistant =
+    (isWaiting || isStreaming) && lastUserIdx > lastAssistantIdx;
 
-  // Actual output tokens from API (if available)
+  const activeAssistantMessage = useMemo(
+    (): AssistantMessage | null => {
+      if (waitingForNewAssistant) return null;
+      if (lastAssistantIdx < 0) return null;
+      const msg = messages[lastAssistantIdx];
+      return isAssistantMessage(msg) ? msg : null;
+    },
+    [messages, lastAssistantIdx, waitingForNewAssistant],
+  );
+
+  const usage = activeAssistantMessage?.usage;
+
+  const allText = useMemo(
+    (): string => extractAllText(activeAssistantMessage),
+    [activeAssistantMessage],
+  );
+
   const actualOutputTokens = usage?.completion_tokens ?? 0;
 
-  // Estimated tokens from content (for live display during streaming)
-  const estimatedOutputTokens = useMemo(() => {
-    return estimateTokens(content);
-  }, [content]);
+  const estimatedOutputTokens = useMemo((): number => {
+    return estimateTokens(allText);
+  }, [allText]);
 
-  // Use actual tokens if available, otherwise use estimate
-  // During streaming, providers usually don't send usage until the end
-  const outputTokens = actualOutputTokens > 0 ? actualOutputTokens : estimatedOutputTokens;
+  const outputTokens: number =
+    actualOutputTokens > 0 ? actualOutputTokens : estimatedOutputTokens;
 
-  // Context tokens (prompt_tokens) - usually available at start for some providers
-  const contextTokens = usage?.prompt_tokens ?? 0;
+  const actualContextTokens = usage?.prompt_tokens ?? 0;
+  const contextTokens =
+    actualContextTokens > 0 ? actualContextTokens : currentSessionTokens;
 
-  // Context percentage
+  const isFallbackContext = actualContextTokens === 0 && contextTokens > 0;
+
   const contextPercentage = useMemo(() => {
     if (!maxContextTokens || maxContextTokens === 0) return 0;
     return Math.round((contextTokens / maxContextTokens) * 100);
   }, [contextTokens, maxContextTokens]);
 
-  // Update display with animation when tokens change
+  useEffect(() => {
+    setVisible(isStreaming || isWaiting);
+  }, [isStreaming, isWaiting]);
+
   useEffect(() => {
     if (outputTokens !== prevTokensRef.current) {
       prevTokensRef.current = outputTokens;
       setDisplayTokens(outputTokens);
+      setPulseKey((k: number) => k + 1);
     }
   }, [outputTokens]);
 
-  // Reset when streaming stops
   useEffect(() => {
-    if (!isStreaming) {
+    if (!isStreaming && !isWaiting) {
       setDisplayTokens(0);
       prevTokensRef.current = 0;
     }
-  }, [isStreaming]);
+  }, [isStreaming, isWaiting]);
 
-  // Don't show anything if no content yet
-  if (!isStreaming || displayTokens === 0) return null;
+  if (!visible) return null;
 
-  // Show "~" prefix when using estimates (no actual usage data yet)
-  const isEstimate = actualOutputTokens === 0;
+  const showPlaceholder = allText.length === 0 && (isStreaming || isWaiting);
+
+  const isOutputEstimate = actualOutputTokens === 0;
 
   return (
     <Flex align="center" gap="1" className={styles.inlineContainer}>
-      {/* Separator */}
       <Text className={styles.separator}>|</Text>
 
-      {/* Output tokens (live counter) */}
       <Text
+        key={pulseKey}
         className={classNames(styles.tokenValue, {
           [styles.animateValue]: displayTokens > 0,
         })}
       >
-        {isEstimate ? "~" : ""}
-        {formatNumberToFixed(displayTokens)}
+        {showPlaceholder
+          ? "…"
+          : `${isOutputEstimate ? "~" : ""}${formatNumberToFixed(displayTokens)}`}
       </Text>
 
-      {/* Context percentage if available */}
       {contextTokens > 0 && maxContextTokens > 0 && (
         <Text
           className={classNames(styles.contextPercent, {
+            [styles.fallback]: isFallbackContext,
             [styles.warning]: contextPercentage >= 70,
             [styles.critical]: contextPercentage >= 90,
           })}
         >
-          ({contextPercentage}%)
+          ({isOutputEstimate || isFallbackContext ? "~" : ""}
+          {contextPercentage}%)
         </Text>
       )}
     </Flex>
