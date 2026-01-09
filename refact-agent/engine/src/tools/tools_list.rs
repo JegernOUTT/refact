@@ -347,7 +347,7 @@ pub async fn get_available_tools_by_chat_mode(
                 // Investigation tools
                 "tree", "cat", "search_pattern", "search_symbol_definition", "search_semantic",
                 "knowledge", "search_trajectories", "get_trajectory_context", "web",
-                "shell", "subagent", "deep_research", "strategic_planning",
+                "shell", "subagent", "deep_research", "strategic_planning", "update_textdoc",
                 // Board management
                 "task_board_get", "task_board_create_card", "task_board_update_card",
                 "task_board_delete_card", "task_board_move_card", "task_ready_cards",
