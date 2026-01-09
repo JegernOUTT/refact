@@ -68,7 +68,7 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
         <Tabs.Root value={activeTab} onValueChange={handleTabChange}>
           <Tabs.List className={styles.tabsList}>
             <Tabs.Trigger value="compress" className={styles.tabsTrigger}>
-              Compress
+              Compress in-place
             </Tabs.Trigger>
             <Tabs.Trigger value="handoff" className={styles.tabsTrigger}>
               Handoff
@@ -80,7 +80,23 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
               <Text as="label" size="2">
                 <Flex gap="2" align="center">
                   <Checkbox
+                    checked={transformOptions.drop_all_context}
+                    onCheckedChange={(checked) => {
+                      const enabled = checked === true;
+                      updateTransformOption("drop_all_context", enabled);
+                      if (enabled) {
+                        updateTransformOption("dedup_and_compress_context", false);
+                      }
+                    }}
+                  />
+                  Drop all context files
+                </Flex>
+              </Text>
+              <Text as="label" size="2" color={transformOptions.drop_all_context ? "gray" : undefined}>
+                <Flex gap="2" align="center" ml="4">
+                  <Checkbox
                     checked={transformOptions.dedup_and_compress_context}
+                    disabled={transformOptions.drop_all_context}
                     onCheckedChange={(checked) =>
                       updateTransformOption("dedup_and_compress_context", checked === true)
                     }
@@ -96,18 +112,7 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
                       updateTransformOption("compress_non_agentic_tools", checked === true)
                     }
                   />
-                  Compress tool results
-                </Flex>
-              </Text>
-              <Text as="label" size="2">
-                <Flex gap="2" align="center">
-                  <Checkbox
-                    checked={transformOptions.drop_all_context}
-                    onCheckedChange={(checked) =>
-                      updateTransformOption("drop_all_context", checked === true)
-                    }
-                  />
-                  Drop all context files
+                  Truncate tool results
                 </Flex>
               </Text>
               <Text as="label" size="2">
@@ -136,18 +141,10 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
 
             {transformPreview && (
               <Box className={styles.previewSection}>
-                <Flex className={styles.previewStats}>
-                  <Text size="1" color="gray">
-                    Before: {transformPreview.stats.before_approx_tokens} tokens
-                  </Text>
-                  <Text size="1" color="gray">
-                    After: {transformPreview.stats.after_approx_tokens} tokens
-                  </Text>
-                </Flex>
                 <Text size="2" weight="medium">
                   ~{transformPreview.stats.before_approx_tokens > 0
                     ? Math.round(((transformPreview.stats.before_approx_tokens - transformPreview.stats.after_approx_tokens) / transformPreview.stats.before_approx_tokens) * 100)
-                    : 0}% reduction
+                    : 0}% reduction (approximate)
                 </Text>
                 {transformPreview.actions.length > 0 && (
                   <ul className={styles.actionsList}>
@@ -188,7 +185,7 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
                       updateHandoffOption("include_last_user_plus", checked === true)
                     }
                   />
-                  From last user message only
+                  Include last user message + responses
                 </Flex>
               </Text>
               <Text as="label" size="2">
@@ -199,7 +196,7 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
                       updateHandoffOption("include_all_opened_context", checked === true)
                     }
                   />
-                  Include context files
+                  Include all opened files
                 </Flex>
               </Text>
               <Text as="label" size="2">
@@ -210,7 +207,7 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
                       updateHandoffOption("include_agentic_tools", checked === true)
                     }
                   />
-                  Include tool results
+                  Include research, subagent & planning results
                 </Flex>
               </Text>
               <Text as="label" size="2">
@@ -228,9 +225,10 @@ export const TrajectoryPopoverContent: React.FC<TrajectoryPopoverContentProps> =
 
             {handoffPreview && (
               <Box className={styles.previewSection}>
-                <Text size="1" color="gray" mb="2">
-                  ~{handoffPreview.stats.after_approx_tokens} tokens
-                  {handoffOptions.llm_summary_for_excluded && " (inaccurate, summary will be generated on Create)"}
+                <Text size="2" weight="medium" mb="2">
+                  ~{handoffPreview.stats.before_approx_tokens > 0
+                    ? Math.round(((handoffPreview.stats.before_approx_tokens - handoffPreview.stats.after_approx_tokens) / handoffPreview.stats.before_approx_tokens) * 100)
+                    : 0}% reduction (approximate)
                 </Text>
                 {handoffPreview.actions.length > 0 && (
                   <ul className={styles.actionsList}>

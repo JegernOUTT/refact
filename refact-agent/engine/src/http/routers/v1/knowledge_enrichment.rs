@@ -59,46 +59,33 @@ fn normalize_query(query: &str) -> String {
 
 fn should_enrich(messages: &[ChatMessage], query_raw: &str, query_normalized: &str) -> bool {
     let trimmed = query_raw.trim();
-
-    // Guardrail: empty query
     if trimmed.is_empty() {
         return false;
     }
-
-    // Guardrail: command-like messages
     if trimmed.starts_with('@') || trimmed.starts_with('/') {
         return false;
     }
-
-    // Rule 1: Always enrich first user message
     let user_message_count = messages.iter().filter(|m| m.role == "user").count();
     if user_message_count == 1 {
         tracing::info!("Knowledge enrichment: first user message");
         return true;
     }
-
-    // Rule 2: Signal-based for subsequent messages
     let strong = count_strong_signals(query_raw);
     let weak = count_weak_signals(query_raw, query_normalized);
-
     if strong >= 1 {
         tracing::info!("Knowledge enrichment: {} strong signal(s)", strong);
         return true;
     }
-
     if weak >= 2 && query_normalized.len() >= 20 {
         tracing::info!("Knowledge enrichment: {} weak signal(s)", weak);
         return true;
     }
-
     false
 }
 
 fn count_strong_signals(query: &str) -> usize {
     let query_lower = query.to_lowercase();
     let mut count = 0;
-
-    // Error/debug keywords
     let error_keywords = [
         "error",
         "panic",
@@ -118,8 +105,6 @@ fn count_strong_signals(query: &str) -> usize {
     if error_keywords.iter().any(|kw| query_lower.contains(kw)) {
         count += 1;
     }
-
-    // File references
     let file_extensions = [
         ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".cpp", ".c", ".h",
     ];
@@ -137,19 +122,13 @@ fn count_strong_signals(query: &str) -> usize {
     {
         count += 1;
     }
-
-    // Path-like pattern
     let path_re = Regex::new(r"\b[\w-]+/[\w-]+(?:/[\w.-]+)*\b").unwrap();
     if path_re.is_match(query) {
         count += 1;
     }
-
-    // Code symbols
     if query.contains("::") || query.contains("->") || query.contains("`") {
         count += 1;
     }
-
-    // Explicit retrieval intent
     let retrieval_phrases = [
         "search",
         "find",
@@ -169,13 +148,9 @@ fn count_strong_signals(query: &str) -> usize {
 
 fn count_weak_signals(query_raw: &str, query_normalized: &str) -> usize {
     let mut count = 0;
-
-    // Has question mark
     if query_raw.contains('?') {
         count += 1;
     }
-
-    // Starts with question word
     let query_lower = query_raw.trim().to_lowercase();
     let question_starters = [
         "how",
@@ -193,12 +168,9 @@ fn count_weak_signals(query_raw: &str, query_normalized: &str) -> usize {
     if question_starters.iter().any(|s| query_lower.starts_with(s)) {
         count += 1;
     }
-
-    // Long enough natural language (after stripping code)
     if query_normalized.len() >= 80 {
         count += 1;
     }
-
     count
 }
 

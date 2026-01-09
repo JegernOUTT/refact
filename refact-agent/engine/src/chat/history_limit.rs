@@ -296,9 +296,11 @@ pub(crate) fn remove_invalid_tool_calls_and_tool_calls_results(messages: &mut Ve
     // Remove duplicate tool results - keep only the last occurrence of each tool_call_id
     // Anthropic API requires exactly one tool_result per tool_use
     // For file edit operations, "diff" role typically comes after "tool" and contains cleaner output
+    // Only applies to actual tool results (role == "tool" or "diff"), not context_file markers
     let mut last_occurrence: HashMap<String, usize> = HashMap::new();
     for (i, m) in messages.iter().enumerate() {
-        if !m.tool_call_id.is_empty() {
+        let is_tool_result = m.role == "tool" || m.role == "diff";
+        if is_tool_result && !m.tool_call_id.is_empty() {
             last_occurrence.insert(m.tool_call_id.clone(), i);
         }
     }
@@ -307,7 +309,8 @@ pub(crate) fn remove_invalid_tool_calls_and_tool_calls_results(messages: &mut Ve
     messages.retain(|m| {
         let idx = current_idx;
         current_idx += 1;
-        if m.tool_call_id.is_empty() {
+        let is_tool_result = m.role == "tool" || m.role == "diff";
+        if m.tool_call_id.is_empty() || !is_tool_result {
             true
         } else if indices_to_keep.contains(&idx) {
             true

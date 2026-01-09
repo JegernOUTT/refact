@@ -163,7 +163,7 @@ impl Tool for ToolSubagent {
             format!("Subagent: {}", task)
         };
 
-        let config = crate::subchat::resolve_subchat_config(
+        let config = crate::subchat::resolve_subchat_config_with_parent(
             gcx.clone(),
             "subagent",
             true,
@@ -175,6 +175,7 @@ impl Tool for ToolSubagent {
             max_steps,
             false,
             None,
+            Some(tool_call_id.clone()),
         ).await?;
 
         let user_prompt = build_task_prompt(&task, &expected_result, &tools, max_steps);

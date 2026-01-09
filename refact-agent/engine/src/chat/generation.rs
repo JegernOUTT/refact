@@ -35,6 +35,30 @@ pub fn parse_chat_mode(mode: &str) -> ChatMode {
     }
 }
 
+fn tail_needs_assistant(messages: &[ChatMessage]) -> bool {
+    let mut saw_toolish = false;
+
+    for m in messages.iter().rev() {
+        match m.role.as_str() {
+            "assistant" => {
+                if !saw_toolish {
+                    return false;
+                }
+                let Some(tcs) = m.tool_calls.as_ref() else { return false };
+                if tcs.is_empty() {
+                    return false;
+                }
+                return tcs.iter().any(|tc| !tc.id.starts_with("srvtoolu_"));
+            }
+            "user" => return true,
+            "tool" | "context_file" => saw_toolish = true,
+            _ => {}
+        }
+    }
+
+    false
+}
+
 pub fn start_generation(
     gcx: Arc<ARwLock<GlobalContext>>,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -96,6 +120,13 @@ pub fn start_generation(
             match process_tool_calls_once(gcx.clone(), session_arc.clone(), chat_mode).await {
                 ToolStepOutcome::NoToolCalls => {
                     if inject_priority_messages_if_any(gcx.clone(), session_arc.clone()).await {
+                        continue;
+                    }
+                    let should_continue = {
+                        let session = session_arc.lock().await;
+                        tail_needs_assistant(&session.messages)
+                    };
+                    if should_continue {
                         continue;
                     }
                     break;
@@ -497,4 +528,208 @@ async fn run_streaming_generation(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call_validation::{ChatToolCall, ChatToolFunction};
+
+    fn make_user_msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn make_assistant_msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn make_assistant_with_tool_call(tool_call_id: &str, tool_name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("".to_string()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: tool_call_id.to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: tool_name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn make_tool_msg(tool_call_id: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn make_context_file_msg() -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::SimpleText("file content".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_ends_with_assistant_no_tools() {
+        let messages = vec![
+            make_user_msg("hello"),
+            make_assistant_msg("response"),
+        ];
+        assert!(!tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_ends_with_user() {
+        let messages = vec![
+            make_user_msg("hello"),
+        ];
+        assert!(tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_ends_with_tool_from_client() {
+        let messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("call_123", "cat"),
+            make_tool_msg("call_123", "file content"),
+        ];
+        assert!(tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_ends_with_tool_from_server() {
+        let messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("srvtoolu_123", "web_search"),
+            make_tool_msg("srvtoolu_123", "search results"),
+        ];
+        assert!(!tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_empty_assistant_discarded() {
+        let messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("call_123", "cat"),
+            make_tool_msg("call_123", "file content"),
+        ];
+        assert!(tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_context_file_after_tool() {
+        let messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("call_123", "cat"),
+            make_tool_msg("call_123", "file content"),
+            make_context_file_msg(),
+        ];
+        assert!(tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_multiple_tool_calls_mixed() {
+        let messages = vec![
+            make_user_msg("hello"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![
+                    ChatToolCall {
+                        id: "call_123".to_string(),
+                        index: Some(0),
+                        function: ChatToolFunction {
+                            name: "cat".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    },
+                    ChatToolCall {
+                        id: "srvtoolu_456".to_string(),
+                        index: Some(1),
+                        function: ChatToolFunction {
+                            name: "web_search".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            make_tool_msg("call_123", "file content"),
+            make_tool_msg("srvtoolu_456", "search results"),
+        ];
+        assert!(tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_only_server_tools() {
+        let messages = vec![
+            make_user_msg("hello"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![
+                    ChatToolCall {
+                        id: "srvtoolu_123".to_string(),
+                        index: Some(0),
+                        function: ChatToolFunction {
+                            name: "web_search".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    },
+                    ChatToolCall {
+                        id: "srvtoolu_456".to_string(),
+                        index: Some(1),
+                        function: ChatToolFunction {
+                            name: "web_search".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            make_tool_msg("srvtoolu_123", "search results 1"),
+            make_tool_msg("srvtoolu_456", "search results 2"),
+        ];
+        assert!(!tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_empty_messages() {
+        let messages: Vec<ChatMessage> = vec![];
+        assert!(!tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_assistant_with_empty_tool_calls() {
+        let messages = vec![
+            make_user_msg("hello"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("response".to_string()),
+                tool_calls: Some(vec![]),
+                ..Default::default()
+            },
+        ];
+        assert!(!tail_needs_assistant(&messages));
+    }
 }

@@ -260,9 +260,9 @@ pub async fn handoff_select(
     let system_prefix: Vec<ChatMessage> = messages.iter().take(system_prefix_len).cloned().collect();
 
     let start_idx = if opts.include_last_user_plus {
-        messages.iter().rposition(|m| m.role == "user").unwrap_or(0)
+        messages.iter().rposition(|m| m.role == "user").unwrap_or(messages.len())
     } else {
-        0
+        messages.len()
     };
 
     let bundled_context: Option<ChatMessage> = if opts.include_all_opened_context {
@@ -294,6 +294,7 @@ pub async fn handoff_select(
     };
 
     let mut preserved_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut edited_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut agentic_tool_messages: Vec<ChatMessage> = Vec::new();
 
     if opts.include_agentic_tools {
@@ -328,6 +329,34 @@ pub async fn handoff_select(
         }
     }
 
+    if opts.include_agentic_tools && opts.include_all_edited_context {
+        for msg in messages.iter() {
+            if msg.role == "diff" && !msg.tool_call_id.is_empty() && !preserved_tool_ids.contains(&msg.tool_call_id) {
+                edited_tool_ids.insert(msg.tool_call_id.clone());
+            }
+        }
+
+        for msg in messages.iter() {
+            if let Some(ref tool_calls) = msg.tool_calls {
+                let edited_calls: Vec<_> = tool_calls
+                    .iter()
+                    .filter(|tc| edited_tool_ids.contains(&tc.id))
+                    .cloned()
+                    .collect();
+
+                if !edited_calls.is_empty() {
+                    let mut assistant_msg = msg.clone();
+                    assistant_msg.tool_calls = Some(edited_calls);
+                    agentic_tool_messages.push(assistant_msg);
+                }
+            }
+
+            if msg.role == "diff" && edited_tool_ids.contains(&msg.tool_call_id) {
+                agentic_tool_messages.push(msg.clone());
+            }
+        }
+    }
+
     let mut conversation: Vec<ChatMessage> = Vec::new();
     for (i, msg) in messages.iter().enumerate().skip(system_prefix_len) {
         let should_include = match msg.role.as_str() {
@@ -335,7 +364,9 @@ pub async fn handoff_select(
             "assistant" => {
                 if i >= start_idx {
                     if let Some(ref tool_calls) = msg.tool_calls {
-                        let has_non_preserved = tool_calls.iter().any(|tc| !should_preserve_tool(&tc.function.name));
+                        let has_non_preserved = tool_calls.iter().any(|tc| {
+                            !should_preserve_tool(&tc.function.name) && !edited_tool_ids.contains(&tc.id)
+                        });
                         has_non_preserved || tool_calls.is_empty()
                     } else {
                         true
@@ -346,14 +377,8 @@ pub async fn handoff_select(
             }
             "system" => false,
             "context_file" => false,
-            "diff" => {
-                if preserved_tool_ids.contains(&msg.tool_call_id) {
-                    false
-                } else {
-                    i >= start_idx && opts.include_all_edited_context
-                }
-            }
-            "tool" => !preserved_tool_ids.contains(&msg.tool_call_id) && false,
+            "diff" => false,
+            "tool" => false,
             _ => i >= start_idx,
         };
 
@@ -366,8 +391,7 @@ pub async fn handoff_select(
     let mut summary_msg: Option<ChatMessage> = None;
 
     if opts.llm_summary_for_excluded && generate_summary {
-        // Generate summary from the entire original conversation (excluding system prefix)
-        let all_conversation: Vec<ChatMessage> = messages[system_prefix_len..].to_vec();
+        let all_conversation = sanitize_messages_for_new_thread(messages);
 
         if !all_conversation.is_empty() {
             let summary = crate::agentic::compress_trajectory::compress_trajectory(gcx, &all_conversation).await
@@ -809,7 +833,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_all_messages_when_include_last_user_plus_false() {
+    async fn test_handoff_only_system_when_all_options_false() {
         let messages = vec![
             make_system_msg("System prompt"),
             make_user_msg("first question"),
@@ -825,8 +849,8 @@ mod tests {
         let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
 
         assert_system_prefix(&selected);
-        assert_eq!(selected.len(), 5);
-        assert_eq!(roles(&selected), vec!["system", "user", "assistant", "user", "assistant"]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(roles(&selected), vec!["system"]);
     }
 
     #[tokio::test]
@@ -1061,8 +1085,36 @@ mod tests {
         let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
 
         assert_system_prefix(&selected);
-        // update_textdoc is NOT in TOOLS_TO_PRESERVE, so diff is included only via include_all_edited_context
-        assert_eq!(roles(&selected), vec!["system", "diff", "user", "assistant"]);
+        assert_eq!(roles(&selected), vec!["system", "assistant", "diff", "user", "assistant"]);
+    }
+
+    #[tokio::test]
+    async fn test_handoff_edited_context_requires_agentic_tools() {
+        let diff_msg = ChatMessage {
+            role: "diff".to_string(),
+            tool_call_id: "tc1".to_string(),
+            content: ChatContent::SimpleText("diff content".to_string()),
+            ..Default::default()
+        };
+        let messages = vec![
+            make_system_msg("s"),
+            make_user_msg("u1"),
+            make_assistant_with_tool_call("tc1", "update_textdoc"),
+            diff_msg,
+            make_user_msg("u2"),
+            make_assistant_msg("a2"),
+        ];
+        let opts = HandoffOptions {
+            include_last_user_plus: true,
+            include_all_edited_context: true,
+            include_agentic_tools: false,
+            ..Default::default()
+        };
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+
+        assert_system_prefix(&selected);
+        assert_eq!(roles(&selected), vec!["system", "user", "assistant"]);
     }
 
     #[tokio::test]
@@ -1211,14 +1263,14 @@ mod tests {
         ];
         let opts = HandoffOptions {
             include_last_user_plus: true,
-            llm_summary_for_excluded: true,
+            llm_summary_for_excluded: false,
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let result = handoff_select(&messages, &opts, gcx, true).await;
+        let result = handoff_select(&messages, &opts, gcx, false).await;
         assert!(result.is_ok(), "Should succeed when only system messages exist");
         let (_, _, llm_summary) = result.unwrap();
-        assert!(llm_summary.is_none(), "No summary should be generated when no conversation exists");
+        assert!(llm_summary.is_none(), "No summary should be generated when option disabled");
     }
 
     #[test]

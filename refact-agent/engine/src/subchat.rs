@@ -82,6 +82,7 @@ pub struct SubchatConfig {
     pub max_new_tokens: usize,
     pub temperature: Option<f32>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub parent_tool_call_id: Option<String>,
 }
 
 pub struct SubchatResult {
@@ -172,6 +173,36 @@ pub async fn resolve_subchat_config(
     prepend_system_prompt: bool,
     wrap_up: Option<WrapUpConfig>,
 ) -> Result<SubchatConfig, String> {
+    resolve_subchat_config_with_parent(
+        gcx,
+        tool_name,
+        stateful,
+        chat_id,
+        title,
+        parent_id,
+        link_type,
+        tools,
+        max_steps,
+        prepend_system_prompt,
+        wrap_up,
+        None,
+    ).await
+}
+
+pub async fn resolve_subchat_config_with_parent(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    tool_name: &str,
+    stateful: bool,
+    chat_id: Option<String>,
+    title: Option<String>,
+    parent_id: Option<String>,
+    link_type: Option<String>,
+    tools: Option<Vec<String>>,
+    max_steps: usize,
+    prepend_system_prompt: bool,
+    wrap_up: Option<WrapUpConfig>,
+    parent_tool_call_id: Option<String>,
+) -> Result<SubchatConfig, String> {
     if max_steps == 0 {
         return Err("max_steps must be > 0".to_string());
     }
@@ -207,6 +238,7 @@ pub async fn resolve_subchat_config(
         max_new_tokens: params.subchat_max_new_tokens,
         temperature: params.subchat_temperature,
         reasoning_effort: params.subchat_reasoning_effort,
+        parent_tool_call_id,
     })
 }
 
@@ -398,8 +430,9 @@ async fn run_subchat_loop(
             &config.model,
             messages,
             tools_policy,
-            None,
-            None,
+            step,
+            config.max_steps,
+            config.parent_tool_call_id.clone(),
         )
         .await?;
     }
@@ -464,8 +497,9 @@ async fn run_subchat_with_wrap_up(
             &config.model,
             messages,
             tools_policy,
-            None,
-            None,
+            step_n,
+            config.max_steps,
+            config.parent_tool_call_id.clone(),
         )
         .await?;
 
@@ -477,8 +511,9 @@ async fn run_subchat_with_wrap_up(
         &config.model,
         messages,
         tools_policy,
-        None,
-        None,
+        step_n,
+        config.max_steps,
+        config.parent_tool_call_id.clone(),
     )
     .await?;
 
@@ -546,13 +581,19 @@ fn extract_paths_from_tool_args(tool_name: &str, args_json: &str) -> Vec<String>
     out
 }
 
+fn truncate_args(s: &str, max: usize) -> String {
+    if s.len() <= max { return s.to_string(); }
+    format!("{}…", &s[..max])
+}
+
 async fn execute_pending_tool_calls(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,
     mut messages: Vec<ChatMessage>,
     tools_policy: &ToolsPolicy,
+    step_idx: usize,
+    max_steps: usize,
     tx_toolid_mb: Option<String>,
-    tx_chatid_mb: Option<String>,
 ) -> Result<Vec<ChatMessage>, String> {
     let (gcx, n_ctx) = {
         let ccx_locked = ccx.lock().await;
@@ -595,17 +636,21 @@ async fn execute_pending_tool_calls(
         ..Default::default()
     };
 
-    if let (Some(tx_toolid), Some(tx_chatid)) = (&tx_toolid_mb, &tx_chatid_mb) {
+    if let Some(tx_toolid) = &tx_toolid_mb {
         let subchat_tx = ccx.lock().await.subchat_tx.clone();
         for tc in &allowed {
             let paths = extract_paths_from_tool_args(&tc.function.name, &tc.function.arguments);
+            let args_truncated = truncate_args(&tc.function.arguments, 200);
+            let progress_msg = format!(
+                "{}/{}: {}({})",
+                step_idx + 1,
+                max_steps,
+                tc.function.name,
+                args_truncated
+            );
             let tool_msg = json!({
                 "tool_call_id": tx_toolid,
-                "subchat_id": format!("{}/tool:{}", tx_chatid, tc.function.name),
-                "tool_call": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments
-                },
+                "subchat_id": progress_msg,
                 "attached_files": paths
             });
             let _ = subchat_tx.lock().await.send(tool_msg);

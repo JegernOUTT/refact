@@ -35,9 +35,10 @@ export function useTrajectoryOps() {
   });
   const [handoffOptions, setHandoffOptions] = useState<HandoffOptions>({
     include_last_user_plus: false,
-    include_all_opened_context: true,
-    include_agentic_tools: true,
-    llm_summary_for_excluded: false,
+    include_all_opened_context: false,
+    include_all_edited_context: false,
+    include_agentic_tools: false,
+    llm_summary_for_excluded: true,
   });
 
   const [transformPreview, setTransformPreview] = useState<TransformPreviewResponse | null>(null);
