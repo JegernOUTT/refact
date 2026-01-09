@@ -15,6 +15,7 @@ export * from "./integrations";
 export * from "./docker";
 export * from "./telemetry";
 export * from "./knowledge";
+export * from "./knowledgeGraphApi";
 export * from "./teams";
 export * from "./trajectories";
 export * from "./trajectory";

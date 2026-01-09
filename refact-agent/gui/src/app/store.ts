@@ -23,6 +23,7 @@ import {
   dockerApi,
   telemetryApi,
   knowledgeApi,
+  knowledgeGraphApi,
   providersApi,
   modelsApi,
   teamsApi,
@@ -95,6 +96,7 @@ const rootReducer = combineSlices(
     [checkpointsApi.reducerPath]: checkpointsApi.reducer,
     [telemetryApi.reducerPath]: telemetryApi.reducer,
     [knowledgeApi.reducerPath]: knowledgeApi.reducer,
+    [knowledgeGraphApi.reducerPath]: knowledgeGraphApi.reducer,
     [teamsApi.reducerPath]: teamsApi.reducer,
     [providersApi.reducerPath]: providersApi.reducer,
     [modelsApi.reducerPath]: modelsApi.reducer,
@@ -181,6 +183,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
             checkpointsApi.middleware,
             telemetryApi.middleware,
             knowledgeApi.middleware,
+            knowledgeGraphApi.middleware,
             providersApi.middleware,
             modelsApi.middleware,
             teamsApi.middleware,
@@ -189,7 +192,6 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
             tasksApi.middleware,
           )
           .prepend(historyMiddleware.middleware)
-          // .prepend(errorMiddleware.middleware)
           .prepend(listenerMiddleware.middleware)
       );
     },
