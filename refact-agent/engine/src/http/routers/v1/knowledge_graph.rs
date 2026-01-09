@@ -7,6 +7,10 @@ use crate::custom_error::ScratchError;
 use crate::global_context::SharedGlobalContext;
 use crate::knowledge_graph::build_knowledge_graph;
 
+fn normalize_tag(tag: &str) -> String {
+    tag.to_lowercase().trim().to_string()
+}
+
 #[derive(Serialize)]
 struct KgNodeJson {
     id: String,
@@ -73,8 +77,9 @@ pub async fn handle_v1_knowledge_graph(
     }
 
     for (tag, _) in &kg.tag_index {
+        let normalized = normalize_tag(tag);
         nodes.push(KgNodeJson {
-            id: format!("tag:{}", tag),
+            id: format!("tag:{}", normalized),
             node_type: "tag".to_string(),
             label: tag.clone(),
         });
@@ -104,7 +109,7 @@ pub async fn handle_v1_knowledge_graph(
         for tag in &doc.frontmatter.tags {
             edges.push(KgEdgeJson {
                 source: id.clone(),
-                target: format!("tag:{}", tag.to_lowercase()),
+                target: format!("tag:{}", normalize_tag(tag)),
                 edge_type: "tagged_with".to_string(),
             });
         }
