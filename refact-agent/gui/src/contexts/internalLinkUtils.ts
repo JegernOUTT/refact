@@ -2,7 +2,8 @@ import { useContext } from "react";
 import { InternalLinkContext } from "./InternalLinkContext";
 
 export const useInternalLinkHandler = () => {
-  return useContext(InternalLinkContext);
+  const context = useContext(InternalLinkContext);
+  return context;
 };
 
 export const parseRefactLink = (

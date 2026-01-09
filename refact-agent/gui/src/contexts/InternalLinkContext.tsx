@@ -2,7 +2,7 @@ import React, { createContext } from "react";
 
 export type InternalLinkHandler = (url: string) => boolean;
 
-interface InternalLinkContextValue {
+export interface InternalLinkContextValue {
   handleInternalLink: InternalLinkHandler;
 }
 

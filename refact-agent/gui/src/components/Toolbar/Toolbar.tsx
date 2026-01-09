@@ -507,7 +507,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                 title={tab.title}
               >
                 {(tab.streaming || tab.waiting) && <Spinner mr="1" />}
-                {!tab.streaming && !tab.waiting && tab.read === false && (
+                {!tab.streaming && !tab.waiting && !tab.read && (
                   <DotFilledIcon />
                 )}
                 <Flex gap="2" align="center">
