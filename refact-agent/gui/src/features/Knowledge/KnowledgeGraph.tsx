@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import CytoscapeComponent from "react-cytoscapejs";
-import Cytoscape from "cytoscape";
+import type Cytoscape from "cytoscape";
 import fcose from "cytoscape-fcose";
 import { Flex, Text, Checkbox } from "@radix-ui/themes";
 import { useGetKnowledgeGraphQuery } from "../../services/refact/knowledgeGraphApi";
@@ -8,7 +8,9 @@ import { useKnowledgeGraphTheme } from "./useKnowledgeGraphTheme";
 import styles from "./KnowledgeGraph.module.css";
 import type { KnowledgeGraphEdge } from "../../services/refact/types";
 
-Cytoscape.use(fcose);
+// @ts-ignore - fcose is a Cytoscape extension
+const CytoscapeLib = require("cytoscape");
+CytoscapeLib.use(fcose);
 
 type FilterState = {
   kinds: Set<string>;
@@ -29,7 +31,7 @@ type CytoscapeElement = {
 };
 
 export function KnowledgeGraph() {
-  const { data: graph, isLoading, error } = useGetKnowledgeGraphQuery();
+  const { data: graph, isLoading, error } = useGetKnowledgeGraphQuery(undefined);
   const { colors } = useKnowledgeGraphTheme();
   const cyRef = useRef<Cytoscape.Core | null>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
@@ -41,12 +43,12 @@ export function KnowledgeGraph() {
 
   useEffect(() => {
     if (cyRef.current) {
-      cyRef.current.on("tap", "node", (e) => {
+      cyRef.current.on("tap", "node", (e: any) => {
         const nodeId = e.target.id();
         setSelectedNode(nodeId);
       });
 
-      cyRef.current.on("tap", (e) => {
+      cyRef.current.on("tap", (e: any) => {
         if (e.target === cyRef.current) {
           setSelectedNode(null);
         }
@@ -126,7 +128,7 @@ export function KnowledgeGraph() {
     return colors.kind.other;
   };
 
-  const stylesheet: Cytoscape.StylesheetStyle[] = [
+  const stylesheet: any[] = [
     {
       selector: "node",
       style: {
@@ -136,8 +138,8 @@ export function KnowledgeGraph() {
         color: "#ffffff",
         "text-valign": "center",
         "text-halign": "center",
-        width: "mapData(degree, 1, 20, 30, 60)" as unknown as number,
-        height: "mapData(degree, 1, 20, 30, 60)" as unknown as number,
+        width: "mapData(degree, 1, 20, 30, 60)",
+        height: "mapData(degree, 1, 20, 30, 60)",
         "text-wrap": "wrap",
         "text-max-width": "80px",
       },
@@ -195,8 +197,8 @@ export function KnowledgeGraph() {
           name: "fcose",
           animationDuration: 500,
           randomize: false,
-        } as Cytoscape.LayoutOptions}
-        cy={(cy) => {
+        } as any}
+        cy={(cy: any) => {
           cyRef.current = cy;
         }}
         className={styles.graphContainer}
