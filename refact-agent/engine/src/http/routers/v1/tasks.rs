@@ -82,7 +82,9 @@ pub async fn handle_list_tasks(
         for (chat_id, session_arc) in sessions.iter() {
             if is_planner_chat_for_task(chat_id, &task.id) {
                 let session = session_arc.lock().await;
-                if session.runtime.state == crate::chat::types::SessionState::Generating {
+                if session.runtime.state != crate::chat::types::SessionState::Idle
+                    && session.runtime.state != crate::chat::types::SessionState::Error
+                {
                     task.planner_streaming = true;
                     break;
                 }

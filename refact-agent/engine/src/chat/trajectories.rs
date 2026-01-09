@@ -1254,7 +1254,9 @@ async fn enrich_with_streaming_state(
     for traj in trajectories.iter_mut() {
         if let Some(session_arc) = sessions.get(&traj.id) {
             let session = session_arc.lock().await;
-            if session.runtime.state == SessionState::Generating {
+            if session.runtime.state != SessionState::Idle
+                && session.runtime.state != SessionState::Error
+            {
                 traj.is_streaming = true;
             }
         }

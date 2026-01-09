@@ -102,7 +102,6 @@ impl Tool for ToolTaskMergeAgent {
         let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
         let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
 
-        // Verify it's a git repo
         if !workspace_root.join(".git").exists() {
             return Err("Workspace is not a git repository".to_string());
         }
@@ -120,7 +119,6 @@ impl Tool for ToolTaskMergeAgent {
         let base_branch = task_meta.base_branch.as_ref()
             .ok_or("Task has no base branch set")?;
 
-        // Helper to run git commands
         let run_git = |args: &[&str]| -> Result<String, String> {
             let output = Command::new("git")
                 .args(args)
@@ -235,7 +233,6 @@ impl Tool for ToolTaskMergeAgent {
             }
         }
 
-        // Cleanup worktree and branch if requested
         if delete_worktree {
             let worktree_removed = run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
             let branch_deleted = run_git(&["branch", "-D", agent_branch]).is_ok();
