@@ -8,6 +8,7 @@ import {
   selectIsWaiting,
   selectMessages,
   selectThreadMaximumTokens,
+  selectStreamVersion,
 } from "../../features/Chat";
 import {
   AssistantMessage,
@@ -55,6 +56,9 @@ export const StreamingTokenCounter: React.FC = () => {
   const isWaiting = useAppSelector(selectIsWaiting);
   const messages = useAppSelector(selectMessages);
   const maxContextTokens = useAppSelector(selectThreadMaximumTokens) ?? 0;
+  // Subscribe to stream_version to force re-renders on every delta
+  // The value itself is not used, but subscribing triggers re-renders
+  void useAppSelector(selectStreamVersion);
 
   const { currentSessionTokens, isContextFromPreviousMessage } = useUsageCounter();
 

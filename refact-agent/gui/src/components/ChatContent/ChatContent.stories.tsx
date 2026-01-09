@@ -73,6 +73,7 @@ const MockedStore: React.FC<{
       tool_use: "quick",
       system_prompt: {},
       sse_refresh_requested: null,
+      stream_version: 0,
     },
   });
 

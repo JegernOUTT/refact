@@ -163,6 +163,7 @@ const createInitialState = (): Chat => {
     checkpoints_enabled: true,
     follow_ups_enabled: undefined,
     sse_refresh_requested: null,
+    stream_version: 0,
   };
 };
 
@@ -913,6 +914,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
             msg as Parameters<typeof applyDeltaOps>[0],
             event.ops,
           );
+          // Increment version to force component re-renders
+          state.stream_version += 1;
         }
         break;
       }
