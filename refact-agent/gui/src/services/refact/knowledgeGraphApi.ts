@@ -18,7 +18,7 @@ export const knowledgeGraphApi = createApi({
   }),
   tagTypes: ["KnowledgeGraph", "Memory"],
   endpoints: (builder) => ({
-    getKnowledgeGraph: builder.query<KnowledgeGraphResponse, void>({
+    getKnowledgeGraph: builder.query<KnowledgeGraphResponse, undefined>({
       async queryFn(_arg, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
@@ -70,6 +70,7 @@ export const knowledgeGraphApi = createApi({
           await queryFulfilled;
           dispatch(knowledgeGraphApi.util.invalidateTags(["KnowledgeGraph"]));
         } catch (err) {
+          // eslint-disable-next-line no-console
           console.error("Failed to update memory", err);
         }
       },
