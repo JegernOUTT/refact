@@ -57,6 +57,7 @@ export const createDefaultChatState = () => {
     system_prompt: {},
     tool_use: "explore" as const,
     sse_refresh_requested: null,
+    stream_version: 0,
   };
 };
 

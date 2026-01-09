@@ -297,3 +297,6 @@ export const selectThreadImagesById = (state: RootState, chatId: string) =>
 
 export const selectSseRefreshRequested = (state: RootState) =>
   state.chat.sse_refresh_requested;
+
+export const selectStreamVersion = (state: RootState): number =>
+  state.chat.stream_version;

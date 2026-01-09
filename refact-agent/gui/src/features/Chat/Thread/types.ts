@@ -100,6 +100,8 @@ export type Chat = {
   max_new_tokens?: number;
   /** When set, useChatSubscription should reconnect to get fresh state */
   sse_refresh_requested: string | null;
+  /** Increments on every stream_delta to force component re-renders */
+  stream_version: number;
 };
 
 export type PayloadWithId = { id: string };

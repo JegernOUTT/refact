@@ -470,4 +470,5 @@ export const CHAT_CONFIG_THREAD: Chat = {
   system_prompt: {},
   tool_use: "agent",
   sse_refresh_requested: null,
+  stream_version: 0,
 };

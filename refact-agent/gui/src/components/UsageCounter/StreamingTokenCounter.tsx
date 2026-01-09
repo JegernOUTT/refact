@@ -7,6 +7,7 @@ import {
   selectIsStreaming,
   selectMessages,
   selectThreadMaximumTokens,
+  selectStreamVersion,
 } from "../../features/Chat";
 import { AssistantMessage, isAssistantMessage } from "../../services/refact";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
@@ -39,6 +40,9 @@ export const StreamingTokenCounter: React.FC = () => {
   const isStreaming = useAppSelector(selectIsStreaming);
   const messages = useAppSelector(selectMessages);
   const maxContextTokens = useAppSelector(selectThreadMaximumTokens) ?? 0;
+  // Subscribe to stream_version to force re-renders on every delta
+  // The value itself is not used, but subscribing triggers re-renders
+  void useAppSelector(selectStreamVersion);
 
   // Track for animation
   const [displayTokens, setDisplayTokens] = useState(0);
