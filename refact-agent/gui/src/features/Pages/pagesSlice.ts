@@ -58,6 +58,10 @@ export interface TaskAgentPage {
   chatId: string;
 }
 
+export interface KnowledgeGraphPage {
+  name: "knowledge graph";
+}
+
 export interface IntegrationsSetupPage {
   name: "integrations page";
   projectPath?: string;
@@ -81,7 +85,8 @@ export type Page =
   | LoginPage
   | TasksListPage
   | TaskWorkspacePage
-  | TaskAgentPage;
+  | TaskAgentPage
+  | KnowledgeGraphPage;
 
 export function isIntegrationSetupPage(
   page: Page,

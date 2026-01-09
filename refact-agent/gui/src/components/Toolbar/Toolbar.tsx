@@ -176,6 +176,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           success: true,
           error_message: "",
         });
+      } else if (to === "knowledge graph") {
+        dispatch(push({ name: "knowledge graph" }));
+        void sendTelemetryEvent({
+          scope: `openKnowledgeGraph`,
+          success: true,
+          error_message: "",
+        });
       } else if (to === "chat") {
         dispatch(popBackTo({ name: "history" }));
         dispatch(push({ name: "chat" }));

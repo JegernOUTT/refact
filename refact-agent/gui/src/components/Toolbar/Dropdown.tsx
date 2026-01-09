@@ -43,6 +43,7 @@ export type DropdownNavigationOptions =
   | "login page"
   | "integrations"
   | "providers"
+  | "knowledge graph"
   | "";
 
 type DropdownProps = {
@@ -262,8 +263,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
 
         {isKnowledgeFeatureAvailable && (
           <DropdownMenu.Item
-            // TODO: get real URL from cloud inference
-            onSelect={() => openUrl("https://flexus.team/")}
+            onSelect={() => handleNavigation("knowledge graph")}
           >
             Manage Knowledge
           </DropdownMenu.Item>
