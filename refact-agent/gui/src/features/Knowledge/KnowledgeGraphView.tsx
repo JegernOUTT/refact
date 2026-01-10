@@ -29,19 +29,16 @@ interface KnowledgeGraphViewProps {
   isLoading?: boolean;
 }
 
-// Helper to check if a node is a doc node
 const isDocNode = (node: KnowledgeGraphNode): boolean => {
   return node.node_type === "doc" || node.node_type.startsWith("doc_");
 };
-
-// Color mapping based on kind (not node_type)
 const NODE_COLORS: Record<string, string> = {
   code: "#3B82F6",
   decision: "#8B5CF6",
   preference: "#10B981",
   pattern: "#F59E0B",
   lesson: "#06B6D4",
-  default: "#8B5CF6", // fallback color
+  default: "#8B5CF6",
 };
 
 export function KnowledgeGraphView({
@@ -86,7 +83,7 @@ export function KnowledgeGraphView({
         data: {
           id: node.id,
           label: node.label,
-          type: node.kind ?? "default", // Use kind for color mapping
+          type: node.kind ?? "default",
           degree: degreeMap.get(node.id) ?? 1,
         },
         group: "nodes" as const,
@@ -175,7 +172,6 @@ export function KnowledgeGraphView({
     };
 
     cyRef.current.on("tap", "node", (e) => {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       handleNodeClick(e.target.id() as string);
     });
 
@@ -188,14 +184,12 @@ export function KnowledgeGraphView({
     cyRef.current.on("zoom", handleZoom);
 
     cyRef.current.on("mouseover", "node", (e) => {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       e.target.style("label", e.target.data("label") as string);
     });
 
     cyRef.current.on("mouseout", "node", (e) => {
       const zoom = cyRef.current?.zoom() ?? 1;
       if (zoom <= 1.2) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
         e.target.style("label", "");
       }
     });
@@ -225,7 +219,6 @@ export function KnowledgeGraphView({
     if (!cyRef.current || !cyReady) return;
 
     if (layoutRef.current) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       layoutRef.current.stop();
     }
 
@@ -249,7 +242,6 @@ export function KnowledgeGraphView({
     requestAnimationFrame(() => {
       cyRef.current?.resize();
       if (layoutRef.current) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
         layoutRef.current.run();
       }
     });
@@ -297,7 +289,6 @@ export function KnowledgeGraphView({
       <CytoscapeComponent
         elements={elements}
         style={{ width: "100%", height: "100%" }}
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
         stylesheet={stylesheet as any}
         cy={(cy) => {
           cyRef.current = cy;

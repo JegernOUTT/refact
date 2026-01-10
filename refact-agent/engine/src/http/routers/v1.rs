@@ -136,7 +136,7 @@ pub fn make_v1_router() -> Router {
             "/tools-check-if-confirmation-needed",
             post(handle_v1_tools_check_if_confirmation_needed),
         )
-        .route("/tools-execute", post(handle_v1_tools_execute)) // because it works remotely
+        .route("/tools-execute", post(handle_v1_tools_execute))
         .route("/lsp-initialize", post(handle_v1_lsp_initialize))
         .route("/lsp-did-changed", post(handle_v1_lsp_did_change))
         .route("/lsp-add-folder", post(handle_v1_lsp_add_folder))
@@ -159,10 +159,10 @@ pub fn make_v1_router() -> Router {
         .route(
             "/prepend-system-prompt-and-maybe-more-initial-messages",
             post(handle_v1_prepend_system_prompt_and_maybe_more_initial_messages),
-        ) // because it works remotely
+        )
         .route("/at-command-completion", post(handle_v1_command_completion))
         .route("/at-command-preview", post(handle_v1_command_preview))
-        .route("/at-command-execute", post(handle_v1_at_command_execute)) // because it works remotely
+        .route("/at-command-execute", post(handle_v1_at_command_execute))
         .route("/fullpath", post(handle_v1_fullpath))
         .route("/integrations", get(handle_v1_integrations))
         .route(

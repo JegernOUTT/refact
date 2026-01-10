@@ -25,8 +25,8 @@ export type ChatContextFile = {
 
 export type ToolCall = {
   function: {
-    arguments: string; // stringed json
-    name?: string; // will be present when it's new
+    arguments: string;
+    name?: string;
   };
   index: number;
   type?: "function";
@@ -69,7 +69,7 @@ export function isToolContent(json: unknown): json is ToolContent {
 }
 export interface BaseToolResult {
   tool_call_id: string;
-  finish_reason?: string; // "call_failed" | "call_worked";
+  finish_reason?: string;
   content: ToolContent;
   compression_strength?: CompressionStrength;
   tool_failed?: boolean;
@@ -85,8 +85,8 @@ export interface MultiModalToolResult extends BaseToolResult {
 export type ToolResult = SingleModelToolResult | MultiModalToolResult;
 
 export type MultiModalToolContent = {
-  m_type: string; // "image/*" | "text" ... maybe narrow this?
-  m_content: string; // base64 if image,
+  m_type: string;
+  m_content: string;
 };
 
 export function isMultiModalToolContent(
@@ -189,13 +189,12 @@ export interface SystemMessage extends BaseMessage {
 
 export interface ToolMessage extends BaseMessage {
   role: "tool";
-  content: string | MultiModalToolContent[]; // Direct content from engine
-  tool_call_id: string; // At message level, not nested in content
+  content: string | MultiModalToolContent[];
+  tool_call_id: string;
   tool_failed?: boolean;
   compression_strength?: CompressionStrength;
 }
 
-// TODO: There maybe sub-types for this
 export type DiffChunk = {
   file_name: string;
   file_action: string;
@@ -205,8 +204,6 @@ export type DiffChunk = {
   lines_add: string;
   file_name_rename?: string | null;
   application_details?: string;
-  // apply?: boolean;
-  // chunk_id?: number;
 };
 
 export function isDiffChunk(json: unknown) {
@@ -307,7 +304,6 @@ export function isToolCallMessage(
   if (!isAssistantMessage(message)) return false;
   const tool_calls = message.tool_calls;
   if (!tool_calls) return false;
-  // TODO: check browser support of every
   return tool_calls.every(isToolCall);
 }
 
@@ -329,15 +325,12 @@ interface BaseDelta {
     citation?: WebSearchCitation;
     thinking_blocks?: ThinkingBlock[];
   } | null;
-  // refusal?: null;
-  // function_call?: null;
-  // audio?: null;
 }
 
 interface AssistantDelta extends BaseDelta {
   role?: "assistant" | null;
-  content?: string | null; // might be undefined, will be null if tool_calls
-  reasoning_content?: string | null; // NOTE: only for internal UI usage, don't send it back
+  content?: string | null;
+  reasoning_content?: string | null;
   tool_calls?: ToolCall[] | null;
   thinking_blocks?: ThinkingBlock[] | null;
 }
@@ -395,7 +388,7 @@ export type ThinkingBlock = {
 
 interface ThinkingBlocksDelta extends BaseDelta {
   thinking_blocks?: ThinkingBlock[];
-  reasoning_content?: string | null; // NOTE: only for internal UI usage, don't send it back
+  reasoning_content?: string | null;
 }
 
 export function isThinkingBlocksDelta(
@@ -522,15 +515,12 @@ export function isContextMemoryResponse(
 export function isToolResponse(json: unknown): json is ToolResponse {
   if (!json) return false;
   if (typeof json !== "object") return false;
-  // if (!("id" in json)) return false;
   if (!("content" in json)) return false;
   if (!("role" in json)) return false;
   if (!("tool_call_id" in json)) return false;
   if (!("tool_failed" in json)) return false;
   return json.role === "tool";
 }
-
-// TODO: isThinkingBlocksResponse
 
 export type DiffResponse = {
   role: "diff";
@@ -621,7 +611,6 @@ export function isChatResponseChoice(
   return true;
 }
 
-// TODO: type checks for this.
 export type CompressionStrength = "absent" | "low" | "medium" | "high";
 export type ChatResponse =
   | ChatResponseChoice
@@ -711,7 +700,7 @@ export type KnowledgeGraphResponse = {
 
 export type VecDbStatus = {
   files_unprocessed: number;
-  files_total: number; // only valid for status bar in the UI, resets to 0 when done
+  files_total: number;
   requests_made_since_start: number;
   vectors_made_since_start: number;
   db_size: number;

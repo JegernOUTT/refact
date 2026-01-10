@@ -87,7 +87,6 @@ export function MemoryDetailsEditor({ memory, onMemoryUpdated, onMemoryDeleted }
       setIsDirty(false);
       onMemoryUpdated?.();
     }).catch((error: unknown) => {
-      // eslint-disable-next-line no-console
       console.error('Failed to save memory:', error);
     });
   };
@@ -102,7 +101,6 @@ export function MemoryDetailsEditor({ memory, onMemoryUpdated, onMemoryDeleted }
       setIsDeleteOpen(false);
       onMemoryDeleted?.();
     }).catch((error: unknown) => {
-      // eslint-disable-next-line no-console
       console.error('Failed to delete memory:', error);
     });
   };

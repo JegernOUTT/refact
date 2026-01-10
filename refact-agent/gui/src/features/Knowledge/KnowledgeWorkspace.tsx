@@ -13,13 +13,11 @@ export function KnowledgeWorkspace() {
   const allDocNodes = useMemo(() => {
     if (!graph) return [];
     return graph.nodes.filter((node) => {
-      // Accept both "doc" and "doc_*" types
       const isDocNode = node.node_type === 'doc' || node.node_type.startsWith('doc_');
       if (!isDocNode) return false;
-      
-      // Filter out deprecated and trajectory nodes
+
       const kind = node.node_type.replace('doc_', '').toLowerCase();
-      return kind !== 'deprecated' && 
+      return kind !== 'deprecated' &&
              kind !== 'archived' &&
              kind !== 'trajectory';
     });

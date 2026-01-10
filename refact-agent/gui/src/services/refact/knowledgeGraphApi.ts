@@ -42,7 +42,7 @@ export const knowledgeGraphApi = createApi({
     updateMemory: builder.mutation<
       SuccessResponse,
       {
-        file_path: string; // path to .md file
+        file_path: string;
         title?: string;
         content: string;
         tags: string[];
@@ -69,12 +69,10 @@ export const knowledgeGraphApi = createApi({
       },
       invalidatesTags: ["KnowledgeGraph", "Memory"],
       async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
-        // Optimistic update: refetch graph after success
         try {
           await queryFulfilled;
           dispatch(knowledgeGraphApi.util.invalidateTags(["KnowledgeGraph"]));
         } catch (err) {
-          // eslint-disable-next-line no-console
           console.error("Failed to update memory", err);
         }
       },
@@ -84,7 +82,7 @@ export const knowledgeGraphApi = createApi({
       SuccessResponse,
       {
         file_path: string;
-        archive?: boolean; // true = move to archive, false = permanent delete
+        archive?: boolean;
       }
     >({
       async queryFn(arg, api, _extraOptions, baseQuery) {

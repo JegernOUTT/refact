@@ -48,14 +48,14 @@ pub struct MemoryOperationResponse {
 fn get_knowledge_root(gcx: &Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, ScratchError> {
     let workspace_folders = gcx.blocking_read().documents_state.workspace_folders.clone();
     let folders = workspace_folders.lock().unwrap();
-    
+
     if folders.is_empty() {
         return Err(ScratchError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "No workspace folder configured".to_string(),
         ));
     }
-    
+
     Ok(folders[0].join(KNOWLEDGE_FOLDER_NAME))
 }
 
@@ -69,28 +69,28 @@ async fn validate_knowledge_path(
             "File not found".to_string(),
         )
     })?;
-    
+
     let root_canonical = tokio::fs::canonicalize(workspace_root).await.map_err(|_| {
         ScratchError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Cannot access workspace".to_string(),
         )
     })?;
-    
+
     if !canonical.starts_with(&root_canonical) {
         return Err(ScratchError::new(
             StatusCode::FORBIDDEN,
             "Path outside knowledge directory".to_string(),
         ));
     }
-    
+
     if canonical.extension().map(|e| e != "md").unwrap_or(true) {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "Only .md files allowed".to_string(),
         ));
     }
-    
+
     Ok(canonical)
 }
 
@@ -132,7 +132,6 @@ pub async fn handle_v1_knowledge_update_memory(
     frontmatter.updated = Some(Local::now().format("%Y-%m-%d").to_string());
 
     let content_to_write = post.content.unwrap_or_else(|| {
-        // If no content provided, keep existing content
         existing_text.split("\n\n").skip(1).collect::<Vec<_>>().join("\n\n")
     });
     let new_content = format!("{}\n\n{}", frontmatter.to_yaml(), content_to_write.trim());
