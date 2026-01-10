@@ -293,9 +293,13 @@ export function KnowledgeGraph() {
           name: "concentric",
           animationDuration: 500,
           randomize: false,
-          minNodeSpacing: 50,
+          minNodeSpacing: 10,
           concentric: (node: any) => node.degree(),
-          levelWidth: () => 2,
+          levelWidth: () => 1,
+          startAngle: 0,
+          sweep: undefined,
+          clockwise: true,
+          equidistant: false,
         }
       : {
           name: "fcose",
@@ -385,7 +389,7 @@ export function KnowledgeGraph() {
 
   return (
     <div className={styles.container}>
-      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+      <div className={styles.graphContainer}>
         <div className={styles.modeHeader}>
           <span className={styles.modeIndicator}>
             {mode === "overview" ? "📊 Overview" : `🔍 Focus: ${focusSeedLabel}`}
@@ -427,12 +431,11 @@ export function KnowledgeGraph() {
         ) : (
           <CytoscapeComponent
             elements={elements}
-            style={{ width: "100%", height: "100%" }}
+            style={{ width: "100%", height: "100%", flex: 1 }}
             stylesheet={stylesheet}
             cy={(cy: any) => {
               cyRef.current = cy;
             }}
-            className={styles.graphContainer}
           />
         )}
       </div>

@@ -5,6 +5,8 @@
   padding: var(--space-3);
   background-color: var(--color-surface);
   border-radius: var(--radius-2);
+  width: 100%;
+  overflow: hidden;
 }
 
 .graphContainer {
@@ -13,9 +15,14 @@
   border: 1px solid var(--gray-a7);
   border-radius: var(--radius-2);
   background-color: var(--color-panel);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .sidebar {
+  flex-shrink: 0;
   width: 280px;
   overflow-y: auto;
   border: 1px solid var(--gray-a7);
