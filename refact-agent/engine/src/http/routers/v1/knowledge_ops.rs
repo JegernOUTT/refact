@@ -155,6 +155,8 @@ pub async fn handle_v1_knowledge_update_memory(
             .await;
     }
 
+    gcx.write().await.documents_state.memory_document_map.remove(&file_path);
+
     tracing::info!("Updated memory: {}", file_path.display());
 
     Ok(Response::builder()
@@ -214,6 +216,8 @@ pub async fn handle_v1_knowledge_delete_memory(
             .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true)
             .await;
     }
+
+    gcx.write().await.documents_state.memory_document_map.remove(&file_path);
 
     Ok(Response::builder()
         .status(StatusCode::OK)
