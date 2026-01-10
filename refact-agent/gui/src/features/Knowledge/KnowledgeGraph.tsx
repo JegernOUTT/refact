@@ -63,8 +63,8 @@ export function KnowledgeGraph() {
 
   const handleNodeClick = useCallback((nodeId: string) => {
     setSelectedNode(nodeId);
-    if (mode === "overview") {
-      const node = graph?.nodes.find((n) => n.id === nodeId);
+    if (mode === "overview" && graph) {
+      const node = graph.nodes.find((n) => n.id === nodeId);
       if (node && node.node_type.startsWith("doc_")) {
         setFocusSeedId(nodeId);
         setMode("focus");
@@ -77,62 +77,6 @@ export function KnowledgeGraph() {
     setFocusSeedId(null);
     setSelectedNode(null);
   }, []);
-
-  useEffect(() => {
-    if (cyRef.current) {
-      cyRef.current.on("tap", "node", (e: any) => {
-        const nodeId = e.target.id();
-        handleNodeClick(nodeId);
-      });
-
-      cyRef.current.on("tap", (e: any) => {
-        if (e.target === cyRef.current) {
-          setSelectedNode(null);
-        }
-      });
-
-      const handleZoom = () => {
-        if (!cyRef.current) return;
-        const zoom = cyRef.current.zoom();
-        cyRef.current.elements("node").forEach((node: any) => {
-          node.style("label", zoom > 1.2 ? node.data("label") : "");
-        });
-      };
-
-      cyRef.current.on("zoom", handleZoom);
-
-      cyRef.current.on("mouseover", "node", (e: any) => {
-        e.target.style("label", e.target.data("label"));
-      });
-
-      cyRef.current.on("mouseout", "node", (e: any) => {
-        const zoom = cyRef.current?.zoom() || 1;
-        if (zoom <= 1.2) {
-          e.target.style("label", "");
-        }
-      });
-    }
-  }, [handleNodeClick]);
-
-  if (isLoading) {
-    return (
-      <Flex align="center" justify="center" height="100%">
-        <Text>Loading graph...</Text>
-      </Flex>
-    );
-  }
-
-  if (error) {
-    return (
-      <Flex align="center" justify="center" height="100%">
-        <Text color="red">Error loading graph</Text>
-      </Flex>
-    );
-  }
-
-  if (!graph) {
-    return null;
-  }
 
   const includeNodeByType = useCallback((node: KnowledgeGraphNode): boolean => {
     const nodeType = node.node_type.toLowerCase();
@@ -150,6 +94,8 @@ export function KnowledgeGraph() {
   }, [filters.kinds, visibleNodeGroups]);
 
   const { filteredNodes, filteredEdges } = useMemo(() => {
+    if (!graph) return { filteredNodes: [], filteredEdges: [] };
+
     if (mode === "overview") {
       const nodes = graph.nodes.filter((node) => {
         const nodeType = node.node_type.toLowerCase();
@@ -302,6 +248,42 @@ export function KnowledgeGraph() {
   ];
 
   useEffect(() => {
+    if (cyRef.current) {
+      cyRef.current.on("tap", "node", (e: any) => {
+        const nodeId = e.target.id();
+        handleNodeClick(nodeId);
+      });
+
+      cyRef.current.on("tap", (e: any) => {
+        if (e.target === cyRef.current) {
+          setSelectedNode(null);
+        }
+      });
+
+      const handleZoom = () => {
+        if (!cyRef.current) return;
+        const zoom = cyRef.current.zoom();
+        cyRef.current.elements("node").forEach((node: any) => {
+          node.style("label", zoom > 1.2 ? node.data("label") : "");
+        });
+      };
+
+      cyRef.current.on("zoom", handleZoom);
+
+      cyRef.current.on("mouseover", "node", (e: any) => {
+        e.target.style("label", e.target.data("label"));
+      });
+
+      cyRef.current.on("mouseout", "node", (e: any) => {
+        const zoom = cyRef.current?.zoom() || 1;
+        if (zoom <= 1.2) {
+          e.target.style("label", "");
+        }
+      });
+    }
+  }, [handleNodeClick]);
+
+  useEffect(() => {
     if (!cyRef.current) return;
 
     layoutRef.current?.stop();
@@ -347,7 +329,7 @@ export function KnowledgeGraph() {
     }));
   };
 
-  const selectedNodeData = selectedNode
+  const selectedNodeData = selectedNode && graph
     ? graph.nodes.find((n) => n.id === selectedNode)
     : null;
 
@@ -376,10 +358,30 @@ export function KnowledgeGraph() {
   }, []);
 
   const focusSeedLabel = useMemo(() => {
-    if (!focusSeedId) return "";
+    if (!focusSeedId || !graph) return "";
     const node = graph.nodes.find((n) => n.id === focusSeedId);
     return node?.label || focusSeedId;
-  }, [focusSeedId, graph.nodes]);
+  }, [focusSeedId, graph]);
+
+  if (isLoading) {
+    return (
+      <Flex align="center" justify="center" height="100%">
+        <Text>Loading graph...</Text>
+      </Flex>
+    );
+  }
+
+  if (error) {
+    return (
+      <Flex align="center" justify="center" height="100%">
+        <Text color="red">Error loading graph</Text>
+      </Flex>
+    );
+  }
+
+  if (!graph) {
+    return null;
+  }
 
   return (
     <div className={styles.container}>
