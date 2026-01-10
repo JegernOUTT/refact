@@ -224,4 +224,24 @@ describe("KnowledgeGraphView", () => {
 
     expect(screen.getByText("9 elements")).toBeInTheDocument();
   });
+
+  it("renders plain 'doc' node type (without underscore)", () => {
+    const nodes = [
+      createDocNode("doc1", "doc", "Plain Doc Memory"),
+      createDocNode("doc2", "doc_code", "Code Memory"),
+    ];
+    const edges = [createEdge("doc1", "doc2", "relates_to")];
+
+    render(
+      <KnowledgeGraphView
+        nodes={nodes}
+        edges={edges}
+        selectedId={null}
+        onSelectId={vi.fn()}
+      />
+    );
+
+    // Should have 2 nodes + 1 edge = 3 elements
+    expect(screen.getByText("3 elements")).toBeInTheDocument();
+  });
 });

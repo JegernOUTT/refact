@@ -29,20 +29,19 @@ interface KnowledgeGraphViewProps {
   isLoading?: boolean;
 }
 
-const DOC_NODE_TYPES = new Set([
-  "doc_code",
-  "doc_decision",
-  "doc_preference",
-  "doc_pattern",
-  "doc_lesson",
-]);
+// Helper to check if a node is a doc node
+const isDocNode = (node: KnowledgeGraphNode): boolean => {
+  return node.node_type === "doc" || node.node_type.startsWith("doc_");
+};
 
+// Color mapping based on kind (not node_type)
 const NODE_COLORS: Record<string, string> = {
-  doc_code: "#3B82F6",
-  doc_decision: "#8B5CF6",
-  doc_preference: "#10B981",
-  doc_pattern: "#F59E0B",
-  doc_lesson: "#06B6D4",
+  code: "#3B82F6",
+  decision: "#8B5CF6",
+  preference: "#10B981",
+  pattern: "#F59E0B",
+  lesson: "#06B6D4",
+  default: "#8B5CF6", // fallback color
 };
 
 export function KnowledgeGraphView({
@@ -59,7 +58,7 @@ export function KnowledgeGraphView({
   const cyReadyRef = useRef(false);
 
   const filteredNodes = useMemo(() => {
-    return nodes.filter((node) => DOC_NODE_TYPES.has(node.node_type));
+    return nodes.filter((node) => isDocNode(node));
   }, [nodes]);
 
   const filteredEdges = useMemo(() => {
@@ -87,7 +86,7 @@ export function KnowledgeGraphView({
         data: {
           id: node.id,
           label: node.label,
-          type: node.node_type,
+          type: node.kind ?? "default", // Use kind for color mapping
           degree: degreeMap.get(node.id) ?? 1,
         },
         group: "nodes" as const,
@@ -121,12 +120,14 @@ export function KnowledgeGraphView({
           "text-max-width": "80px",
         },
       },
-      ...Object.entries(NODE_COLORS).map(([type, color]) => ({
-        selector: `node[type="${type}"]`,
-        style: {
-          "background-color": color,
-        },
-      })),
+      ...Object.entries(NODE_COLORS)
+        .filter(([type]) => type !== "default")
+        .map(([type, color]) => ({
+          selector: `node[type="${type}"]`,
+          style: {
+            "background-color": color,
+          },
+        })),
       {
         selector: "edge",
         style: {

@@ -260,4 +260,54 @@ describe('KnowledgeWorkspace', () => {
 
     expect(screen.getByText('Memory: Code Memory 1')).toBeInTheDocument();
   });
+
+  it('includes plain "doc" node type (without underscore)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    mockGraphResponse = {
+      nodes: [
+        { 
+          id: 'doc1', 
+          node_type: 'doc', 
+          label: 'Plain Doc Memory',
+          title: 'Plain Doc Memory',
+          content: 'This is a plain doc memory',
+          tags: ['test'],
+          created: '2024-01-10T10:00:00Z',
+          file_path: '/path/to/plain.md',
+          kind: 'code'
+        },
+        { 
+          id: 'doc2', 
+          node_type: 'doc_code', 
+          label: 'Code Memory',
+          title: 'Code Memory',
+          content: 'This is code memory',
+          tags: ['test'],
+          created: '2024-01-10T10:00:00Z',
+          file_path: '/path/to/code.md',
+          kind: 'code'
+        },
+      ],
+      edges: [
+        { source: 'doc1', target: 'doc2', edge_type: 'relates_to' },
+      ],
+      stats: {
+        doc_count: 2,
+        tag_count: 0,
+        file_count: 0,
+        entity_count: 0,
+        edge_count: 1,
+        active_docs: 2,
+        deprecated_docs: 0,
+        trajectory_count: 0,
+      },
+    };
+    
+    render(<KnowledgeWorkspace />);
+
+    // Both memories should be visible
+    expect(screen.getByText('Memories: 2')).toBeInTheDocument();
+    expect(screen.getAllByText('Plain Doc Memory').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Code Memory').length).toBeGreaterThan(0);
+  });
 });
