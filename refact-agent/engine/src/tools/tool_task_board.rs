@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 use chrono::Utc;
@@ -42,13 +43,27 @@ async fn get_task_id(ccx: &Arc<AMutex<AtCommandsContext>>, args: &HashMap<String
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
 }
 
+#[derive(Serialize, Deserialize)]
+struct CardSummary {
+    id: String,
+    title: String,
+    column: String,
+    priority: String,
+    depends_on: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BoardSummary {
+    rev: u64,
+    cards: Vec<CardSummary>,
+}
+
 pub struct ToolTaskBoardGet;
 pub struct ToolTaskBoardCreateCard;
 pub struct ToolTaskBoardUpdateCard;
 pub struct ToolTaskBoardMoveCard;
 pub struct ToolTaskBoardDeleteCard;
 pub struct ToolTaskReadyCards;
-pub struct ToolTaskSetPlannerInstructions;
 
 impl ToolTaskBoardGet { pub fn new() -> Self { Self } }
 
@@ -65,7 +80,24 @@ impl Tool for ToolTaskBoardGet {
         let task_id = get_task_id(&ccx, args).await?;
         let gcx = ccx.lock().await.global_context.clone();
         let board = storage::load_board(gcx, &task_id).await?;
-        let result = serde_yaml::to_string(&board).map_err(|e| e.to_string())?;
+        let card_id = args.get("card_id").and_then(|v| v.as_str());
+
+        let result = if let Some(cid) = card_id {
+            let card = board.get_card(cid).ok_or(format!("Card {} not found", cid))?;
+            serde_yaml::to_string(card).map_err(|e| e.to_string())?
+        } else {
+            let summary = BoardSummary {
+                rev: board.rev,
+                cards: board.cards.iter().map(|c| CardSummary {
+                    id: c.id.clone(),
+                    title: c.title.clone(),
+                    column: c.column.clone(),
+                    priority: c.priority.clone(),
+                    depends_on: c.depends_on.clone(),
+                }).collect(),
+            };
+            serde_yaml::to_string(&summary).map_err(|e| e.to_string())?
+        };
 
         Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
@@ -85,9 +117,10 @@ impl Tool for ToolTaskBoardGet {
             source: make_source(),
             agentic: true,
             experimental: false,
-            description: "Get the current state of the task board including all columns and cards.".to_string(),
+            description: "Get task board state. Without card_id returns summary (id, title, column, priority, depends_on). With card_id returns full card details including instructions, status_updates, final_report.".to_string(),
             parameters: vec![
-                ToolParam { name: "task_id".to_string(), param_type: "string".to_string(), description: "Task UUID (optional if in task context)".to_string() }
+                ToolParam { name: "task_id".to_string(), param_type: "string".to_string(), description: "Task UUID (optional if in task context)".to_string() },
+                ToolParam { name: "card_id".to_string(), param_type: "string".to_string(), description: "Card ID to get full details for (optional)".to_string() },
             ],
             parameters_required: vec![],
         }
@@ -473,48 +506,4 @@ impl Tool for ToolTaskReadyCards {
     }
 }
 
-impl ToolTaskSetPlannerInstructions { pub fn new() -> Self { Self } }
 
-#[async_trait]
-impl Tool for ToolTaskSetPlannerInstructions {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
-        let content = args.get("content").and_then(|v| v.as_str()).ok_or("Missing 'content'")?;
-
-        let gcx = ccx.lock().await.global_context.clone();
-        storage::save_planner_instructions(gcx, &task_id, content).await?;
-
-        let result = "Saved planner instructions".to_string();
-        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(result),
-            tool_calls: None,
-            tool_call_id: tool_call_id.clone(),
-            ..Default::default()
-        })]))
-    }
-
-    fn tool_depends_on(&self) -> Vec<String> { vec![] }
-
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "task_set_planner_instructions".to_string(),
-            display_name: "Task Set Planner Instructions".to_string(),
-            source: make_source(),
-            agentic: true,
-            experimental: false,
-            description: "Set the planner instructions for the task.".to_string(),
-            parameters: vec![
-                ToolParam { name: "content".to_string(), param_type: "string".to_string(), description: "Markdown content for planner guidance".to_string() },
-            ],
-            parameters_required: vec!["content".to_string()],
-        }
-    }
-}

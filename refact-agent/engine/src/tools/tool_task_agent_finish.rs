@@ -180,7 +180,7 @@ impl Tool for ToolTaskAgentFinish {
         let success_clone = success;
         let commit_hash = commit_result.clone();
 
-        let (board, (card_title, _agent_branch, all_finished)) = storage::update_board_atomic(
+        let (_, (card_title, _agent_branch, all_finished)) = storage::update_board_atomic(
             gcx.clone(),
             &task_id,
             move |board| {
@@ -266,45 +266,13 @@ impl Tool for ToolTaskAgentFinish {
         );
 
         if all_finished {
-            let mut done_cards = Vec::new();
-            let mut failed_cards = Vec::new();
-
-            for card in &board.cards {
-                if card.column == "done" {
-                    let branch_info = card.agent_branch.as_deref().unwrap_or("no branch");
-                    let report_preview: String = card.final_report
-                        .as_deref()
-                        .unwrap_or("")
-                        .chars()
-                        .take(100)
-                        .collect();
-                    done_cards.push(format!("- **{}**: {} (branch: {})\n  Report: {}", 
-                        card.id, card.title, branch_info, report_preview));
-                } else if card.column == "failed" {
-                    let report_preview: String = card.final_report
-                        .as_deref()
-                        .unwrap_or("")
-                        .chars()
-                        .take(100)
-                        .collect();
-                    failed_cards.push(format!("- **{}**: {}\n  Reason: {}", 
-                        card.id, card.title, report_preview));
-                }
-            }
-
-            let mut planner_message = String::from("✅ **All agents have completed!**\n\n");
-            
-            if !done_cards.is_empty() {
-                planner_message.push_str(&format!("**Completed ({}):**\n{}\n\n", 
-                    done_cards.len(), done_cards.join("\n")));
-            }
-            
-            if !failed_cards.is_empty() {
-                planner_message.push_str(&format!("**Failed ({}):**\n{}\n\n", 
-                    failed_cards.len(), failed_cards.join("\n")));
-            }
-            
-            planner_message.push_str("Run `task_board_get` to review full results and decide next steps.");
+            let planner_message = format!(
+                "✅ **Agent finished: {} ({})**\n\n**Report:**\n{}\n\n\
+                All agents have completed. Run `task_board_get` to review the board.",
+                card_title,
+                if success { "done" } else { "failed" },
+                report
+            );
 
             let sessions = {
                 let gcx_locked = gcx.read().await;
