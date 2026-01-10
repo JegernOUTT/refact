@@ -18,11 +18,15 @@ export const knowledgeGraphApi = createApi({
   }),
   tagTypes: ["KnowledgeGraph", "Memory"],
   endpoints: (builder) => ({
-    getKnowledgeGraph: builder.query<KnowledgeGraphResponse, undefined>({
-      async queryFn(_arg, api, _extraOptions, baseQuery) {
+    getKnowledgeGraph: builder.query<
+      KnowledgeGraphResponse,
+      { includeContent?: boolean } | undefined
+    >({
+      async queryFn(arg, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}/v1/knowledge-graph`;
+        const includeContent = arg?.includeContent ?? false;
+        const url = `http://127.0.0.1:${port}/v1/knowledge-graph?include_content=${includeContent ? 1 : 0}`;
 
         const response = await baseQuery({ url });
 

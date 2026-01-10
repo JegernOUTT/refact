@@ -1,7 +1,9 @@
 use axum::Extension;
+use axum::extract::Query;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::custom_error::ScratchError;
 use crate::global_context::SharedGlobalContext;
@@ -57,8 +59,15 @@ struct KnowledgeGraphJson {
 }
 
 pub async fn handle_v1_knowledge_graph(
+    Query(params): Query<HashMap<String, String>>,
     Extension(gcx): Extension<SharedGlobalContext>,
 ) -> Result<Response<Body>, ScratchError> {
+    let include_content = params
+        .get("include_content")
+        .and_then(|v| v.parse::<u8>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(false);
+
     let kg = build_knowledge_graph(gcx).await;
 
     let mut nodes = Vec::new();
@@ -86,7 +95,11 @@ pub async fn handle_v1_knowledge_graph(
             node_type: node_type.to_string(),
             label,
             title: doc.frontmatter.title.clone(),
-            content: Some(doc.content.clone()),
+            content: if include_content {
+                Some(doc.content.clone())
+            } else {
+                None
+            },
             tags: Some(doc.frontmatter.tags.clone()),
             created: doc.frontmatter.created.clone(),
             file_path: Some(doc.path.to_string_lossy().to_string()),
