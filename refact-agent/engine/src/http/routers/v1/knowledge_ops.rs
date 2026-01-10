@@ -21,13 +21,14 @@ pub struct UpdateMemoryPost {
     pub file_path: String,
     #[serde(default)]
     pub title: Option<String>,
-    pub content: String,
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
-    pub filenames: Vec<String>,
+    pub filenames: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -119,18 +120,22 @@ pub async fn handle_v1_knowledge_update_memory(
     if let Some(title) = post.title {
         frontmatter.title = Some(title);
     }
-    if !post.tags.is_empty() {
-        frontmatter.tags = post.tags;
+    if let Some(tags) = post.tags {
+        frontmatter.tags = tags;
     }
     if let Some(kind) = post.kind {
         frontmatter.kind = Some(kind);
     }
-    if !post.filenames.is_empty() {
-        frontmatter.filenames = post.filenames;
+    if let Some(filenames) = post.filenames {
+        frontmatter.filenames = filenames;
     }
     frontmatter.updated = Some(Local::now().format("%Y-%m-%d").to_string());
 
-    let new_content = format!("{}\n\n{}", frontmatter.to_yaml(), post.content.trim());
+    let content_to_write = post.content.unwrap_or_else(|| {
+        // If no content provided, keep existing content
+        existing_text.split("\n\n").skip(1).collect::<Vec<_>>().join("\n\n")
+    });
+    let new_content = format!("{}\n\n{}", frontmatter.to_yaml(), content_to_write.trim());
 
     let dir = file_path.parent().ok_or_else(|| {
         ScratchError::new(
