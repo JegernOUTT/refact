@@ -111,6 +111,11 @@ export function KnowledgeGraph() {
         (edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target),
       );
 
+      console.log(`[KnowledgeGraph] Filtered nodes: ${nodes.length} / ${graph.nodes.length}, Edges: ${edges.length} / ${graph.edges.length}`, {
+        filterKinds: Array.from(filters.kinds),
+        nodeTypeSample: graph.nodes.slice(0, 5).map(n => n.node_type),
+      });
+
       return { filteredNodes: nodes, filteredEdges: edges };
     }
 
@@ -429,14 +434,16 @@ export function KnowledgeGraph() {
             </div>
           </div>
         ) : (
-          <CytoscapeComponent
-            elements={elements}
-            style={{ width: "100%", height: "100%", flex: 1 }}
-            stylesheet={stylesheet}
-            cy={(cy: any) => {
-              cyRef.current = cy;
-            }}
-          />
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
+            <CytoscapeComponent
+              elements={elements}
+              style={{ width: "100%", height: "100%" }}
+              stylesheet={stylesheet}
+              cy={(cy: any) => {
+                cyRef.current = cy;
+              }}
+            />
+          </div>
         )}
       </div>
 
