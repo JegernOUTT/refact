@@ -90,7 +90,7 @@ export const knowledgeGraphApi = createApi({
 
         const response = await baseQuery({
           url,
-          method: "DELETE",
+          method: "POST",
           body: arg,
         });
 

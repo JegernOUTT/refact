@@ -231,7 +231,7 @@ pub fn make_v1_router() -> Router {
         .route("/vdb-status", get(handle_v1_vecdb_status))
         .route("/knowledge-graph", get(handle_v1_knowledge_graph))
         .route("/knowledge/update-memory", post(handle_v1_knowledge_update_memory))
-        .route("/knowledge/delete-memory", delete(handle_v1_knowledge_delete_memory))
+        .route("/knowledge/delete-memory", post(handle_v1_knowledge_delete_memory))
         .route("/trajectory-compress", post(handle_v1_trajectory_compress))
         .route("/trajectories", get(handle_v1_trajectories_list))
         .route("/trajectories/all", get(handle_v1_trajectories_all))
