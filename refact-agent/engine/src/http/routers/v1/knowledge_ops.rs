@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::io::Write;
 use axum::Extension;
 use axum::http::{Response, StatusCode};
 use hyper::Body;
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use tokio::fs;
 use chrono::Local;
+use tempfile::NamedTempFile;
 
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
@@ -130,24 +132,52 @@ pub async fn handle_v1_knowledge_update_memory(
 
     let new_content = format!("{}\n\n{}", frontmatter.to_yaml(), post.content.trim());
 
-    let tmp_path = file_path.with_extension("md.tmp");
-    fs::write(&tmp_path, &new_content)
-        .await
-        .map_err(|e| {
+    let dir = file_path.parent().ok_or_else(|| {
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid file path: no parent directory".to_string(),
+        )
+    })?.to_path_buf();
+
+    let file_path_clone = file_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut tmp_file = NamedTempFile::new_in(&dir).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create temporary file: {}", e),
+            )
+        })?;
+
+        tmp_file.write_all(new_content.as_bytes()).map_err(|e| {
             ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write temporary file: {}", e),
             )
         })?;
 
-    fs::rename(&tmp_path, &file_path)
-        .await
-        .map_err(|e| {
+        tmp_file.flush().map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to flush temporary file: {}", e),
+            )
+        })?;
+
+        tmp_file.persist(&file_path_clone).map_err(|e| {
             ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to update memory file: {}", e),
             )
         })?;
+
+        Ok::<(), ScratchError>(())
+    })
+    .await
+    .map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task join error: {}", e),
+        )
+    })??;
 
     if let Some(vecdb) = gcx.read().await.vec_db.lock().await.as_ref() {
         vecdb
