@@ -103,7 +103,7 @@ export function KnowledgeGraphView({
     ];
   }, [filteredNodes, filteredEdges, degreeMap]);
 
-  const stylesheet: Cytoscape.Stylesheet[] = useMemo(() => {
+  const stylesheet: unknown[] = useMemo(() => {
     return [
       {
         selector: "node",
@@ -216,7 +216,7 @@ export function KnowledgeGraphView({
       layoutRef.current.stop();
     }
 
-    const layoutOpts: Cytoscape.LayoutOptions = {
+    const layoutOpts: Cytoscape.LayoutOptions & Record<string, unknown> = {
       name: "fcose",
       animationDuration: 500,
       randomize: false,
@@ -277,7 +277,7 @@ export function KnowledgeGraphView({
       <CytoscapeComponent
         elements={elements}
         style={{ width: "100%", height: "100%" }}
-        stylesheet={stylesheet}
+        stylesheet={stylesheet as any}
         cy={(cy) => {
           cyRef.current = cy;
           if (!cyReadyRef.current) {
