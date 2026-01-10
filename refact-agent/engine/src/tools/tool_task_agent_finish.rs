@@ -180,7 +180,7 @@ impl Tool for ToolTaskAgentFinish {
         let success_clone = success;
         let commit_hash = commit_result.clone();
 
-        let (_, (card_title, _agent_branch, all_finished)) = storage::update_board_atomic(
+        let (board, (card_title, _agent_branch, all_finished)) = storage::update_board_atomic(
             gcx.clone(),
             &task_id,
             move |board| {
@@ -266,12 +266,19 @@ impl Tool for ToolTaskAgentFinish {
         );
 
         if all_finished {
+            let mut results = Vec::new();
+            for card in &board.cards {
+                if card.agent_chat_id.is_none() {
+                    continue;
+                }
+                let status = if card.column == "done" { "✅ done" } else if card.column == "failed" { "❌ failed" } else { continue };
+                let report_preview: String = card.final_report.as_deref().unwrap_or("").chars().take(200).collect();
+                results.push(format!("**{} ({})**: {}\n{}", card.id, card.title, status, report_preview));
+            }
+
             let planner_message = format!(
-                "✅ **Agent finished: {} ({})**\n\n**Report:**\n{}\n\n\
-                All agents have completed. Run `task_board_get` to review the board.",
-                card_title,
-                if success { "done" } else { "failed" },
-                report
+                "**All agents have completed.**\n\n{}\n\nRun `task_board_get(card_id)` to see full details for any card.",
+                results.join("\n\n")
             );
 
             let sessions = {
