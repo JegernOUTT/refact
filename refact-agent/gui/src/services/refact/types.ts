@@ -678,6 +678,12 @@ export type KnowledgeGraphNode = {
   id: string;
   node_type: string;
   label: string;
+  title?: string;
+  content?: string;
+  tags?: string[];
+  created?: string;
+  file_path?: string;
+  kind?: string;
 };
 
 export type KnowledgeGraphEdge = {

@@ -16,6 +16,18 @@ struct KgNodeJson {
     id: String,
     node_type: String,
     label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +85,12 @@ pub async fn handle_v1_knowledge_graph(
             id: id.clone(),
             node_type: node_type.to_string(),
             label,
+            title: doc.frontmatter.title.clone(),
+            content: Some(doc.content.clone()),
+            tags: Some(doc.frontmatter.tags.clone()),
+            created: doc.frontmatter.created.clone(),
+            file_path: Some(doc.path.to_string_lossy().to_string()),
+            kind: doc.frontmatter.kind.clone(),
         });
     }
 
@@ -82,6 +100,12 @@ pub async fn handle_v1_knowledge_graph(
             id: format!("tag:{}", normalized),
             node_type: "tag".to_string(),
             label: tag.clone(),
+            title: None,
+            content: None,
+            tags: None,
+            created: None,
+            file_path: None,
+            kind: None,
         });
     }
 
@@ -94,6 +118,12 @@ pub async fn handle_v1_knowledge_graph(
             id: format!("file:{}", file),
             node_type: "file".to_string(),
             label,
+            title: None,
+            content: None,
+            tags: None,
+            created: None,
+            file_path: None,
+            kind: None,
         });
     }
 
@@ -102,6 +132,12 @@ pub async fn handle_v1_knowledge_graph(
             id: format!("entity:{}", entity),
             node_type: "entity".to_string(),
             label: entity.clone(),
+            title: None,
+            content: None,
+            tags: None,
+            created: None,
+            file_path: None,
+            kind: None,
         });
     }
 

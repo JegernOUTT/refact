@@ -6,9 +6,39 @@ import type { KnowledgeGraphResponse } from '../../services/refact/types';
 
 const mockGraphData: KnowledgeGraphResponse = {
   nodes: [
-    { id: 'doc1', node_type: 'doc_code', label: 'Code Memory 1' },
-    { id: 'doc2', node_type: 'doc_decision', label: 'Decision Memory 2' },
-    { id: 'doc3', node_type: 'doc_preference', label: 'Preference Memory 3' },
+    { 
+      id: 'doc1', 
+      node_type: 'doc_code', 
+      label: 'Code Memory 1',
+      title: 'Code Memory 1',
+      content: 'This is code memory content',
+      tags: ['rust', 'backend'],
+      created: '2024-01-10T10:00:00Z',
+      file_path: '/path/to/memory1.md',
+      kind: 'code'
+    },
+    { 
+      id: 'doc2', 
+      node_type: 'doc_decision', 
+      label: 'Decision Memory 2',
+      title: 'Decision Memory 2',
+      content: 'This is decision memory content',
+      tags: ['architecture'],
+      created: '2024-01-09T10:00:00Z',
+      file_path: '/path/to/memory2.md',
+      kind: 'decision'
+    },
+    { 
+      id: 'doc3', 
+      node_type: 'doc_preference', 
+      label: 'Preference Memory 3',
+      title: 'Preference Memory 3',
+      content: 'This is preference memory content',
+      tags: ['style'],
+      created: '2024-01-08T10:00:00Z',
+      file_path: '/path/to/memory3.md',
+      kind: 'preference'
+    },
     { id: 'doc4', node_type: 'doc_deprecated', label: 'Deprecated Memory' },
     { id: 'doc5', node_type: 'doc_trajectory', label: 'Trajectory Memory' },
     { id: 'tag1', node_type: 'tag', label: 'Tag Node' },
@@ -219,5 +249,15 @@ describe('KnowledgeWorkspace', () => {
     expect(screen.getAllByText('Code Memory 1').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Decision Memory 2').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Preference Memory 3').length).toBeGreaterThan(0);
+  });
+
+  it('populates memory records with full data from graph nodes', async () => {
+    const user = userEvent.setup();
+    render(<KnowledgeWorkspace />);
+
+    const button = screen.getAllByRole('button', { name: /Code Memory 1/i })[0];
+    await user.click(button);
+
+    expect(screen.getByText('Memory: Code Memory 1')).toBeInTheDocument();
   });
 });

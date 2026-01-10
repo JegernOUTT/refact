@@ -45,10 +45,12 @@ export function KnowledgeWorkspace() {
   const memoryRecords = useMemo((): KnowledgeMemoRecord[] => {
     return allDocNodes.map((node) => ({
       memid: node.id,
-      tags: [],
-      content: '',
-      title: node.label,
-      kind: node.node_type.replace('doc_', ''),
+      tags: node.tags ?? [],
+      content: node.content ?? '',
+      title: node.title ?? node.label,
+      kind: node.kind ?? node.node_type.replace('doc_', ''),
+      file_path: node.file_path,
+      created: node.created,
     }));
   }, [allDocNodes]);
 
@@ -58,10 +60,12 @@ export function KnowledgeWorkspace() {
     if (!node) return null;
     return {
       memid: node.id,
-      tags: [],
-      content: '',
-      title: node.label,
-      kind: node.node_type.replace('doc_', ''),
+      tags: node.tags ?? [],
+      content: node.content ?? '',
+      title: node.title ?? node.label,
+      kind: node.kind ?? node.node_type.replace('doc_', ''),
+      file_path: node.file_path,
+      created: node.created,
     };
   }, [selectedId, allDocNodes]);
 
