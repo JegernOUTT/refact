@@ -277,7 +277,8 @@ export function KnowledgeGraphView({
       <CytoscapeComponent
         elements={elements}
         style={{ width: "100%", height: "100%" }}
-        stylesheet={stylesheet}
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+        stylesheet={stylesheet as any}
         cy={(cy) => {
           cyRef.current = cy;
           if (!cyReadyRef.current) {

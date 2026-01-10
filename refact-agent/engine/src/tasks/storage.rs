@@ -283,10 +283,8 @@ pub async fn list_task_trajectories(
         }
     }
 
-    // Sort by created_at ascending (oldest first)
     trajectories.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
-    // Add session state for active sessions
     let gcx_locked = gcx.read().await;
     let sessions = gcx_locked.chat_sessions.read().await;
     for traj in &mut trajectories {
@@ -323,7 +321,6 @@ pub async fn get_planner_chat_id(
 ) -> Result<String, String> {
     let trajectories = list_task_trajectories(gcx, task_id, "planner", None).await?;
 
-    // Return most recently updated planner (the "active" one)
     trajectories
         .iter()
         .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
