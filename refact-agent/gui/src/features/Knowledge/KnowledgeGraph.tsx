@@ -7,7 +7,6 @@ import { Flex, Text, Checkbox } from "@radix-ui/themes";
 import { useGetKnowledgeGraphQuery } from "../../services/refact/knowledgeGraphApi";
 import { useKnowledgeGraphTheme } from "./useKnowledgeGraphTheme";
 import styles from "./KnowledgeGraph.module.css";
-import type { KnowledgeGraphEdge } from "../../services/refact/types";
 
 // Register fcose layout extension
 cytoscape.use(fcose);
