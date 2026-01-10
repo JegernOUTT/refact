@@ -145,7 +145,7 @@ Content to delete.""")
         }
         
         try:
-            response = requests.delete(
+            response = requests.post(
                 f"{LSP_URL}/v1/knowledge/delete-memory",
                 json=delete_payload,
                 timeout=10
@@ -198,7 +198,7 @@ Content to archive.""")
         }
         
         try:
-            response = requests.delete(
+            response = requests.post(
                 f"{LSP_URL}/v1/knowledge/delete-memory",
                 json=delete_payload,
                 timeout=10
