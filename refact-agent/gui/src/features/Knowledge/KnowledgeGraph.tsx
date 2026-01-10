@@ -43,6 +43,8 @@ export function KnowledgeGraph() {
   const { data: graph, isLoading, error } = useGetKnowledgeGraphQuery(undefined);
   const cyRef = useRef<Cytoscape.Core | null>(null);
   const layoutRef = useRef<any>(null);
+  const [cyReady, setCyReady] = useState(false);
+  const cyReadyRef = useRef(false);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [mode, setMode] = useState<ViewMode>("overview");
   const [focusSeedId, setFocusSeedId] = useState<string | null>(null);
@@ -258,43 +260,51 @@ export function KnowledgeGraph() {
   ];
 
   useEffect(() => {
-    if (cyRef.current) {
-      cyRef.current.on("tap", "node", (e: any) => {
-        const nodeId = e.target.id();
-        handleNodeClick(nodeId);
+    if (!cyRef.current || !cyReady) return;
+
+    const handleZoom = () => {
+      if (!cyRef.current) return;
+      const zoom = cyRef.current.zoom();
+      cyRef.current.elements("node").forEach((node: any) => {
+        node.style("label", zoom > 1.2 ? node.data("label") : "");
       });
+    };
 
-      cyRef.current.on("tap", (e: any) => {
-        if (e.target === cyRef.current) {
-          setSelectedNode(null);
-        }
-      });
+    cyRef.current.on("tap", "node", (e: any) => {
+      handleNodeClick(e.target.id());
+    });
 
-      const handleZoom = () => {
-        if (!cyRef.current) return;
-        const zoom = cyRef.current.zoom();
-        cyRef.current.elements("node").forEach((node: any) => {
-          node.style("label", zoom > 1.2 ? node.data("label") : "");
-        });
-      };
+    cyRef.current.on("tap", (e: any) => {
+      if (e.target === cyRef.current) {
+        setSelectedNode(null);
+      }
+    });
 
-      cyRef.current.on("zoom", handleZoom);
+    cyRef.current.on("zoom", handleZoom);
 
-      cyRef.current.on("mouseover", "node", (e: any) => {
-        e.target.style("label", e.target.data("label"));
-      });
+    cyRef.current.on("mouseover", "node", (e: any) => {
+      e.target.style("label", e.target.data("label"));
+    });
 
-      cyRef.current.on("mouseout", "node", (e: any) => {
-        const zoom = cyRef.current?.zoom() || 1;
-        if (zoom <= 1.2) {
-          e.target.style("label", "");
-        }
-      });
-    }
-  }, [handleNodeClick]);
+    cyRef.current.on("mouseout", "node", (e: any) => {
+      const zoom = cyRef.current?.zoom() || 1;
+      if (zoom <= 1.2) {
+        e.target.style("label", "");
+      }
+    });
+
+    return () => {
+      if (cyRef.current) {
+        cyRef.current.off("tap");
+        cyRef.current.off("zoom");
+        cyRef.current.off("mouseover");
+        cyRef.current.off("mouseout");
+      }
+    };
+  }, [cyReady, handleNodeClick]);
 
   useEffect(() => {
-    if (!cyRef.current) return;
+    if (!cyRef.current || !cyReady) return;
 
     layoutRef.current?.stop();
 
@@ -321,8 +331,12 @@ export function KnowledgeGraph() {
         };
 
     layoutRef.current = cyRef.current.layout(layoutOpts as any);
-    layoutRef.current.run();
-  }, [mode, focusSeedId, elements]);
+
+    requestAnimationFrame(() => {
+      cyRef.current?.resize();
+      layoutRef.current?.run();
+    });
+  }, [cyReady, mode, focusSeedId, focusDepth, elements]);
 
   const handleKindToggle = (kind: string) => {
     setFilters((prev) => {
@@ -446,6 +460,11 @@ export function KnowledgeGraph() {
               stylesheet={stylesheet}
               cy={(cy: any) => {
                 cyRef.current = cy;
+                if (!cyReadyRef.current) {
+                  cyReadyRef.current = true;
+                  setCyReady(true);
+                  cy.resize();
+                }
               }}
             />
           </div>
