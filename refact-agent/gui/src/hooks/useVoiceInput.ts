@@ -99,7 +99,7 @@ export function useVoiceInput(
       }
       return null;
     }
-  }, [isRecording, startRecording, stopRecording, onTranscript]);
+  }, [isRecording, startRecording, stopRecording, onTranscript, port]);
 
   return {
     isRecording,
