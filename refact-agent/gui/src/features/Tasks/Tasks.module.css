@@ -1,0 +1,232 @@
+.kanbanBoard {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: center;
+  align-items: flex-start;
+  padding: var(--space-2);
+  overflow-x: auto;
+}
+
+.kanbanColumn {
+  flex: 0 1 auto;
+  min-width: 140px;
+  max-width: 220px;
+  width: fit-content;
+  background: var(--gray-2);
+  border-radius: var(--radius-3);
+  border-top: 3px solid var(--gray-5);
+  display: flex;
+  flex-direction: column;
+}
+
+.kanbanColumnContent {
+  padding: var(--space-1);
+}
+
+.kanbanCard {
+  background: var(--color-background);
+  transition: transform 0.1s ease;
+  padding: var(--space-2);
+}
+
+.kanbanCard:hover {
+  transform: translateY(-1px);
+}
+
+.kanbanColumnHeader {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--gray-4);
+}
+
+.taskWorkspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.taskWorkspace.expanded .boardSection,
+.taskWorkspace.expanded .panelsSection {
+  display: none;
+}
+
+.taskHeader {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--gray-5);
+  flex-shrink: 0;
+}
+
+.boardSection {
+  flex: 0 0 auto;
+  max-height: 30%;
+  min-height: 80px;
+  overflow: auto;
+  border-bottom: 1px solid var(--gray-5);
+}
+
+.panelsSection {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--gray-5);
+  min-height: 180px;
+  max-height: 280px;
+  overflow: hidden;
+}
+
+.panel {
+  flex: 1;
+  background: var(--gray-2);
+  border-radius: var(--radius-3);
+  padding: var(--space-2);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panelHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--gray-4);
+  margin-bottom: var(--space-2);
+}
+
+.panelContent {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.chatSection {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chatHeader {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--gray-4);
+  background: var(--gray-2);
+  user-select: none;
+  transition: background-color 0.2s ease;
+  cursor: pointer;
+}
+
+.chatHeader:hover {
+  background: var(--gray-3);
+}
+
+.chevron {
+  transition: transform 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chevron.chevronExpanded {
+  transform: rotate(180deg);
+}
+
+.chatContent {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panelItem {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.panelItem:hover {
+  background: var(--gray-4);
+}
+
+.cardDetailOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.cardDetail {
+  background: var(--color-background);
+  border-radius: var(--radius-4);
+  padding: var(--space-4);
+  max-width: 600px;
+  max-height: 80vh;
+  overflow: auto;
+  width: 90%;
+}
+
+@keyframes pulseBlue {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.2);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes pulseGreen {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.agentDotSmall {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agentDotMedium {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agentDotDoing {
+  background-color: var(--blue-9);
+  animation: pulseBlue 1.5s ease-in-out infinite;
+}
+
+.agentDotDone {
+  background-color: var(--green-9);
+  animation: pulseGreen 2s ease-in-out infinite;
+}
+
+.agentDotFailed {
+  background-color: var(--red-9);
+}

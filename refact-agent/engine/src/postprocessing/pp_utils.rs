@@ -6,13 +6,13 @@ use tracing::{info, warn};
 use tokio::sync::RwLock as ARwLock;
 use std::hash::{Hash, Hasher};
 
+use crate::ast::chunk_utils::official_text_hashing_function;
 use crate::ast::treesitter::parsers::get_ast_parser_by_filename;
 use crate::call_validation::{ContextFile, PostprocessSettings};
 use crate::global_context::GlobalContext;
 use crate::files_in_workspace::{Document, get_file_text_from_memory_or_disk};
 use crate::files_correction::shortify_paths;
 use crate::postprocessing::pp_context_files::{PPFile, FileLine, DEBUG};
-
 
 pub fn color_with_gradient_type(msg: &ContextFile, lines: &mut Vec<FileLine>) {
     fn find_line_parameters(x1: f32, y1: f32, x2: f32, y2: f32) -> (f32, f32) {
@@ -29,18 +29,56 @@ pub fn color_with_gradient_type(msg: &ContextFile, lines: &mut Vec<FileLine>) {
     }
 
     let t_fade_away_lines = 50;
-    let (m11, c11) = find_line_parameters(msg.line1 as f32, msg.usefulness, msg.line1 as f32 - t_fade_away_lines as f32, 0. );
-    let (m12, c12) = find_line_parameters(msg.line1 as f32, msg.usefulness, msg.line1 as f32 + t_fade_away_lines as f32, 0. );
-    let (m21, c21) = find_line_parameters(msg.line2 as f32, msg.usefulness, msg.line2 as f32 - t_fade_away_lines as f32, 0. );
-    let (m22, c22) = find_line_parameters(msg.line2 as f32, msg.usefulness, msg.line2 as f32 + t_fade_away_lines as f32, 0. );
+    let (m11, c11) = find_line_parameters(
+        msg.line1 as f32,
+        msg.usefulness,
+        msg.line1 as f32 - t_fade_away_lines as f32,
+        0.,
+    );
+    let (m12, c12) = find_line_parameters(
+        msg.line1 as f32,
+        msg.usefulness,
+        msg.line1 as f32 + t_fade_away_lines as f32,
+        0.,
+    );
+    let (m21, c21) = find_line_parameters(
+        msg.line2 as f32,
+        msg.usefulness,
+        msg.line2 as f32 - t_fade_away_lines as f32,
+        0.,
+    );
+    let (m22, c22) = find_line_parameters(
+        msg.line2 as f32,
+        msg.usefulness,
+        msg.line2 as f32 + t_fade_away_lines as f32,
+        0.,
+    );
 
     for (line_n, line) in lines.iter_mut().enumerate() {
         let line_n = line_n + 1;
         let usefulness = match msg.gradient_type {
             0 => msg.usefulness - (line_n as f32) * 0.001,
-            1 => if line_n < msg.line1 {(line_n as f32 * m11 + c11).max(0.)} else {(line_n as f32 * m12 + c12).max(0.)},
-            2 => if line_n <= msg.line2 {(line_n as f32 * m21 + c21).max(0.) } else {-1.},
-            3 => if line_n < msg.line1 {-1.} else {(line_n as f32 * m12 + c12).max(0.)},
+            1 => {
+                if line_n < msg.line1 {
+                    (line_n as f32 * m11 + c11).max(0.)
+                } else {
+                    (line_n as f32 * m12 + c12).max(0.)
+                }
+            }
+            2 => {
+                if line_n <= msg.line2 {
+                    (line_n as f32 * m21 + c21).max(0.)
+                } else {
+                    -1.
+                }
+            }
+            3 => {
+                if line_n < msg.line1 {
+                    -1.
+                } else {
+                    (line_n as f32 * m12 + c12).max(0.)
+                }
+            }
             4 => {
                 if line_n < msg.line1 {
                     line_n as f32 * m11 + c11
@@ -49,17 +87,22 @@ pub fn color_with_gradient_type(msg: &ContextFile, lines: &mut Vec<FileLine>) {
                 } else {
                     line_n as f32 * m22 + c22
                 }
-            }.max(0.),
+            }
+            .max(0.),
             5 => {
                 if line_n >= msg.line1 && line_n <= msg.line2 {
                     100.
                 } else {
                     -1.
                 }
-            },
+            }
             _ => 0.0,
         };
-        set_useful_for_line(line, usefulness, format!("gradient_type: {:?}", msg.gradient_type));
+        set_useful_for_line(
+            line,
+            usefulness,
+            format!("gradient_type: {:?}", msg.gradient_type),
+        );
     }
 }
 
@@ -83,21 +126,35 @@ pub async fn pp_resolve_ctx_file_paths(
     let mut unique_cpaths = IndexSet::<String>::new();
     for context_file in context_file_vec.iter_mut() {
         let path_as_presented = context_file.file_name.clone();
-        let candidates = crate::files_correction::correct_to_nearest_filename(gcx.clone(), &path_as_presented, false, 5).await;
+        let candidates = crate::files_correction::correct_to_nearest_filename(
+            gcx.clone(),
+            &path_as_presented,
+            false,
+            5,
+        )
+        .await;
         let cpath = match candidates.first() {
             Some(c) => crate::files_correction::canonical_path(c),
-            None => crate::files_correction::canonical_path(&path_as_presented)
+            None => crate::files_correction::canonical_path(&path_as_presented),
         };
         context_file.file_name = cpath.to_string_lossy().to_string();
         if candidates.len() != 1 {
-            tracing::warn!("{:?} -> snap {:?} -> {:?}", path_as_presented, candidates, context_file.file_name);
+            tracing::warn!(
+                "{:?} -> snap {:?} -> {:?}",
+                path_as_presented,
+                candidates,
+                context_file.file_name
+            );
         }
         unique_cpaths.insert(context_file.file_name.clone());
     }
 
     let unique_cpaths_vec: Vec<String> = unique_cpaths.into_iter().collect();
     let shortified_vec: Vec<String> = shortify_paths(gcx.clone(), &unique_cpaths_vec).await;
-    unique_cpaths_vec.into_iter().zip(shortified_vec.into_iter()).collect()
+    unique_cpaths_vec
+        .into_iter()
+        .zip(shortified_vec.into_iter())
+        .collect()
 }
 
 pub async fn pp_ast_markup_files(
@@ -108,7 +165,8 @@ pub async fn pp_ast_markup_files(
     let ast_service = gcx.read().await.ast_service.clone();
     for (cpath, short) in pp_resolve_ctx_file_paths(gcx.clone(), context_file_vec).await {
         let cpath_pathbuf = PathBuf::from(&cpath);
-        let cpath_symmetry_breaker: f32 = (calculate_hash(&cpath_pathbuf) as f32) / (u64::MAX as f32) / 100.0;
+        let cpath_symmetry_breaker: f32 =
+            (calculate_hash(&cpath_pathbuf) as f32) / (u64::MAX as f32) / 100.0;
         let mut doc = Document::new(&cpath_pathbuf);
         let text = match get_file_text_from_memory_or_disk(gcx.clone(), &doc.doc_path).await {
             Ok(text) => text,
@@ -127,8 +185,9 @@ pub async fn pp_ast_markup_files(
         };
         let mut symbols_sorted_by_path_len = defs.clone();
         symbols_sorted_by_path_len.sort_by_key(|s| s.path().len());
-        result.push(Arc::new(PPFile {  // doesn't matter what size the output vector is
+        result.push(Arc::new(PPFile {
             symbols_sorted_by_path_len,
+            file_rev: Some(official_text_hashing_function(&text)),
             file_content: text,
             cpath: cpath,
             cpath_symmetry_breaker,
@@ -146,16 +205,21 @@ pub async fn pp_load_files_without_ast(
     let mut result: Vec<Arc<PPFile>> = vec![];
     for (cpath, short) in pp_resolve_ctx_file_paths(gcx.clone(), context_file_vec).await {
         let cpath_pathbuf = PathBuf::from(&cpath);
-        let cpath_symmetry_breaker: f32 = (calculate_hash(&cpath_pathbuf) as f32) / (u64::MAX as f32) / 100.0;
+        let cpath_symmetry_breaker: f32 =
+            (calculate_hash(&cpath_pathbuf) as f32) / (u64::MAX as f32) / 100.0;
         let text = match get_file_text_from_memory_or_disk(gcx.clone(), &cpath_pathbuf).await {
             Ok(text) => text,
             Err(e) => {
-                warn!("pp_load_files_without_ast: cannot read file {:?}, skipping. Error: {}", cpath, e);
+                warn!(
+                    "pp_load_files_without_ast: cannot read file {:?}, skipping. Error: {}",
+                    cpath, e
+                );
                 continue;
             }
         };
         result.push(Arc::new(PPFile {
             symbols_sorted_by_path_len: vec![],
+            file_rev: Some(official_text_hashing_function(&text)),
             file_content: text,
             cpath: cpath,
             cpath_symmetry_breaker,
@@ -165,9 +229,18 @@ pub async fn pp_load_files_without_ast(
     result
 }
 
-pub fn colorize_if_more_useful(lines: &mut Vec<FileLine>, line1: usize, line2: usize, color: String, useful: f32) {
+pub fn colorize_if_more_useful(
+    lines: &mut Vec<FileLine>,
+    line1: usize,
+    line2: usize,
+    color: String,
+    useful: f32,
+) {
     if DEBUG >= 2 {
-        info!("    colorize_if_more_useful {}..{} <= color {:?} useful {}", line1, line2, color, useful);
+        info!(
+            "    colorize_if_more_useful {}..{} <= color {:?} useful {}",
+            line1, line2, color, useful
+        );
     }
     for i in line1..line2 {
         if i >= lines.len() {
@@ -186,7 +259,7 @@ pub fn colorize_if_more_useful(lines: &mut Vec<FileLine>, line1: usize, line2: u
 
 pub async fn context_msgs_from_paths(
     global_context: Arc<ARwLock<GlobalContext>>,
-    files_set: HashSet<String>
+    files_set: HashSet<String>,
 ) -> Vec<ContextFile> {
     // XXX: only used once in a test handler, maybe remove?
     let mut messages = vec![];
@@ -204,6 +277,7 @@ pub async fn context_msgs_from_paths(
             file_content: text.clone(),
             line1: 1,
             line2: text.lines().count().max(1),
+            file_rev: None,
             symbols: vec![],
             gradient_type: -1,
             usefulness: 0.,
@@ -213,9 +287,17 @@ pub async fn context_msgs_from_paths(
     messages
 }
 
-pub fn colorize_parentof(lines: &mut Vec<FileLine>, long_child_path: &String, bg: f32, maxuseful: f32) {
+pub fn colorize_parentof(
+    lines: &mut Vec<FileLine>,
+    long_child_path: &String,
+    bg: f32,
+    maxuseful: f32,
+) {
     if DEBUG >= 2 {
-        info!("    colorize_parentof long_child_path={} bg={} maxuseful={}", long_child_path, bg, maxuseful);
+        info!(
+            "    colorize_parentof long_child_path={} bg={} maxuseful={}",
+            long_child_path, bg, maxuseful
+        );
     }
     for i in 0..lines.len() {
         if let Some(line) = lines.get_mut(i) {
@@ -223,7 +305,7 @@ pub fn colorize_parentof(lines: &mut Vec<FileLine>, long_child_path: &String, bg
             if long_child_path.starts_with(color) && color.len() > 0 {
                 let plen = line.color.len();
                 let long = long_child_path.len();
-                let mut u = bg + (maxuseful - bg)*(plen as f32)/(long as f32);
+                let mut u = bg + (maxuseful - bg) * (plen as f32) / (long as f32);
                 u -= (i as f32) * 0.001;
                 if line.useful < u {
                     if DEBUG >= 2 {
@@ -246,8 +328,11 @@ pub fn colorize_minus_one(lines: &mut Vec<FileLine>, line1: usize, line2: usize)
 }
 
 pub fn colorize_comments_up(lines: &mut Vec<FileLine>, settings: &PostprocessSettings) {
-    for i in (0 .. lines.len() - 1).rev() {
-        let next_line = lines.get(i+1).map(|x|x.clone());
+    if lines.len() < 2 {
+        return;
+    }
+    for i in (0..lines.len() - 1).rev() {
+        let next_line = lines.get(i + 1).map(|x| x.clone());
         let this_line = lines.get_mut(i);
         if this_line.is_none() || next_line.is_none() {
             continue;
@@ -265,15 +350,22 @@ pub fn colorize_comments_up(lines: &mut Vec<FileLine>, settings: &PostprocessSet
     }
 }
 
-pub fn downgrade_lines_if_subsymbol(lines: &mut Vec<FileLine>, line1_base0: usize, line2_base0: usize, subsymbol: &String, downgrade_coef: f32) {
+pub fn downgrade_lines_if_subsymbol(
+    lines: &mut Vec<FileLine>,
+    line1_base0: usize,
+    line2_base0: usize,
+    subsymbol: &String,
+    downgrade_coef: f32,
+) {
     let mut changes_cnt = 0;
-    for i in line1_base0 .. line2_base0 {
+    for i in line1_base0..line2_base0 {
         if i >= lines.len() {
             continue;
         }
         if let Some(line) = lines.get_mut(i) {
-            if i == line2_base0-1 || i == line1_base0 {
-                if line.line_content.trim().len() == 1 {  // only closing bracket -- don't degrade, for C++ void f()  { ... }  last line with "}" only
+            if i == line2_base0 - 1 || i == line1_base0 {
+                if line.line_content.trim().len() == 1 {
+                    // only closing bracket -- don't degrade, for C++ void f()  { ... }  last line with "}" only
                     continue;
                 }
             }
@@ -285,6 +377,9 @@ pub fn downgrade_lines_if_subsymbol(lines: &mut Vec<FileLine>, line1_base0: usiz
         }
     }
     if DEBUG >= 2 {
-        info!("        {}..{} ({} affected) <= subsymbol {:?} downgrade {}", line1_base0, line2_base0, changes_cnt, subsymbol, downgrade_coef);
+        info!(
+            "        {}..{} ({} affected) <= subsymbol {:?} downgrade {}",
+            line1_base0, line2_base0, changes_cnt, subsymbol, downgrade_coef
+        );
     }
 }

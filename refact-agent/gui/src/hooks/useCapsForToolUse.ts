@@ -120,7 +120,9 @@ export function useCapsForToolUse() {
       const toChange =
         models.find((elem) => currentModel === elem) ?? models[0];
 
-      setCapModel(toChange);
+      if (toChange && toChange !== currentModel) {
+        setCapModel(toChange);
+      }
     }
   }, [setCapModel, currentModel, usableModels, usableModelsForPlan]);
 

@@ -65,8 +65,10 @@ async fn _render_context_files(
         }
         "chat" => {
             for m in postprocessed_messages {
-                context_files_prompt
-                    .push_str(&format!("Filename: {}\nUseful content:\n```\n{}\n```\n\n", m.file_name, m.file_content));
+                context_files_prompt.push_str(&format!(
+                    "Filename: {}\nUseful content:\n```\n{}\n```\n\n",
+                    m.file_name, m.file_content
+                ));
             }
             context_files_prompt
         }
@@ -121,7 +123,8 @@ async fn _cursor_position_to_context_file(
             info!("adding {} to context", double_colon_path);
         }
         let defs: Vec<Arc<AstDefinition>> =
-            crate::ast::ast_db::definitions(ast_index.clone(), double_colon_path.as_str()).unwrap_or_else(trace_and_default);
+            crate::ast::ast_db::definitions(ast_index.clone(), double_colon_path.as_str())
+                .unwrap_or_else(trace_and_default);
         if defs.len() != 1 {
             tracing::warn!(
                 "hmm, number of definitions for {} is {} which is not one",
@@ -135,6 +138,7 @@ async fn _cursor_position_to_context_file(
                 file_content: "".to_string(),
                 line1: def.full_line1(),
                 line2: def.full_line2(),
+                file_rev: None,
                 symbols: vec![def.path_drop0()],
                 gradient_type: 4,
                 usefulness: 100.,
@@ -194,6 +198,7 @@ pub async fn retrieve_ast_based_extra_context(
             file_content: "".to_string(),
             line1: (subblock_to_ignore_range.0 + 1) as usize,
             line2: (subblock_to_ignore_range.1 + 1) as usize,
+            file_rev: None,
             symbols: vec![],
             gradient_type: 4,
             usefulness: -1.0,
@@ -204,7 +209,7 @@ pub async fn retrieve_ast_based_extra_context(
 
     info!(" -- post processing starts --");
     let post_t0 = Instant::now();
-    let postprocessed_messages = postprocess_context_files(
+    let (postprocessed_messages, _notes) = postprocess_context_files(
         gcx.clone(),
         &mut ast_context_file_vec,
         t.tokenizer.clone(),

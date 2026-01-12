@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AMutex;
 use tokio::sync::mpsc;
 use async_stream::stream;
@@ -10,6 +11,10 @@ use serde_json::{json, Value};
 use tracing::info;
 use uuid;
 
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const STREAM_HEARTBEAT: Duration = Duration::from_secs(2);
+
 use crate::call_validation::{ChatMeta, SamplingParameters};
 use crate::caps::BaseModelRecord;
 use crate::custom_error::ScratchError;
@@ -18,16 +23,15 @@ use crate::scratchpad_abstract::{FinishReason, ScratchpadAbstract};
 use crate::telemetry::telemetry_structs;
 use crate::at_commands::at_commands::AtCommandsContext;
 
-
 pub async fn scratchpad_interaction_not_stream_json(
     ccx: Arc<AMutex<AtCommandsContext>>,
     scratchpad: &mut Box<dyn ScratchpadAbstract>,
     scope: String,
     prompt: &str,
     model_rec: &BaseModelRecord,
-    parameters: &SamplingParameters,  // includes n
+    parameters: &SamplingParameters, // includes n
     only_deterministic_messages: bool,
-    meta: Option<ChatMeta>
+    meta: Option<ChatMeta>,
 ) -> Result<serde_json::Value, ScratchError> {
     let t2 = std::time::SystemTime::now();
     let gcx = ccx.lock().await.global_context.clone();
@@ -36,7 +40,7 @@ pub async fn scratchpad_interaction_not_stream_json(
         (
             gcx_locked.http_client.clone(),
             gcx_locked.telemetry.clone(),
-            gcx_locked.http_client_slowdown.clone()
+            gcx_locked.http_client_slowdown.clone(),
         )
     };
 
@@ -51,34 +55,52 @@ pub async fn scratchpad_interaction_not_stream_json(
             prompt,
             &client,
             &parameters,
-            meta
-        ).await
+            meta,
+        )
+        .await
     } else {
         crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint(
             &model_rec,
             prompt,
             &client,
             &parameters,
-            meta
-        ).await
-    }.map_err(|e| {
-        tele_storage.write().unwrap().tele_net.push(telemetry_structs::TelemetryNetwork::new(
+            meta,
+        )
+        .await
+    }
+    .map_err(|e| {
+        tele_storage
+            .write()
+            .unwrap()
+            .tele_net
+            .push(telemetry_structs::TelemetryNetwork::new(
                 save_url.clone(),
                 scope.clone(),
                 false,
                 e.to_string(),
             ));
-        ScratchError::new_but_skip_telemetry(StatusCode::INTERNAL_SERVER_ERROR, format!("forward_to_endpoint: {}", e))
+        ScratchError::new_but_skip_telemetry(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("forward_to_endpoint: {}", e),
+        )
     })?;
     generate_id_and_index_for_tool_calls_if_missing(&mut model_says);
-    
-    tele_storage.write().unwrap().tele_net.push(telemetry_structs::TelemetryNetwork::new(
-        save_url.clone(),
-        scope.clone(),
-        true,
-        "".to_string(),
-    ));
-    info!("forward to endpoint {:.2}ms, url was {}", t2.elapsed().unwrap().as_millis() as f64, save_url);
+
+    tele_storage
+        .write()
+        .unwrap()
+        .tele_net
+        .push(telemetry_structs::TelemetryNetwork::new(
+            save_url.clone(),
+            scope.clone(),
+            true,
+            "".to_string(),
+        ));
+    info!(
+        "forward to endpoint {:.2}ms, url was {}",
+        t2.elapsed().unwrap().as_millis() as f64,
+        save_url
+    );
     crate::global_context::look_for_piggyback_fields(gcx.clone(), &model_says).await;
 
     let scratchpad_result: Result<serde_json::Value, String>;
@@ -88,97 +110,117 @@ pub async fn scratchpad_interaction_not_stream_json(
             model_says["choices"] = serde_json::Value::Array(vec![]);
         }
         scratchpad_result = Ok(model_says.clone());
-
     } else if let Some(hf_arr) = model_says.as_array() {
-        let choices = hf_arr.iter().map(|x| {
-            x.get("generated_text")
-                .and_then(|val| val.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    tracing::error!("Failed to get generated_text or convert to str");
-                    "".to_string()
-                })
-        }).collect::<Vec<_>>();
+        let choices = hf_arr
+            .iter()
+            .map(|x| {
+                x.get("generated_text")
+                    .and_then(|val| val.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        tracing::error!("Failed to get generated_text or convert to str");
+                        "".to_string()
+                    })
+            })
+            .collect::<Vec<_>>();
         let finish_reasons = vec![FinishReason::Length; choices.len()];
         scratchpad_result = scratchpad.response_n_choices(choices, finish_reasons);
-
     } else if let Some(oai_choices) = model_says.clone().get("choices") {
-        let choice0 = oai_choices.as_array().unwrap().get(0).unwrap();
-        let finish_reasons = oai_choices.clone().as_array().unwrap().iter().map(
-            |x| FinishReason::from_json_val(x.get("finish_reason").unwrap_or(&json!(""))).unwrap_or_else(|err| {
-                tracing::error!("Couldn't parse finish_reason: {err}. Fallback to finish_reason=null");
-                FinishReason::None
+        let choices_arr = oai_choices.as_array().ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "choices is not an array".to_string(),
+            )
+        })?;
+        if choices_arr.is_empty() {
+            return Err(ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "choices array is empty".to_string(),
+            ));
+        }
+        let choice0 = &choices_arr[0];
+        let finish_reasons = choices_arr
+            .iter()
+            .map(|x| {
+                FinishReason::from_json_val(x.get("finish_reason").unwrap_or(&json!("")))
+                    .unwrap_or_else(|err| {
+                        tracing::error!(
+                            "Couldn't parse finish_reason: {err}. Fallback to finish_reason=null"
+                        );
+                        FinishReason::None
+                    })
             })
-        ).collect::<Vec<_>>();
+            .collect::<Vec<_>>();
         if let Some(_msg) = choice0.get("message") {
             if let Ok(det_msgs) = scratchpad.response_spontaneous() {
                 model_says["deterministic_messages"] = json!(det_msgs);
             }
-            let choices = oai_choices.clone().as_array().unwrap().iter().map(|x| {
-                match (x.get("message"), x.get("message").and_then(|msg| msg.get("content")), x.get("message").and_then(|msg| msg.get("content")).and_then(|content| content.as_str())) {
-                    (Some(_), Some(_), Some(content)) => content.to_string(),
-                    (msg, content, as_str) => {
-                        tracing::info!(
-                            "no text content: msg={:?}, content={:?}, as_str={:?}",
-                            msg, content, as_str
-                        );
-                        "".to_string()
+            let choices = choices_arr
+                .iter()
+                .map(|x| {
+                    match (
+                        x.get("message"),
+                        x.get("message").and_then(|msg| msg.get("content")),
+                        x.get("message")
+                            .and_then(|msg| msg.get("content"))
+                            .and_then(|content| content.as_str()),
+                    ) {
+                        (Some(_), Some(_), Some(content)) => content.to_string(),
+                        (msg, content, as_str) => {
+                            tracing::info!(
+                                "no text content: msg={:?}, content={:?}, as_str={:?}",
+                                msg,
+                                content,
+                                as_str
+                            );
+                            "".to_string()
+                        }
                     }
-                }
-            }).collect::<Vec<_>>();
-            scratchpad_result = match scratchpad.response_message_n_choices(choices, finish_reasons) {
-                Ok(res) => Ok(res),
-                Err(err) => {
-                    if err == "not implemented" {
-                        info!("scratchpad doesn't implement response_message_n_choices, passing the original message through");
-                        Ok(model_says.clone())
-                    } else {
-                        Err(err)
-                    }
-                }
-            };
+                })
+                .collect::<Vec<_>>();
+            scratchpad_result = scratchpad.response_message_n_choices(choices, finish_reasons);
         } else {
-            // TODO: restore order using 'index'
-            // for oai_choice in oai_choices.as_array().unwrap() {
-            //     let index = oai_choice.get("index").unwrap().as_u64().unwrap() as usize;
-            // }
-            let choices = oai_choices.as_array().unwrap().iter().map(|x| {
-                x.get("text")
-                    .and_then(|val| val.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| {
-                        tracing::error!("Failed to get text or convert to str");
-                        "".to_string()
-                    })
-            }).collect::<Vec<_>>();
+            let choices = choices_arr
+                .iter()
+                .map(|x| {
+                    x.get("text")
+                        .and_then(|val| val.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| {
+                            tracing::error!("Failed to get text or convert to str");
+                            "".to_string()
+                        })
+                })
+                .collect::<Vec<_>>();
             scratchpad_result = scratchpad.response_n_choices(choices, finish_reasons);
         }
-
     } else if let Some(err) = model_says.get("error") {
-        return Err(ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{}", err)
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{}", err),
         ));
-
     } else if let Some(msg) = model_says.get("human_readable_message") {
-        return Err(ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{}", msg)
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{}", msg),
         ));
-
     } else if let Some(msg) = model_says.get("detail") {
-        return Err(ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{}", msg)
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{}", msg),
         ));
-
     } else {
-        return Err(ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR,
-            format!("unrecognized response (1): {:?}", model_says))
-        );
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("unrecognized response (1): {:?}", model_says),
+        ));
     }
 
     if let Err(problem) = scratchpad_result {
-        return Err(ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR,
-            format!("scratchpad: {}", problem))
-        );
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("scratchpad: {}", problem),
+        ));
     }
     return Ok(scratchpad_result.unwrap());
 }
@@ -190,16 +232,19 @@ pub async fn scratchpad_interaction_not_stream(
     model_rec: &BaseModelRecord,
     parameters: &mut SamplingParameters,
     only_deterministic_messages: bool,
-    meta: Option<ChatMeta>
+    meta: Option<ChatMeta>,
 ) -> Result<Response<Body>, ScratchError> {
     let t1 = std::time::Instant::now();
-    let prompt = scratchpad.prompt(
-        ccx.clone(),
-        parameters,
-    ).await.map_err(|e|
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Prompt: {}", e))
-    )?;
-    info!("scratchpad_interaction_not_stream prompt {:?}", t1.elapsed());
+    let prompt = scratchpad
+        .prompt(ccx.clone(), parameters)
+        .await
+        .map_err(|e| {
+            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Prompt: {}", e))
+        })?;
+    info!(
+        "scratchpad_interaction_not_stream prompt {:?}",
+        t1.elapsed()
+    );
 
     let t2 = std::time::SystemTime::now();
     let mut scratchpad_response_json = scratchpad_interaction_not_stream_json(
@@ -210,10 +255,15 @@ pub async fn scratchpad_interaction_not_stream(
         &model_rec,
         parameters,
         only_deterministic_messages,
-        meta
-    ).await?;
-    scratchpad_response_json["created"] = json!(t2.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64());
-    scratchpad_response_json["compression_strength"] = crate::forward_to_openai_endpoint::try_get_compression_from_prompt(&prompt);
+        meta,
+    )
+    .await?;
+    scratchpad_response_json["created"] = json!(t2
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64());
+    scratchpad_response_json["compression_strength"] =
+        crate::forward_to_openai_endpoint::try_get_compression_from_prompt(&prompt);
 
     let txt = serde_json::to_string_pretty(&scratchpad_response_json).unwrap();
     // info!("handle_v1_code_completion return {}", txt);
@@ -366,8 +416,39 @@ pub async fn scratchpad_interaction_stream(
             };
             let mut was_correct_output_even_if_error = false;
             let mut last_finish_reason = FinishReason::None;
-            // let mut test_countdown = 250;
-            while let Some(event) = event_source.next().await {
+            let stream_started_at = Instant::now();
+            let mut last_event_at = Instant::now();
+            let mut heartbeat = tokio::time::interval(STREAM_HEARTBEAT);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                let event = tokio::select! {
+                    _ = heartbeat.tick() => {
+                        if stream_started_at.elapsed() > STREAM_TOTAL_TIMEOUT {
+                            let err_str = "LLM stream timeout";
+                            tracing::error!("{}", err_str);
+                            yield Result::<_, String>::Ok(format!("data: {}\n\n", serde_json::to_string(&json!({"detail": err_str})).unwrap()));
+                            event_source.close();
+                            return;
+                        }
+                        if last_event_at.elapsed() > STREAM_IDLE_TIMEOUT {
+                            let err_str = "LLM stream stalled";
+                            tracing::error!("{}", err_str);
+                            yield Result::<_, String>::Ok(format!("data: {}\n\n", serde_json::to_string(&json!({"detail": err_str})).unwrap()));
+                            event_source.close();
+                            return;
+                        }
+                        continue;
+                    }
+                    maybe_event = event_source.next() => {
+                        match maybe_event {
+                            Some(e) => e,
+                            None => break,
+                        }
+                    }
+                };
+                last_event_at = Instant::now();
+
                 match event {
                     Ok(Event::Open) => {},
                     Ok(Event::Message(message)) => {
@@ -463,58 +544,15 @@ pub async fn scratchpad_interaction_stream(
         .unwrap())
 }
 
-#[allow(dead_code)]
-pub fn try_insert_usage(msg_value: &mut serde_json::Value) -> bool {
-    let map = match msg_value.as_object() {
-        Some(map) => map,
-        None => {
-            return false;
-        }
-    };
-    let get_field_as_usize = |field: &str| -> Option<usize> {
-        map.get(field).and_then(|v| v.as_u64()).map(|v| v as usize)
-    };
-
-    if let Some(usage) = map.get("usage") {
-        if !usage.is_null() {
-            tracing::info!("model says usage: {:?}", usage);
-        }
-    }
-
-    let metering_prompt_tokens_n = match get_field_as_usize("metering_prompt_tokens_n") {
-        Some(value) => value,
-        None => return false,
-    };
-    let metering_generated_tokens_n = match get_field_as_usize("metering_generated_tokens_n") {
-        Some(value) => value,
-        None => return false,
-    };
-
-    if let Some(map) = msg_value.as_object_mut() {
-        ["pp1000t_prompt", "pp1000t_generated", "metering_prompt_tokens_n", "metering_generated_tokens_n"]
-            .iter()
-            .for_each(|&field| { map.remove(field); });
-
-        let usage = json!({
-            "prompt_tokens": metering_prompt_tokens_n,
-            "completion_tokens": metering_generated_tokens_n,
-            "total_tokens": metering_prompt_tokens_n + metering_generated_tokens_n
-        });
-        map.insert("usage".to_string(), usage);
-        return true;
-    }
-    return false;
-}
-
-/// Generates tool call ID and index for tool calls missing them, required by providers like Gemini
 fn generate_id_and_index_for_tool_calls_if_missing(value: &mut serde_json::Value) {
     fn process_tool_call(tool_call: &mut serde_json::Value, idx: usize) {
-        if let Some(id) = tool_call.get_mut("id") {
-            if id.is_string() && id.as_str().unwrap_or("").is_empty() {
-                let uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
-                *id = json!(format!("call_{uuid}"));
-                tracing::info!("Generated UUID for empty tool call ID: call_{}", uuid);
-            }
+        let needs_id = match tool_call.get("id") {
+            None => true,
+            Some(id) => id.is_null() || (id.is_string() && id.as_str().unwrap_or("").is_empty()),
+        };
+        if needs_id {
+            let uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
+            tool_call["id"] = json!(format!("call_{uuid}"));
         }
         if tool_call.get("index").is_none() {
             tool_call["index"] = json!(idx);
@@ -526,13 +564,14 @@ fn generate_id_and_index_for_tool_calls_if_missing(value: &mut serde_json::Value
             process_tool_call(tool_call, i);
         }
     }
-    
+
     if let Some(choices) = value.get_mut("choices").and_then(|c| c.as_array_mut()) {
         for choice in choices {
             for field in ["delta", "message"] {
-                if let Some(tool_calls) = choice.get_mut(field)
+                if let Some(tool_calls) = choice
+                    .get_mut(field)
                     .and_then(|v| v.get_mut("tool_calls"))
-                    .and_then(|tc| tc.as_array_mut()) 
+                    .and_then(|tc| tc.as_array_mut())
                 {
                     for (i, tool_call) in tool_calls.iter_mut().enumerate() {
                         process_tool_call(tool_call, i);
@@ -543,43 +582,49 @@ fn generate_id_and_index_for_tool_calls_if_missing(value: &mut serde_json::Value
     }
 }
 
-
 fn _push_streaming_json_into_scratchpad(
     scratch: &mut Box<dyn ScratchpadAbstract>,
     json: &serde_json::Value,
     model_name: &mut String,
     was_correct_output_even_if_error: &mut bool,
 ) -> Result<(serde_json::Value, FinishReason), String> {
-    if let Some(token) = json.get("token") { // hf style produces this
-        let text = token.get("text").unwrap_or(&json!("")).as_str().unwrap_or("").to_string();
+    if let Some(token) = json.get("token") {
+        // hf style produces this
+        let text = token
+            .get("text")
+            .unwrap_or(&json!(""))
+            .as_str()
+            .unwrap_or("")
+            .to_string();
         // TODO: probably we must retrieve the correct `finish_reason` from the json somehow
         let (mut value, finish_reason) = scratch.response_streaming(text, FinishReason::None)?;
         value["model"] = json!(model_name.clone());
         *was_correct_output_even_if_error |= json.get("generated_text").is_some();
         Ok((value, finish_reason))
-    } else if let Some(choices) = json.get("choices") { // openai style
+    } else if let Some(choices) = json.get("choices") {
+        // openai style
         let choice0 = &choices[0];
         let mut value: serde_json::Value;
-        let mut finish_reason = FinishReason::from_json_val(choice0.get("finish_reason").unwrap_or(&json!(""))).unwrap_or_else(|err| {
-            tracing::error!("Couldn't parse finish_reason: {err}. Fallback to finish_reason=null");
-            FinishReason::None
-        });
+        let mut finish_reason =
+            FinishReason::from_json_val(choice0.get("finish_reason").unwrap_or(&json!("")))
+                .unwrap_or_else(|err| {
+                    tracing::error!(
+                        "Couldn't parse finish_reason: {err}. Fallback to finish_reason=null"
+                    );
+                    FinishReason::None
+                });
         if let Some(_delta) = choice0.get("delta") {
-            (value, finish_reason) = match scratch.response_message_streaming(&json, finish_reason.clone()) {
-                Ok(res) => Ok(res),
-                Err(err) => {
-                    if err == "not implemented" {
-                        info!("scratchpad doesn't implement response_message_streaming, passing the original message through");
-                        Ok((json.clone(), finish_reason.clone()))
-                    } else {
-                        Err(err)
-                    }
-                }
-            }?;
-        } else if choices.as_array().map_or(true, |arr|arr.is_empty())  {
+            (value, finish_reason) =
+                scratch.response_message_streaming(&json, finish_reason.clone())?;
+        } else if choices.as_array().map_or(true, |arr| arr.is_empty()) {
             value = json.clone();
         } else {
-            let text = choice0.get("text").unwrap_or(&json!("")).as_str().unwrap_or("").to_string();
+            let text = choice0
+                .get("text")
+                .unwrap_or(&json!(""))
+                .as_str()
+                .unwrap_or("")
+                .to_string();
             (value, finish_reason) = scratch.response_streaming(text, finish_reason)?;
         }
         if let Some(model_value) = choice0.get("model") {
@@ -605,9 +650,9 @@ pub async fn cached_not_stream(
 ) -> Result<Response<Body>, ScratchError> {
     let txt = serde_json::to_string_pretty(&cached_json_value).unwrap();
     let response = Response::builder()
-       .header("Content-Type", "application/json")
-      .body(Body::from(txt))
-      .unwrap();
+        .header("Content-Type", "application/json")
+        .body(Body::from(txt))
+        .unwrap();
     return Ok(response);
 }
 
@@ -621,8 +666,8 @@ pub async fn cached_stream(
         yield Result::<_, String>::Ok("data: [DONE]\n\n".to_string());
     };
     let response = Response::builder()
-       .header("Content-Type", "application/json")
-       .body(Body::wrap_stream(evstream))
-       .unwrap();
+        .header("Content-Type", "application/json")
+        .body(Body::wrap_stream(evstream))
+        .unwrap();
     return Ok(response);
 }

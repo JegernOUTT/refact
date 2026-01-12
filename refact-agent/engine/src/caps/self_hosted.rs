@@ -8,7 +8,7 @@ use crate::caps::{
     BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord, DefaultModels,
     EmbeddingModelRecord, CapsMetadata, default_chat_scratchpad, default_completion_scratchpad,
     default_completion_scratchpad_patch, default_embedding_batch, default_hf_tokenizer_template,
-    default_rejection_threshold, relative_to_full_url, normalize_string, resolve_relative_urls
+    default_rejection_threshold, relative_to_full_url, normalize_string, resolve_relative_urls,
 };
 use crate::caps::providers;
 
@@ -39,6 +39,9 @@ pub struct SelfHostedCapsModelRecord {
 
     #[serde(default)]
     pub default_temperature: Option<f32>,
+
+    #[serde(default)]
+    pub supports_strict_tools: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -113,7 +116,8 @@ fn configure_base_model(
     base_model.name = model_name.to_string();
     base_model.id = format!("{}/{}", cloud_name, model_name);
     if base_model.endpoint.is_empty() {
-        base_model.endpoint = relative_to_full_url(caps_url, &endpoint.replace("$MODEL", model_name))?;
+        base_model.endpoint =
+            relative_to_full_url(caps_url, &endpoint.replace("$MODEL", model_name))?;
     }
     if let Some(tokenizer) = tokenizer_endpoints.get(&base_model.name) {
         base_model.tokenizer = relative_to_full_url(caps_url, &tokenizer)?;
@@ -127,18 +131,41 @@ fn configure_base_model(
 impl SelfHostedCapsModelRecord {
     fn get_completion_scratchpad(&self) -> (String, serde_json::Value) {
         if !self.supports_scratchpads.is_empty() {
-            let scratchpad_name = self.supports_scratchpads.keys().next().unwrap_or(&default_completion_scratchpad()).clone();
-            let scratchpad_patch = self.supports_scratchpads.values().next().unwrap_or(&serde_json::Value::Null).clone();
+            let scratchpad_name = self
+                .supports_scratchpads
+                .keys()
+                .next()
+                .unwrap_or(&default_completion_scratchpad())
+                .clone();
+            let scratchpad_patch = self
+                .supports_scratchpads
+                .values()
+                .next()
+                .unwrap_or(&serde_json::Value::Null)
+                .clone();
             (scratchpad_name, scratchpad_patch)
         } else {
-            (default_completion_scratchpad(), default_completion_scratchpad_patch())
+            (
+                default_completion_scratchpad(),
+                default_completion_scratchpad_patch(),
+            )
         }
     }
 
     fn get_chat_scratchpad(&self) -> (String, serde_json::Value) {
         if !self.supports_scratchpads.is_empty() {
-            let scratchpad_name = self.supports_scratchpads.keys().next().unwrap_or(&default_chat_scratchpad()).clone();
-            let scratchpad_patch = self.supports_scratchpads.values().next().unwrap_or(&serde_json::Value::Null).clone();
+            let scratchpad_name = self
+                .supports_scratchpads
+                .keys()
+                .next()
+                .unwrap_or(&default_chat_scratchpad())
+                .clone();
+            let scratchpad_patch = self
+                .supports_scratchpads
+                .values()
+                .next()
+                .unwrap_or(&serde_json::Value::Null)
+                .clone();
             (scratchpad_name, scratchpad_patch)
         } else {
             (default_chat_scratchpad(), serde_json::Value::Null)
@@ -219,6 +246,7 @@ impl SelfHostedCapsModelRecord {
             scratchpad,
             scratchpad_patch,
             supports_tools: self.supports_tools,
+            supports_strict_tools: self.supports_strict_tools,
             supports_multimodality: self.supports_multimodality,
             supports_clicks: self.supports_clicks,
             supports_agent: self.supports_agent,
@@ -238,7 +266,11 @@ impl SelfHostedCapsEmbeddingModelRecord {
         cmdline_api_key: &str,
     ) -> Result<EmbeddingModelRecord, String> {
         let mut embedding_model = EmbeddingModelRecord {
-            base: BaseModelRecord { n_ctx: self.n_ctx, enabled: true, ..Default::default() },
+            base: BaseModelRecord {
+                n_ctx: self.n_ctx,
+                enabled: true,
+                ..Default::default()
+            },
             embedding_size: self.size,
             rejection_threshold: default_rejection_threshold(),
             embedding_batch: default_embedding_batch(),
@@ -259,21 +291,35 @@ impl SelfHostedCapsEmbeddingModelRecord {
     }
 }
 
-
 impl SelfHostedCaps {
-    pub fn into_caps(self, caps_url: &String, cmdline_api_key: &str) -> Result<CodeAssistantCaps, String> {
+    pub fn into_caps(
+        self,
+        caps_url: &String,
+        cmdline_api_key: &str,
+    ) -> Result<CodeAssistantCaps, String> {
         let mut caps = CodeAssistantCaps {
             cloud_name: self.cloud_name.clone(),
 
-            telemetry_basic_dest: relative_to_full_url(caps_url, &self.telemetry_endpoints.telemetry_basic_endpoint)?,
-            telemetry_basic_retrieve_my_own: relative_to_full_url(caps_url, &self.telemetry_endpoints.telemetry_basic_retrieve_my_own_endpoint)?,
+            telemetry_basic_dest: relative_to_full_url(
+                caps_url,
+                &self.telemetry_endpoints.telemetry_basic_endpoint,
+            )?,
+            telemetry_basic_retrieve_my_own: relative_to_full_url(
+                caps_url,
+                &self
+                    .telemetry_endpoints
+                    .telemetry_basic_retrieve_my_own_endpoint,
+            )?,
 
             completion_models: IndexMap::new(),
             chat_models: IndexMap::new(),
             embedding_model: EmbeddingModelRecord::default(),
 
             defaults: DefaultModels {
-                completion_default_model: format!("{}/{}", self.cloud_name, self.completion.default_model),
+                completion_default_model: format!(
+                    "{}/{}",
+                    self.cloud_name, self.completion.default_model
+                ),
                 chat_default_model: format!("{}/{}", self.cloud_name, self.chat.default_model),
                 chat_thinking_model: if self.chat.default_thinking_model.is_empty() {
                     String::new()
@@ -295,41 +341,39 @@ impl SelfHostedCaps {
         };
 
         for (model_name, model_rec) in &self.completion.models {
-            let completion_model = model_rec.into_completion_model(
-                model_name,
-                &self,
-                caps_url,
-                cmdline_api_key,
-            )?;
+            let completion_model =
+                model_rec.into_completion_model(model_name, &self, caps_url, cmdline_api_key)?;
 
-            caps.completion_models.insert(completion_model.base.id.clone(), Arc::new(completion_model));
+            caps.completion_models
+                .insert(completion_model.base.id.clone(), Arc::new(completion_model));
         }
 
         for (model_name, model_rec) in &self.chat.models {
-            let chat_model = model_rec.into_chat_model(
-                model_name,
-                &self,
-                caps_url,
-                cmdline_api_key,
-            )?;
+            let chat_model =
+                model_rec.into_chat_model(model_name, &self, caps_url, cmdline_api_key)?;
 
-            caps.chat_models.insert(chat_model.base.id.clone(), Arc::new(chat_model));
+            caps.chat_models
+                .insert(chat_model.base.id.clone(), Arc::new(chat_model));
         }
 
-        if let Some((model_name, model_rec)) = self.embedding.models.get_key_value(&self.embedding.default_model) {
-            let embedding_model = model_rec.into_embedding_model(
-                model_name,
-                &self,
-                caps_url,
-                cmdline_api_key,
-            )?;
+        if let Some((model_name, model_rec)) = self
+            .embedding
+            .models
+            .get_key_value(&self.embedding.default_model)
+        {
+            let embedding_model =
+                model_rec.into_embedding_model(model_name, &self, caps_url, cmdline_api_key)?;
             caps.embedding_model = embedding_model;
         }
 
         Ok(caps)
     }
 
-    pub fn into_provider(self, caps_url: &String, cmdline_api_key: &str) -> Result<providers::CapsProvider, String> {
+    pub fn into_provider(
+        self,
+        caps_url: &String,
+        cmdline_api_key: &str,
+    ) -> Result<providers::CapsProvider, String> {
         let mut provider = providers::CapsProvider {
             name: self.cloud_name.clone(),
             enabled: true,
@@ -364,34 +408,28 @@ impl SelfHostedCaps {
         };
 
         for (model_name, model_rec) in &self.completion.models {
-            let completion_model = model_rec.into_completion_model(
-                model_name,
-                &self,
-                caps_url,
-                cmdline_api_key,
-            )?;
+            let completion_model =
+                model_rec.into_completion_model(model_name, &self, caps_url, cmdline_api_key)?;
 
-            provider.completion_models.insert(model_name.clone(), completion_model);
+            provider
+                .completion_models
+                .insert(model_name.clone(), completion_model);
         }
 
         for (model_name, model_rec) in &self.chat.models {
-            let chat_model = model_rec.into_chat_model(
-                model_name,
-                &self,
-                caps_url,
-                cmdline_api_key,
-            )?;
+            let chat_model =
+                model_rec.into_chat_model(model_name, &self, caps_url, cmdline_api_key)?;
 
             provider.chat_models.insert(model_name.clone(), chat_model);
         }
 
-        if let Some((model_name, model_rec)) = self.embedding.models.get_key_value(&self.embedding.default_model) {
-            let embedding_model = model_rec.into_embedding_model(
-                model_name,
-                &self,
-                caps_url,
-                cmdline_api_key,
-            )?;
+        if let Some((model_name, model_rec)) = self
+            .embedding
+            .models
+            .get_key_value(&self.embedding.default_model)
+        {
+            let embedding_model =
+                model_rec.into_embedding_model(model_name, &self, caps_url, cmdline_api_key)?;
             provider.embedding_model = embedding_model;
         }
 

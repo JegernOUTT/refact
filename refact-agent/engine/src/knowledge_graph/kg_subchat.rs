@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as AMutex;
+use tokio::sync::RwLock as ARwLock;
 
-use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::ChatMessage;
-use crate::subchat::subchat_single;
+use crate::global_context::GlobalContext;
+use crate::subchat::run_subchat_once;
 
 use super::kg_structs::KnowledgeDoc;
 
@@ -93,16 +93,21 @@ Return JSON:
 Only deprecate with confidence >= 0.75. JSON only:"#;
 
 pub async fn enrich_knowledge_metadata(
-    ccx: Arc<AMutex<AtCommandsContext>>,
-    model_id: &str,
+    gcx: Arc<ARwLock<GlobalContext>>,
     content: &str,
     entities: &[String],
     candidate_files: &[String],
     candidate_docs: &[(String, String)],
 ) -> Result<EnrichmentResult, String> {
     let entities_str = entities.join(", ");
-    let files_str = candidate_files.iter().take(20).cloned().collect::<Vec<_>>().join("\n");
-    let docs_str = candidate_docs.iter()
+    let files_str = candidate_files
+        .iter()
+        .take(20)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let docs_str = candidate_docs
+        .iter()
         .take(10)
         .map(|(id, title)| format!("- {}: {}", id, title))
         .collect::<Vec<_>>()
@@ -116,25 +121,10 @@ pub async fn enrich_knowledge_metadata(
 
     let messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
-    let results = subchat_single(
-        ccx,
-        model_id,
-        messages,
-        Some(vec![]),
-        Some("none".to_string()),
-        false,
-        Some(0.0),
-        Some(1024),
-        1,
-        None,
-        false,
-        None,
-        None,
-        None,
-    ).await?;
+    let result = run_subchat_once(gcx, "kg_enrich", messages).await?;
 
-    let response = results.get(0)
-        .and_then(|msgs| msgs.last())
+    let response = result.messages
+        .last()
         .map(|m| m.content.content_text_only())
         .unwrap_or_default();
 
@@ -146,8 +136,7 @@ pub async fn enrich_knowledge_metadata(
 }
 
 pub async fn check_deprecation(
-    ccx: Arc<AMutex<AtCommandsContext>>,
-    model_id: &str,
+    gcx: Arc<ARwLock<GlobalContext>>,
     new_doc_title: &str,
     new_doc_tags: &[String],
     new_doc_files: &[String],
@@ -155,17 +144,28 @@ pub async fn check_deprecation(
     candidates: &[&KnowledgeDoc],
 ) -> Result<DeprecationResult, String> {
     if candidates.is_empty() {
-        return Ok(DeprecationResult { deprecate: vec![], keep: vec![] });
+        return Ok(DeprecationResult {
+            deprecate: vec![],
+            keep: vec![],
+        });
     }
 
-    let candidates_str = candidates.iter()
+    let candidates_str = candidates
+        .iter()
         .map(|doc| {
-            let id = doc.frontmatter.id.clone().unwrap_or_else(|| doc.path.to_string_lossy().to_string());
+            let id = doc
+                .frontmatter
+                .id
+                .clone()
+                .unwrap_or_else(|| doc.path.to_string_lossy().to_string());
             let title = doc.frontmatter.title.clone().unwrap_or_default();
             let tags = doc.frontmatter.tags.join(", ");
             let files = doc.frontmatter.filenames.join(", ");
             let snippet: String = doc.content.chars().take(300).collect();
-            format!("ID: {}\nTitle: {}\nTags: {}\nFiles: {}\nSnippet: {}\n---", id, title, tags, files, snippet)
+            format!(
+                "ID: {}\nTitle: {}\nTags: {}\nFiles: {}\nSnippet: {}\n---",
+                id, title, tags, files, snippet
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -174,30 +174,18 @@ pub async fn check_deprecation(
         .replace("{new_title}", new_doc_title)
         .replace("{new_tags}", &new_doc_tags.join(", "))
         .replace("{new_files}", &new_doc_files.join(", "))
-        .replace("{new_snippet}", &new_doc_snippet.chars().take(500).collect::<String>())
+        .replace(
+            "{new_snippet}",
+            &new_doc_snippet.chars().take(500).collect::<String>(),
+        )
         .replace("{candidates}", &candidates_str);
 
     let messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
-    let results = subchat_single(
-        ccx,
-        model_id,
-        messages,
-        Some(vec![]),
-        Some("none".to_string()),
-        false,
-        Some(0.0),
-        Some(1024),
-        1,
-        None,
-        false,
-        None,
-        None,
-        None,
-    ).await?;
+    let result = run_subchat_once(gcx, "kg_deprecate", messages).await?;
 
-    let response = results.get(0)
-        .and_then(|msgs| msgs.last())
+    let response = result.messages
+        .last()
         .map(|m| m.content.content_text_only())
         .unwrap_or_default();
 

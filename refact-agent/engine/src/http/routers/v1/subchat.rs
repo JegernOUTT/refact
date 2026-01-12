@@ -1,21 +1,17 @@
 use std::sync::Arc;
-use tokio::sync::Mutex as AMutex;
 use axum::Extension;
 use axum::http::{Response, StatusCode};
 use hyper::Body;
 use serde::Deserialize;
 use tokio::sync::RwLock as ARwLock;
-use crate::caps::resolve_chat_model;
-use crate::subchat::{subchat, subchat_single};
-use crate::at_commands::at_commands::AtCommandsContext;
+use crate::subchat::{run_subchat, run_subchat_once, resolve_subchat_config, resolve_subchat_params, resolve_subchat_model, WrapUpConfig};
 use crate::custom_error::ScratchError;
-use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
-use crate::http::routers::v1::chat::deserialize_messages_from_post;
+use crate::global_context::GlobalContext;
+use crate::call_validation::deserialize_messages_from_post;
 
 
 #[derive(Deserialize)]
 struct SubChatPost {
-    model_name: String,
     messages: Vec<serde_json::Value>,
     wrap_up_depth: usize,
     wrap_up_tokens_cnt: usize,
@@ -30,65 +26,49 @@ pub async fn handle_v1_subchat(
     let post = serde_json::from_slice::<SubChatPost>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e)))?;
     let messages = deserialize_messages_from_post(&post.messages)?;
-    let caps = try_load_caps_quickly_if_not_present(global_context.clone(), 0).await?;
 
-    let top_n = 7;
-    let fake_n_ctx = 4096;
-    let ccx: Arc<AMutex<AtCommandsContext>> = Arc::new(AMutex::new(AtCommandsContext::new(
+    let wrap_up = WrapUpConfig {
+        depth: post.wrap_up_depth,
+        tokens_cnt: post.wrap_up_tokens_cnt,
+        prompt: post.wrap_up_prompt.clone(),
+    };
+
+    let config = resolve_subchat_config(
         global_context.clone(),
-        fake_n_ctx,
-        top_n,
+        "http_subchat",
         false,
-        messages.clone(),
-        "".to_string(),
+        None,
+        None,
+        None,
+        None,
+        Some(post.tools_turn_on.clone()),
+        post.wrap_up_depth.max(1),
         false,
-        post.model_name.clone(),
-    ).await));
+        Some(wrap_up),
+    ).await.map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let model = resolve_chat_model(caps, &post.model_name)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let new_messages = subchat(
-        ccx.clone(),
-        &model.base.id,
-        messages,
-        post.tools_turn_on,
-        post.wrap_up_depth,
-        post.wrap_up_tokens_cnt,
-        post.wrap_up_prompt.as_str(),
-        1,
-        None,
-        None,
-        None,
-        None,
-        Some(false),
-    ).await.map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)))?;
+    let model_id = config.model.clone();
 
-    let new_messages = new_messages.into_iter()
-        .map(|msgs|msgs.iter().map(|msg|msg.into_value(&None, &model.base.id)).collect::<Vec<_>>())
-       .collect::<Vec<Vec<_>>>();
-    let resp_serialised = serde_json::to_string_pretty(&new_messages).unwrap();
-    Ok(
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(Body::from(resp_serialised))
-            .unwrap()
-    )
+    let result = run_subchat(global_context.clone(), messages, config)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)))?;
+
+    let new_messages = vec![result.messages.iter()
+        .map(|msg| msg.into_value(&None, &model_id))
+        .collect::<Vec<_>>()];
+    let resp_serialised = serde_json::to_string_pretty(&new_messages)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e)))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(resp_serialised))
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Response build error: {}", e)))
 }
 
 #[derive(Deserialize)]
 struct SubChatSinglePost {
-    model_name: String,
     messages: Vec<serde_json::Value>,
-    tools_turn_on: Vec<String>,
-    tool_choice: Option<String>,
-    only_deterministic_messages: bool,
-    temperature: Option<f32>,
-    #[serde(default = "default_n")]
-    n: usize,
 }
-
-fn default_n() -> usize { 1 }
 
 pub async fn handle_v1_subchat_single(
     Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
@@ -97,49 +77,26 @@ pub async fn handle_v1_subchat_single(
     let post = serde_json::from_slice::<SubChatSinglePost>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e)))?;
     let messages = deserialize_messages_from_post(&post.messages)?;
-    let caps = try_load_caps_quickly_if_not_present(global_context.clone(), 0).await?;
 
-    let top_n = 7;
-    let fake_n_ctx = 4096;
-    let ccx: Arc<AMutex<AtCommandsContext>> = Arc::new(AMutex::new(AtCommandsContext::new(
-        global_context.clone(),
-        fake_n_ctx,
-        top_n,
-        false,
-        messages.clone(),
-        "".to_string(),
-        false,
-        post.model_name.clone(),
-    ).await));
-
-    let model = resolve_chat_model(caps, &post.model_name)
+    let params = resolve_subchat_params(global_context.clone(), "http_subchat_single")
+        .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let new_messages = subchat_single(
-        ccx.clone(),
-        &model.base.id,
-        messages,
-        Some(post.tools_turn_on),
-        post.tool_choice,
-        post.only_deterministic_messages,
-        post.temperature,
-        None,
-        post.n,
-        None,
-        false,
-        None,
-        None,
-        None,
-    ).await.map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)))?;
+    let model_id = resolve_subchat_model(global_context.clone(), &params)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let new_messages = new_messages.into_iter()
-        .map(|msgs|msgs.iter().map(|msg|msg.into_value(&None, &model.base.id)).collect::<Vec<_>>())
-        .collect::<Vec<Vec<_>>>();
-    let resp_serialised = serde_json::to_string_pretty(&new_messages).unwrap();
-    Ok(
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(Body::from(resp_serialised))
-            .unwrap()
-    )
+    let result = run_subchat_once(global_context.clone(), "http_subchat_single", messages)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)))?;
+
+    let new_messages = vec![result.messages.iter()
+        .map(|msg| msg.into_value(&None, &model_id))
+        .collect::<Vec<_>>()];
+    let resp_serialised = serde_json::to_string_pretty(&new_messages)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e)))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(resp_serialised))
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Response build error: {}", e)))
 }

@@ -18,7 +18,12 @@ pub fn get_week_n(date: &DateTime<Utc>, from_year: i32) -> i32 {
     let week_num = date.iso_week().week() as i32;
     let mut total_weeks = 0;
     for year in from_year..date.year() {
-        total_weeks += if chrono::naive::NaiveDate::from_ymd_opt(year, 12, 28).unwrap().iso_week().year() == year {
+        total_weeks += if chrono::naive::NaiveDate::from_ymd_opt(year, 12, 28)
+            .unwrap()
+            .iso_week()
+            .year()
+            == year
+        {
             53
         } else {
             52

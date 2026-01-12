@@ -2,6 +2,13 @@
   overflow-wrap: anywhere;
 }
 
+.compactTrigger {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  padding-block: 0;
+}
+
 .content {
   /* JB doesn't support dvw yet */
   max-width: 50vw;

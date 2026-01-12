@@ -7,8 +7,7 @@ use ropey::Rope;
 // use tracing::info;
 
 const CACHE_ENTRIES: usize = 500;
-const CACHE_KEY_CHARS: usize = 5000;  // max memory CACHE_KEY_CHARS * CACHE_ENTRIES = 2500000 = 2.5M
-
+const CACHE_KEY_CHARS: usize = 5000; // max memory CACHE_KEY_CHARS * CACHE_ENTRIES = 2500000 = 2.5M
 
 // aggregate this struct in scratchpad to save cache
 #[derive(Debug, Clone)]
@@ -22,10 +21,7 @@ pub struct CompletionSaveToCache {
 }
 
 impl CompletionSaveToCache {
-    pub fn new(
-        cache_arc: Arc<StdRwLock<CompletionCache>>,
-        post: &CodeCompletionPost
-    ) -> Self {
+    pub fn new(cache_arc: Arc<StdRwLock<CompletionCache>>, post: &CodeCompletionPost) -> Self {
         CompletionSaveToCache {
             cache_arc: cache_arc.clone(),
             cache_key: cache_key_from_post(post),
@@ -37,7 +33,6 @@ impl CompletionSaveToCache {
     }
 }
 
-
 #[derive(Debug)]
 pub struct CompletionCache {
     pub map: HashMap<(String, String), serde_json::Value>,
@@ -45,9 +40,11 @@ pub struct CompletionCache {
 }
 
 impl CompletionCache {
-    pub fn new(
-    ) -> Self {
-        Self { map: HashMap::new(), in_added_order: Vec::new() }
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            in_added_order: Vec::new(),
+        }
     }
 }
 
@@ -76,26 +73,42 @@ pub fn cache_put(
     let mut new_key_copy = new_key.clone();
     let k0_chars = new_key_copy.0.chars();
     if k0_chars.clone().count() > CACHE_KEY_CHARS {
-        new_key_copy.0 = k0_chars.clone().skip(k0_chars.count() - CACHE_KEY_CHARS).collect();
+        new_key_copy.0 = k0_chars
+            .clone()
+            .skip(k0_chars.count() - CACHE_KEY_CHARS)
+            .collect();
     }
-    cache_locked.map.entry(new_key_copy.clone()).or_insert(value);
+    cache_locked
+        .map
+        .entry(new_key_copy.clone())
+        .or_insert(value);
     cache_locked.in_added_order.push(new_key_copy.clone());
 }
 
-pub fn cache_key_from_post(
-    post: &CodeCompletionPost,
-) -> (String, String) {
+pub fn cache_key_from_post(post: &CodeCompletionPost) -> (String, String) {
     // Change this function only together with the function below, it fills the cache ahead of cursor
     // directly manupulating the cache key.
     let text_maybe = post.inputs.sources.get(&post.inputs.cursor.file);
     if let None = text_maybe {
         // Don't handle it there, validation should have caught it
-        return (format!("dummy1-{}:{}", post.inputs.cursor.line, post.inputs.cursor.character), "".to_string());
+        return (
+            format!(
+                "dummy1-{}:{}",
+                post.inputs.cursor.line, post.inputs.cursor.character
+            ),
+            "".to_string(),
+        );
     }
     let rope = Rope::from_str(text_maybe.unwrap());
     let cursor_line_maybe = rope.get_line(post.inputs.cursor.line as usize);
     if let None = cursor_line_maybe {
-        return (format!("dummy2-{}:{}", post.inputs.cursor.line, post.inputs.cursor.character), "".to_string());
+        return (
+            format!(
+                "dummy2-{}:{}",
+                post.inputs.cursor.line, post.inputs.cursor.character
+            ),
+            "".to_string(),
+        );
     }
     let mut cursor_line = cursor_line_maybe.unwrap();
     let cpos = post.inputs.cursor.character as usize;
@@ -131,16 +144,19 @@ pub fn cache_key_from_post(
     return (key, cache_part2_from_post(post));
 }
 
-
 pub fn cache_part2_from_post(post: &CodeCompletionPost) -> String {
-    if post.inputs.multiline { "multiline".to_string() } else { "singleline".to_string() }
+    if post.inputs.multiline {
+        "multiline".to_string()
+    } else {
+        "singleline".to_string()
+    }
 }
-
 
 impl Drop for CompletionSaveToCache {
     fn drop(&mut self) {
         // flush to cache on destruction
-        if self.completion0_finish_reason.is_empty() { // error happened, no nothing happened (prompt only request)
+        if self.completion0_finish_reason.is_empty() {
+            // error happened, no nothing happened (prompt only request)
             return;
         }
         let mut believe_chars = self.completion0_text.len();
@@ -153,23 +169,33 @@ impl Drop for CompletionSaveToCache {
             believe_chars += 1;
         }
         for char_num in 0..believe_chars {
-            let code_completion_ahead: String = self.completion0_text.chars().skip(char_num).collect();
+            let code_completion_ahead: String =
+                self.completion0_text.chars().skip(char_num).collect();
             let cache_key_ahead: (String, String) = (
-                self.cache_key.0.clone() + &self.completion0_text.chars().take(char_num).collect::<String>(),
-                self.cache_key.1.clone()
+                self.cache_key.0.clone()
+                    + &self
+                        .completion0_text
+                        .chars()
+                        .take(char_num)
+                        .collect::<String>(),
+                self.cache_key.1.clone(),
             );
-            cache_put(self.cache_arc.clone(), cache_key_ahead, serde_json::json!(
-                {
-                    "choices": [{
-                        "index": 0,
-                        "code_completion": code_completion_ahead,
-                        "finish_reason": self.completion0_finish_reason,
-                    }],
-                    "model": self.model,
-                    "cached": true,
-                    "snippet_telemetry_id": self.completion0_snippet_telemetry_id,
-                }
-            ));
+            cache_put(
+                self.cache_arc.clone(),
+                cache_key_ahead,
+                serde_json::json!(
+                    {
+                        "choices": [{
+                            "index": 0,
+                            "code_completion": code_completion_ahead,
+                            "finish_reason": self.completion0_finish_reason,
+                        }],
+                        "model": self.model,
+                        "cached": true,
+                        "snippet_telemetry_id": self.completion0_snippet_telemetry_id,
+                    }
+                ),
+            );
         }
     }
 }

@@ -1,11 +1,5 @@
 import React, { useCallback, useMemo } from "react";
-import {
-  PATCH_LIKE_FUNCTIONS,
-  useAppDispatch,
-  useAppSelector,
-  useSendChatRequest,
-  // useEventsBusForIDE
-} from "../../hooks";
+import { useAppDispatch, useAppSelector, useChatActions } from "../../hooks";
 import { Card, Button, Text, Flex } from "@radix-ui/themes";
 import { Markdown } from "../Markdown";
 import { Link } from "../Link";
@@ -20,6 +14,7 @@ import {
   selectMessages,
   setAutomaticPatch,
 } from "../../features/Chat";
+import { PATCH_LIKE_FUNCTIONS } from "./constants";
 
 type ToolConfirmationProps = {
   pauseReasons: ToolConfirmationPauseReason[];
@@ -87,16 +82,32 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   );
   const denialCommands = commands.filter((_, i) => types[i] === "denial");
 
-  const { rejectToolUsage, confirmToolUsage } = useSendChatRequest();
+  const { respondToTools } = useChatActions();
 
-  const handleAllowForThisChat = () => {
+  const confirmToolUsage = useCallback(() => {
+    const decisions = toolCallIds.map((id) => ({
+      tool_call_id: id,
+      accepted: true,
+    }));
+    void respondToTools(decisions);
+  }, [respondToTools, toolCallIds]);
+
+  const rejectToolUsage = useCallback(() => {
+    const decisions = toolCallIds.map((id) => ({
+      tool_call_id: id,
+      accepted: false,
+    }));
+    void respondToTools(decisions);
+  }, [respondToTools, toolCallIds]);
+
+  const handleAllowForThisChat = useCallback(() => {
     dispatch(setAutomaticPatch({ chatId, value: true }));
     confirmToolUsage();
-  };
+  }, [dispatch, chatId, confirmToolUsage]);
 
   const handleReject = useCallback(() => {
-    rejectToolUsage(toolCallIds);
-  }, [rejectToolUsage, toolCallIds]);
+    rejectToolUsage();
+  }, [rejectToolUsage]);
 
   const message = getConfirmationMessage(
     commands,
@@ -106,8 +117,7 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
     denialCommands,
   );
 
-  if (isPatchConfirmation) {
-    // TODO: think of multiple toolcalls support
+  if (isPatchConfirmation && allConfirmation) {
     return (
       <PatchConfirmation
         handleAllowForThisChat={handleAllowForThisChat}
@@ -201,25 +211,24 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
 }) => {
   const messages = useAppSelector(selectMessages);
   const assistantMessages = messages.filter(isAssistantMessage);
-  const lastAssistantMessage = useMemo(
-    () => assistantMessages[assistantMessages.length - 1],
-    [assistantMessages],
-  );
-  const toolCalls = lastAssistantMessage.tool_calls;
+  const lastAssistantMessage = assistantMessages.at(-1);
+  const toolCalls = lastAssistantMessage?.tool_calls;
 
-  if (!toolCalls) return;
+  const messageForPatch = useMemo(() => {
+    if (!toolCalls || toolCalls.length === 0) return "Apply changes";
+    try {
+      const parsed = JSON.parse(toolCalls[0].function.arguments) as {
+        path?: string;
+      };
+      if (!parsed.path) return "Apply changes";
+      const parts = parsed.path.split(/[/\\]/);
+      return "Patch `" + parts[parts.length - 1] + "`";
+    } catch {
+      return "Apply changes";
+    }
+  }, [toolCalls]);
 
-  const parsedArgsFromToolCall = JSON.parse(
-    toolCalls[0].function.arguments,
-  ) as {
-    path: string;
-    tickets: string;
-  };
-  const extractedFileNameFromPath =
-    parsedArgsFromToolCall.path.split(/[/\\]/)[
-      parsedArgsFromToolCall.path.split(/[/\\]/).length - 1
-    ];
-  const messageForPatch = "Patch " + "`" + extractedFileNameFromPath + "`";
+  if (!toolCalls || toolCalls.length === 0) return null;
 
   return (
     <Card className={styles.ToolConfirmationCard}>

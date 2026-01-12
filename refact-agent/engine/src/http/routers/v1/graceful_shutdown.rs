@@ -11,7 +11,12 @@ pub async fn handle_v1_graceful_shutdown(
     _: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx_locked = global_context.read().await;
-    gcx_locked.ask_shutdown_sender.lock().unwrap().send(format!("going-down")).unwrap();
+    gcx_locked
+        .ask_shutdown_sender
+        .lock()
+        .unwrap()
+        .send(format!("going-down"))
+        .unwrap();
     Ok(Response::builder()
         .header("Content-Type", "application/json")
         .body(Body::from(json!({"success": true}).to_string()))

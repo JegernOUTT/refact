@@ -6,7 +6,9 @@ pub fn fuzzy_search<I>(
     top_n: usize,
     separator_chars: &[char],
 ) -> Vec<String>
-where I: IntoIterator<Item = String> {
+where
+    I: IntoIterator<Item = String>,
+{
     const FILENAME_WEIGHT: i32 = 3;
     const COMPLETELTY_DROP_DISTANCE: f64 = 0.40;
     const EXCESS_WEIGHT: f64 = 3.0;
@@ -16,7 +18,13 @@ where I: IntoIterator<Item = String> {
     // Count bigrams of correction candidate
     let mut correction_candidate_length = 0;
     let mut weight = FILENAME_WEIGHT;
-    for window in correction_candidate.to_lowercase().chars().collect::<Vec<_>>().windows(2).rev() {
+    for window in correction_candidate
+        .to_lowercase()
+        .chars()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .rev()
+    {
         if separator_chars.contains(&window[0]) {
             weight = 1;
         }
@@ -36,7 +44,13 @@ where I: IntoIterator<Item = String> {
 
         // Discount candidate's bigrams from correction candidate's ones
         let mut weight = FILENAME_WEIGHT;
-        for window in candidate.to_lowercase().chars().collect::<Vec<_>>().windows(2).rev() {
+        for window in candidate
+            .to_lowercase()
+            .chars()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .rev()
+        {
             if separator_chars.contains(&window[0]) {
                 weight = 1;
             }
@@ -56,13 +70,12 @@ where I: IntoIterator<Item = String> {
             }
         }
 
-        let distance = (missing_count as f64 + excess_count as f64 * EXCESS_WEIGHT) /
-            (correction_candidate_length as f64 + (candidate_len as f64) * EXCESS_WEIGHT);
+        let distance = (missing_count as f64 + excess_count as f64 * EXCESS_WEIGHT)
+            / (correction_candidate_length as f64 + (candidate_len as f64) * EXCESS_WEIGHT);
         if distance < COMPLETELTY_DROP_DISTANCE {
             top_n_candidates.push((candidate, distance));
             top_n_candidates
-                .sort_by(|a, b| a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal));
+                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             if top_n_candidates.len() > top_n {
                 top_n_candidates.pop();
             }
@@ -87,18 +100,20 @@ mod tests {
             proj_folders.clone(),
             &mut indexing_everywhere,
             false,
-            false
-        ).await;
+            false,
+        )
+        .await;
 
         workspace_files
             .iter()
             .filter_map(|path| {
-                let relative_path = path.strip_prefix(proj_folder)
+                let relative_path = path
+                    .strip_prefix(proj_folder)
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
 
-                    Some(relative_path)
+                Some(relative_path)
             })
             .collect()
     }
@@ -115,17 +130,26 @@ mod tests {
         let result = fuzzy_search(&correction_candidate, candidates, top_n, &['/', '\\']);
 
         // Assert
-        let expected_result = vec![
-            PathBuf::from("tests").join("emergency_frog_situation").join("frog.py").to_string_lossy().to_string(),
-        ];
+        let expected_result = vec![PathBuf::from("tests")
+            .join("emergency_frog_situation")
+            .join("frog.py")
+            .to_string_lossy()
+            .to_string()];
 
-        assert_eq!(result, expected_result, "It should find the proper frog.py, found {:?} instead", result);
+        assert_eq!(
+            result, expected_result,
+            "It should find the proper frog.py, found {:?} instead",
+            result
+        );
     }
 
     #[tokio::test]
     async fn test_fuzzy_search_path_helps_finding_file() {
         // Arrange
-        let correction_candidate = PathBuf::from("emergency_frog_situation").join("wo").to_string_lossy().to_string();
+        let correction_candidate = PathBuf::from("emergency_frog_situation")
+            .join("wo")
+            .to_string_lossy()
+            .to_string();
         let top_n = 1;
 
         let candidates = get_candidates_from_workspace_files().await;
@@ -134,11 +158,17 @@ mod tests {
         let result = fuzzy_search(&correction_candidate, candidates, top_n, &['/', '\\']);
 
         // Assert
-        let expected_result = vec![
-            PathBuf::from("tests").join("emergency_frog_situation").join("work_day.py").to_string_lossy().to_string(),
-        ];
+        let expected_result = vec![PathBuf::from("tests")
+            .join("emergency_frog_situation")
+            .join("work_day.py")
+            .to_string_lossy()
+            .to_string()];
 
-        assert_eq!(result, expected_result, "It should find the proper file (work_day.py), found {:?} instead", result);
+        assert_eq!(
+            result, expected_result,
+            "It should find the proper file (work_day.py), found {:?} instead",
+            result
+        );
     }
 
     #[tokio::test]
@@ -148,9 +178,18 @@ mod tests {
         let top_n = 2;
 
         let candidates = vec![
-            PathBuf::from("my_library").join("implementation").join("my_file.ext").to_string_lossy().to_string(),
-            PathBuf::from("my_library").join("my_file.ext").to_string_lossy().to_string(),
-            PathBuf::from("another_file.ext").to_string_lossy().to_string(),
+            PathBuf::from("my_library")
+                .join("implementation")
+                .join("my_file.ext")
+                .to_string_lossy()
+                .to_string(),
+            PathBuf::from("my_library")
+                .join("my_file.ext")
+                .to_string_lossy()
+                .to_string(),
+            PathBuf::from("another_file.ext")
+                .to_string_lossy()
+                .to_string(),
         ];
 
         // Act
@@ -158,8 +197,15 @@ mod tests {
 
         // Assert
         let expected_result = vec![
-            PathBuf::from("my_library").join("my_file.ext").to_string_lossy().to_string(),
-            PathBuf::from("my_library").join("implementation").join("my_file.ext").to_string_lossy().to_string(),
+            PathBuf::from("my_library")
+                .join("my_file.ext")
+                .to_string_lossy()
+                .to_string(),
+            PathBuf::from("my_library")
+                .join("implementation")
+                .join("my_file.ext")
+                .to_string_lossy()
+                .to_string(),
         ];
 
         let mut sorted_result = result.clone();
@@ -168,7 +214,11 @@ mod tests {
         sorted_result.sort();
         sorted_expected.sort();
 
-        assert_eq!(sorted_result, sorted_expected, "The result should contain the expected paths in any order, found {:?} instead", result);
+        assert_eq!(
+            sorted_result, sorted_expected,
+            "The result should contain the expected paths in any order, found {:?} instead",
+            result
+        );
     }
 
     // #[cfg(not(debug_assertions))]
@@ -192,7 +242,10 @@ mod tests {
             paths.push(path);
         }
         let start_time = std::time::Instant::now();
-        let paths_str = paths.iter().map(|x| x.to_string_lossy().to_string()).collect::<Vec<_>>();
+        let paths_str = paths
+            .iter()
+            .map(|x| x.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
 
         let correction_candidate = PathBuf::from("file100000")
             .join("dir1000")
@@ -206,7 +259,11 @@ mod tests {
         // Assert
         let time_spent = start_time.elapsed();
         println!("fuzzy_search took {} ms", time_spent.as_millis());
-        assert!(time_spent.as_millis() < 750, "fuzzy_search took {} ms", time_spent.as_millis());
+        assert!(
+            time_spent.as_millis() < 750,
+            "fuzzy_search took {} ms",
+            time_spent.as_millis()
+        );
 
         assert_eq!(results.len(), 10, "The result should contain 10 paths");
         println!("{:?}", results);

@@ -87,7 +87,6 @@ impl TypeDef {
     }
 }
 
-
 #[derive(PartialEq, Debug, Serialize, Deserialize, Clone)]
 pub struct AstSymbolFields {
     pub guid: Uuid,
@@ -183,7 +182,8 @@ impl SymbolInformation {
     }
 
     pub fn get_declaration_content(&self, content: &String) -> io::Result<String> {
-        let content = content.get(self.declaration_range.start_byte..self.declaration_range.end_byte);
+        let content =
+            content.get(self.declaration_range.start_byte..self.declaration_range.end_byte);
         if content.is_none() {
             return Err(io::Error::other("Incorrect declaration range"));
         }
@@ -238,7 +238,6 @@ impl Default for AstSymbolFields {
     }
 }
 
-
 #[async_trait]
 #[typetag::serde]
 #[dyn_partial_eq]
@@ -280,7 +279,9 @@ pub trait AstSymbolInstance: Debug + Send + Sync + Any {
         &self.fields().language
     }
 
-    fn file_path(&self) -> &PathBuf { &self.fields().file_path }
+    fn file_path(&self) -> &PathBuf {
+        &self.fields().file_path
+    }
 
     fn is_type(&self) -> bool;
 
@@ -360,9 +361,7 @@ pub trait AstSymbolInstance: Debug + Send + Sync + Any {
 
     fn remove_linked_guids(&mut self, guids: &HashSet<Uuid>) {
         let mut new_guids = vec![];
-        for t in self
-            .types()
-            .iter() {
+        for t in self.types().iter() {
             if guids.contains(&t.guid.unwrap_or_default()) {
                 new_guids.push(None);
             } else {
@@ -389,7 +388,6 @@ pub trait AstSymbolInstance: Debug + Send + Sync + Any {
 // pub type AstSymbolInstanceRc = Rc<RefCell<Box<dyn AstSymbolInstance>>>;
 pub type AstSymbolInstanceArc = Arc<RwLock<Box<dyn AstSymbolInstance>>>;
 
-
 /*
 StructDeclaration
 */
@@ -410,7 +408,6 @@ impl Default for StructDeclaration {
     }
 }
 
-
 #[async_trait]
 #[typetag::serde]
 impl AstSymbolInstance for StructDeclaration {
@@ -422,7 +419,9 @@ impl AstSymbolInstance for StructDeclaration {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn types(&self) -> Vec<TypeDef> {
         let mut types: Vec<TypeDef> = vec![];
@@ -480,15 +479,11 @@ impl AstSymbolInstance for StructDeclaration {
     fn temporary_types_cleanup(&mut self) {
         for t in self.inherited_types.iter_mut() {
             t.inference_info = None;
-            t.mutate_nested_types(|t| {
-                t.inference_info = None
-            })
+            t.mutate_nested_types(|t| t.inference_info = None)
         }
         for t in self.template_types.iter_mut() {
             t.inference_info = None;
-            t.mutate_nested_types(|t| {
-                t.inference_info = None
-            })
+            t.mutate_nested_types(|t| t.inference_info = None)
         }
     }
 
@@ -496,13 +491,14 @@ impl AstSymbolInstance for StructDeclaration {
         true
     }
 
-    fn is_declaration(&self) -> bool { true }
+    fn is_declaration(&self) -> bool {
+        true
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::StructDeclaration
     }
 }
-
 
 /*
 TypeAlias
@@ -533,7 +529,9 @@ impl AstSymbolInstance for TypeAlias {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn types(&self) -> Vec<TypeDef> {
         let mut types: Vec<TypeDef> = vec![];
@@ -571,9 +569,7 @@ impl AstSymbolInstance for TypeAlias {
     fn temporary_types_cleanup(&mut self) {
         for t in self.types.iter_mut() {
             t.inference_info = None;
-            t.mutate_nested_types(|t| {
-                t.inference_info = None
-            })
+            t.mutate_nested_types(|t| t.inference_info = None)
         }
     }
 
@@ -581,13 +577,14 @@ impl AstSymbolInstance for TypeAlias {
         true
     }
 
-    fn is_declaration(&self) -> bool { true }
+    fn is_declaration(&self) -> bool {
+        true
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::TypeAlias
     }
 }
-
 
 /*
 ClassFieldDeclaration
@@ -618,7 +615,9 @@ impl AstSymbolInstance for ClassFieldDeclaration {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn types(&self) -> Vec<TypeDef> {
         let mut types: Vec<TypeDef> = vec![];
@@ -649,16 +648,16 @@ impl AstSymbolInstance for ClassFieldDeclaration {
 
     fn temporary_types_cleanup(&mut self) {
         self.type_.inference_info = None;
-        self.type_.mutate_nested_types(|t| {
-            t.inference_info = None
-        })
+        self.type_.mutate_nested_types(|t| t.inference_info = None)
     }
 
     fn is_type(&self) -> bool {
         false
     }
 
-    fn is_declaration(&self) -> bool { true }
+    fn is_declaration(&self) -> bool {
+        true
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::ClassFieldDeclaration
@@ -708,7 +707,9 @@ impl AstSymbolInstance for ImportDeclaration {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn types(&self) -> Vec<TypeDef> {
         vec![]
@@ -724,13 +725,14 @@ impl AstSymbolInstance for ImportDeclaration {
         false
     }
 
-    fn is_declaration(&self) -> bool { false }
+    fn is_declaration(&self) -> bool {
+        false
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::ImportDeclaration
     }
 }
-
 
 /*
 VariableDefinition
@@ -761,7 +763,9 @@ impl AstSymbolInstance for VariableDefinition {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn types(&self) -> Vec<TypeDef> {
         let mut types: Vec<TypeDef> = vec![];
@@ -792,22 +796,21 @@ impl AstSymbolInstance for VariableDefinition {
 
     fn temporary_types_cleanup(&mut self) {
         self.type_.inference_info = None;
-        self.type_.mutate_nested_types(|t| {
-            t.inference_info = None
-        })
+        self.type_.mutate_nested_types(|t| t.inference_info = None)
     }
 
     fn is_type(&self) -> bool {
         false
     }
 
-    fn is_declaration(&self) -> bool { true }
+    fn is_declaration(&self) -> bool {
+        true
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::VariableDefinition
     }
 }
-
 
 /*
 FunctionDeclaration
@@ -863,7 +866,9 @@ impl AstSymbolInstance for FunctionDeclaration {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn is_type(&self) -> bool {
         false
@@ -931,27 +936,24 @@ impl AstSymbolInstance for FunctionDeclaration {
     fn temporary_types_cleanup(&mut self) {
         if let Some(t) = &mut self.return_type {
             t.inference_info = None;
-            t.mutate_nested_types(|t| {
-                t.inference_info = None
-            });
+            t.mutate_nested_types(|t| t.inference_info = None);
         }
         for t in self.args.iter_mut() {
             if let Some(t) = &mut t.type_ {
                 t.inference_info = None;
-                t.mutate_nested_types(|t| {
-                    t.inference_info = None
-                });
+                t.mutate_nested_types(|t| t.inference_info = None);
             }
         }
     }
 
-    fn is_declaration(&self) -> bool { true }
+    fn is_declaration(&self) -> bool {
+        true
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::FunctionDeclaration
     }
 }
-
 
 /*
 CommentDefinition
@@ -980,7 +982,9 @@ impl AstSymbolInstance for CommentDefinition {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn is_type(&self) -> bool {
         false
@@ -996,13 +1000,14 @@ impl AstSymbolInstance for CommentDefinition {
 
     fn temporary_types_cleanup(&mut self) {}
 
-    fn is_declaration(&self) -> bool { true }
+    fn is_declaration(&self) -> bool {
+        true
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::CommentDefinition
     }
 }
-
 
 /*
 FunctionCall
@@ -1033,7 +1038,9 @@ impl AstSymbolInstance for FunctionCall {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn is_type(&self) -> bool {
         false
@@ -1095,25 +1102,22 @@ impl AstSymbolInstance for FunctionCall {
     fn temporary_types_cleanup(&mut self) {
         if let Some(t) = &mut self.ast_fields.linked_decl_type {
             t.inference_info = None;
-            t.mutate_nested_types(|t| {
-                t.inference_info = None
-            });
+            t.mutate_nested_types(|t| t.inference_info = None);
         }
         for t in self.template_types.iter_mut() {
             t.inference_info = None;
-            t.mutate_nested_types(|t| {
-                t.inference_info = None
-            });
+            t.mutate_nested_types(|t| t.inference_info = None);
         }
     }
 
-    fn is_declaration(&self) -> bool { false }
+    fn is_declaration(&self) -> bool {
+        false
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::FunctionCall
     }
 }
-
 
 /*
 VariableUsage
@@ -1142,7 +1146,9 @@ impl AstSymbolInstance for VariableUsage {
         &mut self.ast_fields
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn is_type(&self) -> bool {
         false
@@ -1184,13 +1190,13 @@ impl AstSymbolInstance for VariableUsage {
     fn temporary_types_cleanup(&mut self) {
         if let Some(t) = &mut self.ast_fields.linked_decl_type {
             t.inference_info = None;
-            t.mutate_nested_types(|t| {
-                t.inference_info = None
-            });
+            t.mutate_nested_types(|t| t.inference_info = None);
         }
     }
 
-    fn is_declaration(&self) -> bool { false }
+    fn is_declaration(&self) -> bool {
+        false
+    }
 
     fn symbol_type(&self) -> SymbolType {
         SymbolType::VariableUsage

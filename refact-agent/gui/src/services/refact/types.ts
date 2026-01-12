@@ -25,14 +25,15 @@ export type ChatContextFile = {
 
 export type ToolCall = {
   function: {
-    arguments: string; // stringed json
-    name?: string; // will be present when it's new
+    arguments: string;
+    name?: string;
   };
   index: number;
   type?: "function";
   id?: string;
   attached_files?: string[];
   subchat?: string;
+  subchat_log?: string[];
 };
 
 export type ToolUsage = {
@@ -68,7 +69,7 @@ export function isToolContent(json: unknown): json is ToolContent {
 }
 export interface BaseToolResult {
   tool_call_id: string;
-  finish_reason?: string; // "call_failed" | "call_worked";
+  finish_reason?: string;
   content: ToolContent;
   compression_strength?: CompressionStrength;
   tool_failed?: boolean;
@@ -84,8 +85,8 @@ export interface MultiModalToolResult extends BaseToolResult {
 export type ToolResult = SingleModelToolResult | MultiModalToolResult;
 
 export type MultiModalToolContent = {
-  m_type: string; // "image/*" | "text" ... maybe narrow this?
-  m_content: string; // base64 if image,
+  m_type: string;
+  m_content: string;
 };
 
 export function isMultiModalToolContent(
@@ -117,10 +118,11 @@ export function isSingleModelToolResult(toolResult: ToolResult) {
 
 interface BaseMessage {
   role: ChatRole;
+  message_id?: string;
   content:
     | string
     | ChatContextFile[]
-    | ToolResult
+    | MultiModalToolContent[]
     | DiffChunk[]
     | null
     | (UserMessageContentWithImage | ProcessedUserMessageContentWithImages)[];
@@ -129,6 +131,7 @@ interface BaseMessage {
 export interface ChatContextFileMessage extends BaseMessage {
   role: "context_file";
   content: ChatContextFile[];
+  tool_call_id?: string;
 }
 
 export type UserImage = {
@@ -166,12 +169,12 @@ export type WebSearchCitation = {
 export interface AssistantMessage extends BaseMessage, CostInfo {
   role: "assistant";
   content: string | null;
-  reasoning_content?: string | null; // NOTE: only for internal UI usage, don't send it back
+  reasoning_content?: string | null;
   tool_calls?: ToolCall[] | null;
-  server_executed_tools?: ToolCall[] | null; // Tools executed by the provider (srvtoolu_*), for display only
+  server_executed_tools?: ToolCall[] | null;
   thinking_blocks?: ThinkingBlock[] | null;
-  citations?: WebSearchCitation[] | null; // Citations from server-executed tools like web_search
-  finish_reason?: "stop" | "length" | "abort" | "tool_calls" | null;
+  citations?: WebSearchCitation[] | null;
+  finish_reason?: "stop" | "length" | "abort" | "tool_calls" | "error" | null;
   usage?: Usage | null;
 }
 
@@ -186,10 +189,12 @@ export interface SystemMessage extends BaseMessage {
 
 export interface ToolMessage extends BaseMessage {
   role: "tool";
-  content: ToolResult;
+  content: string | MultiModalToolContent[];
+  tool_call_id: string;
+  tool_failed?: boolean;
+  compression_strength?: CompressionStrength;
 }
 
-// TODO: There maybe sub-types for this
 export type DiffChunk = {
   file_name: string;
   file_action: string;
@@ -199,8 +204,6 @@ export type DiffChunk = {
   lines_add: string;
   file_name_rename?: string | null;
   application_details?: string;
-  // apply?: boolean;
-  // chunk_id?: number;
 };
 
 export function isDiffChunk(json: unknown) {
@@ -272,7 +275,7 @@ export type ChatMeta = {
 export function isChatContextFileMessage(
   message: ChatMessage,
 ): message is ChatContextFileMessage {
-  return message.role === "context_file";
+  return message.role === "context_file" && Array.isArray(message.content);
 }
 
 export function isAssistantMessage(
@@ -301,7 +304,6 @@ export function isToolCallMessage(
   if (!isAssistantMessage(message)) return false;
   const tool_calls = message.tool_calls;
   if (!tool_calls) return false;
-  // TODO: check browser support of every
   return tool_calls.every(isToolCall);
 }
 
@@ -323,15 +325,12 @@ interface BaseDelta {
     citation?: WebSearchCitation;
     thinking_blocks?: ThinkingBlock[];
   } | null;
-  // refusal?: null;
-  // function_call?: null;
-  // audio?: null;
 }
 
 interface AssistantDelta extends BaseDelta {
   role?: "assistant" | null;
-  content?: string | null; // might be undefined, will be null if tool_calls
-  reasoning_content?: string | null; // NOTE: only for internal UI usage, don't send it back
+  content?: string | null;
+  reasoning_content?: string | null;
   tool_calls?: ToolCall[] | null;
   thinking_blocks?: ThinkingBlock[] | null;
 }
@@ -389,7 +388,7 @@ export type ThinkingBlock = {
 
 interface ThinkingBlocksDelta extends BaseDelta {
   thinking_blocks?: ThinkingBlock[];
-  reasoning_content?: string | null; // NOTE: only for internal UI usage, don't send it back
+  reasoning_content?: string | null;
 }
 
 export function isThinkingBlocksDelta(
@@ -421,10 +420,8 @@ type Delta =
 
 export type ChatChoice = {
   delta: Delta;
-  finish_reason?: "stop" | "length" | "abort" | "tool_calls" | null;
+  finish_reason?: "stop" | "length" | "abort" | "tool_calls" | "error" | null;
   index: number;
-  // TODO: what's this for?
-  // logprobs?: null;
 };
 
 export type ChatUserMessageResponse =
@@ -518,15 +515,12 @@ export function isContextMemoryResponse(
 export function isToolResponse(json: unknown): json is ToolResponse {
   if (!json) return false;
   if (typeof json !== "object") return false;
-  // if (!("id" in json)) return false;
   if (!("content" in json)) return false;
   if (!("role" in json)) return false;
   if (!("tool_call_id" in json)) return false;
   if (!("tool_failed" in json)) return false;
   return json.role === "tool";
 }
-
-// TODO: isThinkingBlocksResponse
 
 export type DiffResponse = {
   role: "diff";
@@ -617,7 +611,6 @@ export function isChatResponseChoice(
   return true;
 }
 
-// TODO: type checks for this.
 export type CompressionStrength = "absent" | "low" | "medium" | "high";
 export type ChatResponse =
   | ChatResponseChoice
@@ -635,32 +628,79 @@ export function areAllFieldsBoolean(
   );
 }
 
-export type MemoRecord = {
+export type VecDbMemoRecord = {
   memid: string;
-  thevec?: number[]; // are options nullable?
+  thevec?: number[];
   distance?: number;
   m_type: string;
   m_goal: string;
   m_project: string;
   m_payload: string;
   m_origin: string;
-  // mstat_correct: bigint,
-  // mstat_relevant: bigint,
   mstat_correct: number;
   mstat_relevant: number;
   mstat_times_used: number;
 };
+
+export type KnowledgeMemoRecord = {
+  memid: string;
+  tags: string[];
+  content: string;
+  file_path?: string;
+  line_range?: [number, number];
+  title?: string;
+  created?: string;
+  kind?: string;
+  score?: number;
+};
+
+export type MemoRecord = KnowledgeMemoRecord;
+
 export function isMemoRecord(obj: unknown): obj is MemoRecord {
   if (!obj) return false;
   if (typeof obj !== "object") return false;
   if (!("memid" in obj) || typeof obj.memid !== "string") return false;
-  // TODO: other checks
   return true;
 }
 
+export type KnowledgeGraphNode = {
+  id: string;
+  node_type: string;
+  label: string;
+  title?: string;
+  content?: string;
+  tags?: string[];
+  created?: string;
+  file_path?: string;
+  kind?: string;
+};
+
+export type KnowledgeGraphEdge = {
+  source: string;
+  target: string;
+  edge_type: string;
+};
+
+export type KnowledgeGraphStats = {
+  doc_count: number;
+  tag_count: number;
+  file_count: number;
+  entity_count: number;
+  edge_count: number;
+  active_docs: number;
+  deprecated_docs: number;
+  trajectory_count: number;
+};
+
+export type KnowledgeGraphResponse = {
+  nodes: KnowledgeGraphNode[];
+  edges: KnowledgeGraphEdge[];
+  stats: KnowledgeGraphStats;
+};
+
 export type VecDbStatus = {
   files_unprocessed: number;
-  files_total: number; // only valid for status bar in the UI, resets to 0 when done
+  files_total: number;
   requests_made_since_start: number;
   vectors_made_since_start: number;
   db_size: number;

@@ -16,7 +16,10 @@ pub async fn get_embedding(
         "hf" => get_embedding_hf_style(client, text, embedding_model).await,
         "openai" => get_embedding_openai_style(client, text, embedding_model).await,
         _ => {
-            error!("Invalid endpoint_embeddings_style: {}", embedding_model.base.endpoint_style);
+            error!(
+                "Invalid endpoint_embeddings_style: {}",
+                embedding_model.base.endpoint_style
+            );
             Err("Invalid endpoint_embeddings_style".to_string())
         }
     }
@@ -24,7 +27,6 @@ pub async fn get_embedding(
 
 const SLEEP_ON_BIG_BATCH: u64 = 9000;
 const SLEEP_ON_BATCH_ONE: u64 = 100;
-
 
 // HF often returns 500 errors for no reason
 pub async fn get_embedding_with_retries(
@@ -36,11 +38,7 @@ pub async fn get_embedding_with_retries(
     let mut attempt_n = 0;
     loop {
         attempt_n += 1;
-        match get_embedding(
-            client.clone(),
-            embedding_model,
-            text.clone(),
-        ).await {
+        match get_embedding(client.clone(), embedding_model, text.clone()).await {
             Ok(embedding) => return Ok(embedding),
             Err(e) => {
                 if attempt_n >= max_retries {
@@ -52,9 +50,11 @@ pub async fn get_embedding_with_retries(
                     } else {
                         tracing::warn!("will retry later, embedding model doesn't work: {}", e);
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BIG_BATCH)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BIG_BATCH))
+                        .await;
                 } else {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BATCH_ONE)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BATCH_ONE))
+                        .await;
                 }
             }
         }

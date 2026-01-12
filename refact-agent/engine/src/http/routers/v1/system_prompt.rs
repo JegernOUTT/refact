@@ -31,25 +31,36 @@ pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
 ) -> Result<Response<Body>, ScratchError> {
     wait_for_indexing_if_needed(gcx.clone()).await;
 
-    let post = serde_json::from_slice::<PrependSystemPromptPost>(&body_bytes)
-        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e)))?;
+    let post = serde_json::from_slice::<PrependSystemPromptPost>(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
+    })?;
     let mut has_rag_results = HasRagResults::new();
 
     let messages = prepend_the_right_system_prompt_and_maybe_more_initial_messages(
-        gcx.clone(), 
-        post.messages, 
-        &post.chat_meta, 
+        gcx.clone(),
+        post.messages,
+        &post.chat_meta,
         &mut has_rag_results,
         get_available_tools_by_chat_mode(gcx.clone(), post.chat_meta.chat_mode)
             .await
             .into_iter()
             .map(|t| t.tool_description().name)
             .collect(),
-    ).await;
+    )
+    .await;
     let messages_to_stream_back = has_rag_results.in_json;
 
     Ok(Response::builder()
-      .status(StatusCode::OK)
-      .body(Body::from(serde_json::to_string(&PrependSystemPromptResponse { messages, messages_to_stream_back }).unwrap()))
-      .unwrap())
+        .status(StatusCode::OK)
+        .body(Body::from(
+            serde_json::to_string(&PrependSystemPromptResponse {
+                messages,
+                messages_to_stream_back,
+            })
+            .unwrap(),
+        ))
+        .unwrap())
 }

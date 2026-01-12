@@ -8,7 +8,6 @@ use crate::global_context::GlobalContext;
 use crate::custom_error::{ScratchError, YamlError};
 use crate::yaml_configs::customization_loader::load_customization;
 
-
 pub async fn handle_v1_config_path(
     Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
     _body_bytes: hyper::body::Bytes,
@@ -32,6 +31,8 @@ pub async fn handle_v1_customization(
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .body(Body::from(serde_json::to_string_pretty(&response_body).unwrap()))
+        .body(Body::from(
+            serde_json::to_string_pretty(&response_body).unwrap(),
+        ))
         .unwrap())
 }

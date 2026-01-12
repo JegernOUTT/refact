@@ -21,14 +21,9 @@ use crate::telemetry;
 use crate::file_filter::{is_valid_file, SOURCE_FILE_EXTENSIONS};
 use crate::ast::ast_indexer_thread::ast_indexer_enqueue_files;
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, PrivacySettings, FilePrivacyLevel};
-use crate::files_blocklist::{
-    IndexingEverywhere,
-    is_blocklisted,
-    reload_indexing_everywhere_if_needed,
-};
+use crate::files_blocklist::{IndexingEverywhere, is_blocklisted, reload_indexing_everywhere_if_needed};
 use crate::files_correction_cache::PathTrie;
 use crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first;
-
 
 // How this works
 // --------------
@@ -52,50 +47,71 @@ use crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first;
 //   ~/.config/refact/indexing.yaml
 //   ~/path/to/your/project/.refact/indexing.yaml
 
-
 #[derive(Debug, Eq, Hash, PartialEq, Clone)]
 pub struct Document {
     pub doc_path: PathBuf,
     pub doc_text: Option<Rope>,
 }
 
-pub async fn get_file_text_from_memory_or_disk(global_context: Arc<ARwLock<GlobalContext>>, file_path: &PathBuf) -> Result<String, String>
-{
-    check_file_privacy(load_privacy_if_needed(global_context.clone()).await, &file_path, &FilePrivacyLevel::AllowToSendAnywhere)?;
+pub async fn get_file_text_from_memory_or_disk(
+    global_context: Arc<ARwLock<GlobalContext>>,
+    file_path: &PathBuf,
+) -> Result<String, String> {
+    check_file_privacy(
+        load_privacy_if_needed(global_context.clone()).await,
+        &file_path,
+        &FilePrivacyLevel::AllowToSendAnywhere,
+    )?;
 
-    if let Some(doc) = global_context.read().await.documents_state.memory_document_map.get(file_path) {
+    if let Some(doc) = global_context
+        .read()
+        .await
+        .documents_state
+        .memory_document_map
+        .get(file_path)
+    {
         let doc = doc.read().await;
         if doc.doc_text.is_some() {
             return Ok(doc.doc_text.as_ref().unwrap().to_string());
         }
     }
     read_file_from_disk_without_privacy_check(&file_path)
-        .await.map(|x|x.to_string())
-        .map_err(|e|format!("Not found in memory, not found on disk: {}", e))
+        .await
+        .map(|x| x.to_string())
+        .map_err(|e| format!("Not found in memory, not found on disk: {}", e))
 }
 
 impl Document {
     pub fn new(doc_path: &PathBuf) -> Self {
-        Self { doc_path: doc_path.clone(),  doc_text: None }
+        Self {
+            doc_path: doc_path.clone(),
+            doc_text: None,
+        }
     }
 
-    pub async fn update_text_from_disk(&mut self, gcx: Arc<ARwLock<GlobalContext>>) -> Result<(), String> {
+    pub async fn update_text_from_disk(
+        &mut self,
+        gcx: Arc<ARwLock<GlobalContext>>,
+    ) -> Result<(), String> {
         match read_file_from_disk(load_privacy_if_needed(gcx.clone()).await, &self.doc_path).await {
             Ok(res) => {
                 self.doc_text = Some(res);
                 return Ok(());
-            },
-            Err(e) => {
-                return Err(e)
             }
+            Err(e) => return Err(e),
         }
     }
 
-    pub async fn get_text_or_read_from_disk(&mut self, gcx: Arc<ARwLock<GlobalContext>>) -> Result<String, String> {
+    pub async fn get_text_or_read_from_disk(
+        &mut self,
+        gcx: Arc<ARwLock<GlobalContext>>,
+    ) -> Result<String, String> {
         if self.doc_text.is_some() {
             return Ok(self.doc_text.as_ref().unwrap().to_string());
         }
-        read_file_from_disk(load_privacy_if_needed(gcx.clone()).await, &self.doc_path).await.map(|x|x.to_string())
+        read_file_from_disk(load_privacy_if_needed(gcx.clone()).await, &self.doc_path)
+            .await
+            .map(|x| x.to_string())
     }
 
     pub fn update_text(&mut self, text: &String) {
@@ -125,7 +141,10 @@ impl Document {
         let total_spaces = r.chars().filter(|x| x.is_whitespace()).count();
         let spaces_percentage = total_spaces as f32 / total_chars as f32;
         if total_lines >= 5 && spaces_percentage <= 0.05 {
-            return Err(format!("generated or compressed, {:.1}% spaces < 5%", 100.0*spaces_percentage));
+            return Err(format!(
+                "generated or compressed, {:.1}% spaces < 5%",
+                100.0 * spaces_percentage
+            ));
         }
 
         Ok(())
@@ -155,7 +174,10 @@ impl CacheCorrection {
                     unique_directories.insert(parent);
                 }
             }
-            unique_directories.iter().map(|p| PathBuf::from(p)).collect()
+            unique_directories
+                .iter()
+                .map(|p| PathBuf::from(p))
+                .collect()
         };
         let directories = PathTrie::build(&directories, &workspace_folders);
         CacheCorrection {
@@ -173,7 +195,7 @@ pub struct DocumentsState {
     pub jsonl_files: Arc<StdMutex<Vec<PathBuf>>>,
     // document_map on windows: c%3A/Users/user\Documents/file.ext
     // query on windows: C:/Users/user/Documents/file.ext
-    pub memory_document_map: HashMap<PathBuf, Arc<ARwLock<Document>>>,   // if a file is open in IDE, and it's outside workspace dirs, it will be in this map and not in workspace_files
+    pub memory_document_map: HashMap<PathBuf, Arc<ARwLock<Document>>>, // if a file is open in IDE, and it's outside workspace dirs, it will be in this map and not in workspace_files
     pub cache_dirty: Arc<AMutex<f64>>,
     pub cache_correction: Arc<CacheCorrection>,
     pub fs_watcher: Arc<ARwLock<RecommendedWatcher>>,
@@ -181,13 +203,17 @@ pub struct DocumentsState {
 
 async fn mem_overwrite_or_create_document(
     global_context: Arc<ARwLock<GlobalContext>>,
-    document: Document
+    document: Document,
 ) -> (Arc<ARwLock<Document>>, Arc<AMutex<f64>>, bool) {
     let mut cx = global_context.write().await;
     let doc_map = &mut cx.documents_state.memory_document_map;
     if let Some(existing_doc) = doc_map.get_mut(&document.doc_path) {
         *existing_doc.write().await = document;
-        (existing_doc.clone(), cx.documents_state.cache_dirty.clone(), false)
+        (
+            existing_doc.clone(),
+            cx.documents_state.cache_dirty.clone(),
+            false,
+        )
     } else {
         let path = document.doc_path.clone();
         let darc = Arc::new(ARwLock::new(document));
@@ -197,10 +223,8 @@ async fn mem_overwrite_or_create_document(
 }
 
 impl DocumentsState {
-    pub async fn new(
-        workspace_dirs: Vec<PathBuf>,
-    ) -> Self {
-        let watcher = RecommendedWatcher::new(|_|{}, Default::default()).unwrap();
+    pub async fn new(workspace_dirs: Vec<PathBuf>) -> Self {
+        let watcher = RecommendedWatcher::new(|_| {}, Default::default()).unwrap();
         Self {
             workspace_folders: Arc::new(StdMutex::new(workspace_dirs)),
             workspace_files: Arc::new(StdMutex::new(Vec::new())),
@@ -215,9 +239,7 @@ impl DocumentsState {
     }
 }
 
-pub async fn watcher_init(
-    gcx: Arc<ARwLock<GlobalContext>>
-) {
+pub async fn watcher_init(gcx: Arc<ARwLock<GlobalContext>>) {
     let gcx_weak = Arc::downgrade(&gcx);
     let rt = tokio::runtime::Handle::current();
     let event_callback = move |res| {
@@ -229,7 +251,8 @@ pub async fn watcher_init(
     };
     let mut watcher = RecommendedWatcher::new(event_callback, Config::default()).unwrap();
 
-    let workspace_folders: Arc<StdMutex<Vec<PathBuf>>> = gcx.read().await.documents_state.workspace_folders.clone();
+    let workspace_folders: Arc<StdMutex<Vec<PathBuf>>> =
+        gcx.read().await.documents_state.workspace_folders.clone();
 
     for folder in workspace_folders.lock().unwrap().iter() {
         info!("ADD WATCHER (1): {}", folder.display());
@@ -239,29 +262,44 @@ pub async fn watcher_init(
     let mut fs_watcher_on_stack = Arc::new(ARwLock::new(watcher));
     {
         let mut gcx_locked = gcx.write().await;
-        std::mem::swap(&mut gcx_locked.documents_state.fs_watcher, &mut fs_watcher_on_stack);  // avoid destructor under lock
+        std::mem::swap(
+            &mut gcx_locked.documents_state.fs_watcher,
+            &mut fs_watcher_on_stack,
+        ); // avoid destructor under lock
     }
 }
 
-async fn read_file_from_disk_without_privacy_check(
-    path: &PathBuf,
-) -> Result<Rope, String> {
-    tokio::fs::read_to_string(path).await
-        .map(|x|Rope::from_str(&x))
-        .map_err(|e|
-            format!("failed to read file {}: {}", crate::nicer_logs::last_n_chars(&path.display().to_string(), 30), e)
-        )
+async fn read_file_from_disk_without_privacy_check(path: &PathBuf) -> Result<Rope, String> {
+    tokio::fs::read_to_string(path)
+        .await
+        .map(|x| Rope::from_str(&x))
+        .map_err(|e| {
+            format!(
+                "failed to read file {}: {}",
+                crate::nicer_logs::last_n_chars(&path.display().to_string(), 30),
+                e
+            )
+        })
 }
 
 pub async fn read_file_from_disk(
     privacy_settings: Arc<PrivacySettings>,
     path: &PathBuf,
 ) -> Result<Rope, String> {
-    check_file_privacy(privacy_settings, path, &FilePrivacyLevel::AllowToSendAnywhere)?;
+    check_file_privacy(
+        privacy_settings,
+        path,
+        &FilePrivacyLevel::AllowToSendAnywhere,
+    )?;
     read_file_from_disk_without_privacy_check(path).await
 }
 
-async fn _run_command(cmd: &str, args: &[&str], path: &PathBuf, filter_out_status: bool) -> Option<Vec<PathBuf>> {
+async fn _run_command(
+    cmd: &str,
+    args: &[&str],
+    path: &PathBuf,
+    filter_out_status: bool,
+) -> Option<Vec<PathBuf>> {
     info!("{} EXEC {} {}", path.display(), cmd, args.join(" "));
     let output = tokio::process::Command::new(cmd)
         .args(args)
@@ -274,16 +312,18 @@ async fn _run_command(cmd: &str, args: &[&str], path: &PathBuf, filter_out_statu
         return None;
     }
 
-    String::from_utf8(output.stdout.clone())
-        .ok()
-        .map(|s| s.lines().map(|line| {
-            let trimmed = line.trim();
-            if filter_out_status && trimmed.len() > 1 {
-                path.join(&trimmed[1..].trim())
-            } else {
-                path.join(line)
-            }
-        }).collect())
+    String::from_utf8(output.stdout.clone()).ok().map(|s| {
+        s.lines()
+            .map(|line| {
+                let trimmed = line.trim();
+                if filter_out_status && trimmed.len() > 1 {
+                    path.join(&trimmed[1..].trim())
+                } else {
+                    path.join(line)
+                }
+            })
+            .collect()
+    })
 }
 
 async fn ls_files_under_version_control(path: &PathBuf) -> Option<Vec<PathBuf>> {
@@ -291,12 +331,31 @@ async fn ls_files_under_version_control(path: &PathBuf) -> Option<Vec<PathBuf>> 
         git_ls_files(path)
     } else if path.join(".hg").exists() && which("hg").is_ok() {
         // Mercurial repository
-        _run_command("hg", &["status", "--added", "--modified", "--clean", "--unknown", "--no-status"], path, false).await
+        _run_command(
+            "hg",
+            &[
+                "status",
+                "--added",
+                "--modified",
+                "--clean",
+                "--unknown",
+                "--no-status",
+            ],
+            path,
+            false,
+        )
+        .await
     } else if path.join(".svn").exists() && which("svn").is_ok() {
         // SVN repository
         let files_under_vc = _run_command("svn", &["list", "-R"], path, false).await;
         let files_changed = _run_command("svn", &["status"], path, true).await;
-        Some(files_under_vc.unwrap_or_default().into_iter().chain(files_changed.unwrap_or_default().into_iter()).collect())
+        Some(
+            files_under_vc
+                .unwrap_or_default()
+                .into_iter()
+                .chain(files_changed.unwrap_or_default().into_iter())
+                .collect(),
+        )
     } else {
         None
     }
@@ -304,6 +363,7 @@ async fn ls_files_under_version_control(path: &PathBuf) -> Option<Vec<PathBuf>> 
 
 pub fn _ls_files(
     indexing_everywhere: &IndexingEverywhere,
+    scan_root: &Path,
     path: &PathBuf,
     recursive: bool,
     blocklist_check: bool,
@@ -314,26 +374,35 @@ pub fn _ls_files(
     while let Some(dir) = dirs_to_visit.pop() {
         let ls_maybe = fs::read_dir(&dir);
         if ls_maybe.is_err() {
-            info!("failed to read directory {}: {}", dir.display(), ls_maybe.unwrap_err());
+            info!(
+                "failed to read directory {}: {}",
+                dir.display(),
+                ls_maybe.unwrap_err()
+            );
             continue;
         }
         let ls: fs::ReadDir = ls_maybe.unwrap();
         let entries_maybe = ls.collect::<Result<Vec<_>, _>>();
         if entries_maybe.is_err() {
-            info!("failed to read directory {}: {}", dir.display(), entries_maybe.unwrap_err());
+            info!(
+                "failed to read directory {}: {}",
+                dir.display(),
+                entries_maybe.unwrap_err()
+            );
             continue;
         }
         let mut entries = entries_maybe.unwrap();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            let path = entry.path();
-            let indexing_settings = indexing_everywhere.indexing_for_path(&path);
-            if recursive && path.is_dir() {
-                if !blocklist_check || !is_blocklisted(&indexing_settings, &path) {
-                    dirs_to_visit.push(path);
+            let abs_path = entry.path();
+            let indexing_settings = indexing_everywhere.indexing_for_path(&abs_path);
+            let rel_path = abs_path.strip_prefix(scan_root).unwrap_or(&abs_path);
+            if recursive && abs_path.is_dir() {
+                if !blocklist_check || !is_blocklisted(&indexing_settings, rel_path) {
+                    dirs_to_visit.push(abs_path);
                 }
-            } else if path.is_file() {
-                paths.push(path);
+            } else if abs_path.is_file() {
+                paths.push(abs_path);
             }
         }
     }
@@ -351,10 +420,20 @@ pub fn ls_files(
     }
 
     let indexing_settings = indexing_everywhere.indexing_for_path(path);
-    let mut paths = _ls_files(indexing_everywhere, path, recursive, true).unwrap();
+    let mut paths = _ls_files(indexing_everywhere, path.as_path(), path, recursive, true).unwrap();
     if recursive {
         for additional_indexing_dir in indexing_settings.additional_indexing_dirs.iter() {
-            paths.extend(_ls_files(indexing_everywhere, &PathBuf::from(additional_indexing_dir), recursive, false).unwrap());
+            let additional_path = PathBuf::from(additional_indexing_dir);
+            paths.extend(
+                _ls_files(
+                    indexing_everywhere,
+                    additional_path.as_path(),
+                    &additional_path,
+                    recursive,
+                    false,
+                )
+                .unwrap(),
+            );
         }
     }
 
@@ -429,20 +508,28 @@ async fn _ls_files_under_version_control_recursive(
     ignore_size_thresholds: bool,
     check_blocklist: bool,
 ) {
-    let mut candidates: Vec<PathBuf> = vec![crate::files_correction::canonical_path(&path.to_string_lossy().to_string())];
+    let mut candidates: Vec<PathBuf> = vec![crate::files_correction::canonical_path(
+        &path.to_string_lossy().to_string(),
+    )];
     let mut rejected_reasons: HashMap<String, usize> = HashMap::new();
     let mut blocklisted_dirs_cnt: usize = 0;
     while !candidates.is_empty() {
         let checkme = candidates.pop().unwrap();
         if checkme.is_file() {
             let maybe_valid = is_valid_file(
-                &checkme, allow_files_in_hidden_folders, ignore_size_thresholds);
+                &checkme,
+                allow_files_in_hidden_folders,
+                ignore_size_thresholds,
+            );
             match maybe_valid {
                 Ok(_) => {
                     all_files.push(checkme.clone());
                 }
                 Err(e) => {
-                    rejected_reasons.entry(e.to_string()).and_modify(|x| *x += 1).or_insert(1);
+                    rejected_reasons
+                        .entry(e.to_string())
+                        .and_modify(|x| *x += 1)
+                        .or_insert(1);
                     continue;
                 }
             }
@@ -459,43 +546,61 @@ async fn _ls_files_under_version_control_recursive(
                 // Has version control
                 let indexing_yaml_path = checkme.join(".refact").join("indexing.yaml");
                 if indexing_yaml_path.exists() {
-                    match crate::files_blocklist::load_indexing_yaml(&indexing_yaml_path, Some(&checkme)).await {
+                    match crate::files_blocklist::load_indexing_yaml(
+                        &indexing_yaml_path,
+                        Some(&checkme),
+                    )
+                    .await
+                    {
                         Ok(indexing_settings) => {
                             for d in indexing_settings.additional_indexing_dirs.iter() {
                                 let cp = crate::files_correction::canonical_path(d.as_str());
                                 candidates.push(cp);
                             }
-                            indexing_everywhere.vcs_indexing_settings_map.insert(checkme.to_string_lossy().to_string(), indexing_settings);
+                            indexing_everywhere
+                                .vcs_indexing_settings_map
+                                .insert(checkme.to_string_lossy().to_string(), indexing_settings);
                         }
                         Err(e) => {
-                            tracing::error!("failed to load indexing.yaml in {}: {}", checkme.display(), e);
+                            tracing::error!(
+                                "failed to load indexing.yaml in {}: {}",
+                                checkme.display(),
+                                e
+                            );
                         }
                     };
                 }
                 for x in v.iter() {
-                    let maybe_valid = is_valid_file(
-                        x, allow_files_in_hidden_folders, ignore_size_thresholds);
+                    let maybe_valid =
+                        is_valid_file(x, allow_files_in_hidden_folders, ignore_size_thresholds);
                     match maybe_valid {
                         Ok(_) => {
                             all_files.push(x.clone());
                         }
                         Err(e) => {
-                            rejected_reasons.entry(e.to_string()).and_modify(|x| *x += 1).or_insert(1);
+                            rejected_reasons
+                                .entry(e.to_string())
+                                .and_modify(|x| *x += 1)
+                                .or_insert(1);
                         }
                     }
                 }
-
             } else {
                 // Don't have version control
-                let indexing_settings = indexing_everywhere.indexing_for_path(&checkme);  // this effectively only uses global blocklist
+                let indexing_settings = indexing_everywhere.indexing_for_path(&checkme); // this effectively only uses global blocklist
                 if check_blocklist && is_blocklisted(&indexing_settings, &checkme) {
                     blocklisted_dirs_cnt += 1;
                     continue;
                 }
-                let new_paths: Vec<PathBuf> = WalkDir::new(checkme.clone()).max_depth(1)
+                let new_paths: Vec<PathBuf> = WalkDir::new(checkme.clone())
+                    .max_depth(1)
                     .into_iter()
                     .filter_map(|e| e.ok())
-                    .map(|e| crate::files_correction::canonical_path(&e.path().to_string_lossy().to_string()))
+                    .map(|e| {
+                        crate::files_correction::canonical_path(
+                            &e.path().to_string_lossy().to_string(),
+                        )
+                    })
                     .filter(|e| e != &checkme)
                     .collect();
                 candidates.extend(new_paths);
@@ -509,14 +614,16 @@ async fn _ls_files_under_version_control_recursive(
     if rejected_reasons.is_empty() {
         info!("    no bad files at all");
     }
-    info!("also the loop bumped into {} blocklisted dirs", blocklisted_dirs_cnt);
+    info!(
+        "also the loop bumped into {} blocklisted dirs",
+        blocklisted_dirs_cnt
+    );
 }
-
 
 pub async fn retrieve_files_in_workspace_folders(
     proj_folders: Vec<PathBuf>,
     indexing_everywhere: &mut IndexingEverywhere,
-    allow_files_in_hidden_folders: bool,   // true when syncing to remote container
+    allow_files_in_hidden_folders: bool, // true when syncing to remote container
     ignore_size_thresholds: bool,
 ) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut all_files: Vec<PathBuf> = Vec::new();
@@ -532,7 +639,8 @@ pub async fn retrieve_files_in_workspace_folders(
             allow_files_in_hidden_folders,
             ignore_size_thresholds,
             true,
-        ).await;
+        )
+        .await;
     }
     info!("in all workspace folders, VCS roots found:");
     for vcs_folder in vcs_folders.iter() {
@@ -549,11 +657,7 @@ pub fn is_path_to_enqueue_valid(path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-async fn enqueue_some_docs(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    paths: &Vec<String>,
-    force: bool,
-) {
+async fn enqueue_some_docs(gcx: Arc<ARwLock<GlobalContext>>, paths: &Vec<String>, force: bool) {
     info!("detected {} modified/added/removed files", paths.len());
     for d in paths.iter().take(5) {
         info!("    {}", crate::nicer_logs::last_n_chars(&d, 30));
@@ -571,10 +675,16 @@ async fn enqueue_some_docs(
     if let Some(ast) = &ast_service {
         ast_indexer_enqueue_files(ast.clone(), paths, force).await;
     }
-    let cache_correction_arc = crate::files_correction::files_cache_rebuild_as_needed(gcx.clone()).await;
+    let cache_correction_arc =
+        crate::files_correction::files_cache_rebuild_as_needed(gcx.clone()).await;
     let mut moar_files: Vec<PathBuf> = Vec::new();
     for p in paths {
-        if cache_correction_arc.filenames.find_matches(&PathBuf::from(p)).len() == 0 {
+        if cache_correction_arc
+            .filenames
+            .find_matches(&PathBuf::from(p))
+            .len()
+            == 0
+        {
             moar_files.push(PathBuf::from(p.clone()));
         }
     }
@@ -582,11 +692,19 @@ async fn enqueue_some_docs(
         info!("this made file cache dirty");
         let dirty_arc = {
             let gcx_locked = gcx.read().await;
-            gcx_locked.documents_state.workspace_files.lock().unwrap().extend(moar_files);
+            gcx_locked
+                .documents_state
+                .workspace_files
+                .lock()
+                .unwrap()
+                .extend(moar_files);
             gcx_locked.documents_state.cache_dirty.clone()
         };
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
-        *dirty_arc.lock().await = now + 1.0;  // next rebuild will be one second later, to prevent rapid-fire rebuilds from file events
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        *dirty_arc.lock().await = now + 1.0; // next rebuild will be one second later, to prevent rapid-fire rebuilds from file events
     }
 }
 
@@ -595,18 +713,29 @@ pub async fn enqueue_all_files_from_workspace_folders(
     wake_up_indexers: bool,
     vecdb_only: bool,
 ) -> i32 {
-    let folders: Vec<PathBuf> = gcx.read().await.documents_state.workspace_folders.lock().unwrap().clone();
+    let folders: Vec<PathBuf> = gcx
+        .read()
+        .await
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .clone();
 
-    info!("enqueue_all_files_from_workspace_folders started files search with {} folders", folders.len());
-    let mut indexing_everywhere = crate::files_blocklist::reload_global_indexing_only(gcx.clone()).await;
-    let (all_files, vcs_folders) =  retrieve_files_in_workspace_folders(
-        folders,
-        &mut indexing_everywhere,
-        false,
-        false
-    ).await;
-    info!("enqueue_all_files_from_workspace_folders found {} files => workspace_files", all_files.len());
-    let mut workspace_vcs_roots: Arc<StdMutex<Vec<PathBuf>>> = Arc::new(StdMutex::new(vcs_folders.clone()));
+    info!(
+        "enqueue_all_files_from_workspace_folders started files search with {} folders",
+        folders.len()
+    );
+    let mut indexing_everywhere =
+        crate::files_blocklist::reload_global_indexing_only(gcx.clone()).await;
+    let (all_files, vcs_folders) =
+        retrieve_files_in_workspace_folders(folders, &mut indexing_everywhere, false, false).await;
+    info!(
+        "enqueue_all_files_from_workspace_folders found {} files => workspace_files",
+        all_files.len()
+    );
+    let mut workspace_vcs_roots: Arc<StdMutex<Vec<PathBuf>>> =
+        Arc::new(StdMutex::new(vcs_folders.clone()));
 
     let mut old_workspace_files = Vec::new();
     let cache_dirty = {
@@ -617,13 +746,19 @@ pub async fn enqueue_all_files_from_workspace_folders(
             workspace_files.extend(all_files.clone());
         }
         {
-            std::mem::swap(&mut gcx_locked.documents_state.workspace_vcs_roots, &mut workspace_vcs_roots);
+            std::mem::swap(
+                &mut gcx_locked.documents_state.workspace_vcs_roots,
+                &mut workspace_vcs_roots,
+            );
         }
         gcx_locked.indexing_everywhere = Arc::new(indexing_everywhere);
         gcx_locked.documents_state.cache_dirty.clone()
     };
 
-    *cache_dirty.lock().await = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    *cache_dirty.lock().await = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
 
     let (vec_db_module, ast_service) = {
         let cx_locked = gcx.read().await;
@@ -633,12 +768,21 @@ pub async fn enqueue_all_files_from_workspace_folders(
     // Both vecdb and ast support paths to non-existant files (possibly previously existing files) as a way to remove them from index
 
     let mut updated_or_removed: IndexSet<String> = IndexSet::new();
-    updated_or_removed.extend(all_files.iter().map(|file| file.to_string_lossy().to_string()));
-    updated_or_removed.extend(old_workspace_files.iter().map(|p| p.to_string_lossy().to_string()));
+    updated_or_removed.extend(
+        all_files
+            .iter()
+            .map(|file| file.to_string_lossy().to_string()),
+    );
+    updated_or_removed.extend(
+        old_workspace_files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string()),
+    );
     let paths_nodups: Vec<String> = updated_or_removed.into_iter().collect();
 
     if let Some(ref mut db) = *vec_db_module.lock().await {
-        db.vectorizer_enqueue_files(&paths_nodups, wake_up_indexers).await;
+        db.vectorizer_enqueue_files(&paths_nodups, wake_up_indexers)
+            .await;
     }
 
     if let Some(ast) = ast_service {
@@ -649,11 +793,17 @@ pub async fn enqueue_all_files_from_workspace_folders(
     all_files.len() as i32
 }
 
-pub async fn on_workspaces_init(gcx: Arc<ARwLock<GlobalContext>>) -> i32
-{
+pub async fn on_workspaces_init(gcx: Arc<ARwLock<GlobalContext>>) -> i32 {
     // Called from lsp and lsp_like
     // Not called from main.rs as part of initialization
-    let folders = gcx.read().await.documents_state.workspace_folders.lock().unwrap().clone();
+    let folders = gcx
+        .read()
+        .await
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .clone();
     let old_app_searchable_id = gcx.read().await.app_searchable_id.clone();
     let new_app_searchable_id = get_app_searchable_id(&folders);
     if old_app_searchable_id != new_app_searchable_id {
@@ -679,43 +829,58 @@ pub async fn on_did_open(
 ) {
     let mut doc = Document::new(cpath);
     doc.update_text(text);
-    info!("on_did_open {}", crate::nicer_logs::last_n_chars(&cpath.display().to_string(), 30));
-    let (_doc_arc, dirty_arc, mark_dirty) = mem_overwrite_or_create_document(gcx.clone(), doc).await;
+    info!(
+        "on_did_open {}",
+        crate::nicer_logs::last_n_chars(&cpath.display().to_string(), 30)
+    );
+    let (_doc_arc, dirty_arc, mark_dirty) =
+        mem_overwrite_or_create_document(gcx.clone(), doc).await;
     if mark_dirty {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
         *dirty_arc.lock().await = now;
     }
     gcx.write().await.documents_state.active_file_path = Some(cpath.clone());
 }
 
-pub async fn on_did_close(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    cpath: &PathBuf,
-) {
-    info!("on_did_close {}", crate::nicer_logs::last_n_chars(&cpath.display().to_string(), 30));
+pub async fn on_did_close(gcx: Arc<ARwLock<GlobalContext>>, cpath: &PathBuf) {
+    info!(
+        "on_did_close {}",
+        crate::nicer_logs::last_n_chars(&cpath.display().to_string(), 30)
+    );
     {
         let mut cx = gcx.write().await;
-        if cx.documents_state.memory_document_map.remove(cpath).is_none() {
-            tracing::error!("on_did_close: failed to remove from memory_document_map {:?}", cpath.display());
+        if cx
+            .documents_state
+            .memory_document_map
+            .remove(cpath)
+            .is_none()
+        {
+            tracing::error!(
+                "on_did_close: failed to remove from memory_document_map {:?}",
+                cpath.display()
+            );
         }
     }
 }
 
-pub async fn on_did_change(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    path: &PathBuf,
-    text: &String,
-) {
+pub async fn on_did_change(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf, text: &String) {
     let t0 = Instant::now();
     let (doc_arc, dirty_arc, mark_dirty) = {
         let mut doc = Document::new(path);
         doc.update_text(text);
-        let (doc_arc, dirty_arc, set_mark_dirty) = mem_overwrite_or_create_document(gcx.clone(), doc).await;
+        let (doc_arc, dirty_arc, set_mark_dirty) =
+            mem_overwrite_or_create_document(gcx.clone(), doc).await;
         (doc_arc, dirty_arc, set_mark_dirty)
     };
 
     if mark_dirty {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
         *dirty_arc.lock().await = now;
     }
 
@@ -730,7 +895,13 @@ pub async fn on_did_change(
         }
     }
 
-    let cpath = doc_arc.read().await.doc_path.clone().to_string_lossy().to_string();
+    let cpath = doc_arc
+        .read()
+        .await
+        .doc_path
+        .clone()
+        .to_string_lossy()
+        .to_string();
     if go_ahead {
         enqueue_some_docs(gcx.clone(), &vec![cpath], false).await;
     }
@@ -739,22 +910,36 @@ pub async fn on_did_change(
         gcx.clone(),
         &path.to_string_lossy().to_string(),
         text,
-    ).await;
+    )
+    .await;
 
-    info!("on_did_change {}, total time {:.3}s", crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30), t0.elapsed().as_secs_f32());
+    info!(
+        "on_did_change {}, total time {:.3}s",
+        crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30),
+        t0.elapsed().as_secs_f32()
+    );
 }
 
-pub async fn on_did_delete(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf)
-{
-    info!("on_did_delete {}", crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30));
+pub async fn on_did_delete(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
+    info!(
+        "on_did_delete {}",
+        crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
+    );
 
     let (vec_db_module, ast_service, dirty_arc) = {
         let mut cx = gcx.write().await;
         cx.documents_state.memory_document_map.remove(path);
-        (cx.vec_db.clone(), cx.ast_service.clone(), cx.documents_state.cache_dirty.clone())
+        (
+            cx.vec_db.clone(),
+            cx.ast_service.clone(),
+            cx.documents_state.cache_dirty.clone(),
+        )
     };
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
     (*dirty_arc.lock().await) = now;
 
     match *vec_db_module.lock().await {
@@ -770,34 +955,45 @@ pub async fn on_did_delete(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf)
     }
 }
 
-pub async fn add_folder(gcx: Arc<ARwLock<GlobalContext>>, fpath: &PathBuf)
-{
+pub async fn add_folder(gcx: Arc<ARwLock<GlobalContext>>, fpath: &PathBuf) {
     {
         let documents_state = &mut gcx.write().await.documents_state;
-        documents_state.workspace_folders.lock().unwrap().push(fpath.clone());
+        documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .push(fpath.clone());
     }
     on_workspaces_init(gcx.clone()).await;
 }
 
-pub async fn remove_folder(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf)
-{
+pub async fn remove_folder(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
     let was_removed = {
         let documents_state = &mut gcx.write().await.documents_state;
         let initial_len = documents_state.workspace_folders.lock().unwrap().len();
-        documents_state.workspace_folders.lock().unwrap().retain(|p| p != path);
+        documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .retain(|p| p != path);
         let final_len = documents_state.workspace_folders.lock().unwrap().len();
         initial_len > final_len
     };
     if was_removed {
-        tracing::info!("Folder {} was successfully removed from workspace_folders.", path.display());
+        tracing::info!(
+            "Folder {} was successfully removed from workspace_folders.",
+            path.display()
+        );
         on_workspaces_init(gcx.clone()).await;
     } else {
-        tracing::error!("Folder {} was not found in workspace_folders.", path.display());
+        tracing::error!(
+            "Folder {} was not found in workspace_folders.",
+            path.display()
+        );
     }
 }
 
-pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalContext>>)
-{
+pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalContext>>) {
     async fn on_file_change(gcx_weak: Weak<ARwLock<GlobalContext>>, event: Event) {
         let mut docs = vec![];
         let indexing_everywhere_arc;
@@ -808,7 +1004,8 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
         }
         for p in &event.paths {
             let indexing_settings = indexing_everywhere_arc.indexing_for_path(p);
-            if is_blocklisted(&indexing_settings, &p) {  // important to filter BEFORE canonical_path
+            if is_blocklisted(&indexing_settings, &p) {
+                // important to filter BEFORE canonical_path
                 continue;
             }
 
@@ -830,7 +1027,9 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
     async fn on_dot_git_dir_change(gcx_weak: Weak<ARwLock<GlobalContext>>, event: Event) {
         if let Some(gcx) = gcx_weak.clone().upgrade() {
             // Get the path before .git component, and check if repo associated exists
-            let repo_paths = event.paths.iter()
+            let repo_paths = event
+                .paths
+                .iter()
                 .filter_map(|p| {
                     p.components()
                         .position(|c| c == Component::Normal(".git".as_ref()))
@@ -856,11 +1055,17 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
                 let mut workspace_vcs_roots_locked = workspace_vcs_roots.lock().unwrap();
                 for (repo_path, exists_in_disk) in repo_paths {
                     if exists_in_disk && !workspace_vcs_roots_locked.contains(&repo_path) {
-                        tracing::info!("Found .git folder in workspace: {}", repo_path.to_string_lossy());
+                        tracing::info!(
+                            "Found .git folder in workspace: {}",
+                            repo_path.to_string_lossy()
+                        );
                         should_reindex = true;
                         workspace_vcs_roots_locked.push(repo_path);
                     } else if !exists_in_disk && workspace_vcs_roots_locked.contains(&repo_path) {
-                        tracing::info!("Removed .git folder from workspace: {}", repo_path.to_string_lossy());
+                        tracing::info!(
+                            "Removed .git folder from workspace: {}",
+                            repo_path.to_string_lossy()
+                        );
                         should_reindex = true;
                         workspace_vcs_roots_locked.retain(|p| p != &repo_path);
                     }
@@ -876,17 +1081,27 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
 
     match event.kind {
         // We may receive specific event that a folder is being added/removed, but not the .git itself, this happens on Unix systems
-        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) if event.paths.iter().any(
-            |p| p.components().any(|c| c == Component::Normal(".git".as_ref()))
-        ) => on_dot_git_dir_change(gcx_weak.clone(), event).await,
+        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder)
+            if event.paths.iter().any(|p| {
+                p.components()
+                    .any(|c| c == Component::Normal(".git".as_ref()))
+            }) =>
+        {
+            on_dot_git_dir_change(gcx_weak.clone(), event).await
+        }
 
         // In Windows, we receive generic events (Any subtype), but we receive them about each exact folder
-        EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) | EventKind::Remove(RemoveKind::Any)
+        EventKind::Create(CreateKind::Any)
+        | EventKind::Modify(ModifyKind::Any)
+        | EventKind::Remove(RemoveKind::Any)
             if event.paths.iter().any(|p| p.ends_with(".git")) =>
-            on_dot_git_dir_change(gcx_weak, event).await,
+        {
+            on_dot_git_dir_change(gcx_weak, event).await
+        }
 
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) =>
-            on_file_change(gcx_weak.clone(), event).await,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+            on_file_change(gcx_weak.clone(), event).await
+        }
 
         EventKind::Other | EventKind::Any | EventKind::Access(_) => {}
     }

@@ -15,10 +15,20 @@ import {
   DotsVerticalIcon,
   HomeIcon,
   PlusIcon,
+  CheckboxIcon,
 } from "@radix-ui/react-icons";
 import { newChatAction } from "../../events";
 import { restart, useTourRefs } from "../../features/Tour";
 import { popBackTo, push } from "../../features/Pages/pagesSlice";
+import {
+  useCreateTaskMutation,
+  useUpdateTaskMetaMutation,
+} from "../../services/refact/tasks";
+import {
+  selectOpenTasksFromRoot,
+  openTask,
+  closeTask,
+} from "../../features/Tasks";
 import {
   ChangeEvent,
   KeyboardEvent,
@@ -35,8 +45,8 @@ import {
 } from "../../features/History/historySlice";
 import {
   saveTitle,
-  selectOpenThreadIds,
   selectAllThreads,
+  selectTabsDisplayData,
   closeThread,
   switchToThread,
   selectChatId,
@@ -72,7 +82,17 @@ function isChatTab(tab: Tab): tab is ChatTab {
   return tab.type === "chat";
 }
 
-export type Tab = DashboardTab | ChatTab;
+export type TaskTab = {
+  type: "task";
+  taskId: string;
+  taskName: string;
+};
+
+function isTaskTab(tab: Tab): tab is TaskTab {
+  return tab.type === "task";
+}
+
+export type Tab = DashboardTab | ChatTab | TaskTab;
 
 export type ToolbarProps = {
   activeTab: Tab;
@@ -89,15 +109,19 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const [sendTelemetryEvent] =
     telemetryApi.useLazySendTelemetryChatEventQuery();
 
-  const openThreadIds = useAppSelector(selectOpenThreadIds);
+  const tabs = useAppSelector(selectTabsDisplayData);
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
+  const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const { newChatEnabled } = useActiveTeamsGroup();
 
   const { openSettings, openHotKeys } = useEventsBusForIDE();
+  const [createTask] = useCreateTaskMutation();
 
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
+  const [renamingTaskId, setRenamingTaskId] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState<string | null>(null);
+  const [updateTaskMeta] = useUpdateTaskMetaMutation();
 
   const handleNavigation = useCallback(
     (to: DropdownNavigationOptions | "chat") => {
@@ -152,6 +176,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           success: true,
           error_message: "",
         });
+      } else if (to === "knowledge graph") {
+        dispatch(push({ name: "knowledge graph" }));
+        void sendTelemetryEvent({
+          scope: `openKnowledgeGraph`,
+          success: true,
+          error_message: "",
+        });
       } else if (to === "chat") {
         dispatch(popBackTo({ name: "history" }));
         dispatch(push({ name: "chat" }));
@@ -163,24 +194,52 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const onCreateNewChat = useCallback(() => {
     setRenamingTabId(null);
 
-    // Auto-close empty chat tab when creating a new chat
-    if (currentChatId) {
-      const currentThread = allThreads[currentChatId];
-      if (currentThread && currentThread.thread.messages.length === 0) {
-        dispatch(closeThread({ id: currentChatId }));
-      }
+    const currentThread = allThreads[currentChatId] as
+      | { thread: { messages: unknown[] } }
+      | undefined;
+    if (currentThread && currentThread.thread.messages.length === 0) {
+      dispatch(closeThread({ id: currentChatId }));
     }
 
     dispatch(newChatAction());
     dispatch(clearThreadPauseReasons({ id: currentChatId }));
-    dispatch(setThreadConfirmationStatus({ id: currentChatId, wasInteracted: false, confirmationStatus: true }));
+    dispatch(
+      setThreadConfirmationStatus({
+        id: currentChatId,
+        wasInteracted: false,
+        confirmationStatus: true,
+      }),
+    );
     handleNavigation("chat");
     void sendTelemetryEvent({
       scope: `openNewChat`,
       success: true,
       error_message: "",
     });
-  }, [dispatch, currentChatId, allThreads, sendTelemetryEvent, handleNavigation]);
+  }, [
+    dispatch,
+    currentChatId,
+    allThreads,
+    sendTelemetryEvent,
+    handleNavigation,
+  ]);
+
+  const onCreateNewTask = useCallback(() => {
+    createTask({ name: "New Task" })
+      .unwrap()
+      .then((task) => {
+        dispatch(openTask({ id: task.id, name: task.name }));
+        dispatch(push({ name: "task workspace", taskId: task.id }));
+        void sendTelemetryEvent({
+          scope: `openNewTask`,
+          success: true,
+          error_message: "",
+        });
+      })
+      .catch(() => {
+        /* handled by RTK Query */
+      });
+  }, [createTask, dispatch, sendTelemetryEvent]);
 
   const goToTab = useCallback(
     (tab: Tab) => {
@@ -199,6 +258,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       if (tab.type === "dashboard") {
         dispatch(popBackTo({ name: "history" }));
+      } else if (tab.type === "task") {
+        dispatch(popBackTo({ name: "history" }));
+        dispatch(push({ name: "task workspace", taskId: tab.taskId }));
       } else {
         dispatch(switchToThread({ id: tab.id }));
         dispatch(popBackTo({ name: "history" }));
@@ -211,6 +273,18 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       });
     },
     [dispatch, sendTelemetryEvent, activeTab, allThreads],
+  );
+
+  const handleCloseTaskTab = useCallback(
+    (event: MouseEvent, taskId: string) => {
+      event.stopPropagation();
+      event.preventDefault();
+      dispatch(closeTask(taskId));
+      if (isTaskTab(activeTab) && activeTab.taskId === taskId) {
+        goToTab({ type: "dashboard" });
+      }
+    },
+    [dispatch, activeTab, goToTab],
   );
 
   useEffect(() => {
@@ -230,35 +304,24 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     }
   }, [focus]);
 
-  const tabs = useMemo(() => {
-    return openThreadIds
-      .map((id) => {
-        const runtime = allThreads[id];
-        if (!runtime) return null;
-        return {
-          id,
-          title: runtime.thread.title || "New Chat",
-          read: runtime.thread.read,
-          streaming: runtime.streaming,
-          waiting: runtime.waiting_for_response,
-        };
-      })
-      .filter((t): t is NonNullable<typeof t> => t !== null);
-  }, [openThreadIds, allThreads]);
+
 
   const shouldCollapse = useMemo(() => {
     const dashboardWidth = windowWidth < 400 ? 47 : 70;
-    const totalWidth = dashboardWidth + 140 * tabs.length;
+    const totalWidth = dashboardWidth + 140 * (tabs.length + openTasks.length);
     return tabNavWidth < totalWidth;
-  }, [tabNavWidth, tabs.length, windowWidth]);
+  }, [tabNavWidth, tabs.length, openTasks.length, windowWidth]);
 
-  const handleChatThreadDeletion = useCallback((tabId: string) => {
-    dispatch(deleteChatById(tabId));
-    dispatch(closeThread({ id: tabId }));
-    if (activeTab.type === "chat" && activeTab.id === tabId) {
-      goToTab({ type: "dashboard" });
-    }
-  }, [dispatch, activeTab, goToTab]);
+  const handleChatThreadDeletion = useCallback(
+    (tabId: string) => {
+      dispatch(deleteChatById(tabId));
+      dispatch(closeThread({ id: tabId }));
+      if (activeTab.type === "chat" && activeTab.id === tabId) {
+        goToTab({ type: "dashboard" });
+      }
+    },
+    [dispatch, activeTab, goToTab],
+  );
 
   const handleChatThreadRenaming = useCallback((tabId: string) => {
     setRenamingTabId(tabId);
@@ -285,28 +348,49 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [dispatch, newTitle],
   );
 
+  const handleTaskRenaming = useCallback((taskId: string) => {
+    setRenamingTaskId(taskId);
+  }, []);
+
+  const handleKeyUpOnTaskRename = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>, taskId: string) => {
+      if (event.code === "Escape") {
+        setRenamingTaskId(null);
+      }
+      if (event.code === "Enter") {
+        setRenamingTaskId(null);
+        if (!newTitle || newTitle.trim() === "") return;
+        void updateTaskMeta({ taskId, name: newTitle });
+      }
+    },
+    [newTitle, updateTaskMeta],
+  );
+
   const handleChatTitleChange = (event: ChangeEvent<HTMLInputElement>) => {
     setNewTitle(event.target.value);
   };
 
-  const handleCloseTab = useCallback((event: MouseEvent, tabId: string) => {
-    event.stopPropagation();
-    event.preventDefault();
-    dispatch(closeThread({ id: tabId }));
-    if (activeTab.type === "chat" && activeTab.id === tabId) {
-      const remainingTabs = tabs.filter((t) => t.id !== tabId);
-      if (remainingTabs.length > 0) {
-        goToTab({ type: "chat", id: remainingTabs[0].id });
-      } else {
-        goToTab({ type: "dashboard" });
+  const handleCloseTab = useCallback(
+    (event: MouseEvent, tabId: string) => {
+      event.stopPropagation();
+      event.preventDefault();
+      dispatch(closeThread({ id: tabId }));
+      if (activeTab.type === "chat" && activeTab.id === tabId) {
+        const remainingTabs = tabs.filter((t) => t.id !== tabId);
+        if (remainingTabs.length > 0) {
+          goToTab({ type: "chat", id: remainingTabs[0].id });
+        } else {
+          goToTab({ type: "dashboard" });
+        }
       }
-    }
-  }, [dispatch, activeTab, tabs, goToTab]);
+    },
+    [dispatch, activeTab, tabs, goToTab],
+  );
 
   return (
     <Flex align="center" m="4px" gap="4px" style={{ alignSelf: "stretch" }}>
       <Flex flexGrow="1" align="start" maxHeight="40px" overflowY="hidden">
-        <TabNav.Root style={{ flex: 1, overflowX: "scroll" }} ref={tabNav}>
+        <TabNav.Root style={{ flex: 1, overflowX: "scroll" }} ref={tabNav} className={styles.tabNav}>
           <TabNav.Link
             active={isDashboardTab(activeTab)}
             ref={(x) => refs.setBack(x)}
@@ -318,6 +402,88 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           >
             {windowWidth < 400 || shouldCollapse ? <HomeIcon /> : "Home"}
           </TabNav.Link>
+          {openTasks.map((task) => {
+            const isActive =
+              isTaskTab(activeTab) && activeTab.taskId === task.id;
+            const taskName = task.name.trim() || "Task";
+            const isRenaming = renamingTaskId === task.id;
+
+            if (isRenaming) {
+              return (
+                <TextField.Root
+                  my="auto"
+                  key={`task-${task.id}`}
+                  autoComplete="off"
+                  onKeyUp={(e) => handleKeyUpOnTaskRename(e, task.id)}
+                  onBlur={() => setRenamingTaskId(null)}
+                  autoFocus
+                  size="2"
+                  defaultValue={taskName}
+                  onChange={handleChatTitleChange}
+                  className={styles.RenameInput}
+                />
+              );
+            }
+
+            return (
+              <TabNav.Link
+                active={isActive}
+                key={`task-${task.id}`}
+                onClick={() =>
+                  goToTab({ type: "task", taskId: task.id, taskName })
+                }
+                style={{ minWidth: 0, maxWidth: "150px", cursor: "pointer" }}
+                title={taskName}
+              >
+                <Flex gap="2" align="center">
+                  <CheckboxIcon />
+                  <TruncateLeft
+                    style={{
+                      maxWidth: shouldCollapse ? "25px" : "80px",
+                    }}
+                  >
+                    {taskName}
+                  </TruncateLeft>
+                  <Flex gap="1" align="center">
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger>
+                        <IconButton
+                          size="1"
+                          variant="ghost"
+                          color="gray"
+                          title="Task actions"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <DotsVerticalIcon />
+                        </IconButton>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Content
+                        size="1"
+                        side="bottom"
+                        align="end"
+                        style={{ minWidth: 110 }}
+                      >
+                        <DropdownMenu.Item
+                          onClick={() => handleTaskRenaming(task.id)}
+                        >
+                          Rename
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Root>
+                    <IconButton
+                      size="1"
+                      variant="ghost"
+                      color="gray"
+                      title="Close task tab"
+                      onClick={(e) => handleCloseTaskTab(e, task.id)}
+                    >
+                      <Cross1Icon />
+                    </IconButton>
+                  </Flex>
+                </Flex>
+              </TabNav.Link>
+            );
+          })}
           {tabs.map((tab) => {
             const isActive = isChatTab(activeTab) && activeTab.id === tab.id;
             const isRenaming = renamingTabId === tab.id;
@@ -348,7 +514,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                 title={tab.title}
               >
                 {(tab.streaming || tab.waiting) && <Spinner mr="1" />}
-                {!tab.streaming && !tab.waiting && tab.read === false && <DotFilledIcon />}
+                {!tab.streaming && !tab.waiting && !tab.read && (
+                  <DotFilledIcon />
+                )}
                 <Flex gap="2" align="center">
                   <TruncateLeft
                     style={{
@@ -376,7 +544,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                         align="end"
                         style={{ minWidth: 110 }}
                       >
-                        <DropdownMenu.Item onClick={() => handleChatThreadRenaming(tab.id)}>
+                        <DropdownMenu.Item
+                          onClick={() => handleChatThreadRenaming(tab.id)}
+                        >
                           Rename
                         </DropdownMenu.Item>
                         <DropdownMenu.Item
@@ -404,23 +574,38 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         </TabNav.Root>
       </Flex>
       {windowWidth < 400 ? (
-        <IconButton
-          variant="outline"
-          ref={(x) => refs.setNewChat(x)}
-          onClick={onCreateNewChat}
-        >
-          <PlusIcon />
-        </IconButton>
+        <>
+          <IconButton
+            variant="outline"
+            onClick={onCreateNewTask}
+            title="New Task"
+          >
+            <CheckboxIcon />
+          </IconButton>
+          <IconButton
+            variant="outline"
+            ref={(x) => refs.setNewChat(x)}
+            onClick={onCreateNewChat}
+          >
+            <PlusIcon />
+          </IconButton>
+        </>
       ) : (
-        <Button
-          variant="outline"
-          ref={(x) => refs.setNewChat(x)}
-          onClick={onCreateNewChat}
-          disabled={!newChatEnabled}
-        >
-          <PlusIcon />
-          <Text>New chat</Text>
-        </Button>
+        <>
+          <Button variant="outline" onClick={onCreateNewTask}>
+            <CheckboxIcon />
+            <Text>New Task</Text>
+          </Button>
+          <Button
+            variant="outline"
+            ref={(x) => refs.setNewChat(x)}
+            onClick={onCreateNewChat}
+            disabled={!newChatEnabled}
+          >
+            <PlusIcon />
+            <Text>New chat</Text>
+          </Button>
+        </>
       )}
       <Dropdown handleNavigation={handleNavigation} />
     </Flex>

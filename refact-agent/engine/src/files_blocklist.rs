@@ -10,7 +10,6 @@ use crate::files_correction::canonical_path;
 use crate::global_context::GlobalContext;
 use crate::files_correction::any_glob_matches_path;
 
-
 // TODO:
 // remove debug prints
 // react on .git appearing / disappearing => reindex all
@@ -22,7 +21,6 @@ use crate::files_correction::any_glob_matches_path;
 // ignored file add / remove file events don't do anything
 // a file in an ignored dir, same tests
 // changes in indexing.yaml loaded (almost) immediately
-
 
 const INDEXING_TOO_OLD: Duration = Duration::from_secs(3);
 
@@ -67,7 +65,10 @@ impl IndexingEverywhere {
         for (vcs, vcs_settings) in &self.vcs_indexing_settings_map {
             let vcs_pathbuf = PathBuf::from(vcs);
             if path.starts_with(&vcs) {
-                if best_vcs.is_none() || vcs_pathbuf.components().count() > best_pathbuf.clone().unwrap().components().count() {
+                if best_vcs.is_none()
+                    || vcs_pathbuf.components().count()
+                        > best_pathbuf.clone().unwrap().components().count()
+                {
                     best_vcs = Some(vcs_settings.clone());
                     best_pathbuf = Some(vcs_pathbuf);
                 }
@@ -76,7 +77,9 @@ impl IndexingEverywhere {
 
         if let Some(t) = best_vcs {
             result.blocklist.extend(t.blocklist);
-            result.additional_indexing_dirs.extend(t.additional_indexing_dirs);
+            result
+                .additional_indexing_dirs
+                .extend(t.additional_indexing_dirs);
         }
 
         result
@@ -98,7 +101,10 @@ pub async fn load_indexing_yaml(
 pub async fn reload_global_indexing_only(gcx: Arc<ARwLock<GlobalContext>>) -> IndexingEverywhere {
     let (config_dir, indexing_yaml) = {
         let gcx_locked = gcx.read().await;
-        (gcx_locked.config_dir.clone(), gcx_locked.cmdline.indexing_yaml.clone())
+        (
+            gcx_locked.config_dir.clone(),
+            gcx_locked.cmdline.indexing_yaml.clone(),
+        )
     };
     let global_indexing_path = if indexing_yaml.is_empty() {
         config_dir.join("indexing.yaml")
@@ -106,7 +112,9 @@ pub async fn reload_global_indexing_only(gcx: Arc<ARwLock<GlobalContext>>) -> In
         canonical_path(indexing_yaml)
     };
     IndexingEverywhere {
-        global: load_indexing_yaml(&global_indexing_path, None).await.unwrap_or_default(),
+        global: load_indexing_yaml(&global_indexing_path, None)
+            .await
+            .unwrap_or_default(),
         vcs_indexing_settings_map: HashMap::new(),
         loaded_ts: 0,
     }
@@ -115,14 +123,21 @@ pub async fn reload_global_indexing_only(gcx: Arc<ARwLock<GlobalContext>>) -> In
 pub async fn reload_indexing_everywhere_if_needed(
     gcx: Arc<ARwLock<GlobalContext>>,
 ) -> Arc<IndexingEverywhere> {
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     // Initially this is loaded in _ls_files_under_version_control_recursive()
     let (config_dir, indexing_yaml, workspace_vcs_roots) = {
         let gcx_locked = gcx.read().await;
         if gcx_locked.indexing_everywhere.loaded_ts + INDEXING_TOO_OLD.as_secs() > now {
             return gcx_locked.indexing_everywhere.clone();
         }
-        (gcx_locked.config_dir.clone(), gcx_locked.cmdline.indexing_yaml.clone(), gcx_locked.documents_state.workspace_vcs_roots.clone())
+        (
+            gcx_locked.config_dir.clone(),
+            gcx_locked.cmdline.indexing_yaml.clone(),
+            gcx_locked.documents_state.workspace_vcs_roots.clone(),
+        )
     };
 
     let indexing_everywhere = {
@@ -132,21 +147,31 @@ pub async fn reload_indexing_everywhere_if_needed(
             } else {
                 canonical_path(indexing_yaml)
             };
-            load_indexing_yaml(&global_indexing_path, None).await.unwrap_or_else(|e| {
-                tracing::error!("cannot load {:?}: {}, fallback to defaults", config_dir, e);
-                IndexingSettings::default()
-            })
+            load_indexing_yaml(&global_indexing_path, None)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("cannot load {:?}: {}, fallback to defaults", config_dir, e);
+                    IndexingSettings::default()
+                })
         };
 
-        let vcs_dirs: Vec<PathBuf> = workspace_vcs_roots.lock().unwrap().iter().cloned().collect();
+        let vcs_dirs: Vec<PathBuf> = workspace_vcs_roots
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
         let mut vcs_indexing_settings_map: HashMap<String, IndexingSettings> = HashMap::new();
         for indexing_root in vcs_dirs {
             let indexing_path = indexing_root.join(".refact").join("indexing.yaml");
             if indexing_path.exists() {
                 match load_indexing_yaml(&indexing_path, Some(&indexing_root)).await {
                     Ok(indexing_settings) => {
-                        vcs_indexing_settings_map.insert(indexing_root.to_str().unwrap().to_string(), indexing_settings);
-                    },
+                        vcs_indexing_settings_map.insert(
+                            indexing_root.to_str().unwrap().to_string(),
+                            indexing_settings,
+                        );
+                    }
                     Err(e) => {
                         tracing::error!("{}, skip", e);
                     }
@@ -190,8 +215,17 @@ fn _load_indexing_yaml_str(
                 }
                 let expanded_dir = if indexing_dir.starts_with("~") {
                     if let Some(without_tilde) = indexing_dir.strip_prefix("~") {
-                        let home_dir = PathBuf::from(&home::home_dir().ok_or(()).expect("failed to find home dir").to_string_lossy().to_string());
-                        home_dir.join(without_tilde.trim_start_matches('/')).to_string_lossy().into_owned()
+                        let home_dir = PathBuf::from(
+                            &home::home_dir()
+                                .ok_or(())
+                                .expect("failed to find home dir")
+                                .to_string_lossy()
+                                .to_string(),
+                        );
+                        home_dir
+                            .join(without_tilde.trim_start_matches('/'))
+                            .to_string_lossy()
+                            .into_owned()
                     } else {
                         indexing_dir.clone()
                     }
@@ -212,14 +246,17 @@ fn _load_indexing_yaml_str(
                             .into_owned();
                         additional_indexing_dirs.push(normalized);
                     } else {
-                        tracing::error!("can't have relative path {} in the global indexing.yaml", indexing_dir)
+                        tracing::error!(
+                            "can't have relative path {} in the global indexing.yaml",
+                            indexing_dir
+                        )
                     }
                 }
             }
             return Ok(IndexingSettings {
                 blocklist: indexing_settings.blocklist,
                 additional_indexing_dirs,
-            })
+            });
         }
         Err(e) => {
             return Err(format!("{}", e));

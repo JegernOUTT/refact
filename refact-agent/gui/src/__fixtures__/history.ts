@@ -61,11 +61,9 @@ export const HISTORY: ChatHistoryItem[] = [
       },
       {
         role: "tool",
-        content: {
-          tool_call_id: "call_D0rhujadTb1nvKlMbZ8ZYLEt",
-          content: "performed vecdb search, results below",
-          tool_failed: false,
-        },
+        tool_call_id: "call_D0rhujadTb1nvKlMbZ8ZYLEt",
+        content: "performed vecdb search, results below",
+        tool_failed: false,
       },
       {
         role: "context_file",

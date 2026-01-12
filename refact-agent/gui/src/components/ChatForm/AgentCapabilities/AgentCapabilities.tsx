@@ -3,7 +3,6 @@ import {
   QuestionMarkCircledIcon,
 } from "@radix-ui/react-icons";
 import {
-  Box,
   Flex,
   HoverCard,
   IconButton,
@@ -13,11 +12,11 @@ import {
 } from "@radix-ui/themes";
 import { UsageCounter } from "../../UsageCounter";
 import { useUsageCounter } from "../../UsageCounter/useUsageCounter";
+import { TrajectoryButton } from "../../Trajectory";
 import {
   AgentRollbackSwitch,
   ApplyPatchSwitch,
   FollowUpsSwitch,
-  UseCompressionSwitch,
   ProjectInfoSwitch,
 } from "../ChatControls";
 import { useAppSelector } from "../../../hooks";
@@ -25,7 +24,6 @@ import {
   selectAreFollowUpsEnabled,
   selectAutomaticPatch,
   selectCheckpointsEnabled,
-  selectUseCompression,
   selectIncludeProjectInfo,
   selectMessages,
 } from "../../../features/Chat";
@@ -36,7 +34,6 @@ export const AgentCapabilities = () => {
   const isPatchAutomatic = useAppSelector(selectAutomaticPatch);
   const isAgentRollbackEnabled = useAppSelector(selectCheckpointsEnabled);
   const areFollowUpsEnabled = useAppSelector(selectAreFollowUpsEnabled);
-  const useCompression = useAppSelector(selectUseCompression);
   const includeProjectInfo = useAppSelector(selectIncludeProjectInfo);
   const messages = useAppSelector(selectMessages);
   const isNewChat = messages.length === 0;
@@ -60,11 +57,6 @@ export const AgentCapabilities = () => {
         switcher: <FollowUpsSwitch />,
       },
       {
-        name: "Compression",
-        enabled: useCompression,
-        switcher: <UseCompressionSwitch />,
-      },
-      {
         name: "Project info",
         enabled: includeProjectInfo ?? true,
         switcher: <ProjectInfoSwitch />,
@@ -75,7 +67,6 @@ export const AgentCapabilities = () => {
     isPatchAutomatic,
     isAgentRollbackEnabled,
     areFollowUpsEnabled,
-    useCompression,
     includeProjectInfo,
     isNewChat,
   ]);
@@ -104,7 +95,9 @@ export const AgentCapabilities = () => {
             <Flex gap="2" direction="column">
               {agenticFeatures.map((feature) => {
                 if ("hide" in feature && feature.hide) return null;
-                return <Fragment key={feature.name}>{feature.switcher}</Fragment>;
+                return (
+                  <Fragment key={feature.name}>{feature.switcher}</Fragment>
+                );
               })}
               <Separator size="4" mt="2" mb="1" />
               <ToolGroups />
@@ -127,9 +120,10 @@ export const AgentCapabilities = () => {
         </HoverCard.Root>
       </Flex>
       {shouldShowUsage && (
-        <Box>
+        <Flex align="center" gap="1">
           <UsageCounter />
-        </Box>
+          <TrajectoryButton />
+        </Flex>
       )}
     </Flex>
   );

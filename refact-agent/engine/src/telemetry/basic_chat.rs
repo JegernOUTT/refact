@@ -28,10 +28,12 @@ pub async fn compress_basic_chat_telemetry_to_file(
         json_dict["counter"] = json!(cnt);
         records.push(json_dict);
     }
-    match compress_tele_records_to_file(cx.clone(), records, "chat".to_string(), "chat".to_string()).await {
+    match compress_tele_records_to_file(cx.clone(), records, "chat".to_string(), "chat".to_string())
+        .await
+    {
         Ok(_) => {
             cx.write().await.telemetry.write().unwrap().tele_net.clear();
-        },
+        }
         Err(_) => {}
     };
 }

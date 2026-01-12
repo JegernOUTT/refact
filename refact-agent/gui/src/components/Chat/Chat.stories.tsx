@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { Chat } from "./Chat";
@@ -37,7 +38,7 @@ const Template: React.FC<{
       wasSuggested: false,
     },
   };
-  const threadId = threadData.id ?? "test";
+  const threadId = threadData.id;
   const store = setUpStore({
     tour: {
       type: "finished",
@@ -52,7 +53,7 @@ const Template: React.FC<{
           waiting_for_response: false,
           prevent_send: false,
           error: null,
-          queued_messages: [],
+          queued_items: [],
           send_immediately: false,
           attached_images: [],
           confirmation: {
@@ -60,11 +61,14 @@ const Template: React.FC<{
             pause_reasons: [],
             status: { wasInteracted: false, confirmationStatus: true },
           },
+          snapshot_received: true,
         },
       },
       max_new_tokens: 4096,
       tool_use: "agent",
       system_prompt: {},
+      sse_refresh_requested: null,
+      stream_version: 0,
     },
     config,
   });
@@ -117,7 +121,7 @@ export const Primary: Story = {};
 export const Configuration: Story = {
   args: {
     thread:
-      CHAT_CONFIG_THREAD.threads[CHAT_CONFIG_THREAD.current_thread_id]?.thread,
+      CHAT_CONFIG_THREAD.threads[CHAT_CONFIG_THREAD.current_thread_id]!.thread,
   },
 };
 
@@ -160,7 +164,6 @@ export const Knowledge: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-
       ],
     },
   },
@@ -202,7 +205,6 @@ export const EmptySpaceAtBottom: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-
       ],
     },
   },
@@ -283,7 +285,6 @@ export const UserMessageEmptySpaceAtBottom: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-
       ],
     },
   },
@@ -366,7 +367,6 @@ export const CompressButton: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-
       ],
     },
   },

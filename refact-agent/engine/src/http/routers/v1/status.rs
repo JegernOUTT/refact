@@ -19,14 +19,19 @@ pub struct RagStatus {
 pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
     let (vec_db_module, vec_db_error, ast_module) = {
         let gcx_locked = gcx.write().await;
-        (gcx_locked.vec_db.clone(), gcx_locked.vec_db_error.clone(), gcx_locked.ast_service.clone())
+        (
+            gcx_locked.vec_db.clone(),
+            gcx_locked.vec_db_error.clone(),
+            gcx_locked.ast_service.clone(),
+        )
     };
 
-    let (maybe_vecdb_status, vecdb_message) = match crate::vecdb::vdb_highlev::get_status(vec_db_module).await {
-        Ok(Some(status)) => (Some(status), "working".to_string()),
-        Ok(None) => (None, "turned_off".to_string()),
-        Err(err) => (None, err.to_string()),
-    };
+    let (maybe_vecdb_status, vecdb_message) =
+        match crate::vecdb::vdb_highlev::get_status(vec_db_module).await {
+            Ok(Some(status)) => (Some(status), "working".to_string()),
+            Ok(None) => (None, "turned_off".to_string()),
+            Err(err) => (None, err.to_string()),
+        };
 
     let (maybe_ast_status, ast_message) = match &ast_module {
         Some(ast_service) => {
@@ -34,7 +39,7 @@ pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
             let status = ast_status.lock().await.clone();
             (Some(status), "working".to_string())
         }
-        None => (None, "turned_off".to_string())
+        None => (None, "turned_off".to_string()),
     };
 
     RagStatus {
@@ -52,7 +57,10 @@ pub async fn handle_v1_rag_status(
     let status = get_rag_status(gcx).await;
 
     let json_string = serde_json::to_string_pretty(&status).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization problem: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization problem: {}", e),
+        )
     })?;
 
     Ok(Response::builder()

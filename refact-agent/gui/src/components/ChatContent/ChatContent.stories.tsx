@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { ChatContent } from ".";
@@ -45,7 +46,7 @@ const MockedStore: React.FC<{
       wasSuggested: false,
     },
   };
-  const threadId = threadData.id ?? "test";
+  const threadId = threadData.id;
   const store = setUpStore({
     chat: {
       current_thread_id: threadId,
@@ -57,7 +58,7 @@ const MockedStore: React.FC<{
           waiting_for_response: false,
           prevent_send: false,
           error: null,
-          queued_messages: [],
+          queued_items: [],
           send_immediately: false,
           attached_images: [],
           confirmation: {
@@ -65,11 +66,14 @@ const MockedStore: React.FC<{
             pause_reasons: [],
             status: { wasInteracted: false, confirmationStatus: true },
           },
+          snapshot_received: true,
         },
       },
       max_new_tokens: 4096,
       tool_use: "quick",
       system_prompt: {},
+      sse_refresh_requested: null,
+      stream_version: 0,
     },
   });
 
@@ -159,7 +163,7 @@ export const MultiModal: Story = {
 export const IntegrationChat: Story = {
   args: {
     thread:
-      CHAT_CONFIG_THREAD.threads[CHAT_CONFIG_THREAD.current_thread_id]?.thread,
+      CHAT_CONFIG_THREAD.threads[CHAT_CONFIG_THREAD.current_thread_id]!.thread,
   },
   parameters: {
     msw: {

@@ -4,11 +4,11 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 
-use crate::subchat::subchat;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
-use crate::call_validation::{ChatMessage, ChatContent, ChatUsage, ContextEnum, SubchatParameters};
+use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::memories::{memories_add_enriched, EnrichmentParams};
+use crate::subchat::run_subchat;
+use crate::postprocessing::pp_command_output::OutputFilter;
 
 pub struct ToolSubagent {
     pub config_path: String,
@@ -31,9 +31,12 @@ Do NOT:
 - Ask clarifying questions - work with what you have
 - Exceed your step budget unnecessarily"#;
 
-static WRAP_UP_PROMPT: &str = r#"Summarize your work. What did you accomplish? What are the key findings or results?"#;
-
-fn build_task_prompt(task: &str, expected_result: &str, tools: &[String], max_steps: usize) -> String {
+fn build_task_prompt(
+    task: &str,
+    expected_result: &str,
+    tools: &[String],
+    max_steps: usize,
+) -> String {
     format!(
         r#"# Your Task
 {task}
@@ -50,61 +53,22 @@ You have access to these tools: {tools_list}
 - Report findings clearly when done"#,
         task = task,
         expected_result = expected_result,
-        tools_list = if tools.is_empty() { "all available".to_string() } else { tools.join(", ") },
+        tools_list = if tools.is_empty() {
+            "all available".to_string()
+        } else {
+            tools.join(", ")
+        },
         max_steps = max_steps
     )
 }
 
-async fn execute_subagent(
-    ccx_subchat: Arc<AMutex<AtCommandsContext>>,
-    subchat_params: &SubchatParameters,
-    task: &str,
-    expected_result: &str,
-    tools: Vec<String>,
-    max_steps: usize,
-    usage_collector: &mut ChatUsage,
-    tool_call_id: &String,
-    log_prefix: &str,
-) -> Result<ChatMessage, String> {
-    let task_prompt = build_task_prompt(task, expected_result, &tools, max_steps);
 
-    let messages = vec![
-        ChatMessage::new("system".to_string(), SUBAGENT_SYSTEM_PROMPT.to_string()),
-        ChatMessage::new("user".to_string(), task_prompt),
-    ];
-
-    let tools_subset = if tools.is_empty() {
-        vec![]
-    } else {
-        tools
-    };
-
-    let choices = subchat(
-        ccx_subchat.clone(),
-        subchat_params.subchat_model.as_str(),
-        messages,
-        tools_subset,
-        max_steps,
-        subchat_params.subchat_n_ctx - subchat_params.subchat_max_new_tokens,
-        WRAP_UP_PROMPT,
-        1,
-        subchat_params.subchat_temperature,
-        subchat_params.subchat_reasoning_effort.clone(),
-        Some(tool_call_id.clone()),
-        Some(format!("{log_prefix}-subagent")),
-        Some(true),
-    ).await?;
-
-    let session = choices.into_iter().next().unwrap();
-    let reply = session.last().unwrap().clone();
-    crate::tools::tools_execute::update_usage_from_message(usage_collector, &reply);
-
-    Ok(reply)
-}
 
 #[async_trait]
 impl Tool for ToolSubagent {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
@@ -147,111 +111,120 @@ impl Tool for ToolSubagent {
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        args: &HashMap<String, Value>
+        args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let task = match args.get("task") {
             Some(Value::String(s)) => s.clone(),
             Some(v) => return Err(format!("argument `task` is not a string: {:?}", v)),
-            None => return Err("Missing argument `task`".to_string())
+            None => return Err("Missing argument `task`".to_string()),
         };
 
         let expected_result = match args.get("expected_result") {
             Some(Value::String(s)) => s.clone(),
-            Some(v) => return Err(format!("argument `expected_result` is not a string: {:?}", v)),
-            None => return Err("Missing argument `expected_result`".to_string())
+            Some(v) => {
+                return Err(format!(
+                    "argument `expected_result` is not a string: {:?}",
+                    v
+                ))
+            }
+            None => return Err("Missing argument `expected_result`".to_string()),
         };
 
         let tools: Vec<String> = match args.get("tools") {
-            Some(Value::String(s)) if !s.trim().is_empty() => {
-                s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
-            },
-            _ => vec![]
+            Some(Value::String(s)) if !s.trim().is_empty() => s
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
+            _ => vec![],
         };
 
         let max_steps: usize = match args.get("max_steps") {
             Some(Value::String(s)) => s.parse().unwrap_or(10),
             Some(Value::Number(n)) => n.as_u64().unwrap_or(10) as usize,
-            _ => 10
+            _ => 10,
         };
         let max_steps = max_steps.min(50).max(1);
 
-        let mut usage_collector = ChatUsage { ..Default::default() };
-        let log_prefix = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let subchat_params: SubchatParameters = crate::tools::tools_execute::unwrap_subchat_params(ccx.clone(), "subagent").await?;
-
-        let ccx_subchat = {
+        let (gcx, parent_chat_id, parent_subchat_tx) = {
             let ccx_lock = ccx.lock().await;
-            let mut t = AtCommandsContext::new(
-                ccx_lock.global_context.clone(),
-                subchat_params.subchat_n_ctx,
-                8,
-                false,
-                vec![],
-                ccx_lock.chat_id.clone(),
-                ccx_lock.should_execute_remotely,
-                ccx_lock.current_model.clone(),
-            ).await;
-            t.subchat_tx = ccx_lock.subchat_tx.clone();
-            t.subchat_rx = ccx_lock.subchat_rx.clone();
-            Arc::new(AMutex::new(t))
+            (ccx_lock.global_context.clone(), ccx_lock.chat_id.clone(), ccx_lock.subchat_tx.clone())
         };
 
-        tracing::info!("Starting subagent for task: {}", task);
-        let subagent_result = execute_subagent(
-            ccx_subchat.clone(),
-            &subchat_params,
-            &task,
-            &expected_result,
-            tools,
+        let title = if task.len() > 60 {
+            let end = task
+                .char_indices()
+                .take_while(|(i, _)| *i < 60)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(60.min(task.len()));
+            format!("Subagent: {}...", &task[..end])
+        } else {
+            format!("Subagent: {}", task)
+        };
+
+        let config = crate::subchat::resolve_subchat_config_with_parent(
+            gcx.clone(),
+            "subagent",
+            true,
+            None,
+            Some(title),
+            Some(parent_chat_id),
+            Some("subagent".to_string()),
+            if tools.is_empty() { None } else { Some(tools.clone()) },
             max_steps,
-            &mut usage_collector,
-            tool_call_id,
-            &log_prefix,
+            false,
+            None,
+            Some(tool_call_id.clone()),
+            Some(parent_subchat_tx),
         ).await?;
 
-        let report_content = format!(
-            "# Subagent Report\n\n**Task:** {}\n\n**Expected Result:** {}\n\n## Result\n{}",
-            task,
-            expected_result,
-            subagent_result.content.content_text_only()
-        );
-        tracing::info!("Subagent completed task");
+        let user_prompt = build_task_prompt(&task, &expected_result, &tools, max_steps);
 
-        let title = if task.len() > 80 {
-            format!("{}...", &task[..80])
-        } else {
-            task.clone()
-        };
-        let enrichment_params = EnrichmentParams {
-            base_tags: vec!["subagent".to_string(), "delegation".to_string()],
-            base_filenames: vec![],
-            base_kind: "subagent".to_string(),
-            base_title: Some(title),
-        };
-        let memory_note = match memories_add_enriched(ccx.clone(), &report_content, enrichment_params).await {
-            Ok(path) => {
-                tracing::info!("Created enriched memory from subagent: {:?}", path);
-                format!("\n\n---\n📝 **This report has been saved to the knowledge base:** `{}`", path.display())
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: ChatContent::SimpleText(SUBAGENT_SYSTEM_PROMPT.to_string()),
+                ..Default::default()
             },
-            Err(e) => {
-                tracing::warn!("Failed to create enriched memory from subagent: {}", e);
-                String::new()
-            }
-        };
-        let final_message = format!("{}{}", report_content, memory_note);
+            ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::SimpleText(user_prompt),
+                ..Default::default()
+            },
+        ];
 
-        let mut results = vec![];
-        results.push(ContextEnum::ChatMessage(ChatMessage {
+        tracing::info!("Starting subagent for task: {} (model: {})", task, config.model);
+
+        let result = run_subchat(gcx, messages, config).await?;
+
+        let last_assistant = result.messages.iter().rev().find(|m| m.role == "assistant");
+        let result_content = last_assistant
+            .map(|m| m.content.content_text_only())
+            .unwrap_or_else(|| "Subagent completed but produced no response.".to_string());
+
+        let result_message = format!(
+            r#"# Subagent Result
+
+**Task:** {}
+
+**Expected Result:** {}
+
+## Response
+
+{}"#,
+            task, expected_result, result_content
+        );
+
+        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
-            content: ChatContent::SimpleText(final_message),
+            content: ChatContent::SimpleText(result_message),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
-            usage: Some(usage_collector),
-            output_filter: Some(crate::postprocessing::pp_command_output::OutputFilter::no_limits()),
+            usage: Some(result.usage),
+            output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
-        }));
-
-        Ok((false, results))
+        })]))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {

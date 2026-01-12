@@ -1,10 +1,12 @@
 import React, { useCallback, useMemo } from "react";
 import {
   ChatMessages,
+  DiffMessage,
   isChatContextFileMessage,
   isDiffMessage,
   isToolMessage,
   isUserMessage,
+  isSystemMessage,
   UserMessage,
 } from "../../services/refact";
 import { UserInput } from "./UserInput";
@@ -12,6 +14,7 @@ import { ScrollArea, ScrollAreaWithAnchor } from "../ScrollArea";
 import { Flex, Container, Button, Box } from "@radix-ui/themes";
 import styles from "./ChatContent.module.css";
 import { ContextFiles } from "./ContextFiles";
+import { SystemPrompt } from "./SystemPrompt";
 import { AssistantInput } from "./AssistantInput";
 
 import { PlainText } from "./PlainText";
@@ -23,7 +26,8 @@ import {
   selectIsStreaming,
   selectIsWaiting,
   selectMessages,
-  selectQueuedMessages,
+  selectQueuedItems,
+  selectSnapshotReceived,
   selectThread,
 } from "../../features/Chat/Thread/selectors";
 import { takeWhile } from "../../utils";
@@ -34,9 +38,14 @@ import { telemetryApi } from "../../services/refact/telemetry";
 import { PlaceHolderText } from "./PlaceHolderText";
 
 import { QueuedMessage } from "./QueuedMessage";
-import { selectThreadConfirmation, selectThreadPause } from "../../features/Chat";
+import {
+  selectThreadConfirmation,
+  selectThreadPause,
+} from "../../features/Chat";
 
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
+import { ChatLoading } from "./ChatLoading";
+import { StreamingTokenCounter } from "../UsageCounter";
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -50,11 +59,12 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const dispatch = useAppDispatch();
   const pauseReasonsWithPause = useAppSelector(selectThreadConfirmation);
   const messages = useAppSelector(selectMessages);
-  const queuedMessages = useAppSelector(selectQueuedMessages);
+  const queuedItems = useAppSelector(selectQueuedItems);
   const isStreaming = useAppSelector(selectIsStreaming);
+  const snapshotReceived = useAppSelector(selectSnapshotReceived);
   const thread = useAppSelector(selectThread);
 
-  const isConfig = thread?.mode === "CONFIGURE";
+  const isConfig = thread !== null && thread.mode === "CONFIGURE";
   const isWaiting = useAppSelector(selectIsWaiting);
   const [sendTelemetryEvent] =
     telemetryApi.useLazySendTelemetryChatEventQuery();
@@ -66,8 +76,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   };
 
   const handleReturnToConfigurationClick = useCallback(() => {
-    // console.log(`[DEBUG]: going back to configuration page`);
-    // TBD: should it be allowed to run in the background?
     onStopStreaming();
     dispatch(
       popBackTo({
@@ -116,23 +124,14 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         p="2"
         gap="1"
       >
-        {messages.length === 0 && (
+        {!snapshotReceived && <ChatLoading />}
+        {snapshotReceived && messages.length === 0 && (
           <Container>
             <PlaceHolderText />
           </Container>
         )}
-        {renderMessages(messages, onRetryWrapper, isWaiting)}
-        {queuedMessages.length > 0 && (
-          <Flex direction="column" gap="2" mt="2">
-            {queuedMessages.map((queuedMsg, index) => (
-              <QueuedMessage
-                key={queuedMsg.id}
-                queuedMessage={queuedMsg}
-                position={index + 1}
-              />
-            ))}
-          </Flex>
-        )}
+        {snapshotReceived &&
+          renderMessages(messages, onRetryWrapper, isWaiting)}
         <Container>
           <UncommittedChangesWarning />
         </Container>
@@ -151,24 +150,25 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         style={{
           position: "absolute",
           bottom: 0,
-          maxWidth: "100%", // TODO: make space for the down button
+          maxWidth: "100%",
         }}
       >
         <ScrollArea scrollbars="horizontal">
           <Flex align="start" gap="3" pb="2">
             {(isWaiting || isStreaming) && !pauseReasonsWithPause.pause && (
               <Button
-                // ml="auto"
                 color="red"
                 title="stop streaming"
                 onClick={handleManualStopStreamingClick}
               >
-                Stop
+                <Flex align="center" gap="2">
+                  Stop
+                  <StreamingTokenCounter />
+                </Flex>
               </Button>
             )}
             {shouldConfigButtonBeVisible && (
               <Button
-                // ml="auto"
                 color="gray"
                 title="Return to configuration page"
                 onClick={handleReturnToConfigurationClick}
@@ -181,6 +181,20 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           </Flex>
         </ScrollArea>
       </Box>
+
+      {queuedItems.length > 0 && (
+        <Box className={styles.queuedMessagesContainer}>
+          <Flex direction="column" gap="2" align="end">
+            {queuedItems.map((item, index) => (
+              <QueuedMessage
+                key={item.client_request_id}
+                queuedItem={item}
+                position={index + 1}
+              />
+            ))}
+          </Flex>
+        </Box>
+      )}
     </ScrollAreaWithAnchor.ScrollArea>
   );
 };
@@ -209,12 +223,13 @@ function renderMessages(
   if (head.role === "assistant") {
     const key = "assistant-input-" + index;
 
-    // Find context_file messages that follow this assistant message (skipping tool messages)
+    // Find context_file, tool, and diff messages that follow this assistant message
     const contextFilesAfter: React.ReactNode[] = [];
+    const diffMessagesAfter: DiffMessage[] = [];
     let skipCount = 0;
     let tempTail = tail;
 
-    // Skip tool messages and collect context_file messages until we hit another message type
+    // Skip tool messages and collect context_file/diff messages until we hit another message type
     while (tempTail.length > 0) {
       const nextMsg = tempTail[0];
       if (isToolMessage(nextMsg)) {
@@ -222,9 +237,25 @@ function renderMessages(
         skipCount++;
         tempTail = tempTail.slice(1);
       } else if (isChatContextFileMessage(nextMsg)) {
-        // Collect context_file messages to render after assistant
+        if (
+          nextMsg.tool_call_id === "knowledge_enrichment" ||
+          nextMsg.tool_call_id === "project_context"
+        ) {
+          break;
+        }
         const ctxKey = "context-file-" + (index + 1 + skipCount);
-        contextFilesAfter.push(<ContextFiles key={ctxKey} files={nextMsg.content} />);
+        contextFilesAfter.push(
+          <ContextFiles
+            key={ctxKey}
+            files={nextMsg.content}
+            toolCallId={nextMsg.tool_call_id}
+          />,
+        );
+        skipCount++;
+        tempTail = tempTail.slice(1);
+      } else if (isDiffMessage(nextMsg)) {
+        // Collect diff messages to render after assistant (before usage info)
+        diffMessagesAfter.push(nextMsg);
         skipCount++;
         tempTail = tempTail.slice(1);
       } else {
@@ -239,24 +270,36 @@ function renderMessages(
         key={key}
         message={head.content}
         reasoningContent={head.reasoning_content}
+        thinkingBlocks={head.thinking_blocks}
         toolCalls={head.tool_calls}
         serverExecutedTools={head.server_executed_tools}
         citations={head.citations}
       />,
       ...contextFilesAfter,
-      <MessageUsageInfo
-        key={`usage-${key}`}
-        usage={head.usage}
-        metering_coins_prompt={head.metering_coins_prompt}
-        metering_coins_generated={head.metering_coins_generated}
-        metering_coins_cache_creation={head.metering_coins_cache_creation}
-        metering_coins_cache_read={head.metering_coins_cache_read}
-      />,
+      // Render diff messages before usage info so coins appear after diffs
+      ...(diffMessagesAfter.length > 0
+        ? [<GroupedDiffs key={`diffs-${key}`} diffs={diffMessagesAfter} />]
+        : []),
+      <Container key={`usage-${key}`}>
+        <MessageUsageInfo
+          usage={head.usage}
+          metering_coins_prompt={head.metering_coins_prompt}
+          metering_coins_generated={head.metering_coins_generated}
+          metering_coins_cache_creation={head.metering_coins_cache_creation}
+          metering_coins_cache_read={head.metering_coins_cache_read}
+        />
+      </Container>,
     ];
 
-    // Skip the tool and context_file messages we already processed
+    // Skip the tool, context_file, and diff messages we already processed
     const newTail = tail.slice(skipCount);
-    return renderMessages(newTail, onRetry, waiting, nextMemo, index + 1 + skipCount);
+    return renderMessages(
+      newTail,
+      onRetry,
+      waiting,
+      nextMemo,
+      index + 1 + skipCount,
+    );
   }
 
   if (head.role === "user") {
@@ -281,7 +324,23 @@ function renderMessages(
 
   if (isChatContextFileMessage(head)) {
     const key = "context-file-" + index;
-    const nextMemo = [...memo, <ContextFiles key={key} files={head.content} />];
+    const nextMemo = [
+      ...memo,
+      <ContextFiles
+        key={key}
+        files={head.content}
+        toolCallId={head.tool_call_id}
+      />,
+    ];
+    return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
+  }
+
+  if (isSystemMessage(head)) {
+    const key = "system-" + index;
+    const nextMemo = [
+      ...memo,
+      <SystemPrompt key={key} content={head.content} />,
+    ];
     return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
   }
 

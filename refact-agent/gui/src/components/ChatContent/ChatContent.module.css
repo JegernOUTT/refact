@@ -148,20 +148,32 @@
   margin-top: 0 !important;
 }
 
+.queuedMessagesContainer {
+  position: absolute;
+  bottom: 60px;
+  right: 50px;
+  left: var(--space-2);
+  padding: var(--space-2);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.queuedMessagesContainer > * {
+  pointer-events: auto;
+}
+
 .queuedMessage {
-  --base-card-surface-box-shadow: 0 0 0 1px
-    color-mix(in oklab, var(--amber-a5), var(--amber-5) 25%);
-  background: var(--color-surface);
+  --base-card-surface-box-shadow: 0 0 0 1px var(--amber-6);
+  background: color-mix(in oklab, var(--amber-3) 40%, var(--color-surface));
   border-radius: var(--radius-2);
   padding: var(--space-2) var(--space-3);
   margin-left: auto;
   max-width: 85%;
-  opacity: 0.8;
 }
 
 .queuedMessagePriority {
-  --base-card-surface-box-shadow: 0 0 0 1px
-    color-mix(in oklab, var(--blue-a5), var(--blue-5) 25%);
+  --base-card-surface-box-shadow: 0 0 0 1px var(--blue-6);
+  background: color-mix(in oklab, var(--blue-3) 40%, var(--color-surface));
 }
 
 .queuedMessageText {

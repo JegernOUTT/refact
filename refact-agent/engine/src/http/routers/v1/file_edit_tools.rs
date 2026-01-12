@@ -33,12 +33,13 @@ pub async fn handle_v1_file_edit_tool_dry_run(
             format!("JSON problem: {}", e),
         )
     })?;
-    let (file_before, file_after, chunks) = match post.tool_name.as_str() {
+    let (file_before, file_after, chunks, _summary) = match post.tool_name.as_str() {
         "create_textdoc" => {
             crate::tools::file_edit::tool_create_textdoc::tool_create_text_doc_exec(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
@@ -48,6 +49,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
@@ -57,6 +59,7 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
@@ -66,6 +69,27 @@ pub async fn handle_v1_file_edit_tool_dry_run(
                 global_context.clone(),
                 &post.tool_args,
                 true,
+                &None,
+            )
+            .await
+            .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
+        }
+        "update_textdoc_anchored" => {
+            crate::tools::file_edit::tool_update_textdoc_anchored::tool_update_text_doc_anchored_exec(
+                global_context.clone(),
+                &post.tool_args,
+                true,
+                &None,
+            )
+            .await
+            .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?
+        }
+        "apply_patch" => {
+            crate::tools::file_edit::tool_apply_patch::tool_apply_patch_exec(
+                global_context.clone(),
+                &post.tool_args,
+                true,
+                &None,
             )
             .await
             .map_err(|x| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, x))?

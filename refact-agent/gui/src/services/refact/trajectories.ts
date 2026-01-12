@@ -10,6 +10,13 @@ export type TrajectoryMeta = {
   model: string;
   mode: string;
   message_count: number;
+  parent_id?: string;
+  link_type?: string;
+  task_id?: string;
+  task_role?: string;
+  agent_id?: string;
+  card_id?: string;
+  session_state?: "idle" | "generating" | "executing_tools" | "paused" | "waiting_ide" | "error";
 };
 
 export type TrajectoryData = {
@@ -38,16 +45,19 @@ export type TrajectoryEvent = {
   title?: string;
 };
 
-export function chatThreadToTrajectoryData(thread: ChatThread, createdAt?: string): TrajectoryData {
+export function chatThreadToTrajectoryData(
+  thread: ChatThread,
+  createdAt?: string,
+): TrajectoryData {
   const now = new Date().toISOString();
   return {
     id: thread.id,
-    title: thread.title || "New Chat",
-    created_at: createdAt || now,
+    title: thread.title ?? "New Chat",
+    created_at: createdAt ?? now,
     updated_at: now,
     model: thread.model,
-    mode: thread.mode || "AGENT",
-    tool_use: thread.tool_use || "agent",
+    mode: thread.mode ?? "AGENT",
+    tool_use: thread.tool_use ?? "agent",
     messages: thread.messages,
     boost_reasoning: thread.boost_reasoning,
     context_tokens_cap: thread.context_tokens_cap,
@@ -87,15 +97,19 @@ export const trajectoriesApi = createApi({
   baseQuery: fetchBaseQuery({ baseUrl: "/v1" }),
   tagTypes: ["Trajectory"],
   endpoints: (builder) => ({
-    listTrajectories: builder.query<TrajectoryMeta[], void>({
+    listTrajectories: builder.query<TrajectoryMeta[], undefined>({
       query: () => "/trajectories",
+      providesTags: ["Trajectory"],
+    }),
+    listAllTrajectories: builder.query<TrajectoryMeta[], undefined>({
+      query: () => "/trajectories/all",
       providesTags: ["Trajectory"],
     }),
     getTrajectory: builder.query<TrajectoryData, string>({
       query: (id) => `/trajectories/${id}`,
       providesTags: (_result, _error, id) => [{ type: "Trajectory", id }],
     }),
-    saveTrajectory: builder.mutation<void, TrajectoryData>({
+    saveTrajectory: builder.mutation<undefined, TrajectoryData>({
       query: (data) => ({
         url: `/trajectories/${data.id}`,
         method: "PUT",
@@ -106,7 +120,7 @@ export const trajectoriesApi = createApi({
         "Trajectory",
       ],
     }),
-    deleteTrajectory: builder.mutation<void, string>({
+    deleteTrajectory: builder.mutation<undefined, string>({
       query: (id) => ({
         url: `/trajectories/${id}`,
         method: "DELETE",
@@ -118,6 +132,7 @@ export const trajectoriesApi = createApi({
 
 export const {
   useListTrajectoriesQuery,
+  useListAllTrajectoriesQuery,
   useGetTrajectoryQuery,
   useSaveTrajectoryMutation,
   useDeleteTrajectoryMutation,

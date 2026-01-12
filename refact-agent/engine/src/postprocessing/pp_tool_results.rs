@@ -1,0 +1,921 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokenizers::Tokenizer;
+use tokio::sync::RwLock as ARwLock;
+use tracing::warn;
+
+use crate::ast::chunk_utils::official_text_hashing_function;
+use crate::call_validation::{ChatContent, ChatMessage, ContextFile, PostprocessSettings};
+use crate::files_correction::canonical_path;
+use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::global_context::GlobalContext;
+use crate::postprocessing::pp_context_files::postprocess_context_files;
+use crate::postprocessing::pp_plain_text::postprocess_plain_text;
+use crate::tokens::count_text_tokens_with_fallback;
+
+const MIN_CONTEXT_SIZE: usize = 8192;
+
+#[derive(Debug)]
+pub struct ToolBudget {
+    pub tokens_for_code: usize,
+    pub tokens_for_text: usize,
+}
+
+impl ToolBudget {
+    pub fn try_from_n_ctx(n_ctx: usize) -> Result<Self, String> {
+        if n_ctx < MIN_CONTEXT_SIZE {
+            return Err(format!(
+                "Model context size {} is below minimum {} tokens",
+                n_ctx, MIN_CONTEXT_SIZE
+            ));
+        }
+        let total = (n_ctx / 2).max(4096);
+        Ok(Self {
+            tokens_for_code: total,
+            tokens_for_text: total * 30 / 100,
+        })
+    }
+}
+
+pub async fn postprocess_tool_results(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    tokenizer: Option<Arc<Tokenizer>>,
+    tool_messages: Vec<ChatMessage>,
+    context_files: Vec<ContextFile>,
+    budget: ToolBudget,
+    pp_settings: PostprocessSettings,
+    existing_messages: &[ChatMessage],
+) -> Vec<ChatMessage> {
+    let mut result = Vec::new();
+
+    let (diff_messages, other_messages): (Vec<_>, Vec<_>) =
+        tool_messages.into_iter().partition(|m| m.role == "diff");
+
+    result.extend(diff_messages);
+
+    let total_budget = budget.tokens_for_code;
+    let text_budget = if context_files.is_empty() {
+        total_budget
+    } else if other_messages.is_empty() {
+        0
+    } else {
+        budget.tokens_for_text
+    };
+
+    let (text_messages, text_remaining) =
+        postprocess_plain_text(other_messages, tokenizer.clone(), text_budget, &None).await;
+    result.extend(text_messages);
+
+    let code_budget = total_budget.saturating_sub(text_budget) + text_remaining;
+
+    let (file_message, notes, _code_used) = if !context_files.is_empty() {
+        postprocess_context_file_results(
+            gcx,
+            tokenizer.clone(),
+            context_files,
+            code_budget,
+            pp_settings,
+            existing_messages,
+        )
+        .await
+    } else {
+        (None, vec![], 0)
+    };
+
+    if !notes.is_empty() {
+        if let Some(last_tool_msg) = result.iter_mut().rev().find(|m| m.role == "tool") {
+            if let ChatContent::SimpleText(ref mut text) = last_tool_msg.content {
+                text.push_str("\n\n");
+                text.push_str(&notes.join("\n"));
+            }
+        }
+    }
+
+    if let Some(msg) = file_message {
+        result.push(msg);
+    }
+
+    result
+}
+
+fn deduplicate_and_merge_context_files(
+    context_files: Vec<ContextFile>,
+    existing_messages: &[ChatMessage],
+) -> (Vec<ContextFile>, Vec<String>) {
+    let mut file_groups: HashMap<String, Vec<ContextFile>> = HashMap::new();
+
+    for cf in context_files {
+        let canonical = canonical_path(&cf.file_name).to_string_lossy().to_string();
+        file_groups.entry(canonical).or_default().push(cf);
+    }
+
+    let mut result = Vec::new();
+    let mut notes = Vec::new();
+
+    for (_canonical, mut files) in file_groups {
+        if files.len() == 1 {
+            let cf = files.remove(0);
+            if let Some((msg_idx, tool_name)) = find_coverage_in_history(&cf, existing_messages) {
+                let range = if cf.line1 > 0 && cf.line2 > 0 {
+                    format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
+                } else {
+                    cf.file_name.clone()
+                };
+                notes.push(format!(
+                    "📎 `{}` already in context (message #{}, via `{}`). Skipping to save tokens.",
+                    range, msg_idx + 1, tool_name
+                ));
+            } else {
+                result.push(cf);
+            }
+            continue;
+        }
+
+        files.sort_by_key(|f| f.line1);
+        let merged = merge_overlapping_ranges(files);
+
+        for cf in merged {
+            if let Some((msg_idx, tool_name)) = find_coverage_in_history(&cf, existing_messages) {
+                let range = if cf.line1 > 0 && cf.line2 > 0 {
+                    format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
+                } else {
+                    cf.file_name.clone()
+                };
+                notes.push(format!(
+                    "📎 `{}` already in context (message #{}, via `{}`). Skipping to save tokens.",
+                    range, msg_idx + 1, tool_name
+                ));
+            } else {
+                result.push(cf);
+            }
+        }
+    }
+
+    (result, notes)
+}
+
+fn merge_overlapping_ranges(mut files: Vec<ContextFile>) -> Vec<ContextFile> {
+    if files.is_empty() {
+        return files;
+    }
+
+    let mut result = Vec::new();
+    let mut current = files.remove(0);
+
+    for next in files {
+        let curr_start = if current.line1 == 0 { 1 } else { current.line1 };
+        let curr_end = if current.line2 == 0 {
+            usize::MAX
+        } else {
+            current.line2
+        };
+        let next_start = if next.line1 == 0 { 1 } else { next.line1 };
+        let next_end = if next.line2 == 0 {
+            usize::MAX
+        } else {
+            next.line2
+        };
+
+        if curr_end == usize::MAX || next_start <= curr_end.saturating_add(1) {
+            current.line1 = curr_start.min(next_start);
+            current.line2 = if curr_end == usize::MAX || next_end == usize::MAX {
+                0
+            } else {
+                curr_end.max(next_end)
+            };
+            current.usefulness = current.usefulness.max(next.usefulness);
+            for sym in next.symbols {
+                if !current.symbols.contains(&sym) {
+                    current.symbols.push(sym);
+                }
+            }
+        } else {
+            result.push(current);
+            current = next;
+        }
+    }
+    result.push(current);
+    result
+}
+
+fn has_truncation_markers(content: &str) -> bool {
+    content.contains("...") || content.contains("⋮") || content.contains("omitted")
+}
+
+fn find_coverage_in_history(cf: &ContextFile, messages: &[ChatMessage]) -> Option<(usize, String)> {
+    let cf_canonical = canonical_path(&cf.file_name);
+    let cf_start = if cf.line1 == 0 { 1 } else { cf.line1 };
+    let cf_end = if cf.line2 == 0 { usize::MAX } else { cf.line2 };
+
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role != "context_file" {
+            continue;
+        }
+        if let ChatContent::ContextFiles(files) = &msg.content {
+            for existing in files {
+                if canonical_path(&existing.file_name) != cf_canonical {
+                    continue;
+                }
+                let same_rev = matches!(
+                    (&cf.file_rev, &existing.file_rev),
+                    (Some(a), Some(b)) if a == b
+                );
+                if !same_rev {
+                    continue;
+                }
+                if has_truncation_markers(&existing.file_content) {
+                    continue;
+                }
+                let ex_start = if existing.line1 == 0 { 1 } else { existing.line1 };
+                let ex_end = if existing.line2 == 0 { usize::MAX } else { existing.line2 };
+                if ex_start <= cf_start && ex_end >= cf_end {
+                    return Some((idx, msg.tool_call_id.clone()));
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn postprocess_context_file_results(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    tokenizer: Option<Arc<Tokenizer>>,
+    context_files: Vec<ContextFile>,
+    tokens_limit: usize,
+    mut pp_settings: PostprocessSettings,
+    existing_messages: &[ChatMessage],
+) -> (Option<ChatMessage>, Vec<String>, usize) {
+    let (deduped_files, dedup_notes) = deduplicate_and_merge_context_files(context_files, existing_messages);
+
+    let (skip_pp_files, mut pp_files): (Vec<_>, Vec<_>) =
+        deduped_files.into_iter().partition(|cf| cf.skip_pp);
+
+    pp_settings.close_small_gaps = true;
+    if pp_settings.max_files_n == 0 {
+        pp_settings.max_files_n = 25;
+    }
+
+    let total_files = pp_files.len() + skip_pp_files.len();
+    let pp_ratio = if total_files > 0 {
+        pp_files.len() * 100 / total_files
+    } else {
+        50
+    };
+    let tokens_for_pp = tokens_limit * pp_ratio / 100;
+    let tokens_for_skip = tokens_limit.saturating_sub(tokens_for_pp);
+
+    let (pp_result, pp_notes) = postprocess_context_files(
+        gcx.clone(),
+        &mut pp_files,
+        tokenizer.clone(),
+        tokens_for_pp,
+        false,
+        &pp_settings,
+    )
+    .await;
+
+    let (skip_result, skip_notes) = fill_skip_pp_files_with_budget(
+        gcx.clone(),
+        tokenizer.clone(),
+        skip_pp_files,
+        tokens_for_skip,
+        existing_messages,
+    )
+    .await;
+
+    let notes: Vec<String> = dedup_notes.into_iter().chain(pp_notes).chain(skip_notes).collect();
+
+    let all_files: Vec<_> = pp_result
+        .into_iter()
+        .chain(skip_result)
+        .filter(|cf| !cf.file_name.is_empty())
+        .collect();
+
+    if all_files.is_empty() {
+        return (None, notes, 0);
+    }
+
+    let tokens_used: usize = all_files
+        .iter()
+        .map(|cf| count_text_tokens_with_fallback(tokenizer.clone(), &cf.file_content))
+        .sum();
+
+    (
+        Some(ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(all_files),
+            ..Default::default()
+        }),
+        notes,
+        tokens_used,
+    )
+}
+
+const MIN_PER_FILE_BUDGET: usize = 50;
+
+async fn fill_skip_pp_files_with_budget(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    tokenizer: Option<Arc<Tokenizer>>,
+    files: Vec<ContextFile>,
+    tokens_limit: usize,
+    existing_messages: &[ChatMessage],
+) -> (Vec<ContextFile>, Vec<String>) {
+    if files.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    let max_files_by_budget = (tokens_limit / MIN_PER_FILE_BUDGET).max(1);
+    let files_to_skip = if files.len() > max_files_by_budget {
+        files.len() - max_files_by_budget
+    } else {
+        0
+    };
+    let files: Vec<_> = files.into_iter().take(max_files_by_budget).collect();
+    let per_file_budget = (tokens_limit / files.len().max(1)).max(MIN_PER_FILE_BUDGET);
+    let mut result = Vec::new();
+    let mut notes = Vec::new();
+
+    if files_to_skip > 0 {
+        notes.push(format!(
+            "⚠️ {} files skipped due to token budget constraints",
+            files_to_skip
+        ));
+    }
+
+    for mut cf in files {
+        match get_file_text_from_memory_or_disk(gcx.clone(), &PathBuf::from(&cf.file_name)).await {
+            Ok(text) => {
+                cf.file_rev = Some(official_text_hashing_function(&text));
+
+                if let Some(dup_info) = find_duplicate_in_history(&cf, existing_messages) {
+                    let range = if cf.line1 > 0 && cf.line2 > 0 {
+                        format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
+                    } else {
+                        cf.file_name.clone()
+                    };
+                    notes.push(format!(
+                        "📎 Skipped `{}`: already retrieved in message #{} via `{}`.",
+                        range, dup_info.0 + 1, dup_info.1
+                    ));
+                    continue;
+                }
+
+                let lines: Vec<&str> = text.lines().collect();
+                let total_lines = lines.len();
+
+                if total_lines == 0 {
+                    cf.file_content = String::new();
+                    result.push(cf);
+                    continue;
+                }
+
+                let start = normalize_line_start(cf.line1, total_lines);
+                let end = normalize_line_end(cf.line2, total_lines, start);
+
+                let content = format_lines_with_numbers(&lines, start, end);
+                let tokens = count_text_tokens_with_fallback(tokenizer.clone(), &content);
+
+                if tokens <= per_file_budget {
+                    cf.file_content = content;
+                    cf.line1 = start + 1;
+                    cf.line2 = end;
+                } else {
+                    cf.file_content = truncate_file_head_tail(
+                        &lines,
+                        start,
+                        end,
+                        tokenizer.clone(),
+                        per_file_budget,
+                    );
+                    cf.line1 = start + 1;
+                    cf.line2 = end;
+                }
+                result.push(cf);
+            }
+            Err(e) => {
+                warn!("Failed to load file {}: {}", cf.file_name, e);
+                notes.push(format!("⚠️ Failed to load `{}`: {}", cf.file_name, e));
+            }
+        }
+    }
+
+    (result, notes)
+}
+
+fn find_duplicate_in_history(
+    cf: &ContextFile,
+    messages: &[ChatMessage],
+) -> Option<(usize, String)> {
+    let cf_canonical = canonical_path(&cf.file_name);
+    let cf_start = if cf.line1 == 0 { 1 } else { cf.line1 };
+    let cf_end = if cf.line2 == 0 { usize::MAX } else { cf.line2 };
+
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role != "context_file" {
+            continue;
+        }
+        if let ChatContent::ContextFiles(files) = &msg.content {
+            for existing in files {
+                if canonical_path(&existing.file_name) != cf_canonical {
+                    continue;
+                }
+                let same_rev = matches!(
+                    (&cf.file_rev, &existing.file_rev),
+                    (Some(a), Some(b)) if a == b
+                );
+                if !same_rev {
+                    continue;
+                }
+                if has_truncation_markers(&existing.file_content) {
+                    continue;
+                }
+                let ex_start = if existing.line1 == 0 { 1 } else { existing.line1 };
+                let ex_end = if existing.line2 == 0 { usize::MAX } else { existing.line2 };
+                if ex_start <= cf_start && ex_end >= cf_end {
+                    let tool_name = find_tool_name_for_context(messages, idx);
+                    return Some((idx, tool_name));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_tool_name_for_context(messages: &[ChatMessage], context_idx: usize) -> String {
+    for i in (0..context_idx).rev() {
+        if messages[i].role == "tool" {
+            let tool_call_id = &messages[i].tool_call_id;
+            for j in (0..i).rev() {
+                if let Some(calls) = messages[j].tool_calls.as_ref() {
+                    for call in calls {
+                        if &call.id == tool_call_id {
+                            return call.function.name.clone();
+                        }
+                    }
+                }
+            }
+            return "tool".to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+fn normalize_line_start(line1: usize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    if line1 == 0 {
+        0
+    } else {
+        (line1.saturating_sub(1)).min(total.saturating_sub(1))
+    }
+}
+
+fn normalize_line_end(line2: usize, total: usize, start: usize) -> usize {
+    if line2 == 0 {
+        total
+    } else {
+        line2.min(total).max(start)
+    }
+}
+
+fn format_lines_with_numbers(lines: &[&str], start: usize, end: usize) -> String {
+    lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!("{:4} | {}", start + i + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_file_head_tail(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    tokenizer: Option<Arc<Tokenizer>>,
+    tokens_limit: usize,
+) -> String {
+    let total_lines = end - start;
+    let head_lines = (total_lines * 80 / 100).max(1);
+    let tail_lines = (total_lines * 20 / 100).max(1);
+
+    let mut head_end = start + head_lines.min(total_lines);
+    let mut tail_start = end.saturating_sub(tail_lines);
+
+    if tail_start <= head_end {
+        tail_start = head_end;
+    }
+
+    loop {
+        let head_content = format_lines_with_numbers(lines, start, head_end);
+        let tail_content = if tail_start < end {
+            format_lines_with_numbers(lines, tail_start, end)
+        } else {
+            String::new()
+        };
+
+        let truncation_marker = if tail_start > head_end {
+            format!("\n... ({} lines omitted) ...\n", tail_start - head_end)
+        } else {
+            String::new()
+        };
+
+        let full_content = format!("{}{}{}", head_content, truncation_marker, tail_content);
+        let tokens = count_text_tokens_with_fallback(tokenizer.clone(), &full_content);
+
+        if tokens <= tokens_limit || head_end <= start + 1 {
+            return full_content;
+        }
+
+        head_end = start + (head_end - start) * 80 / 100;
+        if tail_start < end {
+            tail_start = end - (end - tail_start) * 80 / 100;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call_validation::{ChatToolCall, ChatToolFunction};
+
+    fn make_context_file(name: &str, line1: usize, line2: usize) -> ContextFile {
+        make_context_file_with_rev(name, line1, line2, Some("test_rev".to_string()))
+    }
+
+    fn make_context_file_with_rev(name: &str, line1: usize, line2: usize, file_rev: Option<String>) -> ContextFile {
+        ContextFile {
+            file_name: name.to_string(),
+            file_content: String::new(),
+            line1,
+            line2,
+            file_rev,
+            symbols: vec![],
+            gradient_type: -1,
+            usefulness: 0.0,
+            skip_pp: false,
+        }
+    }
+
+    fn make_tool_message(content: &str, tool_call_id: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            tool_call_id: tool_call_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn make_context_file_message(files: Vec<ContextFile>) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(files),
+            ..Default::default()
+        }
+    }
+
+    fn make_assistant_with_tool_calls(tool_names: Vec<&str>) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("".to_string()),
+            tool_calls: Some(
+                tool_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| ChatToolCall {
+                        id: format!("call_{}", i),
+                        index: Some(i),
+                        function: ChatToolFunction {
+                            name: name.to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_tool_budget_from_n_ctx() {
+        let budget = ToolBudget::try_from_n_ctx(8192).unwrap();
+        assert_eq!(budget.tokens_for_code, 4096);
+        assert_eq!(budget.tokens_for_text, 1228);
+
+        let budget_small = ToolBudget::try_from_n_ctx(1000);
+        assert!(budget_small.is_err());
+        assert!(budget_small.unwrap_err().contains("below minimum"));
+
+        let budget_large = ToolBudget::try_from_n_ctx(128000).unwrap();
+        assert_eq!(budget_large.tokens_for_code, 64000);
+        assert_eq!(budget_large.tokens_for_text, 19200);
+    }
+
+    #[test]
+    fn test_normalize_line_start() {
+        assert_eq!(normalize_line_start(0, 100), 0);
+        assert_eq!(normalize_line_start(1, 100), 0);
+        assert_eq!(normalize_line_start(10, 100), 9);
+        assert_eq!(normalize_line_start(200, 100), 99); // clamp to last valid index
+        assert_eq!(normalize_line_start(5, 0), 0); // empty file edge case
+    }
+
+    #[test]
+    fn test_normalize_line_end() {
+        assert_eq!(normalize_line_end(0, 100, 0), 100);
+        assert_eq!(normalize_line_end(50, 100, 0), 50);
+        assert_eq!(normalize_line_end(200, 100, 0), 100);
+        assert_eq!(normalize_line_end(10, 100, 20), 20);
+    }
+
+    #[test]
+    fn test_format_lines_with_numbers() {
+        let lines = vec!["line1", "line2", "line3", "line4", "line5"];
+        let result = format_lines_with_numbers(&lines, 0, 3);
+        assert!(result.contains("   1 | line1"));
+        assert!(result.contains("   2 | line2"));
+        assert!(result.contains("   3 | line3"));
+        assert!(!result.contains("line4"));
+
+        let result2 = format_lines_with_numbers(&lines, 2, 5);
+        assert!(result2.contains("   3 | line3"));
+        assert!(result2.contains("   4 | line4"));
+        assert!(result2.contains("   5 | line5"));
+    }
+
+    #[test]
+    fn test_find_duplicate_in_history_no_match() {
+        let cf = make_context_file("new_file.rs", 1, 10);
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "other.rs", 1, 10,
+        )])];
+        assert!(find_duplicate_in_history(&cf, &messages).is_none());
+    }
+
+    #[test]
+    fn test_find_duplicate_in_history_exact_match() {
+        let cf = make_context_file("test.rs", 1, 10);
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 1, 10,
+        )])];
+        let result = find_duplicate_in_history(&cf, &messages);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, 0);
+    }
+
+    #[test]
+    fn test_find_duplicate_in_history_partial_overlap_not_covered() {
+        let cf = make_context_file("test.rs", 5, 15);
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 1, 10,
+        )])];
+        let result = find_duplicate_in_history(&cf, &messages);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_duplicate_in_history_fully_covered() {
+        let cf = make_context_file("test.rs", 5, 10);
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 1, 20,
+        )])];
+        let result = find_duplicate_in_history(&cf, &messages);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_duplicate_in_history_full_file_not_covered_by_partial() {
+        let cf = make_context_file("test.rs", 0, 0);
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 50, 100,
+        )])];
+        let result = find_duplicate_in_history(&cf, &messages);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_duplicate_in_history_full_file_covered_by_full() {
+        let cf = make_context_file("test.rs", 0, 0);
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 0, 0,
+        )])];
+        let result = find_duplicate_in_history(&cf, &messages);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_tool_name_for_context() {
+        let messages = vec![
+            make_assistant_with_tool_calls(vec!["cat"]),
+            make_tool_message("result", "call_0"),
+            make_context_file_message(vec![make_context_file("test.rs", 1, 10)]),
+        ];
+        let name = find_tool_name_for_context(&messages, 2);
+        assert_eq!(name, "cat");
+    }
+
+    #[test]
+    fn test_find_tool_name_for_context_no_tool() {
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 1, 10,
+        )])];
+        let name = find_tool_name_for_context(&messages, 0);
+        assert_eq!(name, "unknown");
+    }
+
+    #[test]
+    fn test_truncate_file_head_tail() {
+        let lines: Vec<&str> = (0..100).map(|_| "content").collect();
+        let result = truncate_file_head_tail(&lines, 0, 100, None, 50);
+        assert!(result.contains("   1 |"));
+        assert!(result.contains("omitted"));
+    }
+
+    #[test]
+    fn test_find_duplicate_path_normalization() {
+        let cf = make_context_file("src/main.rs", 1, 10);
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "src/main.rs",
+            1,
+            10,
+        )])];
+        let result = find_duplicate_in_history(&cf, &messages);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_duplicate_different_files_same_basename() {
+        let cf = make_context_file("src/a/main.rs", 1, 10);
+        let messages = vec![make_context_file_message(vec![make_context_file(
+            "src/b/main.rs",
+            1,
+            10,
+        )])];
+        let result = find_duplicate_in_history(&cf, &messages);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_budget_ratio_all_skip_pp() {
+        let skip_files = vec![
+            ContextFile {
+                skip_pp: true,
+                ..make_context_file("a.rs", 1, 10)
+            },
+            ContextFile {
+                skip_pp: true,
+                ..make_context_file("b.rs", 1, 10)
+            },
+        ];
+        let pp_files: Vec<ContextFile> = vec![];
+        let total = skip_files.len() + pp_files.len();
+        let pp_ratio = if total > 0 {
+            pp_files.len() * 100 / total
+        } else {
+            50
+        };
+        assert_eq!(pp_ratio, 0);
+    }
+
+    #[test]
+    fn test_budget_ratio_all_pp() {
+        let skip_files: Vec<ContextFile> = vec![];
+        let pp_files = vec![
+            make_context_file("a.rs", 1, 10),
+            make_context_file("b.rs", 1, 10),
+        ];
+        let total = skip_files.len() + pp_files.len();
+        let pp_ratio = if total > 0 {
+            pp_files.len() * 100 / total
+        } else {
+            50
+        };
+        assert_eq!(pp_ratio, 100);
+    }
+
+    #[test]
+    fn test_budget_ratio_mixed() {
+        let skip_files = vec![ContextFile {
+            skip_pp: true,
+            ..make_context_file("a.rs", 1, 10)
+        }];
+        let pp_files = vec![
+            make_context_file("b.rs", 1, 10),
+            make_context_file("c.rs", 1, 10),
+            make_context_file("d.rs", 1, 10),
+        ];
+        let total = skip_files.len() + pp_files.len();
+        let pp_ratio = if total > 0 {
+            pp_files.len() * 100 / total
+        } else {
+            50
+        };
+        assert_eq!(pp_ratio, 75);
+    }
+
+    #[test]
+    fn test_find_tool_name_multiple_tools() {
+        let messages = vec![
+            make_assistant_with_tool_calls(vec!["tree", "cat", "search"]),
+            make_tool_message("tree result", "call_0"),
+            make_tool_message("cat result", "call_1"),
+            make_context_file_message(vec![make_context_file("test.rs", 1, 10)]),
+        ];
+        let name = find_tool_name_for_context(&messages, 3);
+        assert_eq!(name, "cat");
+    }
+
+    #[test]
+    fn test_find_tool_name_correct_tool_call_id() {
+        let messages = vec![
+            make_assistant_with_tool_calls(vec!["tree", "cat"]),
+            make_tool_message("tree result", "call_0"),
+            make_context_file_message(vec![make_context_file("test.rs", 1, 10)]),
+        ];
+        let name = find_tool_name_for_context(&messages, 2);
+        assert_eq!(name, "tree");
+    }
+
+    #[test]
+    fn test_merge_overlapping_ranges() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+            make_context_file("test.rs", 40, 100),
+        ];
+        let merged = merge_overlapping_ranges(files);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].line1, 1);
+        assert_eq!(merged[0].line2, 100);
+    }
+
+    #[test]
+    fn test_merge_adjacent_ranges() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+            make_context_file("test.rs", 51, 100),
+        ];
+        let merged = merge_overlapping_ranges(files);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].line1, 1);
+        assert_eq!(merged[0].line2, 100);
+    }
+
+    #[test]
+    fn test_merge_non_overlapping_ranges() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+            make_context_file("test.rs", 100, 150),
+        ];
+        let merged = merge_overlapping_ranges(files);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn test_deduplicate_same_file_different_tools() {
+        let files = vec![
+            make_context_file("test.rs", 1, 50),
+            make_context_file("test.rs", 40, 100),
+            make_context_file("other.rs", 1, 20),
+        ];
+        let (result, _notes) = deduplicate_and_merge_context_files(files, &[]);
+        assert_eq!(result.len(), 2);
+        let test_file = result.iter().find(|f| f.file_name == "test.rs").unwrap();
+        assert_eq!(test_file.line1, 1);
+        assert_eq!(test_file.line2, 100);
+    }
+
+    #[test]
+    fn test_deduplicate_against_history() {
+        let files = vec![make_context_file("test.rs", 1, 50)];
+        let history = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 1, 100,
+        )])];
+        let (result, notes) = deduplicate_and_merge_context_files(files, &history);
+        assert_eq!(result.len(), 0);
+        assert!(!notes.is_empty());
+    }
+
+    #[test]
+    fn test_deduplicate_partial_coverage() {
+        let files = vec![make_context_file("test.rs", 80, 150)];
+        let history = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 1, 100,
+        )])];
+        let (result, _notes) = deduplicate_and_merge_context_files(files, &history);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_find_coverage_in_history() {
+        let cf = make_context_file("test.rs", 10, 50);
+        let history = vec![make_context_file_message(vec![make_context_file(
+            "test.rs", 1, 100,
+        )])];
+        assert!(find_coverage_in_history(&cf, &history).is_some());
+
+        let cf2 = make_context_file("test.rs", 10, 150);
+        assert!(find_coverage_in_history(&cf2, &history).is_none());
+    }
+}

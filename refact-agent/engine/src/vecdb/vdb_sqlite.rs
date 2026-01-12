@@ -2,14 +2,13 @@ use rusqlite::{OpenFlags, Result};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio_rusqlite::Connection;
 use tracing::info;
 use zerocopy::IntoBytes;
 
 use crate::vecdb::vdb_structs::{SimpleTextHashVector, SplitResult, VecdbRecord};
-
 
 impl Debug for VecDBSqlite {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -19,9 +18,8 @@ impl Debug for VecDBSqlite {
 
 pub struct VecDBSqlite {
     conn: Connection,
-    emb_table_name: String
+    emb_table_name: String,
 }
-
 
 #[derive(Debug, PartialEq)]
 struct DataColumn {
@@ -29,35 +27,98 @@ struct DataColumn {
     type_: String,
 }
 
-pub async fn get_db_path(cache_dir: &PathBuf, model_name: &String, embedding_size: i32) -> Result<String, String> {
-    let old_path = cache_dir
-        .join("refact_vecdb_cache")
-        .join(format!("model_{}_esize_{}.sqlite",
-                      model_name.replace("/", "_"),
-                      embedding_size
-        ));
-    let new_path = cache_dir
-        .join(format!("vecdb_model_{}_esize_{}.sqlite",
-                      model_name.replace("/", "_"),
-                      embedding_size
-        ));
-    if old_path.exists() && !new_path.exists() {
-        match fs::rename(&old_path, &new_path).await {
-            Ok(_) => {
-                Ok(new_path.to_string_lossy().to_string())
-            }
-            Err(e) => Err(format!("{:?}", e))
+fn db_filename(model_name: &str, embedding_size: i32) -> String {
+    format!(
+        "vecdb_model_{}_esize_{}.sqlite",
+        model_name.replace("/", "_"),
+        embedding_size
+    )
+}
+
+async fn move_file_with_fallback(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match fs::rename(src, dst).await {
+        Ok(_) => Ok(()),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::CrossesDevices || e.raw_os_error() == Some(18) =>
+        {
+            fs::copy(src, dst).await?;
+            fs::remove_file(src).await?;
+            Ok(())
         }
-    } else {
-        Ok(new_path.to_string_lossy().to_string())
+        Err(e) => Err(e),
     }
+}
+
+async fn migrate_sqlite_files(src: &Path, dst: &Path) -> std::io::Result<()> {
+    move_file_with_fallback(src, dst).await?;
+    for suffix in ["-wal", "-shm"] {
+        let src_side = PathBuf::from(format!("{}{}", src.display(), suffix));
+        let dst_side = PathBuf::from(format!("{}{}", dst.display(), suffix));
+        if src_side.exists() {
+            let _ = move_file_with_fallback(&src_side, &dst_side).await;
+        }
+    }
+    Ok(())
+}
+
+pub async fn get_db_path(
+    dest_dir: &PathBuf,
+    legacy_cache_dir: &PathBuf,
+    model_name: &str,
+    embedding_size: i32,
+) -> Result<PathBuf, String> {
+    let filename = db_filename(model_name, embedding_size);
+    let dest_path = dest_dir.join(&filename);
+
+    if dest_path.exists() {
+        return Ok(dest_path);
+    }
+
+    let legacy_locations = [
+        legacy_cache_dir.join(&filename),
+        legacy_cache_dir.join("refact_vecdb_cache").join(format!(
+            "model_{}_esize_{}.sqlite",
+            model_name.replace("/", "_"),
+            embedding_size
+        )),
+    ];
+
+    for legacy_path in &legacy_locations {
+        if legacy_path.exists() {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            match migrate_sqlite_files(legacy_path, &dest_path).await {
+                Ok(_) => {
+                    info!("migrated vecdb from {:?} to {:?}", legacy_path, dest_path);
+                    return Ok(dest_path);
+                }
+                Err(e) => {
+                    info!("failed to migrate vecdb from {:?}: {}", legacy_path, e);
+                }
+            }
+        }
+    }
+
+    Ok(dest_path)
 }
 
 async fn migrate_202406(conn: &Connection) -> tokio_rusqlite::Result<()> {
     let expected_schema = vec![
-        DataColumn { name: "vector".to_string(), type_: "BLOB".to_string() },
-        DataColumn { name: "window_text".to_string(), type_: "TEXT".to_string() },
-        DataColumn { name: "window_text_hash".to_string(), type_: "TEXT".to_string() },
+        DataColumn {
+            name: "vector".to_string(),
+            type_: "BLOB".to_string(),
+        },
+        DataColumn {
+            name: "window_text".to_string(),
+            type_: "TEXT".to_string(),
+        },
+        DataColumn {
+            name: "window_text_hash".to_string(),
+            type_: "TEXT".to_string(),
+        },
     ];
     conn.call(move |conn| {
         match conn.execute(&format!("ALTER TABLE data RENAME TO embeddings;"), []) {
@@ -79,90 +140,137 @@ async fn migrate_202406(conn: &Connection) -> tokio_rusqlite::Result<()> {
                 info!("vector cache database has invalid schema, recreating the database");
             }
             conn.execute(&format!("DROP TABLE IF EXISTS embeddings"), [])?;
-            conn.execute(&format!(
-                "CREATE TABLE embeddings (
+            conn.execute(
+                &format!(
+                    "CREATE TABLE embeddings (
                     vector BLOB,
                     window_text TEXT NOT NULL,
                     window_text_hash TEXT NOT NULL
-                )"), [])?;
-            conn.execute(&format!(
-                "CREATE INDEX IF NOT EXISTS idx_window_text_hash \
-                ON embeddings (window_text_hash)"),
-                         [],
+                )"
+                ),
+                [],
+            )?;
+            conn.execute(
+                &format!(
+                    "CREATE INDEX IF NOT EXISTS idx_window_text_hash \
+                ON embeddings (window_text_hash)"
+                ),
+                [],
             )?;
         }
         Ok(())
-    }).await
+    })
+    .await
 }
 
-
-async fn migrate_202501(conn: &Connection, embedding_size: i32, emb_table_name: String) -> tokio_rusqlite::Result<()> {
+async fn migrate_202501(
+    conn: &Connection,
+    embedding_size: i32,
+    emb_table_name: String,
+) -> tokio_rusqlite::Result<()> {
     conn.call(move |conn| {
-        match conn.execute(&format!("ALTER TABLE embeddings RENAME TO embeddings_cache;"), []) {
+        match conn.execute(
+            &format!("ALTER TABLE embeddings RENAME TO embeddings_cache;"),
+            [],
+        ) {
             _ => {}
         };
-        conn.execute(&format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS {emb_table_name} using vec0(
+        conn.execute(
+            &format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS {emb_table_name} using vec0(
               embedding float[{embedding_size}] distance_metric=cosine,
               scope TEXT,
               +start_line INTEGER,
               +end_line INTEGER
-            );"), [])?;
+            );"
+            ),
+            [],
+        )?;
         Ok(())
-    }).await
+    })
+    .await
 }
 
 impl VecDBSqlite {
-    pub async fn init(cache_dir: &PathBuf, model_name: &String, embedding_size: i32, emb_table_name: &String) -> Result<VecDBSqlite, String> {
-        let db_path = get_db_path(cache_dir, model_name, embedding_size).await?;
+    pub async fn init(
+        dest_dir: &PathBuf,
+        legacy_cache_dir: &PathBuf,
+        model_name: &str,
+        embedding_size: i32,
+        emb_table_name: &str,
+    ) -> Result<VecDBSqlite, String> {
+        let db_path = get_db_path(dest_dir, legacy_cache_dir, model_name, embedding_size).await?;
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         let conn = match Connection::open_with_flags(
-            db_path, OpenFlags::SQLITE_OPEN_READ_WRITE
+            &db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_URI).await {
+                | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .await
+        {
             Ok(db) => db,
-            Err(err) => return Err(format!("{:?}", err))
+            Err(err) => return Err(format!("{:?}", err)),
         };
         conn.call(move |conn| {
             let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
             Ok(())
-        }).await.map_err(|e| e.to_string())?;
+        })
+        .await
+        .map_err(|e| e.to_string())?;
         migrate_202406(&conn).await.map_err(|e| e.to_string())?;
-        migrate_202501(&conn, embedding_size, emb_table_name.clone()).await.map_err(|e| e.to_string())?;
+        migrate_202501(&conn, embedding_size, emb_table_name.to_string())
+            .await
+            .map_err(|e| e.to_string())?;
         crate::vecdb::vdb_emb_aux::cleanup_old_emb_tables(&conn, 7, 10).await?;
 
-        info!("vecdb initialized");
-        Ok(VecDBSqlite { conn, emb_table_name: emb_table_name.clone() })
+        info!("vecdb initialized at {:?}", db_path);
+        Ok(VecDBSqlite {
+            conn,
+            emb_table_name: emb_table_name.to_string(),
+        })
     }
 
-    pub async fn fetch_vectors_from_cache(&mut self, splits: &Vec<SplitResult>) -> Result<Vec<Option<Vec<f32>>>, String> {
+    pub async fn fetch_vectors_from_cache(
+        &mut self,
+        splits: &Vec<SplitResult>,
+    ) -> Result<Vec<Option<Vec<f32>>>, String> {
         let placeholders: String = splits.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
-        let query = format!("SELECT * FROM embeddings_cache WHERE window_text_hash IN ({placeholders})");
+        let query =
+            format!("SELECT * FROM embeddings_cache WHERE window_text_hash IN ({placeholders})");
         let splits_clone = splits.clone();
-        let found_hashes = match self.conn.call(move |connection| {
-            let mut statement = connection.prepare(&query)?;
-            let params = rusqlite::params_from_iter(splits_clone.iter().map(|x| &x.window_text_hash));
-            let x = match statement.query_map(params, |row| {
-                let vector_blob: Vec<u8> = row.get(0)?;
-                let vector: Vec<f32> = vector_blob
-                    .chunks_exact(4)
-                    .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
-                    .collect();
-                let window_text: String = row.get(1)?;
-                let window_text_hash: String = row.get(2)?;
-                Ok((window_text_hash, (vector, window_text)))
-            }) {
-                Ok(mapped_rows) => {
-                    Ok(mapped_rows.filter_map(|r| r.ok()).collect::<HashMap<_, _>>())
-                }
-                Err(e) => {
-                    Err(tokio_rusqlite::Error::Rusqlite(e))
-                }
-            };
-            x
-        }).await {
+        let found_hashes = match self
+            .conn
+            .call(move |connection| {
+                let mut statement = connection.prepare(&query)?;
+                let params =
+                    rusqlite::params_from_iter(splits_clone.iter().map(|x| &x.window_text_hash));
+                let x = match statement.query_map(params, |row| {
+                    let vector_blob: Vec<u8> = row.get(0)?;
+                    let vector: Vec<f32> = vector_blob
+                        .chunks_exact(4)
+                        .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+                        .collect();
+                    let window_text: String = row.get(1)?;
+                    let window_text_hash: String = row.get(2)?;
+                    Ok((window_text_hash, (vector, window_text)))
+                }) {
+                    Ok(mapped_rows) => Ok(mapped_rows
+                        .filter_map(|r| r.ok())
+                        .collect::<HashMap<_, _>>()),
+                    Err(e) => Err(tokio_rusqlite::Error::Rusqlite(e)),
+                };
+                x
+            })
+            .await
+        {
             Ok(records) => records,
-            Err(err) => return Err(format!("{:?}", err))
+            Err(err) => return Err(format!("{:?}", err)),
         };
         let mut records: Vec<Option<Vec<f32>>> = vec![];
         for split in splits.iter() {
@@ -175,7 +283,10 @@ impl VecDBSqlite {
         Ok(records)
     }
 
-    pub async fn cache_add_new_records(&mut self, records: Vec<SimpleTextHashVector>) -> Result<(), String> {
+    pub async fn cache_add_new_records(
+        &mut self,
+        records: Vec<SimpleTextHashVector>,
+    ) -> Result<(), String> {
         self.conn.call(|connection| {
             let transaction = connection.transaction()?;
             for record in records {
@@ -212,47 +323,50 @@ impl VecDBSqlite {
     }
 
     pub async fn cache_size(&self) -> Result<usize, String> {
-        self.conn.call(move |connection| {
-            let mut stmt = connection.prepare(
-                &format!("SELECT COUNT(1) FROM embeddings_cache")
-            )?;
-            let count: usize = stmt.query_row([], |row| row.get(0))?;
-            Ok(count)
-        }).await.map_err(|e| e.to_string())
+        self.conn
+            .call(move |connection| {
+                let mut stmt =
+                    connection.prepare(&format!("SELECT COUNT(1) FROM embeddings_cache"))?;
+                let count: usize = stmt.query_row([], |row| row.get(0))?;
+                Ok(count)
+            })
+            .await
+            .map_err(|e| e.to_string())
     }
 
     pub async fn size(&self) -> Result<usize, String> {
         let emb_table_name = self.emb_table_name.clone();
-        self.conn.call(move |connection| {
-            let mut stmt = connection.prepare(
-                &format!("SELECT COUNT(1) FROM {}", emb_table_name)
-            )?;
-            let count: usize = stmt.query_row([], |row| row.get(0))?;
-            Ok(count)
-        }).await.map_err(|e| e.to_string())
+        self.conn
+            .call(move |connection| {
+                let mut stmt =
+                    connection.prepare(&format!("SELECT COUNT(1) FROM {}", emb_table_name))?;
+                let count: usize = stmt.query_row([], |row| row.get(0))?;
+                Ok(count)
+            })
+            .await
+            .map_err(|e| e.to_string())
     }
 
     pub async fn vecdb_records_add(&mut self, records: &Vec<VecdbRecord>) -> Result<(), String> {
         use crate::vecdb::vdb_error::with_retry;
         use tokio::time::Duration;
-        
+
         let records_owned = records.clone();
         let emb_table_name = self.emb_table_name.clone();
-        
+
         with_retry(
             || {
                 let records_owned = records_owned.clone();
                 let emb_table_name = emb_table_name.clone();
-                
+
                 self.conn.call(move |connection| {
-                    // Use a transaction for better reliability
                     let tx = connection.transaction()?;
-                    
+
                     {
                         let mut stmt = tx.prepare(&format!(
                             "INSERT INTO {}(embedding, scope, start_line, end_line) VALUES (?, ?, ?, ?)", emb_table_name
                         ))?;
-                        
+
                         for item in records_owned.iter() {
                             stmt.execute(rusqlite::params![
                                 item.vector.clone().expect("No embedding is provided").as_bytes(),
@@ -262,8 +376,7 @@ impl VecDBSqlite {
                             ])?;
                         }
                     }
-                    
-                    // Commit the transaction
+
                     tx.commit()?;
                     Ok(())
                 })
@@ -289,7 +402,7 @@ impl VecDBSqlite {
             .unwrap_or_else(String::new);
         let embedding_owned = embedding.clone();
         let emb_table_name = self.emb_table_name.clone();
-        
+
         // Wrap the database call in retry logic
         with_retry(
             || {
@@ -297,7 +410,7 @@ impl VecDBSqlite {
                 let emb_table_name = emb_table_name.clone();
                 let scope_condition = scope_condition.clone();
                 let vecdb_scope_filter_mb = vecdb_scope_filter_mb.clone();
-                
+
                 self.conn.call(move |connection| {
                     let mut stmt = connection.prepare(&format!(
                         r#"
@@ -322,24 +435,21 @@ impl VecDBSqlite {
                         None => rusqlite::params![&embedding_bytes, top_n],
                     };
 
-                    let rows = stmt.query_map(
-                        params,
-                        |row| {
-                            let vector_blob: Vec<u8> = row.get(3)?;
-                            let vector: Vec<f32> = vector_blob
-                                .chunks_exact(4)
-                                .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
-                                .collect();
-                            Ok(VecdbRecord {
-                                vector: Some(vector),
-                                file_path: PathBuf::from(row.get::<_, String>(0)?),
-                                start_line: row.get(1)?,
-                                end_line: row.get(2)?,
-                                distance: row.get(4)?,
-                                usefulness: 0.0,
-                            })
-                        },
-                    )?;
+                    let rows = stmt.query_map(params, |row| {
+                        let vector_blob: Vec<u8> = row.get(3)?;
+                        let vector: Vec<f32> = vector_blob
+                            .chunks_exact(4)
+                            .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+                            .collect();
+                        Ok(VecdbRecord {
+                            vector: Some(vector),
+                            file_path: PathBuf::from(row.get::<_, String>(0)?),
+                            start_line: row.get(1)?,
+                            end_line: row.get(2)?,
+                            distance: row.get(4)?,
+                            usefulness: 0.0,
+                        })
+                    })?;
 
                     let mut results = Vec::new();
                     for row in rows {
@@ -349,10 +459,11 @@ impl VecDBSqlite {
                     Ok(results)
                 })
             },
-            3, // Max retries
+            3,                          // Max retries
             Duration::from_millis(100), // Retry delay
-            "vector search"
-        ).await
+            "vector search",
+        )
+        .await
     }
 
     pub async fn vecdb_records_remove(
@@ -361,43 +472,46 @@ impl VecDBSqlite {
     ) -> Result<(), String> {
         use crate::vecdb::vdb_error::with_retry;
         use tokio::time::Duration;
-        
+
         if scopes_to_remove.is_empty() {
             return Ok(());
         }
 
-        let placeholders: String = scopes_to_remove.iter()
+        let placeholders: String = scopes_to_remove
+            .iter()
             .map(|_| "?")
             .collect::<Vec<&str>>()
             .join(",");
         let emb_table_name = self.emb_table_name.clone();
-        
+
         with_retry(
             || {
                 let scopes_to_remove = scopes_to_remove.clone();
                 let emb_table_name = emb_table_name.clone();
                 let placeholders = placeholders.clone();
-                
+
                 self.conn.call(move |connection| {
                     // Use a transaction for better reliability
                     let tx = connection.transaction()?;
-                    
+
                     {
-                        let mut stmt = tx.prepare(
-                            &format!("DELETE FROM {} WHERE scope IN ({})", emb_table_name, placeholders)
-                        )?;
+                        let mut stmt = tx.prepare(&format!(
+                            "DELETE FROM {} WHERE scope IN ({})",
+                            emb_table_name, placeholders
+                        ))?;
 
                         stmt.execute(rusqlite::params_from_iter(scopes_to_remove.iter()))?;
                     }
-                    
+
                     // Commit the transaction
                     tx.commit()?;
                     Ok(())
                 })
             },
-            3, // Max retries
+            3,                          // Max retries
             Duration::from_millis(100), // Retry delay
-            "remove vector records"
-        ).await
+            "remove vector records",
+        )
+        .await
     }
 }

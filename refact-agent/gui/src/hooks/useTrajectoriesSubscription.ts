@@ -7,7 +7,11 @@ import {
   chatThreadToTrajectoryData,
   trajectoryDataToChatThread,
 } from "../services/refact/trajectories";
-import { hydrateHistory, deleteChatById, ChatHistoryItem } from "../features/History/historySlice";
+import {
+  hydrateHistory,
+  deleteChatById,
+  ChatHistoryItem,
+} from "../features/History/historySlice";
 import { updateOpenThread, closeThread } from "../features/Chat/Thread";
 
 const MIGRATION_KEY = "refact-trajectories-migrated";
@@ -20,7 +24,10 @@ function getLegacyHistory(): ChatHistoryItem[] {
     const parsed = JSON.parse(raw) as Record<string, string>;
     if (!parsed.history) return [];
 
-    const historyState = JSON.parse(parsed.history) as Record<string, ChatHistoryItem>;
+    const historyState = JSON.parse(parsed.history) as Record<
+      string,
+      ChatHistoryItem
+    >;
     return Object.values(historyState);
   } catch {
     return [];
@@ -52,12 +59,14 @@ export function useTrajectoriesSubscription() {
   const dispatch = useAppDispatch();
   const config = useConfig();
   const eventSourceRef = useRef<EventSource | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   const connect = useCallback(() => {
     if (typeof EventSource === "undefined") return;
 
-    const port = config.lspPort ?? 8001;
+    const port = config.lspPort;
     const url = `http://127.0.0.1:${port}/v1/trajectories/subscribe`;
 
     if (eventSourceRef.current) {
@@ -70,36 +79,32 @@ export function useTrajectoriesSubscription() {
 
       eventSource.onmessage = (event) => {
         try {
-          const data: TrajectoryEvent = JSON.parse(event.data);
+          const data = JSON.parse(event.data as string) as TrajectoryEvent;
           if (data.type === "deleted") {
             dispatch(deleteChatById(data.id));
             // Force delete runtime even if it's streaming - backend says it's gone
             dispatch(closeThread({ id: data.id, force: true }));
-          } else if (data.type === "updated" || data.type === "created") {
-            dispatch(
+          } else {
+            void dispatch(
               trajectoriesApi.endpoints.getTrajectory.initiate(data.id, {
                 forceRefetch: true,
               }),
             )
               .unwrap()
               .then((trajectory) => {
-                // Update history
                 dispatch(hydrateHistory([trajectory]));
-                // Also update open thread metadata if it exists (subscription signal)
-                // IMPORTANT: Only sync metadata, NOT messages - messages are local-authoritative
-                // to prevent SSE from overwriting in-progress or recently-completed conversations
                 const thread = trajectoryDataToChatThread(trajectory);
-                dispatch(updateOpenThread({
-                  id: data.id,
-                  thread: {
-                    title: thread.title,
-                    isTitleGenerated: thread.isTitleGenerated,
-                    // Don't sync `read` - it's a per-client concern
-                    // Don't pass messages - they could be stale from backend
-                  },
-                }));
+                dispatch(
+                  updateOpenThread({
+                    id: data.id,
+                    thread: {
+                      title: thread.title,
+                      isTitleGenerated: thread.isTitleGenerated,
+                    },
+                  }),
+                );
               })
-              .catch(() => {});
+              .catch(() => undefined);
           }
         } catch {
           // ignore parse errors
@@ -130,13 +135,15 @@ export function useTrajectoriesSubscription() {
 
     let successCount = 0;
     for (const chat of legacyChats) {
-      if (!chat.messages || chat.messages.length === 0) continue;
+      if (chat.messages.length === 0) continue;
 
       try {
         const trajectoryData = chatThreadToTrajectoryData(
           {
             ...chat,
-            new_chat_suggested: chat.new_chat_suggested ?? { wasSuggested: false },
+            new_chat_suggested: chat.new_chat_suggested ?? {
+              wasSuggested: false,
+            },
           },
           chat.createdAt,
         );
@@ -162,15 +169,20 @@ export function useTrajectoriesSubscription() {
       await migrateFromLocalStorage();
 
       const result = await dispatch(
-        trajectoriesApi.endpoints.listTrajectories.initiate(),
+        trajectoriesApi.endpoints.listTrajectories.initiate(undefined),
       ).unwrap();
 
       const trajectories = await Promise.all(
-        result.map((meta) =>
-          dispatch(
+        result.map(async (meta) => {
+          const data = await dispatch(
             trajectoriesApi.endpoints.getTrajectory.initiate(meta.id),
-          ).unwrap(),
-        ),
+          ).unwrap();
+          return {
+            ...data,
+            parent_id: meta.parent_id,
+            link_type: meta.link_type,
+          };
+        }),
       );
 
       dispatch(hydrateHistory(trajectories));
@@ -180,7 +192,7 @@ export function useTrajectoriesSubscription() {
   }, [dispatch, migrateFromLocalStorage]);
 
   useEffect(() => {
-    loadInitialHistory();
+    void loadInitialHistory();
     connect();
 
     return () => {

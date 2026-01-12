@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::fs;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex as AMutex;
@@ -13,18 +14,26 @@ use crate::at_commands::execute_at::AtCommandMember;
 use crate::call_validation::{ChatMessage, ContextEnum};
 use crate::files_correction::{correct_to_nearest_dir_path, get_project_dirs, paths_from_anywhere};
 
+const BINARY_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "mp3", "mp4", "wav", "avi", "mov",
+    "mkv", "flv", "webm", "zip", "tar", "gz", "rar", "7z", "bz2", "xz", "exe", "dll", "so",
+    "dylib", "bin", "obj", "o", "a", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "woff",
+    "woff2", "ttf", "otf", "eot", "pyc", "pyo", "class", "jar", "war", "db", "sqlite", "sqlite3",
+    "lock", "sum",
+];
 
-pub struct AtTree {
-    pub params: Vec<Box<dyn AtParam>>,
-}
-
-impl AtTree {
-    pub fn new() -> Self {
-        AtTree {
-            params: vec![],
-        }
-    }
-}
+const SKIP_DIRS: &[&str] = &[
+    "__pycache__",
+    "node_modules",
+    ".git",
+    ".svn",
+    ".hg",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+];
 
 #[derive(Debug, Clone)]
 pub struct PathsHolderNodeArc(Arc<RwLock<PathsHolderNode>>);
@@ -51,7 +60,11 @@ pub struct PathsHolderNode {
 
 impl PathsHolderNode {
     pub fn file_name(&self) -> String {
-        self.path.file_name().unwrap_or_default().to_string_lossy().to_string()
+        self.path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
     }
 
     pub fn child_paths(&self) -> &Vec<PathsHolderNodeArc> {
@@ -63,31 +76,28 @@ impl PathsHolderNode {
     }
 }
 
-pub fn construct_tree_out_of_flat_list_of_paths(paths_from_anywhere: &Vec<PathBuf>) -> Vec<PathsHolderNodeArc> {
+pub fn construct_tree_out_of_flat_list_of_paths(paths: &Vec<PathBuf>) -> Vec<PathsHolderNodeArc> {
     let mut root_nodes: Vec<PathsHolderNodeArc> = Vec::new();
     let mut nodes_map: HashMap<PathBuf, PathsHolderNodeArc> = HashMap::new();
 
-    for path in paths_from_anywhere {
+    for path in paths {
         let components: Vec<_> = path.components().collect();
         let components_count = components.len();
-
         let mut current_path = PathBuf::new();
         let mut parent_node: Option<PathsHolderNodeArc> = None;
 
         for (index, component) in components.into_iter().enumerate() {
             current_path.push(component);
-
             let is_last = index == components_count - 1;
             let depth = index;
+
             let node = nodes_map.entry(current_path.clone()).or_insert_with(|| {
-                PathsHolderNodeArc(Arc::new(RwLock::new(
-                    PathsHolderNode {
-                        path: current_path.clone(),
-                        is_dir: !is_last,
-                        child_paths: Vec::new(),
-                        depth,
-                    }
-                )))
+                PathsHolderNodeArc(Arc::new(RwLock::new(PathsHolderNode {
+                    path: current_path.clone(),
+                    is_dir: !is_last,
+                    child_paths: Vec::new(),
+                    depth,
+                })))
             });
 
             if node.0.read().unwrap().depth != depth {
@@ -98,10 +108,8 @@ pub fn construct_tree_out_of_flat_list_of_paths(paths_from_anywhere: &Vec<PathBu
                 if !parent.0.read().unwrap().child_paths.contains(node) {
                     parent.0.write().unwrap().child_paths.push(node.clone());
                 }
-            } else {
-                if !root_nodes.contains(node) {
-                    root_nodes.push(node.clone());
-                }
+            } else if !root_nodes.contains(node) {
+                root_nodes.push(node.clone());
             }
 
             parent_node = Some(node.clone());
@@ -110,25 +118,53 @@ pub fn construct_tree_out_of_flat_list_of_paths(paths_from_anywhere: &Vec<PathBu
     root_nodes
 }
 
+pub struct AtTree {
+    pub params: Vec<Box<dyn AtParam>>,
+}
+
+impl AtTree {
+    pub fn new() -> Self {
+        AtTree { params: vec![] }
+    }
+}
+
 pub struct TreeNode {
     pub children: HashMap<String, TreeNode>,
-    // NOTE: we can store here more info like depth, sub files count, etc.
+    pub file_size: Option<u64>,
+    pub line_count: Option<usize>,
 }
 
 impl TreeNode {
     pub fn new() -> Self {
         TreeNode {
             children: HashMap::new(),
+            file_size: None,
+            line_count: None,
         }
     }
 
     pub fn build(paths: &Vec<PathBuf>) -> Self {
         let mut root = TreeNode::new();
         for path in paths {
+            if should_skip_path(path) {
+                continue;
+            }
             let mut node = &mut root;
-            for component in path.components() {
+            let components: Vec<_> = path.components().collect();
+            let last_idx = components.len().saturating_sub(1);
+
+            for (i, component) in components.iter().enumerate() {
                 let key = component.as_os_str().to_string_lossy().to_string();
                 node = node.children.entry(key).or_insert_with(TreeNode::new);
+
+                if i == last_idx {
+                    if let Ok(meta) = fs::metadata(path) {
+                        node.file_size = Some(meta.len());
+                        if !is_binary_file(path) {
+                            node.line_count = count_lines(path);
+                        }
+                    }
+                }
             }
         }
         root
@@ -139,128 +175,234 @@ impl TreeNode {
     }
 }
 
-fn _print_symbols(db: Arc<AstDB>, path: &PathBuf) -> String {
-    let cpath = path.to_string_lossy().to_string();
-    let defs = crate::ast::ast_db::doc_defs(db.clone(), &cpath);
-    let symbols_list = defs
-        .iter()
-        .filter(|x| match x.symbol_type {
-            SymbolType::StructDeclaration | SymbolType::TypeAlias | SymbolType::FunctionDeclaration => true,
-            _ => false
-        })
-        .map(|x| x.name())
-        .collect::<Vec<String>>()
-        .join(", ");
-    if !symbols_list.is_empty() { format!(" ({symbols_list})") } else { "".to_string() }
+fn should_skip_path(path: &PathBuf) -> bool {
+    for component in path.components() {
+        let name = component.as_os_str().to_string_lossy();
+        if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
+            return true;
+        }
+    }
+    is_binary_file(path)
 }
 
-async fn _print_files_tree(
+fn is_binary_file(path: &PathBuf) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| BINARY_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn count_lines(path: &PathBuf) -> Option<usize> {
+    fs::read_to_string(path).ok().map(|c| c.lines().count())
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn print_symbols(db: Arc<AstDB>, path: &PathBuf) -> String {
+    let cpath = path.to_string_lossy().to_string();
+    let defs = crate::ast::ast_db::doc_defs(db.clone(), &cpath);
+    let symbols: Vec<String> = defs
+        .iter()
+        .filter(|x| {
+            matches!(
+                x.symbol_type,
+                SymbolType::StructDeclaration
+                    | SymbolType::TypeAlias
+                    | SymbolType::FunctionDeclaration
+            )
+        })
+        .map(|x| x.name())
+        .collect();
+    if symbols.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", symbols.join(", "))
+    }
+}
+
+fn print_files_tree(
     tree: &TreeNode,
     ast_db: Option<Arc<AstDB>>,
     maxdepth: usize,
+    max_files: usize,
+    is_root_query: bool,
 ) -> String {
     fn traverse(
         node: &TreeNode,
         path: PathBuf,
         depth: usize,
         maxdepth: usize,
+        max_files: usize,
+        is_root_level: bool,
         ast_db: Option<Arc<AstDB>>,
     ) -> Option<String> {
         if depth > maxdepth {
             return None;
         }
-        let mut output = String::new();
+
         let indent = "  ".repeat(depth);
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
         if !node.is_dir() {
+            let mut info = String::new();
+            if let Some(size) = node.file_size {
+                info.push_str(&format!(" [{}]", format_size(size)));
+            }
+            if let Some(lines) = node.line_count {
+                info.push_str(&format!(" {}L", lines));
+            }
             if let Some(db) = ast_db.clone() {
-                output.push_str(&format!("{}{}{}\n", indent, name, _print_symbols(db, &path)));
-            } else {
-                output.push_str(&format!("{}{}\n", indent, name));
+                info.push_str(&print_symbols(db, &path));
             }
-            return Some(output);
-        } else {
-            output.push_str(&format!("{}{}/\n", indent, name));
+            return Some(format!("{}{}{}\n", indent, name, info));
         }
 
-        let (mut dirs, mut files) = (0, 0);
-        let mut child_output = String::new();
-        for (name, child) in &node.children {
+        let mut output = format!("{}{}/\n", indent, name);
+        let mut sorted_children: Vec<_> = node.children.iter().collect();
+        sorted_children.sort_by(|a, b| {
+            let a_is_dir = a.1.is_dir();
+            let b_is_dir = b.1.is_dir();
+            b_is_dir.cmp(&a_is_dir).then(a.0.cmp(b.0))
+        });
+
+        let total_files = sorted_children.iter().filter(|(_, c)| !c.is_dir()).count();
+
+        let should_truncate = !is_root_level && total_files > max_files;
+        let mut files_shown = 0;
+        let mut hidden_files = 0;
+        let mut hidden_dirs = 0;
+
+        for (child_name, child) in &sorted_children {
             let mut child_path = path.clone();
-            child_path.push(name);
-            if let Some(child_str) = traverse(child, child_path, depth + 1, maxdepth, ast_db.clone()) {
-                child_output.push_str(&child_str);
+            child_path.push(child_name);
+
+            if !child.is_dir() && should_truncate && files_shown >= max_files {
+                hidden_files += 1;
+                continue;
+            }
+
+            if let Some(child_str) = traverse(
+                child,
+                child_path,
+                depth + 1,
+                maxdepth,
+                max_files,
+                false,
+                ast_db.clone(),
+            ) {
+                output.push_str(&child_str);
+                if !child.is_dir() {
+                    files_shown += 1;
+                }
             } else {
-                dirs += child.is_dir() as usize;
-                files += !child.is_dir() as usize;
+                if child.is_dir() {
+                    hidden_dirs += 1;
+                } else {
+                    hidden_files += 1;
+                }
             }
         }
 
-        if dirs > 0 || files > 0 {
-            let summary = format!("{}  ...{} subdirs, {} files...\n", indent, dirs, files);
-            child_output.push_str(&summary);
+        if hidden_dirs > 0 || hidden_files > 0 {
+            output.push_str(&format!(
+                "{}  ...+{} dirs, +{} files\n",
+                indent, hidden_dirs, hidden_files
+            ));
         }
-        output.push_str(&child_output);
         Some(output)
     }
 
     let mut result = String::new();
     for (name, node) in &tree.children {
-        if let Some(output) = traverse(node, PathBuf::from(name), 0, maxdepth, ast_db.clone()) {
+        if let Some(output) = traverse(
+            node,
+            PathBuf::from(name),
+            0,
+            maxdepth,
+            max_files,
+            is_root_query,
+            ast_db.clone(),
+        ) {
             result.push_str(&output);
-        } else {
-            break;
         }
     }
     result
 }
 
-async fn _print_files_tree_with_budget(
+fn print_files_tree_with_budget(
     tree: &TreeNode,
     char_limit: usize,
     ast_db: Option<Arc<AstDB>>,
+    max_files: usize,
+    is_root_query: bool,
 ) -> String {
     let mut good_enough = String::new();
     for maxdepth in 1..20 {
-        let bigger_tree_str = _print_files_tree(&tree, ast_db.clone(), maxdepth).await;
-        if bigger_tree_str.len() > char_limit {
+        let bigger = print_files_tree(tree, ast_db.clone(), maxdepth, max_files, is_root_query);
+        if bigger.len() > char_limit {
             break;
         }
-        good_enough = bigger_tree_str;
+        good_enough = bigger;
     }
     good_enough
 }
 
-pub async fn print_files_tree_with_budget(
+pub async fn tree_for_tools(
     ccx: Arc<AMutex<AtCommandsContext>>,
     tree: &TreeNode,
     use_ast: bool,
+    max_files: usize,
+    is_root_query: bool,
 ) -> Result<String, String> {
     let (gcx, tokens_for_rag) = {
         let ccx_locked = ccx.lock().await;
         (ccx_locked.global_context.clone(), ccx_locked.tokens_for_rag)
     };
-    tracing::info!("tree() tokens_for_rag={}", tokens_for_rag);
     const SYMBOLS_PER_TOKEN: f32 = 3.5;
     let char_limit = tokens_for_rag * SYMBOLS_PER_TOKEN as usize;
-    let mut ast_module_option = gcx.read().await.ast_service.clone();
-    if !use_ast {
-        ast_module_option = None;
-    }
-    match ast_module_option {
-        Some(ast_module) => {
-            crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(ast_module.clone(), 20_000, true).await;
-            let ast_db: Option<Arc<AstDB>> = Some(ast_module.lock().await.ast_index.clone());
-            Ok(_print_files_tree_with_budget(tree, char_limit, ast_db.clone()).await)
-        }
-        None => Ok(_print_files_tree_with_budget(tree, char_limit, None).await),
-    }
-}
 
+    let ast_db = if use_ast {
+        if let Some(ast_module) = gcx.read().await.ast_service.clone() {
+            crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(
+                ast_module.clone(),
+                20_000,
+                true,
+            )
+            .await;
+            Some(ast_module.lock().await.ast_index.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(print_files_tree_with_budget(
+        tree,
+        char_limit,
+        ast_db,
+        max_files,
+        is_root_query,
+    ))
+}
 
 #[async_trait]
 impl AtCommand for AtTree {
-    fn params(&self) -> &Vec<Box<dyn AtParam>> { &self.params }
+    fn params(&self) -> &Vec<Box<dyn AtParam>> {
+        &self.params
+    }
 
     async fn at_execute(
         &self,
@@ -270,49 +412,67 @@ impl AtCommand for AtTree {
     ) -> Result<(Vec<ContextEnum>, String), String> {
         let gcx = ccx.lock().await.global_context.clone();
         let paths_from_anywhere = paths_from_anywhere(gcx.clone()).await;
-        let paths_from_anywhere_len = paths_from_anywhere.len();
-
         let project_dirs = get_project_dirs(gcx.clone()).await;
-        let filtered_paths: Vec<PathBuf> = paths_from_anywhere.into_iter()
-            .filter(|path| project_dirs.iter().any(|project_dir| path.starts_with(project_dir)))
+        let filtered_paths: Vec<PathBuf> = paths_from_anywhere
+            .into_iter()
+            .filter(|path| project_dirs.iter().any(|pd| path.starts_with(pd)))
             .collect();
-        tracing::info!("tree: project_dirs={:?} file paths {} filtered project dirs only => {} paths", project_dirs, paths_from_anywhere_len, filtered_paths.len());
 
-        *args = args.iter().take_while(|arg| arg.text != "\n" || arg.text == "--ast").take(2).cloned().collect();
+        *args = args
+            .iter()
+            .take_while(|arg| arg.text != "\n" || arg.text == "--ast")
+            .take(2)
+            .cloned()
+            .collect();
 
-        let tree = match args.iter().find(|x| x.text != "--ast") {
-            None => TreeNode::build(&filtered_paths),
+        let (tree, is_root_query) = match args.iter().find(|x| x.text != "--ast") {
+            None => (TreeNode::build(&filtered_paths), true),
             Some(arg) => {
                 let path = arg.text.clone();
                 let candidates = correct_to_nearest_dir_path(gcx.clone(), &path, false, 10).await;
-                let candidate = return_one_candidate_or_a_good_error(gcx.clone(), &path, &candidates, &project_dirs, true).await.map_err(|e| {
+                let candidate = return_one_candidate_or_a_good_error(
+                    gcx.clone(),
+                    &path,
+                    &candidates,
+                    &project_dirs,
+                    true,
+                )
+                .await
+                .map_err(|e| {
                     cmd.ok = false;
                     cmd.reason = Some(e.clone());
                     args.clear();
                     e
                 })?;
                 let start_dir = PathBuf::from(candidate);
-                let paths_start_with_start_dir = filtered_paths.iter()
-                    .filter(|f|f.starts_with(&start_dir)).cloned().collect::<Vec<_>>();
-                TreeNode::build(&paths_start_with_start_dir)
+                let paths = filtered_paths
+                    .iter()
+                    .filter(|f| f.starts_with(&start_dir))
+                    .cloned()
+                    .collect();
+                (TreeNode::build(&paths), false)
             }
         };
 
         let use_ast = args.iter().any(|x| x.text == "--ast");
-        let tree = print_files_tree_with_budget(ccx.clone(), &tree, use_ast).await.map_err(|err| {
-            warn!("{}", err);
-            err
-        })?;
+        let tree = tree_for_tools(ccx.clone(), &tree, use_ast, 10, is_root_query)
+            .await
+            .map_err(|err| {
+                warn!("{}", err);
+                err
+            })?;
+
         let tree = if tree.is_empty() {
             "tree(): directory is empty".to_string()
         } else {
             tree
         };
-
-        let context = ContextEnum::ChatMessage(ChatMessage::new(
-            "plain_text".to_string(),
-            tree,
-        ));
-        Ok((vec![context], "".to_string()))
+        Ok((
+            vec![ContextEnum::ChatMessage(ChatMessage::new(
+                "plain_text".to_string(),
+                tree,
+            ))],
+            "".to_string(),
+        ))
     }
 }

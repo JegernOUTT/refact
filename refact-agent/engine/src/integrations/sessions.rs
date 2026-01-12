@@ -5,13 +5,15 @@ use std::future::Future;
 
 use crate::global_context::GlobalContext;
 
-pub trait IntegrationSession: Any + Send + Sync
-{
+pub trait IntegrationSession: Any + Send + Sync {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
     fn is_expired(&self) -> bool;
 
-    fn try_stop(&mut self, self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>) -> Box<dyn Future<Output = String> + Send>;
+    fn try_stop(
+        &mut self,
+        self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
+    ) -> Box<dyn Future<Output = String> + Send>;
 }
 
 pub fn get_session_hashmap_key(integration_name: &str, base_key: &str) -> String {
@@ -21,7 +23,9 @@ pub fn get_session_hashmap_key(integration_name: &str, base_key: &str) -> String
 async fn remove_expired_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
     let expired_sessions = {
         let mut gcx_locked = gcx.write().await;
-        let sessions = gcx_locked.integration_sessions.iter()
+        let sessions = gcx_locked
+            .integration_sessions
+            .iter()
             .map(|(key, session)| (key.to_string(), session.clone()))
             .collect::<Vec<_>>();
         let mut expired_sessions = vec![];
@@ -43,9 +47,7 @@ async fn remove_expired_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
     // sessions still keeps a reference on all sessions, just in case a destructor is called in the block above
 }
 
-pub async fn remove_expired_sessions_background_task(
-    gcx: Arc<ARwLock<GlobalContext>>,
-) {
+pub async fn remove_expired_sessions_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         remove_expired_sessions(gcx.clone()).await;
@@ -55,7 +57,9 @@ pub async fn remove_expired_sessions_background_task(
 pub async fn stop_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
     let sessions = {
         let mut gcx_locked = gcx.write().await;
-        let sessions = gcx_locked.integration_sessions.iter()
+        let sessions = gcx_locked
+            .integration_sessions
+            .iter()
             .map(|(_, session)| Arc::clone(session))
             .collect::<Vec<_>>();
         gcx_locked.integration_sessions.clear();

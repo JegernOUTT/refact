@@ -9,7 +9,6 @@ use crate::at_commands::execute_at::{AtCommandMember, correct_at_arg};
 use crate::at_commands::at_ast_definition::AtParamSymbolPathQuery;
 use crate::custom_error::trace_and_default;
 
-
 pub struct AtAstReference {
     pub params: Vec<Box<dyn AtParam>>,
 }
@@ -17,13 +16,10 @@ pub struct AtAstReference {
 impl AtAstReference {
     pub fn new() -> Self {
         AtAstReference {
-            params: vec![
-                Box::new(AtParamSymbolPathQuery::new())
-            ],
+            params: vec![Box::new(AtParamSymbolPathQuery::new())],
         }
     }
 }
-
 
 #[async_trait]
 impl AtCommand for AtAstReference {
@@ -44,7 +40,7 @@ impl AtCommand for AtAstReference {
                 cmd.reason = Some("no symbol path".to_string());
                 args.clear();
                 return Err("no symbol path".to_string());
-            },
+            }
         };
 
         correct_at_arg(ccx.clone(), &self.params[0], &mut arg_symbol).await;
@@ -64,18 +60,12 @@ impl AtCommand for AtAstReference {
             const USAGES_LIMIT: usize = 20;
 
             if let Some(def) = defs.get(0) {
-                let usages: Vec<(Arc<crate::ast::ast_structs::AstDefinition>, usize)> = crate::ast::ast_db::usages(
-                    ast_index.clone(),
-                    def.path(),
-                    100,
-                ).unwrap_or_else(trace_and_default);
+                let usages: Vec<(Arc<crate::ast::ast_structs::AstDefinition>, usize)> =
+                    crate::ast::ast_db::usages(ast_index.clone(), def.path(), 100)
+                        .unwrap_or_else(trace_and_default);
                 let usage_count = usages.len();
 
-                let text = format!(
-                    "symbol `{}` has {} usages",
-                    arg_symbol.text,
-                    usage_count
-                );
+                let text = format!("symbol `{}` has {} usages", arg_symbol.text, usage_count);
                 messages.push(text);
 
                 for (usedin, uline) in usages.iter().take(USAGES_LIMIT) {
@@ -88,6 +78,7 @@ impl AtCommand for AtAstReference {
                         gradient_type: 4,
                         usefulness: 100.0,
                         skip_pp: false,
+                        file_rev: None,
                     });
                 }
                 if usage_count > USAGES_LIMIT {
@@ -97,7 +88,13 @@ impl AtCommand for AtAstReference {
                 messages.push("No definitions found for the symbol".to_string());
             }
 
-            Ok((all_results.into_iter().map(|x| ContextEnum::ContextFile(x)).collect::<Vec<ContextEnum>>(), messages.join("\n")))
+            Ok((
+                all_results
+                    .into_iter()
+                    .map(|x| ContextEnum::ContextFile(x))
+                    .collect::<Vec<ContextEnum>>(),
+                messages.join("\n"),
+            ))
         } else {
             Err("attempt to use @references with no ast turned on".to_string())
         }

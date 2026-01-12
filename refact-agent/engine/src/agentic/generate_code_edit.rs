@@ -1,9 +1,7 @@
-use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage};
-use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
-use crate::subchat::subchat_single;
+use crate::global_context::GlobalContext;
+use crate::subchat::run_subchat_once;
 use std::sync::Arc;
-use tokio::sync::Mutex as AMutex;
 use tokio::sync::RwLock as ARwLock;
 
 const CODE_EDIT_SYSTEM_PROMPT: &str = r#"You are a code editing assistant. Your task is to modify the provided code according to the user's instruction.
@@ -17,9 +15,6 @@ const CODE_EDIT_SYSTEM_PROMPT: &str = r#"You are a code editing assistant. Your 
 
 # Output Format
 Return the edited code directly, without any wrapping or explanation. The output should be valid code that can directly replace the input."#;
-
-const N_CTX: usize = 32000;
-const TEMPERATURE: f32 = 0.1;
 
 fn remove_markdown_fences(text: &str) -> String {
     let trimmed = text.trim();
@@ -73,63 +68,18 @@ pub async fn generate_code_edit(
         },
     ];
 
-    let model_id = match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
-        Ok(caps) => {
-            // Prefer light model for fast inline edits, fallback to default
-            let light = &caps.defaults.chat_light_model;
-            if !light.is_empty() {
-                Ok(light.clone())
-            } else {
-                Ok(caps.defaults.chat_default_model.clone())
-            }
-        }
-        Err(_) => Err("No caps available".to_string()),
-    }?;
+    let result = run_subchat_once(gcx, "code_edit", messages)
+        .await
+        .map_err(|e| format!("Error generating code edit: {}", e))?;
 
-    let ccx: Arc<AMutex<AtCommandsContext>> = Arc::new(AMutex::new(
-        AtCommandsContext::new(
-            gcx.clone(),
-            N_CTX,
-            1,
-            false,
-            messages.clone(),
-            "".to_string(),
-            false,
-            model_id.clone(),
-        )
-        .await,
-    ));
-
-    let new_messages = subchat_single(
-        ccx.clone(),
-        &model_id,
-        messages,
-        Some(vec![]),  // No tools - pure generation
-        None,
-        false,
-        Some(TEMPERATURE),
-        None,
-        1,
-        None,
-        false,  // Don't prepend system prompt - we have our own
-        None,
-        None,
-        None,
-    )
-    .await
-    .map_err(|e| format!("Error generating code edit: {}", e))?;
-
-    let edited_code = new_messages
-        .into_iter()
-        .next()
-        .and_then(|msgs| msgs.into_iter().last())
-        .and_then(|msg| match msg.content {
-            ChatContent::SimpleText(text) => Some(text),
-            ChatContent::Multimodal(_) => None,
+    let edited_code = result.messages
+        .last()
+        .and_then(|msg| match &msg.content {
+            ChatContent::SimpleText(text) => Some(text.clone()),
+            _ => None,
         })
         .ok_or("No edited code was generated".to_string())?;
 
-    // Strip markdown fences if present
     Ok(remove_markdown_fences(&edited_code))
 }
 
@@ -140,7 +90,10 @@ mod tests {
     #[test]
     fn test_remove_markdown_fences_with_language() {
         let input = "```python\ndef hello():\n    print('world')\n```";
-        assert_eq!(remove_markdown_fences(input), "def hello():\n    print('world')");
+        assert_eq!(
+            remove_markdown_fences(input),
+            "def hello():\n    print('world')"
+        );
     }
 
     #[test]

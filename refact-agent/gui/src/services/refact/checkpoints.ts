@@ -33,10 +33,12 @@ export const checkpointsApi = createApi({
       async queryFn(args, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const { checkpoints } = args;
-        const port = state.config.lspPort as unknown as number;
+        const port = state.config.lspPort;
         const url = `http://127.0.0.1:${port}${PREVIEW_CHECKPOINTS}`;
 
-        const runtime = state.chat.threads[state.chat.current_thread_id];
+        const runtime = state.chat.threads[state.chat.current_thread_id] as
+          | { thread: { id: string; mode?: string } }
+          | undefined;
         const chat_id = runtime?.thread.id ?? "";
         const mode = runtime?.thread.mode;
 
@@ -76,10 +78,12 @@ export const checkpointsApi = createApi({
       async queryFn(args, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const { checkpoints } = args;
-        const port = state.config.lspPort as unknown as number;
+        const port = state.config.lspPort;
         const url = `http://127.0.0.1:${port}${RESTORE_CHECKPOINTS}`;
 
-        const runtime = state.chat.threads[state.chat.current_thread_id];
+        const runtime = state.chat.threads[state.chat.current_thread_id] as
+          | { thread: { id: string; mode?: string } }
+          | undefined;
         const chat_id = runtime?.thread.id ?? "";
         const mode = runtime?.thread.mode;
 

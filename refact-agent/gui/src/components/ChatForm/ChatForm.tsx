@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-import { Flex, Card, Text, IconButton } from "@radix-ui/themes";
+import { Flex, Card, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
 
 import {
@@ -17,8 +17,6 @@ import {
   useIsOnline,
   useConfig,
   useCapsForToolUse,
-  useSendChatRequest,
-  useCompressChat,
   useAutoFocusOnce,
 } from "../../hooks";
 import { ErrorCallout, Callout } from "../Callout";
@@ -50,23 +48,27 @@ import { ToolConfirmation } from "./ToolConfirmation";
 import { selectThreadConfirmation } from "../../features/Chat";
 import { AttachImagesButton, FileList } from "../Dropzone";
 import { ResendButton } from "../ChatContent/ResendButton";
+import { MicrophoneButton } from "./MicrophoneButton";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import {
+  clearChatError,
   selectChatError,
+  selectCurrentThreadId,
   selectIsStreaming,
   selectIsWaiting,
-  selectLastSentCompression,
   selectMessages,
-  selectQueuedMessages,
+  selectQueuedItems,
   selectThreadToolUse,
   selectToolUse,
+  selectThreadImages,
 } from "../../features/Chat";
 import { telemetryApi } from "../../services/refact";
 import { push } from "../../features/Pages/pagesSlice";
 import { AgentCapabilities } from "./AgentCapabilities/AgentCapabilities";
 import { TokensPreview } from "./TokensPreview";
 import classNames from "classnames";
-import { ArchiveIcon } from "@radix-ui/react-icons";
+import { useUsageCounter } from "../UsageCounter/useUsageCounter";
+import { TrajectoryButton } from "../Trajectory";
 
 export type SendPolicy = "immediate" | "after_flow";
 
@@ -74,14 +76,12 @@ export type ChatFormProps = {
   onSubmit: (str: string, sendPolicy?: SendPolicy) => void;
   onClose?: () => void;
   className?: string;
-  unCalledTools: boolean;
 };
 
 export const ChatForm: React.FC<ChatFormProps> = ({
   onSubmit,
   onClose,
   className,
-  unCalledTools,
 }) => {
   const dispatch = useAppDispatch();
   const isStreaming = useAppSelector(selectIsStreaming);
@@ -92,32 +92,40 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const globalError = useAppSelector(getErrorMessage);
   const globalErrorType = useAppSelector(getErrorType);
   const chatError = useAppSelector(selectChatError);
+  const chatId = useAppSelector(selectCurrentThreadId);
   const information = useAppSelector(getInformationMessage);
   const pauseReasonsWithPause = useAppSelector(selectThreadConfirmation);
   const [helpInfo, setHelpInfo] = React.useState<React.ReactNode | null>(null);
+  const [isVoiceActive, setIsVoiceActive] = React.useState(false);
+  const [liveTranscript, setLiveTranscript] = React.useState("");
+  const [inputResetKey, setInputResetKey] = React.useState(0);
+  const [trajectoryOpen, setTrajectoryOpen] = useState(false);
   const isOnline = useIsOnline();
-  const { retry } = useSendChatRequest();
+  const {
+    isWarning,
+    isContextFull,
+    tokenPercentage,
+    shouldShow: shouldShowUsage,
+  } = useUsageCounter();
 
   const threadToolUse = useAppSelector(selectThreadToolUse);
   const messages = useAppSelector(selectMessages);
-  const lastSentCompression = useAppSelector(selectLastSentCompression);
-  const queuedMessages = useAppSelector(selectQueuedMessages);
-  const { compressChat, compressChatRequest, isCompressing } =
-    useCompressChat();
+  const queuedItems = useAppSelector(selectQueuedItems);
   const autoFocus = useAutoFocusOnce();
   const attachedFiles = useAttachedFiles();
   const shouldShowBalanceLow = useAppSelector(showBalanceLowCallout);
+  const attachedImages = useAppSelector(selectThreadImages);
 
   const shouldAgentCapabilitiesBeShown = useMemo(() => {
     return threadToolUse === "agent";
   }, [threadToolUse]);
 
   const onClearError = useCallback(() => {
-    if (messages.length > 0 && chatError) {
-      retry(messages);
-    }
     dispatch(clearError());
-  }, [dispatch, retry, messages, chatError]);
+    if (chatId) {
+      dispatch(clearChatError({ id: chatId }));
+    }
+  }, [dispatch, chatId]);
 
   const caps = useCapsForToolUse();
 
@@ -127,18 +135,18 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   });
 
   const disableSend = useMemo(() => {
-    // TODO: if interrupting chat some errors can occur
     if (allDisabled) return true;
-    // if (
-    //   currentThreadMaximumContextTokens &&
-    //   currentThreadUsage?.prompt_tokens &&
-    //   currentThreadUsage.prompt_tokens > currentThreadMaximumContextTokens
-    // )
-    //   return false;
-    // if (arePromptTokensBiggerThanContext) return true;
     if (messages.length === 0) return false;
+    if (isContextFull) return true;
     return isWaiting || isStreaming || !isOnline;
-  }, [allDisabled, messages.length, isWaiting, isStreaming, isOnline]);
+  }, [
+    allDisabled,
+    messages.length,
+    isWaiting,
+    isStreaming,
+    isOnline,
+    isContextFull,
+  ]);
 
   const isModelSelectVisible = useMemo(() => messages.length < 1, [messages]);
 
@@ -175,6 +183,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [value, setValue, isSendImmediately, setIsSendImmediately] =
     useInputValue(() => unCheckAll());
 
+  const valueRef = React.useRef(value);
+  valueRef.current = value;
+
   const onClearInformation = useCallback(
     () => dispatch(clearInformation()),
     [dispatch],
@@ -191,8 +202,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const handleSubmit = useCallback(
     (sendPolicy: SendPolicy = "after_flow") => {
       const trimmedValue = value.trim();
-      // Both options queue during streaming, so both should be allowed
-      const canSubmit = trimmedValue.length > 0 && isOnline && !allDisabled;
+      const hasImages = attachedImages.length > 0;
+      const canSubmit =
+        (trimmedValue.length > 0 || hasImages) && isOnline && !allDisabled;
 
       if (canSubmit) {
         const valueWithFiles = attachedFiles.addFilesToInput(trimmedValue);
@@ -200,10 +212,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           valueWithFiles,
           checkboxes,
         );
-        // TODO: add @files
         setLineSelectionInteracted(false);
         onSubmit(valueIncludingChecks, sendPolicy);
-        setValue(() => "");
+        setValue("");
+        setInputResetKey((k) => k + 1);
         unCheckAll();
         attachedFiles.removeAll();
       }
@@ -212,6 +224,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       value,
       allDisabled,
       isOnline,
+      attachedImages,
       attachedFiles,
       checkboxes,
       setLineSelectionInteracted,
@@ -297,6 +310,26 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     setIsSendImmediately,
   ]);
 
+  useEffect(() => {
+    if (isContextFull && !trajectoryOpen) {
+      setTrajectoryOpen(true);
+    }
+  }, [isContextFull, trajectoryOpen]);
+
+  const handleLiveTranscript = useCallback((text: string) => {
+    setLiveTranscript(text);
+  }, []);
+
+  const handleRecordingChange = useCallback(
+    (isRecording: boolean, isFinishing: boolean) => {
+      setIsVoiceActive(isRecording || isFinishing);
+      if (!isRecording && !isFinishing) {
+        setLiveTranscript("");
+      }
+    },
+    [],
+  );
+
   if (globalError) {
     return (
       <Flex direction="column" mt="2" gap="2">
@@ -347,6 +380,24 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           Oops, seems that connection was lost... Check your internet connection
         </Callout>
       )}
+      {shouldShowUsage && isContextFull && (
+        <Flex mb="2" gap="2" align="center">
+          <Callout type="error">
+            Context is full ({Math.round(tokenPercentage)}%). Please compress or
+            handoff to continue.
+          </Callout>
+          <TrajectoryButton
+            forceOpen={trajectoryOpen}
+            onOpenChange={setTrajectoryOpen}
+          />
+        </Flex>
+      )}
+      {shouldShowUsage && isWarning && !isContextFull && (
+        <Callout type="warning" mb="2">
+          Context is almost full ({Math.round(tokenPercentage)}%). Consider
+          compressing or handing off soon.
+        </Callout>
+      )}
 
       <Flex
         ref={(x) => refs.setChat(x)}
@@ -372,24 +423,35 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           <FilesPreview files={previewFiles} />
 
           <ComboBox
+            key={inputResetKey}
             onHelpClick={handleHelpCommand}
             commands={commands}
             requestCommandsCompletion={requestCompletion}
-            value={value}
+            value={
+              isVoiceActive && liveTranscript
+                ? value.trim()
+                  ? `${value}\n${liveTranscript}`
+                  : liveTranscript
+                : value
+            }
             onChange={handleChange}
             onSubmit={(event) => {
               handleEnter(event);
             }}
             placeholder={
-              commands.completions.length < 1 ? "Type @ for commands" : ""
+              isVoiceActive
+                ? "Listening..."
+                : commands.completions.length < 1
+                  ? "Type @ for commands"
+                  : ""
             }
             render={(props) => (
               <TextArea
                 data-testid="chat-form-textarea"
                 required={true}
-                // disabled={isStreaming}
                 {...props}
                 autoFocus={autoFocus}
+                readOnly={isVoiceActive}
                 style={{ boxShadow: "none", outline: "none" }}
                 onPaste={handlePastingFile}
               />
@@ -405,29 +467,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 currentMessageQuery={attachedFiles.addFilesToInput(value)}
               />
               <Flex gap="2" align="center" justify="center">
-                <IconButton
-                  size="1"
-                  variant="ghost"
-                  color={
-                    lastSentCompression === "high"
-                      ? "red"
-                      : lastSentCompression === "medium"
-                        ? "yellow"
-                        : undefined
-                  }
-                  title="Summarize and continue in a new chat"
-                  type="button"
-                  onClick={() => void compressChat()}
-                  disabled={
-                    messages.length === 0 ||
-                    isStreaming ||
-                    isWaiting ||
-                    unCalledTools
-                  }
-                  loading={compressChatRequest.isLoading || isCompressing}
-                >
-                  <ArchiveIcon />
-                </IconButton>
                 {toolUse === "agent" && (
                   <AgentIntegrationsButton
                     title="Set up Agent Integrations"
@@ -449,14 +488,29 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                   isMultimodalitySupportedForCurrentModel && (
                     <AttachImagesButton />
                   )}
-                {/* TODO: Reserved space for microphone button coming later on */}
+                <MicrophoneButton
+                  onTranscript={(text) => {
+                    setValue((prev) => {
+                      if (prev.trim()) {
+                        return `${prev}\n${text}`;
+                      }
+                      return text;
+                    });
+                  }}
+                  onLiveTranscript={handleLiveTranscript}
+                  onRecordingChange={handleRecordingChange}
+                  disabled={disableSend}
+                />
                 <ResendButton />
                 <SendButtonWithDropdown
                   disabled={
-                    !isOnline || allDisabled || value.trim().length === 0
+                    isVoiceActive ||
+                    !isOnline ||
+                    allDisabled ||
+                    (value.trim().length === 0 && attachedImages.length === 0)
                   }
                   isStreaming={isStreaming || isWaiting}
-                  queuedCount={queuedMessages.length}
+                  queuedCount={queuedItems.length}
                   onSend={() => handleSubmit("after_flow")}
                   onSendImmediately={handleSendImmediately}
                 />

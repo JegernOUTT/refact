@@ -34,11 +34,7 @@ fn shortest_root_path(path: &PathBuf, root_paths: &Vec<PathBuf>) -> PathBuf {
 
 pub struct ShortPathsIter<'a> {
     trie: &'a PathTrie,
-    stack: Vec<(
-        &'a TrieNode,
-        HashSet<usize>,
-        String,
-    )>,
+    stack: Vec<(&'a TrieNode, HashSet<usize>, String)>,
 }
 
 impl<'a> Iterator for ShortPathsIter<'a> {
@@ -64,7 +60,9 @@ impl<'a> Iterator for ShortPathsIter<'a> {
                 let mut component = self.trie.index_to_component.get(&index).unwrap().clone();
                 if child.is_root {
                     // we need only last component
-                    if let Some(last_component) = PathBuf::from(component.clone()).components().last() {
+                    if let Some(last_component) =
+                        PathBuf::from(component.clone()).components().last()
+                    {
                         component = last_component.as_os_str().to_string_lossy().to_string();
                     }
                     // The path is unique across all workspaces so we have no need specify workspace prefix
@@ -104,10 +102,8 @@ impl PathTrie {
             let component_count_a = a.components().count();
             let component_count_b = b.components().count();
             match component_count_a.cmp(&component_count_b) {
-                std::cmp::Ordering::Equal => {
-                    a.cmp(b)
-                },
-                other => other
+                std::cmp::Ordering::Equal => a.cmp(b),
+                other => other,
             }
         });
 
@@ -149,7 +145,10 @@ impl PathTrie {
             }
         }
 
-        PathTrie { root, index_to_component }
+        PathTrie {
+            root,
+            index_to_component,
+        }
     }
 
     fn _search_for_nodes(&self, path: &PathBuf) -> Vec<(&TrieNode, PathBuf)> {
@@ -183,7 +182,9 @@ impl PathTrie {
                         }
                         // we need only last component
                         if let Some(last_component) = root_path.components().last() {
-                            root_path = PathBuf::from(last_component.as_os_str().to_string_lossy().to_string());
+                            root_path = PathBuf::from(
+                                last_component.as_os_str().to_string_lossy().to_string(),
+                            );
                         };
                         // if the path is unique within all roots, not add root_path
                         if current.children.len() < 2 {
@@ -193,8 +194,8 @@ impl PathTrie {
                             Ok(root_relative_path) => {
                                 root_path.push(root_relative_path);
                                 nodes.push((child, root_path));
-                            },
-                            Err(_) => continue,  // should not happen, but anyway
+                            }
+                            Err(_) => continue, // should not happen, but anyway
                         };
                     } else if *child_component == component {
                         is_next_found = true;
@@ -216,15 +217,6 @@ impl PathTrie {
         }
 
         nodes
-    }
-
-    #[allow(dead_code)]
-    fn count_matches(&self, path: &PathBuf) -> usize {
-        let mut counter = 0;
-        for (node, _) in self._search_for_nodes(path) {
-            counter += node.count;
-        }
-        counter
     }
 
     pub fn find_matches(&self, path: &PathBuf) -> Vec<PathBuf> {
@@ -257,27 +249,6 @@ impl PathTrie {
         result
     }
 
-    // Unique shortest possible postfix of the path
-    #[allow(dead_code)]
-    pub fn shortest_path(&self, path: &PathBuf) -> Option<PathBuf> {
-        let components: Vec<String> = path
-            .components()
-            .map(|comp| comp.as_os_str().to_string_lossy().to_string())
-            .collect();
-
-        for i in (0..components.len()).rev() {
-            let mut partial_path = PathBuf::new();
-            for j in i..components.len() {
-                partial_path.push(&components[j]);
-            }
-            let matches = self.find_matches(&partial_path);
-            if matches.len() == 1 {
-                return Some(partial_path);
-            }
-        }
-        None
-    }
-
     // Short path postfix (relative to shortest root_path)
     pub fn short_path(&self, path: &PathBuf) -> Option<PathBuf> {
         let nodes = self._search_for_nodes(path);
@@ -289,10 +260,12 @@ impl PathTrie {
                 let index;
                 (index, node) = node.children.iter().last().unwrap();
 
-                let mut child_relative_path = PathBuf::from(self.index_to_component.get(index).unwrap().clone());
+                let mut child_relative_path =
+                    PathBuf::from(self.index_to_component.get(index).unwrap().clone());
                 // we need only last component
                 if let Some(component) = child_relative_path.components().last() {
-                    child_relative_path = PathBuf::from(component.as_os_str().to_string_lossy().to_string());
+                    child_relative_path =
+                        PathBuf::from(component.as_os_str().to_string_lossy().to_string());
                 }
                 // if the path is unique within all roots, not add root_path
                 if node.children.len() < 2 {
@@ -314,7 +287,11 @@ impl PathTrie {
             trie: self,
             stack: vec![(
                 &self.root,
-                self.root.children.keys().cloned().collect::<HashSet<usize>>(),
+                self.root
+                    .children
+                    .keys()
+                    .cloned()
+                    .collect::<HashSet<usize>>(),
                 String::new(),
             )],
         }
@@ -353,11 +330,32 @@ mod tests {
 
         let trie = PathTrie::build(&paths, &workspace_folders);
 
-        assert_eq!(trie.find_matches(&PathBuf::from("project4")).len(), 0, "Invalid number of matches (none)");
-        assert_eq!(trie.find_matches(&PathBuf::from("roject2/file1.ext")).len(), 0, "Invalid number of matches (truncated path)");
-        assert_eq!(trie.find_matches(&PathBuf::from("file2.ext")).len(), 1, "Invalid number of matches (single filename)");
-        assert_eq!(trie.find_matches(&PathBuf::from("user/project2/file1.ext")).len(), 1, "Invalid number of matches (single path)");
-        assert_eq!(trie.find_matches(&PathBuf::from("file1.ext")).len(), 4, "Invalid number of matches (multiple)");
+        assert_eq!(
+            trie.find_matches(&PathBuf::from("project4")).len(),
+            0,
+            "Invalid number of matches (none)"
+        );
+        assert_eq!(
+            trie.find_matches(&PathBuf::from("roject2/file1.ext")).len(),
+            0,
+            "Invalid number of matches (truncated path)"
+        );
+        assert_eq!(
+            trie.find_matches(&PathBuf::from("file2.ext")).len(),
+            1,
+            "Invalid number of matches (single filename)"
+        );
+        assert_eq!(
+            trie.find_matches(&PathBuf::from("user/project2/file1.ext"))
+                .len(),
+            1,
+            "Invalid number of matches (single path)"
+        );
+        assert_eq!(
+            trie.find_matches(&PathBuf::from("file1.ext")).len(),
+            4,
+            "Invalid number of matches (multiple)"
+        );
     }
 
     #[test]
@@ -380,10 +378,32 @@ mod tests {
 
         let trie = PathTrie::build(&paths, &workspace_folders);
 
-        assert_eq!(trie.find_matches(&PathBuf::from("project4")).len(), 0, "Invalid number of matches (none)");
-        assert_eq!(trie.find_matches(&PathBuf::from(r#"roject2\file1.ext"#)).len(), 0, "Invalid number of matches (truncated path)");
-        assert_eq!(trie.find_matches(&PathBuf::from("file2.ext")).len(), 1, "Invalid number of matches (single filename)");
-        assert_eq!(trie.find_matches(&PathBuf::from(r#"User 1\project2\file1.ext"#)).len(), 1, "Invalid number of matches (single path)");
-        assert_eq!(trie.find_matches(&PathBuf::from("file1.ext")).len(), 4, "Invalid number of matches (multiple)");
+        assert_eq!(
+            trie.find_matches(&PathBuf::from("project4")).len(),
+            0,
+            "Invalid number of matches (none)"
+        );
+        assert_eq!(
+            trie.find_matches(&PathBuf::from(r#"roject2\file1.ext"#))
+                .len(),
+            0,
+            "Invalid number of matches (truncated path)"
+        );
+        assert_eq!(
+            trie.find_matches(&PathBuf::from("file2.ext")).len(),
+            1,
+            "Invalid number of matches (single filename)"
+        );
+        assert_eq!(
+            trie.find_matches(&PathBuf::from(r#"User 1\project2\file1.ext"#))
+                .len(),
+            1,
+            "Invalid number of matches (single path)"
+        );
+        assert_eq!(
+            trie.find_matches(&PathBuf::from("file1.ext")).len(),
+            4,
+            "Invalid number of matches (multiple)"
+        );
     }
 }

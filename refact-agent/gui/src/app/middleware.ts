@@ -5,35 +5,39 @@ import {
   isRejected,
 } from "@reduxjs/toolkit";
 import {
-  doneStreaming,
   newChatAction,
-  chatAskQuestionThunk,
   restoreChat,
   newIntegrationChat,
-  setIsWaitingForResponse,
   upsertToolCall,
-  sendCurrentChatToLspAfterToolCallUpdate,
-  chatResponse,
-  chatError,
-  selectHasUncalledToolsById,
+  applyChatEvent,
   clearThreadPauseReasons,
   setThreadConfirmationStatus,
   setThreadPauseReasons,
   resetThreadImages,
   switchToThread,
   selectCurrentThreadId,
+  ideToolRequired,
+  saveTitle,
+  setBoostReasoning,
+  setIncludeProjectInfo,
+  setContextTokensCap,
+  setEnabledCheckpoints,
+  setToolUse,
+  setChatMode,
+  setChatModel,
+  setAutomaticPatch,
+  setIncreaseMaxTokens,
+  setAreFollowUpsEnabled,
+  setSystemPrompt,
 } from "../features/Chat/Thread";
+import { saveLastThreadParams } from "../utils/threadStorage";
 import { statisticsApi } from "../services/refact/statistics";
 import { integrationsApi } from "../services/refact/integrations";
 import { dockerApi } from "../services/refact/docker";
 import { capsApi, isCapsErrorResponse } from "../services/refact/caps";
 import { promptsApi } from "../services/refact/prompts";
 import { toolsApi } from "../services/refact/tools";
-import {
-  commandsApi,
-  isDetailMessage,
-  isDetailMessageWithErrorType,
-} from "../services/refact/commands";
+import { commandsApi, isDetailMessage } from "../services/refact/commands";
 import { pathApi } from "../services/refact/path";
 import { pingApi } from "../services/refact/ping";
 import {
@@ -50,7 +54,13 @@ import {
   ideForceReloadProjectTreeFiles,
 } from "../hooks/useEventBusForIDE";
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
-import { isToolResponse, modelsApi, providersApi } from "../services/refact";
+import {
+  isToolMessage,
+  isDiffMessage,
+  modelsApi,
+  providersApi,
+} from "../services/refact";
+import { sendChatCommand } from "../services/refact/chatCommands";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -79,7 +89,13 @@ startListening({
 
     listenerApi.dispatch(resetThreadImages({ id: chatId }));
     listenerApi.dispatch(clearThreadPauseReasons({ id: chatId }));
-    listenerApi.dispatch(setThreadConfirmationStatus({ id: chatId, wasInteracted: false, confirmationStatus: true }));
+    listenerApi.dispatch(
+      setThreadConfirmationStatus({
+        id: chatId,
+        wasInteracted: false,
+        confirmationStatus: true,
+      }),
+    );
     listenerApi.dispatch(clearError());
   },
 });
@@ -293,14 +309,6 @@ startListening({
     }
 
     if (
-      chatAskQuestionThunk.rejected.match(action) &&
-      !action.meta.aborted &&
-      typeof action.payload === "string"
-    ) {
-      listenerApi.dispatch(setError(action.payload));
-    }
-
-    if (
       (providersApi.endpoints.updateProvider.matchRejected(action) ||
         providersApi.endpoints.getProvider.matchRejected(action) ||
         providersApi.endpoints.getProviderTemplates.matchRejected(action) ||
@@ -344,69 +352,6 @@ startListening({
 });
 
 startListening({
-  actionCreator: doneStreaming,
-  effect: async (action, listenerApi) => {
-    const state = listenerApi.getState();
-    const chatId = action.payload.id;
-    const isCurrentThread = chatId === state.chat.current_thread_id;
-
-    if (isCurrentThread) {
-      listenerApi.dispatch(resetThreadImages({ id: chatId }));
-    }
-
-    const runtime = state.chat.threads[chatId];
-    if (!runtime) return;
-    if (runtime.error) return;
-    if (runtime.prevent_send) return;
-    if (runtime.confirmation.pause) return;
-
-    const hasUncalledTools = selectHasUncalledToolsById(state, chatId);
-    if (!hasUncalledTools) return;
-
-    const lastMessage = runtime.thread.messages[runtime.thread.messages.length - 1];
-    if (!lastMessage || !("tool_calls" in lastMessage) || !lastMessage.tool_calls) return;
-
-    // IMPORTANT: Set waiting=true immediately to prevent race conditions
-    // This blocks any other sender (like useAutoSend) from starting a duplicate request
-    // during the async confirmation check below
-    listenerApi.dispatch(setIsWaitingForResponse({ id: chatId, value: true }));
-
-    const isIntegrationChat = runtime.thread.mode === "CONFIGURE";
-    if (!isIntegrationChat) {
-      const confirmationResult = await listenerApi.dispatch(
-        toolsApi.endpoints.checkForConfirmation.initiate({
-          tool_calls: lastMessage.tool_calls,
-          messages: runtime.thread.messages,
-        }),
-      );
-
-      if ("data" in confirmationResult && confirmationResult.data?.pause) {
-        // setThreadPauseReasons will reset waiting_for_response to false
-        listenerApi.dispatch(setThreadPauseReasons({ id: chatId, pauseReasons: confirmationResult.data.pause_reasons }));
-        return;
-      }
-    }
-
-    // Re-check state after async operation to prevent duplicate requests
-    const latestState = listenerApi.getState();
-    const latestRuntime = latestState.chat.threads[chatId];
-    if (!latestRuntime) return;
-    if (latestRuntime.streaming) return;
-    if (latestRuntime.prevent_send) return;
-    if (latestRuntime.confirmation.pause) return;
-
-    void listenerApi.dispatch(
-      chatAskQuestionThunk({
-        messages: runtime.thread.messages,
-        chatId,
-        mode: runtime.thread.mode,
-        checkpointsEnabled: latestState.chat.checkpoints_enabled,
-      }),
-    );
-  },
-});
-
-startListening({
   matcher: isAnyOf(restoreChat, newChatAction, updateConfig),
   effect: (action, listenerApi) => {
     const state = listenerApi.getState();
@@ -428,27 +373,9 @@ startListening({
   },
 });
 
-startListening({
-  actionCreator: newIntegrationChat,
-  effect: async (_action, listenerApi) => {
-    const state = listenerApi.getState();
-    const runtime = state.chat.threads[state.chat.current_thread_id];
-    if (!runtime) return;
-    await listenerApi.dispatch(
-      chatAskQuestionThunk({
-        messages: runtime.thread.messages,
-        chatId: runtime.thread.id,
-      }),
-    );
-  },
-});
-
-// Telemetry
+// Telemetry for path API
 startListening({
   matcher: isAnyOf(
-    chatAskQuestionThunk.rejected.match,
-    chatAskQuestionThunk.fulfilled.match,
-    // give files api
     pathApi.endpoints.getFullPath.matchFulfilled,
     pathApi.endpoints.getFullPath.matchRejected,
     pathApi.endpoints.customizationPath.matchFulfilled,
@@ -459,44 +386,6 @@ startListening({
     pathApi.endpoints.integrationsPath.matchRejected,
   ),
   effect: (action, listenerApi) => {
-    const state = listenerApi.getState();
-    if (chatAskQuestionThunk.rejected.match(action) && !action.meta.condition) {
-      const { chatId, mode } = action.meta.arg;
-      const runtime = state.chat.threads[chatId];
-      const thread = runtime?.thread;
-      const scope = `sendChat_${thread?.model ?? "unknown"}_${mode}`;
-
-      if (isDetailMessageWithErrorType(action.payload)) {
-        const errorMessage = action.payload.detail;
-        listenerApi.dispatch(
-          action.payload.errorType === "GLOBAL"
-            ? setError(errorMessage)
-            : chatError({ id: chatId, message: errorMessage }),
-        );
-        const thunk = telemetryApi.endpoints.sendTelemetryChatEvent.initiate({
-          scope,
-          success: false,
-          error_message: errorMessage,
-        });
-        void listenerApi.dispatch(thunk);
-      }
-    }
-
-    if (chatAskQuestionThunk.fulfilled.match(action)) {
-      const { chatId, mode } = action.meta.arg;
-      const runtime = state.chat.threads[chatId];
-      const thread = runtime?.thread;
-      const scope = `sendChat_${thread?.model ?? "unknown"}_${mode}`;
-
-      const thunk = telemetryApi.endpoints.sendTelemetryChatEvent.initiate({
-        scope,
-        success: true,
-        error_message: "",
-      });
-
-      void listenerApi.dispatch(thunk);
-    }
-
     if (pathApi.endpoints.getFullPath.matchFulfilled(action)) {
       const thunk = telemetryApi.endpoints.sendTelemetryNetEvent.initiate({
         url: FULL_PATH_URL,
@@ -553,40 +442,32 @@ startListening({
 
 startListening({
   actionCreator: ideToolCallResponse,
-  effect: (action, listenerApi) => {
+  effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const chatId = action.payload.chatId;
-    const runtime = state.chat.threads[chatId];
+    const { toolCallId, accepted } = action.payload;
 
     listenerApi.dispatch(upsertToolCallIntoHistory(action.payload));
     listenerApi.dispatch(upsertToolCall(action.payload));
 
-    if (!runtime) return;
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
 
-    const pauseReasons = runtime.confirmation.pause_reasons.filter(
-      (reason) => reason.tool_call_id !== action.payload.toolCallId,
-    );
-
-    if (pauseReasons.length === 0) {
-      listenerApi.dispatch(clearThreadPauseReasons({ id: chatId }));
-      listenerApi.dispatch(setThreadConfirmationStatus({ id: chatId, wasInteracted: true, confirmationStatus: true }));
-      // If we're about to dispatch a follow-up, set waiting=true; otherwise false
-      if (action.payload.accepted) {
-        listenerApi.dispatch(setIsWaitingForResponse({ id: chatId, value: true }));
-      } else {
-        listenerApi.dispatch(setIsWaitingForResponse({ id: chatId, value: false }));
-      }
-    } else {
-      listenerApi.dispatch(setThreadPauseReasons({ id: chatId, pauseReasons }));
-    }
-
-    if (pauseReasons.length === 0 && action.payload.accepted) {
-      void listenerApi.dispatch(
-        sendCurrentChatToLspAfterToolCallUpdate({
-          chatId,
-          toolCallId: action.payload.toolCallId,
-        }),
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
       );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "ide_tool_result",
+        tool_call_id: toolCallId,
+        content:
+          accepted === true
+            ? "Tool executed successfully"
+            : "Tool execution rejected",
+        tool_failed: accepted !== true,
+      });
+    } catch {
+      // Silently ignore - backend may not support this command
     }
   },
 });
@@ -606,7 +487,6 @@ startListening({
   },
 });
 
-// Auto-switch to thread when it needs confirmation (background chat support)
 startListening({
   actionCreator: setThreadPauseReasons,
   effect: (action, listenerApi) => {
@@ -614,22 +494,331 @@ startListening({
     const currentThreadId = selectCurrentThreadId(state);
     const threadIdNeedingConfirmation = action.payload.id;
 
-    // If the thread needing confirmation is not the current one, switch to it
     if (threadIdNeedingConfirmation !== currentThreadId) {
       listenerApi.dispatch(switchToThread({ id: threadIdNeedingConfirmation }));
     }
   },
 });
 
-// JB file refresh
-// TBD: this could include diff messages to
 startListening({
-  actionCreator: chatResponse,
+  actionCreator: saveTitle,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = action.payload.id;
+    const title = action.payload.title;
+    const isTitleGenerated = action.payload.isTitleGenerated;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { title, is_title_generated: isTitleGenerated },
+      });
+    } catch {
+      // Silently ignore - backend may not support this command
+    }
+  },
+});
+
+startListening({
+  actionCreator: applyChatEvent,
   effect: (action, listenerApi) => {
     const state = listenerApi.getState();
     if (state.config.host !== "jetbrains") return;
-    if (!isToolResponse(action.payload)) return;
     if (!window.postIntellijMessage) return;
-    window.postIntellijMessage(ideForceReloadProjectTreeFiles());
+
+    const event = action.payload;
+    if (event.type === "message_added") {
+      const msg = event.message;
+      if (isToolMessage(msg) || isDiffMessage(msg)) {
+        window.postIntellijMessage(ideForceReloadProjectTreeFiles());
+      }
+    }
+  },
+});
+
+startListening({
+  actionCreator: applyChatEvent,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    if (event.type === "ide_tool_required") {
+      listenerApi.dispatch(
+        ideToolRequired({
+          chatId: event.chat_id,
+          toolCallId: event.tool_call_id,
+          toolName: event.tool_name,
+          args: event.args,
+        }),
+      );
+    }
+  },
+});
+
+// Sync thread params to backend when changed via Redux actions
+startListening({
+  actionCreator: setBoostReasoning,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = action.payload.chatId;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { boost_reasoning: action.payload.value },
+      });
+    } catch {
+      // Silently ignore - backend may not support this command
+    }
+  },
+});
+
+startListening({
+  actionCreator: setAutomaticPatch,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = action.payload.chatId;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { automatic_patch: action.payload.value },
+      });
+    } catch {
+      /* ignore */
+    }
+  },
+});
+
+startListening({
+  actionCreator: setIncludeProjectInfo,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = action.payload.chatId;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { include_project_info: action.payload.value },
+      });
+    } catch {
+      // Silently ignore - backend may not support this command
+    }
+  },
+});
+
+startListening({
+  actionCreator: setContextTokensCap,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = action.payload.chatId;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { context_tokens_cap: action.payload.value },
+      });
+    } catch {
+      // Silently ignore - backend may not support this command
+    }
+  },
+});
+
+startListening({
+  actionCreator: setEnabledCheckpoints,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = state.chat.current_thread_id;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { checkpoints_enabled: action.payload },
+      });
+    } catch {
+      // Silently ignore - backend may not support this command
+    }
+  },
+});
+
+startListening({
+  actionCreator: setToolUse,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = state.chat.current_thread_id;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { tool_use: action.payload },
+      });
+    } catch {
+      // Silently ignore - backend may not support this command
+    }
+  },
+});
+
+startListening({
+  actionCreator: setChatMode,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = state.chat.current_thread_id;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { mode: action.payload },
+      });
+    } catch {
+      // Silently ignore - backend may not support this command
+    }
+  },
+});
+
+startListening({
+  actionCreator: setChatModel,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+    const chatId = state.chat.current_thread_id;
+
+    if (!port || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { model: action.payload },
+      });
+    } catch {
+      /* ignore */
+    }
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    setChatModel,
+    setToolUse,
+    setBoostReasoning,
+    setIncreaseMaxTokens,
+    setIncludeProjectInfo,
+    setContextTokensCap,
+    setEnabledCheckpoints,
+    setAreFollowUpsEnabled,
+    setChatMode,
+    setSystemPrompt,
+  ),
+  effect: (_action, listenerApi) => {
+    const state = listenerApi.getState();
+    const runtime = state.chat.threads[state.chat.current_thread_id];
+    if (!runtime) return;
+
+    saveLastThreadParams({
+      model: runtime.thread.model,
+      tool_use: runtime.thread.tool_use,
+      mode: runtime.thread.mode,
+      boost_reasoning: runtime.thread.boost_reasoning,
+      increase_max_tokens: runtime.thread.increase_max_tokens,
+      include_project_info: runtime.thread.include_project_info,
+      context_tokens_cap: runtime.thread.context_tokens_cap,
+      system_prompt: state.chat.system_prompt,
+      checkpoints_enabled: state.chat.checkpoints_enabled,
+      follow_ups_enabled: state.chat.follow_ups_enabled,
+    });
+  },
+});
+
+startListening({
+  actionCreator: newChatAction,
+  effect: async (_action, listenerApi) => {
+    const state = listenerApi.getState();
+    const chatId = state.chat.current_thread_id;
+    const runtime = state.chat.threads[chatId];
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+
+    if (!runtime || !port || !chatId) return;
+
+    const patch: Record<string, unknown> = {};
+    if (runtime.thread.model) patch.model = runtime.thread.model;
+    if (runtime.thread.tool_use) patch.tool_use = runtime.thread.tool_use;
+    if (runtime.thread.mode) patch.mode = runtime.thread.mode;
+    if (runtime.thread.boost_reasoning !== undefined)
+      patch.boost_reasoning = runtime.thread.boost_reasoning;
+    if (runtime.thread.automatic_patch !== undefined)
+      patch.automatic_patch = runtime.thread.automatic_patch;
+    if (runtime.thread.include_project_info !== undefined)
+      patch.include_project_info = runtime.thread.include_project_info;
+    if (runtime.thread.context_tokens_cap !== undefined)
+      patch.context_tokens_cap = runtime.thread.context_tokens_cap;
+
+    if (Object.keys(patch).length === 0) return;
+
+    try {
+      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        type: "set_params",
+        patch,
+      });
+    } catch {
+      // Best effort - ignore if backend rejects
+    }
   },
 });

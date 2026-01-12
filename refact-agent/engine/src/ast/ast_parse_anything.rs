@@ -8,29 +8,26 @@ use sha2::{Sha256, Digest};
 use crate::ast::ast_structs::{AstDefinition, AstUsage, AstErrorStats};
 use crate::ast::treesitter::parsers::get_ast_parser_by_filename;
 use crate::ast::treesitter::structs::SymbolType;
-use crate::ast::treesitter::ast_instance_structs::{VariableUsage, VariableDefinition, AstSymbolInstance, FunctionDeclaration, StructDeclaration, FunctionCall, AstSymbolInstanceArc};
+use crate::ast::treesitter::ast_instance_structs::{
+    VariableUsage, VariableDefinition, AstSymbolInstance, FunctionDeclaration, StructDeclaration,
+    FunctionCall, AstSymbolInstanceArc,
+};
 use crate::ast::parse_common::line12mid_from_ranges;
-
 
 const TOO_MANY_SYMBOLS_IN_FILE: usize = 10000;
 
 fn _is_declaration(t: SymbolType) -> bool {
     match t {
-        SymbolType::Module |
-        SymbolType::StructDeclaration |
-        SymbolType::TypeAlias |
-        SymbolType::ClassFieldDeclaration |
-        SymbolType::ImportDeclaration |
-        SymbolType::VariableDefinition |
-        SymbolType::FunctionDeclaration |
-        SymbolType::CommentDefinition |
-        SymbolType::Unknown => {
-            true
-        }
-        SymbolType::FunctionCall |
-        SymbolType::VariableUsage => {
-            false
-        }
+        SymbolType::Module
+        | SymbolType::StructDeclaration
+        | SymbolType::TypeAlias
+        | SymbolType::ClassFieldDeclaration
+        | SymbolType::ImportDeclaration
+        | SymbolType::VariableDefinition
+        | SymbolType::FunctionDeclaration
+        | SymbolType::CommentDefinition
+        | SymbolType::Unknown => true,
+        SymbolType::FunctionCall | SymbolType::VariableUsage => false,
     }
 }
 
@@ -46,8 +43,13 @@ fn _go_to_parent_until_declaration(
         if node_option.is_none() {
             // XXX: legit in Python (assignment at top level, function call at top level)
             errors.add_error(
-                "".to_string(), start_node_read.full_range().start_point.row + 1,
-                format!("go_to_parent: parent decl not found for {:?}", start_node_read.name()).as_str(),
+                "".to_string(),
+                start_node_read.full_range().start_point.row + 1,
+                format!(
+                    "go_to_parent: parent decl not found for {:?}",
+                    start_node_read.name()
+                )
+                .as_str(),
             );
             return Uuid::nil();
         }
@@ -106,7 +108,7 @@ fn _find_top_level_nodes(pcx: &mut ParseContext) -> &Vec<AstSymbolInstanceArc> {
         let mut top_level: Vec<AstSymbolInstanceArc> = Vec::new();
         for (_, node_arc) in pcx.map.iter() {
             let node = node_arc.read();
-            assert!(node.parent_guid().is_some());  // parent always exists for some reason :/
+            assert!(node.parent_guid().is_some()); // parent always exists for some reason :/
             if _is_declaration(node.symbol_type()) {
                 if !pcx.map.contains_key(&node.parent_guid().unwrap()) {
                     top_level.push(node_arc.clone());
@@ -145,7 +147,8 @@ fn _name_to_usage(
         if _is_declaration(node.symbol_type()) {
             look_here.push(node_option.unwrap().clone());
 
-            if let Some(function_declaration) = node.as_any().downcast_ref::<FunctionDeclaration>() {
+            if let Some(function_declaration) = node.as_any().downcast_ref::<FunctionDeclaration>()
+            {
                 for arg in &function_declaration.args {
                     if arg.name == name_of_anything {
                         // eprintln!("{:?} is an argument in a function {:?} => ignore, no path at all, no link", name_of_anything, function_declaration.name());
@@ -163,7 +166,12 @@ fn _name_to_usage(
             }
 
             if let Some(struct_declaration) = node.as_any().downcast_ref::<StructDeclaration>() {
-                result.targets_for_guesswork.push(format!("?::{}🔎{}::{}", node.language().to_string(), struct_declaration.name(), name_of_anything));
+                result.targets_for_guesswork.push(format!(
+                    "?::{}🔎{}::{}",
+                    node.language().to_string(),
+                    struct_declaration.name(),
+                    name_of_anything
+                ));
                 // Add all children nodes (shallow)
                 for child_guid in struct_declaration.childs_guid() {
                     if let Some(child_node) = pcx.map.get(child_guid) {
@@ -190,18 +198,27 @@ fn _name_to_usage(
         if _is_declaration(node.symbol_type()) {
             // eprintln!("_name_to_usage {:?} looking in {:?}", name_of_anything, node.name());
             if node.name() == name_of_anything {
-                result.resolved_as = [pcx.file_global_path.clone(), _path_of_node(&pcx.map, Some(node.guid().clone()))].concat().join("::");
+                result.resolved_as = [
+                    pcx.file_global_path.clone(),
+                    _path_of_node(&pcx.map, Some(node.guid().clone())),
+                ]
+                .concat()
+                .join("::");
                 result.debug_hint = "up".to_string();
             }
         }
     }
 
     if allow_global_ref {
-        result.targets_for_guesswork.push(format!("?::{}", name_of_anything));
+        result
+            .targets_for_guesswork
+            .push(format!("?::{}", name_of_anything));
         Some(result)
     } else {
         // ?::DerivedFrom1::f ?::DerivedFrom2::f f
-        result.targets_for_guesswork.push(format!("{}", name_of_anything));
+        result
+            .targets_for_guesswork
+            .push(format!("{}", name_of_anything));
         Some(result)
     }
 }
@@ -254,9 +271,16 @@ fn _typeof(
                 if let Some(first_type) = variable_definition.types().get(0) {
                     let type_name = first_type.name.clone().unwrap_or_default();
                     if type_name.is_empty() {
-                        errors.add_error("".to_string(), node.full_range().start_point.row + 1, "nameless type for variable definition");
+                        errors.add_error(
+                            "".to_string(),
+                            node.full_range().start_point.row + 1,
+                            "nameless type for variable definition",
+                        );
                     } else {
-                        return vec!["?".to_string(), format!("{}🔎{}", node.language().to_string(), type_name)];
+                        return vec![
+                            "?".to_string(),
+                            format!("{}🔎{}", node.language().to_string(), type_name),
+                        ];
                     }
                 }
             }
@@ -269,9 +293,20 @@ fn _typeof(
                 if arg.name == variable_or_param_name {
                     if let Some(arg_type) = &arg.type_ {
                         if arg_type.name.is_none() || arg_type.name.clone().unwrap().is_empty() {
-                            errors.add_error("".to_string(), node.full_range().start_point.row + 1, "nameless type for function argument");
+                            errors.add_error(
+                                "".to_string(),
+                                node.full_range().start_point.row + 1,
+                                "nameless type for function argument",
+                            );
                         } else {
-                            return vec!["?".to_string(), format!("{}🔎{}", node.language().to_string(), arg_type.name.clone().unwrap())];
+                            return vec![
+                                "?".to_string(),
+                                format!(
+                                    "{}🔎{}",
+                                    node.language().to_string(),
+                                    arg_type.name.clone().unwrap()
+                                ),
+                            ];
                         }
                     }
                 }
@@ -307,15 +342,26 @@ fn _usage_or_typeof_caller_colon_colon_usage(
             uline,
         };
         let caller_node = caller.read();
-        let typeof_caller = _typeof(pcx, caller_node.guid().clone(), caller_node.name().to_string(), errors);
+        let typeof_caller = _typeof(
+            pcx,
+            caller_node.guid().clone(),
+            caller_node.name().to_string(),
+            errors,
+        );
         // typeof_caller will be "?" if nothing found, start with "file" if type found in the current file
         if typeof_caller.first() == Some(&"file".to_string()) {
             // actually fully resolved!
-            result.resolved_as = [typeof_caller, vec![symbol.name().to_string()]].concat().join("::");
+            result.resolved_as = [typeof_caller, vec![symbol.name().to_string()]]
+                .concat()
+                .join("::");
             result.debug_hint = caller_node.name().to_string();
         } else {
             // not fully resolved
-            result.targets_for_guesswork.push([typeof_caller, vec![symbol.name().to_string()]].concat().join("::"));
+            result.targets_for_guesswork.push(
+                [typeof_caller, vec![symbol.name().to_string()]]
+                    .concat()
+                    .join("::"),
+            );
             result.debug_hint = caller_node.name().to_string();
         }
         Some(result)
@@ -326,7 +372,13 @@ fn _usage_or_typeof_caller_colon_colon_usage(
         // caller is about caller.function_call(1, 2, 3), in this case means just function_call(1, 2, 3) without anything on the left
         // just look for a name in function's parent and above
         //
-        let tmp = _name_to_usage(pcx, uline, symbol.parent_guid().clone(), symbol.name().to_string(), false);
+        let tmp = _name_to_usage(
+            pcx,
+            uline,
+            symbol.parent_guid().clone(),
+            symbol.name().to_string(),
+            false,
+        );
         // eprintln!("    _usage_or_typeof_caller_colon_colon_usage {} _name_to_usage={:?}", symbol.name().to_string(), tmp);
         tmp
     }
@@ -336,8 +388,7 @@ pub fn parse_anything(
     cpath: &str,
     text: &str,
     errors: &mut AstErrorStats,
-) -> Result<(Vec<AstDefinition>, String), String>
-{
+) -> Result<(Vec<AstDefinition>, String), String> {
     let path = PathBuf::from(cpath);
     let (mut parser, language_id) = get_ast_parser_by_filename(&path).map_err(|err| err.message)?;
     let language = language_id.to_string();
@@ -349,7 +400,10 @@ pub fn parse_anything(
 
     let symbols = parser.parse(text, &path);
     if symbols.len() > TOO_MANY_SYMBOLS_IN_FILE {
-        return Err(format!("more than {} symbols, generated?", TOO_MANY_SYMBOLS_IN_FILE));
+        return Err(format!(
+            "more than {} symbols, generated?",
+            TOO_MANY_SYMBOLS_IN_FILE
+        ));
     }
     let symbols2 = symbols.clone();
 
@@ -366,28 +420,45 @@ pub fn parse_anything(
         let symbol = symbol.read();
         pcx.map.insert(symbol.guid().clone(), symbol_arc_clone);
         match symbol.symbol_type() {
-            SymbolType::StructDeclaration |
-            SymbolType::TypeAlias |
-            SymbolType::ClassFieldDeclaration |
-            SymbolType::VariableDefinition |
-            SymbolType::FunctionDeclaration |
-            SymbolType::Unknown => {
+            SymbolType::StructDeclaration
+            | SymbolType::TypeAlias
+            | SymbolType::ClassFieldDeclaration
+            | SymbolType::VariableDefinition
+            | SymbolType::FunctionDeclaration
+            | SymbolType::Unknown => {
                 let mut this_is_a_class = "".to_string();
                 let mut this_class_derived_from = vec![];
                 let mut usages = vec![];
-                if let Some(struct_declaration) = symbol.as_any().downcast_ref::<StructDeclaration>() {
+                if let Some(struct_declaration) =
+                    symbol.as_any().downcast_ref::<StructDeclaration>()
+                {
                     this_is_a_class = format!("{}🔎{}", pcx.language, struct_declaration.name());
                     for base_class in struct_declaration.inherited_types.iter() {
                         let base_class_name = base_class.name.clone().unwrap_or_default();
                         if base_class_name.is_empty() {
-                            errors.add_error("".to_string(), struct_declaration.full_range().start_point.row + 1, "nameless base class");
+                            errors.add_error(
+                                "".to_string(),
+                                struct_declaration.full_range().start_point.row + 1,
+                                "nameless base class",
+                            );
                             continue;
                         }
-                        this_class_derived_from.push(format!("{}🔎{}", pcx.language, base_class_name));
-                        if let Some(usage) = _name_to_usage(&mut pcx, symbol.full_range().start_point.row + 1, symbol.parent_guid().clone(), base_class_name, true) {
+                        this_class_derived_from
+                            .push(format!("{}🔎{}", pcx.language, base_class_name));
+                        if let Some(usage) = _name_to_usage(
+                            &mut pcx,
+                            symbol.full_range().start_point.row + 1,
+                            symbol.parent_guid().clone(),
+                            base_class_name,
+                            true,
+                        ) {
                             usages.push(usage);
                         } else {
-                            errors.add_error("".to_string(), struct_declaration.full_range().start_point.row + 1, "unable to create base class usage");
+                            errors.add_error(
+                                "".to_string(),
+                                struct_declaration.full_range().start_point.row + 1,
+                                "unable to create base class usage",
+                            );
                         }
                     }
                 }
@@ -396,14 +467,19 @@ pub fn parse_anything(
                     if let Some(parent_guid) = symbol.parent_guid() {
                         if let Some(parent_symbol) = pcx.map.get(&parent_guid) {
                             let parent_symbol = parent_symbol.read();
-                            if parent_symbol.as_any().downcast_ref::<FunctionDeclaration>().is_some() {
+                            if parent_symbol
+                                .as_any()
+                                .downcast_ref::<FunctionDeclaration>()
+                                .is_some()
+                            {
                                 skip_var_because_parent_is_function = true;
                             }
                         }
                     }
                 }
                 if !symbol.name().is_empty() && !skip_var_because_parent_is_function {
-                    let (line1, line2, line_mid) = line12mid_from_ranges(symbol.full_range(), symbol.definition_range());
+                    let (line1, line2, line_mid) =
+                        line12mid_from_ranges(symbol.full_range(), symbol.definition_range());
                     let definition = AstDefinition {
                         official_path: _path_of_node(&pcx.map, Some(symbol.guid().clone())),
                         symbol_type: symbol.symbol_type().clone(),
@@ -422,14 +498,18 @@ pub fn parse_anything(
                     };
                     pcx.definitions.insert(symbol.guid().clone(), definition);
                 } else if symbol.name().is_empty() {
-                    errors.add_error("".to_string(), symbol.full_range().start_point.row + 1, "nameless decl");
+                    errors.add_error(
+                        "".to_string(),
+                        symbol.full_range().start_point.row + 1,
+                        "nameless decl",
+                    );
                 }
             }
-            SymbolType::Module |
-            SymbolType::CommentDefinition |
-            SymbolType::ImportDeclaration |
-            SymbolType::FunctionCall |
-            SymbolType::VariableUsage => {
+            SymbolType::Module
+            | SymbolType::CommentDefinition
+            | SymbolType::ImportDeclaration
+            | SymbolType::FunctionCall
+            | SymbolType::VariableUsage => {
                 // do nothing
             }
         }
@@ -439,47 +519,67 @@ pub fn parse_anything(
         let symbol = symbol_arc.read();
         // eprintln!("pass2: {:?}", symbol);
         match symbol.symbol_type() {
-            SymbolType::StructDeclaration |
-            SymbolType::Module |
-            SymbolType::TypeAlias |
-            SymbolType::ClassFieldDeclaration |
-            SymbolType::ImportDeclaration |
-            SymbolType::VariableDefinition |
-            SymbolType::FunctionDeclaration |
-            SymbolType::CommentDefinition |
-            SymbolType::Unknown => {
+            SymbolType::StructDeclaration
+            | SymbolType::Module
+            | SymbolType::TypeAlias
+            | SymbolType::ClassFieldDeclaration
+            | SymbolType::ImportDeclaration
+            | SymbolType::VariableDefinition
+            | SymbolType::FunctionDeclaration
+            | SymbolType::CommentDefinition
+            | SymbolType::Unknown => {
                 continue;
             }
             SymbolType::FunctionCall => {
-                let function_call = symbol.as_any().downcast_ref::<FunctionCall>().expect("xxx1000");
+                let function_call = symbol
+                    .as_any()
+                    .downcast_ref::<FunctionCall>()
+                    .expect("xxx1000");
                 let uline = function_call.full_range().start_point.row + 1;
                 if function_call.name().is_empty() {
                     errors.add_error("".to_string(), uline, "nameless call");
                     continue;
                 }
-                let usage = _usage_or_typeof_caller_colon_colon_usage(&mut pcx, function_call.get_caller_guid().clone(), uline, function_call, errors);
+                let usage = _usage_or_typeof_caller_colon_colon_usage(
+                    &mut pcx,
+                    function_call.get_caller_guid().clone(),
+                    uline,
+                    function_call,
+                    errors,
+                );
                 // eprintln!("function call name={} usage={:?} debug_hint={:?}", function_call.name(), usage, debug_hint);
                 if usage.is_none() {
                     continue;
                 }
-                let my_parent = _go_to_parent_until_declaration(&pcx.map, symbol_arc.clone(), errors);
+                let my_parent =
+                    _go_to_parent_until_declaration(&pcx.map, symbol_arc.clone(), errors);
                 if let Some(my_parent_def) = pcx.definitions.get_mut(&my_parent) {
                     my_parent_def.usages.push(usage.unwrap());
                 }
             }
             SymbolType::VariableUsage => {
-                let variable_usage = symbol.as_any().downcast_ref::<VariableUsage>().expect("xxx1001");
+                let variable_usage = symbol
+                    .as_any()
+                    .downcast_ref::<VariableUsage>()
+                    .expect("xxx1001");
                 let uline = variable_usage.full_range().start_point.row + 1;
                 if variable_usage.name().is_empty() {
                     errors.add_error("".to_string(), uline, "nameless variable usage");
                     continue;
                 }
-                let usage = _usage_or_typeof_caller_colon_colon_usage(&mut pcx, variable_usage.fields().caller_guid.clone(), uline, variable_usage, errors);
+                let usage = _usage_or_typeof_caller_colon_colon_usage(
+                    &mut pcx,
+                    variable_usage.fields().caller_guid.clone(),
+                    uline,
+                    variable_usage,
+                    errors,
+                );
                 // eprintln!("variable usage name={} usage={:?}", variable_usage.name(), usage);
                 if usage.is_none() {
                     continue;
                 }
-                let my_parent = _go_to_parent_until_declaration(&pcx.map, symbol_arc.clone(), errors);
+                let my_parent =
+                    _go_to_parent_until_declaration(&pcx.map, symbol_arc.clone(), errors);
                 if let Some(my_parent_def) = pcx.definitions.get_mut(&my_parent) {
                     my_parent_def.usages.push(usage.unwrap());
                 }
@@ -515,7 +615,8 @@ pub fn filesystem_path_to_double_colon_path(cpath: &str) -> Vec<String> {
     const ALPHANUM: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     let mut x = 0usize;
-    let short_alphanum: String = result.iter()
+    let short_alphanum: String = result
+        .iter()
         .map(|&byte| {
             x += byte as usize;
             x %= ALPHANUM.len();
@@ -532,8 +633,7 @@ pub fn parse_anything_and_add_file_path(
     cpath: &str,
     text: &str,
     errstats: &mut AstErrorStats,
-) -> Result<(Vec<AstDefinition>, String), String>
-{
+) -> Result<(Vec<AstDefinition>, String), String> {
     let file_global_path = filesystem_path_to_double_colon_path(cpath);
     let file_global_path_str = file_global_path.join("::");
     let errors_count_before = errstats.errors.len();
@@ -546,10 +646,8 @@ pub fn parse_anything_and_add_file_path(
         if !definition.official_path.is_empty() && definition.official_path[0] == "root" {
             definition.official_path.remove(0);
         }
-        definition.official_path = [
-            file_global_path.clone(),
-            definition.official_path.clone()
-        ].concat();
+        definition.official_path =
+            [file_global_path.clone(), definition.official_path.clone()].concat();
         for usage in &mut definition.usages {
             for t in &mut usage.targets_for_guesswork {
                 if t.starts_with("file::") || t.starts_with("root::") {
@@ -569,7 +667,6 @@ pub fn parse_anything_and_add_file_path(
     }
     Ok((definitions, language))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -592,11 +689,25 @@ mod tests {
     }
 
     fn _must_be_no_diff(expected: &str, produced: &str) -> String {
-        let expected_lines: Vec<_> = expected.lines().map(|line| line.trim()).filter(|line| !line.is_empty()).collect();
-        let produced_lines: Vec<_> = produced.lines().map(|line| line.trim()).filter(|line| !line.is_empty()).collect();
+        let expected_lines: Vec<_> = expected
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let produced_lines: Vec<_> = produced
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect();
         let mut mistakes = String::new();
-        let missing_in_produced: Vec<_> = expected_lines.iter().filter(|line| !produced_lines.contains(line)).collect();
-        let missing_in_expected: Vec<_> = produced_lines.iter().filter(|line| !expected_lines.contains(line)).collect();
+        let missing_in_produced: Vec<_> = expected_lines
+            .iter()
+            .filter(|line| !produced_lines.contains(line))
+            .collect();
+        let missing_in_expected: Vec<_> = produced_lines
+            .iter()
+            .filter(|line| !expected_lines.contains(line))
+            .collect();
         if !missing_in_expected.is_empty() {
             mistakes.push_str("bad output:\n");
             for line in missing_in_expected.iter() {
@@ -617,7 +728,8 @@ mod tests {
         let mut errstats = AstErrorStats::default();
         let absfn1 = std::fs::canonicalize(input_file).unwrap();
         let text = _read_file(absfn1.to_str().unwrap());
-        let (definitions, _language) = parse_anything(absfn1.to_str().unwrap(), &text, &mut errstats).unwrap();
+        let (definitions, _language) =
+            parse_anything(absfn1.to_str().unwrap(), &text, &mut errstats).unwrap();
         let mut defs_str = String::new();
         for d in definitions.iter() {
             defs_str.push_str(&format!("{:?}\n", d));
@@ -629,7 +741,10 @@ mod tests {
             println!("PROBLEMS {:#?}:\n{}/PROBLEMS", absfn1, oops);
         }
         for error in errstats.errors {
-            println!("(E) {}:{} {}", error.err_cpath, error.err_line, error.err_message);
+            println!(
+                "(E) {}:{} {}",
+                error.err_cpath, error.err_line, error.err_message
+            );
         }
     }
 
@@ -637,7 +752,7 @@ mod tests {
     fn test_ast_parse_cpp_library() {
         _run_parse_test(
             "src/ast/alt_testsuite/cpp_goat_library.h",
-            "src/ast/alt_testsuite/cpp_goat_library.correct"
+            "src/ast/alt_testsuite/cpp_goat_library.correct",
         );
     }
 
@@ -645,7 +760,7 @@ mod tests {
     fn test_ast_parse_cpp_main() {
         _run_parse_test(
             "src/ast/alt_testsuite/cpp_goat_main.cpp",
-            "src/ast/alt_testsuite/cpp_goat_main.correct"
+            "src/ast/alt_testsuite/cpp_goat_main.correct",
         );
     }
 
@@ -653,8 +768,7 @@ mod tests {
     fn test_ast_parse_py_library() {
         _run_parse_test(
             "src/ast/alt_testsuite/py_goat_library.py",
-            "src/ast/alt_testsuite/py_goat_library.correct"
+            "src/ast/alt_testsuite/py_goat_library.correct",
         );
     }
 }
-

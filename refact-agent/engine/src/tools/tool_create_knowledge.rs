@@ -16,7 +16,9 @@ pub struct ToolCreateKnowledge {
 
 #[async_trait]
 impl Tool for ToolCreateKnowledge {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
@@ -65,12 +67,20 @@ impl Tool for ToolCreateKnowledge {
         };
 
         let user_tags: Vec<String> = match args.get("tags") {
-            Some(Value::String(s)) => s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+            Some(Value::String(s)) => s
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
             _ => vec![],
         };
 
         let user_filenames: Vec<String> = match args.get("filenames") {
-            Some(Value::String(s)) => s.split(',').map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect(),
+            Some(Value::String(s)) => s
+                .split(',')
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty())
+                .collect(),
             _ => vec![],
         };
 
@@ -85,13 +95,16 @@ impl Tool for ToolCreateKnowledge {
 
         let result_msg = format!("Knowledge entry created: {}", file_path.display());
 
-        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(result_msg),
-            tool_calls: None,
-            tool_call_id: tool_call_id.clone(),
-            ..Default::default()
-        })]))
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(result_msg),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            })],
+        ))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {

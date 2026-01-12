@@ -18,7 +18,9 @@ pub struct ToolAstReference {
 
 #[async_trait]
 impl Tool for ToolAstReference {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     async fn tool_execute(
         &mut self,
@@ -48,7 +50,12 @@ impl Tool for ToolAstReference {
         if let Some(ast_service) = ast_service_opt {
             let ast_index = ast_service.lock().await.ast_index.clone();
 
-            crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(ast_service.clone(), 20_000, true).await;
+            crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(
+                ast_service.clone(),
+                20_000,
+                true,
+            )
+            .await;
 
             let mut all_results = vec![];
             let mut all_messages = vec![];
@@ -57,26 +64,39 @@ impl Tool for ToolAstReference {
             const DEFS_LIMIT: usize = 5;
 
             for symbol in symbols {
-                let defs = crate::ast::ast_db::definitions(ast_index.clone(), &symbol).unwrap_or_else(trace_and_default);
+                let defs = crate::ast::ast_db::definitions(ast_index.clone(), &symbol)
+                    .unwrap_or_else(trace_and_default);
                 let mut symbol_messages = vec![];
 
                 if !defs.is_empty() {
                     for (_i, def) in defs.iter().take(DEFS_LIMIT).enumerate() {
-                        let usedin_and_uline = crate::ast::ast_db::usages(ast_index.clone(), def.path(), 100).unwrap_or_else(trace_and_default);
-                        let file_paths = usedin_and_uline.iter().map(|(usedin, _)| usedin.cpath.clone()).collect::<Vec<_>>();
-                        let short_file_paths = crate::files_correction::shortify_paths(gcx.clone(), &file_paths).await;
+                        let usedin_and_uline =
+                            crate::ast::ast_db::usages(ast_index.clone(), def.path(), 100)
+                                .unwrap_or_else(trace_and_default);
+                        let file_paths = usedin_and_uline
+                            .iter()
+                            .map(|(usedin, _)| usedin.cpath.clone())
+                            .collect::<Vec<_>>();
+                        let short_file_paths =
+                            crate::files_correction::shortify_paths(gcx.clone(), &file_paths).await;
 
                         let def_file_path = vec![def.cpath.clone()];
-                        let short_def_file_path = crate::files_correction::shortify_paths(gcx.clone(), &def_file_path).await;
+                        let short_def_file_path =
+                            crate::files_correction::shortify_paths(gcx.clone(), &def_file_path)
+                                .await;
 
                         let text = {
                             let usage_count = usedin_and_uline.len();
                             let mut usage_lines = Vec::new();
-                            for ((_usedin, uline), short_path) in usedin_and_uline.iter().zip(short_file_paths.iter()).take(USAGES_LIMIT) {
+                            for ((_usedin, uline), short_path) in usedin_and_uline
+                                .iter()
+                                .zip(short_file_paths.iter())
+                                .take(USAGES_LIMIT)
+                            {
                                 usage_lines.push(format!("{}:{}", short_path, uline));
                             }
                             let more_usages = if usage_count > USAGES_LIMIT {
-                                format!("...and {} more", usage_count - USAGES_LIMIT)
+                                format!("⚠️ {} more usages not shown (limit: {}). 💡 Use cat() to explore specific files", usage_count - USAGES_LIMIT, USAGES_LIMIT)
                             } else {
                                 String::new()
                             };
@@ -84,7 +104,9 @@ impl Tool for ToolAstReference {
                             format!(
                                 "For {} defined at {}:{}-{} there are {} usages:\n{}\n{}\n",
                                 def.path_drop0(),
-                                short_def_file_path.get(0).unwrap_or(&def.path().to_string()),
+                                short_def_file_path
+                                    .get(0)
+                                    .unwrap_or(&def.path().to_string()),
                                 def.full_line1(),
                                 def.full_line2(),
                                 usage_count,
@@ -100,6 +122,7 @@ impl Tool for ToolAstReference {
                                 file_content: "".to_string(),
                                 line1: *uline,
                                 line2: *uline,
+                                file_rev: None,
                                 symbols: vec![usedin.path()],
                                 gradient_type: 4,
                                 usefulness: 100.0,
@@ -109,18 +132,30 @@ impl Tool for ToolAstReference {
                     }
 
                     if defs.len() > DEFS_LIMIT {
-                        symbol_messages.push(format!("There are {} more symbol definitions that match the query, skipped", defs.len() - DEFS_LIMIT));
+                        symbol_messages.push(format!(
+                            "⚠️ {} more definitions skipped (limit: {}). 💡 Use more specific symbol name",
+                            defs.len() - DEFS_LIMIT, DEFS_LIMIT
+                        ));
                     }
                 } else {
                     corrections = true;
-                    let fuzzy_message = there_are_definitions_with_similar_names_though(ast_index.clone(), &symbol).await;
+                    let fuzzy_message =
+                        there_are_definitions_with_similar_names_though(ast_index.clone(), &symbol)
+                            .await;
                     symbol_messages.push(format!("For symbol `{}`:\n{}", symbol, fuzzy_message));
                 }
 
-                all_messages.push(format!("Results for symbol `{}`:\n{}", symbol, symbol_messages.join("\n")));
+                all_messages.push(format!(
+                    "Results for symbol `{}`:\n{}",
+                    symbol,
+                    symbol_messages.join("\n")
+                ));
             }
 
-            let mut result_messages = all_results.into_iter().map(|x| ContextEnum::ContextFile(x)).collect::<Vec<ContextEnum>>();
+            let mut result_messages = all_results
+                .into_iter()
+                .map(|x| ContextEnum::ContextFile(x))
+                .collect::<Vec<ContextEnum>>();
             result_messages.push(ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
                 content: ChatContent::SimpleText(all_messages.join("\n\n")),

@@ -5,20 +5,25 @@ use tracing_subscriber::{self, Layer};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::Context;
 
-
 pub struct CustomLayer<W> {
     writer: W,
     writer_is_stderr: bool,
     writer_max_level: Level,
     stderr_max_level: Level,
-    ansi: bool
+    ansi: bool,
 }
 
 impl<W> CustomLayer<W>
 where
     W: for<'a> MakeWriter<'a> + Send + 'static,
 {
-    pub fn new(writer: W, writer_is_stderr: bool, writer_max_level: Level, stderr_max_level: Level, ansi: bool) -> Self {
+    pub fn new(
+        writer: W,
+        writer_is_stderr: bool,
+        writer_max_level: Level,
+        stderr_max_level: Level,
+        ansi: bool,
+    ) -> Self {
         Self {
             writer,
             writer_is_stderr,
@@ -35,7 +40,9 @@ where
     W: for<'a> MakeWriter<'a> + Send + 'static,
 {
     fn on_event(&self, event: &tracing::Event, _: Context<S>) {
-        if event.metadata().level() > &self.writer_max_level && event.metadata().level() <= &self.stderr_max_level {
+        if event.metadata().level() > &self.writer_max_level
+            && event.metadata().level() <= &self.stderr_max_level
+        {
             return;
         }
 
@@ -72,22 +79,32 @@ where
 
         if event.metadata().level() <= &self.stderr_max_level {
             let log_message = if self.ansi {
-                format!("{} \x1b[31m{}\x1b[0m{} {}\n", timestamp, ev_level, location, visitor.message)
+                format!(
+                    "{} \x1b[31m{}\x1b[0m{} {}\n",
+                    timestamp, ev_level, location, visitor.message
+                )
             } else {
-                format!("{} {}{} {}\n", timestamp, ev_level, location, visitor.message)
+                format!(
+                    "{} {}{} {}\n",
+                    timestamp, ev_level, location, visitor.message
+                )
             };
             let _ = std::io::stderr().write_all(log_message.as_bytes());
             already_have_in_stderr = true;
         }
 
-        if (!already_have_in_stderr || !self.writer_is_stderr) && event.metadata().level() <= &self.writer_max_level {
+        if (!already_have_in_stderr || !self.writer_is_stderr)
+            && event.metadata().level() <= &self.writer_max_level
+        {
             let mut writer = self.writer.make_writer();
-            let log_message = format!("{} {}{} {}\n", timestamp, ev_level, location, visitor.message);
+            let log_message = format!(
+                "{} {}{} {}\n",
+                timestamp, ev_level, location, visitor.message
+            );
             let _ = writer.write_all(log_message.as_bytes());
         }
     }
 }
-
 
 pub fn first_n_chars(msg: &String, n: usize) -> String {
     let mut last_n_chars: String = msg.chars().take(n).collect();
@@ -98,7 +115,14 @@ pub fn first_n_chars(msg: &String, n: usize) -> String {
 }
 
 pub fn last_n_chars(msg: &String, n: usize) -> String {
-    let mut last_n_chars: String = msg.chars().rev().take(n).collect::<String>().chars().rev().collect();
+    let mut last_n_chars: String = msg
+        .chars()
+        .rev()
+        .take(n)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     if last_n_chars.len() == n {
         last_n_chars.insert_str(0, "...");
     }

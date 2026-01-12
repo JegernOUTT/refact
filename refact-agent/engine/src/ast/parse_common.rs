@@ -4,11 +4,10 @@ use tree_sitter::{Node, Parser, Range};
 
 use crate::ast::ast_structs::{AstDefinition, AstUsage, AstErrorStats};
 
-
 #[derive(Debug)]
 pub struct Thing {
     #[allow(dead_code)]
-    pub tline: usize,  // only needed for printing in this file
+    pub tline: usize, // only needed for printing in this file
     pub public: bool,
     pub thing_kind: char,
     pub type_resolved: String,
@@ -38,7 +37,9 @@ pub struct ContextAnyParser {
 impl ContextAnyParser {
     pub fn error_report(&mut self, node: &Node, msg: String) -> String {
         let line = node.range().start_point.row + 1;
-        let mut node_text = self.code[node.byte_range()].to_string().replace("\n", "\\n");
+        let mut node_text = self.code[node.byte_range()]
+            .to_string()
+            .replace("\n", "\\n");
         if node_text.len() > 50 {
             node_text = node_text.chars().take(50).collect();
             node_text.push_str("...");
@@ -46,8 +47,13 @@ impl ContextAnyParser {
         self.errs.add_error(
             "".to_string(),
             line,
-            format!("{msg}: {:?} in {node_text}", node.kind()).as_str());
-        return format!("line {}: {msg} {}", line, self.recursive_print_with_red_brackets(node));
+            format!("{msg}: {:?} in {node_text}", node.kind()).as_str(),
+        );
+        return format!(
+            "line {}: {msg} {}",
+            line,
+            self.recursive_print_with_red_brackets(node)
+        );
     }
 
     pub fn recursive_print_with_red_brackets(&self, node: &Node) -> String {
@@ -58,9 +64,10 @@ impl ContextAnyParser {
         let mut result = String::new();
         let color_code = if rec >= 1 { "\x1b[90m" } else { "\x1b[31m" };
         match node.kind() {
-            "from" | "class" | "import" | "def" | "if" | "for" | ":" | "," | "=" | "." | "(" | ")" | "[" | "]" | "->" => {
+            "from" | "class" | "import" | "def" | "if" | "for" | ":" | "," | "=" | "." | "("
+            | ")" | "[" | "]" | "->" => {
                 result.push_str(&self.code[node.byte_range()]);
-            },
+            }
             _ => {
                 result.push_str(&format!("{}{}[\x1b[0m", color_code, node.kind()));
                 for i in 0..node.child_count() {
@@ -71,7 +78,8 @@ impl ContextAnyParser {
                     } else if rec == 0 {
                         result.push_str(&format!("\x1b[35mnaf\x1b[0m"));
                     }
-                    result.push_str(&self._recursive_print_with_red_brackets_helper(&child, rec + 1));
+                    result
+                        .push_str(&self._recursive_print_with_red_brackets_helper(&child, rec + 1));
                 }
                 if node.child_count() == 0 {
                     result.push_str(&self.code[node.byte_range()]);
@@ -83,7 +91,7 @@ impl ContextAnyParser {
     }
 
     pub fn indent(&self) -> String {
-        return " ".repeat(self.reclevel*4);
+        return " ".repeat(self.reclevel * 4);
     }
 
     pub fn indented_println(&self, args: std::fmt::Arguments) {
@@ -94,7 +102,13 @@ impl ContextAnyParser {
     pub fn dump(&self) {
         println!("\n  -- things -- ");
         for (key, thing) in self.things.iter() {
-            println!("{:<40} {} {:<40} {}", key, thing.thing_kind, thing.type_resolved, if thing.public { "pub" } else { "" } );
+            println!(
+                "{:<40} {} {:<40} {}",
+                key,
+                thing.thing_kind,
+                thing.type_resolved,
+                if thing.public { "pub" } else { "" }
+            );
         }
         println!("  -- /things --\n");
 
@@ -134,7 +148,10 @@ impl ContextAnyParser {
                     usages_on_line.push(format!("{:?}", usage));
                 }
             }
-            let indent = line.chars().take_while(|c| c.is_whitespace()).collect::<String>();
+            let indent = line
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .collect::<String>();
             for err in &self.errs.errors {
                 if err.err_line == i + 1 {
                     r.push_str(format!("\n{indent}{comment} ERROR {}", err.err_message).as_str());
@@ -146,11 +163,19 @@ impl ContextAnyParser {
                     if thing.thing_kind == 'f' {
                         key_last += "()";
                     }
-                    r.push_str(format!("\n{indent}{comment} {} {} {}", thing.thing_kind, key_last, thing.type_resolved).as_str());
+                    r.push_str(
+                        format!(
+                            "\n{indent}{comment} {} {} {}",
+                            thing.thing_kind, key_last, thing.type_resolved
+                        )
+                        .as_str(),
+                    );
                 }
             }
             if !usages_on_line.is_empty() {
-                r.push_str(format!("\n{}{} {}", indent, comment, usages_on_line.join(" ")).as_str());
+                r.push_str(
+                    format!("\n{}{} {}", indent, comment, usages_on_line.join(" ")).as_str(),
+                );
             }
             r.push('\n');
             r.push_str(line);
@@ -158,7 +183,8 @@ impl ContextAnyParser {
         r
     }
 
-    pub fn export_defs(&mut self, cpath: &str) -> Vec<AstDefinition> {  // self.defs becomes empty after this operation
+    pub fn export_defs(&mut self, cpath: &str) -> Vec<AstDefinition> {
+        // self.defs becomes empty after this operation
         for (def_key, def) in &mut self.defs {
             let def_offpath = def.official_path.join("::");
             assert!(*def_key == def_offpath || format!("{}::<toplevel>", *def_key) == def_offpath);
@@ -167,7 +193,11 @@ impl ContextAnyParser {
         }
         for (usage_at, usage) in &self.usages {
             // println!("usage_at {} {:?} usage.resolved_as={:?}", usage_at, usage, usage.resolved_as);
-            assert!(usage.resolved_as.is_empty() || usage.resolved_as.starts_with("root::") || usage.resolved_as.starts_with("?::"));
+            assert!(
+                usage.resolved_as.is_empty()
+                    || usage.resolved_as.starts_with("root::")
+                    || usage.resolved_as.starts_with("?::")
+            );
             let mut atv = usage_at.split("::").collect::<Vec<&str>>();
             let mut found_home = false;
             while !atv.is_empty() {
@@ -183,7 +213,7 @@ impl ContextAnyParser {
                 self.errs.add_error(
                     "".to_string(),
                     usage.uline + 1,
-                    format!("cannot find parent for {}", usage_at).as_str()
+                    format!("cannot find parent for {}", usage_at).as_str(),
                 );
             }
         }
@@ -193,8 +223,7 @@ impl ContextAnyParser {
     }
 }
 
-pub fn line12mid_from_ranges(full_range: &Range, body_range: &Range) -> (usize, usize, usize)
-{
+pub fn line12mid_from_ranges(full_range: &Range, body_range: &Range) -> (usize, usize, usize) {
     let line1: usize = full_range.start_point.row;
     let mut line_mid: usize = full_range.end_point.row;
     let line2: usize = full_range.end_point.row;
@@ -205,7 +234,6 @@ pub fn line12mid_from_ranges(full_range: &Range, body_range: &Range) -> (usize, 
     }
     (line1, line2, line_mid)
 }
-
 
 // -----------------------------------------------------------
 
@@ -222,9 +250,8 @@ pub fn line12mid_from_ranges(full_range: &Range, body_range: &Range) -> (usize, 
 //     None
 // }
 
-pub fn any_child_of_type<'a>(node: Node<'a>, of_type: &str) -> Option<Node<'a>>
-{
-    for i in 0 .. node.child_count() {
+pub fn any_child_of_type<'a>(node: Node<'a>, of_type: &str) -> Option<Node<'a>> {
+    for i in 0..node.child_count() {
         let child = node.child(i).unwrap();
         if child.kind() == of_type {
             return Some(child);
@@ -233,27 +260,25 @@ pub fn any_child_of_type<'a>(node: Node<'a>, of_type: &str) -> Option<Node<'a>>
     None
 }
 
-pub fn type_call(t: String, _arg_types: String) -> String
-{
+pub fn type_call(t: String, _arg_types: String) -> String {
     if t.starts_with("ERR/") {
         return t;
     }
     // my_function()      t="!MyReturnType"  =>  "MyReturnType"
     if t.starts_with("!") {
-        return t[1 ..].to_string();
+        return t[1..].to_string();
     }
     return "?".to_string();
 }
 
-pub fn type_deindex(t: String) -> String
-{
+pub fn type_deindex(t: String) -> String {
     if t.starts_with("ERR/") {
         return t;
     }
     // Used in this scenario: for x in my_list
     // t="[MyType]"  =>  "MyType"
     if t.starts_with("[") && t.ends_with("]") {
-        return t[1 .. t.len()-1].to_string();
+        return t[1..t.len() - 1].to_string();
     }
     // can't do anything for ()
     return "".to_string();
@@ -269,23 +294,23 @@ pub fn type_zerolevel_comma_split(t: &str) -> Vec<String> {
             '[' => {
                 level_brackets1 += 1;
                 current.push(c);
-            },
+            }
             ']' => {
                 level_brackets1 -= 1;
                 current.push(c);
-            },
+            }
             '(' => {
                 level_brackets2 += 1;
                 current.push(c);
-            },
+            }
             ')' => {
                 level_brackets2 -= 1;
                 current.push(c);
-            },
+            }
             ',' if level_brackets1 == 0 && level_brackets2 == 0 => {
                 parts.push(current.to_string());
                 current = String::new();
-            },
+            }
             _ => {
                 current.push(c);
             }
@@ -295,15 +320,14 @@ pub fn type_zerolevel_comma_split(t: &str) -> Vec<String> {
     parts
 }
 
-pub fn type_deindex_n(t: String, n: usize) -> String
-{
+pub fn type_deindex_n(t: String, n: usize) -> String {
     if t.starts_with("ERR/") {
         return t;
     }
     // Used in this scenario: _, _ = my_value
     // t="[MyClass1,[int,int],MyClass2]"  =>  n==0 MyClass1  n==1 [int,int]   n==2 MyClass2
     if t.starts_with("(") && t.ends_with(")") {
-        let no_square = t[1 .. t.len()-1].to_string();
+        let no_square = t[1..t.len() - 1].to_string();
         let parts = type_zerolevel_comma_split(&no_square);
         if n < parts.len() {
             return parts[n].to_string();

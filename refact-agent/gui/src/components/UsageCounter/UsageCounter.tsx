@@ -44,11 +44,7 @@ const CircularProgress: React.FC<CircularProgressProps> = ({
   const isOverflown = percentage >= 90;
 
   return (
-    <svg
-      width={size}
-      height={size}
-      className={styles.circularProgress}
-    >
+    <svg width={size} height={size} className={styles.circularProgress}>
       <circle
         className={styles.circularProgressBg}
         cx={size / 2}
@@ -158,7 +154,9 @@ const CoinsHoverContent: React.FC<{
   return (
     <Flex direction="column" gap="2" p="1">
       <Flex align="center" justify="between" width="100%" gap="4">
-        <Text size="2" weight="bold">Total coins</Text>
+        <Text size="2" weight="bold">
+          Total coins
+        </Text>
         <Text size="2">
           <Flex align="center" gap="2">
             {Math.round(totalCoins)} <Coin width="14px" height="14px" />
@@ -186,15 +184,23 @@ const TokensHoverContent: React.FC<{
   maxContextTokens: number;
   inputTokens: number;
   outputTokens: number;
-}> = ({ currentSessionTokens, maxContextTokens, inputTokens, outputTokens }) => {
-  const percentage = maxContextTokens > 0
-    ? Math.round((currentSessionTokens / maxContextTokens) * 100)
-    : 0;
+}> = ({
+  currentSessionTokens,
+  maxContextTokens,
+  inputTokens,
+  outputTokens,
+}) => {
+  const percentage =
+    maxContextTokens > 0
+      ? Math.round((currentSessionTokens / maxContextTokens) * 100)
+      : 0;
 
   return (
     <Flex direction="column" gap="2" p="1">
       <Flex align="center" justify="between" width="100%" gap="4">
-        <Text size="2" weight="bold">Context usage</Text>
+        <Text size="2" weight="bold">
+          Context usage
+        </Text>
         <Text size="2">{percentage}%</Text>
       </Flex>
       <TokenDisplay label="Current" value={currentSessionTokens} />
@@ -202,9 +208,15 @@ const TokensHoverContent: React.FC<{
       {(inputTokens > 0 || outputTokens > 0) && (
         <>
           <Box my="1" style={{ borderTop: "1px solid var(--gray-a6)" }} />
-          <Text size="1" weight="bold" color="gray">Total tokens</Text>
-          {inputTokens > 0 && <TokenDisplay label="Input" value={inputTokens} />}
-          {outputTokens > 0 && <TokenDisplay label="Output" value={outputTokens} />}
+          <Text size="1" weight="bold" color="gray">
+            Total tokens
+          </Text>
+          {inputTokens > 0 && (
+            <TokenDisplay label="Input" value={inputTokens} />
+          )}
+          {outputTokens > 0 && (
+            <TokenDisplay label="Output" value={outputTokens} />
+          )}
         </>
       )}
     </Flex>
@@ -233,7 +245,7 @@ const DefaultHoverTriggerContent: React.FC<{
   coinsCacheCreation,
 }) => {
   const hasContent =
-    (totalCoins !== undefined && totalCoins > 0) || currentSessionTokens !== 0;
+    (totalCoins !== undefined && totalCoins > 0) || maxContextTokens > 0;
 
   if (!hasContent) return null;
 
@@ -258,7 +270,7 @@ const DefaultHoverTriggerContent: React.FC<{
           </HoverCard.Content>
         </HoverCard.Root>
       )}
-      {currentSessionTokens !== 0 && maxContextTokens > 0 && (
+      {maxContextTokens > 0 && (
         <HoverCard.Root>
           <HoverCard.Trigger>
             <Flex align="center" gap="1" style={{ cursor: "default" }}>
@@ -293,12 +305,8 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const maybeAttachedImages = useAppSelector(selectThreadImages);
-  const {
-    currentThreadUsage,
-    isOverflown,
-    isWarning,
-    currentSessionTokens,
-  } = useUsageCounter();
+  const { currentThreadUsage, isOverflown, isWarning, currentSessionTokens } =
+    useUsageCounter();
   const currentMessageTokens = useAppSelector(selectThreadCurrentMessageTokens);
   const meteringTokens = useTotalTokenMeteringForChat();
   const cost = useTotalCostForChat();
@@ -384,10 +392,14 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
     return (
       <Flex
         align="center"
-        className={classNames(styles.usageCounterContainer, styles.usageCounterBorderless, {
-          [styles.isWarning]: isWarning,
-          [styles.isOverflown]: isOverflown,
-        })}
+        className={classNames(
+          styles.usageCounterContainer,
+          styles.usageCounterBorderless,
+          {
+            [styles.isWarning]: isWarning,
+            [styles.isOverflown]: isOverflown,
+          },
+        )}
       >
         <DefaultHoverTriggerContent
           currentSessionTokens={currentSessionTokens}

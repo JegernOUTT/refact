@@ -1,8 +1,7 @@
-import type { RootState } from "../app/store";
 import { fallbackCopying } from "./fallbackCopying";
 
 export const copyChatHistoryToClipboard = async (
-  chatThread: RootState["history"]["thread"],
+  chatThread: Record<string, unknown>,
 ): Promise<void> => {
   const jsonString = JSON.stringify(chatThread, null, 2);
 

@@ -14,7 +14,9 @@ use crate::call_validation::{ContextEnum, ChatMessage, ChatContent, ChatUsage};
 use crate::files_correction::canonical_path;
 use crate::integrations::go_to_configuration_message;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
-use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation, IntegrationTrait};
+use crate::integrations::integr_abstract::{
+    IntegrationCommon, IntegrationConfirmation, IntegrationTrait,
+};
 use crate::integrations::process_io_utils::AnsiStrippable;
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
@@ -33,9 +35,16 @@ pub struct ToolGitlab {
 
 #[async_trait]
 impl IntegrationTrait for ToolGitlab {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
-    async fn integr_settings_apply(&mut self, _gcx: Arc<ARwLock<GlobalContext>>, config_path: String, value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    async fn integr_settings_apply(
+        &mut self,
+        _gcx: Arc<ARwLock<GlobalContext>>,
+        config_path: String,
+        value: &serde_json::Value,
+    ) -> Result<(), serde_json::Error> {
         self.settings_gitlab = serde_json::from_value(value.clone())?;
         self.common = serde_json::from_value(value.clone())?;
         self.config_path = config_path;
@@ -50,7 +59,10 @@ impl IntegrationTrait for ToolGitlab {
         self.common.clone()
     }
 
-    async fn integr_tools(&self, _integr_name: &str) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    async fn integr_tools(
+        &self,
+        _integr_name: &str,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         vec![Box::new(ToolGitlab {
             common: self.common.clone(),
             settings_gitlab: self.settings_gitlab.clone(),
@@ -58,12 +70,16 @@ impl IntegrationTrait for ToolGitlab {
         })]
     }
 
-    fn integr_schema(&self) -> &str { GITLAB_INTEGRATION_SCHEMA }
+    fn integr_schema(&self) -> &str {
+        GITLAB_INTEGRATION_SCHEMA
+    }
 }
 
 #[async_trait]
 impl Tool for ToolGitlab {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
@@ -101,7 +117,7 @@ impl Tool for ToolGitlab {
         let project_dir = match args.get("project_dir") {
             Some(Value::String(s)) => s,
             Some(v) => return Err(format!("argument `project_dir` is not a string: {:?}", v)),
-            None => return Err("Missing argument `project_dir`".to_string())
+            None => return Err("Missing argument `project_dir`".to_string()),
         };
         let command_args = parse_command_args(args)?;
 
@@ -116,8 +132,14 @@ impl Tool for ToolGitlab {
             .stdin(std::process::Stdio::null())
             .output()
             .await
-            .map_err(|e| format!("!{}, {} failed:\n{}",
-                go_to_configuration_message("gitlab"), glab_binary_path, e.to_string()))?;
+            .map_err(|e| {
+                format!(
+                    "!{}, {} failed:\n{}",
+                    go_to_configuration_message("gitlab"),
+                    glab_binary_path,
+                    e.to_string()
+                )
+            })?;
 
         let stdout = output.stdout.to_string_lossy_and_strip_ansi();
         let stderr = output.stderr.to_string_lossy_and_strip_ansi();
@@ -129,7 +151,7 @@ impl Tool for ToolGitlab {
                     format!("{}\n\n💿 The UI has the capability to view tool result json efficiently. The result contains {} rows. Unless user specified otherwise, write no more than 3 rows as text and possibly \"and N more\" wording, keep it short.",
                         stdout, row_count
                     )
-                },
+                }
                 Ok(_) => stdout,
                 Err(_) => stdout,
             }
@@ -174,7 +196,9 @@ impl Tool for ToolGitlab {
     fn usage(&mut self) -> &mut Option<ChatUsage> {
         static mut DEFAULT_USAGE: Option<ChatUsage> = None;
         #[allow(static_mut_refs)]
-        unsafe { &mut DEFAULT_USAGE }
+        unsafe {
+            &mut DEFAULT_USAGE
+        }
     }
 
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
@@ -190,7 +214,7 @@ fn parse_command_args(args: &HashMap<String, Value>) -> Result<Vec<String>, Stri
     let command = match args.get("command") {
         Some(Value::String(s)) => s,
         Some(v) => return Err(format!("argument `command` is not a string: {:?}", v)),
-        None => return Err("Missing argument `command`".to_string())
+        None => return Err("Missing argument `command`".to_string()),
     };
 
     let mut parsed_args = shell_words::split(&command).map_err(|e| e.to_string())?;

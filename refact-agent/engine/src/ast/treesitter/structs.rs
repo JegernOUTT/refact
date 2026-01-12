@@ -57,7 +57,7 @@ impl FromStr for SymbolType {
             "comment_definition" => SymbolType::CommentDefinition,
             "function_call" => SymbolType::FunctionCall,
             "variable_usage" => SymbolType::VariableUsage,
-            _ => SymbolType::Unknown
+            _ => SymbolType::Unknown,
         });
     }
 }

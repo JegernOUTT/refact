@@ -7,7 +7,10 @@ pub(crate) fn get_guid() -> Uuid {
     Uuid::new_v4()
 }
 
-pub(crate) fn get_children_guids(parent_guid: &Uuid, children: &Vec<AstSymbolInstanceArc>) -> Vec<Uuid> {
+pub(crate) fn get_children_guids(
+    parent_guid: &Uuid,
+    children: &Vec<AstSymbolInstanceArc>,
+) -> Vec<Uuid> {
     let mut result = Vec::new();
     for child in children {
         let child_ref = child.read();
@@ -19,7 +22,6 @@ pub(crate) fn get_children_guids(parent_guid: &Uuid, children: &Vec<AstSymbolIns
     }
     result
 }
-
 
 pub(crate) struct CandidateInfo<'a> {
     pub ast_fields: AstSymbolFields,

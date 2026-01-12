@@ -1,24 +1,21 @@
 import React from "react";
 import { IconButton, Tooltip } from "@radix-ui/themes";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector, useChatActions } from "../../hooks";
 import {
   selectIsStreaming,
   selectIsWaiting,
   selectMessages,
 } from "../../features/Chat";
-import { useSendChatRequest } from "../../hooks/useSendChatRequest";
 
 function useResendMessages() {
   const messages = useAppSelector(selectMessages);
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
-  const { retry } = useSendChatRequest();
+  const { regenerate } = useChatActions();
 
   const handleResend = React.useCallback(() => {
-    if (messages.length > 0) {
-      retry(messages);
-    }
-  }, [messages, retry]);
+    void regenerate();
+  }, [regenerate]);
 
   const shouldShow = React.useMemo(() => {
     if (messages.length === 0) return false;
@@ -37,7 +34,7 @@ export const ResendButton = () => {
 
   return (
     <Tooltip content="Resend last messages">
-      <IconButton variant="ghost" onClick={handleResend} size="1">
+      <IconButton type="button" variant="ghost" onClick={handleResend} size="1">
         <ResendIcon />
       </IconButton>
     </Tooltip>

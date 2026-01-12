@@ -1,152 +1,201 @@
 use at_tools::handle_v1_post_tools;
 use axum::Router;
-use axum::routing::{get, post, put, delete};
+use axum::routing::{get, post, put, patch, delete};
 use tower_http::cors::CorsLayer;
 
 use crate::http::utils::telemetry_middleware;
-use crate::http::routers::v1::code_completion::{handle_v1_code_completion_web, handle_v1_code_completion_prompt};
+use crate::http::routers::v1::code_completion::{
+    handle_v1_code_completion_web, handle_v1_code_completion_prompt,
+};
 use crate::http::routers::v1::code_lens::handle_v1_code_lens;
-use crate::http::routers::v1::ast::{handle_v1_ast_file_dump, handle_v1_ast_file_symbols, handle_v1_ast_status};
-use crate::http::routers::v1::at_commands::{handle_v1_command_completion, handle_v1_command_preview, handle_v1_at_command_execute};
-use crate::http::routers::v1::at_tools::{handle_v1_get_tools, handle_v1_tools_check_if_confirmation_needed, handle_v1_tools_execute};
+use crate::http::routers::v1::ast::{
+    handle_v1_ast_file_dump, handle_v1_ast_file_symbols, handle_v1_ast_status,
+};
+use crate::http::routers::v1::at_commands::{
+    handle_v1_command_completion, handle_v1_command_preview, handle_v1_at_command_execute,
+};
+use crate::http::routers::v1::at_tools::{
+    handle_v1_get_tools, handle_v1_tools_check_if_confirmation_needed, handle_v1_tools_execute,
+};
 use crate::http::routers::v1::caps::handle_v1_caps;
 use crate::http::routers::v1::caps::handle_v1_ping;
-use crate::http::routers::v1::chat::{handle_v1_chat, handle_v1_chat_completions};
-use crate::http::routers::v1::chat_based_handlers::{handle_v1_commit_message_from_diff, handle_v1_trajectory_compress};
+
+use crate::http::routers::v1::chat_based_handlers::{
+    handle_v1_commit_message_from_diff, handle_v1_trajectory_compress,
+};
 use crate::http::routers::v1::dashboard::get_dashboard_plots;
-use crate::http::routers::v1::docker::{handle_v1_docker_container_action, handle_v1_docker_container_list};
-use crate::http::routers::v1::git::{handle_v1_git_commit, handle_v1_checkpoints_preview, handle_v1_checkpoints_restore};
+use crate::http::routers::v1::docker::{
+    handle_v1_docker_container_action, handle_v1_docker_container_list,
+};
+use crate::http::routers::v1::git::{
+    handle_v1_git_commit, handle_v1_checkpoints_preview, handle_v1_checkpoints_restore,
+};
 use crate::http::routers::v1::graceful_shutdown::handle_v1_graceful_shutdown;
 use crate::http::routers::v1::snippet_accepted::handle_v1_snippet_accepted;
 use crate::http::routers::v1::telemetry_network::handle_v1_telemetry_network;
 use crate::http::routers::v1::telemetry_chat::handle_v1_telemetry_chat;
 use crate::http::routers::v1::links::handle_v1_links;
-use crate::http::routers::v1::lsp_like_handlers::{handle_v1_lsp_did_change, handle_v1_lsp_add_folder, handle_v1_lsp_initialize, handle_v1_lsp_remove_folder, handle_v1_set_active_document};
+use crate::http::routers::v1::lsp_like_handlers::{
+    handle_v1_lsp_did_change, handle_v1_lsp_add_folder, handle_v1_lsp_initialize,
+    handle_v1_lsp_remove_folder, handle_v1_set_active_document,
+};
 use crate::http::routers::v1::status::handle_v1_rag_status;
 use crate::http::routers::v1::customization::handle_v1_customization;
 use crate::http::routers::v1::customization::handle_v1_config_path;
 use crate::http::routers::v1::gui_help_handlers::handle_v1_fullpath;
-use crate::http::routers::v1::subchat::{handle_v1_subchat, handle_v1_subchat_single};
 use crate::http::routers::v1::sync_files::handle_v1_sync_files_extract_tar;
 use crate::http::routers::v1::system_prompt::handle_v1_prepend_system_prompt_and_maybe_more_initial_messages;
-use crate::http::routers::v1::providers::{handle_v1_providers, handle_v1_provider_templates,
-    handle_v1_get_model, handle_v1_get_provider, handle_v1_models, handle_v1_post_model, handle_v1_post_provider,
-    handle_v1_delete_model, handle_v1_delete_provider, handle_v1_model_default, handle_v1_completion_model_families};
+use crate::http::routers::v1::providers::{
+    handle_v1_providers, handle_v1_provider_templates, handle_v1_get_model, handle_v1_get_provider,
+    handle_v1_models, handle_v1_post_model, handle_v1_post_provider, handle_v1_delete_model,
+    handle_v1_delete_provider, handle_v1_model_default, handle_v1_completion_model_families,
+};
 
 use crate::http::routers::v1::vecdb::{handle_v1_vecdb_search, handle_v1_vecdb_status};
 use crate::http::routers::v1::knowledge_graph::handle_v1_knowledge_graph;
-use crate::http::routers::v1::v1_integrations::{handle_v1_integration_get, handle_v1_integration_icon, handle_v1_integration_save, handle_v1_integration_delete, handle_v1_integrations, handle_v1_integrations_filtered, handle_v1_integrations_mcp_logs};
+use crate::http::routers::v1::knowledge_ops::{
+    handle_v1_knowledge_update_memory, handle_v1_knowledge_delete_memory,
+};
+use crate::http::routers::v1::v1_integrations::{
+    handle_v1_integration_get, handle_v1_integration_icon, handle_v1_integration_save,
+    handle_v1_integration_delete, handle_v1_integrations, handle_v1_integrations_filtered,
+    handle_v1_integrations_mcp_logs,
+};
 use crate::http::routers::v1::file_edit_tools::handle_v1_file_edit_tool_dry_run;
 use crate::http::routers::v1::code_edit::handle_v1_code_edit;
-use crate::http::routers::v1::workspace::{handle_v1_get_app_searchable_id, handle_v1_set_active_group_id};
-use crate::http::routers::v1::trajectories::{
-    handle_v1_trajectories_list, handle_v1_trajectories_get,
-    handle_v1_trajectories_save, handle_v1_trajectories_delete,
-    handle_v1_trajectories_subscribe,
+use crate::http::routers::v1::workspace::{
+    handle_v1_get_app_searchable_id, handle_v1_set_active_group_id,
+};
+use crate::chat::{
+    handle_v1_chat_subscribe, handle_v1_chat_command, handle_v1_chat_cancel_queued,
+    handle_v1_trajectories_list, handle_v1_trajectories_all, handle_v1_trajectories_get,
+    handle_v1_trajectories_save, handle_v1_trajectories_delete, handle_v1_trajectories_subscribe,
+};
+use crate::http::routers::v1::voice::{
+    handle_v1_voice_transcribe, handle_v1_voice_download, handle_v1_voice_status,
+    handle_v1_voice_stream_subscribe, handle_v1_voice_stream_chunk,
+};
+use crate::http::routers::v1::tasks::{
+    handle_list_tasks, handle_create_task, handle_get_task, handle_delete_task,
+    handle_get_board, handle_patch_board, handle_get_planner_instructions,
+    handle_set_planner_instructions, handle_get_ready_cards, handle_update_task_status,
+    handle_update_task_meta, handle_list_task_trajectories, handle_create_planner_chat,
+};
+use crate::http::routers::v1::trajectory_ops::{
+    handle_transform_preview, handle_transform_apply,
+    handle_handoff_preview, handle_handoff_apply,
 };
 
 mod ast;
 pub mod at_commands;
 pub mod at_tools;
 pub mod caps;
-pub mod chat;
 pub mod chat_based_handlers;
 pub mod code_completion;
+mod code_edit;
 pub mod code_lens;
 pub mod customization;
 mod dashboard;
 mod docker;
+mod file_edit_tools;
 mod git;
 pub mod graceful_shutdown;
 mod gui_help_handlers;
+pub mod knowledge_enrichment;
+mod knowledge_graph;
+mod knowledge_ops;
 pub mod links;
 pub mod lsp_like_handlers;
+pub mod providers;
 pub mod snippet_accepted;
 pub mod status;
-mod subchat;
 pub mod sync_files;
 pub mod system_prompt;
 pub mod telemetry_chat;
 pub mod telemetry_network;
-pub mod providers;
-mod file_edit_tools;
-mod code_edit;
+mod trajectory_ops;
 mod v1_integrations;
 pub mod vecdb;
+pub mod voice;
 mod workspace;
-mod knowledge_graph;
-mod knowledge_enrichment;
-pub mod trajectories;
+pub mod tasks;
 
 pub fn make_v1_router() -> Router {
     let builder = Router::new()
         .route("/ping", get(handle_v1_ping))
         .route("/graceful-shutdown", get(handle_v1_graceful_shutdown))
-
         .route("/code-completion", post(handle_v1_code_completion_web))
         .route("/code-lens", post(handle_v1_code_lens))
-
-        .route("/chat", post(handle_v1_chat))
-        .route("/chat/completions", post(handle_v1_chat_completions))  // standard
-
         .route("/telemetry-network", post(handle_v1_telemetry_network))
         .route("/telemetry-chat", post(handle_v1_telemetry_chat))
         .route("/snippet-accepted", post(handle_v1_snippet_accepted))
-
         .route("/caps", get(handle_v1_caps))
-
         .route("/tools", get(handle_v1_get_tools))
         .route("/tools", post(handle_v1_post_tools))
-        .route("/tools-check-if-confirmation-needed", post(handle_v1_tools_check_if_confirmation_needed))
-        .route("/tools-execute", post(handle_v1_tools_execute)) // because it works remotely
-
+        .route(
+            "/tools-check-if-confirmation-needed",
+            post(handle_v1_tools_check_if_confirmation_needed),
+        )
+        .route("/tools-execute", post(handle_v1_tools_execute))
         .route("/lsp-initialize", post(handle_v1_lsp_initialize))
         .route("/lsp-did-changed", post(handle_v1_lsp_did_change))
         .route("/lsp-add-folder", post(handle_v1_lsp_add_folder))
         .route("/lsp-remove-folder", post(handle_v1_lsp_remove_folder))
-        .route("/lsp-set-active-document", post(handle_v1_set_active_document))
-
+        .route(
+            "/lsp-set-active-document",
+            post(handle_v1_set_active_document),
+        )
         .route("/ast-file-symbols", post(handle_v1_ast_file_symbols))
         .route("/ast-file-dump", post(handle_v1_ast_file_dump))
         .route("/ast-status", get(handle_v1_ast_status))
-
         .route("/rag-status", get(handle_v1_rag_status))
         .route("/config-path", get(handle_v1_config_path))
-
         .route("/customization", get(handle_v1_customization))
-
-        .route("/sync-files-extract-tar", post(handle_v1_sync_files_extract_tar))
-
+        .route(
+            "/sync-files-extract-tar",
+            post(handle_v1_sync_files_extract_tar),
+        )
         .route("/git-commit", post(handle_v1_git_commit))
-
-        .route("/prepend-system-prompt-and-maybe-more-initial-messages",
-            post(handle_v1_prepend_system_prompt_and_maybe_more_initial_messages)) // because it works remotely
-
+        .route(
+            "/prepend-system-prompt-and-maybe-more-initial-messages",
+            post(handle_v1_prepend_system_prompt_and_maybe_more_initial_messages),
+        )
         .route("/at-command-completion", post(handle_v1_command_completion))
         .route("/at-command-preview", post(handle_v1_command_preview))
-        .route("/at-command-execute", post(handle_v1_at_command_execute)) // because it works remotely
-
+        .route("/at-command-execute", post(handle_v1_at_command_execute))
         .route("/fullpath", post(handle_v1_fullpath))
-
         .route("/integrations", get(handle_v1_integrations))
-        .route("/integrations-filtered/:integr_name", get(handle_v1_integrations_filtered))
+        .route(
+            "/integrations-filtered/:integr_name",
+            get(handle_v1_integrations_filtered),
+        )
         .route("/integration-get", post(handle_v1_integration_get))
         .route("/integration-save", post(handle_v1_integration_save))
         .route("/integration-delete", delete(handle_v1_integration_delete))
-        .route("/integration-icon/:icon_name", get(handle_v1_integration_icon))
-        .route("/integrations-mcp-logs", post(handle_v1_integrations_mcp_logs))
-
-        .route("/docker-container-list", post(handle_v1_docker_container_list))
-        .route("/docker-container-action", post(handle_v1_docker_container_action))
-
+        .route(
+            "/integration-icon/:icon_name",
+            get(handle_v1_integration_icon),
+        )
+        .route(
+            "/integrations-mcp-logs",
+            post(handle_v1_integrations_mcp_logs),
+        )
+        .route(
+            "/docker-container-list",
+            post(handle_v1_docker_container_list),
+        )
+        .route(
+            "/docker-container-action",
+            post(handle_v1_docker_container_action),
+        )
         .route("/checkpoints-preview", post(handle_v1_checkpoints_preview))
         .route("/checkpoints-restore", post(handle_v1_checkpoints_restore))
-
         .route("/links", post(handle_v1_links))
-
-        .route("/file_edit_tool_dry_run", post(handle_v1_file_edit_tool_dry_run))
+        .route(
+            "/file_edit_tool_dry_run",
+            post(handle_v1_file_edit_tool_dry_run),
+        )
         .route("/code-edit", post(handle_v1_code_edit))
-        
         .route("/providers", get(handle_v1_providers))
         .route("/provider-templates", get(handle_v1_provider_templates))
         .route("/provider", get(handle_v1_get_provider))
@@ -157,33 +206,67 @@ pub fn make_v1_router() -> Router {
         .route("/model", post(handle_v1_post_model))
         .route("/model", delete(handle_v1_delete_model))
         .route("/model-defaults", get(handle_v1_model_default))
-        .route("/completion-model-families", get(handle_v1_completion_model_families))
-
-        // cloud related 
+        .route(
+            "/completion-model-families",
+            get(handle_v1_completion_model_families),
+        )
+        // cloud related
         .route("/set-active-group-id", post(handle_v1_set_active_group_id))
-        .route("/get-app-searchable-id", get(handle_v1_get_app_searchable_id))
-
+        .route(
+            "/get-app-searchable-id",
+            get(handle_v1_get_app_searchable_id),
+        )
         // experimental
         .route("/get-dashboard-plots", get(get_dashboard_plots))
-
-        .route("/code-completion-prompt", post(handle_v1_code_completion_prompt))
-        .route("/commit-message-from-diff", post(handle_v1_commit_message_from_diff))
-
-        // to remove
-        .route("/subchat", post(handle_v1_subchat))
-        .route("/subchat-single", post(handle_v1_subchat_single))
-        ;
+        .route(
+            "/code-completion-prompt",
+            post(handle_v1_code_completion_prompt),
+        )
+        .route(
+            "/commit-message-from-diff",
+            post(handle_v1_commit_message_from_diff),
+        );
     let builder = builder
         .route("/vdb-search", post(handle_v1_vecdb_search))
         .route("/vdb-status", get(handle_v1_vecdb_status))
         .route("/knowledge-graph", get(handle_v1_knowledge_graph))
+        .route("/knowledge/update-memory", post(handle_v1_knowledge_update_memory))
+        .route("/knowledge/delete-memory", post(handle_v1_knowledge_delete_memory))
         .route("/trajectory-compress", post(handle_v1_trajectory_compress))
         .route("/trajectories", get(handle_v1_trajectories_list))
-        .route("/trajectories/subscribe", get(handle_v1_trajectories_subscribe))
+        .route("/trajectories/all", get(handle_v1_trajectories_all))
+        .route(
+            "/trajectories/subscribe",
+            get(handle_v1_trajectories_subscribe),
+        )
         .route("/trajectories/:id", get(handle_v1_trajectories_get))
         .route("/trajectories/:id", put(handle_v1_trajectories_save))
         .route("/trajectories/:id", delete(handle_v1_trajectories_delete))
-        ;
+        .route("/chats/subscribe", get(handle_v1_chat_subscribe))
+        .route("/chats/:chat_id/commands", post(handle_v1_chat_command))
+        .route("/chats/:chat_id/queue/:client_request_id", delete(handle_v1_chat_cancel_queued))
+        .route("/voice/transcribe", post(handle_v1_voice_transcribe))
+        .route("/voice/download", post(handle_v1_voice_download))
+        .route("/voice/status", get(handle_v1_voice_status))
+        .route("/voice/stream/:session_id/subscribe", get(handle_v1_voice_stream_subscribe))
+        .route("/voice/stream/:session_id/chunk", post(handle_v1_voice_stream_chunk))
+        .route("/tasks", get(handle_list_tasks))
+        .route("/tasks", post(handle_create_task))
+        .route("/tasks/:task_id", get(handle_get_task))
+        .route("/tasks/:task_id", delete(handle_delete_task))
+         .route("/tasks/:task_id/status", post(handle_update_task_status))
+         .route("/tasks/:task_id/meta", patch(handle_update_task_meta))
+        .route("/tasks/:task_id/board", get(handle_get_board))
+        .route("/tasks/:task_id/board", post(handle_patch_board))
+        .route("/tasks/:task_id/board/ready", get(handle_get_ready_cards))
+        .route("/tasks/:task_id/planner-instructions", get(handle_get_planner_instructions))
+        .route("/tasks/:task_id/planner-instructions", put(handle_set_planner_instructions))
+        .route("/tasks/:task_id/trajectories/:role", get(handle_list_task_trajectories))
+        .route("/tasks/:task_id/planner-chats", post(handle_create_planner_chat))
+        .route("/chats/:chat_id/trajectory/transform/preview", post(handle_transform_preview))
+        .route("/chats/:chat_id/trajectory/transform/apply", post(handle_transform_apply))
+        .route("/chats/:chat_id/trajectory/handoff/preview", post(handle_handoff_preview))
+        .route("/chats/:chat_id/trajectory/handoff/apply", post(handle_handoff_apply));
 
     builder
         .layer(axum::middleware::from_fn(telemetry_middleware))

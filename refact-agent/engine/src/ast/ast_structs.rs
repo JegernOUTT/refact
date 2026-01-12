@@ -5,7 +5,6 @@ use tempfile::TempDir;
 use tokio::sync::{Notify as ANotify};
 pub use crate::ast::treesitter::structs::SymbolType;
 
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AstUsage {
     // Linking means trying to match targets_for_guesswork against official_path, the longer
@@ -13,21 +12,21 @@ pub struct AstUsage {
     pub targets_for_guesswork: Vec<String>, // ?::DerivedFrom1::f ?::DerivedFrom2::f ?::f
     pub resolved_as: String,
     pub debug_hint: String,
-    pub uline: usize,     // starts from 1, like other line numbers
+    pub uline: usize, // starts from 1, like other line numbers
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct AstDefinition {
-    pub official_path: Vec<String>,  // file::namespace::class::method becomes ["file", "namespace", "class", "method"]
+    pub official_path: Vec<String>, // file::namespace::class::method becomes ["file", "namespace", "class", "method"]
     pub symbol_type: SymbolType,
     pub usages: Vec<AstUsage>,
-    pub resolved_type: String,                // for type derivation at pass2 or something, not used much now
-    pub this_is_a_class: String,              // cpp🔎Goat
+    pub resolved_type: String, // for type derivation at pass2 or something, not used much now
+    pub this_is_a_class: String, // cpp🔎Goat
     pub this_class_derived_from: Vec<String>, // cpp🔎Animal, cpp🔎CosmicJustice
     pub cpath: String,
-    pub decl_line1: usize,                    // starts from 1, guaranteed > 0
-    pub decl_line2: usize,                    // guaranteed >= line1
-    pub body_line1: usize,                    // use full_line1() full_line2() if not sure
+    pub decl_line1: usize, // starts from 1, guaranteed > 0
+    pub decl_line2: usize, // guaranteed >= line1
+    pub body_line1: usize, // use full_line1() full_line2() if not sure
     pub body_line2: usize,
 }
 
@@ -37,9 +36,16 @@ impl AstDefinition {
     }
 
     pub fn path_drop0(&self) -> String {
-        if self.official_path.len() > 3 {  // new style long path, starts with hex code we don't want users to see
-            self.official_path.iter().skip(1).cloned().collect::<Vec<String>>().join("::")
-        } else {  // there's not much to cut
+        if self.official_path.len() > 3 {
+            // new style long path, starts with hex code we don't want users to see
+            self.official_path
+                .iter()
+                .skip(1)
+                .cloned()
+                .collect::<Vec<String>>()
+                .join("::")
+        } else {
+            // there's not much to cut
             self.official_path.join("::")
         }
     }
@@ -85,7 +91,6 @@ pub struct AstCounters {
     pub counter_docs: i32,
 }
 
-
 const TOO_MANY_ERRORS: usize = 1000;
 
 pub struct AstError {
@@ -126,13 +131,16 @@ impl Default for AstErrorStats {
     }
 }
 
-
 impl fmt::Debug for AstDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let usages_paths: Vec<String> = self.usages.iter()
+        let usages_paths: Vec<String> = self
+            .usages
+            .iter()
             .map(|link| format!("{:?}", link))
             .collect();
-        let derived_from_paths: Vec<String> = self.this_class_derived_from.iter()
+        let derived_from_paths: Vec<String> = self
+            .this_class_derived_from
+            .iter()
             .map(|link| format!("{:?}", link))
             .collect();
 
@@ -172,7 +180,11 @@ impl fmt::Debug for AstUsage {
             f,
             "U{{ {} {} }}",
             self.debug_hint,
-            if self.resolved_as.len() > 0 { self.resolved_as.clone() } else { format!("guess {}", self.targets_for_guesswork.join(" ")) }
+            if self.resolved_as.len() > 0 {
+                self.resolved_as.clone()
+            } else {
+                format!("guess {}", self.targets_for_guesswork.join(" "))
+            }
         )
     }
 }

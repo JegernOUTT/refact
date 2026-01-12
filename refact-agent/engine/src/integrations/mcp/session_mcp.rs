@@ -12,14 +12,14 @@ use crate::integrations::sessions::IntegrationSession;
 use crate::integrations::process_io_utils::read_file_with_cursor;
 pub struct SessionMCP {
     pub debug_name: String,
-    pub config_path: String,        // to check if expired or not
-    pub launched_cfg: serde_json::Value,  // a copy to compare against IntegrationMCP::cfg, to see if anything has changed
+    pub config_path: String,             // to check if expired or not
+    pub launched_cfg: serde_json::Value, // a copy to compare against IntegrationMCP::cfg, to see if anything has changed
     pub mcp_client: Option<Arc<AMutex<Option<RunningService<RoleClient, ()>>>>>,
     pub mcp_tools: Vec<McpTool>,
     pub startup_task_handles: Option<(Arc<AMutex<Option<JoinHandle<()>>>>, AbortHandle)>,
-    pub logs: Arc<AMutex<Vec<String>>>,          // Store log messages
-    pub stderr_file_path: Option<PathBuf>,       // Path to the temporary file for stderr
-    pub stderr_cursor: Arc<AMutex<u64>>,         // Position in the file where we last read from
+    pub logs: Arc<AMutex<Vec<String>>>,    // Store log messages
+    pub stderr_file_path: Option<PathBuf>, // Path to the temporary file for stderr
+    pub stderr_cursor: Arc<AMutex<u64>>,   // Position in the file where we last read from
 }
 
 impl IntegrationSession for SessionMCP {
@@ -31,11 +31,17 @@ impl IntegrationSession for SessionMCP {
         !std::path::Path::new(&self.config_path).exists()
     }
 
-    fn try_stop(&mut self, self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>) -> Box<dyn Future<Output = String> + Send> {
+    fn try_stop(
+        &mut self,
+        self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
+    ) -> Box<dyn Future<Output = String> + Send> {
         Box::new(async move {
             let (debug_name, client, logs, startup_task_handles, stderr_file) = {
                 let mut session_locked = self_arc.lock().await;
-                let session_downcasted = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                let session_downcasted = session_locked
+                    .as_any_mut()
+                    .downcast_mut::<SessionMCP>()
+                    .unwrap();
                 (
                     session_downcasted.debug_name.clone(),
                     session_downcasted.mcp_client.clone(),
@@ -80,9 +86,10 @@ pub async fn add_log_entry(session_logs: Arc<AMutex<Vec<String>>>, entry: String
 pub async fn update_logs_from_stderr(
     stderr_file_path: &PathBuf,
     stderr_cursor: Arc<AMutex<u64>>,
-    session_logs: Arc<AMutex<Vec<String>>>
+    session_logs: Arc<AMutex<Vec<String>>>,
 ) -> Result<(), String> {
-    let (buffer, bytes_read) = read_file_with_cursor(stderr_file_path, stderr_cursor.clone()).await
+    let (buffer, bytes_read) = read_file_with_cursor(stderr_file_path, stderr_cursor.clone())
+        .await
         .map_err(|e| format!("Failed to read file: {}", e))?;
     if bytes_read > 0 && !buffer.trim().is_empty() {
         add_log_entry(session_logs, buffer.trim().to_string()).await;
@@ -109,12 +116,12 @@ pub async fn cancel_mcp_client(
                 let success_msg = format!("MCP server stopped: {:?}", reason);
                 tracing::info!("{} for {}", success_msg, debug_name);
                 add_log_entry(session_logs, success_msg).await;
-            },
+            }
             Ok(Err(e)) => {
                 let error_msg = format!("Failed to stop MCP: {:?}", e);
                 tracing::error!("{} for {}", error_msg, debug_name);
                 add_log_entry(session_logs, error_msg).await;
-            },
+            }
             Err(_) => {
                 let error_msg = "MCP server stop operation timed out after 3 seconds".to_string();
                 tracing::error!("{} for {}", error_msg, debug_name);
@@ -124,12 +131,13 @@ pub async fn cancel_mcp_client(
     }
 }
 
-pub async fn mcp_session_wait_startup(
-    session_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
-) {
+pub async fn mcp_session_wait_startup(session_arc: Arc<AMutex<Box<dyn IntegrationSession>>>) {
     let startup_task_handles = {
         let mut session_locked = session_arc.lock().await;
-        let session_downcasted = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+        let session_downcasted = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
         session_downcasted.startup_task_handles.clone()
     };
 

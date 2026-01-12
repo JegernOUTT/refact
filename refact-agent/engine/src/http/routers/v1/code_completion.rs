@@ -16,7 +16,6 @@ use crate::files_correction::canonical_path;
 use crate::scratchpads;
 use crate::at_commands::at_commands::AtCommandsContext;
 
-
 const CODE_COMPLETION_TOP_N: usize = 5;
 
 pub async fn handle_v1_code_completion(
@@ -26,8 +25,12 @@ pub async fn handle_v1_code_completion(
     code_completion_post_validate(code_completion_post)?;
 
     let cpath = canonical_path(&code_completion_post.inputs.cursor.file);
-    check_file_privacy(load_privacy_if_needed(gcx.clone()).await, &cpath, &crate::privacy::FilePrivacyLevel::OnlySendToServersIControl)
-        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    check_file_privacy(
+        load_privacy_if_needed(gcx.clone()).await,
+        &cpath,
+        &crate::privacy::FilePrivacyLevel::OnlySendToServersIControl,
+    )
+    .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await?;
     let model_rec = resolve_completion_model(caps, &code_completion_post.model, true)
@@ -38,11 +41,18 @@ pub async fn handle_v1_code_completion(
     if code_completion_post.model == "" {
         code_completion_post.model = model_rec.base.id.clone();
     }
-    info!("chosen completion model: {}, scratchpad: {}", code_completion_post.model, model_rec.scratchpad);
-    code_completion_post.parameters.temperature = Some(code_completion_post.parameters.temperature.unwrap_or(0.2));
+    info!(
+        "chosen completion model: {}, scratchpad: {}",
+        code_completion_post.model, model_rec.scratchpad
+    );
+    code_completion_post.parameters.temperature =
+        Some(code_completion_post.parameters.temperature.unwrap_or(0.2));
     let (cache_arc, tele_storage) = {
         let gcx_locked = gcx.write().await;
-        (gcx_locked.completions_cache.clone(), gcx_locked.telemetry.clone())
+        (
+            gcx_locked.completions_cache.clone(),
+            gcx_locked.telemetry.clone(),
+        )
     };
     if !code_completion_post.no_cache {
         let cache_key = completion_cache::cache_key_from_post(&code_completion_post);
@@ -64,22 +74,48 @@ pub async fn handle_v1_code_completion(
         &code_completion_post.clone(),
         cache_arc.clone(),
         tele_storage.clone(),
-        ast_service_opt
-    ).await.map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
-    let ccx = Arc::new(AMutex::new(AtCommandsContext::new(
-        gcx.clone(),
-        model_rec.base.n_ctx,
-        CODE_COMPLETION_TOP_N,
-        true,
-        vec![],
-        "".to_string(),
-        false,
-        model_rec.base.id.clone(),
-    ).await));
+        ast_service_opt,
+    )
+    .await
+    .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+    let ccx = Arc::new(AMutex::new(
+        AtCommandsContext::new(
+            gcx.clone(),
+            model_rec.base.n_ctx,
+            CODE_COMPLETION_TOP_N,
+            true,
+            vec![],
+            "".to_string(),
+            false,
+            model_rec.base.id.clone(),
+            None,
+            None,
+        )
+        .await,
+    ));
     if !code_completion_post.stream {
-        crate::restream::scratchpad_interaction_not_stream(ccx.clone(), &mut scratchpad, "completion".to_string(), &model_rec.base, &mut code_completion_post.parameters, false, None).await
+        crate::restream::scratchpad_interaction_not_stream(
+            ccx.clone(),
+            &mut scratchpad,
+            "completion".to_string(),
+            &model_rec.base,
+            &mut code_completion_post.parameters,
+            false,
+            None,
+        )
+        .await
     } else {
-        crate::restream::scratchpad_interaction_stream(ccx.clone(), scratchpad, "completion-stream".to_string(), model_rec.base.clone(), code_completion_post.parameters.clone(), false, None, None).await
+        crate::restream::scratchpad_interaction_stream(
+            ccx.clone(),
+            scratchpad,
+            "completion-stream".to_string(),
+            model_rec.base.clone(),
+            code_completion_post.parameters.clone(),
+            false,
+            None,
+            None,
+        )
+        .await
     }
 }
 
@@ -87,9 +123,8 @@ pub async fn handle_v1_code_completion_web(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-    let mut code_completion_post = serde_json::from_slice::<CodeCompletionPost>(&body_bytes).map_err(|e|
-        ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e))
-    )?;
+    let mut code_completion_post = serde_json::from_slice::<CodeCompletionPost>(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     handle_v1_code_completion(gcx.clone(), &mut code_completion_post).await
 }
 
@@ -103,17 +138,24 @@ pub async fn handle_v1_code_completion_prompt(
     code_completion_post_validate(&post)?;
 
     let cpath = canonical_path(&post.inputs.cursor.file);
-    check_file_privacy(load_privacy_if_needed(gcx.clone()).await, &cpath, &crate::privacy::FilePrivacyLevel::OnlySendToServersIControl)
-        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    check_file_privacy(
+        load_privacy_if_needed(gcx.clone()).await,
+        &cpath,
+        &crate::privacy::FilePrivacyLevel::OnlySendToServersIControl,
+    )
+    .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await?;
     let model_rec = resolve_completion_model(caps, &post.model, true)
-            .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
 
     // don't need cache, but go along
     let (cache_arc, tele_storage) = {
         let cx_locked = gcx.write().await;
-        (cx_locked.completions_cache.clone(), cx_locked.telemetry.clone())
+        (
+            cx_locked.completions_cache.clone(),
+            cx_locked.telemetry.clone(),
+        )
     };
 
     let ast_service_opt = gcx.read().await.ast_service.clone();
@@ -123,24 +165,32 @@ pub async fn handle_v1_code_completion_prompt(
         &post,
         cache_arc.clone(),
         tele_storage.clone(),
-        ast_service_opt
-    ).await.map_err(|e|
-        ScratchError::new(StatusCode::BAD_REQUEST, e)
-    )?;
+        ast_service_opt,
+    )
+    .await
+    .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
-    let ccx = Arc::new(AMutex::new(AtCommandsContext::new(
-        gcx.clone(),
-        model_rec.base.n_ctx,
-        CODE_COMPLETION_TOP_N,
-        true,
-        vec![],
-        "".to_string(),
-        false,
-        model_rec.base.id.clone(),
-    ).await));
-    let prompt = scratchpad.prompt(ccx.clone(), &mut post.parameters).await.map_err(|e|
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Prompt: {}", e))
-    )?;
+    let ccx = Arc::new(AMutex::new(
+        AtCommandsContext::new(
+            gcx.clone(),
+            model_rec.base.n_ctx,
+            CODE_COMPLETION_TOP_N,
+            true,
+            vec![],
+            "".to_string(),
+            false,
+            model_rec.base.id.clone(),
+            None,
+            None,
+        )
+        .await,
+    ));
+    let prompt = scratchpad
+        .prompt(ccx.clone(), &mut post.parameters)
+        .await
+        .map_err(|e| {
+            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Prompt: {}", e))
+        })?;
 
     let body = serde_json::json!({"prompt": prompt}).to_string();
     let response = Response::builder()

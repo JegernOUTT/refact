@@ -1,12 +1,20 @@
 import React, { useMemo } from "react";
-import { Card, Flex, Text, Box, Spinner } from "@radix-ui/themes";
-import { ChatBubbleIcon, DotFilledIcon } from "@radix-ui/react-icons";
+import { Card, Flex, Text, Box, Spinner, Badge } from "@radix-ui/themes";
+import {
+  ChatBubbleIcon,
+  DotFilledIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  PauseIcon,
+  CrossCircledIcon,
+} from "@radix-ui/react-icons";
 import { CloseButton } from "../Buttons/Buttons";
 import { IconButton } from "@radix-ui/themes";
 import { OpenInNewWindowIcon } from "@radix-ui/react-icons";
 import type { ChatHistoryItem } from "../../features/History/historySlice";
 import { isUserMessage } from "../../services/refact";
 import { useAppSelector } from "../../hooks";
+import { useChatSessionStates, SessionState } from "../../hooks/useStreamingChatIds";
 import { getTotalCostMeteringForMessages } from "../../utils/getMetering";
 import { Coin } from "../../images";
 
@@ -16,10 +24,25 @@ export const HistoryItem: React.FC<{
   onDelete: (id: string) => void;
   onOpenInTab?: (id: string) => void;
   disabled: boolean;
-}> = ({ historyItem, onClick, onDelete, onOpenInTab, disabled }) => {
+  badge?: string;
+  childCount?: number;
+  isExpanded?: boolean;
+  onToggleExpand?: () => void;
+}> = ({
+  historyItem,
+  onClick,
+  onDelete,
+  onOpenInTab,
+  disabled,
+  badge,
+  childCount,
+  isExpanded,
+  onToggleExpand,
+}) => {
   const dateCreated = new Date(historyItem.createdAt);
   const dateTimeString = dateCreated.toLocaleString();
   const threads = useAppSelector((app) => app.chat.threads);
+  const chatSessionStates = useChatSessionStates();
 
   const totalCost = useMemo(() => {
     const totals = getTotalCostMeteringForMessages(historyItem.messages);
@@ -34,15 +57,25 @@ export const HistoryItem: React.FC<{
     );
   }, [historyItem.messages]);
 
-  const isStreaming = threads[historyItem.id]?.streaming ?? false;
-  const isWaiting = threads[historyItem.id]?.waiting_for_response ?? false;
-  const isBusy = isStreaming || isWaiting;
+  const threadRuntime = threads[historyItem.id] as
+    | { streaming: boolean; waiting_for_response: boolean }
+    | undefined;
+
+  const getSessionState = (): SessionState | null => {
+    if (threadRuntime?.streaming) return "generating";
+    if (threadRuntime?.waiting_for_response) return "executing_tools";
+    return chatSessionStates[historyItem.id] as SessionState | null;
+  };
+
+  const sessionState = getSessionState();
+  const isWorking = sessionState === "generating" || sessionState === "executing_tools";
+  const isPaused = sessionState === "paused" || sessionState === "waiting_ide";
+  const isError = sessionState === "error";
   return (
     <Box style={{ position: "relative", width: "100%" }}>
       <Card
         style={{
           width: "100%",
-          marginBottom: "2px",
           opacity: disabled ? 0.8 : 1,
         }}
         variant="surface"
@@ -59,8 +92,14 @@ export const HistoryItem: React.FC<{
           }}
         >
           <Flex gap="1" align="center">
-            {isBusy && <Spinner style={{ minWidth: 16, minHeight: 16 }} />}
-            {!isBusy && historyItem.read === false && (
+            {isWorking && <Spinner style={{ minWidth: 16, minHeight: 16 }} />}
+            {!isWorking && isPaused && (
+              <PauseIcon style={{ minWidth: 16, minHeight: 16, color: "var(--yellow-9)" }} />
+            )}
+            {!isWorking && !isPaused && isError && (
+              <CrossCircledIcon style={{ minWidth: 16, minHeight: 16, color: "var(--red-9)" }} />
+            )}
+            {!isWorking && !isPaused && !isError && historyItem.read === false && (
               <DotFilledIcon style={{ minWidth: 16, minHeight: 16 }} />
             )}
             <Text
@@ -75,6 +114,11 @@ export const HistoryItem: React.FC<{
             >
               {historyItem.title}
             </Text>
+            {badge && (
+              <Badge size="1" color="gray" variant="soft">
+                {badge}
+              </Badge>
+            )}
           </Flex>
 
           <Flex justify="between" mt="8px">
@@ -102,6 +146,33 @@ export const HistoryItem: React.FC<{
           </Flex>
         </button>
       </Card>
+
+      {childCount !== undefined && onToggleExpand && (
+        <Box
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleExpand();
+          }}
+          style={{
+            cursor: "pointer",
+            padding: "4px 8px",
+            borderRadius: "0 0 4px 4px",
+            marginTop: "-2px",
+            background: "var(--gray-a3)",
+          }}
+        >
+          <Flex align="center" justify="center" gap="1">
+            <Text size="1" color="gray">
+              {childCount} related {childCount === 1 ? "chat" : "chats"}
+            </Text>
+            {isExpanded ? (
+              <ChevronDownIcon width={12} height={12} />
+            ) : (
+              <ChevronRightIcon width={12} height={12} />
+            )}
+          </Flex>
+        </Box>
+      )}
 
       <Flex
         position="absolute"

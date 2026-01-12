@@ -1,6 +1,6 @@
 import { ToolConfirmationPauseReason, Usage } from "../../../services/refact";
 import { SystemPrompts } from "../../../services/refact/prompts";
-import { ChatMessages, UserMessage } from "../../../services/refact/types";
+import { ChatMessages } from "../../../services/refact/types";
 import { parseOrElse } from "../../../utils/parseOrElse";
 
 export type ImageFile = {
@@ -14,11 +14,11 @@ export type ToolConfirmationStatus = {
   confirmationStatus: boolean;
 };
 
-export type QueuedUserMessage = {
-  id: string;
-  message: UserMessage;
-  createdAt: number;
-  priority?: boolean;
+export type QueuedItem = {
+  client_request_id: string;
+  priority: boolean;
+  command_type: string;
+  preview: string;
 };
 
 export type IntegrationMeta = {
@@ -50,6 +50,16 @@ export type ChatThread = {
   increase_max_tokens?: boolean;
   include_project_info?: boolean;
   context_tokens_cap?: number;
+  checkpoints_enabled?: boolean;
+  /** If true, this chat belongs to a task workspace and should not appear in regular chat tabs */
+  is_task_chat?: boolean;
+  /** Task metadata for task-related chats */
+  task_meta?: {
+    task_id: string;
+    role: string;
+    agent_id?: string;
+    card_id?: string;
+  };
 };
 
 export type SuggestedChat = {
@@ -59,32 +69,39 @@ export type SuggestedChat = {
 
 export type ToolUse = "quick" | "explore" | "agent";
 
+export type ThreadConfirmation = {
+  pause: boolean;
+  pause_reasons: ToolConfirmationPauseReason[];
+  status: ToolConfirmationStatus;
+};
+
 export type ChatThreadRuntime = {
   thread: ChatThread;
   streaming: boolean;
   waiting_for_response: boolean;
   prevent_send: boolean;
   error: string | null;
-  queued_messages: QueuedUserMessage[];
+  queued_items: QueuedItem[];
   send_immediately: boolean;
   attached_images: ImageFile[];
-  confirmation: {
-    pause: boolean;
-    pause_reasons: ToolConfirmationPauseReason[];
-    status: ToolConfirmationStatus;
-  };
+  confirmation: ThreadConfirmation;
+  /** Whether the initial snapshot has been received from the backend */
+  snapshot_received: boolean;
 };
 
 export type Chat = {
   current_thread_id: string;
   open_thread_ids: string[];
-  threads: Record<string, ChatThreadRuntime>;
+  threads: Record<string, ChatThreadRuntime | undefined>;
   system_prompt: SystemPrompts;
   tool_use: ToolUse;
   checkpoints_enabled?: boolean;
   follow_ups_enabled?: boolean;
-  use_compression?: boolean;
   max_new_tokens?: number;
+  /** When set, useChatSubscription should reconnect to get fresh state */
+  sse_refresh_requested: string | null;
+  /** Increments on every stream_delta to force component re-renders */
+  stream_version: number;
 };
 
 export type PayloadWithId = { id: string };

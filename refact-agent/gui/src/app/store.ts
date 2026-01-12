@@ -1,5 +1,6 @@
 import { combineSlices, configureStore } from "@reduxjs/toolkit";
 import { storage } from "./storage";
+import { pruneStaleDraftMessages } from "../utils/threadStorage";
 import {
   FLUSH,
   PAUSE,
@@ -22,10 +23,13 @@ import {
   dockerApi,
   telemetryApi,
   knowledgeApi,
+  knowledgeGraphApi,
   providersApi,
   modelsApi,
   teamsApi,
   trajectoriesApi,
+  trajectoryApi,
+  tasksApi,
 } from "../services/refact";
 import { smallCloudApi } from "../services/smallcloud";
 import { reducer as fimReducer } from "../features/FIM/reducer";
@@ -54,6 +58,7 @@ import { checkpointsSlice } from "../features/Checkpoints/checkpointsSlice";
 import { checkpointsApi } from "../services/refact/checkpoints";
 import { patchesAndDiffsTrackerSlice } from "../features/PatchesAndDiffsTracker/patchesAndDiffsTrackerSlice";
 import { coinBallanceSlice } from "../features/CoinBalance";
+import { tasksSlice } from "../features/Tasks";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -91,10 +96,13 @@ const rootReducer = combineSlices(
     [checkpointsApi.reducerPath]: checkpointsApi.reducer,
     [telemetryApi.reducerPath]: telemetryApi.reducer,
     [knowledgeApi.reducerPath]: knowledgeApi.reducer,
+    [knowledgeGraphApi.reducerPath]: knowledgeGraphApi.reducer,
     [teamsApi.reducerPath]: teamsApi.reducer,
     [providersApi.reducerPath]: providersApi.reducer,
     [modelsApi.reducerPath]: modelsApi.reducer,
     [trajectoriesApi.reducerPath]: trajectoriesApi.reducer,
+    [trajectoryApi.reducerPath]: trajectoryApi.reducer,
+    [tasksApi.reducerPath]: tasksApi.reducer,
   },
   historySlice,
   errorSlice,
@@ -108,6 +116,7 @@ const rootReducer = combineSlices(
   checkpointsSlice,
   patchesAndDiffsTrackerSlice,
   coinBallanceSlice,
+  tasksSlice,
 );
 
 const rootPersistConfig = {
@@ -174,13 +183,15 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
             checkpointsApi.middleware,
             telemetryApi.middleware,
             knowledgeApi.middleware,
+            knowledgeGraphApi.middleware,
             providersApi.middleware,
             modelsApi.middleware,
             teamsApi.middleware,
             trajectoriesApi.middleware,
+            trajectoryApi.middleware,
+            tasksApi.middleware,
           )
           .prepend(historyMiddleware.middleware)
-          // .prepend(errorMiddleware.middleware)
           .prepend(listenerMiddleware.middleware)
       );
     },
@@ -188,6 +199,9 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
 
   return store;
 }
+
+pruneStaleDraftMessages();
+
 export const store = setUpStore();
 export type Store = typeof store;
 

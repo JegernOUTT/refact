@@ -5,8 +5,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Local;
-use serde_json::Value;
+
+use serde_json::{Value, json};
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
 use crate::{
@@ -14,12 +14,14 @@ use crate::{
         at_commands::AtCommandsContext,
         at_tree::{construct_tree_out_of_flat_list_of_paths, PathsHolderNodeArc},
     },
-    call_validation::{ChatContent, ChatMessage, ChatUsage, ContextEnum, ContextFile, PostprocessSettings},
+    call_validation::{
+        ChatContent, ChatMessage, ChatUsage, ContextEnum, ContextFile, PostprocessSettings,
+    },
     files_correction::{get_project_dirs, paths_from_anywhere},
     files_in_workspace::{get_file_text_from_memory_or_disk, ls_files},
     global_context::GlobalContext,
     postprocessing::pp_context_files::postprocess_context_files,
-    subchat::subchat,
+    subchat::{run_subchat, resolve_subchat_config, resolve_subchat_model, WrapUpConfig},
     tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType},
 };
 use crate::caps::resolve_chat_model;
@@ -76,7 +78,9 @@ impl ExplorationState {
         let is_project_dir = project_dirs.iter().any(|pd| pd == node_path);
 
         // Only filter out node if it is NOT a project directory
-        if !is_project_dir && (node_ref.file_name().starts_with('.') || node_ref.child_paths().is_empty()) {
+        if !is_project_dir
+            && (node_ref.file_name().starts_with('.') || node_ref.child_paths().is_empty())
+        {
             return None;
         }
 
@@ -92,11 +96,11 @@ impl ExplorationState {
 
         // For deep-first exploration: lower score = higher priority (we sort ascending)
         // Invert relative_depth so deeper directories get lower scores
-        let depth_score = 1.0 - relative_depth;  // Now deeper dirs get higher relative_depth but lower depth_score
-        
+        let depth_score = 1.0 - relative_depth; // Now deeper dirs get higher relative_depth but lower depth_score
+
         // Size score - smaller directories get lower scores (preferred)
         let size_score = ((direct_children + total_children) as f64 / avg_dir_size).min(1.0);
-        
+
         // Deep directory bonus (subtracts from score for deeper directories)
         let deep_bonus = if relative_depth > 0.8 { 1.0 } else { 0.0 };
 
@@ -111,7 +115,7 @@ impl ExplorationState {
     ) -> Vec<ExplorationTarget> {
         let (max_depth, avg_size) = Self::get_tree_stats(tree);
         let project_dirs = get_project_dirs(gcx.clone()).await;
-        
+
         fn traverse(
             node: &PathsHolderNodeArc,
             depth: usize,
@@ -120,44 +124,63 @@ impl ExplorationState {
             project_dirs: &[std::path::PathBuf],
         ) -> Vec<(ExplorationTarget, f64)> {
             let mut targets = Vec::new();
-            
-            if let Some(score) = ExplorationState::calculate_importance_score(node, depth, max_depth, avg_size, project_dirs) {
+
+            if let Some(score) = ExplorationState::calculate_importance_score(
+                node,
+                depth,
+                max_depth,
+                avg_size,
+                project_dirs,
+            ) {
                 let node_ref = node.read();
                 targets.push((
                     ExplorationTarget {
                         target_name: node_ref.get_path().to_string_lossy().to_string(),
                     },
-                    score
+                    score,
                 ));
-                
+
                 for child in node_ref.child_paths() {
-                    targets.extend(traverse(child, depth + 1, max_depth, avg_size, project_dirs));
+                    targets.extend(traverse(
+                        child,
+                        depth + 1,
+                        max_depth,
+                        avg_size,
+                        project_dirs,
+                    ));
                 }
             }
             targets
         }
-        
-        let mut scored_targets: Vec<_> = tree.iter()
+
+        let mut scored_targets: Vec<_> = tree
+            .iter()
             .flat_map(|node| traverse(node, 0, max_depth, avg_size, &project_dirs))
             .collect();
-        
+
         scored_targets.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored_targets.into_iter().map(|(target, _)| target).collect()
+        scored_targets
+            .into_iter()
+            .map(|(target, _)| target)
+            .collect()
     }
 
     async fn new(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Self, String> {
         let project_dirs = get_project_dirs(gcx.clone()).await;
-        let relative_paths: Vec<PathBuf> = paths_from_anywhere(gcx.clone()).await
+        let relative_paths: Vec<PathBuf> = paths_from_anywhere(gcx.clone())
+            .await
             .into_iter()
-            .filter_map(|path| 
-                project_dirs.iter()
+            .filter_map(|path| {
+                project_dirs
+                    .iter()
                     .find(|dir| path.starts_with(dir))
                     .map(|dir| {
                         // Get the project directory name
-                        let project_name = dir.file_name()
+                        let project_name = dir
+                            .file_name()
                             .map(|name| name.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        
+
                         // If path is deeper than project dir, append the rest of the path
                         if let Ok(rest) = path.strip_prefix(dir) {
                             if rest.as_os_str().is_empty() {
@@ -168,7 +191,8 @@ impl ExplorationState {
                         } else {
                             PathBuf::from(&project_name)
                         }
-                    }))
+                    })
+            })
             .collect();
 
         let tree = construct_tree_out_of_flat_list_of_paths(&relative_paths);
@@ -196,24 +220,23 @@ impl ExplorationState {
 
     fn get_exploration_summary(&self) -> String {
         let dir_count = self.explored.len();
-        format!(
-            "Explored {} directories",
-            dir_count
-        )
+        format!("Explored {} directories", dir_count)
     }
 
     fn project_tree_summary(&self) -> String {
-        self.project_tree.as_ref().map_or_else(String::new, |nodes| {
-            fn traverse(node: &PathsHolderNodeArc, depth: usize) -> String {
-                let node_ref = node.read();
-                let mut result = format!("{}{}\n", "  ".repeat(depth), node_ref.file_name());
-                for child in node_ref.child_paths() {
-                    result.push_str(&traverse(child, depth + 1));
+        self.project_tree
+            .as_ref()
+            .map_or_else(String::new, |nodes| {
+                fn traverse(node: &PathsHolderNodeArc, depth: usize) -> String {
+                    let node_ref = node.read();
+                    let mut result = format!("{}{}\n", "  ".repeat(depth), node_ref.file_name());
+                    for child in node_ref.child_paths() {
+                        result.push_str(&traverse(child, depth + 1));
+                    }
+                    result
                 }
-                result
-            }
-            nodes.iter().map(|n| traverse(n, 0)).collect()
-        })
+                nodes.iter().map(|n| traverse(n, 0)).collect()
+            })
     }
 }
 
@@ -230,8 +253,9 @@ async fn read_and_compress_directory(
     let files = ls_files(
         &*crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await,
         &abs_dir,
-        false
-    ).unwrap_or_default();
+        false,
+    )
+    .unwrap_or_default();
     tracing::info!(
         target = "memory_bank",
         directory = dir_relative,
@@ -255,6 +279,7 @@ async fn read_and_compress_directory(
             file_content: text,
             line1: 1,
             line2: lines,
+            file_rev: None,
             symbols: vec![],
             gradient_type: 4,
             usefulness: 100.0,
@@ -262,22 +287,31 @@ async fn read_and_compress_directory(
         });
     }
 
-    let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0).await.map_err(|x| x.message)?;
+    let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|x| x.message)?;
     let model_rec = resolve_chat_model(caps, &model)?;
     let tokenizer = crate::tokens::cached_tokenizer(gcx.clone(), &model_rec.base).await?;
     let mut pp_settings = PostprocessSettings::new();
     pp_settings.max_files_n = context_files.len();
-    let compressed = postprocess_context_files(
+    let (compressed, _notes) = postprocess_context_files(
         gcx.clone(),
         &mut context_files,
         tokenizer,
         tokens_limit,
         false,
         &pp_settings,
-    ).await;
+    )
+    .await;
 
-    Ok(compressed.into_iter()
-        .map(|cf| format!("Filename: {}\n```\n{}\n```\n\n", cf.file_name, cf.file_content))
+    Ok(compressed
+        .into_iter()
+        .map(|cf| {
+            format!(
+                "Filename: {}\n```\n{}\n```\n\n",
+                cf.file_name, cf.file_content
+            )
+        })
         .collect())
 }
 
@@ -346,7 +380,11 @@ impl ToolCreateMemoryBank {
     ) -> String {
         let mut prompt = String::new();
         prompt.push_str(MB_SYSTEM_PROMPT);
-        prompt.push_str(&format!("\n\nNow exploring directory: '{}' from the project '{}'", target.target_name, target.target_name.split('/').next().unwrap_or("")));
+        prompt.push_str(&format!(
+            "\n\nNow exploring directory: '{}' from the project '{}'",
+            target.target_name,
+            target.target_name.split('/').next().unwrap_or("")
+        ));
         {
             prompt.push_str("\nFocus on details like purpose, organization, and notable files. Here is the project structure:\n");
             prompt.push_str(&state.project_tree_summary());
@@ -359,129 +397,166 @@ impl ToolCreateMemoryBank {
     }
 }
 
+async fn execute_memory_bank_exploration(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    subchat_tx: Arc<AMutex<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>>,
+    tool_call_id: String,
+) -> Result<(String, ChatUsage), String> {
+    let mut state = ExplorationState::new(gcx.clone()).await?;
+    let mut step = 0;
+    let mut usage_collector = ChatUsage::default();
+
+    let total_dirs = state.to_explore.len();
+
+    let params = crate::subchat::resolve_subchat_params(gcx.clone(), "create_memory_bank").await?;
+    let model_id = resolve_subchat_model(gcx.clone(), &params).await?;
+
+    while state.has_unexplored_targets() && step < MAX_EXPLORATION_STEPS {
+        step += 1;
+        if let Some(target) = state.get_next_target() {
+            tracing::info!(
+                target = "memory_bank",
+                step = step,
+                max_steps = MAX_EXPLORATION_STEPS,
+                directory = target.target_name,
+                "Starting directory exploration"
+            );
+
+            let progress_msg = json!({
+                "tool_call_id": tool_call_id,
+                "subchat_id": format!("memory-bank-progress-{}/{}", step, total_dirs),
+                "add_message": {
+                    "role": "assistant",
+                    "content": format!("📁 Exploring directory {}/{}: {}", step, total_dirs, target.target_name)
+                }
+            });
+            let _ = subchat_tx.lock().await.send(progress_msg);
+
+            let file_context = read_and_compress_directory(
+                gcx.clone(),
+                target.target_name.clone(),
+                params.subchat_tokens_for_rag,
+                model_id.clone(),
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    "Failed to read/compress files for {}: {}",
+                    target.target_name,
+                    e
+                );
+                e
+            })
+            .ok();
+
+            let step_msg = ChatMessage::new(
+                "user".to_string(),
+                ToolCreateMemoryBank::build_step_prompt(&state, &target, file_context.as_ref()),
+            );
+
+            let wrap_up = WrapUpConfig {
+                depth: 8,
+                tokens_cnt: params.subchat_max_new_tokens,
+                prompt: MB_EXPERT_WRAP_UP.to_string(),
+            };
+
+            let config = resolve_subchat_config(
+                gcx.clone(),
+                "create_memory_bank",
+                false,
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["knowledge".to_string(), "create_knowledge".to_string()]),
+                8,
+                false,
+                Some(wrap_up),
+            ).await?;
+
+            let result = run_subchat(gcx.clone(), vec![step_msg], config).await?;
+
+            if let Some(last_msg) = result.messages.last() {
+                crate::tools::tools_execute::update_usage_from_message(
+                    &mut usage_collector,
+                    last_msg,
+                );
+                tracing::info!(
+                    target = "memory_bank",
+                    directory = target.target_name,
+                    prompt_tokens = usage_collector.prompt_tokens,
+                    completion_tokens = usage_collector.completion_tokens,
+                    total_tokens = usage_collector.total_tokens,
+                    "Updated token usage"
+                );
+            }
+
+            usage_collector.prompt_tokens += result.usage.prompt_tokens;
+            usage_collector.completion_tokens += result.usage.completion_tokens;
+            usage_collector.total_tokens += result.usage.total_tokens;
+
+            state.mark_explored(target.clone());
+            let remaining = state.to_explore.len();
+            let explored = state.explored.len();
+            tracing::info!(
+                target = "memory_bank",
+                directory = target.target_name,
+                remaining_dirs = remaining,
+                explored_dirs = explored,
+                total_dirs = remaining + explored,
+                progress = format!("{}/{}", explored, remaining + explored),
+                "Completed directory exploration"
+            );
+        } else {
+            break;
+        }
+    }
+
+    let summary = format!(
+        "Memory bank creation completed. Steps: {}, {}. Total directories: {}. Usage: {} prompt tokens, {} completion tokens",
+        step,
+        state.get_exploration_summary(),
+        state.explored.len() + state.to_explore.len(),
+        usage_collector.prompt_tokens,
+        usage_collector.completion_tokens,
+    );
+
+    Ok((summary, usage_collector))
+}
+
 #[async_trait]
 impl Tool for ToolCreateMemoryBank {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        _args: &HashMap<String, Value>
+        _args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let params = crate::tools::tools_execute::unwrap_subchat_params(ccx.clone(), "create_memory_bank").await?;
-        
-        let ccx_subchat = {
+        let (gcx, subchat_tx) = {
             let ccx_lock = ccx.lock().await;
-            let mut ctx = AtCommandsContext::new(
-                ccx_lock.global_context.clone(),
-                params.subchat_n_ctx,
-                25,
-                false,
-                ccx_lock.messages.clone(),
-                ccx_lock.chat_id.clone(),
-                ccx_lock.should_execute_remotely,
-                ccx_lock.current_model.clone(),
-            ).await;
-            ctx.subchat_tx = ccx_lock.subchat_tx.clone();
-            ctx.subchat_rx = ccx_lock.subchat_rx.clone();
-            Arc::new(AMutex::new(ctx))
+            (ccx_lock.global_context.clone(), ccx_lock.subchat_tx.clone())
         };
 
-        let mut state = ExplorationState::new(gcx.clone()).await?;
-        let mut final_results = Vec::new();
-        let mut step = 0;
-        let mut usage_collector = ChatUsage::default();
+        tracing::info!("Starting memory bank creation");
 
-        while state.has_unexplored_targets() && step < MAX_EXPLORATION_STEPS {
-            step += 1;
-            let log_prefix = Local::now().format("%Y%m%d-%H%M%S").to_string();
-            if let Some(target) = state.get_next_target() {
-                tracing::info!(
-                    target = "memory_bank",
-                    step = step,
-                    max_steps = MAX_EXPLORATION_STEPS,
-                    directory = target.target_name,
-                    "Starting directory exploration"
-                );
-                let file_context = read_and_compress_directory(
-                    gcx.clone(),
-                    target.target_name.clone(),
-                    params.subchat_tokens_for_rag,
-                    params.subchat_model.clone(),
-                ).await.map_err(|e| {
-                    tracing::warn!("Failed to read/compress files for {}: {}", target.target_name, e);
-                    e
-                }).ok();
+        let (summary, usage_collector) = execute_memory_bank_exploration(
+            gcx,
+            subchat_tx,
+            tool_call_id.clone(),
+        ).await?;
 
-                let step_msg = ChatMessage::new(
-                    "user".to_string(),
-                    Self::build_step_prompt(&state, &target, file_context.as_ref())
-                );
-
-                let subchat_result = subchat(
-                    ccx_subchat.clone(),
-                    params.subchat_model.as_str(),
-                    vec![step_msg],
-                    vec!["knowledge".to_string(), "create_knowledge".to_string()],
-                    8,
-                    params.subchat_max_new_tokens,
-                    MB_EXPERT_WRAP_UP,
-                    1,
-                    None,
-                    None,
-                    Some(tool_call_id.clone()),
-                    Some(format!("{log_prefix}-memory-bank-dir-{}", target.target_name.replace("/", "_"))),
-                    Some(false),
-                ).await?[0].clone();
-
-                // Update usage from subchat result
-                if let Some(last_msg) = subchat_result.last() {
-                    crate::tools::tools_execute::update_usage_from_message(&mut usage_collector, last_msg);
-                    tracing::info!(
-                        target = "memory_bank",
-                        directory = target.target_name,
-                        prompt_tokens = usage_collector.prompt_tokens,
-                        completion_tokens = usage_collector.completion_tokens,
-                        total_tokens = usage_collector.total_tokens,
-                        "Updated token usage"
-                    );
-                }
-
-                state.mark_explored(target.clone());
-                let total = state.to_explore.len() + state.explored.len();
-                tracing::info!(
-                    target = "memory_bank",
-                    directory = target.target_name,
-                    remaining_dirs = state.to_explore.len(),
-                    explored_dirs = state.explored.len(),
-                    total_dirs = total,
-                    progress = format!("{}/{}", state.to_explore.len(), total),
-                    "Completed directory exploration"
-                );
-            } else {
-                break;
-            }
-        }
-
-        final_results.push(ContextEnum::ChatMessage(ChatMessage {
+        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
-            content: ChatContent::SimpleText(format!(
-                "Memory bank creation completed. Steps: {}, {}. Total directories: {}. Usage: {} prompt tokens, {} completion tokens",
-                step,
-                state.get_exploration_summary(),
-                state.explored.len() + state.to_explore.len(),
-                usage_collector.prompt_tokens,
-                usage_collector.completion_tokens,
-            )),
-            usage: Some(usage_collector),
+            content: ChatContent::SimpleText(format!("✅ {}", summary)),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            usage: Some(usage_collector),
             ..Default::default()
-        }));
-
-        Ok((false, final_results))
+        })]))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {

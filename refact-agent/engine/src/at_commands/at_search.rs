@@ -1,4 +1,6 @@
-use crate::at_commands::at_commands::{vec_context_file_to_context_tools, AtCommand, AtCommandsContext, AtParam};
+use crate::at_commands::at_commands::{
+    vec_context_file_to_context_tools, AtCommand, AtCommandsContext, AtParam,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
@@ -10,7 +12,6 @@ use crate::call_validation::{ContextEnum, ContextFile};
 use crate::vecdb;
 use crate::vecdb::vdb_structs::VecdbSearch;
 
-
 pub fn text_on_clip(query: &String, from_tool_call: bool) -> String {
     if !from_tool_call {
         return query.clone();
@@ -18,16 +19,13 @@ pub fn text_on_clip(query: &String, from_tool_call: bool) -> String {
     return format!("performed vecdb search, results below");
 }
 
-
 pub struct AtSearch {
     pub params: Vec<Box<dyn AtParam>>,
 }
 
 impl AtSearch {
     pub fn new() -> Self {
-        AtSearch {
-            params: vec![],
-        }
+        AtSearch { params: vec![] }
     }
 }
 
@@ -37,10 +35,15 @@ fn results2message(results: &Vec<vecdb::vdb_structs::VecdbRecord>) -> Vec<Contex
         let file_name = r.file_path.to_str().unwrap().to_string();
         let mut usefulness = r.usefulness;
         // diversifying results
-        let same_file_again =  vector_of_context_file.iter().map(|x|&x.file_name).filter(|x|**x == file_name).count();
+        let same_file_again = vector_of_context_file
+            .iter()
+            .map(|x| &x.file_name)
+            .filter(|x| **x == file_name)
+            .count();
         let same_file_discount = 1. / (same_file_again as f32 * 0.1 + 1.);
         usefulness *= same_file_discount;
-        info!("results {} usefulness {:.2} after same-file discount {:.2}",
+        info!(
+            "results {} usefulness {:.2} after same-file discount {:.2}",
             last_n_chars(&file_name, 30),
             usefulness,
             same_file_discount,
@@ -54,6 +57,7 @@ fn results2message(results: &Vec<vecdb::vdb_structs::VecdbRecord>) -> Vec<Contex
             gradient_type: 4,
             usefulness,
             skip_pp: false,
+            file_rev: None,
         });
     }
     vector_of_context_file
@@ -95,10 +99,17 @@ impl AtCommand for AtSearch {
         _cmd: &mut AtCommandMember,
         args: &mut Vec<AtCommandMember>,
     ) -> Result<(Vec<ContextEnum>, String), String> {
-        let args1 = args.iter().map(|x|x.clone()).collect::<Vec<_>>();
-        info!("execute @search {:?}", args1.iter().map(|x|x.text.clone()).collect::<Vec<_>>());
+        let args1 = args.iter().map(|x| x.clone()).collect::<Vec<_>>();
+        info!(
+            "execute @search {:?}",
+            args1.iter().map(|x| x.text.clone()).collect::<Vec<_>>()
+        );
 
-        let query = args.iter().map(|x|x.text.clone()).collect::<Vec<_>>().join(" ");
+        let query = args
+            .iter()
+            .map(|x| x.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
         if query.trim().is_empty() {
             if ccx.lock().await.is_preview {
                 return Ok((vec![], "".to_string()));
@@ -108,7 +119,10 @@ impl AtCommand for AtSearch {
 
         let vector_of_context_file = execute_at_search(ccx.clone(), &query, None).await?;
         let text = text_on_clip(&query, false);
-        Ok((vec_context_file_to_context_tools(vector_of_context_file), text))
+        Ok((
+            vec_context_file_to_context_tools(vector_of_context_file),
+            text,
+        ))
     }
 
     fn depends_on(&self) -> Vec<String> {

@@ -42,6 +42,26 @@ export interface ProvidersPage {
   name: "providers page";
 }
 
+export interface TasksListPage {
+  name: "tasks list";
+}
+
+export interface TaskWorkspacePage {
+  name: "task workspace";
+  taskId: string;
+}
+
+export interface TaskAgentPage {
+  name: "task agent";
+  taskId: string;
+  agentId: string;
+  chatId: string;
+}
+
+export interface KnowledgeGraphPage {
+  name: "knowledge graph";
+}
+
 export interface IntegrationsSetupPage {
   name: "integrations page";
   projectPath?: string;
@@ -62,7 +82,11 @@ export type Page =
   | ChatThreadHistoryPage
   | IntegrationsSetupPage
   | ProvidersPage
-  | LoginPage;
+  | LoginPage
+  | TasksListPage
+  | TaskWorkspacePage
+  | TaskAgentPage
+  | KnowledgeGraphPage;
 
 export function isIntegrationSetupPage(
   page: Page,
@@ -100,14 +124,14 @@ export const pagesSlice = createSlice({
       });
       if (pageIndex === -1) {
         state.push(action.payload);
-        return state;
+        return;
       }
-      return state.slice(0, pageIndex + 1);
+      state.length = pageIndex + 1;
     },
 
     change: (state, action: PayloadAction<Page>) => {
-      const last = state.slice(0, -1);
-      return last.concat(action.payload);
+      state.pop();
+      state.push(action.payload);
     },
   },
   selectors: {

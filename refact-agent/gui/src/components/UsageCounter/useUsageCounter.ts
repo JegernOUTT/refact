@@ -1,10 +1,6 @@
 import { useMemo } from "react";
-import {
-  selectIsStreaming,
-  selectIsWaiting,
-  selectMessages,
-} from "../../features/Chat";
-import { useAppSelector, useLastSentCompressionStop } from "../../hooks";
+import { selectMessages, selectThreadMaximumTokens } from "../../features/Chat";
+import { useAppSelector } from "../../hooks";
 import {
   calculateUsageInputTokens,
   mergeUsages,
@@ -12,18 +8,49 @@ import {
 import { isAssistantMessage } from "../../services/refact";
 
 export function useUsageCounter() {
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const compressionStop = useLastSentCompressionStop();
   const messages = useAppSelector(selectMessages);
-  const assistantMessages = messages.filter(isAssistantMessage);
-  const usages = assistantMessages.map((msg) => msg.usage);
+  const maxContextTokens = useAppSelector(selectThreadMaximumTokens);
+
+  // Memoize assistant messages list
+  const assistantMessages = useMemo(
+    () => messages.filter(isAssistantMessage),
+    [messages],
+  );
+
+  // Memoize usages list
+  const usages = useMemo(
+    () => assistantMessages.map((msg) => msg.usage),
+    [assistantMessages],
+  );
+
   const currentThreadUsage = mergeUsages(usages);
-  const lastAssistantMessage =
-    assistantMessages.length > 0
-      ? assistantMessages[assistantMessages.length - 1]
-      : undefined;
-  const lastUsage = lastAssistantMessage?.usage;
+
+  const lastAssistantMessage = useMemo(
+    () =>
+      assistantMessages.length > 0
+        ? assistantMessages[assistantMessages.length - 1]
+        : undefined,
+    [assistantMessages],
+  );
+
+  // Check if the last message has server-executed tools (like web_search)
+  // These can cause temporary inflated token counts during streaming.
+  // We check both server_executed_tools (set after streaming) and tool_calls
+  // with srvtoolu_ prefix (visible during streaming)
+  const hasServerExecutedTools = useMemo(() => {
+    if (!lastAssistantMessage) return false;
+    // Check post-processed server_executed_tools
+    const serverTools = lastAssistantMessage.server_executed_tools;
+    if (Array.isArray(serverTools) && serverTools.length > 0) {
+      return true;
+    }
+    // Check tool_calls during streaming (before post-processing)
+    const toolCalls = lastAssistantMessage.tool_calls;
+    if (Array.isArray(toolCalls)) {
+      return toolCalls.some((tc) => tc.id?.startsWith("srvtoolu_"));
+    }
+    return false;
+  }, [lastAssistantMessage]);
 
   const totalInputTokens = useMemo(() => {
     return calculateUsageInputTokens({
@@ -36,26 +63,46 @@ export function useUsageCounter() {
     });
   }, [currentThreadUsage]);
 
+  // Deterministic fallback: scan backwards through assistant messages for first message with prompt_tokens > 0
   const currentSessionTokens = useMemo(() => {
-    return lastUsage?.prompt_tokens ?? 0;
-  }, [lastUsage]);
+    for (let i = assistantMessages.length - 1; i >= 0; i--) {
+      const t = assistantMessages[i]?.usage?.prompt_tokens;
+      if (typeof t === "number" && t > 0) return t;
+    }
+    return 0;
+  }, [assistantMessages]);
 
-  const isOverflown = useMemo(() => {
-    if (compressionStop.strength === "low") return true;
-    if (compressionStop.strength === "medium") return true;
-    if (compressionStop.strength === "high") return true;
-    return false;
-  }, [compressionStop.strength]);
+  const isContextFromPreviousMessage = useMemo(() => {
+    if (assistantMessages.length === 0) return false;
+    const lastMsg = assistantMessages[assistantMessages.length - 1];
+    const lastHasTokens = (lastMsg.usage?.prompt_tokens ?? 0) > 0;
+    return !lastHasTokens && currentSessionTokens > 0;
+  }, [assistantMessages, currentSessionTokens]);
+
+  const tokenPercentage = useMemo(() => {
+    if (!maxContextTokens || maxContextTokens === 0) return 0;
+    return (currentSessionTokens / maxContextTokens) * 100;
+  }, [currentSessionTokens, maxContextTokens]);
 
   const isWarning = useMemo(() => {
-    if (compressionStop.strength === "medium") return true;
-    if (compressionStop.strength === "high") return true;
-    return false;
-  }, [compressionStop.strength]);
+    return tokenPercentage >= 85;
+  }, [tokenPercentage]);
+
+  const isOverflown = useMemo(() => {
+    return tokenPercentage >= 97;
+  }, [tokenPercentage]);
 
   const shouldShow = useMemo(() => {
-    return messages.length > 0 && !isStreaming && !isWaiting;
-  }, [messages.length, isStreaming, isWaiting]);
+    return messages.length > 0;
+  }, [messages.length]);
+
+  // Don't mark context as full when server-executed tools are present
+  // Claude's web_search can report inflated token counts during streaming
+  // that normalize after completion - this prevents false blocking
+  const isContextFull = useMemo(() => {
+    if (hasServerExecutedTools) return false;
+    return tokenPercentage >= 97;
+  }, [tokenPercentage, hasServerExecutedTools]);
 
   return {
     shouldShow,
@@ -64,6 +111,9 @@ export function useUsageCounter() {
     currentSessionTokens,
     isOverflown,
     isWarning,
-    compressionStrength: compressionStop.strength,
+    isContextFull,
+    tokenPercentage,
+    hasServerExecutedTools,
+    isContextFromPreviousMessage,
   };
 }

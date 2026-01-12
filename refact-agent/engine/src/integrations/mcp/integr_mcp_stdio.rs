@@ -15,7 +15,9 @@ use tempfile::NamedTempFile;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon};
 use super::session_mcp::add_log_entry;
-use super::integr_mcp_common::{CommonMCPSettings, MCPTransportInitializer, mcp_integr_tools, mcp_session_setup};
+use super::integr_mcp_common::{
+    CommonMCPSettings, MCPTransportInitializer, mcp_integr_tools, mcp_session_setup,
+};
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default, Debug)]
 pub struct SettingsMCPStdio {
@@ -43,7 +45,7 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
         debug_name: String,
         init_timeout: u64,
         _request_timeout: u64,
-        session_arc_clone: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>
+        session_arc_clone: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
     ) -> Option<RunningService<RoleClient, ()>> {
         let log = async |level: tracing::Level, msg: String| {
             match level {
@@ -56,7 +58,11 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
 
         let command = self.cfg.mcp_command.trim();
         if command.is_empty() {
-            log(tracing::Level::ERROR, "Command is empty for STDIO transport".to_string()).await;
+            log(
+                tracing::Level::ERROR,
+                "Command is empty for STDIO transport".to_string(),
+            )
+            .await;
             return None;
         }
 
@@ -69,7 +75,11 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
                 args
             }
             Err(e) => {
-                log(tracing::Level::ERROR, format!("Failed to parse command: {}", e)).await;
+                log(
+                    tracing::Level::ERROR,
+                    format!("Failed to parse command: {}", e),
+                )
+                .await;
                 return None;
             }
         };
@@ -84,33 +94,53 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
             Ok(Ok((file, path))) => {
                 {
                     let mut session_locked = session_arc_clone.lock().await;
-                    if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<super::session_mcp::SessionMCP>() {
+                    if let Some(mcp_session) = session_locked
+                        .as_any_mut()
+                        .downcast_mut::<super::session_mcp::SessionMCP>()
+                    {
                         mcp_session.stderr_file_path = Some(path.clone());
                         mcp_session.stderr_cursor = Arc::new(AMutex::new(0));
                     }
                 }
                 command.stderr(Stdio::from(file));
-            },
+            }
             Ok(Err(e)) => tracing::error!("Failed to persist stderr file for {debug_name}: {e}"),
-            Err(e)  => tracing::error!("Failed to create stderr file for {debug_name}: {e}"),
+            Err(e) => tracing::error!("Failed to create stderr file for {debug_name}: {e}"),
         }
 
         let transport = match rmcp::transport::TokioChildProcess::new(command) {
             Ok(t) => t,
             Err(e) => {
-                log(tracing::Level::ERROR, format!("Failed to init Tokio child process: {}", e)).await;
+                log(
+                    tracing::Level::ERROR,
+                    format!("Failed to init Tokio child process: {}", e),
+                )
+                .await;
                 return None;
             }
         };
 
-        match timeout(Duration::from_secs(init_timeout), serve_client((), transport)).await {
+        match timeout(
+            Duration::from_secs(init_timeout),
+            serve_client((), transport),
+        )
+        .await
+        {
             Ok(Ok(client)) => Some(client),
             Ok(Err(e)) => {
-                log(tracing::Level::ERROR, format!("Failed to init stdio server: {}", e)).await;
+                log(
+                    tracing::Level::ERROR,
+                    format!("Failed to init stdio server: {}", e),
+                )
+                .await;
                 None
-            },
+            }
             Err(_) => {
-                log(tracing::Level::ERROR, format!("Request timed out after {} seconds", init_timeout)).await;
+                log(
+                    tracing::Level::ERROR,
+                    format!("Request timed out after {} seconds", init_timeout),
+                )
+                .await;
                 None
             }
         }
@@ -123,7 +153,12 @@ impl IntegrationTrait for IntegrationMCPStdio {
         self
     }
 
-    async fn integr_settings_apply(&mut self, gcx: Arc<ARwLock<GlobalContext>>, config_path: String, value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    async fn integr_settings_apply(
+        &mut self,
+        gcx: Arc<ARwLock<GlobalContext>>,
+        config_path: String,
+        value: &serde_json::Value,
+    ) -> Result<(), serde_json::Error> {
         self.gcx_option = Some(Arc::downgrade(&gcx));
         self.cfg = serde_json::from_value(value.clone())?;
         self.common = serde_json::from_value(value.clone())?;
@@ -135,8 +170,9 @@ impl IntegrationTrait for IntegrationMCPStdio {
             serde_json::to_value(&self.cfg).unwrap_or_default(),
             self.clone(),
             self.cfg.common.init_timeout,
-            self.cfg.common.request_timeout
-        ).await;
+            self.cfg.common.request_timeout,
+        )
+        .await;
 
         Ok(())
     }
@@ -149,13 +185,17 @@ impl IntegrationTrait for IntegrationMCPStdio {
         self.common.clone()
     }
 
-    async fn integr_tools(&self, _integr_name: &str) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    async fn integr_tools(
+        &self,
+        _integr_name: &str,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         mcp_integr_tools(
             self.gcx_option.clone(),
             &self.config_path,
             &self.common,
-            self.cfg.common.request_timeout
-        ).await
+            self.cfg.common.request_timeout,
+        )
+        .await
     }
 
     fn integr_schema(&self) -> &str {

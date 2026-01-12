@@ -26,7 +26,10 @@ pub struct MarkdownFileSplitter {
 
 impl MarkdownFileSplitter {
     pub fn new(max_tokens: usize) -> Self {
-        Self { max_tokens, overlap_lines: 3 }
+        Self {
+            max_tokens,
+            overlap_lines: 3,
+        }
     }
 
     pub async fn split(
@@ -34,10 +37,18 @@ impl MarkdownFileSplitter {
         doc: &Document,
         gcx: Arc<ARwLock<GlobalContext>>,
     ) -> Result<Vec<SplitResult>, String> {
-        let text = doc.clone().get_text_or_read_from_disk(gcx).await.map_err(|e| e.to_string())?;
+        let text = doc
+            .clone()
+            .get_text_or_read_from_disk(gcx)
+            .await
+            .map_err(|e| e.to_string())?;
         let path = doc.doc_path.clone();
         let (frontmatter, content_start) = MarkdownFrontmatter::parse(&text);
-        let frontmatter_lines = if content_start > 0 { text[..content_start].lines().count() } else { 0 };
+        let frontmatter_lines = if content_start > 0 {
+            text[..content_start].lines().count()
+        } else {
+            0
+        };
         let content = &text[content_start..];
         let sections = self.extract_sections(content, frontmatter_lines);
 
@@ -178,7 +189,11 @@ impl MarkdownFileSplitter {
 
         for (idx, line) in lines.iter().enumerate() {
             if current_chunk.len() + line.len() + 1 > chars_per_chunk && !current_chunk.is_empty() {
-                chunks.push((current_chunk.trim().to_string(), chunk_start, current_line.saturating_sub(1)));
+                chunks.push((
+                    current_chunk.trim().to_string(),
+                    chunk_start,
+                    current_line.saturating_sub(1),
+                ));
                 let overlap_start = idx.saturating_sub(self.overlap_lines);
                 current_chunk = lines[overlap_start..idx].join("\n");
                 if !current_chunk.is_empty() {
@@ -192,7 +207,11 @@ impl MarkdownFileSplitter {
         }
 
         if !current_chunk.trim().is_empty() {
-            chunks.push((current_chunk.trim().to_string(), chunk_start, start_line + lines.len().saturating_sub(1)));
+            chunks.push((
+                current_chunk.trim().to_string(),
+                chunk_start,
+                start_line + lines.len().saturating_sub(1),
+            ));
         }
         chunks
     }

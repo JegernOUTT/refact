@@ -7,14 +7,15 @@ use tokio::sync::RwLock as ARwLock;
 use crate::global_context;
 use crate::telemetry::utils::compress_tele_records_to_file;
 
-pub async fn compress_basic_telemetry_to_file(
-    cx: Arc<ARwLock<global_context::GlobalContext>>,
-) {
+pub async fn compress_basic_telemetry_to_file(cx: Arc<ARwLock<global_context::GlobalContext>>) {
     let mut key2cnt = HashMap::new();
     let mut key2dict = HashMap::new();
 
     for rec in cx.read().await.telemetry.read().unwrap().tele_net.iter() {
-        let key = format!("{}/{}/{}/{}", rec.url, rec.scope, rec.success, rec.error_message);
+        let key = format!(
+            "{}/{}/{}/{}",
+            rec.url, rec.scope, rec.success, rec.error_message
+        );
         if !key2dict.contains_key(&key) {
             key2dict.insert(key.clone(), serde_json::to_value(rec).unwrap());
             key2cnt.insert(key.clone(), 0);
@@ -28,10 +29,17 @@ pub async fn compress_basic_telemetry_to_file(
         json_dict["counter"] = json!(cnt);
         records.push(json_dict);
     }
-    match compress_tele_records_to_file(cx.clone(), records, "network".to_string(), "net".to_string()).await {
+    match compress_tele_records_to_file(
+        cx.clone(),
+        records,
+        "network".to_string(),
+        "net".to_string(),
+    )
+    .await
+    {
         Ok(_) => {
             cx.write().await.telemetry.write().unwrap().tele_net.clear();
-        },
+        }
         Err(_) => {}
     };
 }

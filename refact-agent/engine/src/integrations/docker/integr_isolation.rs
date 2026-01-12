@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context::GlobalContext;
-use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num, serialize_ports, deserialize_ports};
+use crate::integrations::utils::{
+    serialize_num_to_str, deserialize_str_to_num, serialize_ports, deserialize_ports,
+};
 use crate::integrations::docker::docker_container_manager::Port;
 use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon};
 
@@ -17,10 +19,16 @@ pub struct SettingsIsolation {
     pub docker_image_id: String,
     #[serde(default)]
     pub docker_network: String,
-    #[serde(serialize_with = "serialize_ports", deserialize_with = "deserialize_ports")]
+    #[serde(
+        serialize_with = "serialize_ports",
+        deserialize_with = "deserialize_ports"
+    )]
     #[serde(default)]
     pub ports: Vec<Port>,
-    #[serde(serialize_with = "serialize_num_to_str", deserialize_with = "deserialize_str_to_num")]
+    #[serde(
+        serialize_with = "serialize_num_to_str",
+        deserialize_with = "deserialize_str_to_num"
+    )]
     pub keep_containers_alive_for_x_minutes: u64,
     #[serde(default = "default_docker_entrypoint")]
     pub docker_entrypoint: String,
@@ -28,23 +36,32 @@ pub struct SettingsIsolation {
     pub docker_extra_params: Vec<String>,
 }
 
-fn default_docker_entrypoint() -> String { "sh".to_string() }
+fn default_docker_entrypoint() -> String {
+    "sh".to_string()
+}
 
 #[derive(Clone, Default)]
 pub struct IntegrationIsolation {
-    pub common:  IntegrationCommon,
+    pub common: IntegrationCommon,
     pub settings_isolation: SettingsIsolation,
 }
 
 #[async_trait]
 impl IntegrationTrait for IntegrationIsolation {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
-    async fn integr_settings_apply(&mut self, _gcx: Arc<ARwLock<GlobalContext>>, _config_path: String, value: &serde_json::Value) -> Result<(), serde_json::Error> {
-      self.settings_isolation = serde_json::from_value(value.clone())?;
-      self.common = serde_json::from_value(value.clone())?;
-      Ok(())
-  }
+    async fn integr_settings_apply(
+        &mut self,
+        _gcx: Arc<ARwLock<GlobalContext>>,
+        _config_path: String,
+        value: &serde_json::Value,
+    ) -> Result<(), serde_json::Error> {
+        self.settings_isolation = serde_json::from_value(value.clone())?;
+        self.common = serde_json::from_value(value.clone())?;
+        Ok(())
+    }
 
     fn integr_settings_as_json(&self) -> Value {
         serde_json::to_value(&self.settings_isolation).unwrap()
@@ -54,7 +71,10 @@ impl IntegrationTrait for IntegrationIsolation {
         self.common.clone()
     }
 
-    async fn integr_tools(&self, _integr_name: &str) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    async fn integr_tools(
+        &self,
+        _integr_name: &str,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         vec![]
     }
 

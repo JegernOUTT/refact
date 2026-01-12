@@ -94,7 +94,11 @@ async fn run_cleanup(gcx: Arc<ARwLock<GlobalContext>>) -> Result<CleanupReport, 
 
     report.orphan_warnings = staleness.orphan_file_refs.len();
     for (path, missing_files) in &staleness.orphan_file_refs {
-        info!("knowledge_cleanup: {} references missing files: {:?}", path.display(), missing_files);
+        info!(
+            "knowledge_cleanup: {} references missing files: {:?}",
+            path.display(),
+            missing_files
+        );
     }
 
     for path in &staleness.past_review {

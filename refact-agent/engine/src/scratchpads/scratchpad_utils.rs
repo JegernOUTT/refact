@@ -2,11 +2,10 @@ use std::io::Cursor;
 use image::ImageReader;
 use regex::Regex;
 use serde_json::Value;
-use crate::call_validation::{ChatToolCall, ContextFile};
 use crate::postprocessing::pp_context_files::RESERVE_FOR_QUESTION_AND_FOLLOWUP;
 
 pub struct HasRagResults {
-    pub was_sent: bool,
+    was_sent: bool,
     pub in_json: Vec<Value>,
 }
 
@@ -24,7 +23,8 @@ impl HasRagResults {
         self.in_json.push(value);
     }
 
-    pub fn response_streaming(&mut self) -> Result<Vec<Value>, String> {
+    #[allow(dead_code)] // Used for streaming responses
+    fn response_streaming(&mut self) -> Result<Vec<Value>, String> {
         if self.was_sent == true || self.in_json.is_empty() {
             return Ok(vec![]);
         }
@@ -43,43 +43,10 @@ pub fn parse_image_b64_from_image_url_openai(image_url: &str) -> Option<(String,
     })
 }
 
-pub fn max_tokens_for_rag_chat_by_tools(
-    tools: &Vec<ChatToolCall>,
-    context_files: &Vec<ContextFile>,
-    n_ctx: usize,
-    maxgen: usize,
-) -> usize {
-    let base_limit = n_ctx.saturating_sub(maxgen).saturating_sub(RESERVE_FOR_QUESTION_AND_FOLLOWUP);
-    if tools.is_empty() {
-        return base_limit.min(4096);
-    }
-    let context_files_len = context_files.len().min(crate::http::routers::v1::chat::CHAT_TOP_N);
-    let mut overall_tool_limit: usize = 0;
-    for tool in tools {
-        let is_cat_with_lines = if tool.function.name == "cat" {
-            // Look for patterns like "filename:10-20" in the arguments
-            let re = Regex::new(r":[0-9]+-[0-9]+").unwrap();
-            re.is_match(&tool.function.arguments)
-        } else {
-            false
-        };
-        
-        let tool_limit = match tool.function.name.as_str() {
-            "search_semantic" | "search_pattern" | "search_symbol_definition" | "search_symbol_usages" | "cat" if is_cat_with_lines => {
-                (4096 * context_files_len).min(base_limit / 2).max(4096)
-            },
-            "cat" => (8192 * context_files_len).min(base_limit / 2).max(8192),
-            "deep_research" | "strategic_planning" => 32000,
-            _ => (4096 * context_files_len).min(base_limit / 2).max(4096)
-        };
-        
-        overall_tool_limit += tool_limit;
-    }
-    base_limit.min(overall_tool_limit)
-}
-
 pub fn max_tokens_for_rag_chat(n_ctx: usize, maxgen: usize) -> usize {
-    (n_ctx / 4).saturating_sub(maxgen).saturating_sub(RESERVE_FOR_QUESTION_AND_FOLLOWUP)
+    (n_ctx / 4)
+        .saturating_sub(maxgen)
+        .saturating_sub(RESERVE_FOR_QUESTION_AND_FOLLOWUP)
 }
 
 fn calculate_image_tokens_by_dimensions_openai(mut width: u32, mut height: u32) -> i32 {
@@ -102,18 +69,34 @@ fn calculate_image_tokens_by_dimensions_openai(mut width: u32, mut height: u32) 
     small_chunks_needed as i32 * COST_PER_SMALL_CHUNK + CONST_COST
 }
 
-pub fn image_reader_from_b64string(image_b64: &str) -> Result<ImageReader<Cursor<Vec<u8>>>, String> {
+const MAX_IMAGE_BASE64_LEN: usize = 15 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+pub fn image_reader_from_b64string(
+    image_b64: &str,
+) -> Result<ImageReader<Cursor<Vec<u8>>>, String> {
+    if image_b64.len() > MAX_IMAGE_BASE64_LEN {
+        return Err(format!("image base64 too large: {} bytes", image_b64.len()));
+    }
     #[allow(deprecated)]
     let image_bytes = base64::decode(image_b64).map_err(|_| "base64 decode failed".to_string())?;
+    if image_bytes.len() > MAX_IMAGE_BYTES {
+        return Err(format!("image too large: {} bytes", image_bytes.len()));
+    }
     let cursor = Cursor::new(image_bytes);
-    let reader = ImageReader::new(cursor).with_guessed_format().map_err(|e| e.to_string())?;
+    let reader = ImageReader::new(cursor)
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
     Ok(reader)
 }
 
 // for detail = high. all images w detail = low cost 85 tokens (independent of image size)
 pub fn calculate_image_tokens_openai(image_string: &String, detail: &str) -> Result<i32, String> {
-    let reader = image_reader_from_b64string(&image_string).map_err(|_| "Failed to read image".to_string())?;
-    let (width, height) = reader.into_dimensions().map_err(|_| "Failed to get dimensions".to_string())?;
+    let reader = image_reader_from_b64string(&image_string)
+        .map_err(|_| "Failed to read image".to_string())?;
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|_| "Failed to get dimensions".to_string())?;
 
     match detail {
         "high" => Ok(calculate_image_tokens_by_dimensions_openai(width, height)),
@@ -133,7 +116,11 @@ mod tests {
         let height = 1024;
         let expected_tokens = 765;
         let tokens = calculate_image_tokens_by_dimensions_openai(width, height);
-        assert_eq!(tokens, expected_tokens, "Expected {} tokens, but got {}", expected_tokens, tokens);
+        assert_eq!(
+            tokens, expected_tokens,
+            "Expected {} tokens, but got {}",
+            expected_tokens, tokens
+        );
     }
 
     #[test]
@@ -148,9 +135,15 @@ mod tests {
         );
 
         let invalid_image_url = "data:image/png;base64,";
-        assert_eq!(parse_image_b64_from_image_url_openai(invalid_image_url), None);
+        assert_eq!(
+            parse_image_b64_from_image_url_openai(invalid_image_url),
+            None
+        );
 
         let non_matching_url = "https://example.com/image.png";
-        assert_eq!(parse_image_b64_from_image_url_openai(non_matching_url), None);
+        assert_eq!(
+            parse_image_b64_from_image_url_openai(non_matching_url),
+            None
+        );
     }
 }

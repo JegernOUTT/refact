@@ -8,7 +8,11 @@ use similar::DiffableStr;
 use tree_sitter::{Node, Parser, Range};
 use uuid::Uuid;
 
-use crate::ast::treesitter::ast_instance_structs::{AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg, FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, TypeDef, VariableDefinition, VariableUsage};
+use crate::ast::treesitter::ast_instance_structs::{
+    AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg,
+    FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, TypeDef,
+    VariableDefinition, VariableUsage,
+};
 use crate::ast::treesitter::language_id::LanguageId;
 use crate::ast::treesitter::parsers::{AstLanguageParser, internal_error, ParserError};
 use crate::ast::treesitter::parsers::utils::{CandidateInfo, get_guid};
@@ -23,29 +27,25 @@ fn parse_type_from_value(parent: &Node, code: &str) -> Option<TypeDef> {
     let kind = parent.kind();
     let text = code.slice(parent.byte_range()).to_string();
     return match kind {
-        "number" | "null" | "string" | "true" | "false" | "undefined" => {
-            Some(TypeDef {
-                name: None,
-                inference_info: Some(text),
-                inference_info_guid: None,
-                is_pod: true,
-                namespace: "".to_string(),
-                guid: None,
-                nested_types: vec![],
-            })
-        }
-        &_ => {
-            Some(TypeDef {
-                name: None,
-                inference_info: Some(text),
-                inference_info_guid: None,
-                is_pod: false,
-                namespace: "".to_string(),
-                guid: None,
-                nested_types: vec![],
-            })
-        }
-    }
+        "number" | "null" | "string" | "true" | "false" | "undefined" => Some(TypeDef {
+            name: None,
+            inference_info: Some(text),
+            inference_info_guid: None,
+            is_pod: true,
+            namespace: "".to_string(),
+            guid: None,
+            nested_types: vec![],
+        }),
+        &_ => Some(TypeDef {
+            name: None,
+            inference_info: Some(text),
+            inference_info_guid: None,
+            is_pod: false,
+            namespace: "".to_string(),
+            guid: None,
+            nested_types: vec![],
+        }),
+    };
 }
 
 fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
@@ -151,8 +151,8 @@ impl JSParser {
         info: &CandidateInfo<'a>,
         code: &str,
         candidates: &mut VecDeque<CandidateInfo<'a>>,
-        name_from_var: Option<String>)
-        -> Vec<AstSymbolInstanceArc> {
+        name_from_var: Option<String>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = StructDeclaration::default();
 
@@ -163,7 +163,12 @@ impl JSParser {
         decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
         decl.ast_fields.guid = get_guid();
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         if let Some(name) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name.byte_range()).to_string();
@@ -176,12 +181,21 @@ impl JSParser {
         // find base classes
         for i in 0..info.node.child_count() {
             let class_heritage = info.node.child(i).unwrap();
-            symbols.extend(self.find_error_usages(&class_heritage, code, &info.ast_fields.file_path,
-                                                  &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &class_heritage,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             if class_heritage.kind() == "class_heritage" {
                 for i in 0..class_heritage.child_count() {
                     let extends_clause = class_heritage.child(i).unwrap();
-                    symbols.extend(self.find_error_usages(&extends_clause, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+                    symbols.extend(self.find_error_usages(
+                        &extends_clause,
+                        code,
+                        &info.ast_fields.file_path,
+                        &decl.ast_fields.guid,
+                    ));
                     if let Some(dtype) = parse_type(&extends_clause, code) {
                         decl.inherited_types.push(dtype);
                     }
@@ -230,9 +244,19 @@ impl JSParser {
         symbols
     }
 
-    fn parse_variable_definition<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_variable_definition<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         let mut decl = VariableDefinition::default();
         decl.ast_fields = AstSymbolFields::from_fields(&info.ast_fields);
@@ -264,7 +288,12 @@ impl JSParser {
         symbols
     }
 
-    fn parse_field_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_field_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut decl = ClassFieldDeclaration::default();
         decl.ast_fields = AstSymbolFields::from_fields(&info.ast_fields);
@@ -299,11 +328,10 @@ impl JSParser {
     pub fn parse_function_declaration<'a>(
         &mut self,
         info: &CandidateInfo<'a>,
-        code: &str, candidates:
-        &mut VecDeque<CandidateInfo<'a>>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
         name_from_var: Option<String>,
-    )
-        -> Vec<AstSymbolInstanceArc> {
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = FunctionDeclaration::default();
         decl.ast_fields = AstSymbolFields::from_fields(&info.ast_fields);
@@ -313,7 +341,12 @@ impl JSParser {
         decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
         decl.ast_fields.guid = get_guid();
 
-        symbols.extend(self.find_error_usages(&info.node, code, &decl.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &decl.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         if let Some(name) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name.byte_range()).to_string();
@@ -330,10 +363,20 @@ impl JSParser {
                 start_point: decl.ast_fields.full_range.start_point,
                 end_point: parameters.end_position(),
             };
-            symbols.extend(self.find_error_usages(&parameters, code, &decl.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &parameters,
+                code,
+                &decl.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             for i in 0..parameters.child_count() {
                 let child = parameters.child(i).unwrap();
-                symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+                symbols.extend(self.find_error_usages(
+                    &child,
+                    code,
+                    &info.ast_fields.file_path,
+                    &decl.ast_fields.guid,
+                ));
                 let kind = child.kind();
                 match kind {
                     "identifier" => {
@@ -388,8 +431,8 @@ impl JSParser {
         &mut self,
         info: &CandidateInfo<'a>,
         code: &str,
-        candidates: &mut VecDeque<CandidateInfo<'a>>)
-        -> Vec<AstSymbolInstanceArc> {
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = FunctionCall::default();
         decl.ast_fields = AstSymbolFields::from_fields(&info.ast_fields);
@@ -401,7 +444,12 @@ impl JSParser {
         }
         decl.ast_fields.caller_guid = Some(get_guid());
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         if let Some(function) = info.node.child_by_field_name("function") {
             let kind = function.kind();
@@ -460,7 +508,13 @@ impl JSParser {
         symbols
     }
 
-    fn find_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn find_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         for i in 0..parent.child_count() {
             let child = parent.child(i).unwrap();
@@ -471,7 +525,13 @@ impl JSParser {
         symbols
     }
 
-    fn parse_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn parse_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         match parent.kind() {
             "identifier" /*| "field_identifier"*/ => {
@@ -519,7 +579,12 @@ impl JSParser {
         symbols
     }
 
-    fn parse_usages_<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_usages_<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
 
         let kind = info.node.kind();
@@ -759,8 +824,10 @@ impl JSParser {
             symbols.extend(symbols_l);
         }
 
-        let guid_to_symbol_map = symbols.iter()
-            .map(|s| (s.clone().read().guid().clone(), s.clone())).collect::<HashMap<_, _>>();
+        let guid_to_symbol_map = symbols
+            .iter()
+            .map(|s| (s.clone().read().guid().clone(), s.clone()))
+            .collect::<HashMap<_, _>>();
         for symbol in symbols.iter_mut() {
             let guid = symbol.read().guid().clone();
             if let Some(parent_guid) = symbol.read().parent_guid() {
@@ -775,10 +842,20 @@ impl JSParser {
             use itertools::Itertools;
             for symbol in symbols.iter_mut() {
                 let mut sym = symbol.write();
-                sym.fields_mut().childs_guid = sym.fields_mut().childs_guid.iter()
+                sym.fields_mut().childs_guid = sym
+                    .fields_mut()
+                    .childs_guid
+                    .iter()
                     .sorted_by_key(|x| {
-                        guid_to_symbol_map.get(*x).unwrap().read().full_range().start_byte
-                    }).map(|x| x.clone()).collect();
+                        guid_to_symbol_map
+                            .get(*x)
+                            .unwrap()
+                            .read()
+                            .full_range()
+                            .start_byte
+                    })
+                    .map(|x| x.clone())
+                    .collect();
             }
         }
 
@@ -793,5 +870,3 @@ impl AstLanguageParser for JSParser {
         symbols
     }
 }
-
-

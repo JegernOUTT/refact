@@ -2,7 +2,11 @@ import React, { useCallback, useMemo } from "react";
 import { Markdown } from "../Markdown";
 
 import { Container, Box, Flex, Text, Link, Card } from "@radix-ui/themes";
-import { ToolCall, WebSearchCitation } from "../../services/refact";
+import {
+  ThinkingBlock,
+  ToolCall,
+  WebSearchCitation,
+} from "../../services/refact";
 import { ToolContent } from "./ToolsContent";
 import { fallbackCopying } from "../../utils/fallbackCopying";
 import { telemetryApi } from "../../services/refact/telemetry";
@@ -11,6 +15,7 @@ import { ReasoningContent } from "./ReasoningContent";
 type ChatInputProps = {
   message: string | null;
   reasoningContent?: string | null;
+  thinkingBlocks?: ThinkingBlock[] | null;
   toolCalls?: ToolCall[] | null;
   serverExecutedTools?: ToolCall[] | null;
   citations?: WebSearchCitation[] | null;
@@ -19,6 +24,7 @@ type ChatInputProps = {
 export const AssistantInput: React.FC<ChatInputProps> = ({
   message,
   reasoningContent,
+  thinkingBlocks,
   toolCalls,
   serverExecutedTools,
   citations,
@@ -70,11 +76,27 @@ export const AssistantInput: React.FC<ChatInputProps> = ({
     [sendTelemetryEvent],
   );
 
+  const combinedReasoning = useMemo(() => {
+    if (reasoningContent) {
+      return reasoningContent;
+    }
+    if (thinkingBlocks && thinkingBlocks.length > 0) {
+      const thinkingText = thinkingBlocks
+        .filter((block) => block.thinking)
+        .map((block) => block.thinking)
+        .join("\n\n");
+      if (thinkingText) {
+        return thinkingText;
+      }
+    }
+    return null;
+  }, [reasoningContent, thinkingBlocks]);
+
   return (
     <Container position="relative">
-      {reasoningContent && (
+      {combinedReasoning && (
         <ReasoningContent
-          reasoningContent={reasoningContent}
+          reasoningContent={combinedReasoning}
           onCopyClick={handleCopy}
         />
       )}

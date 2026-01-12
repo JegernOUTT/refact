@@ -11,6 +11,19 @@
   outline: none;
 }
 
+.textarea :global(.rt-TextAreaInput[readonly]) {
+  color: var(--gray-12);
+  -webkit-text-fill-color: var(--gray-12);
+  opacity: 1;
+  background-color: transparent !important;
+}
+
+.textarea:has(:global(.rt-TextAreaInput[readonly])),
+.textarea:has(:global(.rt-TextAreaInput[readonly])) :global(*) {
+  background-color: transparent !important;
+  background: transparent !important;
+}
+
 :global(.rt-TextAreaRoot) > .textarea {
   background-color: unset;
 }

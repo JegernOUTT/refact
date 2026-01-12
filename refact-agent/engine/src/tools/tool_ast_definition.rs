@@ -18,7 +18,9 @@ pub struct ToolAstDefinition {
 
 #[async_trait]
 impl Tool for ToolAstDefinition {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     async fn tool_execute(
         &mut self,
@@ -48,49 +50,67 @@ impl Tool for ToolAstDefinition {
         if let Some(ast_service) = ast_service_opt {
             let ast_index = ast_service.lock().await.ast_index.clone();
 
-            crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(ast_service.clone(), 20_000, true).await;
+            crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(
+                ast_service.clone(),
+                20_000,
+                true,
+            )
+            .await;
 
             let mut all_messages = Vec::new();
             let mut all_context_files = Vec::new();
 
             for symbol in symbols {
-                let defs = crate::ast::ast_db::definitions(ast_index.clone(), &symbol).unwrap_or_default();
+                let defs =
+                    crate::ast::ast_db::definitions(ast_index.clone(), &symbol).unwrap_or_default();
 
                 let file_paths = defs.iter().map(|x| x.cpath.clone()).collect::<Vec<_>>();
-                let short_file_paths = crate::files_correction::shortify_paths(gcx.clone(), &file_paths).await;
+                let short_file_paths =
+                    crate::files_correction::shortify_paths(gcx.clone(), &file_paths).await;
 
                 if !defs.is_empty() {
                     const DEFS_LIMIT: usize = 20;
                     let mut tool_message = format!("Definitions for `{}`:\n", symbol).to_string();
-                    let context_files: Vec<ContextEnum> = defs.iter().zip(short_file_paths.iter()).take(DEFS_LIMIT).map(|(res, short_path)| {
-                        tool_message.push_str(&format!(
-                            "{} defined at {}:{}-{}\n",
-                            res.path_drop0(),
-                            short_path,
-                            res.full_line1(),
-                            res.full_line2()
-                        ));
-                        ContextEnum::ContextFile(ContextFile {
-                            file_name: res.cpath.clone(),
-                            file_content: "".to_string(),
-                            line1: res.full_line1(),
-                            line2: res.full_line2(),
-                            symbols: vec![res.path_drop0()],
-                            gradient_type: 5,
-                            usefulness: 100.0,
-                            skip_pp: false,
+                    let context_files: Vec<ContextEnum> = defs
+                        .iter()
+                        .zip(short_file_paths.iter())
+                        .take(DEFS_LIMIT)
+                        .map(|(res, short_path)| {
+                            tool_message.push_str(&format!(
+                                "{} defined at {}:{}-{}\n",
+                                res.path_drop0(),
+                                short_path,
+                                res.full_line1(),
+                                res.full_line2()
+                            ));
+                            ContextEnum::ContextFile(ContextFile {
+                                file_name: res.cpath.clone(),
+                                file_content: "".to_string(),
+                                line1: res.full_line1(),
+                                line2: res.full_line2(),
+                                file_rev: None,
+                                symbols: vec![res.path_drop0()],
+                                gradient_type: 5,
+                                usefulness: 100.0,
+                                skip_pp: false,
+                            })
                         })
-                    }).collect();
+                        .collect();
 
                     if defs.len() > DEFS_LIMIT {
-                        tool_message.push_str(&format!("...and {} more\n", defs.len() - DEFS_LIMIT));
+                        tool_message.push_str(&format!(
+                            "⚠️ {} more definitions not shown (limit: {}). 💡 Use more specific symbol name\n",
+                            defs.len() - DEFS_LIMIT, DEFS_LIMIT
+                        ));
                     }
 
                     all_messages.push(tool_message);
                     all_context_files.extend(context_files);
                 } else {
                     corrections = true;
-                    let tool_message = there_are_definitions_with_similar_names_though(ast_index.clone(), &symbol).await;
+                    let tool_message =
+                        there_are_definitions_with_similar_names_though(ast_index.clone(), &symbol)
+                            .await;
                     all_messages.push(format!("For symbol `{}`:\n{}", symbol, tool_message));
                 }
             }
@@ -142,16 +162,20 @@ pub async fn there_are_definitions_with_similar_names_though(
     ast_index: Arc<AstDB>,
     symbol: &str,
 ) -> String {
-    let fuzzy_matches: Vec<String> = crate::ast::ast_db::definition_paths_fuzzy(ast_index.clone(), symbol, 20, 5000)
-        .await
-        .unwrap_or_else(trace_and_default);
+    let fuzzy_matches: Vec<String> =
+        crate::ast::ast_db::definition_paths_fuzzy(ast_index.clone(), symbol, 20, 5000)
+            .await
+            .unwrap_or_else(trace_and_default);
 
     let tool_message = if fuzzy_matches.is_empty() {
         let counters = fetch_counters(ast_index).unwrap_or_else(trace_and_default);
-        format!("No definitions with name `{}` found in the workspace, and no similar names were found among {} definitions in the AST tree.\n", symbol, counters.counter_defs)
+        format!(
+            "⚠️ No definitions for '{}' found ({} total in AST). 💡 Check spelling or use search_pattern() to find\n",
+            symbol, counters.counter_defs
+        )
     } else {
         let mut msg = format!(
-            "No definitions with name `{}` found in the workspace, there are definitions with similar names though:\n",
+            "⚠️ No exact match for '{}'. 💡 Similar definitions found:\n",
             symbol
         );
         for line in fuzzy_matches {

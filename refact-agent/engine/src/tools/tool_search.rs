@@ -13,7 +13,6 @@ use crate::tools::scope_utils::create_scope_filter;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 
-
 pub struct ToolSearch {
     pub config_path: String,
 }
@@ -23,10 +22,12 @@ async fn execute_att_search(
     query: &String,
     scope: &String,
 ) -> Result<Vec<ContextFile>, String> {
-    let gcx = ccx.lock().await.global_context.clone();
-    
-    // Use the common function to create a scope filter
-    let filter = create_scope_filter(gcx.clone(), scope).await?;
+    let (gcx, code_workdir) = {
+        let ccx_locked = ccx.lock().await;
+        (ccx_locked.global_context.clone(), ccx_locked.code_workdir.clone())
+    };
+
+    let filter = create_scope_filter(gcx.clone(), &code_workdir, scope).await?;
 
     info!("att-search: filter: {:?}", filter);
     execute_at_search(ccx.clone(), &query, filter).await
@@ -34,7 +35,9 @@ async fn execute_att_search(
 
 #[async_trait]
 impl Tool for ToolSearch {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
@@ -62,7 +65,7 @@ impl Tool for ToolSearch {
             parameters_required: vec!["queries".to_string(), "scope".to_string()],
         }
     }
-    
+
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -72,12 +75,16 @@ impl Tool for ToolSearch {
         let query_str = match args.get("queries") {
             Some(Value::String(s)) => s.clone(),
             Some(v) => return Err(format!("argument `queries` is not a string: {:?}", v)),
-            None => return Err("Missing argument `queries` in the search_semantic() call.".to_string())
+            None => {
+                return Err("Missing argument `queries` in the search_semantic() call.".to_string())
+            }
         };
         let scope = match args.get("scope") {
             Some(Value::String(s)) => s.clone(),
             Some(v) => return Err(format!("argument `scope` is not a string: {:?}", v)),
-            None => return Err("Missing argument `scope` in the search_semantic() call.".to_string())
+            None => {
+                return Err("Missing argument `scope` in the search_semantic() call.".to_string())
+            }
         };
 
         let queries: Vec<String> = query_str
@@ -97,30 +104,45 @@ impl Tool for ToolSearch {
             if i > 0 {
                 all_content.push_str("\n\n");
             }
-            
+
             all_content.push_str(&format!("Results for query: \"{}\"\n", query));
-            
+
             let vector_of_context_file = execute_att_search(ccx.clone(), query, &scope).await?;
-            info!("att-search: vector_of_context_file={:?}", vector_of_context_file);
+            info!(
+                "att-search: vector_of_context_file={:?}",
+                vector_of_context_file
+            );
 
             if vector_of_context_file.is_empty() {
-                all_content.push_str("No results found for this query.\n");
+                all_content.push_str("⚠️ No results for this query. 💡 Try different keywords or broaden scope to 'workspace'\n");
                 continue;
             }
 
             all_content.push_str("Records found:\n\n");
             let mut file_results_to_reqs: HashMap<String, Vec<&ContextFile>> = HashMap::new();
             vector_of_context_file.iter().for_each(|rec| {
-                file_results_to_reqs.entry(rec.file_name.clone()).or_insert(vec![]).push(rec)
+                file_results_to_reqs
+                    .entry(rec.file_name.clone())
+                    .or_insert(vec![])
+                    .push(rec)
             });
-            
+
             let mut used_files: HashSet<String> = HashSet::new();
-            for rec in vector_of_context_file.iter().sorted_by(|rec1, rec2| rec2.usefulness.total_cmp(&rec1.usefulness)) {
+            for rec in vector_of_context_file
+                .iter()
+                .sorted_by(|rec1, rec2| rec2.usefulness.total_cmp(&rec1.usefulness))
+            {
                 if !used_files.contains(&rec.file_name) {
                     all_content.push_str(&format!("{}:\n", rec.file_name.clone()));
                     let file_recs = file_results_to_reqs.get(&rec.file_name).unwrap();
-                    for file_req in file_recs.iter().sorted_by(|rec1, rec2| rec2.usefulness.total_cmp(&rec1.usefulness)) {
-                        all_content.push_str(&format!("    lines {}-{} score {:.1}%\n", file_req.line1, file_req.line2, file_req.usefulness));
+                    for file_req in file_recs
+                        .iter()
+                        .sorted_by(|rec1, rec2| rec2.usefulness.total_cmp(&rec1.usefulness))
+                    {
+                        all_content.push_str(&format!(
+                            "    lines {}-{} score {:.1}%\n",
+                            file_req.line1, file_req.line2, file_req.usefulness
+                        ));
                     }
                     used_files.insert(rec.file_name.clone());
                 }
@@ -130,7 +152,7 @@ impl Tool for ToolSearch {
         }
 
         if all_context_files.is_empty() {
-            return Err("All searches produced no results, adjust the queries or try a different scope.".to_string());
+            return Err("⚠️ All searches produced no results. 💡 Try different keywords, broaden scope to 'workspace', or use search_pattern() for regex search".to_string());
         }
 
         let mut results = vec_context_file_to_context_tools(all_context_files);

@@ -6,7 +6,10 @@ export {
   type Chat,
   type ToolUse,
 } from "../features/Chat/Thread/types";
-export { newChatAction } from "../features/Chat/Thread/actions";
+export {
+  newChatAction,
+  newChatWithInitialMessages,
+} from "../features/Chat/Thread/actions";
 import { type Chat } from "../features/Chat/Thread/types";
 import type { Snippet } from "../features/Chat/selectedSnippet";
 import type { Config } from "../features/Config/configSlice";

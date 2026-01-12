@@ -10,8 +10,10 @@ use crate::files_in_workspace::Document;
 use crate::global_context::GlobalContext;
 
 use crate::ast::ast_structs::{AstDB, AstStatus, AstCounters, AstErrorStats};
-use crate::ast::ast_db::{ast_index_init, fetch_counters, doc_add, doc_remove, connect_usages, connect_usages_look_if_full_reset_needed};
-
+use crate::ast::ast_db::{
+    ast_index_init, fetch_counters, doc_add, doc_remove, connect_usages,
+    connect_usages_look_if_full_reset_needed,
+};
 
 pub struct AstIndexService {
     pub ast_index: Arc<AstDB>,
@@ -43,7 +45,7 @@ async fn ast_indexer_thread(
             ast_service_locked.ast_sleeping_point.clone(),
         )
     };
-    let ast_max_files = ast_index.ast_max_files;  // cannot change
+    let ast_max_files = ast_index.ast_max_files; // cannot change
 
     loop {
         let (cpath, left_todo_count) = {
@@ -74,22 +76,43 @@ async fn ast_indexer_thread(
                     break;
                 }
             };
-            let mut doc = Document { doc_path: cpath.clone().into(), doc_text: None };
+            let mut doc = Document {
+                doc_path: cpath.clone().into(),
+                doc_text: None,
+            };
 
             doc_remove(ast_index.clone(), &cpath);
 
-            match crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx.clone(), &doc.doc_path).await {
+            match crate::files_in_workspace::get_file_text_from_memory_or_disk(
+                gcx.clone(),
+                &doc.doc_path,
+            )
+            .await
+            {
                 Ok(file_text) => {
                     doc.update_text(&file_text);
                     let mut error_message: Option<String> = None;
                     match doc.does_text_look_good() {
                         Ok(_) => {
                             let start_time = std::time::Instant::now();
-                            match doc_add(ast_index.clone(), &cpath, &file_text, &mut stats_parsing_errors).await {
+                            match doc_add(
+                                ast_index.clone(),
+                                &cpath,
+                                &file_text,
+                                &mut stats_parsing_errors,
+                            )
+                            .await
+                            {
                                 Ok((defs, language)) => {
                                     let elapsed = start_time.elapsed().as_secs_f32();
                                     if elapsed > 0.1 {
-                                        tracing::info!("{}/{} doc_add {:.3?}s {}", stats_parsed_cnt, (stats_parsed_cnt+left_todo_count), elapsed, crate::nicer_logs::last_n_chars(&cpath, 40));
+                                        tracing::info!(
+                                            "{}/{} doc_add {:.3?}s {}",
+                                            stats_parsed_cnt,
+                                            (stats_parsed_cnt + left_todo_count),
+                                            elapsed,
+                                            crate::nicer_logs::last_n_chars(&cpath, 40)
+                                        );
                                     }
                                     stats_parsed_cnt += 1;
                                     stats_symbols_cnt += defs.len();
@@ -109,12 +132,18 @@ async fn ast_indexer_thread(
                     }
                 }
                 Err(_e) => {
-                    tracing::info!("deleting from index {} because cannot read it", crate::nicer_logs::last_n_chars(&cpath, 30));
-                    *stats_failure_reasons.entry("cannot read file".to_string()).or_insert(0) += 1;
+                    tracing::info!(
+                        "deleting from index {} because cannot read it",
+                        crate::nicer_logs::last_n_chars(&cpath, 30)
+                    );
+                    *stats_failure_reasons
+                        .entry("cannot read file".to_string())
+                        .or_insert(0) += 1;
                 }
             }
 
-            if stats_update_ts.elapsed() >= std::time::Duration::from_millis(1000) { // can't be lower, because flush_sled_batch() happens not very often at all
+            if stats_update_ts.elapsed() >= std::time::Duration::from_millis(1000) {
+                // can't be lower, because flush_sled_batch() happens not very often at all
                 let counters = fetch_counters(ast_index.clone()).unwrap_or_else(trace_and_default);
                 {
                     let mut status_locked = ast_status.lock().await;
@@ -143,7 +172,10 @@ async fn ast_indexer_thread(
                 let display_count = std::cmp::min(5, error_count);
                 let mut error_messages = String::new();
                 for error in &stats_parsing_errors.errors[..display_count] {
-                    error_messages.push_str(&format!("(E) {}:{} {}\n", error.err_cpath, error.err_line, error.err_message));
+                    error_messages.push_str(&format!(
+                        "(E) {}:{} {}\n",
+                        error.err_cpath, error.err_line, error.err_message
+                    ));
                 }
                 if error_count > 5 {
                     error_messages.push_str(&format!("...and {} more", error_count - 5));
@@ -152,7 +184,8 @@ async fn ast_indexer_thread(
                 stats_parsing_errors = AstErrorStats::default();
             }
             if stats_parsed_cnt + stats_symbols_cnt > 0 {
-                info!("AST finished parsing, got {} symbols by processing {} files in {:>.3}s",
+                info!(
+                    "AST finished parsing, got {} symbols by processing {} files in {:>.3}s",
                     stats_symbols_cnt,
                     stats_parsed_cnt,
                     stats_t0.elapsed().as_secs_f64()
@@ -161,7 +194,8 @@ async fn ast_indexer_thread(
             let language_stats: String = if stats_success_languages.is_empty() {
                 "no files".to_string()
             } else {
-                stats_success_languages.iter()
+                stats_success_languages
+                    .iter()
                     .map(|(lang, count)| format!("{:>30} {}", lang, count))
                     .collect::<Vec<String>>()
                     .join("\n")
@@ -169,7 +203,8 @@ async fn ast_indexer_thread(
             let problem_stats: String = if stats_failure_reasons.is_empty() {
                 "no errors".to_string()
             } else {
-                stats_failure_reasons.iter()
+                stats_failure_reasons
+                    .iter()
                     .map(|(reason, count)| format!("{:>30} {}", reason, count))
                     .collect::<Vec<String>>()
                     .join("\n")
@@ -187,7 +222,8 @@ async fn ast_indexer_thread(
             stats_parsed_cnt = 0;
             stats_symbols_cnt = 0;
             reported_parse_stats = true;
-            let counters: AstCounters = fetch_counters(ast_index.clone()).unwrap_or_else(trace_and_default);
+            let counters: AstCounters =
+                fetch_counters(ast_index.clone()).unwrap_or_else(trace_and_default);
             {
                 let mut status_locked = ast_status.lock().await;
                 status_locked.files_unparsed = 0;
@@ -200,13 +236,15 @@ async fn ast_indexer_thread(
         }
 
         // Connect usages, unless we have files in the todo
-        let mut usagecx = connect_usages_look_if_full_reset_needed(ast_index.clone()).unwrap_or_else(trace_and_default);
+        let mut usagecx = connect_usages_look_if_full_reset_needed(ast_index.clone())
+            .unwrap_or_else(trace_and_default);
         loop {
             todo_count = ast_service.lock().await.ast_todo.len();
             if todo_count > 0 {
                 break;
             }
-            let did_anything = connect_usages(ast_index.clone(), &mut usagecx).unwrap_or_else(trace_and_default);
+            let did_anything =
+                connect_usages(ast_index.clone(), &mut usagecx).unwrap_or_else(trace_and_default);
             if !did_anything {
                 break;
             }
@@ -217,14 +255,22 @@ async fn ast_indexer_thread(
             let display_count = std::cmp::min(5, error_count);
             let mut error_messages = String::new();
             for error in &usagecx.errstats.errors[..display_count] {
-                error_messages.push_str(&format!("(U) {}:{} {}\n", error.err_cpath, error.err_line, error.err_message));
+                error_messages.push_str(&format!(
+                    "(U) {}:{} {}\n",
+                    error.err_cpath, error.err_line, error.err_message
+                ));
             }
             if error_count > 5 {
                 error_messages.push_str(&format!("...and {} more", error_count - 5));
             }
             info!("AST connection graph errors:\n{}", error_messages);
         }
-        if usagecx.usages_connected + usagecx.usages_not_found + usagecx.usages_ambiguous + usagecx.usages_homeless > 0 {
+        if usagecx.usages_connected
+            + usagecx.usages_not_found
+            + usagecx.usages_ambiguous
+            + usagecx.usages_homeless
+            > 0
+        {
             info!("AST connection graph stats: homeless={}, connected={}, not_found={}, ambiguous={} in {:.3}s",
                 usagecx.usages_homeless,
                 usagecx.usages_connected,
@@ -240,7 +286,8 @@ async fn ast_indexer_thread(
         }
 
         if !reported_connect_stats {
-            let counters: AstCounters = fetch_counters(ast_index.clone()).unwrap_or_else(trace_and_default);
+            let counters: AstCounters =
+                fetch_counters(ast_index.clone()).unwrap_or_else(trace_and_default);
             {
                 let mut status_locked = ast_status.lock().await;
                 status_locked.files_unparsed = 0;
@@ -258,12 +305,20 @@ async fn ast_indexer_thread(
             reported_connect_stats = true;
         }
 
-        tokio::time::timeout(tokio::time::Duration::from_secs(10), ast_sleeping_point.notified()).await.ok();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            ast_sleeping_point.notified(),
+        )
+        .await
+        .ok();
     }
 }
 
-pub async fn ast_indexer_block_until_finished(ast_service: Arc<AMutex<AstIndexService>>, max_blocking_time_ms: usize, wake_up_indexer: bool) -> bool
-{
+pub async fn ast_indexer_block_until_finished(
+    ast_service: Arc<AMutex<AstIndexService>>,
+    max_blocking_time_ms: usize,
+    wake_up_indexer: bool,
+) -> bool {
     let max_blocking_duration = tokio::time::Duration::from_millis(max_blocking_time_ms as u64);
     let start_time = std::time::Instant::now();
     let ast_sleeping_point = {
@@ -299,8 +354,10 @@ pub async fn ast_indexer_block_until_finished(ast_service: Arc<AMutex<AstIndexSe
     }
 }
 
-pub async fn ast_service_init(ast_permanent: String, ast_max_files: usize) -> Arc<AMutex<AstIndexService>>
-{
+pub async fn ast_service_init(
+    ast_permanent: String,
+    ast_max_files: usize,
+) -> Arc<AMutex<AstIndexService>> {
     let ast_index = ast_index_init(ast_permanent, ast_max_files).await;
     let ast_status = Arc::new(AMutex::new(AstStatus {
         astate_notify: Arc::new(ANotify::new()),
@@ -310,7 +367,7 @@ pub async fn ast_service_init(ast_permanent: String, ast_max_files: usize) -> Ar
         ast_index_files_total: 0,
         ast_index_symbols_total: 0,
         ast_index_usages_total: 0,
-        ast_max_files_hit: false
+        ast_max_files_hit: false,
     }));
     let ast_service = AstIndexService {
         ast_sleeping_point: Arc::new(ANotify::new()),
@@ -324,19 +381,19 @@ pub async fn ast_service_init(ast_permanent: String, ast_max_files: usize) -> Ar
 pub async fn ast_indexer_start(
     ast_service: Arc<AMutex<AstIndexService>>,
     gcx: Arc<ARwLock<GlobalContext>>,
-) -> Vec<JoinHandle<()>>
-{
-    let indexer_handle = tokio::spawn(
-        ast_indexer_thread(
-            Arc::downgrade(&gcx),
-            ast_service.clone(),
-        )
-    );
+) -> Vec<JoinHandle<()>> {
+    let indexer_handle = tokio::spawn(ast_indexer_thread(
+        Arc::downgrade(&gcx),
+        ast_service.clone(),
+    ));
     return vec![indexer_handle];
 }
 
-pub async fn ast_indexer_enqueue_files(ast_service: Arc<AMutex<AstIndexService>>, cpaths: &Vec<String>, wake_up_indexer: bool)
-{
+pub async fn ast_indexer_enqueue_files(
+    ast_service: Arc<AMutex<AstIndexService>>,
+    cpaths: &Vec<String>,
+    wake_up_indexer: bool,
+) {
     let ast_status;
     let nonzero = cpaths.len() > 0;
     {

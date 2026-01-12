@@ -6,7 +6,10 @@ import { updateConfig } from "../features/Config/configSlice";
 import { setFileInfo } from "../features/Chat/activeFile";
 import { setSelectedSnippet } from "../features/Chat/selectedSnippet";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
-import { newChatAction } from "../features/Chat/Thread/actions";
+import {
+  newChatAction,
+  newChatWithInitialMessages,
+} from "../features/Chat/Thread/actions";
 import {
   isPageInHistory,
   push,
@@ -40,7 +43,17 @@ export function useEventBusForApp() {
         if (!isPageInHistory({ pages }, "chat")) {
           dispatch(push({ name: "chat" }));
         }
-        dispatch(newChatAction(event.data.payload));
+        const payload = event.data.payload;
+        if (payload?.messages && payload.messages.length > 0) {
+          void dispatch(
+            newChatWithInitialMessages({
+              title: payload.title,
+              messages: payload.messages,
+            }),
+          );
+        } else {
+          dispatch(newChatAction(payload));
+        }
       }
 
       if (setCurrentProjectInfo.match(event.data)) {

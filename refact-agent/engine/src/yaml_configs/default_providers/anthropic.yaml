@@ -7,6 +7,7 @@ chat_models:
   claude-3-7-sonnet-latest:
     n_ctx: 200000
     supports_tools: true
+    supports_strict_tools: true
     supports_multimodality: true
     supports_clicks: true
     supports_agent: true
@@ -22,6 +23,7 @@ model_default_settings_ui:
   chat:
     n_ctx: 200000
     supports_tools: true
+    supports_strict_tools: true
     supports_multimodality: true
     supports_agent: true
     tokenizer: hf://Xenova/claude-tokenizer

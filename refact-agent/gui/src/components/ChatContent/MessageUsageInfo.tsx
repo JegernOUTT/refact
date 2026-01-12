@@ -87,7 +87,9 @@ export const MessageUsageInfo: React.FC<MessageUsageInfoProps> = ({
             <Flex align="center" gap="3">
               {contextTokens > 0 && (
                 <Flex align="center" gap="1">
-                  <Text size="1" color="gray">ctx:</Text>
+                  <Text size="1" color="gray">
+                    ctx:
+                  </Text>
                   <Text size="1">{formatNumberToFixed(contextTokens)}</Text>
                 </Flex>
               )}

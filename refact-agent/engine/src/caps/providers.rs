@@ -9,7 +9,7 @@ use structopt::StructOpt;
 use crate::caps::{
     BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord, DefaultModels,
     EmbeddingModelRecord, HasBaseModelRecord, default_embedding_batch, default_rejection_threshold,
-    load_caps_value_from_url, resolve_relative_urls, strip_model_from_finetune, normalize_string
+    load_caps_value_from_url, resolve_relative_urls, strip_model_from_finetune, normalize_string,
 };
 use crate::custom_error::{MapErrToString, YamlError};
 use crate::global_context::{CommandLine, GlobalContext};
@@ -68,25 +68,43 @@ impl CapsProvider {
     pub fn apply_override(&mut self, value: serde_yaml::Value) -> Result<(), String> {
         set_field_if_exists::<bool>(&mut self.enabled, "enabled", &value)?;
         set_field_if_exists::<String>(&mut self.endpoint_style, "endpoint_style", &value)?;
-        set_field_if_exists::<String>(&mut self.completion_endpoint, "completion_endpoint", &value)?;
+        set_field_if_exists::<String>(
+            &mut self.completion_endpoint,
+            "completion_endpoint",
+            &value,
+        )?;
         set_field_if_exists::<String>(&mut self.chat_endpoint, "chat_endpoint", &value)?;
         set_field_if_exists::<String>(&mut self.embedding_endpoint, "embedding_endpoint", &value)?;
         set_field_if_exists::<String>(&mut self.api_key, "api_key", &value)?;
         set_field_if_exists::<String>(&mut self.tokenizer_api_key, "tokenizer_api_key", &value)?;
-        set_field_if_exists::<EmbeddingModelRecord>(&mut self.embedding_model, "embedding_model", &value)?;
+        set_field_if_exists::<EmbeddingModelRecord>(
+            &mut self.embedding_model,
+            "embedding_model",
+            &value,
+        )?;
         if value.get("embedding_model").is_some() {
             self.embedding_model.base.removable = true;
             self.embedding_model.base.user_configured = true;
         }
 
-        extend_model_collection::<ChatModelRecord>(&mut self.chat_models, "chat_models", &value, &self.running_models)?;
-        extend_model_collection::<CompletionModelRecord>(&mut self.completion_models, "completion_models", &value, &self.running_models)?;
+        extend_model_collection::<ChatModelRecord>(
+            &mut self.chat_models,
+            "chat_models",
+            &value,
+            &self.running_models,
+        )?;
+        extend_model_collection::<CompletionModelRecord>(
+            &mut self.completion_models,
+            "completion_models",
+            &value,
+            &self.running_models,
+        )?;
         extend_collection::<Vec<String>>(&mut self.running_models, "running_models", &value)?;
 
         match serde_yaml::from_value::<DefaultModels>(value) {
             Ok(default_models) => {
                 self.defaults.apply_override(&default_models, None);
-            },
+            }
             Err(e) => return Err(e.to_string()),
         }
 
@@ -95,7 +113,9 @@ impl CapsProvider {
 }
 
 fn set_field_if_exists<T: for<'de> serde::Deserialize<'de>>(
-    target: &mut T, field: &str, value: &serde_yaml::Value
+    target: &mut T,
+    field: &str,
+    value: &serde_yaml::Value,
 ) -> Result<(), String> {
     if let Some(val) = value.get(field) {
         *target = serde_yaml::from_value(val.clone())
@@ -105,7 +125,9 @@ fn set_field_if_exists<T: for<'de> serde::Deserialize<'de>>(
 }
 
 fn extend_collection<C: for<'de> serde::Deserialize<'de> + Extend<C::Item> + IntoIterator>(
-    target: &mut C, field: &str, value: &serde_yaml::Value
+    target: &mut C,
+    field: &str,
+    value: &serde_yaml::Value,
 ) -> Result<(), String> {
     if let Some(value) = value.get(field) {
         let imported_collection = serde_yaml::from_value::<C>(value.clone())
@@ -119,7 +141,10 @@ fn extend_collection<C: for<'de> serde::Deserialize<'de> + Extend<C::Item> + Int
 // Special implementation for ChatModelRecord and CompletionModelRecord collections
 // that sets removable=true for newly added models
 fn extend_model_collection<T: for<'de> serde::Deserialize<'de> + HasBaseModelRecord>(
-    target: &mut IndexMap<String, T>, field: &str, value: &serde_yaml::Value, prev_running_models: &Vec<String>
+    target: &mut IndexMap<String, T>,
+    field: &str,
+    value: &serde_yaml::Value,
+    prev_running_models: &Vec<String>,
 ) -> Result<(), String> {
     if let Some(value) = value.get(field) {
         let imported_collection = serde_yaml::from_value::<IndexMap<String, T>>(value.clone())
@@ -136,13 +161,16 @@ fn extend_model_collection<T: for<'de> serde::Deserialize<'de> + HasBaseModelRec
     Ok(())
 }
 
-fn default_endpoint_style() -> String { "openai".to_string() }
+fn default_endpoint_style() -> String {
+    "openai".to_string()
+}
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl<'de> serde::Deserialize<'de> for EmbeddingModelRecord {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>
-    {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Input {
@@ -164,7 +192,10 @@ impl<'de> serde::Deserialize<'de> for EmbeddingModelRecord {
 
         match Input::deserialize(deserializer)? {
             Input::String(name) => Ok(EmbeddingModelRecord {
-                base: BaseModelRecord { name, ..Default::default() },
+                base: BaseModelRecord {
+                    name,
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             Input::Full(mut helper) => {
@@ -179,7 +210,7 @@ impl<'de> serde::Deserialize<'de> for EmbeddingModelRecord {
                     rejection_threshold: helper.rejection_threshold,
                     embedding_size: helper.embedding_size,
                 })
-            },
+            }
         }
     }
 }
@@ -195,16 +226,46 @@ pub struct ModelDefaultSettingsUI {
 }
 
 const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
-    ("anthropic", include_str!("../yaml_configs/default_providers/anthropic.yaml")),
-    ("custom", include_str!("../yaml_configs/default_providers/custom.yaml")),
-    ("deepseek", include_str!("../yaml_configs/default_providers/deepseek.yaml")),
-    ("google_gemini", include_str!("../yaml_configs/default_providers/google_gemini.yaml")),
-    ("groq", include_str!("../yaml_configs/default_providers/groq.yaml")),
-    ("lmstudio", include_str!("../yaml_configs/default_providers/lmstudio.yaml")),
-    ("ollama", include_str!("../yaml_configs/default_providers/ollama.yaml")),
-    ("openai", include_str!("../yaml_configs/default_providers/openai.yaml")),
-    ("openrouter", include_str!("../yaml_configs/default_providers/openrouter.yaml")),
-    ("xai", include_str!("../yaml_configs/default_providers/xai.yaml")),
+    (
+        "anthropic",
+        include_str!("../yaml_configs/default_providers/anthropic.yaml"),
+    ),
+    (
+        "custom",
+        include_str!("../yaml_configs/default_providers/custom.yaml"),
+    ),
+    (
+        "deepseek",
+        include_str!("../yaml_configs/default_providers/deepseek.yaml"),
+    ),
+    (
+        "google_gemini",
+        include_str!("../yaml_configs/default_providers/google_gemini.yaml"),
+    ),
+    (
+        "groq",
+        include_str!("../yaml_configs/default_providers/groq.yaml"),
+    ),
+    (
+        "lmstudio",
+        include_str!("../yaml_configs/default_providers/lmstudio.yaml"),
+    ),
+    (
+        "ollama",
+        include_str!("../yaml_configs/default_providers/ollama.yaml"),
+    ),
+    (
+        "openai",
+        include_str!("../yaml_configs/default_providers/openai.yaml"),
+    ),
+    (
+        "openrouter",
+        include_str!("../yaml_configs/default_providers/openrouter.yaml"),
+    ),
+    (
+        "xai",
+        include_str!("../yaml_configs/default_providers/xai.yaml"),
+    ),
 ];
 static PARSED_PROVIDERS: OnceLock<IndexMap<String, CapsProvider>> = OnceLock::new();
 static PARSED_MODEL_DEFAULTS: OnceLock<IndexMap<String, ModelDefaultSettingsUI>> = OnceLock::new();
@@ -224,17 +285,27 @@ pub fn get_provider_templates() -> &'static IndexMap<String, CapsProvider> {
     })
 }
 
-pub fn get_provider_model_default_settings_ui() -> &'static IndexMap<String, ModelDefaultSettingsUI> {
+pub fn get_provider_model_default_settings_ui() -> &'static IndexMap<String, ModelDefaultSettingsUI>
+{
     PARSED_MODEL_DEFAULTS.get_or_init(|| {
         let mut map = IndexMap::new();
         for (name, yaml) in PROVIDER_TEMPLATES {
             let yaml_value = serde_yaml::from_str::<serde_yaml::Value>(yaml)
                 .unwrap_or_else(|_| panic!("Failed to parse YAML for provider {}", name));
 
-            let model_default_settings_ui_value = yaml_value.get("model_default_settings_ui").cloned()
-                .expect(&format!("Missing `model_model_default_settings_ui` for provider template {name}"));
+            let model_default_settings_ui_value = yaml_value
+                .get("model_default_settings_ui")
+                .cloned()
+                .expect(&format!(
+                    "Missing `model_model_default_settings_ui` for provider template {name}"
+                ));
             let model_default_settings_ui = serde_yaml::from_value(model_default_settings_ui_value)
-                .unwrap_or_else(|e| panic!("Failed to parse model_defaults for provider {}: {}", name, e));
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to parse model_defaults for provider {}: {}",
+                        name, e
+                    )
+                });
 
             map.insert(name.to_string(), model_default_settings_ui);
         }
@@ -262,11 +333,14 @@ pub async fn get_provider_yaml_paths(config_dir: &Path) -> (Vec<PathBuf>, Vec<St
             Ok(entry) => {
                 let path = entry.path();
 
-                if path.is_file() &&
-                   path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml") {
+                if path.is_file()
+                    && path
+                        .extension()
+                        .map_or(false, |ext| ext == "yaml" || ext == "yml")
+                {
                     yaml_paths.push(path);
                 }
-            },
+            }
             Err(e) => {
                 errors.push(format!("Error reading directory entry: {e}"));
             }
@@ -287,7 +361,9 @@ pub fn post_process_provider(
     add_name_and_id_to_model_records(provider);
     if !include_disabled_models {
         provider.chat_models.retain(|_, model| model.base.enabled);
-        provider.completion_models.retain(|_, model| model.base.enabled);
+        provider
+            .completion_models
+            .retain(|_, model| model.base.enabled);
     }
 }
 
@@ -318,10 +394,18 @@ pub async fn read_providers_d(
         };
 
         if provider_templates.contains_key(&provider_name) {
-            match get_provider_from_template_and_config_file(config_dir, &provider_name, false, false, experimental).await {
+            match get_provider_from_template_and_config_file(
+                config_dir,
+                &provider_name,
+                false,
+                false,
+                experimental,
+            )
+            .await
+            {
                 Ok(provider) => {
                     providers.push(provider);
-                },
+                }
                 Err(e) => {
                     error_log.push(YamlError {
                         path: yaml_path.to_string_lossy().to_string(),
@@ -396,18 +480,28 @@ pub async fn get_latest_provider_mtime(config_dir: &Path) -> Option<u64> {
                         _ => latest_mtime,
                     };
                 }
-            },
+            }
             Err(e) => {
                 tracing::error!("Failed to get metadata for {}: {}", path.display(), e);
             }
         }
     }
 
-    latest_mtime.map(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())
+    latest_mtime.map(|mtime| {
+        mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    })
 }
 
 pub fn add_models_to_caps(caps: &mut CodeAssistantCaps, providers: Vec<CapsProvider>) {
-    fn add_provider_details_to_model(base_model_rec: &mut BaseModelRecord, provider: &CapsProvider, model_name: &str, endpoint: &str) {
+    fn add_provider_details_to_model(
+        base_model_rec: &mut BaseModelRecord,
+        provider: &CapsProvider,
+        model_name: &str,
+        endpoint: &str,
+    ) {
         base_model_rec.api_key = provider.api_key.clone();
         base_model_rec.tokenizer_api_key = provider.tokenizer_api_key.clone();
         base_model_rec.endpoint = endpoint.replace("$MODEL", model_name);
@@ -416,32 +510,41 @@ pub fn add_models_to_caps(caps: &mut CodeAssistantCaps, providers: Vec<CapsProvi
     }
 
     for mut provider in providers {
-
         let completion_models = std::mem::take(&mut provider.completion_models);
         for (model_name, mut model_rec) in completion_models {
             if model_rec.base.endpoint.is_empty() {
                 add_provider_details_to_model(
-                    &mut model_rec.base, &provider, &model_name, &provider.completion_endpoint
+                    &mut model_rec.base,
+                    &provider,
+                    &model_name,
+                    &provider.completion_endpoint,
                 );
 
-                if provider.code_completion_n_ctx > 0 && provider.code_completion_n_ctx < model_rec.base.n_ctx {
+                if provider.code_completion_n_ctx > 0
+                    && provider.code_completion_n_ctx < model_rec.base.n_ctx
+                {
                     // model is capable of more, but we may limit it from server or provider, e.x. for latency
                     model_rec.base.n_ctx = provider.code_completion_n_ctx;
                 }
             }
 
-            caps.completion_models.insert(model_rec.base.id.clone(), Arc::new(model_rec));
+            caps.completion_models
+                .insert(model_rec.base.id.clone(), Arc::new(model_rec));
         }
 
         let chat_models = std::mem::take(&mut provider.chat_models);
         for (model_name, mut model_rec) in chat_models {
             if model_rec.base.endpoint.is_empty() {
                 add_provider_details_to_model(
-                    &mut model_rec.base, &provider, &model_name, &provider.chat_endpoint
+                    &mut model_rec.base,
+                    &provider,
+                    &model_name,
+                    &provider.chat_endpoint,
                 );
             }
 
-            caps.chat_models.insert(model_rec.base.id.clone(), Arc::new(model_rec));
+            caps.chat_models
+                .insert(model_rec.base.id.clone(), Arc::new(model_rec));
         }
 
         if provider.embedding_model.is_configured() && provider.embedding_model.base.enabled {
@@ -450,13 +553,17 @@ pub fn add_models_to_caps(caps: &mut CodeAssistantCaps, providers: Vec<CapsProvi
             if embedding_model.base.endpoint.is_empty() {
                 let model_name = embedding_model.base.name.clone();
                 add_provider_details_to_model(
-                    &mut embedding_model.base, &provider, &model_name, &provider.embedding_endpoint
+                    &mut embedding_model.base,
+                    &provider,
+                    &model_name,
+                    &provider.embedding_endpoint,
                 );
             }
             caps.embedding_model = embedding_model;
         }
 
-        caps.defaults.apply_override(&provider.defaults, Some(&provider.name));
+        caps.defaults
+            .apply_override(&provider.defaults, Some(&provider.name));
     }
 }
 
@@ -472,7 +579,8 @@ fn add_name_and_id_to_model_records(provider: &mut CapsProvider) {
     }
 
     if provider.embedding_model.is_configured() {
-        provider.embedding_model.base.id = format!("{}/{}", provider.name, provider.embedding_model.base.name);
+        provider.embedding_model.base.id =
+            format!("{}/{}", provider.name, provider.embedding_model.base.name);
     }
 }
 
@@ -489,10 +597,15 @@ fn apply_models_dict_patch(provider: &mut CapsProvider) {
                 chat_rec.base.n_ctx = n_ctx as usize;
             }
 
-            if let Some(supports_tools) = rec_patched.get("supports_tools").and_then(|v| v.as_bool()) {
+            if let Some(supports_tools) =
+                rec_patched.get("supports_tools").and_then(|v| v.as_bool())
+            {
                 chat_rec.supports_tools = supports_tools;
             }
-            if let Some(supports_multimodality) = rec_patched.get("supports_multimodality").and_then(|v| v.as_bool()) {
+            if let Some(supports_multimodality) = rec_patched
+                .get("supports_multimodality")
+                .and_then(|v| v.as_bool())
+            {
                 chat_rec.supports_multimodality = supports_multimodality;
             }
         }
@@ -510,10 +623,16 @@ static KNOWN_MODELS: OnceLock<KnownModels> = OnceLock::new();
 
 pub fn get_known_models() -> &'static KnownModels {
     KNOWN_MODELS.get_or_init(|| {
-        serde_json::from_str::<KnownModels>(UNPARSED_KNOWN_MODELS).map_err(|e| {
-            let up_to_line = UNPARSED_KNOWN_MODELS.lines().take(e.line()).collect::<Vec<&str>>().join("\n");
-            panic!("{}\nfailed to parse KNOWN_MODELS: {}", up_to_line, e);
-        }).unwrap()
+        serde_json::from_str::<KnownModels>(UNPARSED_KNOWN_MODELS)
+            .map_err(|e| {
+                let up_to_line = UNPARSED_KNOWN_MODELS
+                    .lines()
+                    .take(e.line())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
+                panic!("{}\nfailed to parse KNOWN_MODELS: {}", up_to_line, e);
+            })
+            .unwrap()
     })
 }
 
@@ -522,33 +641,54 @@ fn populate_model_records(provider: &mut CapsProvider, experimental: bool) {
 
     for model_name in &provider.running_models {
         if !provider.completion_models.contains_key(model_name) {
-            if let Some(model_rec) = find_model_match(model_name, &provider.completion_models, &known_models.completion_models, experimental) {
-                provider.completion_models.insert(model_name.clone(), model_rec);
+            if let Some(model_rec) = find_model_match(
+                model_name,
+                &provider.completion_models,
+                &known_models.completion_models,
+                experimental,
+            ) {
+                provider
+                    .completion_models
+                    .insert(model_name.clone(), model_rec);
             }
         }
 
         if !provider.chat_models.contains_key(model_name) {
-            if let Some(model_rec) = find_model_match(model_name, &provider.chat_models, &known_models.chat_models, experimental) {
+            if let Some(model_rec) = find_model_match(
+                model_name,
+                &provider.chat_models,
+                &known_models.chat_models,
+                experimental,
+            ) {
                 provider.chat_models.insert(model_name.clone(), model_rec);
             }
         }
     }
 
     for model in &provider.running_models {
-        if !provider.completion_models.contains_key(model) &&
-            !provider.chat_models.contains_key(model) &&
-            !(model == &provider.embedding_model.base.name) {
+        if !provider.completion_models.contains_key(model)
+            && !provider.chat_models.contains_key(model)
+            && !(model == &provider.embedding_model.base.name)
+        {
             tracing::warn!("Indicated as running, unknown model {:?} for provider {}, maybe update this rust binary", model, provider.name);
         }
     }
 
     if !provider.embedding_model.is_configured() && !provider.embedding_model.base.name.is_empty() {
         let model_name = provider.embedding_model.base.name.clone();
-        if let Some(model_rec) = find_model_match(&model_name, &IndexMap::new(), &known_models.embedding_models, experimental) {
+        if let Some(model_rec) = find_model_match(
+            &model_name,
+            &IndexMap::new(),
+            &known_models.embedding_models,
+            experimental,
+        ) {
             provider.embedding_model = model_rec;
             provider.embedding_model.base.name = model_name;
         } else {
-            tracing::warn!("Unknown embedding model '{}', maybe configure it or update this binary", model_name);
+            tracing::warn!(
+                "Unknown embedding model '{}', maybe configure it or update this binary",
+                model_name
+            );
         }
     }
 }
@@ -561,32 +701,41 @@ fn find_model_match<T: Clone + HasBaseModelRecord>(
 ) -> Option<T> {
     let model_stripped = strip_model_from_finetune(model_name);
 
-    if let Some(model) = provider_models.get(model_name)
-        .or_else(|| provider_models.get(&model_stripped)) {
+    if let Some(model) = provider_models
+        .get(model_name)
+        .or_else(|| provider_models.get(&model_stripped))
+    {
         if !model.base().experimental || experimental {
             return Some(model.clone());
         }
     }
 
     for model in provider_models.values() {
-        if model.base().similar_models.contains(model_name) ||
-            model.base().similar_models.contains(&model_stripped) {
+        if model.base().similar_models.contains(model_name)
+            || model.base().similar_models.contains(&model_stripped)
+        {
             if !model.base().experimental || experimental {
                 return Some(model.clone());
             }
         }
     }
 
-    if let Some(model) = known_models.get(model_name)
-        .or_else(|| known_models.get(&model_stripped)) {
+    if let Some(model) = known_models
+        .get(model_name)
+        .or_else(|| known_models.get(&model_stripped))
+    {
         if !model.base().experimental || experimental {
             return Some(model.clone());
         }
     }
 
     for model in known_models.values() {
-        if model.base().similar_models.contains(&model_name.to_string()) ||
-            model.base().similar_models.contains(&model_stripped) {
+        if model
+            .base()
+            .similar_models
+            .contains(&model_name.to_string())
+            || model.base().similar_models.contains(&model_stripped)
+        {
             if !model.base().experimental || experimental {
                 return Some(model.clone());
             }
@@ -596,21 +745,27 @@ fn find_model_match<T: Clone + HasBaseModelRecord>(
     None
 }
 
-pub fn resolve_api_key(provider: &CapsProvider, key: &str, fallback: &str, key_name: &str) -> String {
+pub fn resolve_api_key(
+    provider: &CapsProvider,
+    key: &str,
+    fallback: &str,
+    key_name: &str,
+) -> String {
     match key {
         k if k.is_empty() => fallback.to_string(),
-        k if k.starts_with("$") => {
-            match std::env::var(&k[1..]) {
-                Ok(env_val) => env_val,
-                Err(e) => {
-                    tracing::error!(
-                        "tried to read {} from env var {} for provider {}, but failed: {}",
-                        key_name, k, provider.name, e
-                    );
-                    fallback.to_string()
-                }
+        k if k.starts_with("$") => match std::env::var(&k[1..]) {
+            Ok(env_val) => env_val,
+            Err(e) => {
+                tracing::error!(
+                    "tried to read {} from env var {} for provider {}, but failed: {}",
+                    key_name,
+                    k,
+                    provider.name,
+                    e
+                );
+                fallback.to_string()
             }
-        }
+        },
         k => k.to_string(),
     }
 }
@@ -620,26 +775,39 @@ pub fn resolve_provider_api_key(provider: &CapsProvider, cmdline_api_key: &str) 
 }
 
 pub fn resolve_tokenizer_api_key(provider: &CapsProvider) -> String {
-    resolve_api_key(provider, &provider.tokenizer_api_key, "", "tokenizer API key")
+    resolve_api_key(
+        provider,
+        &provider.tokenizer_api_key,
+        "",
+        "tokenizer API key",
+    )
 }
 
 pub async fn get_provider_from_template_and_config_file(
-    config_dir: &Path, name: &str, config_file_must_exist: bool, post_process: bool, experimental: bool
+    config_dir: &Path,
+    name: &str,
+    config_file_must_exist: bool,
+    post_process: bool,
+    experimental: bool,
 ) -> Result<CapsProvider, String> {
-    let mut provider = get_provider_templates().get(name).cloned()
+    let mut provider = get_provider_templates()
+        .get(name)
+        .cloned()
         .ok_or("Provider template not found")?;
 
     let provider_path = config_dir.join("providers.d").join(format!("{name}.yaml"));
     let config_file_value = match tokio::fs::read_to_string(&provider_path).await {
-        Ok(content) => {
-            serde_yaml::from_str::<serde_yaml::Value>(&content)
-                .map_err_with_prefix(format!("Error parsing file {}:", provider_path.display()))?
-        },
+        Ok(content) => serde_yaml::from_str::<serde_yaml::Value>(&content)
+            .map_err_with_prefix(format!("Error parsing file {}:", provider_path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !config_file_must_exist => {
             serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-        },
+        }
         Err(e) => {
-            return Err(format!("Failed to read file {}: {}", provider_path.display(), e));
+            return Err(format!(
+                "Failed to read file {}: {}",
+                provider_path.display(),
+                e
+            ));
         }
     };
 
@@ -652,7 +820,9 @@ pub async fn get_provider_from_template_and_config_file(
     Ok(provider)
 }
 
-pub async fn get_provider_from_server(gcx: Arc<ARwLock<GlobalContext>>) -> Result<CapsProvider, String> {
+pub async fn get_provider_from_server(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> Result<CapsProvider, String> {
     let command_line = CommandLine::from_args();
     let cmdline_api_key = command_line.api_key.clone();
     let cmdline_experimental = command_line.experimental;
@@ -665,7 +835,8 @@ pub async fn get_provider_from_server(gcx: Arc<ARwLock<GlobalContext>>) -> Resul
         provider.tokenizer_api_key = resolve_tokenizer_api_key(&provider);
         Ok(provider)
     } else {
-        let mut provider = serde_json::from_value::<CapsProvider>(caps_value).map_err_to_string()?;
+        let mut provider =
+            serde_json::from_value::<CapsProvider>(caps_value).map_err_to_string()?;
 
         resolve_relative_urls(&mut provider, &caps_url)?;
         post_process_provider(&mut provider, true, cmdline_experimental);

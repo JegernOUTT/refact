@@ -38,6 +38,8 @@ import { Providers } from "./Providers";
 import { UserSurvey } from "./UserSurvey";
 import { integrationsApi } from "../services/refact";
 import { LoginPage } from "./Login";
+import { TaskList, TaskWorkspace } from "./Tasks";
+import { KnowledgeWorkspace } from "./Knowledge";
 
 import styles from "./App.module.css";
 import classNames from "classnames";
@@ -157,6 +159,18 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         type: "dashboard",
       };
     }
+    if (page.name === "task workspace") {
+      return {
+        type: "task",
+        taskId: page.taskId,
+        taskName: "",
+      };
+    }
+    if (page.name === "knowledge graph") {
+      return {
+        type: "dashboard",
+      };
+    }
   }, [page, chatId]);
 
   return (
@@ -233,6 +247,11 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             chatId={page.chatId}
           />
         )}
+        {page.name === "tasks list" && <TaskList />}
+        {page.name === "task workspace" && (
+          <TaskWorkspace taskId={page.taskId} />
+        )}
+        {page.name === "knowledge graph" && <KnowledgeWorkspace />}
       </PageWrapper>
       {page.name !== "welcome" && <Tour page={pages[pages.length - 1].name} />}
     </Flex>

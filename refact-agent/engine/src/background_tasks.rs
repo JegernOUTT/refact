@@ -7,16 +7,13 @@ use tokio::task::JoinHandle;
 
 use crate::global_context::GlobalContext;
 
-
 pub struct BackgroundTasksHolder {
     tasks: Vec<JoinHandle<()>>,
 }
 
 impl BackgroundTasksHolder {
     pub fn new(tasks: Vec<JoinHandle<()>>) -> Self {
-        BackgroundTasksHolder {
-            tasks
-        }
+        BackgroundTasksHolder { tasks }
     }
 
     pub fn push_back(&mut self, task: JoinHandle<()>) {
@@ -24,8 +21,8 @@ impl BackgroundTasksHolder {
     }
 
     pub fn extend<T>(&mut self, tasks: T)
-        where
-            T: IntoIterator<Item=JoinHandle<()>>,
+    where
+        T: IntoIterator<Item = JoinHandle<()>>,
     {
         self.tasks.extend(tasks);
     }
@@ -39,26 +36,47 @@ impl BackgroundTasksHolder {
     }
 }
 
-pub async fn start_background_tasks(gcx: Arc<ARwLock<GlobalContext>>, _config_dir: &PathBuf) -> BackgroundTasksHolder {
+pub async fn start_background_tasks(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    _config_dir: &PathBuf,
+) -> BackgroundTasksHolder {
     let mut bg = BackgroundTasksHolder::new(vec![
-        tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(gcx.clone())),
-        tokio::spawn(crate::telemetry::basic_transmit::telemetry_background_task(gcx.clone())),
-        tokio::spawn(crate::snippets_transmit::tele_snip_background_task(gcx.clone())),
-        tokio::spawn(crate::vecdb::vdb_highlev::vecdb_background_reload(gcx.clone())),
-        tokio::spawn(crate::integrations::sessions::remove_expired_sessions_background_task(gcx.clone())),
-        tokio::spawn(crate::git::cleanup::git_shadow_cleanup_background_task(gcx.clone())),
-        tokio::spawn(crate::knowledge_graph::knowledge_cleanup_background_task(gcx.clone())),
-        tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(gcx.clone())),
+        tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
+            gcx.clone(),
+        )),
+        tokio::spawn(crate::telemetry::basic_transmit::telemetry_background_task(
+            gcx.clone(),
+        )),
+        tokio::spawn(crate::snippets_transmit::tele_snip_background_task(
+            gcx.clone(),
+        )),
+        tokio::spawn(crate::vecdb::vdb_highlev::vecdb_background_reload(
+            gcx.clone(),
+        )),
+        tokio::spawn(
+            crate::integrations::sessions::remove_expired_sessions_background_task(gcx.clone()),
+        ),
+        tokio::spawn(crate::git::cleanup::git_shadow_cleanup_background_task(
+            gcx.clone(),
+        )),
+        tokio::spawn(crate::knowledge_graph::knowledge_cleanup_background_task(
+            gcx.clone(),
+        )),
+        tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(
+            gcx.clone(),
+        )),
     ]);
     let ast = gcx.clone().read().await.ast_service.clone();
     if let Some(ast_service) = ast {
-        bg.extend(crate::ast::ast_indexer_thread::ast_indexer_start(ast_service, gcx.clone()).await);
+        bg.extend(
+            crate::ast::ast_indexer_thread::ast_indexer_start(ast_service, gcx.clone()).await,
+        );
     }
     let files_jsonl_path = gcx.clone().read().await.cmdline.files_jsonl_path.clone();
     if !files_jsonl_path.is_empty() {
-        bg.extend(vec![
-            tokio::spawn(crate::files_in_jsonl::reload_if_jsonl_changes_background_task(gcx.clone()))
-        ]);
+        bg.extend(vec![tokio::spawn(
+            crate::files_in_jsonl::reload_if_jsonl_changes_background_task(gcx.clone()),
+        )]);
     }
     bg
 }

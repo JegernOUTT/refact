@@ -11,7 +11,9 @@ use base64::{engine::general_purpose, Engine as _};
 use crate::global_context::GlobalContext;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ContextEnum, ChatMessage, ChatContent, ChatUsage};
-use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation, IntegrationTrait};
+use crate::integrations::integr_abstract::{
+    IntegrationCommon, IntegrationConfirmation, IntegrationTrait,
+};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use reqwest::{Client, header};
 use thiserror::Error;
@@ -64,14 +66,14 @@ pub struct Branch {
 
 #[derive(Serialize, Debug)]
 pub struct Name {
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub name: String,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct Repository {
     pub slug: String,
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub name: String,
     pub description: Option<String>,
 }
@@ -93,21 +95,31 @@ pub struct BitbucketClient {
 impl BitbucketClient {
     pub fn new(username: &str, token: &str, workspace: &str) -> Result<Self, BitbucketError> {
         let mut headers = header::HeaderMap::new();
-        let auth_value = format!("Basic {}", general_purpose::STANDARD.encode(format!("{}:{}", username, token)));
-        headers.insert(header::AUTHORIZATION, header::HeaderValue::from_str(&auth_value).unwrap());
-        
-        let client = Client::builder()
-            .default_headers(headers)
-            .build()?;
-            
+        let auth_value = format!(
+            "Basic {}",
+            general_purpose::STANDARD.encode(format!("{}:{}", username, token))
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            header::HeaderValue::from_str(&auth_value).unwrap(),
+        );
+
+        let client = Client::builder().default_headers(headers).build()?;
+
         Ok(Self {
             client,
             workspace: workspace.to_string(),
         })
     }
 
-    pub async fn get_pull_requests(&self, repo_slug: &str) -> Result<Vec<PullRequest>, BitbucketError> {
-        let url = format!("{}/repositories/{}/{}/pullrequests", API_BASE_URL, self.workspace, repo_slug);
+    pub async fn get_pull_requests(
+        &self,
+        repo_slug: &str,
+    ) -> Result<Vec<PullRequest>, BitbucketError> {
+        let url = format!(
+            "{}/repositories/{}/{}/pullrequests",
+            API_BASE_URL, self.workspace, repo_slug
+        );
         let response = self.client.get(&url).send().await?;
         if response.status().is_success() {
             let prs = response.json::<Paginated<PullRequest>>().await?.values;
@@ -117,8 +129,15 @@ impl BitbucketClient {
         }
     }
 
-    pub async fn get_pull_request(&self, repo_slug: &str, pr_id: u64) -> Result<PullRequest, BitbucketError> {
-        let url = format!("{}/repositories/{}/{}/pullrequests/{}", API_BASE_URL, self.workspace, repo_slug, pr_id);
+    pub async fn get_pull_request(
+        &self,
+        repo_slug: &str,
+        pr_id: u64,
+    ) -> Result<PullRequest, BitbucketError> {
+        let url = format!(
+            "{}/repositories/{}/{}/pullrequests/{}",
+            API_BASE_URL, self.workspace, repo_slug, pr_id
+        );
         let response = self.client.get(&url).send().await?;
         if response.status().is_success() {
             let pr = response.json::<PullRequest>().await?;
@@ -128,8 +147,15 @@ impl BitbucketClient {
         }
     }
 
-    pub async fn create_pull_request(&self, repo_slug: &str, pr: CreatePullRequest) -> Result<PullRequest, BitbucketError> {
-        let url = format!("{}/repositories/{}/{}/pullrequests", API_BASE_URL, self.workspace, repo_slug);
+    pub async fn create_pull_request(
+        &self,
+        repo_slug: &str,
+        pr: CreatePullRequest,
+    ) -> Result<PullRequest, BitbucketError> {
+        let url = format!(
+            "{}/repositories/{}/{}/pullrequests",
+            API_BASE_URL, self.workspace, repo_slug
+        );
         let response = self.client.post(&url).json(&pr).send().await?;
         if response.status().is_success() {
             let pr = response.json::<PullRequest>().await?;
@@ -150,8 +176,16 @@ impl BitbucketClient {
         }
     }
 
-    pub async fn get_file(&self, repo_slug: &str, commit: &str, path: &str) -> Result<String, BitbucketError> {
-        let url = format!("{}/repositories/{}/{}/src/{}/{}", API_BASE_URL, self.workspace, repo_slug, commit, path);
+    pub async fn get_file(
+        &self,
+        repo_slug: &str,
+        commit: &str,
+        path: &str,
+    ) -> Result<String, BitbucketError> {
+        let url = format!(
+            "{}/repositories/{}/{}/src/{}/{}",
+            API_BASE_URL, self.workspace, repo_slug, commit, path
+        );
         let response = self.client.get(&url).send().await?;
         if response.status().is_success() {
             let content = response.text().await?;
@@ -179,9 +213,16 @@ pub struct ToolBitbucket {
 
 #[async_trait]
 impl IntegrationTrait for ToolBitbucket {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
-    async fn integr_settings_apply(&mut self, _gcx: Arc<ARwLock<GlobalContext>>, config_path: String, value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    async fn integr_settings_apply(
+        &mut self,
+        _gcx: Arc<ARwLock<GlobalContext>>,
+        config_path: String,
+        value: &serde_json::Value,
+    ) -> Result<(), serde_json::Error> {
         self.settings_bitbucket = serde_json::from_value(value.clone())?;
         self.common = serde_json::from_value(value.clone())?;
         self.config_path = config_path;
@@ -196,7 +237,10 @@ impl IntegrationTrait for ToolBitbucket {
         self.common.clone()
     }
 
-    async fn integr_tools(&self, _integr_name: &str) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    async fn integr_tools(
+        &self,
+        _integr_name: &str,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         vec![Box::new(ToolBitbucket {
             common: self.common.clone(),
             settings_bitbucket: self.settings_bitbucket.clone(),
@@ -204,12 +248,16 @@ impl IntegrationTrait for ToolBitbucket {
         })]
     }
 
-    fn integr_schema(&self) -> &str { BITBUCKET_INTEGRATION_SCHEMA }
+    fn integr_schema(&self) -> &str {
+        BITBUCKET_INTEGRATION_SCHEMA
+    }
 }
 
 #[async_trait]
 impl Tool for ToolBitbucket {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
@@ -232,7 +280,7 @@ impl Tool for ToolBitbucket {
                     name: "command".to_string(),
                     param_type: "string".to_string(),
                     description: "Examples:\n`list_prs`\n`get_pr --id 123`".to_string(),
-                }
+                },
             ],
             parameters_required: vec!["repo_slug".to_string(), "command".to_string()],
         }
@@ -257,11 +305,15 @@ impl Tool for ToolBitbucket {
             &self.settings_bitbucket.bitbucket_username,
             &self.settings_bitbucket.bitbucket_token,
             &self.settings_bitbucket.bitbucket_workspace,
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
 
         let content = match command.as_str() {
             "list_prs" => {
-                let prs = client.get_pull_requests(repo_slug).await.map_err(|e| e.to_string())?;
+                let prs = client
+                    .get_pull_requests(repo_slug)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let mut pr_list = String::new();
                 for pr in prs {
                     pr_list.push_str(&format!(
@@ -276,7 +328,10 @@ impl Tool for ToolBitbucket {
                     Some(Value::Number(n)) => n.as_u64().unwrap(),
                     _ => return Err("Missing or invalid `id` argument".to_string()),
                 };
-                let pr = client.get_pull_request(repo_slug, pr_id).await.map_err(|e| e.to_string())?;
+                let pr = client
+                    .get_pull_request(repo_slug, pr_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 format!(
                     "#{} {}: {} (by {})\n",
                     pr.id, pr.title, pr.state, pr.author.display_name
@@ -308,7 +363,10 @@ impl Tool for ToolBitbucket {
                         },
                     },
                 };
-                let new_pr = client.create_pull_request(repo_slug, pr).await.map_err(|e| e.to_string())?;
+                let new_pr = client
+                    .create_pull_request(repo_slug, pr)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 format!("Created PR #{}: {}", new_pr.id, new_pr.title)
             }
             "list_repos" => {
@@ -332,18 +390,24 @@ impl Tool for ToolBitbucket {
                     Some(Value::String(s)) => s,
                     _ => return Err("Missing or invalid `path` argument".to_string()),
                 };
-                client.get_file(repo_slug, commit, path).await.map_err(|e| e.to_string())?
+                client
+                    .get_file(repo_slug, commit, path)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             _ => format!("Unknown command: {}", command),
         };
 
-        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(content),
-            tool_calls: None,
-            tool_call_id: tool_call_id.clone(),
-            ..Default::default()
-        })]))
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(content),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            })],
+        ))
     }
 
     async fn command_to_match_against_confirm_deny(
@@ -361,7 +425,9 @@ impl Tool for ToolBitbucket {
     fn usage(&mut self) -> &mut Option<ChatUsage> {
         static mut DEFAULT_USAGE: Option<ChatUsage> = None;
         #[allow(static_mut_refs)]
-        unsafe { &mut DEFAULT_USAGE }
+        unsafe {
+            &mut DEFAULT_USAGE
+        }
     }
 
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {

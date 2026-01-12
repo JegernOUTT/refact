@@ -32,7 +32,7 @@ const createTestThreadRuntime = (): ChatThreadRuntime => {
     waiting_for_response: false,
     prevent_send: false,
     error: null,
-    queued_messages: [],
+    queued_items: [],
     send_immediately: false,
     attached_images: [],
     confirmation: {
@@ -43,6 +43,7 @@ const createTestThreadRuntime = (): ChatThreadRuntime => {
         confirmationStatus: true,
       },
     },
+    snapshot_received: true,
   };
 };
 
@@ -55,6 +56,8 @@ export const createDefaultChatState = () => {
     threads: { [runtime.thread.id]: runtime },
     system_prompt: {},
     tool_use: "explore" as const,
+    sse_refresh_requested: null,
+    stream_version: 0,
   };
 };
 

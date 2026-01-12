@@ -19,10 +19,14 @@ use crate::integrations::process_io_utils::{execute_command, AnsiStrippable};
 use crate::tools::tools_description::{ToolParam, Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::postprocessing::pp_command_output::{OutputFilter, output_mini_postprocessing};
-use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon, IntegrationConfirmation};
-use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num, serialize_opt_num_to_str, deserialize_str_to_opt_num};
+use crate::integrations::integr_abstract::{
+    IntegrationTrait, IntegrationCommon, IntegrationConfirmation,
+};
+use crate::integrations::utils::{
+    serialize_num_to_str, deserialize_str_to_num, serialize_opt_num_to_str,
+    deserialize_str_to_opt_num,
+};
 use crate::custom_error::YamlError;
-
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct CmdlineToolConfig {
@@ -42,9 +46,17 @@ pub struct CmdlineToolConfig {
     pub output_filter: OutputFilter,
 
     // background
-    #[serde(default, serialize_with = "serialize_opt_num_to_str", deserialize_with = "deserialize_str_to_opt_num")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_num_to_str",
+        deserialize_with = "deserialize_str_to_opt_num"
+    )]
     pub startup_wait_port: Option<u16>,
-    #[serde(default = "_default_startup_wait", serialize_with = "serialize_num_to_str", deserialize_with = "deserialize_str_to_num")]
+    #[serde(
+        default = "_default_startup_wait",
+        serialize_with = "serialize_num_to_str",
+        deserialize_with = "deserialize_str_to_num"
+    )]
     pub startup_wait: u64,
     #[serde(default)]
     pub startup_wait_keyword: String,
@@ -64,9 +76,16 @@ pub struct ToolCmdline {
 
 #[async_trait]
 impl IntegrationTrait for ToolCmdline {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
-    async fn integr_settings_apply(&mut self, _gcx: Arc<ARwLock<GlobalContext>>, config_path: String, value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    async fn integr_settings_apply(
+        &mut self,
+        _gcx: Arc<ARwLock<GlobalContext>>,
+        config_path: String,
+        value: &serde_json::Value,
+    ) -> Result<(), serde_json::Error> {
         self.cfg = serde_json::from_value(value.clone())?;
         self.common = serde_json::from_value(value.clone())?;
         self.config_path = config_path;
@@ -81,7 +100,10 @@ impl IntegrationTrait for ToolCmdline {
         self.common.clone()
     }
 
-    async fn integr_tools(&self, integr_name: &str) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    async fn integr_tools(
+        &self,
+        integr_name: &str,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         vec![Box::new(ToolCmdline {
             common: self.common.clone(),
             name: integr_name.to_string(),
@@ -90,8 +112,7 @@ impl IntegrationTrait for ToolCmdline {
         })]
     }
 
-    fn integr_schema(&self) -> &str
-    {
+    fn integr_schema(&self) -> &str {
         CMDLINE_INTEGRATION_SCHEMA
     }
 }
@@ -101,8 +122,8 @@ fn powershell_escape(s: &str) -> String {
     let mut needs_escape = s.is_empty();
     for ch in s.chars() {
         match ch {
-            ' ' | '"' | '\'' | '$' | '`' | '[' | ']' | '{' | '}' | '(' | ')' |
-            '@' | '&' | '#' | ',' | ';' | '.' | '\t' | '\n' | '|' | '<' | '>' | '\\' => {
+            ' ' | '"' | '\'' | '$' | '`' | '[' | ']' | '{' | '}' | '(' | ')' | '@' | '&' | '#'
+            | ',' | ';' | '.' | '\t' | '\n' | '|' | '<' | '>' | '\\' => {
                 needs_escape = true;
                 break;
             }
@@ -176,8 +197,16 @@ pub fn create_command_from_string(
     env_variables: &HashMap<String, String>,
     project_dirs: Vec<PathBuf>,
 ) -> Result<Command, String> {
-    let shell = if cfg!(target_os = "windows") { "powershell.exe" } else { "sh" };
-    let shell_arg = if cfg!(target_os = "windows") { "-Command" } else { "-c" };
+    let shell = if cfg!(target_os = "windows") {
+        "powershell.exe"
+    } else {
+        "sh"
+    };
+    let shell_arg = if cfg!(target_os = "windows") {
+        "-Command"
+    } else {
+        "-c"
+    };
     let mut cmd = Command::new(shell);
 
     if command_workdir.is_empty() {
@@ -221,17 +250,28 @@ pub async fn execute_blocking_command(
     let duration = t0.elapsed();
     info!("EXEC: /finished in {:?}", duration);
 
-    let stdout = output_mini_postprocessing(&cfg.output_filter, &output.stdout.to_string_lossy_and_strip_ansi());
-    let stderr = output_mini_postprocessing(&cfg.output_filter, &output.stderr.to_string_lossy_and_strip_ansi());
+    let stdout = output_mini_postprocessing(
+        &cfg.output_filter,
+        &output.stdout.to_string_lossy_and_strip_ansi(),
+    );
+    let stderr = output_mini_postprocessing(
+        &cfg.output_filter,
+        &output.stderr.to_string_lossy_and_strip_ansi(),
+    );
 
     let mut out = format_output(&stdout, &stderr);
     let exit_code = output.status.code().unwrap_or_default();
-    out.push_str(&format!("The command was running {:.3}s, finished with exit code {exit_code}\n", duration.as_secs_f64()));
+    out.push_str(&format!(
+        "The command was running {:.3}s, finished with exit code {exit_code}\n",
+        duration.as_secs_f64()
+    ));
     Ok(out)
 }
 
-fn _parse_command_args(args: &HashMap<String, serde_json::Value>, cfg: &CmdlineToolConfig) -> Result<(String, String), String>
-{
+fn _parse_command_args(
+    args: &HashMap<String, serde_json::Value>,
+    cfg: &CmdlineToolConfig,
+) -> Result<(String, String), String> {
     let mut args_str: HashMap<String, String> = HashMap::new();
     let valid_params: Vec<String> = cfg.parameters.iter().map(|p| p.name.clone()).collect();
 
@@ -240,13 +280,20 @@ fn _parse_command_args(args: &HashMap<String, serde_json::Value>, cfg: &CmdlineT
             return Err(format!("Unexpected argument `{}`", k));
         }
         match v {
-            serde_json::Value::String(s) => { args_str.insert(k.clone(), s.clone()); },
+            serde_json::Value::String(s) => {
+                args_str.insert(k.clone(), s.clone());
+            }
             _ => return Err(format!("argument `{}` is not a string: {:?}", k, v)),
         }
     }
 
     for param in &cfg.parameters {
-        if cfg.parameters_required.as_ref().map_or(false, |req| req.contains(&param.name)) && !args_str.contains_key(&param.name) {
+        if cfg
+            .parameters_required
+            .as_ref()
+            .map_or(false, |req| req.contains(&param.name))
+            && !args_str.contains_key(&param.name)
+        {
             return Err(format!("Missing required argument `{}`", param.name));
         }
     }
@@ -258,7 +305,9 @@ fn _parse_command_args(args: &HashMap<String, serde_json::Value>, cfg: &CmdlineT
 
 #[async_trait]
 impl Tool for ToolCmdline {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     async fn tool_execute(
         &mut self,
@@ -270,16 +319,24 @@ impl Tool for ToolCmdline {
 
         let gcx = ccx.lock().await.global_context.clone();
         let mut error_log = Vec::<YamlError>::new();
-        let env_variables = crate::integrations::setting_up_integrations::get_vars_for_replacements(gcx.clone(), &mut error_log).await;
+        let env_variables =
+            crate::integrations::setting_up_integrations::get_vars_for_replacements(
+                gcx.clone(),
+                &mut error_log,
+            )
+            .await;
         let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
 
-        let tool_output = execute_blocking_command(&command, &self.cfg, &workdir, &env_variables, project_dirs).await?;
+        let tool_output =
+            execute_blocking_command(&command, &self.cfg, &workdir, &env_variables, project_dirs)
+                .await?;
 
         let result = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(tool_output),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         })];
 
@@ -292,7 +349,11 @@ impl Tool for ToolCmdline {
 
     fn tool_description(&self) -> ToolDesc {
         let parameters_required = self.cfg.parameters_required.clone().unwrap_or_else(|| {
-            self.cfg.parameters.iter().map(|param| param.name.clone()).collect()
+            self.cfg
+                .parameters
+                .iter()
+                .map(|param| param.name.clone())
+                .collect()
         });
         ToolDesc {
             name: self.name.clone(),

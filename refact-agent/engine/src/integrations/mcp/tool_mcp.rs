@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -39,11 +38,17 @@ impl Tool for ToolMCP {
         let session_key = format!("{}", self.config_path);
         let (gcx, current_model) = {
             let ccx_locked = ccx.lock().await;
-            (ccx_locked.global_context.clone(), ccx_locked.current_model.clone())
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.current_model.clone(),
+            )
         };
         let (session_maybe, caps_maybe) = {
             let gcx_locked = gcx.read().await;
-            (gcx_locked.integration_sessions.get(&session_key).cloned(), gcx_locked.caps.clone())
+            (
+                gcx_locked.integration_sessions.get(&session_key).cloned(),
+                gcx_locked.caps.clone(),
+            )
         };
         if session_maybe.is_none() {
             tracing::error!("No session for {:?}, strange (2)", session_key);
@@ -56,32 +61,49 @@ impl Tool for ToolMCP {
         mcp_session_wait_startup(session.clone()).await;
 
         let json_args = serde_json::json!(args);
-        tracing::info!("\n\nMCP CALL tool '{}' with arguments: {:?}", self.mcp_tool.name, json_args);
+        tracing::info!(
+            "\n\nMCP CALL tool '{}' with arguments: {:?}",
+            self.mcp_tool.name,
+            json_args
+        );
 
         let session_logs = {
             let mut session_locked = session.lock().await;
-            let session_downcasted = session_locked.as_any_mut().downcast_mut::<super::session_mcp::SessionMCP>().unwrap();
+            let session_downcasted = session_locked
+                .as_any_mut()
+                .downcast_mut::<super::session_mcp::SessionMCP>()
+                .unwrap();
             session_downcasted.logs.clone()
         };
 
-        add_log_entry(session_logs.clone(), format!("Executing tool '{}' with arguments: {:?}", self.mcp_tool.name, json_args)).await;
+        add_log_entry(
+            session_logs.clone(),
+            format!(
+                "Executing tool '{}' with arguments: {:?}",
+                self.mcp_tool.name, json_args
+            ),
+        )
+        .await;
 
         let result_probably = {
             let mcp_client_locked = self.mcp_client.lock().await;
             if let Some(client) = &*mcp_client_locked {
-                match timeout(Duration::from_secs(self.request_timeout),
+                match timeout(
+                    Duration::from_secs(self.request_timeout),
                     client.call_tool(CallToolRequestParam {
                         name: self.mcp_tool.name.clone(),
                         arguments: match json_args {
                             serde_json::Value::Object(map) => Some(map),
                             _ => None,
                         },
-                    })
-                ).await {
+                    }),
+                )
+                .await
+                {
                     Ok(result) => result,
-                    Err(_) => {Err(rmcp::service::ServiceError::Timeout {
+                    Err(_) => Err(rmcp::service::ServiceError::Timeout {
                         timeout: Duration::from_secs(self.request_timeout),
-                    })},
+                    }),
                 }
             } else {
                 return Err("MCP client is not available".to_string());
@@ -99,12 +121,10 @@ impl Tool for ToolMCP {
                 let mut elements = Vec::new();
                 for content in result.content {
                     match content.raw {
-                        RawContent::Text(text_content) => {
-                            elements.push(MultimodalElement {
-                                m_type: "text".to_string(),
-                                m_content: text_content.text,
-                            })
-                        }
+                        RawContent::Text(text_content) => elements.push(MultimodalElement {
+                            m_type: "text".to_string(),
+                            m_content: text_content.text,
+                        }),
                         RawContent::Image(image_content) => {
                             if model_supports_multimodality {
                                 let mime_type = if image_content.mime_type.starts_with("image/") {
@@ -122,25 +142,26 @@ impl Tool for ToolMCP {
                                     m_content: "Server returned an image, but model does not support multimodality".to_string(),
                                 })
                             }
-                        },
-                        RawContent::Audio(_) => {
-                            elements.push(MultimodalElement {
-                                m_type: "text".to_string(),
-                                m_content: "Server returned audio, which is not supported".to_string(),
-                            })
-                        },
-                        RawContent::Resource(_) => {
-                            elements.push(MultimodalElement {
-                                m_type: "text".to_string(),
-                                m_content: "Server returned resource, which is not supported".to_string(),
-                            })
-                        },
+                        }
+                        RawContent::Audio(_) => elements.push(MultimodalElement {
+                            m_type: "text".to_string(),
+                            m_content: "Server returned audio, which is not supported".to_string(),
+                        }),
+                        RawContent::Resource(_) => elements.push(MultimodalElement {
+                            m_type: "text".to_string(),
+                            m_content: "Server returned resource, which is not supported"
+                                .to_string(),
+                        }),
                     }
                 }
 
                 let content = if elements.iter().all(|el| el.m_type == "text") {
                     ChatContent::SimpleText(
-                        elements.into_iter().map(|el| el.m_content).collect::<Vec<_>>().join("\n\n")
+                        elements
+                            .into_iter()
+                            .map(|el| el.m_content)
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
                     )
                 } else {
                     ChatContent::Multimodal(elements)
@@ -191,11 +212,21 @@ impl Tool for ToolMCP {
         let mut parameters = vec![];
         let mut parameters_required = vec![];
 
-        if let Some(serde_json::Value::Object(properties)) = self.mcp_tool.input_schema.get("properties") {
+        if let Some(serde_json::Value::Object(properties)) =
+            self.mcp_tool.input_schema.get("properties")
+        {
             for (name, prop) in properties {
                 if let serde_json::Value::Object(prop_obj) = prop {
-                    let param_type = prop_obj.get("type").and_then(|v| v.as_str()).unwrap_or("string").to_string();
-                    let description = prop_obj.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let param_type = prop_obj
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("string")
+                        .to_string();
+                    let description = prop_obj
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     parameters.push(ToolParam {
                         name: name.clone(),
                         param_type,
@@ -204,7 +235,8 @@ impl Tool for ToolMCP {
                 }
             }
         }
-        if let Some(serde_json::Value::Array(required)) = self.mcp_tool.input_schema.get("required") {
+        if let Some(serde_json::Value::Array(required)) = self.mcp_tool.input_schema.get("required")
+        {
             for req in required {
                 if let Some(req_str) = req.as_str() {
                     parameters_required.push(req_str.to_string());
@@ -240,7 +272,12 @@ impl Tool for ToolMCP {
             },
             agentic: true,
             experimental: false,
-            description: self.mcp_tool.description.to_owned().unwrap_or_default().to_string(),
+            description: self
+                .mcp_tool
+                .description
+                .to_owned()
+                .unwrap_or_default()
+                .to_string(),
             parameters,
             parameters_required,
         }
@@ -252,7 +289,10 @@ impl Tool for ToolMCP {
         _args: &HashMap<String, serde_json::Value>,
     ) -> Result<String, String> {
         let command = self.mcp_tool.name.clone();
-        tracing::info!("MCP command_to_match_against_confirm_deny() returns {:?}", command);
+        tracing::info!(
+            "MCP command_to_match_against_confirm_deny() returns {:?}",
+            command
+        );
         Ok(command.to_string())
     }
 

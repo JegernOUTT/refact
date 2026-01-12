@@ -14,16 +14,13 @@ use crate::at_commands::at_commands::{AtCommand, AtCommandsContext, AtParam};
 use crate::at_commands::execute_at::AtCommandMember;
 use crate::call_validation::{ChatMessage, ContextEnum};
 
-
 pub struct AtWeb {
     pub params: Vec<Box<dyn AtParam>>,
 }
 
 impl AtWeb {
     pub fn new() -> Self {
-        AtWeb {
-            params: vec![],
-        }
+        AtWeb { params: vec![] }
     }
 }
 
@@ -42,7 +39,8 @@ impl AtCommand for AtWeb {
         let url = match args.get(0) {
             Some(x) => x.clone(),
             None => {
-                cmd.ok = false; cmd.reason = Some("missing URL".to_string());
+                cmd.ok = false;
+                cmd.reason = Some("missing URL".to_string());
                 args.clear();
                 return Err("missing URL".to_string());
             }
@@ -54,25 +52,32 @@ impl AtCommand for AtWeb {
             let gcx_read = gcx.read().await;
             gcx_read.at_commands_preview_cache.clone()
         };
-        let text_from_cache = preview_cache.lock().await.get(&format!("@web:{}", url.text));
+        let text_from_cache = preview_cache
+            .lock()
+            .await
+            .get(&format!("@web:{}", url.text));
 
         let text = match text_from_cache {
             Some(text) => text,
             None => {
-                let text = execute_at_web(&url.text, None).await
+                let text = execute_at_web(&url.text, None)
+                    .await
                     .map_err(|e| format!("Failed to execute @web {}.\nError: {e}", url.text))?;
-                preview_cache.lock().await.insert(format!("@web:{}", url.text), text.clone());
+                preview_cache
+                    .lock()
+                    .await
+                    .insert(format!("@web:{}", url.text), text.clone());
                 text
             }
         };
 
-        let message = ChatMessage::new(
-            "plain_text".to_string(),
-            text,
-        );
+        let message = ChatMessage::new("plain_text".to_string(), text);
 
         info!("executed @web {}", url.text);
-        Ok((vec![ContextEnum::ChatMessage(message)], format!("[see text downloaded from {} above]", url.text)))
+        Ok((
+            vec![ContextEnum::ChatMessage(message)],
+            format!("[see text downloaded from {} above]", url.text),
+        ))
     }
 
     fn depends_on(&self) -> Vec<String> {
@@ -84,14 +89,20 @@ const JINA_READER_BASE_URL: &str = "https://r.jina.ai/";
 const JINA_TIMEOUT_SECS: u64 = 60;
 const FALLBACK_TIMEOUT_SECS: u64 = 10;
 
-pub async fn execute_at_web(url: &str, options: Option<&HashMap<String, Value>>) -> Result<String, String> {
+pub async fn execute_at_web(
+    url: &str,
+    options: Option<&HashMap<String, Value>>,
+) -> Result<String, String> {
     match fetch_with_jina_reader(url, options).await {
         Ok(text) => {
             info!("successfully fetched {} via Jina Reader", url);
             Ok(text)
         }
         Err(jina_err) => {
-            warn!("Jina Reader failed for {}: {}, falling back to simple fetch", url, jina_err);
+            warn!(
+                "Jina Reader failed for {}: {}, falling back to simple fetch",
+                url, jina_err
+            );
             match fetch_simple(url).await {
                 Ok(text) => {
                     info!("successfully fetched {} via simple fetch (fallback)", url);
@@ -105,14 +116,19 @@ pub async fn execute_at_web(url: &str, options: Option<&HashMap<String, Value>>)
     }
 }
 
-async fn fetch_with_jina_reader(url: &str, options: Option<&HashMap<String, Value>>) -> Result<String, String> {
+async fn fetch_with_jina_reader(
+    url: &str,
+    options: Option<&HashMap<String, Value>>,
+) -> Result<String, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(JINA_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
     let jina_url = format!("{}{}", JINA_READER_BASE_URL, url);
-    let mut request = client.get(&jina_url).header("User-Agent", "RefactAgent/1.0");
+    let mut request = client
+        .get(&jina_url)
+        .header("User-Agent", "RefactAgent/1.0");
 
     let mut is_streaming = false;
 
@@ -157,7 +173,10 @@ async fn fetch_with_jina_reader(url: &str, options: Option<&HashMap<String, Valu
     let response = request.send().await.map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
-        return Err(format!("Jina Reader returned status: {}", response.status()));
+        return Err(format!(
+            "Jina Reader returned status: {}",
+            response.status()
+        ));
     }
 
     let text = if is_streaming {
@@ -303,19 +322,29 @@ async fn fetch_html(url: &str, timeout: Duration) -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client.get(url)
+    let response = client
+        .get(url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        )
         .header("Accept-Language", "en-US,en;q=0.5")
         .header("Connection", "keep-alive")
         .header("Upgrade-Insecure-Requests", "1")
         .header("Cache-Control", "max-age=0")
         .header("DNT", "1")
         .header("Referer", "https://www.google.com/")
-        .send().await.map_err(|e| e.to_string())?;
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
-        return Err(format!("unable to fetch url: {}; status: {}", url, response.status()));
+        return Err(format!(
+            "unable to fetch url: {}; status: {}",
+            url,
+            response.status()
+        ));
     }
     let body = response.text().await.map_err(|e| e.to_string())?;
     Ok(body)
@@ -332,7 +361,6 @@ async fn fetch_simple(url: &str) -> Result<String, String> {
     Ok(text)
 }
 
-
 #[cfg(test)]
 mod tests {
     use tracing::warn;
@@ -342,7 +370,11 @@ mod tests {
     async fn test_execute_at_web_jina() {
         let url = "https://doc.rust-lang.org/book/ch03-04-comments.html";
         match execute_at_web(url, None).await {
-            Ok(text) => info!("test executed successfully (length: {} chars):\n\n{}", text.len(), &text[..text.len().min(500)]),
+            Ok(text) => info!(
+                "test executed successfully (length: {} chars):\n\n{}",
+                text.len(),
+                &text[..text.len().min(500)]
+            ),
             Err(e) => warn!("test failed with error: {e}"),
         }
     }
@@ -351,7 +383,10 @@ mod tests {
     async fn test_jina_pdf_reading() {
         let url = "https://www.w3.org/WAI/WCAG21/Techniques/pdf/PDF1.pdf";
         match execute_at_web(url, None).await {
-            Ok(text) => info!("PDF test executed successfully (length: {} chars)", text.len()),
+            Ok(text) => info!(
+                "PDF test executed successfully (length: {} chars)",
+                text.len()
+            ),
             Err(e) => warn!("PDF test failed with error: {e}"),
         }
     }
@@ -360,9 +395,15 @@ mod tests {
     async fn test_jina_with_options() {
         let url = "https://doc.rust-lang.org/book/ch03-04-comments.html";
         let mut options = HashMap::new();
-        options.insert("target_selector".to_string(), Value::String("main".to_string()));
+        options.insert(
+            "target_selector".to_string(),
+            Value::String("main".to_string()),
+        );
         match execute_at_web(url, Some(&options)).await {
-            Ok(text) => info!("options test executed successfully (length: {} chars)", text.len()),
+            Ok(text) => info!(
+                "options test executed successfully (length: {} chars)",
+                text.len()
+            ),
             Err(e) => warn!("options test failed with error: {e}"),
         }
     }

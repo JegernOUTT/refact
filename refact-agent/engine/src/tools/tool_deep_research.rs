@@ -4,12 +4,17 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 
-use crate::subchat::subchat_single;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType, MatchConfirmDeny, MatchConfirmDenyResult};
-use crate::call_validation::{ChatMessage, ChatContent, ChatUsage, ContextEnum, SubchatParameters};
+use crate::subchat::run_subchat_once;
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType, MatchConfirmDeny, MatchConfirmDenyResult,
+};
+use crate::call_validation::{ChatMessage, ChatContent, ChatUsage, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::global_context::GlobalContext;
+use tokio::sync::RwLock as ARwLock;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::memories::{memories_add_enriched, EnrichmentParams};
+use crate::postprocessing::pp_command_output::OutputFilter;
 
 pub struct ToolDeepResearch {
     pub config_path: String,
@@ -24,15 +29,15 @@ static RESEARCHER_PROMPT: &str = r#"Do:
 Be analytical, avoid generalities, and ensure that each section supports data-backed reasoning that could inform technical decisions or implementation strategies."#;
 
 static ENTERTAINMENT_MESSAGES: &[&str] = &[
-    "🔬 Deep research in progress... This may take up to 30 minutes, please be patient!",
-    "🌐 Browsing the web and gathering relevant sources...",
-    "📚 Reading through documentation and articles...",
-    "🔍 Cross-referencing information from multiple sources...",
-    "🧠 Analyzing and synthesizing the findings...",
-    "📊 Organizing data and preparing insights...",
-    "✍️ Composing comprehensive report with citations...",
-    "⏳ Still working... Almost there!",
-    "🔄 Continuing deep research... Thank you for your patience!",
+    "1/9: 🔬 Deep research in progress... This may take up to 30 minutes, please be patient!",
+    "2/9: 🌐 Browsing the web and gathering relevant sources...",
+    "3/9: 📚 Reading through documentation and articles...",
+    "4/9: 🔍 Cross-referencing information from multiple sources...",
+    "5/9: 🧠 Analyzing and synthesizing the findings...",
+    "6/9: 📊 Organizing data and preparing insights...",
+    "7/9: ✍️ Composing comprehensive report with citations...",
+    "8/9: ⏳ Still working... Almost there!",
+    "9/9: 🔄 Continuing deep research... Thank you for your patience!",
 ];
 
 async fn send_entertainment_message(
@@ -49,7 +54,11 @@ async fn send_entertainment_message(
             "content": message_text
         }
     });
-    let _ = subchat_tx.lock().await.send(entertainment_msg);
+    tracing::info!("deep_research: sending entertainment message: tool_call_id={}, subchat_id={}", tool_call_id, message_text);
+    match subchat_tx.lock().await.send(entertainment_msg) {
+        Ok(_) => tracing::info!("deep_research: entertainment message sent successfully"),
+        Err(e) => tracing::error!("deep_research: failed to send entertainment message: {}", e),
+    }
 }
 
 fn spawn_entertainment_task(
@@ -74,55 +83,37 @@ fn spawn_entertainment_task(
 }
 
 async fn execute_deep_research(
-    ccx_subchat: Arc<AMutex<AtCommandsContext>>,
-    subchat_params: &SubchatParameters,
-    research_query: &str,
-    usage_collector: &mut ChatUsage,
-    tool_call_id: &String,
-    log_prefix: &str,
-) -> Result<ChatMessage, String> {
-    let subchat_tx = ccx_subchat.lock().await.subchat_tx.clone();
-
-    send_entertainment_message(&subchat_tx, tool_call_id, 0).await;
+    gcx: Arc<ARwLock<GlobalContext>>,
+    subchat_tx: Arc<AMutex<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>>,
+    research_query: String,
+    tool_call_id: String,
+) -> Result<(ChatMessage, ChatUsage), String> {
+    send_entertainment_message(&subchat_tx, &tool_call_id, 0).await;
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
     spawn_entertainment_task(subchat_tx, tool_call_id.clone(), cancel_token.clone());
 
     let messages = vec![
         ChatMessage::new("user".to_string(), RESEARCHER_PROMPT.to_string()),
-        ChatMessage::new("user".to_string(), research_query.to_string()),
+        ChatMessage::new("user".to_string(), research_query),
     ];
 
-    let result = subchat_single(
-        ccx_subchat.clone(),
-        subchat_params.subchat_model.as_str(),
-        messages,
-        Some(vec![]),
-        None,
-        false,
-        subchat_params.subchat_temperature,
-        Some(subchat_params.subchat_max_new_tokens),
-        1,
-        subchat_params.subchat_reasoning_effort.clone(),
-        false,
-        Some(usage_collector),
-        Some(tool_call_id.clone()),
-        Some(format!("{log_prefix}-deep-research")),
-    ).await;
+    let result = run_subchat_once(gcx, "deep_research", messages).await;
 
     cancel_token.cancel();
 
-    let choices = result?;
-    let session = choices.into_iter().next().unwrap();
-    let reply = session.last().unwrap().clone();
-    crate::tools::tools_execute::update_usage_from_message(usage_collector, &reply);
+    let subchat_result = result?;
+    let reply = subchat_result.messages.last().cloned()
+        .ok_or("No response from deep research")?;
 
-    Ok(reply)
+    Ok((reply, subchat_result.usage))
 }
 
 #[async_trait]
 impl Tool for ToolDeepResearch {
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
@@ -150,47 +141,37 @@ impl Tool for ToolDeepResearch {
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        args: &HashMap<String, Value>
+        args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let research_query = match args.get("research_query") {
             Some(Value::String(s)) => s.clone(),
-            Some(v) => return Err(format!("argument `research_query` is not a string: {:?}", v)),
-            None => return Err("Missing argument `research_query`".to_string())
+            Some(v) => {
+                return Err(format!(
+                    "argument `research_query` is not a string: {:?}",
+                    v
+                ))
+            }
+            None => return Err("Missing argument `research_query`".to_string()),
         };
 
-        let mut usage_collector = ChatUsage { ..Default::default() };
-        let log_prefix = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let subchat_params: SubchatParameters = crate::tools::tools_execute::unwrap_subchat_params(ccx.clone(), "deep_research").await?;
-
-        let ccx_subchat = {
+        let (gcx, subchat_tx) = {
             let ccx_lock = ccx.lock().await;
-            let mut t = AtCommandsContext::new(
-                ccx_lock.global_context.clone(),
-                subchat_params.subchat_n_ctx,
-                0,
-                false,
-                vec![],
-                ccx_lock.chat_id.clone(),
-                ccx_lock.should_execute_remotely,
-                ccx_lock.current_model.clone(),
-            ).await;
-            t.subchat_tx = ccx_lock.subchat_tx.clone();
-            t.subchat_rx = ccx_lock.subchat_rx.clone();
-            Arc::new(AMutex::new(t))
+            (ccx_lock.global_context.clone(), ccx_lock.subchat_tx.clone())
         };
 
         tracing::info!("Starting deep research for query: {}", research_query);
-        let research_result = execute_deep_research(
-            ccx_subchat.clone(),
-            &subchat_params,
-            &research_query,
-            &mut usage_collector,
-            tool_call_id,
-            &log_prefix,
+
+        let (research_result, usage_collector) = execute_deep_research(
+            gcx,
+            subchat_tx,
+            research_query.clone(),
+            tool_call_id.clone(),
         ).await?;
 
-        let research_content = format!("# Deep Research Report\n\n{}", research_result.content.content_text_only());
-        tracing::info!("Deep research completed");
+        let research_content = format!(
+            "# Deep Research Report\n\n{}",
+            research_result.content.content_text_only()
+        );
 
         let title = if research_query.len() > 80 {
             format!("{}...", &research_query[..80])
@@ -206,8 +187,11 @@ impl Tool for ToolDeepResearch {
         let memory_note = match memories_add_enriched(ccx.clone(), &research_content, enrichment_params).await {
             Ok(path) => {
                 tracing::info!("Created enriched memory from deep research: {:?}", path);
-                format!("\n\n---\n📝 **This report has been saved to the knowledge base:** `{}`", path.display())
-            },
+                format!(
+                    "\n\n---\n📝 **This report has been saved to the knowledge base:** `{}`",
+                    path.display()
+                )
+            }
             Err(e) => {
                 tracing::warn!("Failed to create enriched memory from deep research: {}", e);
                 String::new()
@@ -215,18 +199,15 @@ impl Tool for ToolDeepResearch {
         };
         let final_message = format!("{}{}", research_content, memory_note);
 
-        let mut results = vec![];
-        results.push(ContextEnum::ChatMessage(ChatMessage {
+        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(final_message),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             usage: Some(usage_collector),
-            output_filter: Some(crate::postprocessing::pp_command_output::OutputFilter::no_limits()),
+            output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
-        }));
-
-        Ok((false, results))
+        })]))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -243,7 +224,13 @@ impl Tool for ToolDeepResearch {
             _ => return Ok("".to_string()),
         };
         let truncated_query = if query.len() > 100 {
-            format!("{}...", &query[..100])
+            let end = query
+                .char_indices()
+                .take_while(|(i, _)| *i < 100)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(100.min(query.len()));
+            format!("{}...", &query[..end])
         } else {
             query
         };
@@ -262,9 +249,10 @@ impl Tool for ToolDeepResearch {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
-        let command_to_match = self.command_to_match_against_confirm_deny(ccx.clone(), &args).await.map_err(|e| {
-            format!("Error getting tool command to match: {}", e)
-        })?;
+        let command_to_match = self
+            .command_to_match_against_confirm_deny(ccx.clone(), &args)
+            .await
+            .map_err(|e| format!("Error getting tool command to match: {}", e))?;
         Ok(MatchConfirmDeny {
             result: MatchConfirmDenyResult::CONFIRMATION,
             command: command_to_match,

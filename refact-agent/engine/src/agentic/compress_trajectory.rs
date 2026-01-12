@@ -1,11 +1,8 @@
-use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage};
-use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
-use crate::subchat::subchat_single;
+use crate::global_context::GlobalContext;
+use crate::subchat::run_subchat_once;
 use std::sync::Arc;
-use tokio::sync::Mutex as AMutex;
 use tokio::sync::RwLock as ARwLock;
-use crate::caps::strip_model_from_finetune;
 
 const COMPRESSION_MESSAGE: &str = r#"Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
@@ -73,24 +70,6 @@ Here's an example of how your output should be structured:
 </example>
 
 Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response."#;
-const TEMPERATURE: f32 = 0.0;
-
-fn gather_used_tools(messages: &Vec<ChatMessage>) -> Vec<String> {
-    let mut tools: Vec<String> = Vec::new();
-    
-    for message in messages {
-        if let Some(tool_calls) = &message.tool_calls {
-            for tool_call in tool_calls {
-                if !tools.contains(&tool_call.function.name) {
-                    tools.push(tool_call.function.name.clone());
-                }
-            }
-        }
-    }
-    
-    tools
-}
-
 pub async fn compress_trajectory(
     gcx: Arc<ARwLock<GlobalContext>>,
     messages: &Vec<ChatMessage>,
@@ -98,68 +77,27 @@ pub async fn compress_trajectory(
     if messages.is_empty() {
         return Err("The provided chat is empty".to_string());
     }
-    let (model_id, n_ctx) = match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
-        Ok(caps) => {
-            let model_id = caps.defaults.chat_light_model.clone();
-            if let Some(model_rec) = caps.chat_models.get(&strip_model_from_finetune(&model_id)) {
-                Ok((model_id, model_rec.base.n_ctx))
-            } else {
-                Err(format!(
-                    "Model '{}' not found, server has these models: {:?}",
-                    model_id, caps.chat_models.keys()
-                ))
-            }
-        },
-        Err(_) => Err("No caps available".to_string()),
-    }?;
-    let mut messages_compress = messages.clone();
-    messages_compress.push(
-        ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText(COMPRESSION_MESSAGE.to_string()),
-            ..Default::default()
-        },
-    );
-    let ccx: Arc<AMutex<AtCommandsContext>> = Arc::new(AMutex::new(AtCommandsContext::new(
-        gcx.clone(),
-        n_ctx,
-        1,
-        false,
-        messages_compress.clone(),
-        "".to_string(),
-        false,
-        model_id.clone(),
-    ).await));
-    let tools = gather_used_tools(&messages);
-    let new_messages = subchat_single(
-        ccx.clone(),
-        &model_id,
-        messages_compress,
-        Some(tools),
-        None,
-        false,
-        Some(TEMPERATURE),
-        None,
-        1,
-        None, 
-        true,
-        None,
-        None,
-        None,
-    ).await.map_err(|e| format!("Error: {}", e))?;
 
-    let content = new_messages
-        .into_iter()
-        .next()
-        .map(|x| {
-            x.into_iter().last().map(|last_m| match last_m.content {
-                ChatContent::SimpleText(text) => Some(text),
-                ChatContent::Multimodal(_) => None,
-            })
+    let mut messages_compress = messages.clone();
+    messages_compress.push(ChatMessage {
+        role: "user".to_string(),
+        content: ChatContent::SimpleText(COMPRESSION_MESSAGE.to_string()),
+        ..Default::default()
+    });
+
+    let result = run_subchat_once(gcx, "compress_trajectory", messages_compress)
+        .await
+        .map_err(|e| format!("Error: {}", e))?;
+
+    let content = result.messages
+        .last()
+        .and_then(|last_m| match &last_m.content {
+            ChatContent::SimpleText(text) => Some(text.clone()),
+            _ => None,
         })
-        .flatten()
-        .flatten()
         .ok_or("No traj message was generated".to_string())?;
-    let compressed_message = format!("{content}\n\nPlease, continue the conversation based on the provided summary");
+
+    let compressed_message =
+        format!("{content}\n\nPlease, continue the conversation based on the provided summary");
     Ok(compressed_message)
 }

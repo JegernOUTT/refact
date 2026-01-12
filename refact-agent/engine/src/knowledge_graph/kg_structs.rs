@@ -80,21 +80,27 @@ impl KnowledgeFrontmatter {
             lines.push(format!("status: {}", status));
         }
         if !self.tags.is_empty() {
-            let tags_str = self.tags.iter()
+            let tags_str = self
+                .tags
+                .iter()
                 .map(|t| format!("\"{}\"", t))
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("tags: [{}]", tags_str));
         }
         if !self.filenames.is_empty() {
-            let files_str = self.filenames.iter()
+            let files_str = self
+                .filenames
+                .iter()
                 .map(|f| format!("\"{}\"", f))
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("filenames: [{}]", files_str));
         }
         if !self.links.is_empty() {
-            let links_str = self.links.iter()
+            let links_str = self
+                .links
+                .iter()
                 .map(|l| format!("\"{}\"", l))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -124,7 +130,13 @@ impl KnowledgeFrontmatter {
     }
 
     pub fn kind_or_default(&self) -> &str {
-        self.kind.as_deref().unwrap_or(if self.filenames.is_empty() { "domain" } else { "code" })
+        self.kind
+            .as_deref()
+            .unwrap_or(if self.filenames.is_empty() {
+                "domain"
+            } else {
+                "code"
+            })
     }
 }
 
@@ -211,7 +223,11 @@ impl KnowledgeGraph {
     }
 
     pub fn add_doc(&mut self, doc: KnowledgeDoc) -> NodeIndex {
-        let id = doc.frontmatter.id.clone().unwrap_or_else(|| doc.path.to_string_lossy().to_string());
+        let id = doc
+            .frontmatter
+            .id
+            .clone()
+            .unwrap_or_else(|| doc.path.to_string_lossy().to_string());
         let path = doc.path.clone();
 
         let doc_idx = self.graph.add_node(KgNode::Doc { id: id.clone() });
@@ -225,7 +241,8 @@ impl KnowledgeGraph {
 
         for filename in &doc.frontmatter.filenames {
             let file_idx = self.get_or_create_file(filename, true);
-            self.graph.add_edge(doc_idx, file_idx, KgEdge::ReferencesFile);
+            self.graph
+                .add_edge(doc_idx, file_idx, KgEdge::ReferencesFile);
         }
 
         for entity in &doc.entities {
@@ -238,26 +255,41 @@ impl KnowledgeGraph {
     }
 
     pub fn link_docs(&mut self) {
-        let links: Vec<(String, String)> = self.docs.iter()
+        let links: Vec<(String, String)> = self
+            .docs
+            .iter()
             .flat_map(|(id, doc)| {
-                doc.frontmatter.links.iter().map(|link| (id.clone(), link.clone())).collect::<Vec<_>>()
+                doc.frontmatter
+                    .links
+                    .iter()
+                    .map(|link| (id.clone(), link.clone()))
+                    .collect::<Vec<_>>()
             })
             .collect();
 
         for (from_id, to_id) in links {
-            if let (Some(&from_idx), Some(&to_idx)) = (self.doc_index.get(&from_id), self.doc_index.get(&to_id)) {
+            if let (Some(&from_idx), Some(&to_idx)) =
+                (self.doc_index.get(&from_id), self.doc_index.get(&to_id))
+            {
                 self.graph.add_edge(from_idx, to_idx, KgEdge::LinksTo);
             }
         }
 
-        let supersedes: Vec<(String, String)> = self.docs.iter()
+        let supersedes: Vec<(String, String)> = self
+            .docs
+            .iter()
             .filter_map(|(id, doc)| {
-                doc.frontmatter.superseded_by.as_ref().map(|s| (id.clone(), s.clone()))
+                doc.frontmatter
+                    .superseded_by
+                    .as_ref()
+                    .map(|s| (id.clone(), s.clone()))
             })
             .collect();
 
         for (old_id, new_id) in supersedes {
-            if let (Some(&old_idx), Some(&new_idx)) = (self.doc_index.get(&old_id), self.doc_index.get(&new_id)) {
+            if let (Some(&old_idx), Some(&new_idx)) =
+                (self.doc_index.get(&old_id), self.doc_index.get(&new_id))
+            {
                 self.graph.add_edge(old_idx, new_idx, KgEdge::SupersededBy);
             }
         }
@@ -268,14 +300,13 @@ impl KnowledgeGraph {
     }
 
     pub fn get_doc_by_path(&self, path: &PathBuf) -> Option<&KnowledgeDoc> {
-        self.doc_path_index.get(path)
-            .and_then(|idx| {
-                if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(*idx) {
-                    self.docs.get(id)
-                } else {
-                    None
-                }
-            })
+        self.doc_path_index.get(path).and_then(|idx| {
+            if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(*idx) {
+                self.docs.get(id)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn active_docs(&self) -> impl Iterator<Item = &KnowledgeDoc> {
@@ -288,7 +319,8 @@ impl KnowledgeGraph {
             return HashSet::new();
         };
 
-        self.graph.neighbors_directed(tag_idx, petgraph::Direction::Incoming)
+        self.graph
+            .neighbors_directed(tag_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
                 if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
                     Some(id.clone())
@@ -304,7 +336,8 @@ impl KnowledgeGraph {
             return HashSet::new();
         };
 
-        self.graph.neighbors_directed(file_idx, petgraph::Direction::Incoming)
+        self.graph
+            .neighbors_directed(file_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
                 if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
                     Some(id.clone())
@@ -320,7 +353,8 @@ impl KnowledgeGraph {
             return HashSet::new();
         };
 
-        self.graph.neighbors_directed(entity_idx, petgraph::Direction::Incoming)
+        self.graph
+            .neighbors_directed(entity_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
                 if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
                     Some(id.clone())

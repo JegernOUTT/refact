@@ -11,12 +11,15 @@ use tokio::sync::RwLock as ARwLock;
 use similar::{ChangeTag, TextDiff};
 use crate::global_context;
 
-
 pub async fn telemetry_storage_dirs(cache_dir: &PathBuf) -> (PathBuf, PathBuf) {
     let dir = cache_dir.join("telemetry").join("compressed");
-    tokio::fs::create_dir_all(dir.clone()).await.unwrap_or_else(|_| {});
+    tokio::fs::create_dir_all(dir.clone())
+        .await
+        .unwrap_or_else(|_| {});
     let dir2 = cache_dir.join("telemetry").join("sent");
-    tokio::fs::create_dir_all(dir2.clone()).await.unwrap_or_else(|_| {});
+    tokio::fs::create_dir_all(dir2.clone())
+        .await
+        .unwrap_or_else(|_| {});
     (dir, dir2)
 }
 
@@ -25,7 +28,7 @@ pub async fn compress_tele_records_to_file(
     records: Vec<Value>,
     teletype: String,
     teletype_short: String,
-) -> Result<(), String>{
+) -> Result<(), String> {
     if records.is_empty() {
         info!("no records to save for {} (telemetry)", teletype);
         return Err("empty records".to_string());
@@ -41,7 +44,12 @@ pub async fn compress_tele_records_to_file(
     };
     let (dir_compressed, _) = telemetry_storage_dirs(&cache_dir).await;
 
-    let file_name = dir_compressed.join(format!("{}-{}-{}.json", file_prefix, now.format("%Y%m%d-%H%M%S"), teletype_short));
+    let file_name = dir_compressed.join(format!(
+        "{}-{}-{}.json",
+        file_prefix,
+        now.format("%Y%m%d-%H%M%S"),
+        teletype_short
+    ));
     let big_json_rh = json!({
         "records": json!(records),
         "ts_start": now.timestamp(),
@@ -51,20 +59,21 @@ pub async fn compress_tele_records_to_file(
     });
     return match file_save(file_name.clone(), big_json_rh).await {
         Ok(_) => {
-            info!("{} telemetry save \"{}\"", teletype, file_name.to_str().unwrap());
+            info!(
+                "{} telemetry save \"{}\"",
+                teletype,
+                file_name.to_str().unwrap()
+            );
             Ok(())
-        },
+        }
         Err(e) => {
-            error!("error saving {} telemetry: {}", teletype,  e);
+            error!("error saving {} telemetry: {}", teletype, e);
             Err(e)
-        },
+        }
     };
 }
 
-pub fn get_add_del_from_texts(
-    text_a: &String,
-    text_b: &String,
-) -> (String, String) {
+pub fn get_add_del_from_texts(text_a: &String, text_b: &String) -> (String, String) {
     let mut text_a_lines = text_a.lines().collect::<Vec<&str>>();
     let mut text_b_lines = text_b.lines().collect::<Vec<&str>>();
 
@@ -93,19 +102,14 @@ pub fn get_add_del_from_texts(
                 added += change.value();
                 // info!("add: {}; len: {}", change.value(), change.value().len());
             }
-            ChangeTag::Equal => {
-            }
+            ChangeTag::Equal => {}
         }
     }
 
     (added, removed)
 }
 
-
-pub fn get_add_del_chars_from_texts(
-    text_a: &String,
-    text_b: &String,
-) -> (String, String) {
+pub fn get_add_del_chars_from_texts(text_a: &String, text_b: &String) -> (String, String) {
     let diff = TextDiff::from_chars(text_a, text_b);
     let mut added = "".to_string();
     let mut removed = "".to_string();
@@ -117,8 +121,7 @@ pub fn get_add_del_chars_from_texts(
             ChangeTag::Insert => {
                 added += change.value();
             }
-            ChangeTag::Equal => {
-            }
+            ChangeTag::Equal => {}
         }
     }
 
@@ -126,15 +129,16 @@ pub fn get_add_del_chars_from_texts(
 }
 
 pub async fn file_save(path: PathBuf, json: serde_json::Value) -> Result<(), String> {
-    let mut f = tokio::fs::File::create(path).await.map_err(|e| format!("{:?}", e))?;
-    f.write_all(serde_json::to_string_pretty(&json).unwrap().as_bytes()).await.map_err(|e| format!("{}", e))?;
+    let mut f = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+    f.write_all(serde_json::to_string_pretty(&json).unwrap().as_bytes())
+        .await
+        .map_err(|e| format!("{}", e))?;
     Ok(())
 }
 
-pub async fn cleanup_old_files(
-    dir: PathBuf,
-    how_much_to_keep: i32,
-) {
+pub async fn cleanup_old_files(dir: PathBuf, how_much_to_keep: i32) {
     const HOPELESSLY_OLD_DAYS: u64 = 3;
     let max_age = std::time::Duration::from_secs(HOPELESSLY_OLD_DAYS * 24 * 60 * 60);
     let now = std::time::SystemTime::now();
@@ -190,9 +194,13 @@ pub async fn sorted_json_files(dir: PathBuf) -> Vec<PathBuf> {
 }
 
 pub async fn read_file(path: PathBuf) -> Result<String, String> {
-    let mut f = tokio::fs::File::open(path.clone()).await.map_err(|e| format!("{:?}", e))?;
+    let mut f = tokio::fs::File::open(path.clone())
+        .await
+        .map_err(|e| format!("{:?}", e))?;
     let mut contents = String::new();
-    f.read_to_string(&mut contents).await.map_err(|e| format!("{}", e))?;
+    f.read_to_string(&mut contents)
+        .await
+        .map_err(|e| format!("{}", e))?;
     Ok(contents)
 }
 
@@ -305,19 +313,13 @@ pub fn if_head_tail_equal_return_added_text(
     (true, added_text)
 }
 
-pub fn unchanged_percentage(
-    text_a: &String,
-    text_b: &String,
-) -> f64 {
-
+pub fn unchanged_percentage(text_a: &String, text_b: &String) -> f64 {
     let diff = TextDiff::from_chars(text_a, text_b);
     let mut common_text = "".to_string();
     for c in diff.iter_all_changes() {
         match c.tag() {
-            ChangeTag::Delete => {
-            }
-            ChangeTag::Insert => {
-            }
+            ChangeTag::Delete => {}
+            ChangeTag::Insert => {}
             ChangeTag::Equal => {
                 common_text += c.value();
             }
@@ -347,11 +349,7 @@ fn common_characters_in_strings(a: &String, b: &String) -> i32 {
     common
 }
 
-pub fn unchanged_percentage_approx(
-    text_a: &String,
-    text_b: &String,
-    grey_text_a: &String,
-) -> f64 {
+pub fn unchanged_percentage_approx(text_a: &String, text_b: &String, grey_text_a: &String) -> f64 {
     struct BiggestCommon {
         val: i32,
         idx: usize,
