@@ -319,19 +319,6 @@ pub enum ChatMode {
 }
 
 impl ChatMode {
-    #[allow(dead_code)]
-    pub fn supports_checkpoints(self) -> bool {
-        match self {
-            ChatMode::NO_TOOLS => false,
-            ChatMode::AGENT
-            | ChatMode::CONFIGURE
-            | ChatMode::PROJECT_SUMMARY
-            | ChatMode::EXPLORE
-            | ChatMode::TASK_PLANNER
-            | ChatMode::TASK_AGENT => true,
-        }
-    }
-
     pub fn is_agentic(self) -> bool {
         match self {
             ChatMode::AGENT

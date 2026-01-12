@@ -177,18 +177,6 @@ fn spawn_subchat_bridge(
     cancel_flag
 }
 
-#[allow(dead_code)] // Helper for creating error tool responses
-pub fn tool_answer_err(content: String, tool_call_id: String) -> ChatMessage {
-    ChatMessage {
-        role: "tool".to_string(),
-        content: ChatContent::SimpleText(content),
-        tool_calls: None,
-        tool_call_id,
-        tool_failed: Some(true),
-        ..Default::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

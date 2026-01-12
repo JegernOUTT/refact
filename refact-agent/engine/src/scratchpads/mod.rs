@@ -6,7 +6,6 @@ pub mod code_completion_fim;
 mod completon_rag;
 pub mod multimodality;
 pub mod scratchpad_utils;
-pub mod token_count_cache;
 
 pub use crate::chat::history_limit as chat_utils_limit_history;
 pub use crate::chat::prompts as chat_utils_prompts;

@@ -108,7 +108,6 @@ mod bug_tests {
 mod problem_highlighting_tests {
     use crate::scratchpads::chat_utils_limit_history::{
         compress_duplicate_context_files, is_content_duplicate, CompressionStrength,
-        get_model_token_params,
     };
     use crate::call_validation::{ChatMessage, ChatToolCall, ChatContent, ContextFile};
 
@@ -220,33 +219,6 @@ mod problem_highlighting_tests {
     }
 
     #[test]
-    fn test_claude_model_params_consistency() {
-        let claude_variants = vec![
-            "claude-3-opus",
-            "claude-3-sonnet",
-            "claude-3-haiku",
-            "claude-3-5-sonnet",
-            "claude-3-5-haiku",
-            "anthropic/claude",
-            "CLAUDE-3-OPUS",
-        ];
-
-        let expected_overhead = 150;
-        let expected_budget_offset = 0.15;
-
-        for model in &claude_variants {
-            let (overhead, budget_offset) = get_model_token_params(model);
-
-            if model.to_lowercase().contains("claude") {
-                assert_eq!(overhead, expected_overhead,
-                    "Claude model '{}' should have overhead {}, got {}", model, expected_overhead, overhead);
-                assert!((budget_offset - expected_budget_offset).abs() < 0.001,
-                    "Claude model '{}' should have budget_offset {}, got {}", model, expected_budget_offset, budget_offset);
-            }
-        }
-    }
-
-    #[test]
     fn test_content_duplicate_edge_cases() {
         assert!(!is_content_duplicate("", 1, 1, "some content", 1, 10),
             "Empty current content should not be duplicate");
@@ -334,21 +306,6 @@ mod problem_highlighting_tests {
         assert!(preserve_flags[1], "First context_file should be preserved");
     }
 
-    #[test]
-    fn test_model_detection_case_sensitivity() {
-        let lowercase = get_model_token_params("claude-3-sonnet");
-        let uppercase = get_model_token_params("CLAUDE-3-SONNET");
-        let mixed = get_model_token_params("Claude-3-Sonnet");
-
-        assert_eq!(lowercase.0, 150, "Lowercase 'claude' should be detected");
-
-        if uppercase.0 != 150 {
-            eprintln!("NOTE: Uppercase 'CLAUDE' not detected - consider case-insensitive matching");
-        }
-        if mixed.0 != 150 {
-            eprintln!("NOTE: Mixed case 'Claude' not detected - consider case-insensitive matching");
-        }
-    }
 }
 
 #[cfg(test)]

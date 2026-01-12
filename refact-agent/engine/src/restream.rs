@@ -544,56 +544,6 @@ pub async fn scratchpad_interaction_stream(
         .unwrap())
 }
 
-#[allow(dead_code)]
-pub fn try_insert_usage(msg_value: &mut serde_json::Value) -> bool {
-    let map = match msg_value.as_object() {
-        Some(map) => map,
-        None => {
-            return false;
-        }
-    };
-    let get_field_as_usize = |field: &str| -> Option<usize> {
-        map.get(field).and_then(|v| v.as_u64()).map(|v| v as usize)
-    };
-
-    if let Some(usage) = map.get("usage") {
-        if !usage.is_null() {
-            tracing::info!("model says usage: {:?}", usage);
-        }
-    }
-
-    let metering_prompt_tokens_n = match get_field_as_usize("metering_prompt_tokens_n") {
-        Some(value) => value,
-        None => return false,
-    };
-    let metering_generated_tokens_n = match get_field_as_usize("metering_generated_tokens_n") {
-        Some(value) => value,
-        None => return false,
-    };
-
-    if let Some(map) = msg_value.as_object_mut() {
-        [
-            "pp1000t_prompt",
-            "pp1000t_generated",
-            "metering_prompt_tokens_n",
-            "metering_generated_tokens_n",
-        ]
-        .iter()
-        .for_each(|&field| {
-            map.remove(field);
-        });
-
-        let usage = json!({
-            "prompt_tokens": metering_prompt_tokens_n,
-            "completion_tokens": metering_generated_tokens_n,
-            "total_tokens": metering_prompt_tokens_n + metering_generated_tokens_n
-        });
-        map.insert("usage".to_string(), usage);
-        return true;
-    }
-    return false;
-}
-
 fn generate_id_and_index_for_tool_calls_if_missing(value: &mut serde_json::Value) {
     fn process_tool_call(tool_call: &mut serde_json::Value, idx: usize) {
         let needs_id = match tool_call.get("id") {
