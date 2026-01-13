@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Flex, Card, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
@@ -68,7 +68,6 @@ import { AgentCapabilities } from "./AgentCapabilities/AgentCapabilities";
 import { TokensPreview } from "./TokensPreview";
 import classNames from "classnames";
 import { useUsageCounter } from "../UsageCounter/useUsageCounter";
-import { TrajectoryButton } from "../Trajectory";
 
 export type SendPolicy = "immediate" | "after_flow";
 
@@ -99,6 +98,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [isVoiceActive, setIsVoiceActive] = React.useState(false);
   const [liveTranscript, setLiveTranscript] = React.useState("");
   const [inputResetKey, setInputResetKey] = React.useState(0);
+  const [trajectoryOpen, setTrajectoryOpen] = useState(false);
   const isOnline = useIsOnline();
   const {
     isWarning,
@@ -106,6 +106,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     tokenPercentage,
     shouldShow: shouldShowUsage,
   } = useUsageCounter();
+
+  const openTrajectory = useCallback(() => {
+    setTrajectoryOpen(true);
+  }, []);
 
   const threadToolUse = useAppSelector(selectThreadToolUse);
   const messages = useAppSelector(selectMessages);
@@ -396,22 +400,16 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         </Callout>
       )}
       {shouldShowUsage && isContextFull && (
-        <Flex mb="2" gap="2" align="center">
-          <Callout type="error" preventClose>
-            Context is full ({Math.round(tokenPercentage)}%). Please compress or
-            handoff to continue.
-          </Callout>
-          <TrajectoryButton />
-        </Flex>
+        <Callout type="error" preventClose mb="2" onClick={openTrajectory}>
+          Context is full ({Math.round(tokenPercentage)}%). Please compress or
+          handoff to continue.
+        </Callout>
       )}
       {shouldShowUsage && isWarning && !isContextFull && (
-        <Flex mb="2" gap="2" align="center">
-          <Callout type="warning" preventClose>
-            Context is almost full ({Math.round(tokenPercentage)}%). Consider
-            compressing or handing off soon.
-          </Callout>
-          <TrajectoryButton />
-        </Flex>
+        <Callout type="warning" preventClose mb="2" onClick={openTrajectory}>
+          Context is almost full ({Math.round(tokenPercentage)}%). Consider
+          compressing or handing off soon.
+        </Callout>
       )}
 
       <Flex
@@ -429,7 +427,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             {helpInfo}
           </Flex>
         )}
-        {shouldAgentCapabilitiesBeShown && <AgentCapabilities />}
+        {shouldAgentCapabilitiesBeShown && (
+          <AgentCapabilities
+            trajectoryOpen={trajectoryOpen}
+            onTrajectoryOpenChange={setTrajectoryOpen}
+          />
+        )}
         <Form
           disabled={disableSend}
           className={classNames(styles.chatForm__form, className)}

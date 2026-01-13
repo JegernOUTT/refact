@@ -417,6 +417,15 @@ pub async fn handoff_select(
     selected.extend(conversation);
 
     super::history_limit::remove_invalid_tool_calls_and_tool_calls_results(&mut selected);
+    
+    let last_assistant_idx = selected.iter().rposition(|m| m.role == "assistant");
+    if let Some(idx) = last_assistant_idx {
+        if let Some(orig_msg) = messages.iter().rfind(|m| m.role == "assistant") {
+            if orig_msg.thinking_blocks.is_some() && !orig_msg.thinking_blocks.as_ref().unwrap().is_empty() {
+                selected[idx].thinking_blocks = orig_msg.thinking_blocks.clone();
+            }
+        }
+    }
 
     let stats = TransformStats {
         before_message_count: before_count,

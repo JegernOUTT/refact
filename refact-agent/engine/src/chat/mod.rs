@@ -11,6 +11,7 @@ mod queue;
 mod session;
 pub mod stream_core;
 pub mod system_context;
+pub mod task_agent_monitor;
 #[cfg(test)]
 mod tests;
 pub mod tools;
@@ -26,3 +27,4 @@ pub use trajectories::{
     handle_v1_trajectories_delete, handle_v1_trajectories_subscribe, maybe_save_trajectory,
 };
 pub use handlers::{handle_v1_chat_subscribe, handle_v1_chat_command, handle_v1_chat_cancel_queued};
+pub use task_agent_monitor::start_agent_monitor;

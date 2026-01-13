@@ -53,10 +53,13 @@ const CircularProgress: React.FC<CircularProgressProps> = ({
         strokeWidth={strokeWidth}
       />
       <circle
-        className={classNames(styles.circularProgressFill, {
-          [styles.circularProgressFillWarning]: isWarning,
-          [styles.circularProgressFillOverflown]: isOverflown,
-        })}
+        className={
+          isOverflown
+            ? styles.circularProgressFillOverflown
+            : isWarning
+              ? styles.circularProgressFillWarning
+              : styles.circularProgressFill
+        }
         cx={size / 2}
         cy={size / 2}
         r={radius}

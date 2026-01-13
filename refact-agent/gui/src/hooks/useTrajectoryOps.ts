@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { useAppDispatch, useAppSelector } from "./index";
-import { selectChatId } from "../features/Chat";
+import { selectChatId, selectThread } from "../features/Chat";
 import {
   usePreviewTransformMutation,
   useApplyTransformMutation,
@@ -25,6 +25,7 @@ export type TrajectoryTab = "compress" | "handoff";
 export function useTrajectoryOps() {
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectChatId);
+  const thread = useAppSelector(selectThread);
   const port = useAppSelector(selectLspPort);
   const apiKey = useAppSelector(selectApiKey);
 
@@ -97,27 +98,73 @@ export function useTrajectoryOps() {
   }, [chatId, handoffOptions, previewHandoff]);
 
   const handleApplyHandoff = useCallback(async () => {
-    if (!chatId) return false;
+    if (!chatId || !thread) return false;
     try {
+      const isTaskChat = thread.is_task_chat;
+      const taskMeta = thread.task_meta;
+      
       const result = await applyHandoff({
         chatId,
         options: handoffOptions,
       }).unwrap();
+      
       await dispatch(
         trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, {
           forceRefetch: true,
         }),
       );
-      dispatch(createChatWithId({ id: result.new_chat_id }));
-      dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
-      dispatch(push({ name: "chat" }));
-      setHandoffPreview(null);
-      await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+      
+      if (isTaskChat && taskMeta?.role === "planner") {
+        const taskId = taskMeta.task_id;
+        const now = new Date().toISOString();
+        
+        dispatch(
+          createChatWithId({
+            id: result.new_chat_id,
+            title: "",
+            isTaskChat: true,
+            mode: "TASK_PLANNER",
+            taskMeta: { task_id: taskId, role: "planner" },
+          }),
+        );
+        
+        const { addPlannerChat, setTaskActiveChat } = await import("../features/Tasks/tasksSlice");
+        
+        dispatch(
+          addPlannerChat({
+            taskId,
+            planner: {
+              id: result.new_chat_id,
+              title: "",
+              createdAt: now,
+              updatedAt: now,
+            },
+          }),
+        );
+        
+        dispatch(
+          setTaskActiveChat({
+            taskId,
+            activeChat: { type: "planner", chatId: result.new_chat_id },
+          }),
+        );
+        
+        dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
+        setHandoffPreview(null);
+        await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+      } else {
+        dispatch(createChatWithId({ id: result.new_chat_id }));
+        dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
+        dispatch(push({ name: "chat" }));
+        setHandoffPreview(null);
+        await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+      }
+      
       return true;
     } catch {
       return false;
     }
-  }, [chatId, handoffOptions, applyHandoff, dispatch, port, apiKey]);
+  }, [chatId, thread, handoffOptions, applyHandoff, dispatch, port, apiKey]);
 
   const clearPreviews = useCallback(() => {
     setTransformPreview(null);

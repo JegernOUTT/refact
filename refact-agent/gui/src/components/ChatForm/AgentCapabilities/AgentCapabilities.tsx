@@ -30,7 +30,15 @@ import {
 import { Fragment, useMemo } from "react";
 import { ToolGroups } from "./ToolGroups";
 
-export const AgentCapabilities = () => {
+export type AgentCapabilitiesProps = {
+  trajectoryOpen?: boolean;
+  onTrajectoryOpenChange?: (open: boolean) => void;
+};
+
+export const AgentCapabilities = ({
+  trajectoryOpen,
+  onTrajectoryOpenChange,
+}: AgentCapabilitiesProps) => {
   const isPatchAutomatic = useAppSelector(selectAutomaticPatch);
   const isAgentRollbackEnabled = useAppSelector(selectCheckpointsEnabled);
   const areFollowUpsEnabled = useAppSelector(selectAreFollowUpsEnabled);
@@ -122,7 +130,10 @@ export const AgentCapabilities = () => {
       {shouldShowUsage && (
         <Flex align="center" gap="1">
           <UsageCounter />
-          <TrajectoryButton />
+          <TrajectoryButton
+            forceOpen={trajectoryOpen}
+            onOpenChange={onTrajectoryOpenChange}
+          />
         </Flex>
       )}
     </Flex>

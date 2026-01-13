@@ -59,8 +59,10 @@ export const Callout: React.FC<CalloutProps> = ({
   }, []);
 
   const handleRetryClick = () => {
-    // TBD: why was this added, it won't close on click :/?
-    if (preventClose) return;
+    if (preventClose) {
+      onClick();
+      return;
+    }
     setIsOpened(false);
     const timeoutId = setTimeout(() => {
       onClick();
@@ -79,11 +81,11 @@ export const Callout: React.FC<CalloutProps> = ({
         styles.callout_box,
         {
           [styles.callout_box_opened]: isOpened,
+          [styles.callout_box_warning]: type === "warning",
         },
         props.className,
       )}
     >
-      {type === "warning" && <div className={styles.callout_box_background} />}
       <Flex direction="row" align="center" gap="4">
         <RadixCallout.Icon>
           {type === "error" ? <ExclamationTriangleIcon /> : <InfoCircledIcon />}

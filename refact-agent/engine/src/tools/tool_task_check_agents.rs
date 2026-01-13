@@ -93,9 +93,9 @@ fn format_agent_status(status: &AgentStatus) -> String {
                 Some(SessionState::ExecutingTools) => ("⚙️", "Executing tools"),
                 Some(SessionState::Paused) => ("⏸️", "Paused (awaiting confirmation)"),
                 Some(SessionState::WaitingIde) => ("⏳", "Waiting for IDE"),
-                Some(SessionState::Error) => ("⚠️", "Error state"),
+                Some(SessionState::Error) => ("⚠️", "Error state (will be marked as failed)"),
                 Some(SessionState::Idle) => ("💤", "Idle (waiting)"),
-                None => ("❓", "Unknown/offline (session not loaded - may be stuck)"),
+                None => ("❓", "Unknown/offline (will be marked as failed if stuck too long)"),
             }
         }
         _ => ("❓", "Unknown"),
@@ -137,7 +137,7 @@ impl Tool for ToolTaskCheckAgents {
             },
             agentic: false,
             experimental: false,
-            description: "Check the status of all spawned agents for a task. Shows their board status (primary) and live session state (if available). Agents mark themselves done via task_agent_finish().".to_string(),
+            description: "Check the status of all spawned agents for a task. Shows their board status (primary) and live session state (if available). Agents mark themselves done via task_agent_finish(). Agents that fail (streaming errors, timeouts, stuck) are automatically marked as failed.".to_string(),
             parameters: vec![
                 ToolParam {
                     name: "task_id".to_string(),

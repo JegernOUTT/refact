@@ -415,6 +415,7 @@ pub struct ChatSession {
     pub closed: bool,
     pub external_reload_pending: bool,
     pub last_prompt_messages: Vec<ChatMessage>,
+    pub task_agent_error: Option<String>,
 }
 
 #[cfg(test)]

@@ -13,15 +13,11 @@
     opacity 0.3s ease-in-out;
 }
 
-.callout_box_background {
-  background-color: var(--orange-3) !important;
-  position: absolute;
-  top: 0;
-  left: -15px;
-  right: 0;
-  bottom: 0;
-  z-index: -1;
-  border-radius: 10px;
+.callout_box_warning {
+  --callout-a2: var(--orange-a2);
+  --callout-a3: var(--orange-a3);
+  --callout-a9: var(--orange-9);
+  background-color: var(--orange-3);
 }
 
 .callout_box_opened {

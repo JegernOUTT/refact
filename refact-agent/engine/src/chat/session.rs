@@ -47,6 +47,7 @@ impl ChatSession {
             closed: false,
             external_reload_pending: false,
             last_prompt_messages: Vec::new(),
+            task_agent_error: None,
         }
     }
 
@@ -78,6 +79,7 @@ impl ChatSession {
             created_at,
             closed: false,
             last_prompt_messages: Vec::new(),
+            task_agent_error: None,
         }
     }
 
@@ -365,8 +367,11 @@ impl ChatSession {
                 });
             }
         }
-        self.set_runtime_state(SessionState::Error, Some(error));
+        self.set_runtime_state(SessionState::Error, Some(error.clone()));
         self.touch();
+
+        // Store task_meta for async notification (need to clone before async)
+        self.task_agent_error = Some(error);
     }
 
     pub fn abort_stream(&mut self) {

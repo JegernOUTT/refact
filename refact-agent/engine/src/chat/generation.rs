@@ -99,9 +99,27 @@ pub fn start_generation(
             .await;
 
             if let Err(e) = generation_result {
-                let mut session = session_arc.lock().await;
-                if !session.abort_flag.load(Ordering::SeqCst) {
-                    session.finish_stream_with_error(e);
+                let task_meta_opt = {
+                    let mut session = session_arc.lock().await;
+                    if !session.abort_flag.load(Ordering::SeqCst) {
+                        session.finish_stream_with_error(e);
+                    }
+                    session.thread.task_meta.clone()
+                };
+
+                if let Some(task_meta) = task_meta_opt {
+                    let error_msg = {
+                        let session = session_arc.lock().await;
+                        session.task_agent_error.clone()
+                    };
+                    if let Some(error) = error_msg {
+                        super::task_agent_monitor::handle_agent_streaming_error(
+                            gcx.clone(),
+                            &task_meta,
+                            &error,
+                        )
+                        .await;
+                    }
                 }
                 break;
             }

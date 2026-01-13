@@ -65,6 +65,7 @@ pub async fn start_background_tasks(
         tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(
             gcx.clone(),
         )),
+        tokio::spawn(crate::chat::start_agent_monitor(gcx.clone())),
     ]);
     let ast = gcx.clone().read().await.ast_service.clone();
     if let Some(ast_service) = ast {
