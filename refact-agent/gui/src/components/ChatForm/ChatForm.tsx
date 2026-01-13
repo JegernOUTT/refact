@@ -309,8 +309,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     setIsSendImmediately,
   ]);
 
-
-
   const handleLiveTranscript = useCallback((text: string) => {
     setLiveTranscript(text);
   }, []);
