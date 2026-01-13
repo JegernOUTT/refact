@@ -143,6 +143,12 @@ export function useStreamingVoiceRecording(
     finalizeRejectRef.current = null;
     bufferRef.current = [];
 
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("Microphone not supported in this browser or context");
+      return;
+    }
+
     sessionIdRef.current = uuidv4();
     recordingStartTimeRef.current = Date.now();
 

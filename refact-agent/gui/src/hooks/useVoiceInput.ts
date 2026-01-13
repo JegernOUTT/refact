@@ -26,6 +26,7 @@ export function useVoiceInput(
 ): UseVoiceInputResult {
   const config = useConfig();
   const port = config.lspPort;
+  const isJetBrains = config.host === "jetbrains";
   const {
     isRecording,
     isFinishing,
@@ -45,10 +46,20 @@ export function useVoiceInput(
   }, [recordingError]);
 
   useEffect(() => {
+    if (isJetBrains) {
+      setStatus({
+        enabled: false,
+        model_loaded: false,
+        model_name: "",
+        is_downloading: false,
+        download_progress: 0,
+      });
+      return;
+    }
     getVoiceStatus(port)
       .then(setStatus)
       .catch(() => setStatus(null));
-  }, [port]);
+  }, [port, isJetBrains]);
 
   useEffect(() => {
     if (!status?.is_downloading) return;

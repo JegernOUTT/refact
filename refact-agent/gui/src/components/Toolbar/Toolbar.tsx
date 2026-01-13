@@ -405,7 +405,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         onWheel={handleWheel}
         style={{ minWidth: 0, position: "relative", display: "flex" }}
       >
-        {/* Home button - always visible, outside TabNav.Root */}
         <div className={styles.homeButtonWrapper}>
           <TabNav.Root>
             <TabNav.Link
@@ -422,7 +421,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           </TabNav.Root>
         </div>
 
-        {/* Scrollable tabs container */}
         <div ref={scrollContainerRef} className={styles.scrollContainer}>
           <TabNav.Root
             style={{ display: "flex" }}

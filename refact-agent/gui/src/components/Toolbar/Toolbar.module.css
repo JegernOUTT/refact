@@ -29,37 +29,26 @@
   transition: transform 150ms ease-out;
 }
 
-/* Home button wrapper - always visible */
 .homeButtonWrapper {
   flex-shrink: 0;
   position: relative;
   z-index: 10;
-  background: var(--color-background);
-  padding-right: var(--space-2);
+  margin-right: var(--space-2);
 }
 
-/* Add fade shadow to right of home button */
-.homeButtonWrapper::after {
-  content: "";
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  width: 12px;
-  background: linear-gradient(to right, var(--color-background), transparent);
-  pointer-events: none;
+.homeButtonWrapper :global(.rt-TabNavLink) {
+  margin-right: 0 !important;
 }
 
-/* Scrollable container for tabs */
 .scrollContainer {
   flex: 1;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: none; /* Firefox */
-  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   min-width: 0;
 }
 
 .scrollContainer::-webkit-scrollbar {
-  display: none; /* Chrome, Safari, Opera */
+  display: none;
 }

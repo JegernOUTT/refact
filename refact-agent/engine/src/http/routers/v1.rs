@@ -1,7 +1,6 @@
 use at_tools::handle_v1_post_tools;
 use axum::Router;
 use axum::routing::{get, post, put, patch, delete};
-use tower_http::cors::CorsLayer;
 
 use crate::http::utils::telemetry_middleware;
 use crate::http::routers::v1::code_completion::{
@@ -270,5 +269,4 @@ pub fn make_v1_router() -> Router {
 
     builder
         .layer(axum::middleware::from_fn(telemetry_middleware))
-        .layer(CorsLayer::very_permissive())
 }

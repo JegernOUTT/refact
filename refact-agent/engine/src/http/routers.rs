@@ -1,6 +1,7 @@
 use axum::extract::DefaultBodyLimit;
 use axum::Router;
 use axum::routing::get;
+use tower_http::cors::CorsLayer;
 
 use crate::http::handler_404;
 
@@ -13,4 +14,5 @@ pub fn make_refact_http_server() -> Router {
         .nest("/v1", v1::make_v1_router())
         .route("/build_info", get(info::handle_info))
         .layer(DefaultBodyLimit::max(2usize.pow(20) * 15)) // new limit of payload 15MB(default: 2MB)
+        .layer(CorsLayer::very_permissive())
 }
