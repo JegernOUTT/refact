@@ -105,7 +105,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
           >
             Tasks
           </Text>
-          <Flex direction="column" gap="2">
+          <Flex direction="column" gap="1">
             {activeTasks.map((task) => {
               const plannerState = task.planner_session_state;
               const isPlannerWorking =

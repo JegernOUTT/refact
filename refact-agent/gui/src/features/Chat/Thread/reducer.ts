@@ -225,11 +225,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const lastParams = getLastThreadParams();
 
     const mode = getThreadMode({
-      tool_use: lastParams.tool_use ?? state.tool_use,
+      tool_use: state.tool_use,
       maybeMode: currentRt?.thread.mode ?? lastParams.mode,
     });
     const newRuntime = createThreadRuntime(
-      lastParams.tool_use ?? state.tool_use,
+      state.tool_use,
       null,
       mode,
     );

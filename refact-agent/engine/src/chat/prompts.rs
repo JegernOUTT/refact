@@ -15,7 +15,9 @@ use super::system_context::{
     self, create_instruction_files_message, create_memories_message, gather_system_context,
     generate_git_info_prompt, gather_git_info, PROJECT_CONTEXT_MARKER,
 };
-use crate::call_validation::{ChatMessage, ChatContent, ChatMode};
+use crate::call_validation::{ChatMessage, ChatContent, ChatMode, ContextFile};
+use crate::tasks::storage::infer_task_id_from_chat_id;
+use crate::tools::tool_task_memory::load_task_memories;
 
 pub async fn get_default_system_prompt(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -409,6 +411,15 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         tracing::info!("Skipping project/system context injection (include_project_info=false)");
     }
 
+    if matches!(chat_meta.chat_mode, ChatMode::TASK_PLANNER | ChatMode::TASK_AGENT) {
+        match inject_task_memories(&gcx, &mut messages, stream_back_to_user, &chat_meta.chat_id).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!("Failed to inject task memories: {}", e);
+            }
+        }
+    }
+
     tracing::info!(
         "\n\nSYSTEM PROMPT MIXER chat_mode={:?}\n{:#?}",
         chat_meta.chat_mode,
@@ -416,6 +427,10 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
     );
     messages
 }
+
+const TASK_MEMORIES_CONTEXT_MARKER: &str = "task_memories_context";
+const MAX_TASK_MEMORY_CONTENT_SIZE: usize = 3000;
+const MAX_TASK_MEMORIES_TOTAL_SIZE: usize = 80_000;
 
 async fn gather_and_inject_system_context(
     gcx: &Arc<ARwLock<GlobalContext>>,
@@ -481,6 +496,107 @@ async fn gather_and_inject_system_context(
                 .collect::<Vec<_>>()
         );
     }
+
+    Ok(())
+}
+
+pub async fn inject_task_memories(
+    gcx: &Arc<ARwLock<GlobalContext>>,
+    messages: &mut Vec<ChatMessage>,
+    stream_back_to_user: &mut HasRagResults,
+    chat_id: &str,
+) -> Result<(), String> {
+    let task_id = match infer_task_id_from_chat_id(chat_id) {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let memories = load_task_memories(gcx.clone(), &task_id).await?;
+    if memories.is_empty() {
+        return Ok(());
+    }
+
+    let mut context_files: Vec<ContextFile> = Vec::new();
+    let mut total_size = 0;
+    let mut included_count = 0;
+    let mut skipped_count = 0;
+
+    for (path, content) in &memories {
+        if total_size >= MAX_TASK_MEMORIES_TOTAL_SIZE {
+            skipped_count += 1;
+            continue;
+        }
+
+        let truncated_content = if content.len() > MAX_TASK_MEMORY_CONTENT_SIZE {
+            format!(
+                "{}\n\n[TRUNCATED]",
+                content.chars().take(MAX_TASK_MEMORY_CONTENT_SIZE).collect::<String>()
+            )
+        } else {
+            content.clone()
+        };
+
+        let line_count = truncated_content.lines().count().max(1);
+        total_size += truncated_content.len();
+        included_count += 1;
+
+        context_files.push(ContextFile {
+            file_name: path.to_string_lossy().to_string(),
+            file_content: truncated_content,
+            line1: 1,
+            line2: line_count,
+            file_rev: None,
+            symbols: vec![],
+            gradient_type: -1,
+            usefulness: 95.0,
+            skip_pp: true,
+        });
+    }
+
+    if context_files.is_empty() {
+        return Ok(());
+    }
+
+    if skipped_count > 0 {
+        context_files.push(ContextFile {
+            file_name: "(task memories summary)".to_string(),
+            file_content: format!(
+                "Note: {} task memories included, {} omitted due to size limits. Use task_memories_get() to retrieve all.",
+                included_count,
+                skipped_count
+            ),
+            line1: 1,
+            line2: 1,
+            file_rev: None,
+            symbols: vec![],
+            gradient_type: -1,
+            usefulness: 50.0,
+            skip_pp: true,
+        });
+    }
+
+    let task_memories_msg = ChatMessage {
+        role: "context_file".to_string(),
+        content: ChatContent::ContextFiles(context_files),
+        tool_call_id: TASK_MEMORIES_CONTEXT_MARKER.to_string(),
+        ..Default::default()
+    };
+
+    let insert_pos = messages
+        .iter()
+        .position(|m| m.role == "user" || m.role == "assistant")
+        .unwrap_or(messages.len());
+
+    stream_back_to_user.push_in_json(serde_json::json!(task_memories_msg));
+    messages.insert(insert_pos, task_memories_msg);
+
+    tracing::info!(
+        "Injected {} task memories at position {} for task {} ({} skipped)",
+        included_count,
+        insert_pos,
+        task_id,
+        skipped_count
+    );
 
     Ok(())
 }

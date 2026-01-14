@@ -1,4 +1,4 @@
-import { ToolUse, LspChatMode } from "../features/Chat/Thread/types";
+import { LspChatMode } from "../features/Chat/Thread/types";
 import { SystemPrompts } from "../services/refact/prompts";
 
 const LAST_THREAD_PARAMS_KEY = "refact_last_thread_params";
@@ -7,7 +7,6 @@ const MAX_DRAFT_MESSAGES = 50;
 
 export interface PersistedThreadParams {
   model: string;
-  tool_use: ToolUse;
   mode?: LspChatMode;
   boost_reasoning?: boolean;
   increase_max_tokens?: boolean;

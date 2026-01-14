@@ -30,3 +30,4 @@ mod tool_task_check_agents;
 mod tool_task_agent_finish;
 mod tool_task_mark_card;
 mod tool_task_merge_agent;
+pub mod tool_task_memory;

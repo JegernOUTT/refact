@@ -183,7 +183,7 @@ pub async fn handle_handoff_preview(
         session.messages.clone()
     };
 
-    let (_, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), false).await
+    let (_, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), false, &chat_id).await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = HandoffPreviewResponse {
@@ -223,7 +223,7 @@ pub async fn handle_handoff_apply(
         (session.messages.clone(), session.thread.clone(), session.thread.task_meta.clone())
     };
 
-    let (selected_messages, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), true).await
+    let (selected_messages, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), true, &chat_id).await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let selected_messages = sanitize_messages_for_new_thread(&selected_messages);

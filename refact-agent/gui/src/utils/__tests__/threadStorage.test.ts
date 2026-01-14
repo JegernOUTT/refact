@@ -19,7 +19,6 @@ describe("threadStorage", () => {
     it("should save and retrieve thread params", () => {
       const params = {
         model: "gpt-4",
-        tool_use: "agent" as const,
         boost_reasoning: true,
       };
 
@@ -30,19 +29,18 @@ describe("threadStorage", () => {
     });
 
     it("should merge with existing params", () => {
-      saveLastThreadParams({ model: "gpt-4", tool_use: "agent" as const });
+      saveLastThreadParams({ model: "gpt-4" });
       saveLastThreadParams({ boost_reasoning: true });
 
       const retrieved = getLastThreadParams();
       expect(retrieved).toEqual({
         model: "gpt-4",
-        tool_use: "agent",
         boost_reasoning: true,
       });
     });
 
     it("should clear thread params", () => {
-      saveLastThreadParams({ model: "gpt-4", tool_use: "agent" as const });
+      saveLastThreadParams({ model: "gpt-4" });
       clearLastThreadParams();
 
       const retrieved = getLastThreadParams();

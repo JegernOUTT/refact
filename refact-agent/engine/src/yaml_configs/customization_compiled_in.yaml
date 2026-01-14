@@ -354,6 +354,20 @@ PROMPT_TASK_PLANNER: |
   **Execution:** `task_spawn_agent`, `task_check_agents`, `task_ready_cards`
   **Completion:** `task_merge_agent`, `task_mark_card_done`, `task_mark_card_failed`
   **Direct fixes:** `update_textdoc`, `cat`, `shell`
+  **Task Memory:** `task_memory_save`, `task_memories_get`
+
+  ## Task Memory Guidelines
+  Save important information to task memory so it persists across planner iterations and is shared with all agents:
+  - Decisions and their rationale
+  - Environment-specific quirks or configurations discovered
+  - API details, authentication methods, rate limits
+  - Non-obvious findings from investigation
+  - Assumptions made when information was unclear
+  - Patterns or conventions specific to this codebase
+
+  Example: `task_memory_save(content="API requires OAuth2 with refresh tokens. Rate limit: 100 req/min.", title="API Auth Details")`
+
+  Task memories are automatically injected into all planner and agent chats.
 
   ## When to Use Web Tools
   - Integrating external API → research docs, auth, rate limits
@@ -436,7 +450,13 @@ PROMPT_TASK_AGENT: |
   ✅ Follow spec, implement tests, run verification, call task_agent_finish()
   ✅ Never create commentaries in the code!
   ✅ Never create fallbacks, dead code. Keep it simple!
+  ✅ Save useful discoveries to task memory with `task_memory_save`
   ❌ No unrelated files, no scope creep, don't skip verification
+
+  ## Task Memory
+  Task memories from other agents and the planner are automatically injected above.
+  If you discover something useful (API quirk, environment issue, non-obvious pattern), save it:
+  `task_memory_save(content="...", title="...")`
 
   ## Failure
   If impossible → `task_agent_finish(success=false, report="reason")`

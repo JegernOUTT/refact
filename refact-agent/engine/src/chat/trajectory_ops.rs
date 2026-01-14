@@ -250,6 +250,7 @@ pub async fn handoff_select(
     opts: &HandoffOptions,
     gcx: Arc<ARwLock<GlobalContext>>,
     generate_summary: bool,
+    trajectory_id: &str,
 ) -> Result<(Vec<ChatMessage>, TransformStats, Option<String>), String> {
     use crate::call_validation::ContextFile;
 
@@ -414,18 +415,20 @@ pub async fn handoff_select(
     if let Some(msg) = summary_msg {
         selected.push(msg);
     }
+    
+    let handoff_context_msg = ChatMessage {
+        role: "user".to_string(),
+        content: ChatContent::SimpleText(format!(
+            "The previous trajectory {}. Continue from where you stopped.",
+            trajectory_id
+        )),
+        ..Default::default()
+    };
+    selected.push(handoff_context_msg);
+    
     selected.extend(conversation);
 
     super::history_limit::remove_invalid_tool_calls_and_tool_calls_results(&mut selected);
-    
-    let last_assistant_idx = selected.iter().rposition(|m| m.role == "assistant");
-    if let Some(idx) = last_assistant_idx {
-        if let Some(orig_msg) = messages.iter().rfind(|m| m.role == "assistant") {
-            if orig_msg.thinking_blocks.is_some() && !orig_msg.thinking_blocks.as_ref().unwrap().is_empty() {
-                selected[idx].thinking_blocks = orig_msg.thinking_blocks.clone();
-            }
-        }
-    }
 
     let stats = TransformStats {
         before_message_count: before_count,
@@ -769,7 +772,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(selected[0].role, "system");
@@ -792,7 +795,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(selected[0].role, "system");
@@ -813,7 +816,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(selected[0].role, "system");
@@ -834,7 +837,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(selected[0].role, "user");
@@ -855,7 +858,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(selected.len(), 1);
@@ -875,7 +878,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         let system_count = selected.iter().filter(|m| m.role == "system").count();
@@ -899,7 +902,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert!(selected.iter().all(|m| m.role != "tool"));
@@ -922,7 +925,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         // Order: system -> preserved_tool_call -> preserved_tool_result -> user -> assistant
@@ -946,7 +949,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(roles(&selected), vec!["system", "assistant", "tool", "user", "assistant"]);
@@ -967,7 +970,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(roles(&selected), vec!["system", "assistant", "tool", "user", "assistant"]);
@@ -983,7 +986,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert!(selected.is_empty());
     }
@@ -999,7 +1002,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(selected.len(), 2);
@@ -1024,7 +1027,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(selected[0].role, "system");
@@ -1062,7 +1065,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(roles(&selected), vec!["system", "user"]);
@@ -1091,7 +1094,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(roles(&selected), vec!["system", "assistant", "diff", "user", "assistant"]);
@@ -1120,7 +1123,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         assert_eq!(roles(&selected), vec!["system", "user", "assistant"]);
@@ -1144,7 +1147,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         // Order: system -> preserved_assistant -> preserved_tool -> user -> assistant
@@ -1176,7 +1179,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
         // Order: system -> context_file -> assistant(tool_call) -> tool -> user -> assistant
@@ -1211,7 +1214,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false).await.unwrap();
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await.unwrap();
 
         assert_system_prefix(&selected);
 
@@ -1240,7 +1243,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let result = handoff_select(&messages, &opts, gcx, false).await;
+        let result = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await;
         assert!(result.is_ok(), "Should succeed when generate_summary=false");
         let (_, _, llm_summary) = result.unwrap();
         assert!(llm_summary.is_none(), "No summary should be generated when generate_summary=false");
@@ -1276,7 +1279,7 @@ mod tests {
             ..Default::default()
         };
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let result = handoff_select(&messages, &opts, gcx, false).await;
+        let result = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id").await;
         assert!(result.is_ok(), "Should succeed when only system messages exist");
         let (_, _, llm_summary) = result.unwrap();
         assert!(llm_summary.is_none(), "No summary should be generated when option disabled");

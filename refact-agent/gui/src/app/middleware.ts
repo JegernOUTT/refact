@@ -756,7 +756,6 @@ startListening({
 startListening({
   matcher: isAnyOf(
     setChatModel,
-    setToolUse,
     setBoostReasoning,
     setIncreaseMaxTokens,
     setIncludeProjectInfo,
@@ -773,7 +772,6 @@ startListening({
 
     saveLastThreadParams({
       model: runtime.thread.model,
-      tool_use: runtime.thread.tool_use,
       mode: runtime.thread.mode,
       boost_reasoning: runtime.thread.boost_reasoning,
       increase_max_tokens: runtime.thread.increase_max_tokens,
