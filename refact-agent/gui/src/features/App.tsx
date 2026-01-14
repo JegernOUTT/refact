@@ -9,6 +9,7 @@ import {
   useEffectOnce,
   useEventsBusForIDE,
   useTrajectoriesSubscription,
+  useTasksSubscription,
 } from "../hooks";
 import { FIMDebug } from "./FIM";
 import { store, persistor, RootState } from "../app/store";
@@ -74,6 +75,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useEventBusForApp();
   usePatchesAndDiffsEventsForIDE();
   useTrajectoriesSubscription();
+  useTasksSubscription();
 
   const [isPaddingApplied, setIsPaddingApplied] = useState<boolean>(false);
 
@@ -93,8 +95,8 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       if (tourState.type === "in_progress" && tourState.step === 1) {
         dispatch(push({ name: "welcome" }));
       } else if (
-        Object.keys(historyState).length === 0 &&
-        // TODO: rework when better router will be implemented
+        !historyState.isLoading &&
+        Object.keys(historyState.chats).length === 0 &&
         maybeCurrentActiveGroup
       ) {
         dispatch(push({ name: "history" }));

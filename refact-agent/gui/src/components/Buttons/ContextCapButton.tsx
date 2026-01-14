@@ -134,13 +134,15 @@ export const ContextCapButton: React.FC = () => {
   return (
     <HoverCard.Root>
       <HoverCard.Trigger>
-        <Select
-          key={selectKey}
-          title={undefined}
-          options={capOptions}
-          defaultValue={safeDefaultValue}
-          onChange={handleCapChange}
-        />
+        <span>
+          <Select
+            key={selectKey}
+            title={undefined}
+            options={capOptions}
+            defaultValue={safeDefaultValue}
+            onChange={handleCapChange}
+          />
+        </span>
       </HoverCard.Trigger>
       <HoverCard.Content size="1" side="top">
         <Text as="p" size="2">

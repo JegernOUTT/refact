@@ -40,7 +40,10 @@ export type HistoryMeta = Pick<
   "id" | "title" | "createdAt" | "model" | "updatedAt"
 > & { userMessageCount: number };
 
-export type HistoryState = Record<string, ChatHistoryItem>;
+export type HistoryState = {
+  chats: Record<string, ChatHistoryItem>;
+  isLoading: boolean;
+};
 
 export type TrajectoryWithMeta = TrajectoryData & {
   parent_id?: string;
@@ -55,7 +58,10 @@ export type HistoryTreeNode = ChatHistoryItem & {
   children: HistoryTreeNode[];
 };
 
-const initialState: HistoryState = {};
+const initialState: HistoryState = {
+  chats: {},
+  isLoading: true,
+};
 
 function getFirstUserContentFromChat(messages: ChatThread["messages"]): string {
   const message = messages.find(
@@ -136,12 +142,15 @@ export const historySlice = createSlice({
   name: "history",
   initialState,
   reducers: {
+    setHistoryLoading: (state, action: PayloadAction<boolean>) => {
+      state.isLoading = action.payload;
+    },
+
     saveChat: (state, action: PayloadAction<ChatThread>) => {
       if (action.payload.messages.length === 0) return;
       const chat = chatThreadToHistoryItem(action.payload);
-      // Preserve existing metadata if chat already exists
-      if (chat.id in state) {
-        const existing = state[chat.id];
+      if (chat.id in state.chats) {
+        const existing = state.chats[chat.id];
         if (
           existing.isTitleGenerated === true &&
           chat.isTitleGenerated !== true
@@ -156,27 +165,27 @@ export const historySlice = createSlice({
         chat.agent_id = existing.agent_id;
         chat.card_id = existing.card_id;
       }
-      state[chat.id] = chat;
+      state.chats[chat.id] = chat;
 
-      const messages = Object.values(state);
-      if (messages.length > 100) {
-        const sorted = messages.sort((a, b) =>
+      const allChats = Object.values(state.chats);
+      if (allChats.length > 100) {
+        const sorted = allChats.sort((a, b) =>
           b.updatedAt.localeCompare(a.updatedAt),
         );
         const idsToKeep = new Set(sorted.slice(0, 100).map((c) => c.id));
-        const idsToRemove = Object.keys(state).filter(
+        const idsToRemove = Object.keys(state.chats).filter(
           (id) => !idsToKeep.has(id),
         );
         for (const id of idsToRemove) {
           // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-          delete state[id];
+          delete state.chats[id];
         }
       }
     },
 
     hydrateHistory: (state, action: PayloadAction<TrajectoryWithMeta[]>) => {
       for (const data of action.payload) {
-        state[data.id] = trajectoryToHistoryItem(data, {
+        state.chats[data.id] = trajectoryToHistoryItem(data, {
           parent_id: data.parent_id,
           link_type: data.link_type,
           task_id: data.task_id,
@@ -188,33 +197,48 @@ export const historySlice = createSlice({
     },
 
     markChatAsUnread: (state, action: PayloadAction<string>) => {
-      if (action.payload in state) {
-        state[action.payload].read = false;
+      if (action.payload in state.chats) {
+        state.chats[action.payload].read = false;
       }
     },
 
     markChatAsRead: (state, action: PayloadAction<string>) => {
-      if (action.payload in state) {
-        state[action.payload].read = true;
+      if (action.payload in state.chats) {
+        state.chats[action.payload].read = true;
       }
     },
 
     deleteChatById: (state, action: PayloadAction<string>) => {
       // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-      delete state[action.payload];
+      delete state.chats[action.payload];
     },
 
     updateChatTitleById: (
       state,
       action: PayloadAction<{ chatId: string; newTitle: string }>,
     ) => {
-      if (action.payload.chatId in state) {
-        state[action.payload.chatId].title = action.payload.newTitle;
+      if (action.payload.chatId in state.chats) {
+        state.chats[action.payload.chatId].title = action.payload.newTitle;
+      }
+    },
+
+    updateChatMetaById: (
+      state,
+      action: PayloadAction<{ id: string; title?: string; updatedAt?: string }>,
+    ) => {
+      if (!(action.payload.id in state.chats)) return;
+      const chat = state.chats[action.payload.id];
+      if (action.payload.title !== undefined) {
+        chat.title = action.payload.title;
+        chat.isTitleGenerated = true;
+      }
+      if (action.payload.updatedAt !== undefined) {
+        chat.updatedAt = action.payload.updatedAt;
       }
     },
 
     clearHistory: () => {
-      return {};
+      return { chats: {}, isLoading: false };
     },
 
     upsertToolCallIntoHistory: (
@@ -225,9 +249,9 @@ export const historySlice = createSlice({
         }
       >,
     ) => {
-      if (!(action.payload.chatId in state)) return;
+      if (!(action.payload.chatId in state.chats)) return;
       maybeAppendToolCallResultFromIdeToMessages(
-        state[action.payload.chatId].messages,
+        state.chats[action.payload.chatId].messages,
         action.payload.toolCallId,
         action.payload.accepted,
         action.payload.replaceOnly,
@@ -235,18 +259,20 @@ export const historySlice = createSlice({
     },
   },
   selectors: {
+    selectHistoryIsLoading: (state): boolean => state.isLoading,
+
     getChatById: (state, id: string): ChatHistoryItem | null => {
-      if (!(id in state)) return null;
-      return state[id];
+      if (!(id in state.chats)) return null;
+      return state.chats[id];
     },
 
     getHistory: (state): ChatHistoryItem[] =>
-      Object.values(state)
+      Object.values(state.chats)
         .filter((item) => !item.task_id)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
 
     getHistoryTree: (state): HistoryTreeNode[] => {
-      const items = Object.values(state).filter((item) => !item.task_id);
+      const items = Object.values(state.chats).filter((item) => !item.task_id);
       const itemMap = new Map<string, HistoryTreeNode>();
       const roots: HistoryTreeNode[] = [];
 
@@ -324,16 +350,18 @@ export const historySlice = createSlice({
 });
 
 export const {
+  setHistoryLoading,
   saveChat,
   hydrateHistory,
   deleteChatById,
   markChatAsUnread,
   markChatAsRead,
   updateChatTitleById,
+  updateChatMetaById,
   clearHistory,
   upsertToolCallIntoHistory,
 } = historySlice.actions;
-export const { getChatById, getHistory, getHistoryTree } =
+export const { selectHistoryIsLoading, getChatById, getHistory, getHistoryTree } =
   historySlice.selectors;
 
 export const historyMiddleware = createListenerMiddleware();
@@ -393,7 +421,7 @@ startHistoryListening({
     const runtime = state.chat.threads[state.chat.current_thread_id];
     if (!runtime) return;
     const thread = runtime.thread;
-    if (!(thread.id in state.history)) return;
+    if (!(thread.id in state.history.chats)) return;
 
     const toSave = { ...thread, mode: action.payload };
     listenerApi.dispatch(saveChat(toSave));

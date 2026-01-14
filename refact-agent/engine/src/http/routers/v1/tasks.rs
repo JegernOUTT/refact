@@ -1,15 +1,19 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use axum::Extension;
 use axum::extract::Path;
-use axum::http::StatusCode;
+use axum::http::{Response, StatusCode};
 use axum::response::Json;
+use hyper::Body;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::RwLock as ARwLock;
+use tokio::sync::{RwLock as ARwLock, broadcast};
 use chrono::Utc;
 
+use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::tasks::types::{TaskMeta, TaskBoard, BoardCard, StatusUpdate, TaskStatus, TrajectoryInfo};
+use crate::tasks::events::{TaskEvent, TaskEventEnvelope};
 use crate::tasks::storage;
 
 #[derive(Deserialize)]
@@ -70,23 +74,30 @@ pub enum BoardPatch {
     },
 }
 
+async fn enrich_task_with_session_state(gcx: Arc<ARwLock<GlobalContext>>, task: &mut TaskMeta) {
+    if let Ok(planner_chat_id) = storage::get_planner_chat_id(gcx.clone(), &task.id).await {
+        let gcx_locked = gcx.read().await;
+        let sessions = gcx_locked.chat_sessions.read().await;
+        if let Some(session_arc) = sessions.get(&planner_chat_id) {
+            let session = session_arc.lock().await;
+            task.planner_session_state = Some(session.runtime.state.to_string());
+        }
+    }
+}
+
+async fn list_tasks_with_session_state(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Vec<TaskMeta>, String> {
+    let mut tasks = storage::list_tasks(gcx.clone()).await?;
+    for task in &mut tasks {
+        enrich_task_with_session_state(gcx.clone(), task).await;
+    }
+    Ok(tasks)
+}
+
 pub async fn handle_list_tasks(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Json<Vec<TaskMeta>>, (StatusCode, String)> {
-    let mut tasks = storage::list_tasks(gcx.clone()).await
+    let tasks = list_tasks_with_session_state(gcx).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    for task in &mut tasks {
-        if let Ok(planner_chat_id) = storage::get_planner_chat_id(gcx.clone(), &task.id).await {
-            let gcx_locked = gcx.read().await;
-            let sessions = gcx_locked.chat_sessions.read().await;
-            if let Some(session_arc) = sessions.get(&planner_chat_id) {
-                let session = session_arc.lock().await;
-                task.planner_session_state = Some(session.runtime.state.to_string());
-            }
-        }
-    }
-
     Ok(Json(tasks))
 }
 
@@ -228,6 +239,13 @@ pub async fn handle_patch_board(
     board.rev += 1;
     storage::save_board(gcx.clone(), &task_id, &board).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    crate::tasks::events::emit_task_event(gcx.clone(), TaskEvent::BoardChanged {
+        task_id: task_id.clone(),
+        rev: board.rev,
+        board: board.clone(),
+    }).await;
+
     storage::update_task_stats(gcx, &task_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -277,8 +295,12 @@ pub async fn handle_update_task_status(
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
     meta.status = req.status;
     meta.updated_at = Utc::now().to_rfc3339();
-    storage::save_task_meta(gcx, &task_id, &meta).await
+    storage::save_task_meta(gcx.clone(), &task_id, &meta).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::tasks::events::emit_task_event(gcx, TaskEvent::TaskUpdated {
+        task_id,
+        meta: meta.clone(),
+    }).await;
     Ok(Json(meta))
 }
 
@@ -319,8 +341,12 @@ pub async fn handle_update_task_meta(
         meta.default_agent_model = Some(model);
     }
     meta.updated_at = Utc::now().to_rfc3339();
-    storage::save_task_meta(gcx, &task_id, &meta).await
+    storage::save_task_meta(gcx.clone(), &task_id, &meta).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::tasks::events::emit_task_event(gcx, TaskEvent::TaskUpdated {
+        task_id,
+        meta: meta.clone(),
+    }).await;
     Ok(Json(meta))
 }
 
@@ -359,4 +385,74 @@ pub async fn handle_create_planner_chat(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(json!({"chat_id": chat_id})))
+}
+
+pub async fn handle_tasks_subscribe(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<Response<Body>, ScratchError> {
+    let (rx, seq_counter, tasks) = {
+        let gcx_locked = gcx.read().await;
+        let rx = match &gcx_locked.task_events_tx {
+            Some(tx) => tx.subscribe(),
+            None => {
+                return Err(ScratchError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Task events not available".to_string(),
+                ))
+            }
+        };
+        let seq_counter = gcx_locked.task_events_seq.clone().ok_or_else(|| {
+            ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, "Task events seq not available".to_string())
+        })?;
+        drop(gcx_locked);
+        let tasks = list_tasks_with_session_state(gcx.clone()).await.unwrap_or_default();
+        (rx, seq_counter, tasks)
+    };
+
+    let stream = async_stream::stream! {
+        let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
+        let envelope = TaskEventEnvelope { seq, event: TaskEvent::Snapshot { tasks } };
+        let json = serde_json::to_string(&envelope).unwrap_or_default();
+        yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+
+        let mut rx = rx;
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(10));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Ok(envelope) => {
+                            let json = serde_json::to_string(&envelope).unwrap_or_default();
+                            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let tasks = list_tasks_with_session_state(gcx.clone()).await.unwrap_or_default();
+                            let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
+                            let envelope = TaskEventEnvelope { seq, event: TaskEvent::Snapshot { tasks } };
+                            let json = serde_json::to_string(&envelope).unwrap_or_default();
+                            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    let tasks = list_tasks_with_session_state(gcx.clone()).await.unwrap_or_default();
+                    let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
+                    let envelope = TaskEventEnvelope { seq, event: TaskEvent::Snapshot { tasks } };
+                    let json = serde_json::to_string(&envelope).unwrap_or_default();
+                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                }
+            }
+        }
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "keep-alive")
+        .body(Body::wrap_stream(stream))
+        .unwrap())
 }

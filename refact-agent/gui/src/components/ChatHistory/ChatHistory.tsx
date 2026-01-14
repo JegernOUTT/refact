@@ -1,17 +1,16 @@
 import { memo, useState, useCallback } from "react";
 import { Flex, Box, Text } from "@radix-ui/themes";
+import { ChatLoading } from "../ChatContent/ChatLoading";
 import { ScrollArea } from "../ScrollArea";
 import { HistoryItem } from "./HistoryItem";
 import {
   ChatHistoryItem,
-  getHistory,
-  getHistoryTree,
   HistoryTreeNode,
-  type HistoryState,
 } from "../../features/History/historySlice";
 
 export type ChatHistoryProps = {
-  history: HistoryState;
+  history: Record<string, ChatHistoryItem>;
+  isLoading?: boolean;
   onHistoryItemClick: (id: ChatHistoryItem) => void;
   onDeleteHistoryItem: (id: string) => void;
   onOpenChatInTab?: (id: string) => void;
@@ -101,6 +100,80 @@ const TreeNode = memo(
 
 TreeNode.displayName = "TreeNode";
 
+function getSortedHistory(history: Record<string, ChatHistoryItem>): ChatHistoryItem[] {
+  return Object.values(history)
+    .filter((item) => !item.task_id)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function buildHistoryTree(history: Record<string, ChatHistoryItem>): HistoryTreeNode[] {
+  const items = Object.values(history).filter((item) => !item.task_id);
+  const itemMap = new Map<string, HistoryTreeNode>();
+  const roots: HistoryTreeNode[] = [];
+
+  for (const item of items) {
+    itemMap.set(item.id, { ...item, children: [] });
+  }
+
+  const assignedAsChild = new Set<string>();
+  const handoffParentIds = new Set<string>();
+
+  for (const item of items) {
+    if (item.link_type === "handoff" && item.parent_id && itemMap.has(item.parent_id)) {
+      handoffParentIds.add(item.parent_id);
+    }
+  }
+
+  for (const item of items) {
+    const node = itemMap.get(item.id);
+    if (!node) continue;
+
+    if (handoffParentIds.has(item.id)) continue;
+
+    if (item.parent_id && itemMap.has(item.parent_id)) {
+      if (assignedAsChild.has(item.id)) {
+        roots.push(node);
+        continue;
+      }
+      const parent = itemMap.get(item.parent_id);
+      if (!parent || parent.parent_id === item.id) {
+        roots.push(node);
+        continue;
+      }
+
+      if (item.link_type === "handoff") {
+        const parentNode = itemMap.get(item.parent_id);
+        if (parentNode) {
+          node.children.push(parentNode);
+          assignedAsChild.add(item.parent_id);
+          roots.push(node);
+        }
+      } else {
+        const parentNode = itemMap.get(item.parent_id);
+        if (parentNode) {
+          parentNode.children.push(node);
+          assignedAsChild.add(item.id);
+        }
+      }
+    } else {
+      roots.push(node);
+    }
+  }
+
+  const sortByUpdated = (a: HistoryTreeNode, b: HistoryTreeNode) =>
+    b.updatedAt.localeCompare(a.updatedAt);
+
+  const sortTree = (nodes: HistoryTreeNode[]) => {
+    nodes.sort(sortByUpdated);
+    for (const node of nodes) {
+      if (node.children.length > 0) sortTree(node.children);
+    }
+  };
+
+  sortTree(roots);
+  return roots;
+}
+
 export const ChatHistory = memo(
   ({
     history,
@@ -109,9 +182,10 @@ export const ChatHistory = memo(
     onOpenChatInTab,
     currentChatId,
     treeView = false,
+    isLoading = false,
   }: ChatHistoryProps) => {
-    const sortedHistory = getHistory({ history });
-    const historyTree = getHistoryTree({ history });
+    const sortedHistory = getSortedHistory(history);
+    const historyTree = buildHistoryTree(history);
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
     const handleToggleExpand = useCallback((id: string) => {
@@ -126,9 +200,8 @@ export const ChatHistory = memo(
       });
     }, []);
 
-    const hasTaskChats = sortedHistory.some((item) => !!item.task_id);
     const hasChildChats = sortedHistory.some((item) => !!item.parent_id);
-    const showTree = treeView || hasTaskChats || hasChildChats;
+    const showTree = treeView || hasChildChats;
 
     return (
       <Box
@@ -147,7 +220,11 @@ export const ChatHistory = memo(
             gap="1"
             direction="column"
           >
-            {sortedHistory.length !== 0 ? (
+            {isLoading ? (
+              <Box style={{ width: "100%" }}>
+                <ChatLoading />
+              </Box>
+            ) : sortedHistory.length !== 0 ? (
               showTree ? (
                 historyTree.map((node) => (
                   <TreeNode

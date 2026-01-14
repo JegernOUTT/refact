@@ -21,7 +21,6 @@ mod tool_web;
 
 pub mod file_edit;
 mod tool_create_knowledge;
-mod tool_create_memory_bank;
 mod tool_task_init;
 mod tool_task_board;
 mod tool_task_agent;

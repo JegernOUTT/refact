@@ -97,7 +97,5 @@ pub async fn compress_trajectory(
         })
         .ok_or("No traj message was generated".to_string())?;
 
-    let compressed_message =
-        format!("{content}\n\nPlease, continue the conversation based on the provided summary");
-    Ok(compressed_message)
+    Ok(content)
 }

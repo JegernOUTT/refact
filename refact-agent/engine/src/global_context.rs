@@ -290,6 +290,8 @@ pub struct GlobalContext {
     pub git_operations_abort_flag: Arc<AtomicBool>,
     pub app_searchable_id: String,
     pub trajectory_events_tx: Option<tokio::sync::broadcast::Sender<crate::chat::TrajectoryEvent>>,
+    pub task_events_tx: Option<tokio::sync::broadcast::Sender<crate::tasks::events::TaskEventEnvelope>>,
+    pub task_events_seq: Option<Arc<std::sync::atomic::AtomicU64>>,
     pub chat_sessions: crate::chat::SessionsMap,
     pub voice_service: SharedVoiceService,
 }
@@ -577,6 +579,8 @@ pub async fn create_global_context(
         git_operations_abort_flag: Arc::new(AtomicBool::new(false)),
         app_searchable_id: get_app_searchable_id(&workspace_dirs),
         trajectory_events_tx: Some(tokio::sync::broadcast::channel(100).0),
+        task_events_tx: Some(tokio::sync::broadcast::channel(100).0),
+        task_events_seq: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))),
         chat_sessions: crate::chat::create_sessions_map(),
         voice_service: crate::voice::VoiceService::new(),
     };
@@ -673,6 +677,8 @@ pub mod tests {
             git_operations_abort_flag: Arc::new(AtomicBool::new(false)),
             app_searchable_id: "test".to_string(),
             trajectory_events_tx: Some(tokio::sync::broadcast::channel(16).0),
+            task_events_tx: Some(tokio::sync::broadcast::channel(16).0),
+            task_events_seq: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))),
             chat_sessions: crate::chat::create_sessions_map(),
             voice_service: crate::voice::VoiceService::new(),
         };

@@ -10,6 +10,7 @@ use chrono::Utc;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
 use super::types::{TaskMeta, TaskBoard, TaskStatus, TrajectoryInfo};
+use super::events::{TaskEvent, emit_task_event};
 
 const TASKS_DIR: &str = "tasks";
 
@@ -138,7 +139,12 @@ where
     let mut board = load_board(gcx.clone(), task_id).await?;
     let result = updater(&mut board)?;
     board.rev += 1;
-    save_board(gcx, task_id, &board).await?;
+    save_board(gcx.clone(), task_id, &board).await?;
+    emit_task_event(gcx, TaskEvent::BoardChanged {
+        task_id: task_id.to_string(),
+        rev: board.rev,
+        board: board.clone(),
+    }).await;
     Ok((board, result))
 }
 
@@ -191,16 +197,24 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
     save_planner_instructions(gcx.clone(), &task_id, "").await?;
 
     let planner_chat_id = format!("planner-{}-1", task_id);
-    crate::chat::trajectories::save_initial_planner_trajectory(gcx, &task_id, &planner_chat_id).await?;
+    crate::chat::trajectories::save_initial_planner_trajectory(gcx.clone(), &task_id, &planner_chat_id).await?;
+
+    emit_task_event(gcx, TaskEvent::TaskCreated {
+        task_id: task_id.clone(),
+        meta: meta.clone(),
+    }).await;
 
     Ok(meta)
 }
 
 pub async fn delete_task(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str) -> Result<(), String> {
-    let task_dir = get_task_dir(gcx, task_id).await?;
+    let task_dir = get_task_dir(gcx.clone(), task_id).await?;
     if task_dir.exists() {
         fs::remove_dir_all(&task_dir).await.map_err(|e| e.to_string())?;
     }
+    emit_task_event(gcx, TaskEvent::TaskDeleted {
+        task_id: task_id.to_string(),
+    }).await;
     Ok(())
 }
 
@@ -209,7 +223,11 @@ pub async fn update_task_name(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str, n
     meta.name = name.to_string();
     meta.is_name_generated = true;
     meta.updated_at = Utc::now().to_rfc3339();
-    save_task_meta(gcx, task_id, &meta).await?;
+    save_task_meta(gcx.clone(), task_id, &meta).await?;
+    emit_task_event(gcx, TaskEvent::TaskUpdated {
+        task_id: task_id.to_string(),
+        meta: meta.clone(),
+    }).await;
     Ok(meta)
 }
 
@@ -223,7 +241,11 @@ pub async fn update_task_stats(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str) 
     meta.agents_active = board.cards.iter().filter(|c| c.column == "doing" && c.assignee.is_some()).count();
     meta.updated_at = Utc::now().to_rfc3339();
 
-    save_task_meta(gcx, task_id, &meta).await?;
+    save_task_meta(gcx.clone(), task_id, &meta).await?;
+    emit_task_event(gcx, TaskEvent::TaskUpdated {
+        task_id: task_id.to_string(),
+        meta: meta.clone(),
+    }).await;
     Ok(meta)
 }
 

@@ -10,6 +10,21 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::subchat::run_subchat;
 use crate::postprocessing::pp_command_output::OutputFilter;
 
+const FILE_EDITING_TOOLS: &[&str] = &[
+    "create_textdoc",
+    "update_textdoc",
+    "update_textdoc_anchored",
+    "update_textdoc_by_lines",
+    "update_textdoc_regex",
+    "apply_patch",
+    "undo_textdoc",
+    "rm",
+];
+
+fn tools_contain_file_editing(tools: &[String]) -> bool {
+    tools.iter().any(|t| FILE_EDITING_TOOLS.contains(&t.as_str()))
+}
+
 pub struct ToolSubagent {
     pub config_path: String,
 }
@@ -151,6 +166,9 @@ impl Tool for ToolSubagent {
             (ccx_lock.global_context.clone(), ccx_lock.chat_id.clone(), ccx_lock.subchat_tx.clone())
         };
 
+        let has_editing_tools = tools_contain_file_editing(&tools);
+        let config_name = if has_editing_tools { "subagent_with_editing" } else { "subagent" };
+
         let title = if task.len() > 60 {
             let end = task
                 .char_indices()
@@ -165,7 +183,7 @@ impl Tool for ToolSubagent {
 
         let config = crate::subchat::resolve_subchat_config_with_parent(
             gcx.clone(),
-            "subagent",
+            config_name,
             true,
             None,
             Some(title),
@@ -222,6 +240,7 @@ impl Tool for ToolSubagent {
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             usage: Some(result.usage),
+            extra: result.metering,
             output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         })]))

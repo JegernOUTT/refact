@@ -221,13 +221,13 @@ async fn _make_prompt(
 async fn _execute_subchat_iteration(
     gcx: Arc<ARwLock<GlobalContext>>,
     history: Vec<ChatMessage>,
-) -> Result<(Vec<ChatMessage>, ChatMessage, ChatUsage), String> {
+) -> Result<(Vec<ChatMessage>, ChatMessage, ChatUsage, serde_json::Map<String, serde_json::Value>), String> {
     let result = run_subchat_once(gcx, "strategic_planning", history).await?;
 
     let reply = result.messages.last().cloned()
         .ok_or("No response from strategic planning")?;
 
-    Ok((result.messages, reply, result.usage))
+    Ok((result.messages, reply, result.usage, result.metering))
 }
 
 async fn execute_strategic_planning(
@@ -236,7 +236,7 @@ async fn execute_strategic_planning(
     important_paths: Vec<PathBuf>,
     external_messages: Vec<ChatMessage>,
     tool_call_id: String,
-) -> Result<(String, ChatUsage), String> {
+) -> Result<(String, ChatUsage, serde_json::Map<String, serde_json::Value>), String> {
     let subchat_tx = ccx_subchat.lock().await.subchat_tx.clone();
 
     send_entertainment_message(&subchat_tx, &tool_call_id, 0).await;
@@ -275,7 +275,7 @@ async fn execute_strategic_planning(
 
     cancel_token.cancel();
 
-    let (_, initial_solution, usage_collector) = result?;
+    let (_, initial_solution, usage_collector, metering) = result?;
     let solution_content = format!(
         "# Solution\n{}",
         initial_solution.content.content_text_only()
@@ -317,7 +317,7 @@ async fn execute_strategic_planning(
     };
     let final_message = format!("{}{}", solution_content, memory_note);
 
-    Ok((final_message, usage_collector))
+    Ok((final_message, usage_collector, metering))
 }
 
 #[async_trait]
@@ -403,7 +403,7 @@ impl Tool for ToolStrategicPlanning {
 
         tracing::info!("Starting strategic planning for {} files", important_paths.len());
 
-        let (final_message, usage_collector) = execute_strategic_planning(
+        let (final_message, usage_collector, metering) = execute_strategic_planning(
             gcx,
             ccx.clone(),
             important_paths.clone(),
@@ -418,6 +418,7 @@ impl Tool for ToolStrategicPlanning {
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
                 usage: Some(usage_collector),
+                extra: metering,
                 output_filter: Some(OutputFilter::no_limits()),
                 ..Default::default()
             }),

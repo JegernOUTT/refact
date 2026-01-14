@@ -79,6 +79,7 @@ use crate::http::routers::v1::tasks::{
     handle_get_board, handle_patch_board, handle_get_planner_instructions,
     handle_set_planner_instructions, handle_get_ready_cards, handle_update_task_status,
     handle_update_task_meta, handle_list_task_trajectories, handle_create_planner_chat,
+    handle_tasks_subscribe,
 };
 use crate::http::routers::v1::trajectory_ops::{
     handle_transform_preview, handle_transform_apply,
@@ -251,6 +252,7 @@ pub fn make_v1_router() -> Router {
         .route("/voice/stream/:session_id/chunk", post(handle_v1_voice_stream_chunk))
         .route("/tasks", get(handle_list_tasks))
         .route("/tasks", post(handle_create_task))
+        .route("/tasks/subscribe", get(handle_tasks_subscribe))
         .route("/tasks/:task_id", get(handle_get_task))
         .route("/tasks/:task_id", delete(handle_delete_task))
          .route("/tasks/:task_id/status", post(handle_update_task_status))

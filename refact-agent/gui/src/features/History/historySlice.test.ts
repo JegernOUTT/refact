@@ -26,22 +26,25 @@ function createHistoryItem(
 
 describe("getHistoryTree", () => {
   it("returns empty array for empty state", () => {
-    const state: HistoryState = {};
+    const state: HistoryState = { chats: {}, isLoading: false };
     const result = getHistoryTree({ history: state });
     expect(result).toEqual([]);
   });
 
   it("returns flat list when no parent_id relationships exist", () => {
     const state: HistoryState = {
-      chat1: createHistoryItem("chat1", "Chat 1", {
-        updatedAt: "2024-01-03T00:00:00Z",
-      }),
-      chat2: createHistoryItem("chat2", "Chat 2", {
-        updatedAt: "2024-01-02T00:00:00Z",
-      }),
-      chat3: createHistoryItem("chat3", "Chat 3", {
-        updatedAt: "2024-01-01T00:00:00Z",
-      }),
+      chats: {
+        chat1: createHistoryItem("chat1", "Chat 1", {
+          updatedAt: "2024-01-03T00:00:00Z",
+        }),
+        chat2: createHistoryItem("chat2", "Chat 2", {
+          updatedAt: "2024-01-02T00:00:00Z",
+        }),
+        chat3: createHistoryItem("chat3", "Chat 3", {
+          updatedAt: "2024-01-01T00:00:00Z",
+        }),
+      },
+      isLoading: false,
     };
 
     const result = getHistoryTree({ history: state });
@@ -55,17 +58,20 @@ describe("getHistoryTree", () => {
 
   it("builds tree structure with parent_id relationships", () => {
     const state: HistoryState = {
-      parent: createHistoryItem("parent", "Parent Chat", {
-        updatedAt: "2024-01-03T00:00:00Z",
-      }),
-      child1: createHistoryItem("child1", "Child 1", {
-        updatedAt: "2024-01-02T00:00:00Z",
-        parent_id: "parent",
-      }),
-      child2: createHistoryItem("child2", "Child 2", {
-        updatedAt: "2024-01-01T00:00:00Z",
-        parent_id: "parent",
-      }),
+      chats: {
+        parent: createHistoryItem("parent", "Parent Chat", {
+          updatedAt: "2024-01-03T00:00:00Z",
+        }),
+        child1: createHistoryItem("child1", "Child 1", {
+          updatedAt: "2024-01-02T00:00:00Z",
+          parent_id: "parent",
+        }),
+        child2: createHistoryItem("child2", "Child 2", {
+          updatedAt: "2024-01-01T00:00:00Z",
+          parent_id: "parent",
+        }),
+      },
+      isLoading: false,
     };
 
     const result = getHistoryTree({ history: state });
@@ -79,17 +85,20 @@ describe("getHistoryTree", () => {
 
   it("handles nested tree structure", () => {
     const state: HistoryState = {
-      root: createHistoryItem("root", "Root", {
-        updatedAt: "2024-01-04T00:00:00Z",
-      }),
-      level1: createHistoryItem("level1", "Level 1", {
-        updatedAt: "2024-01-03T00:00:00Z",
-        parent_id: "root",
-      }),
-      level2: createHistoryItem("level2", "Level 2", {
-        updatedAt: "2024-01-02T00:00:00Z",
-        parent_id: "level1",
-      }),
+      chats: {
+        root: createHistoryItem("root", "Root", {
+          updatedAt: "2024-01-04T00:00:00Z",
+        }),
+        level1: createHistoryItem("level1", "Level 1", {
+          updatedAt: "2024-01-03T00:00:00Z",
+          parent_id: "root",
+        }),
+        level2: createHistoryItem("level2", "Level 2", {
+          updatedAt: "2024-01-02T00:00:00Z",
+          parent_id: "level1",
+        }),
+      },
+      isLoading: false,
     };
 
     const result = getHistoryTree({ history: state });
@@ -104,13 +113,16 @@ describe("getHistoryTree", () => {
 
   it("treats items with missing parent as roots", () => {
     const state: HistoryState = {
-      orphan: createHistoryItem("orphan", "Orphan", {
-        updatedAt: "2024-01-02T00:00:00Z",
-        parent_id: "nonexistent",
-      }),
-      regular: createHistoryItem("regular", "Regular", {
-        updatedAt: "2024-01-01T00:00:00Z",
-      }),
+      chats: {
+        orphan: createHistoryItem("orphan", "Orphan", {
+          updatedAt: "2024-01-02T00:00:00Z",
+          parent_id: "nonexistent",
+        }),
+        regular: createHistoryItem("regular", "Regular", {
+          updatedAt: "2024-01-01T00:00:00Z",
+        }),
+      },
+      isLoading: false,
     };
 
     const result = getHistoryTree({ history: state });
@@ -122,21 +134,24 @@ describe("getHistoryTree", () => {
 
   it("sorts roots and children by updatedAt descending", () => {
     const state: HistoryState = {
-      parent: createHistoryItem("parent", "Parent", {
-        updatedAt: "2024-01-01T00:00:00Z",
-      }),
-      child_old: createHistoryItem("child_old", "Old Child", {
-        updatedAt: "2024-01-01T00:00:00Z",
-        parent_id: "parent",
-      }),
-      child_new: createHistoryItem("child_new", "New Child", {
-        updatedAt: "2024-01-03T00:00:00Z",
-        parent_id: "parent",
-      }),
-      child_mid: createHistoryItem("child_mid", "Mid Child", {
-        updatedAt: "2024-01-02T00:00:00Z",
-        parent_id: "parent",
-      }),
+      chats: {
+        parent: createHistoryItem("parent", "Parent", {
+          updatedAt: "2024-01-01T00:00:00Z",
+        }),
+        child_old: createHistoryItem("child_old", "Old Child", {
+          updatedAt: "2024-01-01T00:00:00Z",
+          parent_id: "parent",
+        }),
+        child_new: createHistoryItem("child_new", "New Child", {
+          updatedAt: "2024-01-03T00:00:00Z",
+          parent_id: "parent",
+        }),
+        child_mid: createHistoryItem("child_mid", "Mid Child", {
+          updatedAt: "2024-01-02T00:00:00Z",
+          parent_id: "parent",
+        }),
+      },
+      isLoading: false,
     };
 
     const result = getHistoryTree({ history: state });
@@ -148,10 +163,13 @@ describe("getHistoryTree", () => {
 
   it("filters out task chats from tree", () => {
     const state: HistoryState = {
-      task_chat: createHistoryItem("task_chat", "Task Chat", {
-        task_id: "task-123",
-      }),
-      regular: createHistoryItem("regular", "Regular Chat"),
+      chats: {
+        task_chat: createHistoryItem("task_chat", "Task Chat", {
+          task_id: "task-123",
+        }),
+        regular: createHistoryItem("regular", "Regular Chat"),
+      },
+      isLoading: false,
     };
 
     const result = getHistoryTree({ history: state });
@@ -162,14 +180,17 @@ describe("getHistoryTree", () => {
 
   it("inverts handoff relationship - handoff becomes root with parent as child", () => {
     const state: HistoryState = {
-      original: createHistoryItem("original", "Original Chat", {
-        updatedAt: "2024-01-01T00:00:00Z",
-      }),
-      handoff: createHistoryItem("handoff", "Handoff Chat", {
-        updatedAt: "2024-01-02T00:00:00Z",
-        parent_id: "original",
-        link_type: "handoff",
-      }),
+      chats: {
+        original: createHistoryItem("original", "Original Chat", {
+          updatedAt: "2024-01-01T00:00:00Z",
+        }),
+        handoff: createHistoryItem("handoff", "Handoff Chat", {
+          updatedAt: "2024-01-02T00:00:00Z",
+          parent_id: "original",
+          link_type: "handoff",
+        }),
+      },
+      isLoading: false,
     };
 
     const result = getHistoryTree({ history: state });
@@ -182,14 +203,17 @@ describe("getHistoryTree", () => {
 
   it("keeps subagent as child of parent", () => {
     const state: HistoryState = {
-      parent: createHistoryItem("parent", "Parent Chat", {
-        updatedAt: "2024-01-02T00:00:00Z",
-      }),
-      subagent: createHistoryItem("subagent", "Subagent Chat", {
-        updatedAt: "2024-01-01T00:00:00Z",
-        parent_id: "parent",
-        link_type: "subagent",
-      }),
+      chats: {
+        parent: createHistoryItem("parent", "Parent Chat", {
+          updatedAt: "2024-01-02T00:00:00Z",
+        }),
+        subagent: createHistoryItem("subagent", "Subagent Chat", {
+          updatedAt: "2024-01-01T00:00:00Z",
+          parent_id: "parent",
+          link_type: "subagent",
+        }),
+      },
+      isLoading: false,
     };
 
     const result = getHistoryTree({ history: state });

@@ -82,7 +82,9 @@ export const Select: React.FC<SelectProps> = ({
       !isOpen ? (
         <HoverCard.Root openDelay={1000}>
           <HoverCard.Trigger>
-            <Trigger />
+            <span>
+              <Trigger />
+            </span>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="top">
             {maybeSelectedOption.tooltip}

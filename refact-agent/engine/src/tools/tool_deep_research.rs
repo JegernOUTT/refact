@@ -87,7 +87,7 @@ async fn execute_deep_research(
     subchat_tx: Arc<AMutex<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>>,
     research_query: String,
     tool_call_id: String,
-) -> Result<(ChatMessage, ChatUsage), String> {
+) -> Result<(ChatMessage, ChatUsage, serde_json::Map<String, serde_json::Value>), String> {
     send_entertainment_message(&subchat_tx, &tool_call_id, 0).await;
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -106,7 +106,7 @@ async fn execute_deep_research(
     let reply = subchat_result.messages.last().cloned()
         .ok_or("No response from deep research")?;
 
-    Ok((reply, subchat_result.usage))
+    Ok((reply, subchat_result.usage, subchat_result.metering))
 }
 
 #[async_trait]
@@ -161,7 +161,7 @@ impl Tool for ToolDeepResearch {
 
         tracing::info!("Starting deep research for query: {}", research_query);
 
-        let (research_result, usage_collector) = execute_deep_research(
+        let (research_result, usage_collector, metering) = execute_deep_research(
             gcx,
             subchat_tx,
             research_query.clone(),
@@ -205,6 +205,7 @@ impl Tool for ToolDeepResearch {
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             usage: Some(usage_collector),
+            extra: metering,
             output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         })]))

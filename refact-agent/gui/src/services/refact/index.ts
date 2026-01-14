@@ -22,3 +22,4 @@ export * from "./trajectory";
 export * from "./chatSubscription";
 export * from "./chatCommands";
 export * from "./tasks";
+export * from "./tasksSubscription";

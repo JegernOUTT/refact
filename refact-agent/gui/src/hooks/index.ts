@@ -37,6 +37,7 @@ export * from "./useEventBusForApp";
 export * from "./useTotalCostForChat";
 export * from "./useCheckpoints";
 export * from "./useTrajectoriesSubscription";
+export * from "./useTasksSubscription";
 export * from "./useChatSubscription";
 export * from "./useDraftMessage";
 export * from "./useStreamingChatIds"; // exports useChatSessionStates and SessionState

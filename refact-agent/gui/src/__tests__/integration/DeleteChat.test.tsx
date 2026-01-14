@@ -36,20 +36,23 @@ describe("Delete a Chat form history", () => {
   it("can delete a chat", async () => {
     const now = new Date().toISOString();
     const history: HistoryState = {
-      abc123: {
-        title: "Test title",
-        isTitleGenerated: false,
-        messages: [],
-        id: "abc123",
-        model: "foo",
-        tool_use: "quick",
-        new_chat_suggested: {
-          wasSuggested: false,
+      chats: {
+        abc123: {
+          title: "Test title",
+          isTitleGenerated: false,
+          messages: [],
+          id: "abc123",
+          model: "foo",
+          tool_use: "quick",
+          new_chat_suggested: {
+            wasSuggested: false,
+          },
+          createdAt: now,
+          updatedAt: now,
+          read: true,
         },
-        createdAt: now,
-        updatedAt: now,
-        read: true,
       },
+      isLoading: false,
     };
     const { user, store, ...app } = render(<InnerApp />, {
       preloadedState: {
@@ -82,6 +85,6 @@ describe("Delete a Chat form history", () => {
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     await user.click(deleteButton!);
 
-    expect(store.getState().history).toEqual({});
+    expect(store.getState().history.chats).toEqual({});
   });
 });

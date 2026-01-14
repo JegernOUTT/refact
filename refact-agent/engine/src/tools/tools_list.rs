@@ -173,11 +173,6 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
             config_path: config_path.clone(),
         }),
         Box::new(
-            crate::tools::tool_create_memory_bank::ToolCreateMemoryBank {
-                config_path: config_path.clone(),
-            },
-        ),
-        Box::new(
             crate::tools::tool_trajectory_context::ToolTrajectoryContext {
                 config_path: config_path.clone(),
             },

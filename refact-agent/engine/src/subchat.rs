@@ -117,6 +117,8 @@ pub struct SubchatConfig {
 pub struct SubchatResult {
     pub messages: Vec<ChatMessage>,
     pub usage: ChatUsage,
+    /// Aggregated metering data from all assistant messages (coins, tokens, etc.)
+    pub metering: serde_json::Map<String, serde_json::Value>,
     /// Set when `config.stateful == true`, allows caller to reference the saved trajectory.
     /// Intentionally public API - callers may use it for trajectory linking.
     #[allow(dead_code)]
@@ -361,9 +363,12 @@ pub async fn run_subchat(
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
     }
 
+    let metering = aggregate_metering_from_messages(&current_messages);
+
     Ok(SubchatResult {
         messages: current_messages,
         usage,
+        metering,
         chat_id: if config.stateful {
             Some(chat_id)
         } else {
@@ -426,10 +431,12 @@ pub async fn run_subchat_once(
     update_usage_from_messages(&mut usage, &results);
 
     let final_messages = results.into_iter().next().unwrap_or_default();
+    let metering = aggregate_metering_from_messages(&final_messages);
 
     Ok(SubchatResult {
         messages: final_messages,
         usage,
+        metering,
         chat_id: None,
     })
 }
@@ -859,6 +866,26 @@ fn update_usage_from_messages(usage: &mut ChatUsage, messages: &[Vec<ChatMessage
             }
         }
     }
+}
+
+fn aggregate_metering_from_messages(messages: &[ChatMessage]) -> serde_json::Map<String, serde_json::Value> {
+    let mut aggregated = serde_json::Map::new();
+
+    for msg in messages.iter().filter(|m| m.role == "assistant") {
+        for (key, value) in &msg.extra {
+            if key.starts_with("metering_") {
+                if let Some(num) = value.as_f64() {
+                    let current = aggregated
+                        .get(key)
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    aggregated.insert(key.clone(), serde_json::json!(current + num));
+                }
+            }
+        }
+    }
+
+    aggregated
 }
 
 async fn subchat_single_internal(

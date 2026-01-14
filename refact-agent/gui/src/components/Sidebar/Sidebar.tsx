@@ -1,5 +1,6 @@
 import React, { useCallback } from "react";
 import { Box, Flex, Spinner, Text, Card } from "@radix-ui/themes";
+import { Loading } from "../Loading";
 import { ChatHistory, type ChatHistoryProps } from "../ChatHistory";
 import { useAppSelector, useAppDispatch } from "../../hooks";
 import {
@@ -45,12 +46,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
   const dispatch = useAppDispatch();
   const globalError = useAppSelector(getErrorMessage);
   const currentHost = useAppSelector(selectHost);
-  const history = useAppSelector((app) => app.history, {
+  const history = useAppSelector((app) => app.history.chats, {
     devModeChecks: { stabilityCheck: "never" },
   });
-  const { data: tasks = [] } = useListTasksQuery(undefined, {
-    pollingInterval: 2000,
+  const historyIsLoading = useAppSelector((app) => app.history.isLoading);
+  const { data: tasks, isFetching: tasksIsFetching } = useListTasksQuery(undefined, {
+    refetchOnMountOrArgChange: true,
   });
+  const tasksIsLoading = tasksIsFetching || tasks === undefined;
   const [deleteTask] = useDeleteTaskMutation();
 
   const onDeleteHistoryItem = useCallback(
@@ -80,7 +83,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
     [deleteTask],
   );
 
-  const activeTasks = tasks.filter(
+  const activeTasks = (tasks ?? []).filter(
     (t) =>
       t.status === "active" || t.status === "planning" || t.status === "paused",
   );
@@ -94,17 +97,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
         </Box>
       </Flex>
 
-      {activeTasks.length > 0 && (
-        <Box p="2">
-          <Text
-            size="2"
-            weight="medium"
-            color="gray"
-            mb="2"
-            style={{ display: "block" }}
-          >
-            Tasks
-          </Text>
+      <Box p="2">
+        <Text
+          size="2"
+          weight="medium"
+          color="gray"
+          mb="2"
+          style={{ display: "block" }}
+        >
+          Tasks
+        </Text>
+        {tasksIsLoading ? (
+          <Loading />
+        ) : activeTasks.length > 0 ? (
           <Flex direction="column" gap="1">
             {activeTasks.map((task) => {
               const plannerState = task.planner_session_state;
@@ -269,8 +274,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
               );
             })}
           </Flex>
-        </Box>
-      )}
+        ) : (
+          <Text size="2" color="gray">No active tasks</Text>
+        )}
+      </Box>
 
       <Box p="2" pb="0">
         <Text
@@ -285,6 +292,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
       </Box>
       <ChatHistory
         history={history}
+        isLoading={historyIsLoading}
         onHistoryItemClick={onHistoryItemClick}
         onDeleteHistoryItem={onDeleteHistoryItem}
       />

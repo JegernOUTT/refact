@@ -5,14 +5,16 @@ import {
   trajectoriesApi,
   TrajectoryEvent,
   chatThreadToTrajectoryData,
-  trajectoryDataToChatThread,
 } from "../services/refact/trajectories";
 import {
   hydrateHistory,
   deleteChatById,
-  ChatHistoryItem,
+  updateChatMetaById,
+  setHistoryLoading,
 } from "../features/History/historySlice";
+import type { ChatHistoryItem } from "../features/History/historySlice";
 import { updateOpenThread, closeThread } from "../features/Chat/Thread";
+import { useAppSelector } from "./useAppSelector";
 
 const MIGRATION_KEY = "refact-trajectories-migrated";
 
@@ -58,6 +60,9 @@ function markMigrationDone() {
 export function useTrajectoriesSubscription() {
   const dispatch = useAppDispatch();
   const config = useConfig();
+  const historyChats = useAppSelector((state) => state.history.chats);
+  const historyRef = useRef(historyChats);
+  historyRef.current = historyChats;
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -82,29 +87,46 @@ export function useTrajectoriesSubscription() {
           const data = JSON.parse(event.data as string) as TrajectoryEvent;
           if (data.type === "deleted") {
             dispatch(deleteChatById(data.id));
-            // Force delete runtime even if it's streaming - backend says it's gone
             dispatch(closeThread({ id: data.id, force: true }));
           } else {
-            void dispatch(
-              trajectoriesApi.endpoints.getTrajectory.initiate(data.id, {
-                forceRefetch: true,
-              }),
-            )
-              .unwrap()
-              .then((trajectory) => {
-                dispatch(hydrateHistory([trajectory]));
-                const thread = trajectoryDataToChatThread(trajectory);
+            const existsInHistory = data.id in historyRef.current;
+            if (existsInHistory && (data.title || data.updated_at)) {
+              dispatch(
+                updateChatMetaById({
+                  id: data.id,
+                  title: data.title,
+                  updatedAt: data.updated_at,
+                }),
+              );
+              if (data.title) {
                 dispatch(
                   updateOpenThread({
                     id: data.id,
-                    thread: {
-                      title: thread.title,
-                      isTitleGenerated: thread.isTitleGenerated,
-                    },
+                    thread: { title: data.title, isTitleGenerated: true },
                   }),
                 );
-              })
-              .catch(() => undefined);
+              }
+            } else if (!existsInHistory) {
+              void dispatch(
+                trajectoriesApi.endpoints.getTrajectory.initiate(data.id, {
+                  forceRefetch: true,
+                }),
+              )
+                .unwrap()
+                .then((trajectory) => {
+                  dispatch(hydrateHistory([trajectory]));
+                  dispatch(
+                    updateOpenThread({
+                      id: data.id,
+                      thread: {
+                        title: trajectory.title,
+                        isTitleGenerated: trajectory.isTitleGenerated,
+                      },
+                    }),
+                  );
+                })
+                .catch(() => undefined);
+            }
           }
         } catch {
           // ignore parse errors
@@ -165,17 +187,22 @@ export function useTrajectoriesSubscription() {
   }, [dispatch]);
 
   const loadInitialHistory = useCallback(async () => {
+    dispatch(setHistoryLoading(true));
     try {
       await migrateFromLocalStorage();
 
       const result = await dispatch(
-        trajectoriesApi.endpoints.listTrajectories.initiate(undefined),
+        trajectoriesApi.endpoints.listTrajectories.initiate(undefined, {
+          forceRefetch: true,
+        }),
       ).unwrap();
 
       const trajectories = await Promise.all(
         result.map(async (meta) => {
           const data = await dispatch(
-            trajectoriesApi.endpoints.getTrajectory.initiate(meta.id),
+            trajectoriesApi.endpoints.getTrajectory.initiate(meta.id, {
+              forceRefetch: true,
+            }),
           ).unwrap();
           return {
             ...data,
@@ -186,8 +213,9 @@ export function useTrajectoriesSubscription() {
       );
 
       dispatch(hydrateHistory(trajectories));
+      dispatch(setHistoryLoading(false));
     } catch {
-      // Backend not available
+      dispatch(setHistoryLoading(false));
     }
   }, [dispatch, migrateFromLocalStorage]);
 
