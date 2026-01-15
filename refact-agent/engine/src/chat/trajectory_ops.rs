@@ -441,6 +441,9 @@ pub async fn handoff_select(
     if let Some(msg) = summary_msg {
         selected.push(msg);
     }
+    selected.extend(conversation);
+
+    super::history_limit::remove_invalid_tool_calls_and_tool_calls_results(&mut selected);
 
     let handoff_context_msg = ChatMessage {
         role: "user".to_string(),
@@ -451,10 +454,6 @@ pub async fn handoff_select(
         ..Default::default()
     };
     selected.push(handoff_context_msg);
-
-    selected.extend(conversation);
-
-    super::history_limit::remove_invalid_tool_calls_and_tool_calls_results(&mut selected);
 
     let stats = TransformStats {
         before_message_count: before_count,
@@ -819,8 +818,9 @@ mod tests {
             "You are an assistant"
         );
         assert_eq!(selected[1].role, "user");
-        assert_eq!(selected[2].role, "user");
-        assert_eq!(selected[2].content.content_text_only(), "second question");
+        assert_eq!(selected[1].content.content_text_only(), "second question");
+        assert_eq!(selected[2].role, "assistant");
+        assert_eq!(selected[3].role, "user");
     }
 
     #[tokio::test]
@@ -886,8 +886,8 @@ mod tests {
 
         assert_system_prefix(&selected);
         assert_eq!(selected[0].role, "user");
-        assert_eq!(selected[1].role, "user");
-        assert_eq!(selected[2].role, "assistant");
+        assert_eq!(selected[1].role, "assistant");
+        assert_eq!(selected[2].role, "user");
     }
 
     #[tokio::test]
@@ -958,7 +958,7 @@ mod tests {
 
         assert_system_prefix(&selected);
         assert!(selected.iter().all(|m| m.role != "tool"));
-        assert_eq!(roles(&selected), vec!["system", "user", "user", "assistant"]);
+        assert_eq!(roles(&selected), vec!["system", "user", "assistant", "user"]);
     }
 
     #[tokio::test]
@@ -984,7 +984,7 @@ mod tests {
         assert_system_prefix(&selected);
         assert_eq!(
             roles(&selected),
-            vec!["system", "assistant", "tool", "user", "user", "assistant"]
+            vec!["system", "assistant", "tool", "user", "assistant", "user"]
         );
         assert_eq!(selected[1].tool_calls.as_ref().unwrap()[0].id, "tc1");
         assert_eq!(selected[2].tool_call_id, "tc1");
@@ -1012,7 +1012,7 @@ mod tests {
         assert_system_prefix(&selected);
         assert_eq!(
             roles(&selected),
-            vec!["system", "assistant", "tool", "user", "user", "assistant"]
+            vec!["system", "assistant", "tool", "user", "assistant", "user"]
         );
     }
 
@@ -1038,7 +1038,7 @@ mod tests {
         assert_system_prefix(&selected);
         assert_eq!(
             roles(&selected),
-            vec!["system", "assistant", "tool", "user", "user", "assistant"]
+            vec!["system", "assistant", "tool", "user", "assistant", "user"]
         );
     }
 
@@ -1175,7 +1175,7 @@ mod tests {
         assert_system_prefix(&selected);
         assert_eq!(
             roles(&selected),
-            vec!["system", "assistant", "diff", "user", "user", "assistant"]
+            vec!["system", "assistant", "diff", "user", "assistant", "user"]
         );
     }
 
@@ -1207,7 +1207,7 @@ mod tests {
             .unwrap();
 
         assert_system_prefix(&selected);
-        assert_eq!(roles(&selected), vec!["system", "user", "user", "assistant"]);
+        assert_eq!(roles(&selected), vec!["system", "user", "assistant", "user"]);
     }
 
     #[tokio::test]
@@ -1235,7 +1235,7 @@ mod tests {
         assert_system_prefix(&selected);
         assert_eq!(
             roles(&selected),
-            vec!["system", "assistant", "tool", "user", "user", "assistant"]
+            vec!["system", "assistant", "tool", "user", "assistant", "user"]
         );
 
         let tool_idx = selected.iter().position(|m| m.role == "tool").unwrap();
@@ -1268,7 +1268,7 @@ mod tests {
             .unwrap();
 
         assert_system_prefix(&selected);
-        // Order: system -> context_file -> assistant(tool_call) -> tool -> user -> assistant
+        // Order: system -> context_file -> assistant(tool_call) -> tool -> user -> assistant -> user
         assert_eq!(
             roles(&selected),
             vec![
@@ -1277,8 +1277,8 @@ mod tests {
                 "assistant",
                 "tool",
                 "user",
-                "user",
-                "assistant"
+                "assistant",
+                "user"
             ]
         );
 
