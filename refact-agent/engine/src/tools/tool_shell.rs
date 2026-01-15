@@ -22,7 +22,7 @@ use crate::files_correction::preprocess_path_for_normalization;
 use crate::files_correction::CommandSimplifiedDirExt;
 use crate::global_context::GlobalContext;
 use crate::tools::tools_description::{
-    ToolParam, Tool, ToolDesc, ToolSource, ToolSourceType, MatchConfirmDeny, MatchConfirmDenyResult,
+    ToolParam, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::postprocessing::pp_command_output::{
@@ -30,7 +30,7 @@ use crate::postprocessing::pp_command_output::{
 };
 use crate::postprocessing::pp_capture_buffer::{CaptureBuffer, KeepStrategy};
 use crate::integrations::integr_abstract::IntegrationConfirmation;
-use crate::tools::tools_description::{command_should_be_denied, command_should_be_confirmed_by_user};
+
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct SettingsShell {

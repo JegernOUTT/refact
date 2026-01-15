@@ -108,6 +108,8 @@ pub fn parse_output_filter_args(
             .unwrap_or(default.limit_lines)
     };
 
+    let skip_filtering = is_unlimited && output_filter_pattern.is_none();
+
     OutputFilter {
         limit_lines,
         limit_chars: if is_unlimited {
@@ -116,7 +118,13 @@ pub fn parse_output_filter_args(
             limit_lines.saturating_mul(200)
         },
         valuable_top_or_bottom: default.valuable_top_or_bottom.clone(),
-        grep: output_filter_pattern.unwrap_or_else(|| default.grep.clone()),
+        grep: output_filter_pattern.unwrap_or_else(|| {
+            if is_unlimited {
+                String::new()
+            } else {
+                default.grep.clone()
+            }
+        }),
         grep_context_lines: default.grep_context_lines,
         remove_from_output: default.remove_from_output.clone(),
         limit_tokens: if is_unlimited {
@@ -124,7 +132,7 @@ pub fn parse_output_filter_args(
         } else {
             Some(limit_lines.saturating_mul(50))
         },
-        skip: false,
+        skip: skip_filtering,
     }
 }
 

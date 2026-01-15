@@ -14,7 +14,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
-use crate::integrations::integr_cmdline::{create_command_from_string, format_output, replace_args};
+use crate::integrations::integr_cmdline::{create_command_from_string, format_output};
 use crate::integrations::process_io_utils::{blocking_read_until_token_or_timeout, is_someone_listening_on_that_tcp_port};
 use crate::integrations::sessions::IntegrationSession;
 use crate::postprocessing::pp_command_output::{OutputFilter, output_mini_postprocessing};
@@ -22,6 +22,68 @@ use crate::tools::tools_description::{
     Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType, MatchConfirmDeny, MatchConfirmDenyResult,
     command_should_be_denied, command_should_be_confirmed_by_user,
 };
+
+const ASK_USER_DEFAULT: &[&str] = &[
+    "*rm*",
+    "*rmdir*",
+    "*del /s*",
+    "*deltree*",
+    "*mkfs*",
+    "*dd *",
+    "*format*",
+    "*> /dev/*",
+    ":(){ :|:& };:",
+    "*chmod -R*",
+    "*chown -R*",
+    "*chmod 777*",
+    "*chmod a+rwx*",
+    "*git push*",
+    "*git reset --hard*",
+    "curl * | sh",
+    "curl * | bash",
+    "wget * -O - | sh",
+    "wget * -O - | bash",
+    "*apt-get remove*",
+    "*apt-get purge*",
+    "*apt remove*",
+    "*apt purge*",
+    "*yum remove*",
+    "*yum erase*",
+    "*dnf remove*",
+    "*pacman -R*",
+    "*brew uninstall*",
+    "*docker rm*",
+    "*docker rmi*",
+    "*docker system prune*",
+    "*kubectl delete*",
+    "*kill -9*",
+    "*killall*",
+    "*pkill*",
+    "*shutdown*",
+    "*reboot*",
+    "*halt*",
+    "*poweroff*",
+    "*init 0*",
+    "*init 6*",
+    "*systemctl stop*",
+    "*systemctl disable*",
+    "*service * stop",
+    "*truncate -s 0*",
+    "*fdisk*",
+    "*parted*",
+    "*mkswap*",
+    "*swapon*",
+    "*swapoff*",
+    "*mount*",
+    "*umount*",
+    "*crontab -r*",
+    "*history -c*",
+    "*shred*",
+    "*wipe*",
+    "*srm*",
+];
+
+const DENY_DEFAULT: &[&str] = &["sudo*"];
 use crate::custom_error::YamlError;
 
 const REALLY_HORRIBLE_ROUNDTRIP: u64 = 3000;
@@ -163,15 +225,16 @@ fn parse_startup_wait_params(args: &HashMap<String, Value>) -> (u64, Option<u16>
 }
 
 fn parse_output_params(args: &HashMap<String, Value>) -> OutputFilter {
-    let output_filter = args
+    let output_filter_pattern = args
         .get("output_filter")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
     let output_limit = args
         .get("output_limit")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_u64().map(|n| n.to_string())))
+        .unwrap_or_default();
 
     let is_unlimited = output_limit.eq_ignore_ascii_case("all") || output_limit.eq_ignore_ascii_case("full");
 
@@ -181,19 +244,17 @@ fn parse_output_params(args: &HashMap<String, Value>) -> OutputFilter {
         output_limit.parse::<usize>().unwrap_or(40)
     };
 
+    let skip_filtering = is_unlimited && output_filter_pattern.is_none();
+
     OutputFilter {
         limit_lines,
-        limit_chars: usize::MAX,
+        limit_chars: if is_unlimited { usize::MAX } else { limit_lines.saturating_mul(200) },
         valuable_top_or_bottom: "top".to_string(),
-        grep: output_filter.to_string(),
+        grep: output_filter_pattern.unwrap_or_default(),
         grep_context_lines: 3,
         remove_from_output: "".to_string(),
-        limit_tokens: if is_unlimited {
-            None
-        } else {
-            Some(limit_lines.saturating_mul(50))
-        },
-        skip: false,
+        limit_tokens: if is_unlimited { None } else { Some(limit_lines.saturating_mul(50)) },
+        skip: skip_filtering,
     }
 }
 
@@ -644,8 +705,8 @@ impl Tool for ToolShellService {
 
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
         Some(IntegrationConfirmation {
-            ask_user: vec!["*".to_string()],
-            deny: vec!["sudo*".to_string()],
+            ask_user: ASK_USER_DEFAULT.iter().map(|s| s.to_string()).collect(),
+            deny: DENY_DEFAULT.iter().map(|s| s.to_string()).collect(),
         })
     }
 
