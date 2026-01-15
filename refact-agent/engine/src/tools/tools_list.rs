@@ -151,6 +151,14 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
         config_path: config_path.clone(),
     })];
 
+    let system_tools: Vec<Box<dyn Tool + Send>> = vec![Box::new(crate::tools::tool_shell::ToolShell {
+        cfg: crate::tools::tool_shell::SettingsShell {
+            timeout: "10".to_string(),
+            output_filter: crate::postprocessing::pp_command_output::OutputFilter::default(),
+        },
+        config_path: config_path.clone(),
+    })];
+
     let deep_analysis_tools: Vec<Box<dyn Tool + Send>> = vec![
         Box::new(
             crate::tools::tool_strategic_planning::ToolStrategicPlanning {
@@ -224,6 +232,12 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
             description: "Web tools".to_string(),
             category: ToolGroupCategory::Builtin,
             tools: web_tools,
+        },
+        ToolGroup {
+            name: "System".to_string(),
+            description: "System tools".to_string(),
+            category: ToolGroupCategory::Builtin,
+            tools: system_tools,
         },
         ToolGroup {
             name: "Strategic Planning".to_string(),
