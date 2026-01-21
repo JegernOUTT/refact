@@ -25,7 +25,7 @@ export function useChatSessionStates(): Record<string, SessionState> {
     }
 
     for (const chat of Object.values(historyChats)) {
-      if (states[chat.id]) continue;
+      if (chat.id in states) continue;
       if (chat.session_state && chat.session_state !== "idle") {
         states[chat.id] = chat.session_state;
       }
