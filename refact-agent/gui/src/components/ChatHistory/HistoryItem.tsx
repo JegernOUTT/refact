@@ -12,8 +12,6 @@ import { CloseButton } from "../Buttons/Buttons";
 import { IconButton } from "@radix-ui/themes";
 import { OpenInNewWindowIcon } from "@radix-ui/react-icons";
 import type { ChatHistoryItem } from "../../features/History/historySlice";
-import { isUserMessage } from "../../services/refact";
-import { useAppSelector } from "../../hooks";
 import {
   useChatSessionStates,
   SessionState,
@@ -44,7 +42,6 @@ export const HistoryItem: React.FC<{
 }) => {
   const dateCreated = new Date(historyItem.createdAt);
   const dateTimeString = dateCreated.toLocaleString();
-  const threads = useAppSelector((app) => app.chat.threads);
   const chatSessionStates = useChatSessionStates();
 
   const totalCost = useMemo(() => {
@@ -60,13 +57,7 @@ export const HistoryItem: React.FC<{
     );
   }, [historyItem.messages]);
 
-  const threadRuntime = threads[historyItem.id] as
-    | { streaming: boolean; waiting_for_response: boolean }
-    | undefined;
-
   const getSessionState = (): SessionState | null => {
-    if (threadRuntime?.streaming) return "generating";
-    if (threadRuntime?.waiting_for_response) return "executing_tools";
     return chatSessionStates[historyItem.id] as SessionState | null;
   };
 
@@ -142,18 +133,15 @@ export const HistoryItem: React.FC<{
                 size="1"
                 style={{ display: "flex", gap: "4px", alignItems: "center" }}
               >
-                <ChatBubbleIcon />{" "}
-                {historyItem.messages.filter(isUserMessage).length}
+                <ChatBubbleIcon /> {historyItem.message_count ?? 0}
               </Text>
-              {totalCost ? (
+              {totalCost !== null && (
                 <Text
                   size="1"
                   style={{ display: "flex", gap: "4px", alignItems: "center" }}
                 >
                   <Coin width="15px" height="15px" /> {Math.round(totalCost)}
                 </Text>
-              ) : (
-                false
               )}
             </Flex>
 
@@ -196,9 +184,7 @@ export const HistoryItem: React.FC<{
         gap="1"
         justify="end"
         align="center"
-        // justify to flex end
       >
-        {/**TODO: open in tab button */}
         {onOpenInTab && (
           <IconButton
             size="1"
@@ -216,7 +202,6 @@ export const HistoryItem: React.FC<{
 
         <CloseButton
           size="1"
-          // needs to be smaller
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { getHistoryTree, HistoryState, ChatHistoryItem } from "./historySlice";
+import {
+  getHistoryTree,
+  HistoryState,
+  ChatHistoryItem,
+  historySlice,
+} from "./historySlice";
 
 function createHistoryItem(
   id: string,
@@ -24,9 +29,16 @@ function createHistoryItem(
   };
 }
 
+const defaultPagination = { cursor: null, hasMore: true };
+
 describe("getHistoryTree", () => {
   it("returns empty array for empty state", () => {
-    const state: HistoryState = { chats: {}, isLoading: false };
+    const state: HistoryState = {
+      chats: {},
+      isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
+    };
     const result = getHistoryTree({ history: state });
     expect(result).toEqual([]);
   });
@@ -45,6 +57,8 @@ describe("getHistoryTree", () => {
         }),
       },
       isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
     };
 
     const result = getHistoryTree({ history: state });
@@ -72,6 +86,8 @@ describe("getHistoryTree", () => {
         }),
       },
       isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
     };
 
     const result = getHistoryTree({ history: state });
@@ -99,6 +115,8 @@ describe("getHistoryTree", () => {
         }),
       },
       isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
     };
 
     const result = getHistoryTree({ history: state });
@@ -123,13 +141,15 @@ describe("getHistoryTree", () => {
         }),
       },
       isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
     };
 
     const result = getHistoryTree({ history: state });
 
     expect(result).toHaveLength(2);
-    expect(result.map((n) => n.id)).toContain("orphan");
-    expect(result.map((n) => n.id)).toContain("regular");
+    expect(result.map((n: { id: string }) => n.id)).toContain("orphan");
+    expect(result.map((n: { id: string }) => n.id)).toContain("regular");
   });
 
   it("sorts roots and children by updatedAt descending", () => {
@@ -152,6 +172,8 @@ describe("getHistoryTree", () => {
         }),
       },
       isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
     };
 
     const result = getHistoryTree({ history: state });
@@ -170,6 +192,8 @@ describe("getHistoryTree", () => {
         regular: createHistoryItem("regular", "Regular Chat"),
       },
       isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
     };
 
     const result = getHistoryTree({ history: state });
@@ -191,6 +215,8 @@ describe("getHistoryTree", () => {
         }),
       },
       isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
     };
 
     const result = getHistoryTree({ history: state });
@@ -214,6 +240,8 @@ describe("getHistoryTree", () => {
         }),
       },
       isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
     };
 
     const result = getHistoryTree({ history: state });
@@ -222,5 +250,162 @@ describe("getHistoryTree", () => {
     expect(result[0].id).toBe("parent");
     expect(result[0].children).toHaveLength(1);
     expect(result[0].children[0].id).toBe("subagent");
+  });
+});
+
+describe("pagination reducers", () => {
+  it("setPagination updates cursor and hasMore", () => {
+    const state: HistoryState = {
+      chats: {},
+      isLoading: false,
+      loadError: null,
+      pagination: { cursor: null, hasMore: true },
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.setPagination({
+        cursor: "next-cursor",
+        hasMore: true,
+      }),
+    );
+
+    expect(result.pagination.cursor).toBe("next-cursor");
+    expect(result.pagination.hasMore).toBe(true);
+  });
+
+  it("setPagination sets hasMore to false when no more pages", () => {
+    const state: HistoryState = {
+      chats: {},
+      isLoading: false,
+      loadError: null,
+      pagination: { cursor: "some-cursor", hasMore: true },
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.setPagination({
+        cursor: null,
+        hasMore: false,
+      }),
+    );
+
+    expect(result.pagination.cursor).toBeNull();
+    expect(result.pagination.hasMore).toBe(false);
+  });
+});
+
+describe("error handling reducers", () => {
+  it("setHistoryLoadError sets error without affecting pagination", () => {
+    const state: HistoryState = {
+      chats: {},
+      isLoading: true,
+      loadError: null,
+      pagination: { cursor: "some-cursor", hasMore: true },
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.setHistoryLoadError("Network error"),
+    );
+
+    expect(result.loadError).toBe("Network error");
+    expect(result.isLoading).toBe(false);
+    expect(result.pagination.hasMore).toBe(true);
+    expect(result.pagination.cursor).toBe("some-cursor");
+  });
+
+  it("setHistoryLoadError clears error when null is passed", () => {
+    const state: HistoryState = {
+      chats: {},
+      isLoading: false,
+      loadError: "Previous error",
+      pagination: { cursor: null, hasMore: true },
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.setHistoryLoadError(null),
+    );
+
+    expect(result.loadError).toBeNull();
+  });
+
+  it("setHistoryLoading clears error when loading starts", () => {
+    const state: HistoryState = {
+      chats: {},
+      isLoading: false,
+      loadError: "Previous error",
+      pagination: { cursor: null, hasMore: true },
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.setHistoryLoading(true),
+    );
+
+    expect(result.isLoading).toBe(true);
+    expect(result.loadError).toBeNull();
+  });
+});
+
+describe("session_state handling", () => {
+  it("hydrateHistoryFromMeta includes session_state", () => {
+    const state: HistoryState = {
+      chats: {},
+      isLoading: false,
+      loadError: null,
+      pagination: { cursor: null, hasMore: true },
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.hydrateHistoryFromMeta([
+        {
+          id: "chat1",
+          title: "Test Chat",
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-01T00:00:00Z",
+          model: "gpt-4",
+          mode: "AGENT",
+          message_count: 5,
+          session_state: "generating",
+        },
+      ]),
+    );
+
+    expect(result.chats.chat1).toBeDefined();
+    expect(result.chats.chat1.session_state).toBe("generating");
+  });
+
+  it("hydrateHistoryFromMeta updates session_state for existing chats", () => {
+    const state: HistoryState = {
+      chats: {
+        chat1: createHistoryItem("chat1", "Test Chat", {
+          session_state: "idle",
+        }),
+      },
+      isLoading: false,
+      loadError: null,
+      pagination: { cursor: null, hasMore: true },
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.hydrateHistoryFromMeta([
+        {
+          id: "chat1",
+          title: "Test Chat",
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-02T00:00:00Z",
+          model: "gpt-4",
+          mode: "AGENT",
+          message_count: 5,
+          session_state: "executing_tools",
+        },
+      ]),
+    );
+
+    expect(result.chats.chat1.session_state).toBe("executing_tools");
   });
 });

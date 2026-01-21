@@ -66,7 +66,10 @@ pub async fn get_task_dir(
 }
 
 pub async fn list_tasks(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Vec<TaskMeta>, String> {
-    let tasks_dir = get_tasks_dir(gcx.clone()).await?;
+    let tasks_dir = match get_tasks_dir(gcx.clone()).await {
+        Ok(dir) => dir,
+        Err(_) => return Ok(vec![]),
+    };
     if !tasks_dir.exists() {
         return Ok(vec![]);
     }

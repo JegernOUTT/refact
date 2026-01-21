@@ -24,6 +24,7 @@ export type TrajectoryMeta = {
     | "paused"
     | "waiting_ide"
     | "error";
+  root_chat_id?: string;
 };
 
 export type TrajectoryData = {
@@ -50,6 +51,31 @@ export type TrajectoryEvent = {
   id: string;
   updated_at?: string;
   title?: string;
+  session_state?:
+    | "idle"
+    | "generating"
+    | "executing_tools"
+    | "paused"
+    | "waiting_ide"
+    | "error";
+  message_count?: number;
+  parent_id?: string;
+  link_type?: string;
+  root_chat_id?: string;
+  model?: string;
+  mode?: string;
+};
+
+export type PaginatedTrajectories = {
+  items: TrajectoryMeta[];
+  next_cursor: string | null;
+  has_more: boolean;
+  total_count: number;
+};
+
+export type TrajectoriesListParams = {
+  limit?: number;
+  cursor?: string;
 };
 
 export function chatThreadToTrajectoryData(
@@ -112,14 +138,35 @@ export const trajectoriesApi = createApi({
   }),
   tagTypes: ["Trajectory"],
   endpoints: (builder) => ({
-    listTrajectories: builder.query<TrajectoryMeta[], undefined>({
+    listTrajectoriesFirstPage: builder.query<TrajectoryMeta[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
         const url = `http://127.0.0.1:${port}/v1/trajectories`;
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
-        return { data: result.data as TrajectoryMeta[] };
+        const response = result.data as PaginatedTrajectories;
+        return { data: response.items };
+      },
+      providesTags: ["Trajectory"],
+    }),
+    listTrajectoriesPaginated: builder.query<
+      PaginatedTrajectories,
+      TrajectoriesListParams | undefined
+    >({
+      queryFn: async (args, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort;
+        const params = new URLSearchParams();
+        if (args?.limit) params.set("limit", String(args.limit));
+        if (args?.cursor) params.set("cursor", args.cursor);
+        const queryString = params.toString();
+        const url = `http://127.0.0.1:${port}/v1/trajectories${
+          queryString ? `?${queryString}` : ""
+        }`;
+        const result = await baseQuery({ url });
+        if (result.error) return { error: result.error };
+        return { data: result.data as PaginatedTrajectories };
       },
       providesTags: ["Trajectory"],
     }),
@@ -181,7 +228,8 @@ export const trajectoriesApi = createApi({
 });
 
 export const {
-  useListTrajectoriesQuery,
+  useListTrajectoriesFirstPageQuery,
+  useListTrajectoriesPaginatedQuery,
   useListAllTrajectoriesQuery,
   useGetTrajectoryQuery,
   useSaveTrajectoryMutation,

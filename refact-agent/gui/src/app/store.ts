@@ -59,6 +59,7 @@ import { checkpointsApi } from "../services/refact/checkpoints";
 import { patchesAndDiffsTrackerSlice } from "../features/PatchesAndDiffsTracker/patchesAndDiffsTrackerSlice";
 import { coinBallanceSlice } from "../features/CoinBalance";
 import { tasksSlice } from "../features/Tasks";
+import { connectionSlice } from "../features/Connection";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -117,6 +118,7 @@ const rootReducer = combineSlices(
   patchesAndDiffsTrackerSlice,
   coinBallanceSlice,
   tasksSlice,
+  connectionSlice,
 );
 
 const rootPersistConfig = {

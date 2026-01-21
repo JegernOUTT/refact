@@ -16,6 +16,7 @@ import {
 import {
   trajectoriesApi,
   TrajectoryData,
+  TrajectoryMeta,
   trajectoryDataToChatThread,
 } from "../../services/refact";
 import { AppDispatch, RootState } from "../../app/store";
@@ -33,6 +34,15 @@ export type ChatHistoryItem = Omit<ChatThread, "new_chat_suggested"> & {
   task_role?: string;
   agent_id?: string;
   card_id?: string;
+  session_state?:
+    | "idle"
+    | "generating"
+    | "executing_tools"
+    | "paused"
+    | "waiting_ide"
+    | "error";
+  message_count?: number;
+  root_chat_id?: string;
 };
 
 export type HistoryMeta = Pick<
@@ -43,6 +53,11 @@ export type HistoryMeta = Pick<
 export type HistoryState = {
   chats: Record<string, ChatHistoryItem>;
   isLoading: boolean;
+  loadError: string | null;
+  pagination: {
+    cursor: string | null;
+    hasMore: boolean;
+  };
 };
 
 export type TrajectoryWithMeta = TrajectoryData & {
@@ -58,9 +73,67 @@ export type HistoryTreeNode = ChatHistoryItem & {
   children: HistoryTreeNode[];
 };
 
+export function buildHistoryTree(
+  chats: Record<string, ChatHistoryItem>,
+): HistoryTreeNode[] {
+  const nodes = Object.values(chats)
+    .filter((x) => !x.task_id)
+    .map((x) => ({ ...x, children: [] as HistoryTreeNode[] }));
+
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const parentByChild = new Map<string, string>();
+
+  const ordered = [...nodes].sort((a, b) =>
+    b.updatedAt.localeCompare(a.updatedAt),
+  );
+
+  const wouldCycle = (parentId: string, childId: string): boolean => {
+    let cur: string | undefined = parentId;
+    while (cur) {
+      if (cur === childId) return true;
+      cur = parentByChild.get(cur);
+    }
+    return false;
+  };
+
+  const attach = (parentId: string, childId: string) => {
+    if (parentByChild.has(childId)) return;
+    if (wouldCycle(parentId, childId)) return;
+    const parent = byId.get(parentId);
+    const child = byId.get(childId);
+    if (!parent || !child) return;
+    parentByChild.set(childId, parentId);
+    parent.children.push(child);
+  };
+
+  for (const node of ordered) {
+    const pid = node.parent_id;
+    if (!pid || !byId.has(pid)) continue;
+    if (node.link_type === "handoff") {
+      attach(node.id, pid);
+    } else {
+      attach(pid, node.id);
+    }
+  }
+
+  const sortTree = (xs: HistoryTreeNode[]) => {
+    xs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    for (const x of xs) sortTree(x.children);
+  };
+
+  const roots = nodes.filter((n) => !parentByChild.has(n.id));
+  sortTree(roots);
+  return roots;
+}
+
 const initialState: HistoryState = {
   chats: {},
   isLoading: true,
+  loadError: null,
+  pagination: {
+    cursor: null,
+    hasMore: true,
+  },
 };
 
 function getFirstUserContentFromChat(messages: ChatThread["messages"]): string {
@@ -138,17 +211,57 @@ function trajectoryToHistoryItem(
   };
 }
 
+function trajectoryMetaToHistoryItem(meta: TrajectoryMeta): ChatHistoryItem {
+  return {
+    id: meta.id,
+    title: meta.title,
+    model: meta.model,
+    mode: meta.mode as ChatHistoryItem["mode"],
+    tool_use: "agent",
+    messages: [],
+    boost_reasoning: false,
+    context_tokens_cap: undefined,
+    include_project_info: true,
+    increase_max_tokens: false,
+    automatic_patch: false,
+    project_name: undefined,
+    read: true,
+    isTitleGenerated: true,
+    createdAt: meta.created_at,
+    last_user_message_id: "",
+    updatedAt: meta.updated_at,
+    parent_id: meta.parent_id,
+    link_type: meta.link_type,
+    task_id: meta.task_id,
+    task_role: meta.task_role,
+    agent_id: meta.agent_id,
+    card_id: meta.card_id,
+    session_state: meta.session_state,
+    message_count: meta.message_count,
+    root_chat_id: meta.root_chat_id,
+  };
+}
+
 export const historySlice = createSlice({
   name: "history",
   initialState,
   reducers: {
     setHistoryLoading: (state, action: PayloadAction<boolean>) => {
       state.isLoading = action.payload;
+      if (action.payload) {
+        state.loadError = null;
+      }
+    },
+
+    setHistoryLoadError: (state, action: PayloadAction<string | null>) => {
+      state.loadError = action.payload;
+      state.isLoading = false;
     },
 
     saveChat: (state, action: PayloadAction<ChatThread>) => {
       if (action.payload.messages.length === 0) return;
       const chat = chatThreadToHistoryItem(action.payload);
+      chat.messages = [];
       if (chat.id in state.chats) {
         const existing = state.chats[chat.id];
         if (
@@ -166,21 +279,6 @@ export const historySlice = createSlice({
         chat.card_id = existing.card_id;
       }
       state.chats[chat.id] = chat;
-
-      const allChats = Object.values(state.chats);
-      if (allChats.length > 100) {
-        const sorted = allChats.sort((a, b) =>
-          b.updatedAt.localeCompare(a.updatedAt),
-        );
-        const idsToKeep = new Set(sorted.slice(0, 100).map((c) => c.id));
-        const idsToRemove = Object.keys(state.chats).filter(
-          (id) => !idsToKeep.has(id),
-        );
-        for (const id of idsToRemove) {
-          // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-          delete state.chats[id];
-        }
-      }
     },
 
     hydrateHistory: (state, action: PayloadAction<TrajectoryWithMeta[]>) => {
@@ -194,6 +292,40 @@ export const historySlice = createSlice({
           card_id: data.card_id,
         });
       }
+    },
+
+    hydrateHistoryFromMeta: (
+      state,
+      action: PayloadAction<TrajectoryMeta[]>,
+    ) => {
+      for (const meta of action.payload) {
+        if (!(meta.id in state.chats)) {
+          state.chats[meta.id] = trajectoryMetaToHistoryItem(meta);
+        } else {
+          const existing = state.chats[meta.id];
+          existing.title = meta.title;
+          existing.updatedAt = meta.updated_at;
+          existing.model = meta.model;
+          existing.mode = meta.mode as ChatHistoryItem["mode"];
+          existing.parent_id = meta.parent_id;
+          existing.link_type = meta.link_type;
+          existing.task_id = meta.task_id;
+          existing.task_role = meta.task_role;
+          existing.agent_id = meta.agent_id;
+          existing.card_id = meta.card_id;
+          existing.session_state = meta.session_state;
+          existing.message_count = meta.message_count;
+          existing.root_chat_id = meta.root_chat_id;
+        }
+      }
+    },
+
+    setPagination: (
+      state,
+      action: PayloadAction<{ cursor: string | null; hasMore: boolean }>,
+    ) => {
+      state.pagination.cursor = action.payload.cursor;
+      state.pagination.hasMore = action.payload.hasMore;
     },
 
     markChatAsUnread: (state, action: PayloadAction<string>) => {
@@ -224,7 +356,16 @@ export const historySlice = createSlice({
 
     updateChatMetaById: (
       state,
-      action: PayloadAction<{ id: string; title?: string; updatedAt?: string }>,
+      action: PayloadAction<{
+        id: string;
+        title?: string;
+        updatedAt?: string;
+        session_state?: ChatHistoryItem["session_state"];
+        message_count?: number;
+        parent_id?: string;
+        link_type?: string;
+        root_chat_id?: string;
+      }>,
     ) => {
       if (!(action.payload.id in state.chats)) return;
       const chat = state.chats[action.payload.id];
@@ -235,10 +376,30 @@ export const historySlice = createSlice({
       if (action.payload.updatedAt !== undefined) {
         chat.updatedAt = action.payload.updatedAt;
       }
+      if (action.payload.session_state !== undefined) {
+        chat.session_state = action.payload.session_state;
+      }
+      if (action.payload.message_count !== undefined) {
+        chat.message_count = action.payload.message_count;
+      }
+      if (action.payload.parent_id !== undefined) {
+        chat.parent_id = action.payload.parent_id;
+      }
+      if (action.payload.link_type !== undefined) {
+        chat.link_type = action.payload.link_type;
+      }
+      if (action.payload.root_chat_id !== undefined) {
+        chat.root_chat_id = action.payload.root_chat_id;
+      }
     },
 
     clearHistory: () => {
-      return { chats: {}, isLoading: false };
+      return {
+        chats: {},
+        isLoading: false,
+        loadError: null,
+        pagination: { cursor: null, hasMore: true },
+      };
     },
 
     upsertToolCallIntoHistory: (
@@ -271,88 +432,17 @@ export const historySlice = createSlice({
         .filter((item) => !item.task_id)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
 
-    getHistoryTree: (state): HistoryTreeNode[] => {
-      const items = Object.values(state.chats).filter((item) => !item.task_id);
-      const itemMap = new Map<string, HistoryTreeNode>();
-      const roots: HistoryTreeNode[] = [];
-
-      for (const item of items) {
-        itemMap.set(item.id, { ...item, children: [] });
-      }
-
-      const assignedAsChild = new Set<string>();
-      const handoffParentIds = new Set<string>();
-
-      for (const item of items) {
-        if (
-          item.link_type === "handoff" &&
-          item.parent_id &&
-          itemMap.has(item.parent_id)
-        ) {
-          handoffParentIds.add(item.parent_id);
-        }
-      }
-
-      for (const item of items) {
-        const node = itemMap.get(item.id);
-        if (!node) continue;
-
-        if (handoffParentIds.has(item.id)) {
-          continue;
-        }
-
-        if (item.parent_id && itemMap.has(item.parent_id)) {
-          if (assignedAsChild.has(item.id)) {
-            roots.push(node);
-            continue;
-          }
-          const parent = itemMap.get(item.parent_id);
-          if (!parent || parent.parent_id === item.id) {
-            roots.push(node);
-            continue;
-          }
-
-          if (item.link_type === "handoff") {
-            const parentNode = itemMap.get(item.parent_id);
-            if (parentNode) {
-              node.children.push(parentNode);
-              assignedAsChild.add(item.parent_id);
-              roots.push(node);
-            }
-          } else {
-            const parentNode = itemMap.get(item.parent_id);
-            if (parentNode) {
-              parentNode.children.push(node);
-              assignedAsChild.add(item.id);
-            }
-          }
-        } else {
-          roots.push(node);
-        }
-      }
-
-      const sortByUpdated = (a: HistoryTreeNode, b: HistoryTreeNode) =>
-        b.updatedAt.localeCompare(a.updatedAt);
-
-      const sortTree = (nodes: HistoryTreeNode[]) => {
-        nodes.sort(sortByUpdated);
-        for (const node of nodes) {
-          if (node.children.length > 0) {
-            sortTree(node.children);
-          }
-        }
-      };
-
-      sortTree(roots);
-      return roots;
-    },
+    getHistoryTree: (state): HistoryTreeNode[] => buildHistoryTree(state.chats),
   },
 });
 
 export const {
   setHistoryLoading,
+  setHistoryLoadError,
   saveChat,
   hydrateHistory,
+  hydrateHistoryFromMeta,
+  setPagination,
   deleteChatById,
   markChatAsUnread,
   markChatAsRead,

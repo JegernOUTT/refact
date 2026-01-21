@@ -1876,6 +1876,7 @@ const SubagentTool: React.FC<{ toolCall: ToolCall }> = ({ toolCall }) => {
 
   const subchatLog: string[] = toolCall.subchat_log ?? [];
   const currentStep = subchatLog.slice(-1)[0];
+  const attachedFiles = toolCall.attached_files ?? [];
 
   const meta = [
     args.tools && `tools: ${args.tools}`,
@@ -1914,6 +1915,16 @@ const SubagentTool: React.FC<{ toolCall: ToolCall }> = ({ toolCall }) => {
                   {meta && (
                     <Text weight="light" size="1" color="gray">
                       {meta}
+                    </Text>
+                  )}
+                  {attachedFiles.length > 0 && (
+                    <Text weight="light" size="1" color="gray">
+                      {attachedFiles.length} files:{" "}
+                      {attachedFiles
+                        .slice(0, 3)
+                        .map((p) => truncatePath(p, 20))
+                        .join(", ")}
+                      {attachedFiles.length > 3 ? ", …" : ""}
                     </Text>
                   )}
                   {currentStep &&

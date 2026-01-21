@@ -53,6 +53,8 @@ describe("Delete a Chat form history", () => {
         },
       },
       isLoading: false,
+      loadError: null,
+      pagination: { cursor: null, hasMore: false },
     };
     const { user, store, ...app } = render(<InnerApp />, {
       preloadedState: {

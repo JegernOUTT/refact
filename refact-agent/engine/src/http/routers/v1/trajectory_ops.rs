@@ -79,8 +79,6 @@ fn describe_handoff_actions(opts: &HandoffOptions) -> Vec<String> {
     let mut actions = Vec::new();
     if opts.include_last_user_plus {
         actions.push("Include last user message and all following".to_string());
-    } else {
-        actions.push("Include user/assistant/system messages".to_string());
     }
     if opts.include_all_opened_context {
         actions.push("Include all opened context files".to_string());
@@ -121,11 +119,13 @@ pub async fn handle_transform_preview(
         actions: describe_transform_actions(&req.options),
     };
 
-    Ok(Response::builder()
+    let body = serde_json::to_vec(&response)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&response).unwrap()))
-        .unwrap())
+        .body(Body::from(body))
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 pub async fn handle_transform_apply(
@@ -168,11 +168,13 @@ pub async fn handle_transform_apply(
 
     let response = TransformApplyResponse { stats };
 
-    Ok(Response::builder()
+    let body = serde_json::to_vec(&response)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&response).unwrap()))
-        .unwrap())
+        .body(Body::from(body))
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 pub async fn handle_handoff_preview(
@@ -191,9 +193,15 @@ pub async fn handle_handoff_preview(
         session.messages.clone()
     };
 
-    let (_, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), false, &chat_id)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (_, stats, _) = handoff_select(
+        &messages,
+        &req.options,
+        gcx.clone(),
+        false,
+        &chat_id,
+    )
+    .await
+    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = HandoffPreviewResponse {
         stats,
@@ -201,11 +209,13 @@ pub async fn handle_handoff_preview(
         llm_summary: None,
     };
 
-    Ok(Response::builder()
+    let body = serde_json::to_vec(&response)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&response).unwrap()))
-        .unwrap())
+        .body(Body::from(body))
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 pub async fn handle_handoff_apply(
@@ -278,11 +288,13 @@ pub async fn handle_handoff_apply(
 
     let response = HandoffApplyResponse { new_chat_id, stats };
 
-    Ok(Response::builder()
+    let body = serde_json::to_vec(&response)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&response).unwrap()))
-        .unwrap())
+        .body(Body::from(body))
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn save_trajectory_snapshot_with_parent(
@@ -316,6 +328,10 @@ async fn save_trajectory_snapshot_with_parent(
         "parent_id": parent_id,
         "link_type": link_type,
     });
+
+    if let Some(ref root_chat_id) = snapshot.root_chat_id {
+        trajectory["root_chat_id"] = serde_json::Value::String(root_chat_id.clone());
+    }
 
     if let Some(ref task_meta) = snapshot.task_meta {
         trajectory["task_meta"] = serde_json::to_value(task_meta).unwrap_or_default();

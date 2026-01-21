@@ -1,24 +1,36 @@
 import { useMemo } from "react";
-import {
-  useListTrajectoriesQuery,
-  TrajectoryMeta,
-} from "../services/refact/trajectories";
+import { useAppSelector } from "./useAppSelector";
+import type { ChatHistoryItem } from "../features/History/historySlice";
 
-export type SessionState = NonNullable<TrajectoryMeta["session_state"]>;
+export type SessionState = NonNullable<ChatHistoryItem["session_state"]>;
 
 export function useChatSessionStates(): Record<string, SessionState> {
-  const { data: trajectories } = useListTrajectoriesQuery(undefined, {
-    pollingInterval: 2000,
-  });
+  const historyChats = useAppSelector((state) => state.history.chats);
+  const chatThreads = useAppSelector((state) => state.chat.threads);
 
   return useMemo(() => {
-    if (!trajectories) return {};
     const states: Record<string, SessionState> = {};
-    for (const t of trajectories) {
-      if (t.session_state) {
-        states[t.id] = t.session_state;
+
+    for (const [id, runtime] of Object.entries(chatThreads)) {
+      if (!runtime) continue;
+      if (runtime.streaming) {
+        states[id] = "generating";
+      } else if (runtime.confirmation.pause) {
+        states[id] = "paused";
+      } else if (runtime.waiting_for_response) {
+        states[id] = "executing_tools";
+      } else if (runtime.error) {
+        states[id] = "error";
       }
     }
+
+    for (const chat of Object.values(historyChats)) {
+      if (states[chat.id]) continue;
+      if (chat.session_state && chat.session_state !== "idle") {
+        states[chat.id] = chat.session_state;
+      }
+    }
+
     return states;
-  }, [trajectories]);
+  }, [historyChats, chatThreads]);
 }

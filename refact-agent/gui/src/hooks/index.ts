@@ -42,3 +42,5 @@ export * from "./useChatSubscription";
 export * from "./useAllChatsSubscription";
 export * from "./useDraftMessage";
 export * from "./useStreamingChatIds"; // exports useChatSessionStates and SessionState
+export * from "./useBrowserOnlineStatus";
+export * from "./useLoadMoreHistory";

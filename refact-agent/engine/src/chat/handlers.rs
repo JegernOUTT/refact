@@ -15,6 +15,7 @@ use super::session::get_or_create_session_with_trajectory;
 use super::content::validate_content_with_attachments;
 use super::queue::process_command_queue;
 use super::trajectory_ops::sanitize_messages_for_model_switch;
+use super::trajectories::validate_trajectory_id;
 
 pub async fn handle_v1_chat_subscribe(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
@@ -24,6 +25,7 @@ pub async fn handle_v1_chat_subscribe(
         .get("chat_id")
         .ok_or_else(|| ScratchError::new(StatusCode::BAD_REQUEST, "chat_id required".to_string()))?
         .clone();
+    validate_trajectory_id(&chat_id)?;
 
     let sessions = {
         let gcx_locked = gcx.read().await;
@@ -50,25 +52,35 @@ pub async fn handle_v1_chat_subscribe(
         let json = serde_json::to_string(&initial_envelope).unwrap_or_default();
         yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
 
+        let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
-            match rx.recv().await {
-                Ok(envelope) => {
-                    let json = serde_json::to_string(&envelope).unwrap_or_default();
-                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Ok(envelope) => {
+                            let json = serde_json::to_string(&envelope).unwrap_or_default();
+                            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::info!("SSE subscriber lagged, skipped {} events, sending fresh snapshot", skipped);
+                            let session = session_for_stream.lock().await;
+                            let recovery_envelope = EventEnvelope {
+                                chat_id: chat_id_for_stream.clone(),
+                                seq: session.event_seq,
+                                event: session.snapshot(),
+                            };
+                            drop(session);
+                            let json = serde_json::to_string(&recovery_envelope).unwrap_or_default();
+                            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
                 }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::info!("SSE subscriber lagged, skipped {} events, sending fresh snapshot", skipped);
-                    let session = session_for_stream.lock().await;
-                    let recovery_envelope = EventEnvelope {
-                        chat_id: chat_id_for_stream.clone(),
-                        seq: session.event_seq,
-                        event: session.snapshot(),
-                    };
-                    drop(session);
-                    let json = serde_json::to_string(&recovery_envelope).unwrap_or_default();
-                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                _ = heartbeat_interval.tick() => {
+                    yield Ok::<_, std::convert::Infallible>(format!(": hb {}\n\n", chrono::Utc::now().timestamp()));
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     };
@@ -87,6 +99,8 @@ pub async fn handle_v1_chat_command(
     Path(chat_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    validate_trajectory_id(&chat_id)?;
+
     let request: CommandRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -265,6 +279,8 @@ pub async fn handle_v1_chat_cancel_queued(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     Path((chat_id, client_request_id)): Path<(String, String)>,
 ) -> Result<Response<Body>, ScratchError> {
+    validate_trajectory_id(&chat_id)?;
+
     let sessions = {
         let gcx_locked = gcx.read().await;
         gcx_locked.chat_sessions.clone()

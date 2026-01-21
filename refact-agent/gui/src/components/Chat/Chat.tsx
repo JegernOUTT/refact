@@ -18,6 +18,7 @@ import { DropzoneProvider } from "../Dropzone";
 import { useCheckpoints } from "../../hooks/useCheckpoints";
 import { Checkpoints } from "../../features/Checkpoints";
 import { EnhancedModelSelector } from "./EnhancedModelSelector";
+import { ConnectionBanner } from "../ConnectionStatus";
 
 export type ChatProps = {
   host: Config["host"];
@@ -39,9 +40,6 @@ export const Chat: React.FC<ChatProps> = ({
   const isStreaming = useAppSelector(selectIsStreaming);
 
   const chatId = useAppSelector(selectChatId);
-
-  // SSE subscription is handled by useAllChatsSubscription in App.tsx
-  // which subscribes to all open tabs including the current one
 
   const { submit, abort, retryFromIndex } = useChatActions();
 
@@ -91,6 +89,7 @@ export const Chat: React.FC<ChatProps> = ({
         width="100%"
         px="1"
       >
+        <ConnectionBanner />
         <Flex
           direction="column"
           style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden" }}

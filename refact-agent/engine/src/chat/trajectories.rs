@@ -33,6 +33,20 @@ pub struct TrajectoryEvent {
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -527,12 +541,20 @@ pub async fn save_trajectory_snapshot(
     }
 
     if snapshot.task_meta.is_none() {
+        let effective_root = snapshot.root_chat_id.clone().unwrap_or_else(|| snapshot.chat_id.clone());
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let event = TrajectoryEvent {
                 event_type: "updated".to_string(),
                 id: snapshot.chat_id.clone(),
                 updated_at: Some(now),
                 title: Some(snapshot.title.clone()),
+                session_state: None,
+                message_count: Some(snapshot.messages.len()),
+                parent_id: snapshot.parent_id.clone(),
+                link_type: snapshot.link_type.clone(),
+                root_chat_id: Some(effective_root),
+                model: Some(snapshot.model.clone()),
+                mode: Some(snapshot.mode.clone()),
             };
             let _ = tx.send(event);
         }
@@ -636,19 +658,44 @@ async fn process_trajectory_change(
                 id: chat_id.to_string(),
                 updated_at: None,
                 title: None,
+                session_state: None,
+                message_count: None,
+                parent_id: None,
+                link_type: None,
+                root_chat_id: None,
+                model: None,
+                mode: None,
             });
         }
     } else {
-        let (updated_at, title) = load_trajectory_for_chat(gcx.clone(), chat_id)
-            .await
-            .map(|t| (Some(chrono::Utc::now().to_rfc3339()), Some(t.thread.title)))
-            .unwrap_or((None, None));
+        let loaded = load_trajectory_for_chat(gcx.clone(), chat_id).await;
+        let (updated_at, title, message_count, parent_id, link_type, root_chat_id, model, mode) =
+            loaded.map(|t| {
+                let effective_root = t.thread.root_chat_id.clone().unwrap_or_else(|| t.thread.id.clone());
+                (
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    Some(t.thread.title),
+                    Some(t.messages.len()),
+                    t.thread.parent_id,
+                    t.thread.link_type,
+                    Some(effective_root),
+                    Some(t.thread.model),
+                    Some(t.thread.mode),
+                )
+            }).unwrap_or((None, None, None, None, None, None, None, None));
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let _ = tx.send(TrajectoryEvent {
                 event_type: "updated".to_string(),
                 id: chat_id.to_string(),
                 updated_at,
                 title,
+                session_state: None,
+                message_count,
+                parent_id,
+                link_type,
+                root_chat_id,
+                model,
+                mode,
             });
         }
     }
@@ -812,8 +859,14 @@ pub fn start_trajectory_watcher(gcx: Arc<ARwLock<GlobalContext>>) {
     });
 }
 
-fn validate_trajectory_id(id: &str) -> Result<(), ScratchError> {
-    if id.contains('/') || id.contains('\\') || id.contains("..") || id.contains('\0') {
+pub fn validate_trajectory_id(id: &str) -> Result<(), ScratchError> {
+    if id.is_empty() || id.len() > 128 {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid trajectory id".to_string(),
+        ));
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "Invalid trajectory id".to_string(),
@@ -1056,6 +1109,13 @@ fn spawn_title_generation_task(
             id: id.clone(),
             updated_at: Some(now),
             title: Some(title.clone()),
+            session_state: None,
+            message_count: None,
+            parent_id: None,
+            link_type: None,
+            root_chat_id: None,
+            model: None,
+            mode: None,
         };
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let _ = tx.send(event);
@@ -1166,13 +1226,61 @@ fn trajectory_data_to_meta(data: &TrajectoryData) -> TrajectoryMeta {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TrajectoriesListQuery {
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaginatedTrajectories {
+    pub items: Vec<TrajectoryMeta>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub total_count: usize,
+}
+
+fn encode_cursor(updated_at: &str, id: &str) -> String {
+    use base64::Engine;
+    let cursor_data = format!("{}|{}", updated_at, id);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cursor_data.as_bytes())
+}
+
+fn decode_cursor(cursor: &str) -> Option<(String, String)> {
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let cursor_str = String::from_utf8(decoded).ok()?;
+    let parts: Vec<&str> = cursor_str.splitn(2, '|').collect();
+    if parts.len() == 2 {
+        Some((parts[0].to_string(), parts[1].to_string()))
+    } else {
+        None
+    }
+}
+
 pub async fn handle_v1_trajectories_list(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    axum::extract::Query(params): axum::extract::Query<TrajectoriesListQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let cursor_filter = match &params.cursor {
+        Some(c) => {
+            let decoded = decode_cursor(c);
+            if decoded.is_none() {
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid cursor format".to_string(),
+                ));
+            }
+            decoded
+        }
+        None => None,
+    };
+
     let trajectories_dir = get_trajectories_dir(gcx.clone())
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut result: Vec<TrajectoryMeta> = Vec::new();
+    let mut all_items: Vec<TrajectoryMeta> = Vec::new();
     if trajectories_dir.exists() {
         let mut entries = fs::read_dir(&trajectories_dir)
             .await
@@ -1188,17 +1296,60 @@ pub async fn handle_v1_trajectories_list(
             }
             if let Ok(content) = fs::read_to_string(&path).await {
                 if let Ok(data) = serde_json::from_str::<TrajectoryData>(&content) {
-                    result.push(trajectory_data_to_meta(&data));
+                    all_items.push(trajectory_data_to_meta(&data));
                 }
             }
         }
     }
-    enrich_with_session_state(gcx, &mut result).await;
-    result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    enrich_with_session_state(gcx, &mut all_items).await;
+    all_items.sort_by(|a, b| {
+        match b.updated_at.cmp(&a.updated_at) {
+            std::cmp::Ordering::Equal => b.id.cmp(&a.id),
+            other => other,
+        }
+    });
+
+    let total_count = all_items.len();
+
+    let start_idx = if let Some((cursor_updated_at, cursor_id)) = cursor_filter {
+        all_items
+            .iter()
+            .position(|item| {
+                (item.updated_at.as_str(), item.id.as_str()) < (cursor_updated_at.as_str(), cursor_id.as_str())
+            })
+            .unwrap_or(all_items.len())
+    } else {
+        0
+    };
+
+    let page_items: Vec<TrajectoryMeta> = all_items
+        .into_iter()
+        .skip(start_idx)
+        .take(limit + 1)
+        .collect();
+
+    let has_more = page_items.len() > limit;
+    let items: Vec<TrajectoryMeta> = page_items.into_iter().take(limit).collect();
+
+    let next_cursor = if has_more {
+        items.last().map(|last| encode_cursor(&last.updated_at, &last.id))
+    } else {
+        None
+    };
+
+    let response = PaginatedTrajectories {
+        items,
+        next_cursor,
+        has_more,
+        total_count,
+    };
+
+    let json = serde_json::to_string(&response)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {}", e)))?;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&result).unwrap()))
+        .body(Body::from(json))
         .unwrap())
 }
 
@@ -1272,13 +1423,21 @@ async fn enrich_with_session_state(
     gcx: Arc<ARwLock<GlobalContext>>,
     trajectories: &mut Vec<TrajectoryMeta>,
 ) {
-    let gcx_locked = gcx.read().await;
-    let sessions = gcx_locked.chat_sessions.read().await;
-    for traj in trajectories.iter_mut() {
-        if let Some(session_arc) = sessions.get(&traj.id) {
-            let session = session_arc.lock().await;
-            traj.session_state = Some(session.runtime.state.to_string());
-        }
+    let session_arcs: Vec<(usize, Arc<AMutex<ChatSession>>)> = {
+        let gcx_locked = gcx.read().await;
+        let sessions = gcx_locked.chat_sessions.read().await;
+        trajectories
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, traj)| {
+                sessions.get(&traj.id).map(|arc| (idx, arc.clone()))
+            })
+            .collect()
+    };
+
+    for (idx, session_arc) in session_arcs {
+        let session = session_arc.lock().await;
+        trajectories[idx].session_state = Some(session.runtime.state.to_string());
     }
 }
 
@@ -1360,6 +1519,12 @@ pub async fn handle_v1_trajectories_save(
     validate_trajectory_id(&id)?;
     let data: TrajectoryData = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut data = data;
+    data.updated_at = now.clone();
+    if data.created_at.is_empty() {
+        data.created_at = now.clone();
+    }
     if data.id != id {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
@@ -1384,6 +1549,12 @@ pub async fn handle_v1_trajectories_save(
     atomic_write_json(&file_path, &data)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let parent_id = data.extra.get("parent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let link_type = data.extra.get("link_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let effective_root = data.extra.get("root_chat_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| id.clone());
     let event = TrajectoryEvent {
         event_type: if is_new {
             "created".to_string()
@@ -1397,6 +1568,13 @@ pub async fn handle_v1_trajectories_save(
         } else {
             None
         },
+        session_state: None,
+        message_count: Some(data.messages.len()),
+        parent_id,
+        link_type,
+        root_chat_id: Some(effective_root),
+        model: Some(data.model.clone()),
+        mode: Some(data.mode.clone()),
     };
     if let Some(tx) = &gcx.read().await.trajectory_events_tx {
         let _ = tx.send(event);
@@ -1434,6 +1612,13 @@ pub async fn handle_v1_trajectories_delete(
         id: id.clone(),
         updated_at: None,
         title: None,
+        session_state: None,
+        message_count: None,
+        parent_id: None,
+        link_type: None,
+        root_chat_id: None,
+        model: None,
+        mode: None,
     };
     if let Some(tx) = &gcx.read().await.trajectory_events_tx {
         let _ = tx.send(event);
@@ -1515,6 +1700,29 @@ mod tests {
         assert!(validate_trajectory_id("abc-123").is_ok());
         assert!(validate_trajectory_id("chat_456").is_ok());
         assert!(validate_trajectory_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert!(validate_trajectory_id("planner-task-1").is_ok());
+        assert!(validate_trajectory_id("A1b2C3").is_ok());
+    }
+
+    #[test]
+    fn test_validate_trajectory_id_rejects_empty() {
+        assert!(validate_trajectory_id("").is_err());
+    }
+
+    #[test]
+    fn test_validate_trajectory_id_rejects_too_long() {
+        let long_id = "a".repeat(129);
+        assert!(validate_trajectory_id(&long_id).is_err());
+        let max_id = "a".repeat(128);
+        assert!(validate_trajectory_id(&max_id).is_ok());
+    }
+
+    #[test]
+    fn test_validate_trajectory_id_rejects_invalid_chars() {
+        assert!(validate_trajectory_id("has space").is_err());
+        assert!(validate_trajectory_id("has.dot").is_err());
+        assert!(validate_trajectory_id("has@symbol").is_err());
+        assert!(validate_trajectory_id("has#hash").is_err());
     }
 
     #[test]
@@ -1752,10 +1960,21 @@ mod tests {
             id: "chat-123".to_string(),
             updated_at: Some("2024-01-01T00:00:00Z".to_string()),
             title: Some("Test Title".to_string()),
+            session_state: Some("generating".to_string()),
+            message_count: Some(5),
+            parent_id: Some("parent-123".to_string()),
+            link_type: Some("subagent".to_string()),
+            root_chat_id: Some("root-123".to_string()),
+            model: Some("gpt-4".to_string()),
+            mode: Some("AGENT".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "updated");
         assert_eq!(json["id"], "chat-123");
+        assert_eq!(json["session_state"], "generating");
+        assert_eq!(json["message_count"], 5);
+        assert_eq!(json["parent_id"], "parent-123");
+        assert_eq!(json["link_type"], "subagent");
     }
 
     #[test]

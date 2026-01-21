@@ -64,6 +64,7 @@ import { telemetryApi } from "../../services/refact/telemetry";
 
 import styles from "./Toolbar.module.css";
 import { useActiveTeamsGroup } from "../../hooks/useActiveTeamsGroup";
+import { ConnectionStatusIndicator } from "../ConnectionStatus";
 
 export type DashboardTab = {
   type: "dashboard";
@@ -633,6 +634,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           </Button>
         </>
       )}
+      <ConnectionStatusIndicator />
       <Dropdown handleNavigation={handleNavigation} />
     </Flex>
   );

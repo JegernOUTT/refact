@@ -13,6 +13,7 @@ use crate::global_context::GlobalContext;
 use super::types::*;
 use super::types::{session_idle_timeout, session_cleanup_interval};
 use super::config::limits;
+use super::trajectories::TrajectoryEvent;
 
 pub type SessionsMap = Arc<ARwLock<HashMap<String, Arc<AMutex<ChatSession>>>>>;
 
@@ -36,6 +37,7 @@ impl ChatSession {
             command_queue: VecDeque::new(),
             event_seq: 0,
             event_tx,
+            trajectory_events_tx: None,
             recent_request_ids: VecDeque::with_capacity(limits().recent_request_ids_capacity),
             abort_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
@@ -68,6 +70,7 @@ impl ChatSession {
             command_queue: VecDeque::new(),
             event_seq: 0,
             event_tx,
+            trajectory_events_tx: None,
             recent_request_ids: VecDeque::with_capacity(limits().recent_request_ids_capacity),
             abort_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
@@ -194,6 +197,7 @@ impl ChatSession {
     pub fn set_runtime_state(&mut self, state: SessionState, error: Option<String>) {
         let was_paused = self.runtime.state == SessionState::Paused;
         let had_pause_reasons = !self.runtime.pause_reasons.is_empty();
+        let old_state = self.runtime.state;
 
         self.runtime.state = state;
         self.runtime.paused = state == SessionState::Paused;
@@ -213,6 +217,41 @@ impl ChatSession {
             queue_size: self.runtime.queue_size,
             queued_items: self.runtime.queued_items.clone(),
         });
+
+        if old_state != state {
+            self.emit_trajectory_state_change();
+        }
+    }
+
+    fn emit_trajectory_state_change(&self) {
+        if self.thread.task_meta.is_some() {
+            return;
+        }
+        if let Some(ref tx) = self.trajectory_events_tx {
+            let state_str = match self.runtime.state {
+                SessionState::Idle => "idle",
+                SessionState::Generating => "generating",
+                SessionState::ExecutingTools => "executing_tools",
+                SessionState::Paused => "paused",
+                SessionState::WaitingIde => "waiting_ide",
+                SessionState::Error => "error",
+            };
+            let effective_root = self.thread.root_chat_id.clone().unwrap_or_else(|| self.chat_id.clone());
+            let event = TrajectoryEvent {
+                event_type: "updated".to_string(),
+                id: self.chat_id.clone(),
+                updated_at: None,
+                title: None,
+                session_state: Some(state_str.to_string()),
+                message_count: Some(self.messages.len()),
+                parent_id: self.thread.parent_id.clone(),
+                link_type: self.thread.link_type.clone(),
+                root_chat_id: Some(effective_root),
+                model: Some(self.thread.model.clone()),
+                mode: Some(self.thread.mode.clone()),
+            };
+            let _ = tx.send(event);
+        }
     }
 
     pub fn build_queued_items(&self) -> Vec<QueuedItem> {
@@ -465,7 +504,9 @@ pub async fn get_or_create_session_with_trajectory(
         }
     }
 
-    let (session, is_new) = if let Some(loaded) =
+    let trajectory_events_tx = gcx.read().await.trajectory_events_tx.clone();
+
+    let (mut session, is_new) = if let Some(loaded) =
         super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id).await
     {
         info!(
@@ -487,6 +528,8 @@ pub async fn get_or_create_session_with_trajectory(
         s.increment_version();
         (s, true)
     };
+
+    session.trajectory_events_tx = trajectory_events_tx;
 
     let session_arc = {
         let mut sessions_write = sessions.write().await;

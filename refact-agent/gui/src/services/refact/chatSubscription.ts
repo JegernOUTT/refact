@@ -185,6 +185,7 @@ export type ChatSubscriptionCallbacks = {
   onError: (error: Error) => void;
   onConnected?: () => void;
   onDisconnected?: () => void;
+  onActivity?: () => void;
 };
 
 export type SubscriptionOptions = Record<string, never>;
@@ -239,6 +240,7 @@ export function subscribeToChatEvents(
         const { done, value } = await reader.read();
         if (done) break;
 
+        callbacks.onActivity?.();
         buffer += decoder.decode(value, { stream: true });
         buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 

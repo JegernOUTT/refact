@@ -2,7 +2,11 @@ import React, { useCallback } from "react";
 import { Box, Flex, Spinner, Text, Card } from "@radix-ui/themes";
 import { Loading } from "../Loading";
 import { ChatHistory, type ChatHistoryProps } from "../ChatHistory";
-import { useAppSelector, useAppDispatch } from "../../hooks";
+import {
+  useAppSelector,
+  useAppDispatch,
+  useLoadMoreHistory,
+} from "../../hooks";
 import {
   ChatHistoryItem,
   deleteChatById,
@@ -50,14 +54,28 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
     devModeChecks: { stabilityCheck: "never" },
   });
   const historyIsLoading = useAppSelector((app) => app.history.isLoading);
-  const { data: tasks, isFetching: tasksIsFetching } = useListTasksQuery(
-    undefined,
-    {
-      refetchOnMountOrArgChange: true,
-    },
-  );
-  const tasksIsLoading = tasksIsFetching || tasks === undefined;
+  const historyLoadError = useAppSelector((app) => app.history.loadError);
+  const {
+    data: tasks,
+    isFetching: tasksIsFetching,
+    isError: tasksIsError,
+  } = useListTasksQuery(undefined, {
+    refetchOnMountOrArgChange: true,
+  });
+  const tasksIsLoading =
+    tasksIsFetching || (tasks === undefined && !tasksIsError);
   const [deleteTask] = useDeleteTaskMutation();
+  const {
+    loadMore: loadMoreHistoryAsync,
+    hasMore: hasMoreHistory,
+    isLoading: isLoadingMoreHistory,
+    error: loadMoreError,
+    retry: retryLoadMore,
+  } = useLoadMoreHistory();
+
+  const loadMoreHistory = useCallback(() => {
+    void loadMoreHistoryAsync();
+  }, [loadMoreHistoryAsync]);
 
   const onDeleteHistoryItem = useCallback(
     (id: string) => dispatch(deleteChatById(id)),
@@ -278,8 +296,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
             })}
           </Flex>
         ) : (
-          <Text size="2" color="gray">
-            No active tasks
+          <Text size="2" color={tasksIsError ? "red" : "gray"}>
+            {tasksIsError ? "Unable to load tasks" : "No active tasks"}
           </Text>
         )}
       </Box>
@@ -300,8 +318,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ takingNotes, style }) => {
         isLoading={historyIsLoading}
         onHistoryItemClick={onHistoryItemClick}
         onDeleteHistoryItem={onDeleteHistoryItem}
+        onLoadMore={loadMoreHistory}
+        hasMore={hasMoreHistory}
+        isLoadingMore={isLoadingMoreHistory}
+        loadMoreError={loadMoreError}
+        onRetryLoadMore={retryLoadMore}
+        hasConnectionError={!!historyLoadError}
       />
-      {/* TODO: duplicated */}
       {globalError && (
         <ErrorCallout
           mx="0"

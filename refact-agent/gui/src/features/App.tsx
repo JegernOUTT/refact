@@ -12,6 +12,7 @@ import {
   useTasksSubscription,
   useAllChatsSubscription,
 } from "../hooks";
+import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
 import { FIMDebug } from "./FIM";
 import { store, persistor, RootState } from "../app/store";
 import { Provider } from "react-redux";
@@ -78,6 +79,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useTrajectoriesSubscription();
   useTasksSubscription();
   useAllChatsSubscription();
+  useBrowserOnlineStatus();
 
   const [isPaddingApplied, setIsPaddingApplied] = useState<boolean>(false);
 

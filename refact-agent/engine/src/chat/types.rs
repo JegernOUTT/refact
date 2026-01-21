@@ -425,6 +425,7 @@ pub struct ChatSession {
     pub command_queue: VecDeque<CommandRequest>,
     pub event_seq: u64,
     pub event_tx: broadcast::Sender<EventEnvelope>,
+    pub trajectory_events_tx: Option<broadcast::Sender<super::trajectories::TrajectoryEvent>>,
     pub recent_request_ids: VecDeque<String>,
     pub abort_flag: Arc<AtomicBool>,
     pub queue_processor_running: Arc<AtomicBool>,
