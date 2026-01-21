@@ -249,11 +249,6 @@ pub fn load_and_mix_with_users_config(
     work_config
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct Competency {
-    #[serde(default)]
-    system_prompt_vars: HashMap<String, String>,
-}
 
 pub async fn load_customization(
     gcx: Arc<ARwLock<GlobalContext>>,

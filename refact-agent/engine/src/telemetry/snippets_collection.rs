@@ -80,11 +80,6 @@ pub fn snippet_register_from_data4cache(
     ));
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SnippetAccepted {
-    pub snippet_telemetry_id: u64,
-}
-
 pub async fn snippet_accepted(
     gcx: Arc<ARwLock<global_context::GlobalContext>>,
     snippet_telemetry_id: u64,
@@ -103,7 +98,7 @@ pub async fn snippet_accepted(
         );
         return true;
     }
-    return false;
+    false
 }
 
 pub async fn sources_changed(

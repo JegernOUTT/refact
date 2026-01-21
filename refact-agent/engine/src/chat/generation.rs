@@ -396,7 +396,6 @@ pub async fn run_llm_generation(
         messages.clone(),
         chat_id.clone(),
         thread.root_chat_id.clone(),
-        false,
         model_rec.base.id.clone(),
         thread.task_meta.clone(),
         code_workdir,

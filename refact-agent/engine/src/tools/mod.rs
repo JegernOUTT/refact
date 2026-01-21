@@ -1,11 +1,9 @@
 pub mod scope_utils;
 pub mod tools_description;
-pub mod tools_execute;
 pub mod tools_list;
 
 mod tool_add_workspace_folder;
 mod tool_ast_definition;
-mod tool_ast_reference;
 mod tool_cat;
 mod tool_deep_research;
 mod tool_knowledge;

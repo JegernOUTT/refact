@@ -24,17 +24,6 @@ use crate::telemetry::snippets_collection;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Deserialize)]
-struct APIError {
-    error: String,
-}
-
-impl Display for APIError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error)
-    }
-}
-
 pub struct LspBackend {
     pub gcx: Arc<ARwLock<GlobalContext>>,
     pub client: tower_lsp::Client,
@@ -47,17 +36,11 @@ pub struct RequestParams {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Completion {
-    generated_text: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub struct CompletionParams1 {
     #[serde(flatten)]
     pub text_document_position: TextDocumentPositionParams,
     pub parameters: RequestParams,
     pub multiline: bool,
-    // pub model: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -68,20 +51,6 @@ pub struct SnippetAcceptedParams {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ChangeActiveFile {
     pub uri: Url,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TestHeadTailAddedText {
-    pub text_a: String,
-    pub text_b: String,
-    pub orig_grey_text: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TestHeadTailAddedTextRes {
-    pub is_valid: bool,
-    pub grey_corrected: String,
-    pub unchanged_percentage: f64,
 }
 
 fn internal_error<E: Display>(err: E) -> Error {

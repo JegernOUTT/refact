@@ -5,7 +5,6 @@ use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use serde_json::json;
-use uuid::Uuid;
 
 use crate::custom_error::ScratchError;
 use crate::files_in_workspace::{Document, get_file_text_from_memory_or_disk};
@@ -13,19 +12,6 @@ use crate::global_context::SharedGlobalContext;
 use crate::postprocessing::pp_context_files::pp_color_lines;
 use crate::postprocessing::pp_utils::{context_msgs_from_paths, pp_ast_markup_files};
 use crate::call_validation::PostprocessSettings;
-
-#[derive(Serialize, Deserialize, Clone)]
-struct AstQuerySearchBy {
-    query: String,
-    is_declaration: bool,
-    use_fuzzy_search: bool,
-    top_n: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct AstQuerySearchByGuid {
-    guid: Uuid,
-}
 
 #[derive(Serialize, Deserialize, Clone)]
 struct AstFileUrlPost {
