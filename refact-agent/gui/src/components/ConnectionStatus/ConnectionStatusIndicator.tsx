@@ -71,7 +71,7 @@ export const ConnectionStatusIndicator: React.FC = () => {
       <Tooltip content="Connected - Click to refresh">
         <button
           type="button"
-           onClick={() => void handleRefresh()}
+          onClick={() => void handleRefresh()}
           disabled={isRefreshing}
           className={styles.statusButton}
         >
@@ -98,8 +98,7 @@ export const ConnectionStatusIndicator: React.FC = () => {
       >
         <button
           type="button"
-
-           onClick={() => void handleRefresh()}
+          onClick={() => void handleRefresh()}
           disabled={isRefreshing || isReconnecting}
           className={styles.statusButton}
         >
