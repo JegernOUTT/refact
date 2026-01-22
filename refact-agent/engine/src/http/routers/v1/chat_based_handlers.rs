@@ -35,7 +35,7 @@ pub async fn handle_v1_commit_message_from_diff(
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
+        .header("Content-Type", "text/plain; charset=utf-8")
         .body(Body::from(commit_message))
         .unwrap())
 }

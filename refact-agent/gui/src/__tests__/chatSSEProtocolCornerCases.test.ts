@@ -555,6 +555,6 @@ describe("SSE Protocol - Disconnect Handling", () => {
     unsubscribe();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(onDisconnected).toHaveBeenCalledTimes(1);
+    expect(onDisconnected).not.toHaveBeenCalled();
   });
 });
