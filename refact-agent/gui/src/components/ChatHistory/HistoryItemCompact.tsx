@@ -232,134 +232,143 @@ export const HistoryItemCompact: React.FC<HistoryItemCompactProps> = ({
   }`;
 
   return (
-    <div
-      className={itemClasses}
-      onClick={handleClick}
-      role="button"
-      tabIndex={disabled ? -1 : 0}
-      onKeyDown={handleRowKeyDown}
-    >
-      <div className={styles.chevronArea}>
-        {hasChildren && onToggleExpand && (
-          <HoverCard.Root openDelay={200} closeDelay={100}>
-            <HoverCard.Trigger>
-              <div
-                className={styles.expandChevron}
-                onClick={handleToggleExpand}
-                onKeyDown={handleChevronKeyDown}
-                role="button"
-                tabIndex={0}
-                aria-label={chevronTooltip}
-                aria-expanded={isExpanded}
-              >
-                {isExpanded ? (
-                  <ChevronDownIcon width={14} height={14} />
-                ) : (
-                  <ChevronRightIcon width={14} height={14} />
-                )}
-              </div>
-            </HoverCard.Trigger>
-            <HoverCard.Content size="1" side="top" align="center">
-              <Text as="p" size="1">
-                {chevronTooltip}
-              </Text>
-            </HoverCard.Content>
-          </HoverCard.Root>
-        )}
-      </div>
+    <div className={styles.itemContainer}>
+      <div
+        className={itemClasses}
+        onClick={handleClick}
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        onKeyDown={handleRowKeyDown}
+      >
+        <div className={styles.chevronArea}>
+          {hasChildren && onToggleExpand && (
+            <HoverCard.Root openDelay={200} closeDelay={100}>
+              <HoverCard.Trigger>
+                <div
+                  className={styles.expandChevron}
+                  onClick={handleToggleExpand}
+                  onKeyDown={handleChevronKeyDown}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={chevronTooltip}
+                  aria-expanded={isExpanded}
+                >
+                  {isExpanded ? (
+                    <ChevronDownIcon width={14} height={14} />
+                  ) : (
+                    <ChevronRightIcon width={14} height={14} />
+                  )}
+                </div>
+              </HoverCard.Trigger>
+              <HoverCard.Content size="1" side="top" align="center">
+                <Text as="p" size="1">
+                  {chevronTooltip}
+                </Text>
+              </HoverCard.Content>
+            </HoverCard.Root>
+          )}
+        </div>
 
-      <div className={styles.leftSection}>
-        <StatusDot
-          state={statusState}
-          size="small"
-          tooltipText={statusTooltip}
-        />
-        {badge && (
-          <Badge size="1" color="gray" variant="soft" style={{ flexShrink: 0 }}>
-            {badge}
-          </Badge>
-        )}
-      </div>
-
-      <div className={styles.titleSection}>
-        {isEditing ? (
-          <TextField.Root
-            size="1"
-            value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onClick={(e) => e.stopPropagation()}
-            autoFocus
-            className={styles.editInput}
+        <div className={styles.leftSection}>
+          <StatusDot
+            state={statusState}
+            size="small"
+            tooltipText={statusTooltip}
           />
-        ) : (
-          <Text as="span" size="2" weight="regular" className={styles.title}>
-            {historyItem.title}
-          </Text>
-        )}
-      </div>
+          {badge && (
+            <Badge
+              size="1"
+              color="gray"
+              variant="soft"
+              style={{ flexShrink: 0 }}
+            >
+              {badge}
+            </Badge>
+          )}
+        </div>
 
-      <div className={styles.stats}>
-        <ChatBubbleIcon width={12} height={12} />
-        <Text size="1" color="gray">
-          {messageCount}
-        </Text>
-        {totalCoins !== undefined && totalCoins > 0 && (
-          <>
-            <span className={styles.statsSeparator} />
-            <Coin width={12} height={12} />
+        <div className={styles.titleSection}>
+          {isEditing ? (
+            <TextField.Root
+              size="1"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onClick={(e) => e.stopPropagation()}
+              autoFocus
+              className={styles.editInput}
+            />
+          ) : (
+            <Text as="span" size="2" weight="regular" className={styles.title}>
+              {historyItem.title}
+            </Text>
+          )}
+        </div>
+
+        <div className={styles.stats}>
+          <span className={styles.messagesCount}>
+            <ChatBubbleIcon width={12} height={12} />
             <Text size="1" color="gray">
-              {formatCoins(totalCoins)}
+              {messageCount}
             </Text>
-          </>
-        )}
-        {hasLineChanges && (
-          <>
-            <span className={styles.statsSeparator} />
-            <Text size="1" className={styles.linesAdded}>
-              +{linesAdded}
-            </Text>
-            <Text size="1" className={styles.linesRemoved}>
-              -{linesRemoved}
-            </Text>
-          </>
-        )}
-      </div>
+          </span>
+          {totalCoins !== undefined && totalCoins > 0 && (
+            <span className={styles.coinsStats}>
+              <span className={styles.statsSeparator} />
+              <Coin width={12} height={12} />
+              <Text size="1" color="gray">
+                {formatCoins(totalCoins)}
+              </Text>
+            </span>
+          )}
+          {hasLineChanges && (
+            <span className={styles.diffStats}>
+              <span className={styles.statsSeparator} />
+              <Text size="1" className={styles.linesAdded}>
+                +{linesAdded}
+              </Text>
+              <Text size="1" className={styles.linesRemoved}>
+                -{linesRemoved}
+              </Text>
+            </span>
+          )}
+        </div>
 
-      <Text size="1" color="gray" className={styles.date}>
-        {dateTimeString}
-      </Text>
+        <Text size="1" color="gray" className={styles.date}>
+          {dateTimeString}
+        </Text>
 
-      <div className={styles.actions}>
-        {isEditing ? (
-          <>
-            <TooltipButton onClick={handleConfirmEdit} tooltip="Save">
-              <CheckIcon width={12} height={12} />
-            </TooltipButton>
-            <TooltipButton onClick={handleCancelEdit} tooltip="Cancel">
-              <Cross1Icon width={10} height={10} />
-            </TooltipButton>
-          </>
-        ) : (
-          <>
-            {onRename && (
+        <div className={styles.actions}>
+          {isEditing ? (
+            <>
+              <TooltipButton onClick={handleConfirmEdit} tooltip="Save">
+                <CheckIcon width={12} height={12} />
+              </TooltipButton>
+              <TooltipButton onClick={handleCancelEdit} tooltip="Cancel">
+                <Cross1Icon width={10} height={10} />
+              </TooltipButton>
+            </>
+          ) : (
+            <>
+              {onRename && (
+                <TooltipButton
+                  onClick={handleStartEdit}
+                  tooltip="Rename"
+                  className={styles.actionButton}
+                >
+                  <Pencil1Icon width={12} height={12} />
+                </TooltipButton>
+              )}
               <TooltipButton
-                onClick={handleStartEdit}
-                tooltip="Rename"
+                onClick={handleDelete}
+                tooltip="Delete"
                 className={styles.actionButton}
               >
-                <Pencil1Icon width={12} height={12} />
+                <Cross1Icon width={10} height={10} />
               </TooltipButton>
-            )}
-            <TooltipButton
-              onClick={handleDelete}
-              tooltip="Delete"
-              className={styles.actionButton}
-            >
-              <Cross1Icon width={10} height={10} />
-            </TooltipButton>
-          </>
-        )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

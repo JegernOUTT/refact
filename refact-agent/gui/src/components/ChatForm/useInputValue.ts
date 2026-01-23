@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect } from "react";
-import { useAppDispatch, useAppSelector, useChatActions } from "../../hooks";
+import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectPages, change, ChatPage } from "../../features/Pages/pagesSlice";
 import { setInputValue, addInputValue } from "./actions";
 import { debugRefact } from "../../debugConfig";
 import { useDraftMessage } from "../../hooks/useDraftMessage";
+import { sendIdeMessagesToCurrentChat } from "../../features/Chat/Thread/actions";
 
 export function useInputValue(
   uncheckCheckboxes: () => void,
@@ -16,7 +17,6 @@ export function useInputValue(
   const { value, setValue } = useDraftMessage();
   const [isSendImmediately, setIsSendImmediately] =
     React.useState<boolean>(false);
-  const { submit } = useChatActions();
   const dispatch = useAppDispatch();
   const pages = useAppSelector(selectPages);
 
@@ -41,24 +41,14 @@ export function useInputValue(
         if (payload.messages && payload.messages.length > 0) {
           debugRefact(`[DEBUG]: payload messages: `, payload.messages);
           setIsSendImmediately(true);
-          // Extract text from last user message if available
-          const lastMsg = payload.messages[payload.messages.length - 1];
-          if (lastMsg.role === "user") {
-            let content = "";
-            if (typeof lastMsg.content === "string") {
-              content = lastMsg.content;
-            } else if (Array.isArray(lastMsg.content)) {
-              const textItem = lastMsg.content.find(
-                (c: unknown): c is { type: "text"; text: string } =>
-                  typeof c === "object" &&
-                  c !== null &&
-                  "type" in c &&
-                  c.type === "text",
-              );
-              content = textItem?.text ?? "";
-            }
-            void submit(content);
-          }
+          // Use thunk to send messages - it reads fresh chatId from Redux state
+          // to avoid stale closure issues when IDE sends events in quick succession
+          void dispatch(
+            sendIdeMessagesToCurrentChat({
+              messages: payload.messages,
+              priority: payload.send_immediately,
+            }),
+          );
           return;
         }
       }
@@ -86,7 +76,7 @@ export function useInputValue(
         return;
       }
     },
-    [setUpIfNotReady, submit, uncheckCheckboxes, setValue],
+    [setUpIfNotReady, dispatch, uncheckCheckboxes, setValue],
   );
 
   useEffect(() => {

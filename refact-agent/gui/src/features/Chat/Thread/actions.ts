@@ -27,6 +27,7 @@ import {
   type MessageContent,
 } from "../../../services/refact/chatCommands";
 import { selectLspPort, selectApiKey } from "../../Config/configSlice";
+import { selectCurrentThreadId } from "./selectors";
 
 function toMessageContent(
   content: import("../../../services/refact/types").UserMessage["content"],
@@ -67,6 +68,33 @@ export interface TaskMeta {
   agent_id?: string;
   card_id?: string;
 }
+
+/**
+ * Send messages from IDE (e.g., CodeLens) to the current chat.
+ * This thunk reads chatId fresh from Redux state to avoid stale closure issues
+ * that occur when the IDE sends events in quick succession.
+ */
+export const sendIdeMessagesToCurrentChat = createAsyncThunk(
+  "chatThread/sendIdeMessagesToCurrentChat",
+  async (arg: { messages: ChatMessages; priority?: boolean }, api) => {
+    const state = api.getState() as RootState;
+    const chatId = selectCurrentThreadId(state);
+    const port = selectLspPort(state);
+    const apiKey = selectApiKey(state) ?? undefined;
+    if (!chatId || !port) return;
+
+    for (const m of arg.messages) {
+      if (!isUserMessage(m)) continue;
+      const content = toMessageContent(m.content);
+      const empty =
+        typeof content === "string"
+          ? content.trim().length === 0
+          : content.length === 0;
+      if (empty) continue;
+      await sendUserMessage(chatId, content, port, apiKey, arg.priority);
+    }
+  },
+);
 
 export const createChatWithId = createAction<{
   id: string;

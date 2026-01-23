@@ -209,84 +209,95 @@ export const TaskItemCompact: React.FC<TaskItemCompactProps> = ({
   );
 
   return (
-    <div
-      className={styles.item}
-      onClick={handleClick}
-      role="button"
-      tabIndex={0}
-      onKeyDown={handleRowKeyDown}
-    >
-      <div className={styles.chevronArea} />
+    <div className={styles.itemContainer}>
+      <div
+        className={styles.item}
+        onClick={handleClick}
+        role="button"
+        tabIndex={0}
+        onKeyDown={handleRowKeyDown}
+      >
+        <div className={styles.chevronArea} />
 
-      <div className={styles.leftSection}>
-        <StatusDot state={statusState} size="small" tooltipText={tooltipText} />
-        {badge && (
-          <Badge size="1" color="gray" variant="soft" style={{ flexShrink: 0 }}>
-            {badge}
-          </Badge>
-        )}
-      </div>
-
-      <div className={styles.titleSection}>
-        {isEditing ? (
-          <TextField.Root
-            size="1"
-            value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onClick={(e) => e.stopPropagation()}
-            autoFocus
-            className={styles.editInput}
+        <div className={styles.leftSection}>
+          <StatusDot
+            state={statusState}
+            size="small"
+            tooltipText={tooltipText}
           />
-        ) : (
-          <Text as="span" size="2" className={styles.title}>
-            {task.name}
-          </Text>
-        )}
-      </div>
+          {badge && (
+            <Badge
+              size="1"
+              color="gray"
+              variant="soft"
+              style={{ flexShrink: 0 }}
+            >
+              {badge}
+            </Badge>
+          )}
+        </div>
 
-      <div className={styles.stats}>
-        <CircularProgress
-          done={task.cards_done}
-          total={task.cards_total}
-          failed={task.cards_failed}
-        />
-      </div>
+        <div className={styles.titleSection}>
+          {isEditing ? (
+            <TextField.Root
+              size="1"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onClick={(e) => e.stopPropagation()}
+              autoFocus
+              className={styles.editInput}
+            />
+          ) : (
+            <Text as="span" size="2" className={styles.title}>
+              {task.name}
+            </Text>
+          )}
+        </div>
 
-      <Text size="1" color="gray" className={styles.date}>
-        {dateTimeString}
-      </Text>
+        <div className={styles.stats}>
+          <CircularProgress
+            done={task.cards_done}
+            total={task.cards_total}
+            failed={task.cards_failed}
+          />
+        </div>
 
-      <div className={styles.actions}>
-        {isEditing ? (
-          <>
-            <TooltipButton onClick={handleConfirmEdit} tooltip="Save">
-              <CheckIcon width={12} height={12} />
-            </TooltipButton>
-            <TooltipButton onClick={handleCancelEdit} tooltip="Cancel">
-              <Cross1Icon width={10} height={10} />
-            </TooltipButton>
-          </>
-        ) : (
-          <>
-            {onRename && (
+        <Text size="1" color="gray" className={styles.date}>
+          {dateTimeString}
+        </Text>
+
+        <div className={styles.actions}>
+          {isEditing ? (
+            <>
+              <TooltipButton onClick={handleConfirmEdit} tooltip="Save">
+                <CheckIcon width={12} height={12} />
+              </TooltipButton>
+              <TooltipButton onClick={handleCancelEdit} tooltip="Cancel">
+                <Cross1Icon width={10} height={10} />
+              </TooltipButton>
+            </>
+          ) : (
+            <>
+              {onRename && (
+                <TooltipButton
+                  onClick={handleStartEdit}
+                  tooltip="Rename"
+                  className={styles.actionButton}
+                >
+                  <Pencil1Icon width={12} height={12} />
+                </TooltipButton>
+              )}
               <TooltipButton
-                onClick={handleStartEdit}
-                tooltip="Rename"
+                onClick={handleDelete}
+                tooltip="Delete"
                 className={styles.actionButton}
               >
-                <Pencil1Icon width={12} height={12} />
+                <Cross1Icon width={10} height={10} />
               </TooltipButton>
-            )}
-            <TooltipButton
-              onClick={handleDelete}
-              tooltip="Delete"
-              className={styles.actionButton}
-            >
-              <Cross1Icon width={10} height={10} />
-            </TooltipButton>
-          </>
-        )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

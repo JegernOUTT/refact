@@ -129,9 +129,10 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
                 config_path: config_path.clone(),
             },
         ),
-        Box::new(crate::tools::file_edit::tool_apply_patch::ToolApplyPatch {
-            config_path: config_path.clone(),
-        }),
+        // TODO: disable until we make separate tools for each model 
+        // Box::new(crate::tools::file_edit::tool_apply_patch::ToolApplyPatch {
+        //     config_path: config_path.clone(),
+        // }),
         Box::new(
             crate::tools::file_edit::tool_undo_textdoc::ToolUndoTextDoc {
                 config_path: config_path.clone(),

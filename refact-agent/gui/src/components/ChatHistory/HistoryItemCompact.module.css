@@ -1,3 +1,8 @@
+/* Container query context - apply to parent wrapper */
+.itemContainer {
+  container-type: inline-size;
+}
+
 .item {
   position: relative;
   display: grid;
@@ -51,7 +56,7 @@
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
-  min-width: 0;
+  min-width: 60px; /* Ensure at least some title is visible */
 }
 
 .stats {
@@ -60,6 +65,18 @@
   gap: var(--space-1);
   color: var(--gray-11);
   flex-shrink: 0;
+}
+
+.messagesCount {
+  display: contents;
+}
+
+.coinsStats {
+  display: contents;
+}
+
+.diffStats {
+  display: contents;
 }
 
 .statsSeparator {
@@ -153,5 +170,54 @@
 @media (hover: none) {
   .actions {
     opacity: 1;
+  }
+}
+
+/* Progressive hiding based on container width */
+/* Order: 1. diff stats, 2. messages count, 3. coins, 4. date, 5. buttons */
+/* Breakpoints tuned aggressively to preserve title readability */
+
+/* Hide diff stats first (below ~600px) */
+@container (max-width: 600px) {
+  .diffStats {
+    display: none;
+  }
+}
+
+/* Hide messages count (below ~500px) */
+@container (max-width: 500px) {
+  .messagesCount {
+    display: none;
+  }
+}
+
+/* Hide coins (below ~420px) */
+@container (max-width: 420px) {
+  .coinsStats {
+    display: none;
+  }
+}
+
+/* Hide date (below ~350px) */
+@container (max-width: 350px) {
+  .date {
+    display: none;
+  }
+}
+
+/* Hide buttons (below ~280px) */
+@container (max-width: 280px) {
+  .actions {
+    display: none;
+  }
+}
+
+/* Extreme narrow - hide chevron area too */
+@container (max-width: 200px) {
+  .chevronArea {
+    display: none;
+  }
+  .item {
+    grid-template-columns: auto 1fr;
   }
 }
