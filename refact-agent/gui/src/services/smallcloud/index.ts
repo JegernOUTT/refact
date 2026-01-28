@@ -93,6 +93,7 @@ export const smallCloudApi = createApi({
         return response;
       },
       providesTags: ["User"],
+      keepUnusedDataFor: 5 * 60,
     }),
 
     getSurvey: builder.query<SurveyQuestions, undefined>({

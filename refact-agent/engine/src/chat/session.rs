@@ -211,9 +211,10 @@ impl ChatSession {
     }
 
     pub fn set_runtime_state(&mut self, state: SessionState, error: Option<String>) {
-        let was_paused = self.runtime.state == SessionState::Paused;
-        let had_pause_reasons = !self.runtime.pause_reasons.is_empty();
         let old_state = self.runtime.state;
+        let old_error = self.runtime.error.clone();
+        let was_paused = old_state == SessionState::Paused;
+        let had_pause_reasons = !self.runtime.pause_reasons.is_empty();
 
         self.runtime.state = state;
         self.runtime.paused = state == SessionState::Paused;
@@ -226,15 +227,9 @@ impl ChatSession {
             self.emit(ChatEvent::PauseCleared {});
         }
 
-        self.emit(ChatEvent::RuntimeUpdated {
-            state,
-            paused: self.runtime.paused,
-            error,
-            queue_size: self.runtime.queue_size,
-            queued_items: self.runtime.queued_items.clone(),
-        });
-
-        if old_state != state {
+        let state_changed = old_state != state;
+        let error_changed = old_error != error;
+        if state_changed || error_changed {
             self.emit_trajectory_state_change();
         }
     }
@@ -258,13 +253,18 @@ impl ChatSession {
                 id: self.chat_id.clone(),
                 updated_at: None,
                 title: None,
+                is_title_generated: None,
                 session_state: Some(state_str.to_string()),
+                error: self.runtime.error.clone(),
                 message_count: Some(self.messages.len()),
                 parent_id: self.thread.parent_id.clone(),
                 link_type: self.thread.link_type.clone(),
                 root_chat_id: Some(effective_root),
                 model: Some(self.thread.model.clone()),
                 mode: Some(self.thread.mode.clone()),
+                total_coins: None,
+                total_lines_added: None,
+                total_lines_removed: None,
             };
             let _ = tx.send(event);
         }
@@ -280,10 +280,7 @@ impl ChatSession {
     pub fn emit_queue_update(&mut self) {
         self.runtime.queue_size = self.command_queue.len();
         self.runtime.queued_items = self.build_queued_items();
-        self.emit(ChatEvent::RuntimeUpdated {
-            state: self.runtime.state,
-            paused: self.runtime.paused,
-            error: self.runtime.error.clone(),
+        self.emit(ChatEvent::QueueUpdated {
             queue_size: self.runtime.queue_size,
             queued_items: self.runtime.queued_items.clone(),
         });
@@ -462,12 +459,37 @@ impl ChatSession {
     pub fn set_title(&mut self, title: String, is_generated: bool) {
         self.thread.title = title.clone();
         self.thread.is_title_generated = is_generated;
-        self.emit(ChatEvent::TitleUpdated {
-            title,
-            is_generated,
-        });
         self.increment_version();
         self.touch();
+        self.emit_trajectory_title_change(title);
+    }
+
+    fn emit_trajectory_title_change(&self, title: String) {
+        if self.thread.task_meta.is_some() {
+            return;
+        }
+        if let Some(ref tx) = self.trajectory_events_tx {
+            let effective_root = self.thread.root_chat_id.clone().unwrap_or_else(|| self.chat_id.clone());
+            let event = TrajectoryEvent {
+                event_type: "updated".to_string(),
+                id: self.chat_id.clone(),
+                updated_at: Some(chrono::Utc::now().to_rfc3339()),
+                title: Some(title),
+                is_title_generated: Some(self.thread.is_title_generated),
+                session_state: Some(self.runtime.state.to_string()),
+                error: self.runtime.error.clone(),
+                message_count: Some(self.messages.len()),
+                parent_id: self.thread.parent_id.clone(),
+                link_type: self.thread.link_type.clone(),
+                root_chat_id: Some(effective_root),
+                model: Some(self.thread.model.clone()),
+                mode: Some(self.thread.mode.clone()),
+                total_coins: None,
+                total_lines_added: None,
+                total_lines_removed: None,
+            };
+            let _ = tx.send(event);
+        }
     }
 
     pub fn validate_tool_decision(&self, tool_call_id: &str) -> bool {
@@ -513,17 +535,24 @@ pub async fn get_or_create_session_with_trajectory(
     sessions: &SessionsMap,
     chat_id: &str,
 ) -> Arc<AMutex<ChatSession>> {
-    {
+    let maybe_existing = {
         let sessions_read = sessions.read().await;
-        if let Some(session_arc) = sessions_read.get(chat_id) {
+        sessions_read.get(chat_id).cloned()
+    };
+
+    if let Some(session_arc) = maybe_existing {
+        let is_closed = {
             let session = session_arc.lock().await;
-            if !session.closed {
-                return session_arc.clone();
+            session.closed
+        };
+        if !is_closed {
+            return session_arc;
+        }
+        let mut sessions_write = sessions.write().await;
+        if let Some(current) = sessions_write.get(chat_id) {
+            if Arc::ptr_eq(current, &session_arc) {
+                sessions_write.remove(chat_id);
             }
-            drop(session);
-            drop(sessions_read);
-            let mut sessions_write = sessions.write().await;
-            sessions_write.remove(chat_id);
         }
     }
 
@@ -552,19 +581,21 @@ pub async fn get_or_create_session_with_trajectory(
         (s, true)
     };
 
-    session.trajectory_events_tx = trajectory_events_tx;
+    session.trajectory_events_tx = trajectory_events_tx.clone();
 
-    let session_arc = {
+    let (session_arc, inserted) = {
         let mut sessions_write = sessions.write().await;
-        sessions_write
-            .entry(chat_id.to_string())
-            .or_insert_with(|| Arc::new(AMutex::new(session)))
-            .clone()
+        match sessions_write.entry(chat_id.to_string()) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let arc = Arc::new(AMutex::new(session));
+                e.insert(arc.clone());
+                (arc, true)
+            }
+            std::collections::hash_map::Entry::Occupied(e) => {
+                (e.get().clone(), false)
+            }
+        }
     };
-
-    if is_new {
-        super::trajectories::maybe_save_trajectory(gcx, session_arc.clone()).await;
-    }
 
     session_arc
 }
@@ -608,17 +639,18 @@ pub fn start_session_cleanup_task(gcx: Arc<ARwLock<GlobalContext>>) {
                     let mut session = session_arc.lock().await;
                     session.closed = true;
                     session.close_event_channel();
-                    session.queue_notify.notify_one();
+                    session.queue_notify.notify_waiters();
+                }
+                {
+                    let mut sessions_write = sessions.write().await;
+                    if let Some(current) = sessions_write.get(chat_id) {
+                        if Arc::ptr_eq(current, session_arc) {
+                            sessions_write.remove(chat_id);
+                        }
+                    }
                 }
                 super::trajectories::maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
                 info!("Saved trajectory for closed session {}", chat_id);
-            }
-
-            {
-                let mut sessions_write = sessions.write().await;
-                for (chat_id, _) in &to_cleanup {
-                    sessions_write.remove(chat_id);
-                }
             }
         }
     });
@@ -684,14 +716,11 @@ mod tests {
     fn test_emit_sends_correct_envelope() {
         let mut session = make_session();
         let mut rx = session.subscribe();
-        session.emit(ChatEvent::TitleUpdated {
-            title: "Test".into(),
-            is_generated: true,
-        });
+        session.emit(ChatEvent::PauseCleared {});
         let envelope = rx.try_recv().unwrap();
         assert_eq!(envelope.chat_id, "test-chat");
         assert_eq!(envelope.seq, 1);
-        matches!(envelope.event, ChatEvent::TitleUpdated { .. });
+        assert!(matches!(envelope.event, ChatEvent::PauseCleared {}));
     }
 
     #[test]
@@ -1051,24 +1080,10 @@ mod tests {
     #[test]
     fn test_set_title() {
         let mut session = make_session();
-        let mut rx = session.subscribe();
         session.set_title("New Title".into(), true);
         assert_eq!(session.thread.title, "New Title");
         assert!(session.thread.is_title_generated);
         assert!(session.trajectory_dirty);
-        let mut found_title = false;
-        while let Ok(env) = rx.try_recv() {
-            if let ChatEvent::TitleUpdated {
-                title,
-                is_generated,
-            } = env.event
-            {
-                assert_eq!(title, "New Title");
-                assert!(is_generated);
-                found_title = true;
-            }
-        }
-        assert!(found_title);
     }
 
     #[test]
@@ -1219,7 +1234,6 @@ mod tests {
     #[test]
     fn test_emit_queue_update_syncs_runtime() {
         let mut session = make_session();
-        let mut rx = session.subscribe();
         session.command_queue.push_back(CommandRequest {
             client_request_id: "req-1".into(),
             priority: false,
@@ -1228,20 +1242,6 @@ mod tests {
         session.emit_queue_update();
         assert_eq!(session.runtime.queue_size, 1);
         assert_eq!(session.runtime.queued_items.len(), 1);
-        let mut found_update = false;
-        while let Ok(env) = rx.try_recv() {
-            if let ChatEvent::RuntimeUpdated {
-                queue_size,
-                queued_items,
-                ..
-            } = env.event
-            {
-                assert_eq!(queue_size, 1);
-                assert_eq!(queued_items.len(), 1);
-                found_update = true;
-            }
-        }
-        assert!(found_update);
     }
 
     #[test]

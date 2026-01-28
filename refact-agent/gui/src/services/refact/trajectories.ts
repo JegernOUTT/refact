@@ -53,6 +53,7 @@ export type TrajectoryEvent = {
   id: string;
   updated_at?: string;
   title?: string;
+  is_title_generated?: boolean;
   session_state?:
     | "idle"
     | "generating"
@@ -60,12 +61,16 @@ export type TrajectoryEvent = {
     | "paused"
     | "waiting_ide"
     | "error";
+  error?: string;
   message_count?: number;
   parent_id?: string;
   link_type?: string;
   root_chat_id?: string;
   model?: string;
   mode?: string;
+  total_coins?: number;
+  total_lines_added?: number;
+  total_lines_removed?: number;
 };
 
 export type PaginatedTrajectories = {

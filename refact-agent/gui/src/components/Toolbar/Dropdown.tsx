@@ -5,7 +5,6 @@ import {
   useGetUser,
   useLogout,
   useAppSelector,
-  useAppDispatch,
   useStartPollingForUser,
   useEventsBusForIDE,
 } from "../../hooks";
@@ -25,13 +24,12 @@ import {
   QuestionMarkCircledIcon,
   GearIcon,
 } from "@radix-ui/react-icons";
-import { clearHistory } from "../../features/History/historySlice";
+
 import { PuzzleIcon } from "../../images/PuzzleIcon";
 import { Coin } from "../../images";
 import { useCoinBallance } from "../../hooks/useCoinBalance";
 import { isUserWithLoginMessage } from "../../services/smallcloud/types";
-import { resetActiveGroup, selectActiveGroup } from "../../features/Teams";
-import { popBackTo } from "../../features/Pages/pagesSlice";
+
 import { useActiveTeamsGroup } from "../../hooks/useActiveTeamsGroup";
 
 export type DropdownNavigationOptions =
@@ -75,8 +73,6 @@ export const Dropdown: React.FC<DropdownProps> = ({
   const refs = useTourRefs();
   const user = useGetUser();
   const host = useAppSelector(selectHost);
-  const activeGroup = useAppSelector(selectActiveGroup);
-  const dispatch = useAppDispatch();
   // TODO: check how much of this is still used.
   // const { maxAgentUsageAmount, currentAgentUsage } = useAgentUsage();
   const coinBalance = useCoinBallance();
@@ -89,22 +85,8 @@ export const Dropdown: React.FC<DropdownProps> = ({
   const discordUrl = "https://www.smallcloud.ai/discord";
   const accountLink = linkForAccount(host);
   const openUrl = useOpenUrl();
-  const {
-    openCustomizationFile,
-    openPrivacyFile,
-    setLoginMessage,
-    clearActiveTeamsGroupInIDE,
-  } = useEventsBusForIDE();
-
-  const handleChatHistoryCleanUp = () => {
-    dispatch(clearHistory());
-  };
-
-  const handleActiveGroupCleanUp = () => {
-    clearActiveTeamsGroupInIDE();
-    const actions = [resetActiveGroup(), popBackTo({ name: "history" })];
-    actions.forEach((action) => dispatch(action));
-  };
+  const { openCustomizationFile, openPrivacyFile, setLoginMessage } =
+    useEventsBusForIDE();
 
   const handleProUpgradeClick = useCallback(() => {
     startPollingForUser();
@@ -335,19 +317,6 @@ export const Dropdown: React.FC<DropdownProps> = ({
         <DropdownMenu.Item onSelect={() => handleNavigation("stats")}>
           Your Stats
         </DropdownMenu.Item>
-
-        <DropdownMenu.Item onSelect={handleChatHistoryCleanUp}>
-          Clear Chat History
-        </DropdownMenu.Item>
-
-        {isKnowledgeFeatureAvailable && (
-          <DropdownMenu.Item
-            onSelect={handleActiveGroupCleanUp}
-            disabled={activeGroup === null}
-          >
-            Unselect Active Group
-          </DropdownMenu.Item>
-        )}
 
         <DropdownMenu.Item
           onSelect={(event) => {

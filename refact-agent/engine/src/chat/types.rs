@@ -170,17 +170,9 @@ pub enum ChatEvent {
         #[serde(flatten)]
         params: serde_json::Value,
     },
-    RuntimeUpdated {
-        state: SessionState,
-        paused: bool,
-        error: Option<String>,
+    QueueUpdated {
         queue_size: usize,
-        #[serde(default)]
         queued_items: Vec<QueuedItem>,
-    },
-    TitleUpdated {
-        title: String,
-        is_generated: bool,
     },
     MessageAdded {
         message: ChatMessage,

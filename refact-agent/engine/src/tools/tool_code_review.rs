@@ -198,7 +198,7 @@ fn get_last_assistant_content(messages: &[ChatMessage]) -> String {
         .iter()
         .rev()
         .find(|m| m.role == "assistant")
-        .map(|m| m.content.content_text_only())
+        .map(|m| m.content.to_text_with_image_placeholders())
         .unwrap_or_default()
 }
 
@@ -376,9 +376,9 @@ async fn make_review_prompt(
     for message in previous_messages.iter().rev() {
         let message_row = match message.role.as_str() {
             "system" => continue,
-            "user" => format!("👤:\n{}\n\n", &message.content.content_text_only()),
-            "assistant" => format!("🤖:\n{}\n\n", &message.content.content_text_only()),
-            "tool" => format!("📎:\n{}\n\n", &message.content.content_text_only()),
+            "user" => format!("👤:\n{}\n\n", &message.content.to_text_with_image_placeholders()),
+            "assistant" => format!("🤖:\n{}\n\n", &message.content.to_text_with_image_placeholders()),
+            "tool" => format!("📎:\n{}\n\n", &message.content.to_text_with_image_placeholders()),
             _ => continue,
         };
         let left_tokens = tokens_budget - count_text_tokens_with_fallback(tokenizer.clone(), &message_row) as i64;
@@ -464,7 +464,7 @@ async fn execute_code_review(
         filenames.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n")
     );
 
-    let review_content = format!("{}# Code Review\n{}", files_section, review_response.content.content_text_only());
+    let review_content = format!("{}# Code Review\n{}", files_section, review_response.content.to_text_with_image_placeholders());
     let metering = result.metering;
 
     Ok((review_content, result.usage, metering))

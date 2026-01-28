@@ -664,20 +664,26 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_event_serialization_runtime_updated() {
-        let event = ChatEvent::RuntimeUpdated {
-            state: SessionState::Idle,
-            paused: false,
-            error: None,
-            queue_size: 0,
-            queued_items: vec![],
+    fn test_chat_event_serialization_queue_updated() {
+        let event = ChatEvent::QueueUpdated {
+            queue_size: 2,
+            queued_items: vec![
+                QueuedItem {
+                    client_request_id: "req-1".to_string(),
+                    priority: false,
+                    command_type: "user_message".to_string(),
+                    preview: "Hello".to_string(),
+                },
+            ],
         };
 
         let json = serde_json::to_value(&event).expect("serialize");
 
-        assert_eq!(json.get("type"), Some(&json!("runtime_updated")));
-        assert_eq!(json.get("state"), Some(&json!("idle")));
-        assert_eq!(json.get("paused"), Some(&json!(false)));
+        assert_eq!(json.get("type"), Some(&json!("queue_updated")));
+        assert_eq!(json.get("queue_size"), Some(&json!(2)));
+        let items = json.get("queued_items").unwrap().as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("client_request_id"), Some(&json!("req-1")));
     }
 
     #[test]

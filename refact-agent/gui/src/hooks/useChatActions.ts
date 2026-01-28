@@ -6,6 +6,9 @@ import {
   selectChatId,
   selectThreadImages,
   selectSendImmediately,
+  selectMessages,
+  selectThreadToolUse,
+  selectThreadMode,
 } from "../features/Chat/Thread/selectors";
 import { resetThreadImages, setSendImmediately } from "../features/Chat/Thread";
 import {
@@ -66,6 +69,9 @@ export function useChatActions() {
   const chatId = useAppSelector(selectChatId);
   const attachedImages = useAppSelector(selectThreadImages);
   const sendImmediately = useAppSelector(selectSendImmediately);
+  const messages = useAppSelector(selectMessages);
+  const threadToolUse = useAppSelector(selectThreadToolUse);
+  const threadMode = useAppSelector(selectThreadMode);
 
   /**
    * Build message content with attached images if any.
@@ -111,6 +117,15 @@ export function useChatActions() {
           : content.length === 0;
       if (isEmpty) return;
 
+      if (messages.length === 0 && threadToolUse && threadMode) {
+        await updateChatParams(
+          chatId,
+          { tool_use: threadToolUse, mode: threadMode },
+          port,
+          apiKey ?? undefined,
+        );
+      }
+
       const shouldPrioritize = priority ?? sendImmediately;
       await sendUserMessage(
         chatId,
@@ -122,7 +137,17 @@ export function useChatActions() {
       dispatch(resetThreadImages({ id: chatId }));
       dispatch(setSendImmediately(false));
     },
-    [chatId, port, apiKey, buildMessageContent, dispatch, sendImmediately],
+    [
+      chatId,
+      port,
+      apiKey,
+      buildMessageContent,
+      dispatch,
+      sendImmediately,
+      messages,
+      threadToolUse,
+      threadMode,
+    ],
   );
 
   /**

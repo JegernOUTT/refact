@@ -15,6 +15,7 @@ import { trajectoriesApi } from "../services/refact/trajectories";
 import {
   createChatWithId,
   requestSseRefresh,
+  closeThread,
 } from "../features/Chat/Thread/actions";
 import { push } from "../features/Pages/pagesSlice";
 import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
@@ -43,6 +44,7 @@ export function useTrajectoryOps() {
     include_all_edited_context: false,
     include_agentic_tools: false,
     llm_summary_for_excluded: true,
+    include_all_user_assistant_only: false,
   });
 
   const [transformPreview, setTransformPreview] =
@@ -102,6 +104,7 @@ export function useTrajectoryOps() {
     try {
       const isTaskChat = thread.is_task_chat;
       const taskMeta = thread.task_meta;
+      const oldChatId = chatId;
 
       const result = await applyHandoff({
         chatId,
@@ -117,6 +120,8 @@ export function useTrajectoryOps() {
       if (isTaskChat && taskMeta?.role === "planner") {
         const taskId = taskMeta.task_id;
         const now = new Date().toISOString();
+
+        dispatch(closeThread({ id: oldChatId, force: true }));
 
         dispatch(
           createChatWithId({
@@ -155,6 +160,7 @@ export function useTrajectoryOps() {
         setHandoffPreview(null);
         await regenerate(result.new_chat_id, port, apiKey ?? undefined);
       } else {
+        dispatch(closeThread({ id: oldChatId, force: true }));
         dispatch(createChatWithId({ id: result.new_chat_id }));
         dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
         dispatch(push({ name: "chat" }));

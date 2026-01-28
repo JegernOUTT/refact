@@ -699,13 +699,15 @@ startListening({
 
 startListening({
   actionCreator: setToolUse,
-  effect: async (action, listenerApi) => {
+  effect: async (_action, listenerApi) => {
     const state = listenerApi.getState();
     const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = state.chat.current_thread_id;
+    const runtime = state.chat.threads[chatId];
 
-    if (!port || !chatId) return;
+    if (!port || !chatId || !runtime) return;
+    if (runtime.thread.messages.length > 0) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -713,7 +715,10 @@ startListening({
       );
       await sendChatCommand(chatId, port, apiKey ?? undefined, {
         type: "set_params",
-        patch: { tool_use: action.payload },
+        patch: {
+          tool_use: runtime.thread.tool_use,
+          mode: runtime.thread.mode,
+        },
       });
     } catch {
       // Silently ignore - backend may not support this command

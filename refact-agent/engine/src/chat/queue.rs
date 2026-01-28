@@ -385,17 +385,18 @@ pub async fn process_command_queue(
                     session.set_title(title.to_string(), is_generated);
                 } else if let Some(is_gen) = is_gen_in_patch {
                     if session.thread.is_title_generated != is_gen {
-                        session.thread.is_title_generated = is_gen;
                         let title = session.thread.title.clone();
-                        session.emit(ChatEvent::TitleUpdated {
-                            title,
-                            is_generated: is_gen,
-                        });
+                        session.set_title(title, is_gen);
                         changed = true;
                     }
                 }
+                let mut patch_for_chat_sse = sanitized_patch;
+                if let Some(obj) = patch_for_chat_sse.as_object_mut() {
+                    obj.remove("title");
+                    obj.remove("is_title_generated");
+                }
                 session.emit(ChatEvent::ThreadUpdated {
-                    params: sanitized_patch,
+                    params: patch_for_chat_sse,
                 });
                 if changed {
                     session.increment_version();

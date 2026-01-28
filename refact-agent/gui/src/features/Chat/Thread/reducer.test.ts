@@ -283,104 +283,6 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
     });
   });
 
-  describe("applyChatEvent - runtime_updated", () => {
-    test("should update streaming state when generation starts", () => {
-      const snapshotEvent: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "1",
-        type: "snapshot",
-        thread: {
-          id: chatId,
-          title: "Test",
-          model: "gpt-4",
-          mode: "AGENT",
-          tool_use: "agent",
-          boost_reasoning: false,
-          context_tokens_cap: null,
-          include_project_info: true,
-          checkpoints_enabled: true,
-          is_title_generated: false,
-        },
-        runtime: {
-          state: "idle",
-          paused: false,
-          error: null,
-          queue_size: 0,
-          pause_reasons: [],
-          queued_items: [],
-        },
-        messages: [],
-      };
-
-      let state = chatReducer(initialState, applyChatEvent(snapshotEvent));
-
-      const runtimeEvent: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "2",
-        type: "runtime_updated",
-        state: "generating",
-        paused: false,
-        error: null,
-        queue_size: 0,
-        queued_items: [],
-      };
-
-      state = chatReducer(state, applyChatEvent(runtimeEvent));
-      const runtime = state.threads[chatId]!;
-
-      expect(runtime.streaming).toBe(true);
-      expect(runtime.waiting_for_response).toBe(true);
-    });
-
-    test("should update streaming state when generation completes", () => {
-      const snapshotEvent: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "1",
-        type: "snapshot",
-        thread: {
-          id: chatId,
-          title: "Test",
-          model: "gpt-4",
-          mode: "AGENT",
-          tool_use: "agent",
-          boost_reasoning: false,
-          context_tokens_cap: null,
-          include_project_info: true,
-          checkpoints_enabled: true,
-          is_title_generated: false,
-        },
-        runtime: {
-          state: "generating",
-          paused: false,
-          error: null,
-          queue_size: 0,
-          pause_reasons: [],
-          queued_items: [],
-        },
-        messages: [],
-      };
-
-      let state = chatReducer(initialState, applyChatEvent(snapshotEvent));
-
-      const runtimeEvent: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "2",
-        type: "runtime_updated",
-        state: "idle",
-        paused: false,
-        error: null,
-        queue_size: 0,
-        queued_items: [],
-      };
-
-      state = chatReducer(state, applyChatEvent(runtimeEvent));
-      const runtime = state.threads[chatId]!;
-
-      expect(runtime.streaming).toBe(false);
-      expect(runtime.waiting_for_response).toBe(false);
-    });
-  });
-
   describe("applyChatEvent - message_added", () => {
     test("should add message at index", () => {
       const snapshotEvent: ChatEventEnvelope = {
@@ -553,105 +455,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
       expect(runtime.confirmation.pause_reasons[0].tool_call_id).toBe(
         "call_123",
       );
-      // Note: streaming state is controlled by runtime_updated, not pause_required
-    });
-  });
-
-  describe("applyChatEvent - runtime_updated with error", () => {
-    test("should set error state via runtime_updated", () => {
-      const snapshotEvent: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "1",
-        type: "snapshot",
-        thread: {
-          id: chatId,
-          title: "Test",
-          model: "gpt-4",
-          mode: "AGENT",
-          tool_use: "agent",
-          boost_reasoning: false,
-          context_tokens_cap: null,
-          include_project_info: true,
-          checkpoints_enabled: true,
-          is_title_generated: false,
-        },
-        runtime: {
-          state: "generating",
-          paused: false,
-          error: null,
-          queue_size: 0,
-          pause_reasons: [],
-          queued_items: [],
-        },
-        messages: [],
-      };
-
-      let state = chatReducer(initialState, applyChatEvent(snapshotEvent));
-
-      const errorEvent: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "2",
-        type: "runtime_updated",
-        state: "error",
-        paused: false,
-        error: "API rate limit exceeded",
-        queue_size: 0,
-        queued_items: [],
-      };
-
-      state = chatReducer(state, applyChatEvent(errorEvent));
-      const runtime = state.threads[chatId]!;
-
-      expect(runtime.error).toBe("API rate limit exceeded");
-      // Allow sending even on error for recovery
-      expect(runtime.prevent_send).toBe(false);
-      expect(runtime.streaming).toBe(false);
-    });
-  });
-
-  describe("applyChatEvent - title_updated", () => {
-    test("should update thread title", () => {
-      const snapshotEvent: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "1",
-        type: "snapshot",
-        thread: {
-          id: chatId,
-          title: "",
-          model: "gpt-4",
-          mode: "AGENT",
-          tool_use: "agent",
-          boost_reasoning: false,
-          context_tokens_cap: null,
-          include_project_info: true,
-          checkpoints_enabled: true,
-          is_title_generated: false,
-        },
-        runtime: {
-          state: "idle",
-          paused: false,
-          error: null,
-          queue_size: 0,
-          pause_reasons: [],
-          queued_items: [],
-        },
-        messages: [],
-      };
-
-      let state = chatReducer(initialState, applyChatEvent(snapshotEvent));
-
-      const titleEvent: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "2",
-        type: "title_updated",
-        title: "Help with React hooks",
-        is_generated: true,
-      };
-
-      state = chatReducer(state, applyChatEvent(titleEvent));
-      const runtime = state.threads[chatId]!;
-
-      expect(runtime.thread.title).toBe("Help with React hooks");
+      // Note: streaming state is controlled by sidebar SSE session_state updates
     });
   });
 
@@ -1007,17 +811,12 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
       const event: ChatEventEnvelope = {
         chat_id: "unknown-chat-id",
         seq: "1",
-        type: "runtime_updated",
-        state: "generating",
-        paused: false,
-        error: null,
-        queue_size: 0,
-        queued_items: [],
+        type: "stream_started",
+        message_id: "msg-1",
       };
 
       const result = chatReducer(initialState, applyChatEvent(event));
 
-      // State should be unchanged
       expect(result.threads["unknown-chat-id"]).toBeUndefined();
     });
 
@@ -1051,47 +850,26 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
 
       let state = chatReducer(initialState, applyChatEvent(snapshotEvent));
 
-      // Process sequence of events (using correct event types)
       const events: ChatEventEnvelope[] = [
         {
           chat_id: chatId,
           seq: "2",
-          type: "runtime_updated",
-          state: "generating",
-          paused: false,
-          error: null,
-          queue_size: 0,
-          queued_items: [],
-        },
-        {
-          chat_id: chatId,
-          seq: "3",
           type: "stream_started",
           message_id: "msg-1",
         },
         {
           chat_id: chatId,
-          seq: "4",
+          seq: "3",
           type: "stream_delta",
           message_id: "msg-1",
           ops: [{ op: "append_content", text: "Hello!" }],
         },
         {
           chat_id: chatId,
-          seq: "5",
+          seq: "4",
           type: "stream_finished",
           message_id: "msg-1",
           finish_reason: "stop",
-        },
-        {
-          chat_id: chatId,
-          seq: "6",
-          type: "runtime_updated",
-          state: "idle",
-          paused: false,
-          error: null,
-          queue_size: 0,
-          queued_items: [],
         },
       ];
 
@@ -1101,6 +879,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
 
       const runtime = state.threads[chatId]!;
       expect(runtime.streaming).toBe(false);
+      expect(runtime.waiting_for_response).toBe(false);
       expect(runtime.thread.messages).toHaveLength(2);
       expect(runtime.thread.messages[1].content).toBe("Hello!");
     });

@@ -94,6 +94,8 @@ pub struct CompressOptions {
     pub drop_all_memories: bool,
     #[serde(default)]
     pub drop_project_information: bool,
+    #[serde(default)]
+    pub strip_metering: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -108,6 +110,8 @@ pub struct HandoffOptions {
     pub include_agentic_tools: bool,
     #[serde(default)]
     pub llm_summary_for_excluded: bool,
+    #[serde(default)]
+    pub include_all_user_assistant_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -120,7 +124,7 @@ pub struct TransformStats {
     pub tool_messages_modified: usize,
 }
 
-const TOOLS_TO_PRESERVE: &[&str] = &["deep_research", "subagent", "strategic_planning"];
+const TOOLS_TO_PRESERVE: &[&str] = &["deep_research", "subagent", "strategic_planning", "code_review"];
 
 fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
@@ -223,6 +227,13 @@ pub fn compress_in_place(
     }
 
     super::history_limit::remove_invalid_tool_calls_and_tool_calls_results(messages);
+
+    if opts.strip_metering {
+        for msg in messages.iter_mut() {
+            msg.usage = None;
+            msg.extra.retain(|key, _| !key.starts_with("metering_coins_"));
+        }
+    }
 
     let after_tokens = approx_token_count(messages);
     let reduction_percent = if before_tokens > 0 {
@@ -380,32 +391,47 @@ pub async fn handoff_select(
 
     let mut conversation: Vec<ChatMessage> = Vec::new();
     for (i, msg) in messages.iter().enumerate().skip(system_prefix_len) {
-        let should_include = match msg.role.as_str() {
-            "user" => i >= start_idx,
-            "assistant" => {
-                if i >= start_idx {
-                    if let Some(ref tool_calls) = msg.tool_calls {
-                        let has_non_preserved = tool_calls.iter().any(|tc| {
-                            !should_preserve_tool(&tc.function.name)
-                                && !edited_tool_ids.contains(&tc.id)
-                        });
-                        has_non_preserved || tool_calls.is_empty()
-                    } else {
-                        true
-                    }
-                } else {
-                    false
-                }
+        let should_include = if opts.include_all_user_assistant_only {
+            match msg.role.as_str() {
+                "user" | "assistant" => true,
+                _ => false,
             }
-            "system" => false,
-            "context_file" => false,
-            "diff" => false,
-            "tool" => false,
-            _ => i >= start_idx,
+        } else {
+            match msg.role.as_str() {
+                "user" => i >= start_idx,
+                "assistant" => {
+                    if i >= start_idx {
+                        if let Some(ref tool_calls) = msg.tool_calls {
+                            let has_non_preserved = tool_calls.iter().any(|tc| {
+                                !should_preserve_tool(&tc.function.name)
+                                    && !edited_tool_ids.contains(&tc.id)
+                            });
+                            has_non_preserved || tool_calls.is_empty()
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    }
+                }
+                "system" => false,
+                "context_file" => false,
+                "diff" => false,
+                "tool" => false,
+                _ => i >= start_idx,
+            }
         };
 
         if should_include {
-            conversation.push(msg.clone());
+            if opts.include_all_user_assistant_only && msg.role == "assistant" {
+                let mut clean_msg = msg.clone();
+                clean_msg.tool_calls = None;
+                clean_msg.tool_call_id = String::new();
+                clean_msg.tool_failed = None;
+                conversation.push(clean_msg);
+            } else {
+                conversation.push(msg.clone());
+            }
         }
     }
 
@@ -433,7 +459,9 @@ pub async fn handoff_select(
     }
 
     let mut selected: Vec<ChatMessage> = Vec::new();
-    selected.extend(system_prefix);
+    if !opts.include_all_user_assistant_only {
+        selected.extend(system_prefix);
+    }
     if let Some(ctx_msg) = bundled_context {
         selected.push(ctx_msg);
     }
@@ -573,9 +601,9 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_preserves_deep_research_subagent_strategic_planning() {
+    fn test_compress_preserves_agentic_tools() {
         let long_content = "x".repeat(1000);
-        for tool_name in &["deep_research", "subagent", "strategic_planning"] {
+        for tool_name in &["deep_research", "subagent", "strategic_planning", "code_review"] {
             let mut messages = vec![
                 make_user_msg("hello"),
                 make_assistant_with_tool_call("tc1", tool_name),
@@ -636,6 +664,7 @@ mod tests {
         assert!(should_preserve_tool("deep_research"));
         assert!(should_preserve_tool("subagent"));
         assert!(should_preserve_tool("strategic_planning"));
+        assert!(should_preserve_tool("code_review"));
         assert!(!should_preserve_tool("cat"));
         assert!(!should_preserve_tool("shell"));
         assert!(!should_preserve_tool("unknown_tool"));
@@ -1023,6 +1052,32 @@ mod tests {
             make_user_msg("q"),
             make_assistant_with_tool_call("tc1", "strategic_planning"),
             make_tool_msg("tc1", "planning results"),
+            make_assistant_msg("final"),
+        ];
+        let opts = HandoffOptions {
+            include_last_user_plus: true,
+            include_agentic_tools: true,
+            ..Default::default()
+        };
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id")
+            .await
+            .unwrap();
+
+        assert_system_prefix(&selected);
+        assert_eq!(
+            roles(&selected),
+            vec!["system", "assistant", "tool", "user", "assistant", "user"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handoff_code_review_preserved() {
+        let messages = vec![
+            make_system_msg("s"),
+            make_user_msg("q"),
+            make_assistant_with_tool_call("tc1", "code_review"),
+            make_tool_msg("tc1", "code review results"),
             make_assistant_msg("final"),
         ];
         let opts = HandoffOptions {

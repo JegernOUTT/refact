@@ -12,10 +12,28 @@ pub fn convert_messages_to_openai_format(
     style: &Option<String>,
     model_id: &str,
 ) -> Vec<Value> {
+    fn is_server_tool(id: &str) -> bool {
+        id.starts_with("srvtoolu_")
+    }
+
+    for msg in &mut messages {
+        if msg.role == "assistant" {
+            if let Some(ref mut tool_calls) = msg.tool_calls {
+                tool_calls.retain(|tc| !is_server_tool(&tc.id));
+                if tool_calls.is_empty() {
+                    msg.tool_calls = None;
+                }
+            }
+        }
+    }
+    messages.retain(|msg| {
+        !(msg.role == "tool" && is_server_tool(&msg.tool_call_id))
+    });
+
     if let Some(last_asst_idx) = messages.iter().rposition(|m| m.role == "assistant") {
         let has_only_thinking = messages[last_asst_idx]
             .content
-            .content_text_only()
+            .to_text_with_image_placeholders()
             .trim()
             .is_empty()
             && messages[last_asst_idx]
@@ -564,5 +582,95 @@ mod tests {
         let output = convert_messages_to_openai_format(messages, &style(), "test-model");
         let first_asst = output[1].get("content").unwrap().as_str().unwrap_or("");
         assert!(!first_asst.contains("Previous reasoning"));
+    }
+
+    #[test]
+    fn test_server_tools_filtered_out() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "search for rust".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("I'll search for that.".to_string()),
+                tool_calls: Some(vec![
+                    crate::call_validation::ChatToolCall {
+                        id: "srvtoolu_abc123".into(),
+                        function: crate::call_validation::ChatToolFunction {
+                            name: "web_search".into(),
+                            arguments: r#"{"query":"rust"}"#.into(),
+                        },
+                        tool_type: "function".into(),
+                        index: None,
+                    },
+                    crate::call_validation::ChatToolCall {
+                        id: "call_xyz789".into(),
+                        function: crate::call_validation::ChatToolFunction {
+                            name: "cat".into(),
+                            arguments: r#"{"paths":"main.rs"}"#.into(),
+                        },
+                        tool_type: "function".into(),
+                        index: None,
+                    },
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("server search results".into()),
+                tool_call_id: "srvtoolu_abc123".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("file contents".into()),
+                tool_call_id: "call_xyz789".into(),
+                ..Default::default()
+            },
+        ];
+        let output = convert_messages_to_openai_format(messages, &style(), "test-model");
+
+        assert_eq!(output.len(), 3);
+        assert_eq!(output[0].get("role").unwrap(), "user");
+        assert_eq!(output[1].get("role").unwrap(), "assistant");
+        assert_eq!(output[2].get("role").unwrap(), "tool");
+
+        let tool_calls = output[1].get("tool_calls").unwrap().as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].get("id").unwrap(), "call_xyz789");
+
+        assert_eq!(output[2].get("tool_call_id").unwrap(), "call_xyz789");
+    }
+
+    #[test]
+    fn test_server_tools_only_all_filtered() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "search".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Searching...".to_string()),
+                tool_calls: Some(vec![crate::call_validation::ChatToolCall {
+                    id: "srvtoolu_only".into(),
+                    function: crate::call_validation::ChatToolFunction {
+                        name: "web_search".into(),
+                        arguments: "{}".into(),
+                    },
+                    tool_type: "function".into(),
+                    index: None,
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("results".into()),
+                tool_call_id: "srvtoolu_only".into(),
+                ..Default::default()
+            },
+        ];
+        let output = convert_messages_to_openai_format(messages, &style(), "test-model");
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].get("role").unwrap(), "user");
+        assert_eq!(output[1].get("role").unwrap(), "assistant");
+
+        assert!(output[1].get("tool_calls").is_none());
     }
 }

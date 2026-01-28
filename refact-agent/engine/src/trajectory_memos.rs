@@ -7,6 +7,7 @@ use tracing::{info, warn};
 use walkdir::WalkDir;
 
 use crate::call_validation::{ChatContent, ChatMessage};
+use crate::chat::trajectories::extract_text_with_image_placeholders_from_json;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::memories::{memories_add, create_frontmatter};
@@ -220,20 +221,12 @@ fn build_chat_messages(messages: &[Value]) -> Vec<ChatMessage> {
         .iter()
         .filter_map(|msg| {
             let role = msg.get("role").and_then(|v| v.as_str())?;
-            if role == "context_file" || role == "cd_instruction" {
+            if role != "user" && role != "assistant" {
                 return None;
             }
 
-            let content = if let Some(c) = msg.get("content").and_then(|v| v.as_str()) {
-                c.to_string()
-            } else if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
-                arr.iter()
-                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            } else {
-                return None;
-            };
+            let content = msg.get("content")
+                .and_then(extract_text_with_image_placeholders_from_json)?;
 
             if content.trim().is_empty() {
                 return None;

@@ -200,6 +200,28 @@ impl ChatContent {
         }
     }
 
+    pub fn to_text_with_image_placeholders(&self) -> String {
+        match self {
+            ChatContent::SimpleText(_) | ChatContent::ContextFiles(_) => self.content_text_only(),
+            ChatContent::Multimodal(elements) => {
+                let parts: Vec<String> = elements
+                    .iter()
+                    .map(|el| {
+                        if el.is_text() {
+                            el.m_content.clone()
+                        } else if el.is_image() {
+                            "[image]".to_string()
+                        } else {
+                            format!("[unsupported:{}]", el.m_type)
+                        }
+                    })
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                parts.join("\n\n")
+            }
+        }
+    }
+
     pub fn size_estimate(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,

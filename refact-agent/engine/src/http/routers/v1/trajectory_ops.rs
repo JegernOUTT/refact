@@ -71,12 +71,18 @@ fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
                 .to_string(),
         );
     }
+    if opts.strip_metering {
+        actions.push("Strip metering information (usage, coins)".to_string());
+    }
     actions.push("Remove invalid tool calls and orphan results".to_string());
     actions
 }
 
 fn describe_handoff_actions(opts: &HandoffOptions) -> Vec<String> {
     let mut actions = Vec::new();
+    if opts.include_all_user_assistant_only {
+        actions.push("Include all user and assistant messages only (strip system, tools, context)".to_string());
+    }
     if opts.include_last_user_plus {
         actions.push("Include last user message and all following".to_string());
     }

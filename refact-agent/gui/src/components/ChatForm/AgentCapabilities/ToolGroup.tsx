@@ -28,7 +28,7 @@ export const ToolGroup: React.FC<ToolGroupProps> = ({
 }) => {
   const categoryBadge = useMemo(() => {
     const categoryMap: Record<
-      string,
+      ToolGroupType["category"],
       { color: BadgeProps["color"]; tooltip: string }
     > = {
       builtin: { color: "red", tooltip: "Built-In Tools" },
@@ -36,10 +36,10 @@ export const ToolGroup: React.FC<ToolGroupProps> = ({
       mcp: { color: "green", tooltip: "MCP Tools" },
     };
 
-    const { color, tooltip } = categoryMap[group.category];
+    const info = categoryMap[group.category];
     const label = group.category.charAt(0).toUpperCase();
 
-    return { label, color, tooltip };
+    return { label, color: info.color, tooltip: info.tooltip };
   }, [group.category]);
 
   return (

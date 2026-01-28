@@ -42,9 +42,10 @@ pub struct FollowUpResponse {
 fn _make_conversation(messages: &Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut history_message = "*Conversation:*\n".to_string();
     for m in messages.iter().rev().take(2) {
-        let content = m.content.content_text_only();
-        let limited_content = if content.chars().count() > 5000 {
-            let skip_count = content.chars().count() - 5000;
+        let content = m.content.to_text_with_image_placeholders();
+        let char_count = content.chars().count();
+        let limited_content = if char_count > 5000 {
+            let skip_count = char_count - 5000;
             format!(
                 "...{}",
                 content.chars().skip(skip_count).collect::<String>()
@@ -53,15 +54,9 @@ fn _make_conversation(messages: &Vec<ChatMessage>) -> Vec<ChatMessage> {
             content
         };
         let message_row = match m.role.as_str() {
-            "user" => {
-                format!("👤:{}\n\n", limited_content)
-            }
-            "assistant" => {
-                format!("🤖:{}\n\n", limited_content)
-            }
-            _ => {
-                continue;
-            }
+            "user" => format!("👤:{}\n\n", limited_content),
+            "assistant" => format!("🤖:{}\n\n", limited_content),
+            _ => continue,
         };
         history_message.insert_str(0, &message_row);
     }

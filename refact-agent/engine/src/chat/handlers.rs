@@ -158,14 +158,17 @@ pub async fn handle_v1_chat_command(
             if session.thread.is_title_generated != is_gen {
                 session.thread.is_title_generated = is_gen;
                 let title = session.thread.title.clone();
-                session.emit(ChatEvent::TitleUpdated {
-                    title,
-                    is_generated: is_gen,
-                });
+                session.set_title(title, is_gen);
             }
         }
+        // Strip title-related keys from thread_updated (titles go via sidebar SSE only)
+        let mut patch_for_chat_sse = sanitized_patch;
+        if let Some(obj) = patch_for_chat_sse.as_object_mut() {
+            obj.remove("title");
+            obj.remove("is_title_generated");
+        }
         session.emit(ChatEvent::ThreadUpdated {
-            params: sanitized_patch,
+            params: patch_for_chat_sse,
         });
         if changed {
             session.increment_version();
@@ -232,13 +235,14 @@ pub async fn handle_v1_chat_command(
             accepted: false,
             result: Some(serde_json::json!({"error": error})),
         });
+        let body = serde_json::to_string(&serde_json::json!({
+            "status": "invalid_content",
+            "error": error
+        })).unwrap_or_else(|_| r#"{"status":"invalid_content"}"#.to_string());
         return Ok(Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .header("Content-Type", "application/json")
-            .body(Body::from(format!(
-                r#"{{"status":"invalid_content","error":"{}"}}"#,
-                error
-            )))
+            .body(Body::from(body))
             .unwrap());
     }
 

@@ -21,6 +21,7 @@ export type HandoffOptions = {
   include_all_edited_context?: boolean;
   include_agentic_tools?: boolean;
   llm_summary_for_excluded?: boolean;
+  include_all_user_assistant_only?: boolean;
 };
 
 export type TransformStats = {

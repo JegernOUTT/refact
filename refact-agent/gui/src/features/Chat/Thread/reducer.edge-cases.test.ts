@@ -384,18 +384,8 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       };
       state = chatReducer(state, applyChatEvent(messageRemoved));
 
-      const runtimeIdle: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "5",
-        type: "runtime_updated",
-        state: "idle",
-        paused: false,
-        error: null,
-        queue_size: 0,
-        queued_items: [],
-      };
-      state = chatReducer(state, applyChatEvent(runtimeIdle));
-
+      // Note: runtime state (streaming, etc.) is now controlled by sidebar SSE session_state updates
+      // stream_finished sets streaming to false
       const runtime = state.threads[chatId]!;
       expect(runtime.streaming).toBe(false);
       expect(runtime.thread.messages).toHaveLength(1);
@@ -488,22 +478,11 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       };
       state = chatReducer(state, applyChatEvent(messageRemoved));
 
-      const errorState: ChatEventEnvelope = {
-        chat_id: chatId,
-        seq: "4",
-        type: "runtime_updated",
-        state: "error",
-        paused: false,
-        error: "Model not found",
-        queue_size: 0,
-        queued_items: [],
-      };
-      state = chatReducer(state, applyChatEvent(errorState));
-
+      // Note: error state is now controlled by sidebar SSE session_state updates
+      // Here we just verify the message was removed correctly
       const runtime = state.threads[chatId]!;
-      expect(runtime.error).toBe("Model not found");
       expect(runtime.thread.messages).toHaveLength(1);
-      expect(runtime.streaming).toBe(false);
+      expect(runtime.thread.messages[0].role).toBe("user");
     });
   });
 });

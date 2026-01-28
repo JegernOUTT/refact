@@ -46,6 +46,7 @@ import {
   closeThread,
   switchToThread,
   updateOpenThread,
+  updateChatRuntimeFromSessionState,
   setThreadPauseReasons,
   clearThreadPauseReasons,
   setThreadConfirmationStatus,
@@ -125,14 +126,11 @@ const createThreadRuntime = (
 const getThreadMode = ({
   tool_use,
   integration,
-  maybeMode,
 }: {
   tool_use?: ToolUse;
   integration?: IntegrationMeta | null;
-  maybeMode?: LspChatMode;
 }) => {
   if (integration) return "CONFIGURE";
-  if (maybeMode) return maybeMode === "CONFIGURE" ? "AGENT" : maybeMode;
   return chatModeToLspMode({ toolUse: tool_use });
 };
 
@@ -186,7 +184,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(setToolUse, (state, action) => {
     state.tool_use = action.payload;
     const rt = getCurrentRuntime(state);
-    if (rt) {
+    if (rt && rt.thread.messages.length === 0) {
       rt.thread.tool_use = action.payload;
       rt.thread.mode = chatModeToLspMode({ toolUse: action.payload });
     }
@@ -224,24 +222,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const currentRt = getCurrentRuntime(state);
     const lastParams = getLastThreadParams();
 
-    const allowedModes: LspChatMode[] = ["AGENT", "EXPLORE", "NO_TOOLS"];
-    const currentIsTask = Boolean(
-      currentRt?.thread.is_task_chat ?? currentRt?.thread.task_meta?.task_id,
-    );
-    const fromCurrent =
-      !currentIsTask &&
-      currentRt?.thread.mode &&
-      allowedModes.includes(currentRt.thread.mode)
-        ? currentRt.thread.mode
-        : undefined;
-    const fromStorage =
-      lastParams.mode && allowedModes.includes(lastParams.mode)
-        ? lastParams.mode
-        : undefined;
-    const mode = getThreadMode({
-      tool_use: state.tool_use,
-      maybeMode: fromCurrent ?? fromStorage,
-    });
+    const mode = getThreadMode({ tool_use: state.tool_use });
     const newRuntime = createThreadRuntime(state.tool_use, null, mode);
 
     newRuntime.thread.model = lastParams.model ?? currentRt?.thread.model ?? "";
@@ -299,11 +280,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const currentRt = getCurrentRuntime(state);
     const lastParams = getLastThreadParams();
 
-    const defaultMode = getThreadMode({
-      tool_use: "agent",
-      maybeMode: (mode ?? "AGENT") as LspChatMode,
-    });
-    const newRuntime = createThreadRuntime("agent", null, defaultMode);
+    const effectiveMode = mode
+      ? (mode as LspChatMode)
+      : getThreadMode({ tool_use: "agent" });
+    const newRuntime = createThreadRuntime("agent", null, effectiveMode);
 
     newRuntime.thread.id = id;
     newRuntime.thread.model =
@@ -481,15 +461,18 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (!existingRt) return;
 
     const incomingTitle = action.payload.thread.title;
-    const incomingTitleGenerated = action.payload.thread.isTitleGenerated;
+    const incomingGenerated = action.payload.thread.isTitleGenerated;
 
-    if (
-      incomingTitle &&
-      incomingTitleGenerated &&
-      !existingRt.thread.isTitleGenerated
-    ) {
-      existingRt.thread.title = incomingTitle;
-      existingRt.thread.isTitleGenerated = true;
+    if (incomingTitle) {
+      if (incomingGenerated === true) {
+        if (!existingRt.thread.isTitleGenerated) {
+          existingRt.thread.title = incomingTitle;
+          existingRt.thread.isTitleGenerated = true;
+        }
+      } else if (incomingGenerated === false) {
+        existingRt.thread.title = incomingTitle;
+        existingRt.thread.isTitleGenerated = false;
+      }
     }
 
     const isCurrentThread = action.payload.id === state.current_thread_id;
@@ -509,6 +492,32 @@ export const chatReducer = createReducer(initialState, (builder) => {
         ...existingRt.thread,
         ...otherFields,
       };
+    }
+  });
+
+  builder.addCase(updateChatRuntimeFromSessionState, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (!rt) return;
+
+    const sessionState = action.payload.session_state;
+    rt.streaming = sessionState === "generating";
+    rt.waiting_for_response =
+      sessionState === "generating" ||
+      sessionState === "executing_tools" ||
+      sessionState === "waiting_ide";
+    rt.prevent_send = false;
+
+    if (sessionState === "paused") {
+      rt.confirmation.pause = true;
+    } else if (sessionState === "idle" || sessionState === "error") {
+      rt.confirmation.pause = false;
+      rt.confirmation.pause_reasons = [];
+    }
+
+    if (sessionState === "error") {
+      rt.error = action.payload.error ?? "An error occurred";
+    } else if (sessionState === "idle") {
+      rt.error = null;
     }
   });
 
@@ -675,10 +684,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const snapshotMessages = (event.messages as ChatMessages).map(
           normalizeMessage,
         );
-        const isBusy =
-          event.runtime.state === "generating" ||
-          event.runtime.state === "executing_tools" ||
-          event.runtime.state === "waiting_ide";
 
         const backendModel = event.thread.model.trim();
         const backendToolUse = event.thread.tool_use;
@@ -688,11 +693,21 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const isTaskChat =
           Boolean(existing?.is_task_chat) || Boolean(snapshotTaskMeta?.task_id);
 
+        const snapshotTitle = event.thread.title;
+        const existingTitle = existingRuntime?.thread.title;
+        const snapshotTitleGenerated = event.thread.is_title_generated;
+        const existingTitleGenerated =
+          existingRuntime?.thread.isTitleGenerated === true;
+        const useSnapshotTitle =
+          !existingTitle ||
+          existingTitle === "New Chat" ||
+          (snapshotTitleGenerated && !existingTitleGenerated);
+
         const thread: ChatThread = {
           id: event.thread.id,
           messages: snapshotMessages,
           model: backendModel || (existing?.model ?? ""),
-          title: event.thread.title,
+          title: useSnapshotTitle ? snapshotTitle : existingTitle,
           tool_use: isToolUse(backendToolUse)
             ? backendToolUse
             : existing?.tool_use && isToolUse(existing.tool_use)
@@ -708,7 +723,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
             event.thread.context_tokens_cap ?? existing?.context_tokens_cap,
           include_project_info: event.thread.include_project_info,
           checkpoints_enabled: event.thread.checkpoints_enabled,
-          isTitleGenerated: event.thread.is_title_generated,
+          isTitleGenerated:
+            existingRuntime?.thread.isTitleGenerated ??
+            event.thread.is_title_generated,
           automatic_patch:
             event.thread.automatic_patch ?? existing?.automatic_patch ?? false,
           increase_max_tokens: existing?.increase_max_tokens ?? false,
@@ -717,14 +734,17 @@ export const chatReducer = createReducer(initialState, (builder) => {
           task_meta: snapshotTaskMeta,
         };
 
-        const defaultConfirmationStatus = event.runtime.paused
-          ? { wasInteracted: false, confirmationStatus: false }
-          : { wasInteracted: false, confirmationStatus: true };
+        const snapshotState = event.runtime.state as string;
+        const snapshotStreaming = snapshotState === "generating";
+        const snapshotWaiting =
+          snapshotState === "generating" ||
+          snapshotState === "executing_tools" ||
+          snapshotState === "waiting_ide";
 
         const newRt: ChatThreadRuntime = {
           thread,
-          streaming: event.runtime.state === "generating",
-          waiting_for_response: isBusy,
+          streaming: snapshotStreaming,
+          waiting_for_response: snapshotWaiting,
           prevent_send: false,
           error: event.runtime.error ?? null,
           queued_items: event.runtime
@@ -735,15 +755,16 @@ export const chatReducer = createReducer(initialState, (builder) => {
             pause: event.runtime.paused,
             pause_reasons: event.runtime
               .pause_reasons as ToolConfirmationPauseReason[],
-            status:
-              existingRuntime?.confirmation.status ?? defaultConfirmationStatus,
+            status: existingRuntime?.confirmation.status ?? {
+              wasInteracted: false,
+              confirmationStatus: true,
+            },
           },
           snapshot_received: true,
         };
 
         state.threads[chat_id] = newRt;
 
-        // Only add to open tabs if not a task chat
         if (!isTaskChat && !state.open_thread_ids.includes(chat_id)) {
           state.open_thread_ids.push(chat_id);
         }
@@ -763,8 +784,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
             ? params.mode
             : rt.thread.mode;
         }
-        if ("title" in params && typeof params.title === "string")
-          rt.thread.title = params.title;
         if (
           "boost_reasoning" in params &&
           typeof params.boost_reasoning === "boolean"
@@ -792,11 +811,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
         )
           rt.thread.checkpoints_enabled = params.checkpoints_enabled;
         if (
-          "is_title_generated" in params &&
-          typeof params.is_title_generated === "boolean"
-        )
-          rt.thread.isTitleGenerated = params.is_title_generated;
-        if (
           "automatic_patch" in params &&
           typeof params.automatic_patch === "boolean"
         )
@@ -808,31 +822,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
             (id) => id !== chat_id,
           );
         }
-        break;
-      }
-
-      case "runtime_updated": {
-        if (!rt) break;
-        rt.streaming = event.state === "generating";
-        rt.waiting_for_response =
-          event.state === "generating" ||
-          event.state === "executing_tools" ||
-          event.state === "waiting_ide";
-        rt.prevent_send = false;
-        rt.error = event.error ?? null;
-        rt.confirmation.pause = event.paused;
-        rt.queued_items =
-          event.queued_items as ChatThreadRuntime["queued_items"];
-        if (!event.paused) {
-          rt.confirmation.pause_reasons = [];
-        }
-        break;
-      }
-
-      case "title_updated": {
-        if (!rt) break;
-        rt.thread.title = event.title;
-        rt.thread.isTitleGenerated = event.is_generated;
         break;
       }
 
@@ -901,6 +890,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       case "stream_started": {
         if (!rt) break;
         rt.streaming = true;
+        rt.waiting_for_response = true;
         rt.thread.messages.push({
           role: "assistant",
           content: "",
@@ -928,7 +918,14 @@ export const chatReducer = createReducer(initialState, (builder) => {
       case "stream_finished": {
         if (!rt) break;
         rt.streaming = false;
-        rt.waiting_for_response = false;
+        if (
+          event.finish_reason === "stop" ||
+          event.finish_reason === "length" ||
+          event.finish_reason === "abort" ||
+          event.finish_reason === "error"
+        ) {
+          rt.waiting_for_response = false;
+        }
         const msgIdx = rt.thread.messages.findIndex(
           (m) => "message_id" in m && m.message_id === event.message_id,
         );
@@ -949,8 +946,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
           event.reasons as ToolConfirmationPauseReason[];
         rt.confirmation.status.wasInteracted = false;
         rt.confirmation.status.confirmationStatus = false;
-        rt.streaming = false;
-        rt.waiting_for_response = false;
         break;
       }
 
@@ -964,9 +959,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       }
 
       case "ide_tool_required": {
-        if (!rt) break;
-        rt.streaming = false;
-        rt.waiting_for_response = true;
         break;
       }
 
@@ -1006,6 +998,13 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
       case "ack":
         break;
+
+      case "queue_updated": {
+        if (!rt) break;
+        rt.queued_items =
+          event.queued_items as ChatThreadRuntime["queued_items"];
+        break;
+      }
     }
   });
 

@@ -255,6 +255,20 @@ export const TrajectoryPopoverContent: React.FC<
                 Generate summary
               </Flex>
             </Text>
+            <Text as="label" size="2">
+              <Flex gap="2" align="center">
+                <Checkbox
+                  checked={handoffOptions.include_all_user_assistant_only}
+                  onCheckedChange={(checked) =>
+                    updateHandoffOption(
+                      "include_all_user_assistant_only",
+                      checked === true,
+                    )
+                  }
+                />
+                Include all user messages + responses
+              </Flex>
+            </Text>
           </Box>
 
           {handoffPreview && (

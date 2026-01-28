@@ -180,6 +180,7 @@ export function useChatSubscription(
           connectingRef.current = false;
           setStatus("disconnected");
           callbacksRef.current.onDisconnected?.();
+          scheduleReconnect(reconnectDelay);
         },
         onError: (err) => {
           connectingRef.current = false;

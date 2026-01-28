@@ -15,7 +15,7 @@ impl Default for ChatLimits {
     fn default() -> Self {
         Self {
             max_queue_size: 100,
-            event_channel_capacity: 256,
+            event_channel_capacity: 1024,
             recent_request_ids_capacity: 100,
             max_images_per_message: 5,
             max_parallel_tools: 16,

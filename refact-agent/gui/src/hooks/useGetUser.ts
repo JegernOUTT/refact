@@ -29,7 +29,7 @@ export const useGetUser = () => {
         ) ||
         isStreaming ||
         (supportsMetadata !== undefined && !supportsMetadata), // if it's enterprise, then skipping this request
-      pollingInterval: 60 * 60 * 1000, // 1 hour
+      pollingInterval: 5 * 60 * 1000,
     },
   );
 

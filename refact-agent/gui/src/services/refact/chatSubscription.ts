@@ -80,23 +80,6 @@ export type EventEnvelope =
   | {
       chat_id: string;
       seq: string;
-      type: "runtime_updated";
-      state: SessionState;
-      paused: boolean;
-      error: string | null;
-      queue_size: number;
-      queued_items: QueuedItem[];
-    }
-  | {
-      chat_id: string;
-      seq: string;
-      type: "title_updated";
-      title: string;
-      is_generated: boolean;
-    }
-  | {
-      chat_id: string;
-      seq: string;
       type: "message_added";
       message: ChatMessage;
       index: number;
@@ -174,6 +157,13 @@ export type EventEnvelope =
       client_request_id: string;
       accepted: boolean;
       result: unknown;
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "queue_updated";
+      queue_size: number;
+      queued_items: QueuedItem[];
     };
 
 export type ChatEventEnvelope = EventEnvelope;
@@ -309,6 +299,13 @@ export function subscribeToChatEvents(
           try {
             const parsed = JSON.parse(dataStr) as unknown;
             if (!isValidChatEventBasic(parsed)) {
+              if (process.env.NODE_ENV === "development") {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "[SSE] Invalid event structure:",
+                  dataStr.slice(0, 200),
+                );
+              }
               continue;
             }
             normalizeSeq(parsed);
@@ -316,7 +313,11 @@ export function subscribeToChatEvents(
               continue;
             }
             callbacks.onEvent(parsed);
-          } catch {
+          } catch (e) {
+            if (process.env.NODE_ENV === "development") {
+              // eslint-disable-next-line no-console
+              console.warn("[SSE] Parse error:", e, dataStr.slice(0, 200));
+            }
             continue;
           }
         }

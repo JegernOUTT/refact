@@ -8,22 +8,63 @@ type CoinBalance = {
 const initialState: CoinBalance = {
   balance: 0,
 };
+
+function extractMeteringBalance(event: unknown): number | null {
+  if (typeof event !== "object" || event === null) return null;
+
+  const e = event as Record<string, unknown>;
+
+  if ("metering_balance" in e && typeof e.metering_balance === "number") {
+    return e.metering_balance;
+  }
+
+  if (e.type === "stream_delta" && Array.isArray(e.ops)) {
+    for (const op of e.ops) {
+      if (
+        typeof op === "object" &&
+        op !== null &&
+        (op as Record<string, unknown>).op === "merge_extra"
+      ) {
+        const extra = (op as Record<string, unknown>).extra;
+        if (
+          typeof extra === "object" &&
+          extra !== null &&
+          "metering_balance" in extra &&
+          typeof (extra as Record<string, unknown>).metering_balance ===
+            "number"
+        ) {
+          return (extra as Record<string, unknown>).metering_balance as number;
+        }
+      }
+    }
+  }
+
+  if (
+    e.type === "stream_finished" &&
+    typeof e.usage === "object" &&
+    e.usage !== null
+  ) {
+    const usage = e.usage as Record<string, unknown>;
+    if (
+      "metering_balance" in usage &&
+      typeof usage.metering_balance === "number"
+    ) {
+      return usage.metering_balance;
+    }
+  }
+
+  return null;
+}
+
 export const coinBallanceSlice = createSlice({
   name: "coins",
   initialState,
   reducers: {},
   extraReducers: (builder) => {
-    // Listen to SSE events for metering balance updates
-    // Balance is now primarily updated via getUser query, but we can also
-    // check for metering_balance in SSE events if the engine sends it
     builder.addCase(applyChatEvent, (state, action) => {
-      const event = action.payload;
-      // Check for metering_balance in runtime_updated or message events
-      if (
-        "metering_balance" in event &&
-        typeof event.metering_balance === "number"
-      ) {
-        state.balance = event.metering_balance;
+      const balance = extractMeteringBalance(action.payload);
+      if (balance !== null) {
+        state.balance = balance;
       }
     });
 

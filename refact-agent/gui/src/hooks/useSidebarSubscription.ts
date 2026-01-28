@@ -15,7 +15,11 @@ import {
   setPagination,
 } from "../features/History/historySlice";
 import type { ChatHistoryItem } from "../features/History/historySlice";
-import { updateOpenThread, closeThread } from "../features/Chat/Thread";
+import {
+  updateOpenThread,
+  closeThread,
+  updateChatRuntimeFromSessionState,
+} from "../features/Chat/Thread";
 import { tasksApi } from "../services/refact/tasks";
 import {
   trajectoriesApi,
@@ -105,35 +109,84 @@ export function useSidebarSubscription() {
         event.message_count !== undefined ||
         event.parent_id !== undefined ||
         event.link_type !== undefined ||
-        event.root_chat_id !== undefined;
+        event.root_chat_id !== undefined ||
+        event.is_title_generated !== undefined ||
+        event.error !== undefined ||
+        event.model !== undefined ||
+        event.mode !== undefined ||
+        event.total_coins !== undefined ||
+        event.total_lines_added !== undefined ||
+        event.total_lines_removed !== undefined;
 
       if (existsInHistory && hasMetaUpdate) {
+        const metaPatch: Record<string, unknown> = { id: event.id };
+        if (event.title !== undefined) metaPatch.title = event.title;
+        if (event.is_title_generated !== undefined)
+          metaPatch.isTitleGenerated = event.is_title_generated;
+        if (event.updated_at !== undefined)
+          metaPatch.updatedAt = event.updated_at;
+        if (event.session_state !== undefined)
+          metaPatch.session_state = event.session_state;
+        if (event.message_count !== undefined)
+          metaPatch.message_count = event.message_count;
+        if (event.parent_id !== undefined)
+          metaPatch.parent_id = event.parent_id;
+        if (event.link_type !== undefined)
+          metaPatch.link_type = event.link_type;
+        if (event.root_chat_id !== undefined)
+          metaPatch.root_chat_id = event.root_chat_id;
+        if (event.total_coins !== undefined)
+          metaPatch.total_coins = event.total_coins;
+        if (event.total_lines_added !== undefined)
+          metaPatch.total_lines_added = event.total_lines_added;
+        if (event.total_lines_removed !== undefined)
+          metaPatch.total_lines_removed = event.total_lines_removed;
+        if (event.model !== undefined) metaPatch.model = event.model;
+        if (event.mode !== undefined) metaPatch.mode = event.mode;
         dispatch(
-          updateChatMetaById({
-            id: event.id,
-            title: event.title,
-            updatedAt: event.updated_at,
-            session_state: event.session_state,
-            message_count: event.message_count,
-            parent_id: event.parent_id,
-            link_type: event.link_type,
-            root_chat_id: event.root_chat_id,
-          }),
+          updateChatMetaById(
+            metaPatch as Parameters<typeof updateChatMetaById>[0],
+          ),
         );
-        if (event.title) {
+
+        if (
+          event.title !== undefined ||
+          event.is_title_generated !== undefined
+        ) {
+          const threadPatch: Record<string, unknown> = {};
+          if (event.title !== undefined) threadPatch.title = event.title;
+          if (event.is_title_generated !== undefined)
+            threadPatch.isTitleGenerated = event.is_title_generated;
+          if (Object.keys(threadPatch).length > 0) {
+            dispatch(
+              updateOpenThread({
+                id: event.id,
+                thread: threadPatch as Parameters<
+                  typeof updateOpenThread
+                >[0]["thread"],
+              }),
+            );
+          }
+        }
+        if (event.session_state !== undefined) {
           dispatch(
-            updateOpenThread({
+            updateChatRuntimeFromSessionState({
               id: event.id,
-              thread: { title: event.title, isTitleGenerated: true },
+              session_state: event.session_state,
+              error: event.error,
             }),
           );
         }
-      } else if (!existsInHistory && event.title && event.updated_at) {
+      } else if (
+        !existsInHistory &&
+        (event.title !== undefined || event.session_state !== undefined) &&
+        event.updated_at
+      ) {
         dispatch(
           hydrateHistoryFromMeta([
             {
               id: event.id,
-              title: event.title,
+              title: event.title ?? "New Chat",
               created_at: event.updated_at,
               updated_at: event.updated_at,
               model: event.model ?? "",
@@ -143,17 +196,35 @@ export function useSidebarSubscription() {
               parent_id: event.parent_id,
               link_type: event.link_type,
               root_chat_id: event.root_chat_id,
-              total_lines_added: 0,
-              total_lines_removed: 0,
+              total_coins: event.total_coins,
+              total_lines_added: event.total_lines_added ?? 0,
+              total_lines_removed: event.total_lines_removed ?? 0,
             },
           ]),
         );
-        dispatch(
-          updateOpenThread({
-            id: event.id,
-            thread: { title: event.title, isTitleGenerated: true },
-          }),
-        );
+        const threadPatch: Record<string, unknown> = {};
+        if (event.title !== undefined) threadPatch.title = event.title;
+        if (event.is_title_generated !== undefined)
+          threadPatch.isTitleGenerated = event.is_title_generated;
+        if (Object.keys(threadPatch).length > 0) {
+          dispatch(
+            updateOpenThread({
+              id: event.id,
+              thread: threadPatch as Parameters<
+                typeof updateOpenThread
+              >[0]["thread"],
+            }),
+          );
+        }
+        if (event.session_state !== undefined) {
+          dispatch(
+            updateChatRuntimeFromSessionState({
+              id: event.id,
+              session_state: event.session_state,
+              error: event.error,
+            }),
+          );
+        }
       }
     },
     [dispatch],

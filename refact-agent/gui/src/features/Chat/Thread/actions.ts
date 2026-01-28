@@ -79,12 +79,17 @@ export const sendIdeMessagesToCurrentChat = createAsyncThunk(
     const apiKey = selectApiKey(state) ?? undefined;
     if (!chatId || !port) return;
 
-    const patch: Record<string, unknown> = { tool_use: state.chat.tool_use };
-
     const runtime = state.chat.threads[chatId];
-    if (runtime?.thread.model) patch.model = runtime.thread.model;
-    if (runtime?.thread.mode) patch.mode = runtime.thread.mode;
-    if (runtime?.thread.boost_reasoning !== undefined)
+    if (!runtime) return;
+
+    const patch: Record<string, unknown> = {};
+
+    if (runtime.thread.messages.length === 0) {
+      if (runtime.thread.tool_use) patch.tool_use = runtime.thread.tool_use;
+      if (runtime.thread.mode) patch.mode = runtime.thread.mode;
+    }
+    if (runtime.thread.model) patch.model = runtime.thread.model;
+    if (runtime.thread.boost_reasoning !== undefined)
       patch.boost_reasoning = runtime.thread.boost_reasoning;
 
     if (Object.keys(patch).length > 0) {
@@ -128,6 +133,19 @@ export const newChatWithInitialMessages = createAsyncThunk(
     const port = selectLspPort(state);
     const apiKey = selectApiKey(state) ?? undefined;
     if (!chatId || !port) return;
+
+    const runtime = state.chat.threads[chatId];
+    if (runtime && runtime.thread.messages.length === 0) {
+      const patch: Record<string, unknown> = {};
+      if (runtime.thread.tool_use) patch.tool_use = runtime.thread.tool_use;
+      if (runtime.thread.mode) patch.mode = runtime.thread.mode;
+      if (Object.keys(patch).length > 0) {
+        await sendChatCommand(chatId, port, apiKey, {
+          type: "set_params",
+          patch,
+        });
+      }
+    }
 
     for (const m of arg.messages) {
       if (!isUserMessage(m)) continue;
@@ -191,6 +209,18 @@ export const updateOpenThread = createAction<{
   id: string;
   thread: Partial<ChatThread>;
 }>("chatThread/updateOpenThread");
+
+export const updateChatRuntimeFromSessionState = createAction<{
+  id: string;
+  session_state:
+    | "idle"
+    | "generating"
+    | "executing_tools"
+    | "paused"
+    | "waiting_ide"
+    | "error";
+  error?: string;
+}>("chatThread/updateChatRuntimeFromSessionState");
 
 export const switchToThread = createAction<
   PayloadWithId & { openTab?: boolean }

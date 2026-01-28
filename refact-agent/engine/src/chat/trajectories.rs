@@ -21,6 +21,7 @@ use crate::subchat::run_subchat_once;
 
 use super::types::{ThreadParams, SessionState, ChatSession};
 use super::config::timeouts;
+use super::SessionsMap;
 
 const TITLE_GENERATION_PROMPT: &str = "Summarize this chat in 2-4 words. Prefer filenames, classes, entities, and avoid generic terms. Write only the title, nothing else.";
 
@@ -34,7 +35,11 @@ pub struct TrajectoryEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_title_generated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,6 +52,26 @@ pub struct TrajectoryEvent {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_coins: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_lines_added: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_lines_removed: Option<i64>,
+}
+
+pub async fn get_session_state_for_chat(
+    sessions: &SessionsMap,
+    chat_id: &str,
+) -> (String, Option<String>) {
+    let session_arc = sessions.read().await.get(chat_id).cloned();
+    match session_arc {
+        Some(arc) => {
+            let session = arc.lock().await;
+            (session.runtime.state.to_string(), session.runtime.error.clone())
+        }
+        None => (SessionState::Idle.to_string(), None),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -548,19 +573,28 @@ pub async fn save_trajectory_snapshot(
 
     if snapshot.task_meta.is_none() {
         let effective_root = snapshot.root_chat_id.clone().unwrap_or_else(|| snapshot.chat_id.clone());
+        let sessions = gcx.read().await.chat_sessions.clone();
+        let (session_state, session_error) = get_session_state_for_chat(&sessions, &snapshot.chat_id).await;
+        let total_coins = calculate_total_coins_from_chat_messages(&snapshot.messages);
+        let (total_lines_added, total_lines_removed) = calculate_line_changes_from_chat_messages(&snapshot.messages);
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let event = TrajectoryEvent {
                 event_type: "updated".to_string(),
                 id: snapshot.chat_id.clone(),
                 updated_at: Some(now),
                 title: Some(snapshot.title.clone()),
-                session_state: None,
+                is_title_generated: Some(snapshot.is_title_generated),
+                session_state: Some(session_state),
+                error: session_error,
                 message_count: Some(snapshot.messages.len()),
                 parent_id: snapshot.parent_id.clone(),
                 link_type: snapshot.link_type.clone(),
                 root_chat_id: Some(effective_root),
                 model: Some(snapshot.model.clone()),
                 mode: Some(snapshot.mode.clone()),
+                total_coins,
+                total_lines_added: Some(total_lines_added),
+                total_lines_removed: Some(total_lines_removed),
             };
             let _ = tx.send(event);
         }
@@ -657,6 +691,7 @@ async fn process_trajectory_change(
     chat_id: &str,
     is_remove: bool,
 ) {
+    let sessions = gcx.read().await.chat_sessions.clone();
     if is_remove {
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let _ = tx.send(TrajectoryEvent {
@@ -664,44 +699,61 @@ async fn process_trajectory_change(
                 id: chat_id.to_string(),
                 updated_at: None,
                 title: None,
+                is_title_generated: None,
                 session_state: None,
+                error: None,
                 message_count: None,
                 parent_id: None,
                 link_type: None,
                 root_chat_id: None,
                 model: None,
                 mode: None,
+                total_coins: None,
+                total_lines_added: None,
+                total_lines_removed: None,
             });
         }
     } else {
         let loaded = load_trajectory_for_chat(gcx.clone(), chat_id).await;
-        let (updated_at, title, message_count, parent_id, link_type, root_chat_id, model, mode) =
+        let (updated_at, title, is_title_generated, message_count, parent_id, link_type, root_chat_id, model, mode, total_coins, total_lines_added, total_lines_removed) =
             loaded.map(|t| {
                 let effective_root = t.thread.root_chat_id.clone().unwrap_or_else(|| t.thread.id.clone());
+                let coins = calculate_total_coins_from_chat_messages(&t.messages);
+                let (lines_added, lines_removed) = calculate_line_changes_from_chat_messages(&t.messages);
                 (
                     Some(chrono::Utc::now().to_rfc3339()),
                     Some(t.thread.title),
+                    Some(t.thread.is_title_generated),
                     Some(t.messages.len()),
                     t.thread.parent_id,
                     t.thread.link_type,
                     Some(effective_root),
                     Some(t.thread.model),
                     Some(t.thread.mode),
+                    coins,
+                    Some(lines_added),
+                    Some(lines_removed),
                 )
-            }).unwrap_or((None, None, None, None, None, None, None, None));
+            }).unwrap_or((None, None, None, None, None, None, None, None, None, None, None, None));
+        let (session_state, session_error) = get_session_state_for_chat(&sessions, chat_id).await;
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let _ = tx.send(TrajectoryEvent {
                 event_type: "updated".to_string(),
                 id: chat_id.to_string(),
                 updated_at,
                 title,
-                session_state: None,
+                is_title_generated,
+                session_state: Some(session_state),
+                error: session_error,
                 message_count,
                 parent_id,
                 link_type,
                 root_chat_id,
                 model,
                 mode,
+                total_coins,
+                total_lines_added,
+                total_lines_removed,
             });
         }
     }
@@ -917,31 +969,43 @@ fn count_user_messages(messages: &[serde_json::Value]) -> usize {
 
 fn extract_first_user_message(messages: &[serde_json::Value]) -> Option<String> {
     for msg in messages {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if role != "user" {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
             continue;
         }
-        if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+        if let Some(content) = msg.get("content").and_then(extract_text_with_image_placeholders_from_json) {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.chars().take(200).collect());
             }
         }
-        if let Some(content_arr) = msg.get("content").and_then(|c| c.as_array()) {
-            for item in content_arr {
-                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.chars().take(200).collect());
+    }
+    None
+}
+
+pub fn extract_text_with_image_placeholders_from_json(content_value: &serde_json::Value) -> Option<String> {
+    if let Some(content) = content_value.as_str() {
+        return Some(content.to_string());
+    }
+    if let Some(content_arr) = content_value.as_array() {
+        let parts: Vec<String> = content_arr
+            .iter()
+            .filter_map(|item| {
+                if item.get("type").and_then(|t| t.as_str()) == Some("image_url") {
+                    return Some("[image]".to_string());
+                }
+                if let Some(m_type) = item.get("m_type").and_then(|t| t.as_str()) {
+                    if m_type.starts_with("image/") {
+                        return Some("[image]".to_string());
                     }
                 }
-                if let Some(text) = item.get("m_content").and_then(|t| t.as_str()) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.chars().take(200).collect());
-                    }
-                }
-            }
+                item.get("text")
+                    .and_then(|t| t.as_str())
+                    .or_else(|| item.get("m_content").and_then(|t| t.as_str()))
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        if !parts.is_empty() {
+            return Some(parts.join("\n\n"));
         }
     }
     None
@@ -951,36 +1015,27 @@ fn build_title_generation_context(messages: &[serde_json::Value]) -> String {
     let mut context = String::new();
     let max_messages = 6;
     let max_chars_per_message = 500;
+    let mut included_count = 0;
 
-    for (i, msg) in messages.iter().take(max_messages).enumerate() {
+    for msg in messages.iter() {
+        if included_count >= max_messages {
+            break;
+        }
         let role = msg
             .get("role")
             .and_then(|r| r.as_str())
             .unwrap_or("unknown");
-        if role == "tool" || role == "context_file" || role == "cd_instruction" {
+        if role == "system" || role == "tool" || role == "context_file" || role == "cd_instruction" {
             continue;
         }
-        let content_text = if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-            content.to_string()
-        } else if let Some(content_arr) = msg.get("content").and_then(|c| c.as_array()) {
-            content_arr
-                .iter()
-                .filter_map(|item| {
-                    item.get("text")
-                        .and_then(|t| t.as_str())
-                        .or_else(|| item.get("m_content").and_then(|t| t.as_str()))
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        } else {
-            continue;
+        let content_text = match msg.get("content").and_then(extract_text_with_image_placeholders_from_json) {
+            Some(text) => text,
+            None => continue,
         };
         let truncated: String = content_text.chars().take(max_chars_per_message).collect();
         if !truncated.trim().is_empty() {
             context.push_str(&format!("{}: {}\n\n", role, truncated));
-        }
-        if i >= max_messages - 1 {
-            break;
+            included_count += 1;
         }
     }
     context
@@ -1110,18 +1165,24 @@ fn spawn_title_generation_task(
             return;
         }
         info!("Updated trajectory {} with generated title: {}", id, title);
+        let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
         let event = TrajectoryEvent {
             event_type: "updated".to_string(),
             id: id.clone(),
             updated_at: Some(now),
             title: Some(title.clone()),
-            session_state: None,
+            is_title_generated: Some(true),
+            session_state: Some(session_state),
+            error: session_error,
             message_count: None,
             parent_id: None,
             link_type: None,
             root_chat_id: None,
             model: None,
             mode: None,
+            total_coins: None,
+            total_lines_added: None,
+            total_lines_removed: None,
         };
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let _ = tx.send(event);
@@ -1217,23 +1278,81 @@ fn calculate_total_coins_from_messages(messages: &[serde_json::Value]) -> Option
     let mut found_any = false;
 
     for msg in messages {
-        if let Some(extra) = msg.get("extra").and_then(|e| e.as_object()) {
-            for (key, value) in extra {
+        let mut found_in_extra = false;
+        if let Some(extra_obj) = msg.get("extra").and_then(|e| e.as_object()) {
+            for (key, value) in extra_obj {
                 if key.starts_with("metering_coins_") {
                     if let Some(coins) = value.as_f64() {
                         total += coins;
                         found_any = true;
+                        found_in_extra = true;
                     }
                 }
             }
         }
-        if let Some(obj) = msg.as_object() {
-            for (key, value) in obj {
-                if key.starts_with("metering_coins_") {
-                    if let Some(coins) = value.as_f64() {
-                        total += coins;
-                        found_any = true;
+        if !found_in_extra {
+            if let Some(obj) = msg.as_object() {
+                for (key, value) in obj {
+                    if key == "extra" {
+                        continue;
                     }
+                    if key.starts_with("metering_coins_") {
+                        if let Some(coins) = value.as_f64() {
+                            total += coins;
+                            found_any = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if found_any { Some(total) } else { None }
+}
+
+fn calculate_line_changes_from_chat_messages(messages: &[ChatMessage]) -> (i64, i64) {
+    let mut total_added: i64 = 0;
+    let mut total_removed: i64 = 0;
+
+    for msg in messages {
+        if msg.role != "diff" {
+            continue;
+        }
+
+        let content = match &msg.content {
+            ChatContent::SimpleText(s) => s.as_str(),
+            _ => continue,
+        };
+
+        if let Ok(chunks) = serde_json::from_str::<Vec<serde_json::Value>>(content) {
+            for chunk in chunks {
+                if let Some(lines_add) = chunk.get("lines_add").and_then(|v| v.as_str()) {
+                    if !lines_add.is_empty() {
+                        total_added += lines_add.lines().count() as i64;
+                    }
+                }
+                if let Some(lines_remove) = chunk.get("lines_remove").and_then(|v| v.as_str()) {
+                    if !lines_remove.is_empty() {
+                        total_removed += lines_remove.lines().count() as i64;
+                    }
+                }
+            }
+        }
+    }
+
+    (total_added, total_removed)
+}
+
+fn calculate_total_coins_from_chat_messages(messages: &[ChatMessage]) -> Option<f64> {
+    let mut total: f64 = 0.0;
+    let mut found_any = false;
+
+    for msg in messages {
+        for (key, value) in &msg.extra {
+            if key.starts_with("metering_coins_") {
+                if let Some(coins) = value.as_f64() {
+                    total += coins;
+                    found_any = true;
                 }
             }
         }
@@ -1668,6 +1787,10 @@ pub async fn handle_v1_trajectories_save(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| id.clone());
+    let sessions = gcx.read().await.chat_sessions.clone();
+    let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
+    let total_coins = calculate_total_coins_from_messages(&data.messages);
+    let (total_lines_added, total_lines_removed) = calculate_line_changes_from_messages(&data.messages);
     let event = TrajectoryEvent {
         event_type: if is_new {
             "created".to_string()
@@ -1676,18 +1799,19 @@ pub async fn handle_v1_trajectories_save(
         },
         id: id.clone(),
         updated_at: Some(data.updated_at.clone()),
-        title: if is_new {
-            Some(data.title.clone())
-        } else {
-            None
-        },
-        session_state: None,
+        title: Some(data.title.clone()),
+        is_title_generated: Some(is_title_generated),
+        session_state: Some(session_state),
+        error: session_error,
         message_count: Some(data.messages.len()),
         parent_id,
         link_type,
         root_chat_id: Some(effective_root),
         model: Some(data.model.clone()),
         mode: Some(data.mode.clone()),
+        total_coins,
+        total_lines_added: Some(total_lines_added),
+        total_lines_removed: Some(total_lines_removed),
     };
     if let Some(tx) = &gcx.read().await.trajectory_events_tx {
         let _ = tx.send(event);
@@ -1725,13 +1849,18 @@ pub async fn handle_v1_trajectories_delete(
         id: id.clone(),
         updated_at: None,
         title: None,
+        is_title_generated: None,
         session_state: None,
+        error: None,
         message_count: None,
         parent_id: None,
         link_type: None,
         root_chat_id: None,
         model: None,
         mode: None,
+        total_coins: None,
+        total_lines_added: None,
+        total_lines_removed: None,
     };
     if let Some(tx) = &gcx.read().await.trajectory_events_tx {
         let _ = tx.send(event);
@@ -2073,21 +2202,30 @@ mod tests {
             id: "chat-123".to_string(),
             updated_at: Some("2024-01-01T00:00:00Z".to_string()),
             title: Some("Test Title".to_string()),
+            is_title_generated: Some(true),
             session_state: Some("generating".to_string()),
+            error: Some("Test error".to_string()),
             message_count: Some(5),
             parent_id: Some("parent-123".to_string()),
             link_type: Some("subagent".to_string()),
             root_chat_id: Some("root-123".to_string()),
             model: Some("gpt-4".to_string()),
             mode: Some("AGENT".to_string()),
+            total_coins: Some(1.5),
+            total_lines_added: Some(100),
+            total_lines_removed: Some(50),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "updated");
         assert_eq!(json["id"], "chat-123");
         assert_eq!(json["session_state"], "generating");
+        assert_eq!(json["error"], "Test error");
         assert_eq!(json["message_count"], 5);
         assert_eq!(json["parent_id"], "parent-123");
         assert_eq!(json["link_type"], "subagent");
+        assert_eq!(json["total_coins"], 1.5);
+        assert_eq!(json["total_lines_added"], 100);
+        assert_eq!(json["total_lines_removed"], 50);
     }
 
     #[test]

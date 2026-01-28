@@ -10,7 +10,7 @@ import {
   selectPreventSend,
   selectChatId,
   selectMessages,
-  getSelectedToolUse,
+  selectThreadMode,
 } from "../../features/Chat/Thread";
 import { ThreadHistoryButton } from "../Buttons";
 import { push } from "../../features/Pages/pagesSlice";
@@ -42,7 +42,7 @@ export const Chat: React.FC<ChatProps> = ({
 
   const { submit, abort, retryFromIndex } = useChatActions();
 
-  const chatToolUse = useAppSelector(getSelectedToolUse);
+  const chatMode = useAppSelector(selectThreadMode);
   const messages = useAppSelector(selectMessages);
 
   const { shouldCheckpointsPopupBeShown } = useCheckpoints();
@@ -131,7 +131,7 @@ export const Chat: React.FC<ChatProps> = ({
                     }
                     style={{ cursor: "pointer" }}
                   >
-                    mode: {chatToolUse}
+                    mode: {chatMode}
                   </Text>
                 </Flex>
                 {messages.length !== 0 &&

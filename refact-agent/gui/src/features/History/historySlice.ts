@@ -238,7 +238,7 @@ function trajectoryMetaToHistoryItem(meta: TrajectoryMeta): ChatHistoryItem {
     increase_max_tokens: false,
     automatic_patch: false,
     project_name: undefined,
-    isTitleGenerated: true,
+    isTitleGenerated: false,
     createdAt: meta.created_at,
     last_user_message_id: "",
     updatedAt: meta.updated_at,
@@ -334,6 +334,8 @@ export const historySlice = createSlice({
           existing.message_count = meta.message_count;
           existing.root_chat_id = meta.root_chat_id;
           existing.total_coins = meta.total_coins;
+          existing.total_lines_added = meta.total_lines_added;
+          existing.total_lines_removed = meta.total_lines_removed;
         }
       }
     },
@@ -404,19 +406,27 @@ export const historySlice = createSlice({
       action: PayloadAction<{
         id: string;
         title?: string;
+        isTitleGenerated?: boolean;
         updatedAt?: string;
         session_state?: ChatHistoryItem["session_state"];
         message_count?: number;
         parent_id?: string;
         link_type?: string;
         root_chat_id?: string;
+        total_coins?: number;
+        total_lines_added?: number;
+        total_lines_removed?: number;
+        model?: string;
+        mode?: string;
       }>,
     ) => {
       if (!(action.payload.id in state.chats)) return;
       const chat = state.chats[action.payload.id];
       if (action.payload.title !== undefined) {
         chat.title = action.payload.title;
-        chat.isTitleGenerated = true;
+      }
+      if (action.payload.isTitleGenerated !== undefined) {
+        chat.isTitleGenerated = action.payload.isTitleGenerated;
       }
       if (action.payload.updatedAt !== undefined) {
         chat.updatedAt = action.payload.updatedAt;
@@ -435,6 +445,21 @@ export const historySlice = createSlice({
       }
       if (action.payload.root_chat_id !== undefined) {
         chat.root_chat_id = action.payload.root_chat_id;
+      }
+      if (action.payload.total_coins !== undefined) {
+        chat.total_coins = action.payload.total_coins;
+      }
+      if (action.payload.total_lines_added !== undefined) {
+        chat.total_lines_added = action.payload.total_lines_added;
+      }
+      if (action.payload.total_lines_removed !== undefined) {
+        chat.total_lines_removed = action.payload.total_lines_removed;
+      }
+      if (action.payload.model !== undefined) {
+        chat.model = action.payload.model;
+      }
+      if (action.payload.mode !== undefined) {
+        chat.mode = action.payload.mode as ChatHistoryItem["mode"];
       }
     },
 
