@@ -83,6 +83,9 @@ use crate::http::routers::v1::tasks::{
 use crate::http::routers::v1::trajectory_ops::{
     handle_transform_preview, handle_transform_apply, handle_handoff_preview, handle_handoff_apply,
 };
+use crate::http::routers::v1::project_configs::{
+    handle_v1_project_configs_get, handle_v1_project_configs_rescan,
+};
 
 mod ast;
 pub mod at_commands;
@@ -118,6 +121,7 @@ mod v1_integrations;
 pub mod vecdb;
 pub mod voice;
 mod workspace;
+mod project_configs;
 
 pub fn make_v1_router() -> Router {
     let builder = Router::new()
@@ -150,6 +154,8 @@ pub fn make_v1_router() -> Router {
         .route("/rag-status", get(handle_v1_rag_status))
         .route("/config-path", get(handle_v1_config_path))
         .route("/customization", get(handle_v1_customization))
+        .route("/project-configs", get(handle_v1_project_configs_get))
+        .route("/project-configs/rescan", post(handle_v1_project_configs_rescan))
         .route(
             "/sync-files-extract-tar",
             post(handle_v1_sync_files_extract_tar),
