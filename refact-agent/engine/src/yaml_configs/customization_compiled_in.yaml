@@ -22,6 +22,8 @@
 #       compact project tree structure
 #    %GIT_INFO%
 #       git/vcs info: current branch, branches, remotes, staged/modified/untracked files
+#    %AGENT_WORKTREE%
+#       for task agents: the isolated git worktree path where the agent should work
 #
 # You can also use top-level keys to reduce copy-paste, like you see there with PROMPT_DEFAULT.
 
@@ -499,7 +501,7 @@ PROMPT_TASK_AGENT: |
   ## Failure
   If impossible → `task_agent_finish(success=false, report="reason")`
 
-  %WORKSPACE_INFO%
+  %AGENT_WORKTREE%
 
   %SYSTEM_INFO%
 

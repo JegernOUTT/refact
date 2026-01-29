@@ -99,11 +99,10 @@ async fn setup_agent_worktree(
         task_id, card_id, agent_id_short
     );
     let worktree_name = format!("{}-{}-{}", task_id, card_id, agent_id_short);
-    let worktree_path = workspace_root
-        .join(".refact")
-        .join("tasks")
-        .join(task_id)
+    let cache_dir = gcx.read().await.cache_dir.clone();
+    let worktree_path = cache_dir
         .join("worktrees")
+        .join(task_id)
         .join(agent_id_short);
 
     tokio::fs::create_dir_all(worktree_path.parent().unwrap())
@@ -133,6 +132,8 @@ async fn setup_agent_worktree(
         Ok(())
     })
     .await?;
+
+    crate::files_in_workspace::add_folder(gcx.clone(), &worktree_path).await;
 
     Ok((
         Some(branch_name),

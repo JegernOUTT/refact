@@ -1,7 +1,7 @@
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, DiffChunk};
 use crate::files_correction::{
-    check_if_its_inside_a_workspace_or_config, get_project_dirs_with_code_workdir,
+    check_if_its_inside_a_workspace_or_config, get_project_dirs,
 };
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
@@ -57,19 +57,16 @@ fn parse_patch_arg(args: &HashMap<String, Value>) -> Result<ParsedPatch, String>
 async fn resolve_patch_path(
     gcx: Arc<ARwLock<GlobalContext>>,
     rel_path: &str,
-    code_workdir: &Option<PathBuf>,
     must_exist: bool,
 ) -> Result<PathBuf, String> {
     let rel_path_buf = validate_relative_path(rel_path)?;
-    let project_dirs = get_project_dirs_with_code_workdir(gcx.clone(), code_workdir).await;
+    let project_dirs = get_project_dirs(gcx.clone()).await;
 
     if project_dirs.is_empty() {
         return Err("No workspace found".to_string());
     }
 
-    let full_path = if let Some(workdir) = code_workdir {
-        workdir.join(&rel_path_buf)
-    } else if project_dirs.len() == 1 {
+    let full_path = if project_dirs.len() == 1 {
         project_dirs[0].join(&rel_path_buf)
     } else if must_exist {
         let existing: Vec<_> = project_dirs
@@ -91,10 +88,10 @@ async fn resolve_patch_path(
             ));
         }
     } else {
-        return Err(format!(
-            "Multiple workspaces found, specify code_workdir: {:?}",
-            project_dirs
-        ));
+        let active = crate::files_correction::get_active_project_path(gcx.clone())
+            .await
+            .ok_or_else(|| "No active workspace found for new file".to_string())?;
+        active.join(&rel_path_buf)
     };
 
     let canonical = if full_path.exists() {
@@ -129,7 +126,6 @@ pub async fn tool_apply_patch_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     dry: bool,
-    code_workdir: &Option<PathBuf>,
 ) -> Result<ApplyPatchResult, String> {
     let parsed = parse_patch_arg(args)?;
     await_ast_indexing(gcx.clone()).await?;
@@ -141,7 +137,7 @@ pub async fn tool_apply_patch_exec(
     for op in parsed.operations {
         match op {
             FileOperation::Add { path, contents } => {
-                let full_path = resolve_patch_path(gcx.clone(), &path, code_workdir, false).await?;
+                let full_path = resolve_patch_path(gcx.clone(), &path, false).await?;
 
                 let exists = match overlay.get(&full_path) {
                     Some(OverlayState::Present(_)) => true,
@@ -171,7 +167,7 @@ pub async fn tool_apply_patch_exec(
             }
 
             FileOperation::Delete { path } => {
-                let full_path = resolve_patch_path(gcx.clone(), &path, code_workdir, true).await?;
+                let full_path = resolve_patch_path(gcx.clone(), &path, true).await?;
 
                 let file_content = match overlay.get(&full_path) {
                     Some(OverlayState::Present(content)) => content.clone(),
@@ -190,7 +186,7 @@ pub async fn tool_apply_patch_exec(
                     overlay.insert(full_path.clone(), OverlayState::Deleted);
                 } else {
                     undo_history::record_before_edit(&full_path, &file_content);
-                    std::fs::remove_file(&full_path).map_err(|e| format!("Failed to delete: {}", e))?;
+                    tokio::fs::remove_file(&full_path).await.map_err(|e| format!("Failed to delete: {}", e))?;
                     gcx.write().await.documents_state.memory_document_map.remove(&full_path);
                 }
 
@@ -217,7 +213,7 @@ pub async fn tool_apply_patch_exec(
             }
 
             FileOperation::Update { path, move_to, chunks } => {
-                let full_path = resolve_patch_path(gcx.clone(), &path, code_workdir, true).await?;
+                let full_path = resolve_patch_path(gcx.clone(), &path, true).await?;
 
                 let file_content = match overlay.get(&full_path) {
                     Some(OverlayState::Present(content)) => content.clone(),
@@ -238,7 +234,7 @@ pub async fn tool_apply_patch_exec(
                 let new_file_content = restore_line_endings(&new_content, has_crlf);
 
                 if let Some(move_path) = move_to {
-                    let dest_path = resolve_patch_path(gcx.clone(), &move_path, code_workdir, false).await?;
+                    let dest_path = resolve_patch_path(gcx.clone(), &move_path, false).await?;
 
                     let dest_exists = match overlay.get(&dest_path) {
                         Some(OverlayState::Present(_)) => true,
@@ -255,7 +251,7 @@ pub async fn tool_apply_patch_exec(
                     } else {
                         write_file(gcx.clone(), &dest_path, &new_file_content, false).await?;
                         undo_history::record_before_edit(&full_path, &file_content);
-                        std::fs::remove_file(&full_path).map_err(|e| format!("Failed to remove: {}", e))?;
+                        tokio::fs::remove_file(&full_path).await.map_err(|e| format!("Failed to remove: {}", e))?;
                         gcx.write().await.documents_state.memory_document_map.remove(&full_path);
                         sync_documents_ast(gcx.clone(), &dest_path).await?;
                     }
@@ -316,12 +312,9 @@ impl Tool for ToolApplyPatch {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, code_workdir) = {
-            let ccx_locked = ccx.lock().await;
-            (ccx_locked.global_context.clone(), ccx_locked.code_workdir.clone())
-        };
+        let gcx = ccx.lock().await.global_context.clone();
 
-        let result = tool_apply_patch_exec(gcx, args, false, &code_workdir).await?;
+        let result = tool_apply_patch_exec(gcx, args, false).await?;
 
         Ok((
             false,

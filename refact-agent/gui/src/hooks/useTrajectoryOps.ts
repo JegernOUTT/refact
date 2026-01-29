@@ -169,7 +169,8 @@ export function useTrajectoryOps() {
       }
 
       return true;
-    } catch {
+    } catch (error) {
+      console.error("[handleApplyHandoff]", error);
       return false;
     }
   }, [chatId, thread, handoffOptions, applyHandoff, dispatch, port, apiKey]);

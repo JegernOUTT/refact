@@ -3,7 +3,7 @@ use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_o
 use crate::call_validation::DiffChunk;
 use crate::files_correction::{
     canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
-    correct_to_nearest_dir_path, get_project_dirs_with_code_workdir,
+    correct_to_nearest_dir_path, get_project_dirs,
     preprocess_path_for_normalization,
 };
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
@@ -12,7 +12,6 @@ use crate::privacy::{check_file_privacy, FilePrivacyLevel, PrivacySettings};
 use regex::{Match, Regex};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
@@ -65,7 +64,7 @@ pub async fn parse_path_for_update(
         gcx.clone(),
         &raw_path,
         &candidates,
-        &get_project_dirs_with_code_workdir(gcx.clone(), code_workdir).await,
+        &get_project_dirs(gcx.clone()).await,
         false,
     )
     .await
@@ -122,7 +121,7 @@ pub async fn parse_path_for_create(
                 gcx.clone(),
                 &parent_str,
                 &candidates,
-                &get_project_dirs_with_code_workdir(gcx.clone(), code_workdir).await,
+                &get_project_dirs(gcx.clone()).await,
                 true,
             )
             .await?;
@@ -340,7 +339,7 @@ pub async fn write_file(
 
     if !parent.exists() {
         if !dry {
-            fs::create_dir_all(&parent).map_err(|e| {
+            tokio::fs::create_dir_all(&parent).await.map_err(|e| {
                 let err = format!("Failed to Add: {:?}; Its parent dir {:?} did not exist and attempt to create it failed.\nERROR: {}", path, parent, e);
                 warn!("{err}");
                 err
@@ -356,7 +355,7 @@ pub async fn write_file(
 
     if !dry {
         record_before_edit(path, &before_text);
-        fs::write(&path, file_text).map_err(|e| {
+        tokio::fs::write(&path, file_text).await.map_err(|e| {
             let err = format!("Failed to write file: {:?}\nERROR: {}", path, e);
             warn!("{err}");
             err

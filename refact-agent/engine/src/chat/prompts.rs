@@ -149,6 +149,7 @@ pub async fn system_prompt_add_extra_instructions(
     system_prompt: String,
     tool_names: HashSet<String>,
     chat_meta: &call_validation::ChatMeta,
+    task_meta: &Option<crate::chat::types::TaskMeta>,
 ) -> String {
     let include_project_info = chat_meta.include_project_info;
     async fn workspace_files_info(
@@ -243,6 +244,33 @@ pub async fn system_prompt_add_extra_instructions(
             system_prompt = system_prompt.replace("%WORKSPACE_INFO%", "");
         }
     }
+
+    if system_prompt.contains("%AGENT_WORKTREE%") {
+        let worktree_info = if let Some(tm) = task_meta {
+            if let Some(ref card_id) = tm.card_id {
+                match crate::tasks::storage::load_board(gcx.clone(), &tm.task_id).await {
+                    Ok(board) => {
+                        if let Some(card) = board.get_card(card_id) {
+                            if let Some(ref worktree) = card.agent_worktree {
+                                format!("## Your Working Directory\nYou are working in an isolated git worktree at:\n`{}`\n\nAll your file operations should be within this directory. Changes here don't affect the main repository until merged.", worktree)
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        }
+                    }
+                    Err(_) => String::new(),
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        system_prompt = system_prompt.replace("%AGENT_WORKTREE%", &worktree_info);
+    }
+
     if system_prompt.contains("%KNOWLEDGE_INSTRUCTIONS%") {
         if include_project_info {
             let cfg = crate::yaml_configs::customization_loader::load_customization_compiled_in();
@@ -325,6 +353,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
     gcx: Arc<ARwLock<GlobalContext>>,
     mut messages: Vec<call_validation::ChatMessage>,
     chat_meta: &call_validation::ChatMeta,
+    task_meta: &Option<crate::chat::types::TaskMeta>,
     stream_back_to_user: &mut HasRagResults,
     tool_names: HashSet<String>,
 ) -> Vec<call_validation::ChatMessage> {
@@ -372,6 +401,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
                     get_default_system_prompt(gcx.clone(), chat_meta.chat_mode.clone()).await,
                     tool_names,
                     chat_meta,
+                    task_meta,
                 )
                 .await;
                 let msg = ChatMessage {

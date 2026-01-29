@@ -198,26 +198,6 @@ pub async fn get_project_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> 
     workspace_folders_locked.iter().cloned().collect::<Vec<_>>()
 }
 
-pub fn get_project_dirs_for_workdir(
-    workspace_folders: &[PathBuf],
-    code_workdir: &Option<PathBuf>,
-) -> Vec<PathBuf> {
-    if let Some(wd) = code_workdir {
-        if wd.exists() {
-            return vec![wd.clone()];
-        }
-    }
-    workspace_folders.to_vec()
-}
-
-pub async fn get_project_dirs_with_code_workdir(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    code_workdir: &Option<PathBuf>,
-) -> Vec<PathBuf> {
-    let workspace_folders = get_project_dirs(gcx).await;
-    get_project_dirs_for_workdir(&workspace_folders, code_workdir)
-}
-
 pub async fn get_active_project_path(gcx: Arc<ARwLock<GlobalContext>>) -> Option<PathBuf> {
     let workspace_folders = get_project_dirs(gcx.clone()).await;
     if workspace_folders.is_empty() {

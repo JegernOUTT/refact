@@ -558,7 +558,7 @@ pub async fn get_or_create_session_with_trajectory(
 
     let trajectory_events_tx = gcx.read().await.trajectory_events_tx.clone();
 
-    let (mut session, is_new) = if let Some(loaded) =
+    let (mut session, _is_new) = if let Some(loaded) =
         super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id).await
     {
         info!(
@@ -583,7 +583,7 @@ pub async fn get_or_create_session_with_trajectory(
 
     session.trajectory_events_tx = trajectory_events_tx.clone();
 
-    let (session_arc, inserted) = {
+    let (session_arc, _inserted) = {
         let mut sessions_write = sessions.write().await;
         match sessions_write.entry(chat_id.to_string()) {
             std::collections::hash_map::Entry::Vacant(e) => {

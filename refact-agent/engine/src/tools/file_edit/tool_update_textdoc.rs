@@ -82,14 +82,11 @@ impl Tool for ToolUpdateTextDoc {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, code_workdir) = {
+        let gcx = {
             let ccx_locked = ccx.lock().await;
-            (
-                ccx_locked.global_context.clone(),
-                ccx_locked.code_workdir.clone(),
-            )
+            ccx_locked.global_context.clone()
         };
-        let (_, _, chunks, _) = tool_update_text_doc_exec(gcx, args, false, &code_workdir).await?;
+        let (_, _, chunks, _) = tool_update_text_doc_exec(gcx, args, false, &None).await?;
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
@@ -107,14 +104,11 @@ impl Tool for ToolUpdateTextDoc {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
-        let (gcx, code_workdir) = {
+        let gcx = {
             let ccx_locked = ccx.lock().await;
-            (
-                ccx_locked.global_context.clone(),
-                ccx_locked.code_workdir.clone(),
-            )
+            ccx_locked.global_context.clone()
         };
-        let can_exec = parse_args(gcx.clone(), args, &code_workdir).await.is_ok();
+        let can_exec = parse_args(gcx.clone(), args, &None).await.is_ok();
         let msgs_len = ccx.lock().await.messages.len();
         if msgs_len != 0 && !can_exec {
             return Ok(MatchConfirmDeny {

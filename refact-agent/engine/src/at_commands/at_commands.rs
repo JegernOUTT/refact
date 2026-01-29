@@ -1,6 +1,5 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
@@ -36,7 +35,6 @@ pub struct AtCommandsContext {
     pub root_chat_id: String,
     pub current_model: String,
     pub task_meta: Option<TaskMeta>,
-    pub code_workdir: Option<PathBuf>,
 
     pub at_commands: HashMap<String, Arc<dyn AtCommand + Send>>,
     pub subchat_tool_parameters: IndexMap<String, SubchatParameters>,
@@ -58,7 +56,6 @@ impl AtCommandsContext {
         root_chat_id: Option<String>,
         current_model: String,
         task_meta: Option<TaskMeta>,
-        code_workdir: Option<PathBuf>,
     ) -> Self {
         Self::new_with_abort(
             global_context,
@@ -70,7 +67,6 @@ impl AtCommandsContext {
             root_chat_id,
             current_model,
             task_meta,
-            code_workdir,
             None,
         )
         .await
@@ -86,7 +82,6 @@ impl AtCommandsContext {
         root_chat_id: Option<String>,
         current_model: String,
         task_meta: Option<TaskMeta>,
-        code_workdir: Option<PathBuf>,
         abort_flag: Option<Arc<AtomicBool>>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<serde_json::Value>();
@@ -104,7 +99,6 @@ impl AtCommandsContext {
             root_chat_id: effective_root,
             current_model,
             task_meta,
-            code_workdir,
             at_commands: at_commands_dict(global_context.clone()).await,
             subchat_tool_parameters: IndexMap::new(),
             postprocess_parameters: PostprocessSettings::new(),

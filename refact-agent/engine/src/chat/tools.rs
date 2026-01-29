@@ -384,7 +384,6 @@ pub async fn check_tools_confirmation(
             None,
             String::new(),
             None,
-            None,
         )
         .await,
     ));
@@ -502,21 +501,6 @@ pub async fn execute_tools_with_session(
         }
     };
 
-    let code_workdir = if let Some(tm) = thread.task_meta.as_ref() {
-        match crate::tasks::storage::load_board(gcx.clone(), &tm.task_id).await {
-            Ok(board) => board
-                .get_card(&tm.card_id.as_ref().unwrap_or(&String::new()))
-                .and_then(|card| {
-                    card.agent_worktree
-                        .as_ref()
-                        .map(|p| std::path::PathBuf::from(p))
-                }),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new_with_abort(
             gcx.clone(),
@@ -528,7 +512,6 @@ pub async fn execute_tools_with_session(
             thread.root_chat_id.clone(),
             thread.model.clone(),
             thread.task_meta.clone(),
-            code_workdir,
             Some(session_abort_flag),
         )
         .await,
@@ -773,21 +756,6 @@ pub async fn execute_tools(
         }
     };
 
-    let code_workdir = if let Some(tm) = thread.task_meta.as_ref() {
-        match crate::tasks::storage::load_board(gcx.clone(), &tm.task_id).await {
-            Ok(board) => board
-                .get_card(&tm.card_id.as_ref().unwrap_or(&String::new()))
-                .and_then(|card| {
-                    card.agent_worktree
-                        .as_ref()
-                        .map(|p| std::path::PathBuf::from(p))
-                }),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new(
             gcx.clone(),
@@ -799,7 +767,6 @@ pub async fn execute_tools(
             thread.root_chat_id.clone(),
             thread.model.clone(),
             thread.task_meta.clone(),
-            code_workdir,
         )
         .await,
     ));

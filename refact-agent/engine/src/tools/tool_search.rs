@@ -22,15 +22,9 @@ async fn execute_att_search(
     query: &String,
     scope: &String,
 ) -> Result<Vec<ContextFile>, String> {
-    let (gcx, code_workdir) = {
-        let ccx_locked = ccx.lock().await;
-        (
-            ccx_locked.global_context.clone(),
-            ccx_locked.code_workdir.clone(),
-        )
-    };
+    let gcx = ccx.lock().await.global_context.clone();
 
-    let filter = create_scope_filter(gcx.clone(), &code_workdir, scope).await?;
+    let filter = create_scope_filter(gcx.clone(), scope).await?;
 
     info!("att-search: filter: {:?}", filter);
     execute_at_search(ccx.clone(), &query, filter).await

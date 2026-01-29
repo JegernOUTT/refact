@@ -444,14 +444,17 @@ export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(switchToThread, (state, action) => {
     const { id, openTab } = action.payload;
     const existingRt = getRuntime(state, id);
+
+    if (!existingRt) {
+      console.warn(`[switchToThread] No runtime for ${id}`);
+    }
+
     if (existingRt) {
       const shouldOpenTab =
         openTab !== false && !existingRt.thread.is_task_chat;
       if (shouldOpenTab && !state.open_thread_ids.includes(id)) {
         state.open_thread_ids.push(id);
       }
-      // Don't reset snapshot_received on tab switches.
-      // The flag means "thread has been hydrated at least once", not "currently connected".
       state.current_thread_id = id;
     }
   });

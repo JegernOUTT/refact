@@ -191,6 +191,7 @@ pub struct DocumentsState {
     pub workspace_folders: Arc<StdMutex<Vec<PathBuf>>>,
     pub workspace_files: Arc<StdMutex<Vec<PathBuf>>>,
     pub workspace_vcs_roots: Arc<StdMutex<Vec<PathBuf>>>,
+
     pub active_file_path: Option<PathBuf>,
     pub jsonl_files: Arc<StdMutex<Vec<PathBuf>>>,
     // document_map on windows: c%3A/Users/user\Documents/file.ext
@@ -229,6 +230,7 @@ impl DocumentsState {
             workspace_folders: Arc::new(StdMutex::new(workspace_dirs)),
             workspace_files: Arc::new(StdMutex::new(Vec::new())),
             workspace_vcs_roots: Arc::new(StdMutex::new(Vec::new())),
+
             active_file_path: None,
             jsonl_files: Arc::new(StdMutex::new(Vec::new())),
             memory_document_map: HashMap::new(),
@@ -587,7 +589,7 @@ async fn _ls_files_under_version_control_recursive(
                 }
             } else {
                 // Don't have version control
-                let indexing_settings = indexing_everywhere.indexing_for_path(&checkme); // this effectively only uses global blocklist
+                let indexing_settings = indexing_everywhere.indexing_for_path(&checkme);
                 if check_blocklist && is_blocklisted(&indexing_settings, &checkme) {
                     blocklisted_dirs_cnt += 1;
                     continue;
@@ -623,7 +625,7 @@ async fn _ls_files_under_version_control_recursive(
 pub async fn retrieve_files_in_workspace_folders(
     proj_folders: Vec<PathBuf>,
     indexing_everywhere: &mut IndexingEverywhere,
-    allow_files_in_hidden_folders: bool, // true when syncing to remote container
+    allow_files_in_hidden_folders: bool,
     ignore_size_thresholds: bool,
 ) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut all_files: Vec<PathBuf> = Vec::new();
@@ -713,14 +715,7 @@ pub async fn enqueue_all_files_from_workspace_folders(
     wake_up_indexers: bool,
     vecdb_only: bool,
 ) -> i32 {
-    let folders: Vec<PathBuf> = gcx
-        .read()
-        .await
-        .documents_state
-        .workspace_folders
-        .lock()
-        .unwrap()
-        .clone();
+    let folders = gcx.read().await.documents_state.workspace_folders.lock().unwrap().clone();
 
     info!(
         "enqueue_all_files_from_workspace_folders started files search with {} folders",
@@ -956,40 +951,39 @@ pub async fn on_did_delete(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
 }
 
 pub async fn add_folder(gcx: Arc<ARwLock<GlobalContext>>, fpath: &PathBuf) {
-    {
-        let documents_state = &mut gcx.write().await.documents_state;
-        documents_state
-            .workspace_folders
-            .lock()
-            .unwrap()
-            .push(fpath.clone());
+    let canonical_path = crate::files_correction::canonical_path(fpath.to_string_lossy().to_string());
+    let was_added = {
+        let documents_state = &gcx.write().await.documents_state;
+        let mut folders = documents_state.workspace_folders.lock().unwrap();
+        if folders.iter().any(|p| *p == canonical_path) {
+            false
+        } else {
+            folders.push(canonical_path.clone());
+            true
+        }
+    };
+    if was_added {
+        tracing::info!("Added folder {} to workspace", canonical_path.display());
+        on_workspaces_init(gcx.clone()).await;
+    } else {
+        tracing::debug!("Folder {} already in workspace, skipping", canonical_path.display());
     }
-    on_workspaces_init(gcx.clone()).await;
 }
 
 pub async fn remove_folder(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
+    let canonical_path = crate::files_correction::canonical_path(path.to_string_lossy().to_string());
     let was_removed = {
-        let documents_state = &mut gcx.write().await.documents_state;
-        let initial_len = documents_state.workspace_folders.lock().unwrap().len();
-        documents_state
-            .workspace_folders
-            .lock()
-            .unwrap()
-            .retain(|p| p != path);
-        let final_len = documents_state.workspace_folders.lock().unwrap().len();
-        initial_len > final_len
+        let documents_state = &gcx.write().await.documents_state;
+        let mut folders = documents_state.workspace_folders.lock().unwrap();
+        let before = folders.len();
+        folders.retain(|p| *p != canonical_path && *p != *path);
+        folders.len() < before
     };
     if was_removed {
-        tracing::info!(
-            "Folder {} was successfully removed from workspace_folders.",
-            path.display()
-        );
+        tracing::info!("Removed folder {} from workspace", path.display());
         on_workspaces_init(gcx.clone()).await;
     } else {
-        tracing::error!(
-            "Folder {} was not found in workspace_folders.",
-            path.display()
-        );
+        tracing::debug!("Folder {} not found in workspace, skipping", path.display());
     }
 }
 

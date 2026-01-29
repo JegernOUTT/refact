@@ -237,19 +237,6 @@ pub async fn handle_handoff_apply(
 
     let (messages, thread, task_meta) = {
         let session = session_arc.lock().await;
-
-        if session.runtime.state != SessionState::Idle
-            && session.runtime.state != SessionState::Error
-        {
-            return Err(ScratchError::new(
-                StatusCode::CONFLICT,
-                format!(
-                    "Session is busy, current state: {:?}",
-                    session.runtime.state
-                ),
-            ));
-        }
-
         (
             session.messages.clone(),
             session.thread.clone(),

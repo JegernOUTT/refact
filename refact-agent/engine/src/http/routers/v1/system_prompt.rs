@@ -43,6 +43,7 @@ pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
         gcx.clone(),
         post.messages,
         &post.chat_meta,
+        &None,
         &mut has_rag_results,
         get_available_tools_by_chat_mode(gcx.clone(), post.chat_meta.chat_mode)
             .await

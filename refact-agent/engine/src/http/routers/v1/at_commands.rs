@@ -105,7 +105,6 @@ pub async fn handle_v1_command_completion(
             None,
             "".to_string(),
             None,
-            None,
         )
         .await,
     ));
@@ -231,7 +230,6 @@ pub async fn handle_v1_command_preview(
             "".to_string(),
             None,
             model_rec.base.id.clone(),
-            None,
             None,
         )
         .await,
@@ -360,7 +358,6 @@ pub async fn handle_v1_at_command_execute(
         post.chat_id.clone(),
         None,
         model_rec.base.id.clone(),
-        None,
         None,
     )
     .await;

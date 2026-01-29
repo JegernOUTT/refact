@@ -335,7 +335,6 @@ pub async fn run_subchat(
             config.root_chat_id.clone(),
             config.model.clone(),
             None,
-            None,
             config.abort_flag.clone(),
         )
         .await,
@@ -438,7 +437,6 @@ pub async fn run_subchat_once(
             chat_id.clone(),
             config.root_chat_id.clone(),
             config.model.clone(),
-            None,
             None,
         )
         .await,

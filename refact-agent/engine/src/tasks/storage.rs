@@ -268,7 +268,7 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
         base_branch,
         base_commit,
         default_agent_model: None,
-        is_name_generated: !has_user_provided_name,
+        is_name_generated: has_user_provided_name,
         planner_session_state: None,
     };
 

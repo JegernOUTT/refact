@@ -259,6 +259,7 @@ pub async fn run_llm_generation(
                 gcx.clone(),
                 messages.clone(),
                 &meta,
+                &thread.task_meta,
                 &mut has_rag_results,
                 tool_names,
             )
@@ -367,27 +368,6 @@ pub async fn run_llm_generation(
         ..Default::default()
     };
 
-    let code_workdir = {
-        let session = session_arc.lock().await;
-        let task_meta = session.thread.task_meta.clone();
-        drop(session);
-
-        if let Some(tm) = task_meta {
-            match crate::tasks::storage::load_board(gcx.clone(), &tm.task_id).await {
-                Ok(board) => board
-                    .get_card(&tm.card_id.as_ref().unwrap_or(&String::new()))
-                    .and_then(|card| {
-                        card.agent_worktree
-                            .as_ref()
-                            .map(|p| std::path::PathBuf::from(p))
-                    }),
-                Err(_) => None,
-            }
-        } else {
-            None
-        }
-    };
-
     let ccx = AtCommandsContext::new(
         gcx.clone(),
         effective_n_ctx,
@@ -398,7 +378,6 @@ pub async fn run_llm_generation(
         thread.root_chat_id.clone(),
         model_rec.base.id.clone(),
         thread.task_meta.clone(),
-        code_workdir,
     )
     .await;
     let ccx_arc = Arc::new(AMutex::new(ccx));

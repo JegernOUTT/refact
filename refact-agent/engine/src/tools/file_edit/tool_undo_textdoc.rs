@@ -131,14 +131,11 @@ impl Tool for ToolUndoTextDoc {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, code_workdir) = {
+        let gcx = {
             let ccx_locked = ccx.lock().await;
-            (
-                ccx_locked.global_context.clone(),
-                ccx_locked.code_workdir.clone(),
-            )
+            ccx_locked.global_context.clone()
         };
-        let (_, _, chunks, _) = tool_undo_text_doc_exec(gcx, args, &code_workdir).await?;
+        let (_, _, chunks, _) = tool_undo_text_doc_exec(gcx, args, &None).await?;
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
@@ -156,14 +153,11 @@ impl Tool for ToolUndoTextDoc {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
-        let (gcx, code_workdir) = {
+        let gcx = {
             let ccx_locked = ccx.lock().await;
-            (
-                ccx_locked.global_context.clone(),
-                ccx_locked.code_workdir.clone(),
-            )
+            ccx_locked.global_context.clone()
         };
-        let can_exec = parse_args(gcx, args, &code_workdir).await.is_ok();
+        let can_exec = parse_args(gcx, args, &None).await.is_ok();
         if !can_exec {
             return Ok(MatchConfirmDeny {
                 result: MatchConfirmDenyResult::PASS,

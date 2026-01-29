@@ -106,11 +106,13 @@ pub async fn prepare_chat_passthrough(
     } else {
         HashSet::new()
     };
+    let task_meta = ccx.lock().await.task_meta.clone();
     let messages = if options.prepend_system_prompt {
         prepend_the_right_system_prompt_and_maybe_more_initial_messages(
             gcx.clone(),
             messages,
             meta,
+            &task_meta,
             &mut has_rag_results,
             prompt_tool_names,
         )

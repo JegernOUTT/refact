@@ -13,7 +13,7 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::files_correction::{
     correct_to_nearest_dir_path, correct_to_nearest_filename, get_project_dirs,
-    get_project_dirs_with_code_workdir, paths_from_anywhere,
+    paths_from_anywhere,
 };
 use crate::files_in_workspace::ls_files;
 
@@ -72,13 +72,7 @@ impl Tool for ToolTree {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, code_workdir) = {
-            let ccx_lock = ccx.lock().await;
-            (
-                ccx_lock.global_context.clone(),
-                ccx_lock.code_workdir.clone(),
-            )
-        };
+        let gcx = ccx.lock().await.global_context.clone();
         let paths_from_anywhere = paths_from_anywhere(gcx.clone()).await;
 
         let path_mb = match args.get("path") {
@@ -107,8 +101,7 @@ impl Tool for ToolTree {
                     return Err(format!("⚠️ '{}' is a file, not a directory. 💡 Use cat('{}') to read it, or tree() without path for project root", path, path));
                 }
 
-                let project_dirs =
-                    get_project_dirs_with_code_workdir(gcx.clone(), &code_workdir).await;
+                let project_dirs = get_project_dirs(gcx.clone()).await;
                 let candidate = return_one_candidate_or_a_good_error(
                     gcx.clone(),
                     &path,
