@@ -9,7 +9,10 @@ function isDangerousKey(key: string | number): boolean {
   return typeof key === "string" && DANGEROUS_KEYS.has(key);
 }
 
-export function applyPatch(obj: Record<string, unknown>, patch: ConfigPatch): Record<string, unknown> {
+export function applyPatch(
+  obj: Record<string, unknown>,
+  patch: ConfigPatch,
+): Record<string, unknown> {
   if (patch.path.some(isDangerousKey)) {
     return obj;
   }
@@ -49,14 +52,24 @@ export function applyPatch(obj: Record<string, unknown>, patch: ConfigPatch): Re
   return result;
 }
 
-export function applyPatches(obj: Record<string, unknown>, patches: ConfigPatch[]): Record<string, unknown> {
+export function applyPatches(
+  obj: Record<string, unknown>,
+  patches: ConfigPatch[],
+): Record<string, unknown> {
   return patches.reduce((acc, patch) => applyPatch(acc, patch), obj);
 }
 
-export function getNestedValue<T>(obj: Record<string, unknown>, path: string[]): T | undefined {
+export function getNestedValue<T>(
+  obj: Record<string, unknown>,
+  path: string[],
+): T | undefined {
   let current: unknown = obj;
   for (const key of path) {
-    if (current === null || current === undefined || typeof current !== "object") {
+    if (
+      current === null ||
+      current === undefined ||
+      typeof current !== "object"
+    ) {
       return undefined;
     }
     current = (current as Record<string, unknown>)[key];
@@ -64,8 +77,15 @@ export function getNestedValue<T>(obj: Record<string, unknown>, path: string[]):
   return current as T;
 }
 
-export function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+export function isPlainObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype
+  );
 }
 
 export function sanitizeObject(obj: unknown): unknown {
@@ -87,12 +107,26 @@ export function sanitizeObject(obj: unknown): unknown {
 }
 
 const SUBAGENT_KNOWN_KEYS = new Set([
-  "schema_version", "id", "title", "description", "specific",
-  "expose_as_tool", "has_code", "tool", "subchat", "messages",
-  "prompts", "gather_files", "tools", "base", "match_models"
+  "schema_version",
+  "id",
+  "title",
+  "description",
+  "specific",
+  "expose_as_tool",
+  "has_code",
+  "tool",
+  "subchat",
+  "messages",
+  "prompts",
+  "gather_files",
+  "tools",
+  "base",
+  "match_models",
 ]);
 
-export function extractSubagentExtra(config: Record<string, unknown>): Record<string, unknown> {
+export function extractSubagentExtra(
+  config: Record<string, unknown>,
+): Record<string, unknown> {
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(config)) {
     if (!SUBAGENT_KNOWN_KEYS.has(key) && !DANGEROUS_KEYS.has(key)) {
@@ -104,7 +138,7 @@ export function extractSubagentExtra(config: Record<string, unknown>): Record<st
 
 export function computeExtraPatches(
   oldExtra: Record<string, unknown>,
-  newExtra: Record<string, unknown>
+  newExtra: Record<string, unknown>,
 ): ConfigPatch[] {
   const patches: ConfigPatch[] = [];
   const allKeys = new Set([...Object.keys(oldExtra), ...Object.keys(newExtra)]);
@@ -114,7 +148,9 @@ export function computeExtraPatches(
 
     if (!(key in newExtra)) {
       patches.push({ path: [key], value: undefined });
-    } else if (JSON.stringify(oldExtra[key]) !== JSON.stringify(newExtra[key])) {
+    } else if (
+      JSON.stringify(oldExtra[key]) !== JSON.stringify(newExtra[key])
+    ) {
       patches.push({ path: [key], value: newExtra[key] });
     }
   }
@@ -122,7 +158,10 @@ export function computeExtraPatches(
   return patches;
 }
 
-export function safeArray<T>(value: unknown, guard: (v: unknown) => v is T): T[] {
+export function safeArray<T>(
+  value: unknown,
+  guard: (v: unknown) => v is T,
+): T[] {
   if (!Array.isArray(value)) return [];
   return value.filter(guard);
 }
@@ -154,7 +193,11 @@ export type MessageTemplate = {
 };
 
 export function isMessageTemplate(v: unknown): v is MessageTemplate {
-  return isPlainObject(v) && typeof v.role === "string" && typeof v.content === "string";
+  return (
+    isPlainObject(v) &&
+    typeof v.role === "string" &&
+    typeof v.content === "string"
+  );
 }
 
 export function safeMessageArray(value: unknown): MessageTemplate[] {
@@ -182,11 +225,19 @@ export function parseFloatSafe(value: string): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-export function isToolConfirmRule(v: unknown): v is { match: string; action: string } {
-  return isPlainObject(v) && typeof v.match === "string" && typeof v.action === "string";
+export function isToolConfirmRule(
+  v: unknown,
+): v is { match: string; action: string } {
+  return (
+    isPlainObject(v) &&
+    typeof v.match === "string" &&
+    typeof v.action === "string"
+  );
 }
 
-export function safeToolConfirmRules(value: unknown): { match: string; action: string }[] {
+export function safeToolConfirmRules(
+  value: unknown,
+): { match: string; action: string }[] {
   if (!Array.isArray(value)) return [];
   return value.filter(isToolConfirmRule);
 }
@@ -195,7 +246,9 @@ const ID_PATTERN = /^[a-z0-9_-]+$/;
 
 export function validateConfigId(id: string): string | null {
   if (!id.trim()) return "ID is required";
-  if (id.includes("/") || id.includes("\\") || id.includes("..")) return "ID contains invalid characters";
-  if (!ID_PATTERN.test(id)) return "ID must contain only lowercase letters, digits, underscore, or hyphen";
+  if (id.includes("/") || id.includes("\\") || id.includes(".."))
+    return "ID contains invalid characters";
+  if (!ID_PATTERN.test(id))
+    return "ID must contain only lowercase letters, digits, underscore, or hyphen";
   return null;
 }

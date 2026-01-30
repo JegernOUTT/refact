@@ -1,4 +1,10 @@
-import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
+import React, {
+  useCallback,
+  useMemo,
+  useState,
+  useRef,
+  useEffect,
+} from "react";
 import {
   Flex,
   Text,
@@ -126,7 +132,8 @@ export const ChatSettingsDropdown: React.FC = () => {
         const containerHeight = container.clientHeight;
         const selectedTop = selected.offsetTop;
         const selectedHeight = selected.offsetHeight;
-        container.scrollTop = selectedTop - (containerHeight / 2) + (selectedHeight / 2);
+        container.scrollTop =
+          selectedTop - containerHeight / 2 + selectedHeight / 2;
         return true;
       }
       return false;
@@ -147,9 +154,12 @@ export const ChatSettingsDropdown: React.FC = () => {
     if (!caps.currentModel) return null;
     const data = capsQuery.data;
     if (!data?.chat_models) return null;
-    const modelData = data.chat_models[caps.currentModel] as { n_ctx: number } | undefined;
+    const modelData = data.chat_models[caps.currentModel] as
+      | { n_ctx: number }
+      | undefined;
     if (!modelData) return null;
-    const pricing = data.metadata?.pricing?.[caps.currentModel.replace(/^refact\//, "")];
+    const pricing =
+      data.metadata?.pricing?.[caps.currentModel.replace(/^refact\//, "")];
     return {
       nCtx: modelData.n_ctx,
       pricing: pricing ? formatPricingDetailed(pricing) : null,
@@ -204,11 +214,16 @@ export const ChatSettingsDropdown: React.FC = () => {
     [dispatch, chatId, sliderSteps],
   );
 
-  const noop = useCallback(() => { /* intentionally empty */ }, []);
+  const noop = useCallback(() => {
+    /* intentionally empty */
+  }, []);
   const handleThinkingToggle = useCallback(
     (checked: boolean) => {
       handleReasoningChange(
-        { preventDefault: noop, stopPropagation: noop } as unknown as React.MouseEvent<HTMLButtonElement>,
+        {
+          preventDefault: noop,
+          stopPropagation: noop,
+        } as unknown as React.MouseEvent<HTMLButtonElement>,
         checked,
       );
     },
@@ -235,13 +250,19 @@ export const ChatSettingsDropdown: React.FC = () => {
       </Text>
       {maxTokens > 0 && (
         <>
-          <Text size="1" color="gray">·</Text>
-          <Text size="1" color="gray">{formatTokens(effectiveCap)}</Text>
+          <Text size="1" color="gray">
+            ·
+          </Text>
+          <Text size="1" color="gray">
+            {formatTokens(effectiveCap)}
+          </Text>
         </>
       )}
       {supportsBoostReasoning && isBoostReasoningEnabled && (
         <>
-          <Text size="1" color="gray">·</Text>
+          <Text size="1" color="gray">
+            ·
+          </Text>
           <Text size="1">🧠</Text>
         </>
       )}
@@ -253,7 +274,9 @@ export const ChatSettingsDropdown: React.FC = () => {
     <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
       <Popover.Trigger>
         <button
-          className={`${styles.trigger} ${isInteractionDisabled ? styles.disabled : ""}`}
+          className={`${styles.trigger} ${
+            isInteractionDisabled ? styles.disabled : ""
+          }`}
           disabled={isInteractionDisabled}
           type="button"
         >
@@ -272,7 +295,9 @@ export const ChatSettingsDropdown: React.FC = () => {
           <div className={styles.modelList} ref={modelListRef}>
             {groupedModels.map((group, groupIndex) => (
               <React.Fragment key={group.provider}>
-                {groupIndex > 0 && <Separator size="4" className={styles.groupSeparator} />}
+                {groupIndex > 0 && (
+                  <Separator size="4" className={styles.groupSeparator} />
+                )}
                 <Text size="1" color="gray" className={styles.groupHeader}>
                   {group.displayName}
                 </Text>
@@ -282,22 +307,38 @@ export const ChatSettingsDropdown: React.FC = () => {
                     <button
                       key={model.value}
                       ref={isSelected ? selectedModelRef : undefined}
-                      className={`${styles.item} ${isSelected ? styles.itemSelected : ""} ${model.disabled ? styles.itemDisabled : ""}`}
+                      className={`${styles.item} ${
+                        isSelected ? styles.itemSelected : ""
+                      } ${model.disabled ? styles.itemDisabled : ""}`}
                       onClick={() => handleModelSelect(model.value)}
                       disabled={isInteractionDisabled || model.disabled}
                       type="button"
                     >
                       <Flex align="center" gap="1">
-                        <Text size="1" weight="medium" className={styles.itemModelName}>
+                        <Text
+                          size="1"
+                          weight="medium"
+                          className={styles.itemModelName}
+                        >
                           {model.value}
                         </Text>
                         {model.isDefault && (
-                          <Badge size="1" color="blue" variant="soft" className={styles.badge}>
+                          <Badge
+                            size="1"
+                            color="blue"
+                            variant="soft"
+                            className={styles.badge}
+                          >
                             Default
                           </Badge>
                         )}
                         {model.isThinking && (
-                          <Badge size="1" color="purple" variant="soft" className={styles.badge}>
+                          <Badge
+                            size="1"
+                            color="purple"
+                            variant="soft"
+                            className={styles.badge}
+                          >
                             Reasoning
                           </Badge>
                         )}
@@ -319,24 +360,30 @@ export const ChatSettingsDropdown: React.FC = () => {
         </div>
 
         {/* Model Details */}
-        {selectedModelDetail && (selectedModelDetail.nCtx || selectedModelDetail.pricing) && (
-          <>
-            <Separator size="4" />
-            <Flex gap="2" align="center" px="2" py="1">
-              {selectedModelDetail.nCtx && (
-                <Text size="1" color="gray">{formatContextWindow(selectedModelDetail.nCtx)} context</Text>
-              )}
-              {selectedModelDetail.pricing && (
-                <>
-                  <Text size="1" color="gray">·</Text>
+        {selectedModelDetail &&
+          (selectedModelDetail.nCtx || selectedModelDetail.pricing) && (
+            <>
+              <Separator size="4" />
+              <Flex gap="2" align="center" px="2" py="1">
+                {selectedModelDetail.nCtx && (
                   <Text size="1" color="gray">
-                    {selectedModelDetail.pricing.prompt}/{selectedModelDetail.pricing.output} ⓒ/1K tokens
+                    {formatContextWindow(selectedModelDetail.nCtx)} context
                   </Text>
-                </>
-              )}
-            </Flex>
-          </>
-        )}
+                )}
+                {selectedModelDetail.pricing && (
+                  <>
+                    <Text size="1" color="gray">
+                      ·
+                    </Text>
+                    <Text size="1" color="gray">
+                      {selectedModelDetail.pricing.prompt}/
+                      {selectedModelDetail.pricing.output} ⓒ/1K tokens
+                    </Text>
+                  </>
+                )}
+              </Flex>
+            </>
+          )}
 
         <Separator size="4" />
 
@@ -345,7 +392,12 @@ export const ChatSettingsDropdown: React.FC = () => {
           <>
             <div className={styles.section}>
               <Flex justify="between" align="center" mb="2">
-                <Text size="1" color="gray" weight="medium" className={styles.sectionHeader}>
+                <Text
+                  size="1"
+                  color="gray"
+                  weight="medium"
+                  className={styles.sectionHeader}
+                >
                   Context window
                 </Text>
                 <Text size="1" weight="medium">
@@ -354,7 +406,9 @@ export const ChatSettingsDropdown: React.FC = () => {
                 </Text>
               </Flex>
               <Flex align="center" gap="2" className={styles.sliderContainer}>
-                <Text size="1" color="gray">{formatTokens(MIN_CAP)}</Text>
+                <Text size="1" color="gray">
+                  {formatTokens(MIN_CAP)}
+                </Text>
                 <Slider
                   size="1"
                   min={0}
@@ -366,7 +420,9 @@ export const ChatSettingsDropdown: React.FC = () => {
                   disabled={isInteractionDisabled}
                   className={styles.slider}
                 />
-                <Text size="1" color="gray">{formatTokens(maxTokens)}</Text>
+                <Text size="1" color="gray">
+                  {formatTokens(maxTokens)}
+                </Text>
               </Flex>
             </div>
             <Separator size="4" />
@@ -379,7 +435,9 @@ export const ChatSettingsDropdown: React.FC = () => {
             <Flex align="center" justify="between" gap="3">
               <Flex align="center" gap="1">
                 <Text size="1">🧠</Text>
-                <Text size="1" weight="medium">Extended reasoning</Text>
+                <Text size="1" weight="medium">
+                  Extended reasoning
+                </Text>
               </Flex>
               <Switch
                 size="1"

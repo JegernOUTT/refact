@@ -1,9 +1,32 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { Flex, TextField, Text, Switch, TextArea, Tabs, Button } from "@radix-ui/themes";
+import {
+  Flex,
+  TextField,
+  Text,
+  Switch,
+  TextArea,
+  Tabs,
+  Button,
+} from "@radix-ui/themes";
 import { StringListEditor } from "./StringListEditor";
 import { ToolParametersEditor, ToolParameter } from "./ToolParametersEditor";
 import { MessageListEditor } from "./MessageListEditor";
-import { ConfigPatch, extractSubagentExtra, computeExtraPatches, safeArray, safeString, safeBoolean, safeObject, isString, isPlainObject, sanitizeObject, safeNumber, safeMessageArray, parseIntSafe, parseFloatSafe } from "./configUtils";
+import {
+  ConfigPatch,
+  extractSubagentExtra,
+  computeExtraPatches,
+  safeArray,
+  safeString,
+  safeBoolean,
+  safeObject,
+  isString,
+  isPlainObject,
+  sanitizeObject,
+  safeNumber,
+  safeMessageArray,
+  parseIntSafe,
+  parseFloatSafe,
+} from "./configUtils";
 import styles from "./editors.module.css";
 
 type SubagentFormProps = {
@@ -12,7 +35,11 @@ type SubagentFormProps = {
   availableTools?: string[];
 };
 
-export const SubagentForm: React.FC<SubagentFormProps> = ({ config, onPatch, availableTools = [] }) => {
+export const SubagentForm: React.FC<SubagentFormProps> = ({
+  config,
+  onPatch,
+  availableTools = [],
+}) => {
   const [activeTab, setActiveTab] = useState("basic");
   const [extraJson, setExtraJson] = useState("");
   const [extraJsonDirty, setExtraJsonDirty] = useState(false);
@@ -24,7 +51,10 @@ export const SubagentForm: React.FC<SubagentFormProps> = ({ config, onPatch, ava
   useEffect(() => {
     if (!extraJsonDirty) {
       const newExtra = extractSubagentExtra(config);
-      const newJson = Object.keys(newExtra).length === 0 ? "" : JSON.stringify(newExtra, null, 2);
+      const newJson =
+        Object.keys(newExtra).length === 0
+          ? ""
+          : JSON.stringify(newExtra, null, 2);
       setExtraJson(newJson);
       setExtraJsonError(null);
     }
@@ -42,11 +72,16 @@ export const SubagentForm: React.FC<SubagentFormProps> = ({ config, onPatch, ava
   const prompts = safeObject(config.prompts);
   const gatherFiles = safeObject(config.gather_files);
   const base = typeof config.base === "string" ? config.base : undefined;
-  const matchModels = Array.isArray(config.match_models) ? safeArray(config.match_models, isString) : undefined;
+  const matchModels = Array.isArray(config.match_models)
+    ? safeArray(config.match_models, isString)
+    : undefined;
 
-  const patch = useCallback((path: (string | number)[], value: unknown) => {
-    onPatch({ path, value });
-  }, [onPatch]);
+  const patch = useCallback(
+    (path: (string | number)[], value: unknown) => {
+      onPatch({ path, value });
+    },
+    [onPatch],
+  );
 
   const handleExtraChange = useCallback((text: string) => {
     setExtraJson(text);
@@ -96,9 +131,7 @@ export const SubagentForm: React.FC<SubagentFormProps> = ({ config, onPatch, ava
             availableTools={availableTools}
           />
         )}
-        {activeTab === "tool" && (
-          <ToolTab tool={tool} patch={patch} />
-        )}
+        {activeTab === "tool" && <ToolTab tool={tool} patch={patch} />}
         {activeTab === "subchat" && (
           <SubchatTab subchat={subchat} patch={patch} />
         )}
@@ -134,10 +167,21 @@ const BasicTab: React.FC<{
   tools: string[];
   patch: PatchFn;
   availableTools: string[];
-}> = ({ title, description, specific, exposeAsTool, hasCode, tools, patch, availableTools }) => (
+}> = ({
+  title,
+  description,
+  specific,
+  exposeAsTool,
+  hasCode,
+  tools,
+  patch,
+  availableTools,
+}) => (
   <>
     <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">Title</Text>
+      <Text size="2" weight="medium">
+        Title
+      </Text>
       <TextField.Root
         value={title}
         onChange={(e) => patch(["title"], e.target.value)}
@@ -146,7 +190,9 @@ const BasicTab: React.FC<{
     </Flex>
 
     <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">Description</Text>
+      <Text size="2" weight="medium">
+        Description
+      </Text>
       <TextArea
         value={description}
         onChange={(e) => patch(["description"], e.target.value)}
@@ -157,15 +203,24 @@ const BasicTab: React.FC<{
 
     <Flex gap="4" wrap="wrap">
       <Flex align="center" gap="2">
-        <Switch checked={specific} onCheckedChange={(c) => patch(["specific"], c)} />
+        <Switch
+          checked={specific}
+          onCheckedChange={(c) => patch(["specific"], c)}
+        />
         <Text size="2">Internal Only</Text>
       </Flex>
       <Flex align="center" gap="2">
-        <Switch checked={exposeAsTool} onCheckedChange={(c) => patch(["expose_as_tool"], c)} />
+        <Switch
+          checked={exposeAsTool}
+          onCheckedChange={(c) => patch(["expose_as_tool"], c)}
+        />
         <Text size="2">Expose as Tool</Text>
       </Flex>
       <Flex align="center" gap="2">
-        <Switch checked={hasCode} onCheckedChange={(c) => patch(["has_code"], c)} />
+        <Switch
+          checked={hasCode}
+          onCheckedChange={(c) => patch(["has_code"], c)}
+        />
         <Text size="2">Has Code</Text>
       </Flex>
     </Flex>
@@ -185,10 +240,15 @@ const ToolTab: React.FC<{
   patch: PatchFn;
 }> = ({ tool, patch }) => {
   const hasTool = tool !== undefined;
-  const toolDesc = typeof tool?.description === "string" ? tool.description : "";
+  const toolDesc =
+    typeof tool?.description === "string" ? tool.description : "";
   const agentic = typeof tool?.agentic === "boolean" ? tool.agentic : false;
-  const parameters = Array.isArray(tool?.parameters) ? (tool.parameters as ToolParameter[]) : [];
-  const required = Array.isArray(tool?.required) ? (tool.required as string[]) : [];
+  const parameters = Array.isArray(tool?.parameters)
+    ? (tool.parameters as ToolParameter[])
+    : [];
+  const required = Array.isArray(tool?.required)
+    ? (tool.required as string[])
+    : [];
 
   return (
     <>
@@ -197,7 +257,12 @@ const ToolTab: React.FC<{
           checked={hasTool}
           onCheckedChange={(checked) => {
             if (checked) {
-              patch(["tool"], { description: "", agentic: false, parameters: [], required: [] });
+              patch(["tool"], {
+                description: "",
+                agentic: false,
+                parameters: [],
+                required: [],
+              });
             } else {
               patch(["tool"], undefined);
             }
@@ -209,7 +274,9 @@ const ToolTab: React.FC<{
       {hasTool && (
         <>
           <Flex direction="column" gap="2">
-            <Text size="2" weight="medium">Tool Description</Text>
+            <Text size="2" weight="medium">
+              Tool Description
+            </Text>
             <TextArea
               value={toolDesc}
               onChange={(e) => patch(["tool", "description"], e.target.value)}
@@ -219,9 +286,14 @@ const ToolTab: React.FC<{
           </Flex>
 
           <Flex align="center" gap="2">
-            <Switch checked={agentic} onCheckedChange={(c) => patch(["tool", "agentic"], c)} />
+            <Switch
+              checked={agentic}
+              onCheckedChange={(c) => patch(["tool", "agentic"], c)}
+            />
             <Text size="2">Agentic</Text>
-            <Text size="1" color="gray">(tool can make multiple calls)</Text>
+            <Text size="1" color="gray">
+              (tool can make multiple calls)
+            </Text>
           </Flex>
 
           <ToolParametersEditor
@@ -244,7 +316,9 @@ const SubchatTab: React.FC<{
     <>
       <Flex gap="4">
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">Context Mode</Text>
+          <Text size="2" weight="medium">
+            Context Mode
+          </Text>
           <TextField.Root
             value={safeString(subchat.context_mode) || "bare"}
             onChange={(e) => patch(["subchat", "context_mode"], e.target.value)}
@@ -252,18 +326,26 @@ const SubchatTab: React.FC<{
           />
         </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">Model</Text>
+          <Text size="2" weight="medium">
+            Model
+          </Text>
           <TextField.Root
             value={safeString(subchat.model)}
-            onChange={(e) => patch(["subchat", "model"], e.target.value || undefined)}
+            onChange={(e) =>
+              patch(["subchat", "model"], e.target.value || undefined)
+            }
             placeholder="Default"
           />
         </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">Model Type</Text>
+          <Text size="2" weight="medium">
+            Model Type
+          </Text>
           <TextField.Root
             value={safeString(subchat.model_type)}
-            onChange={(e) => patch(["subchat", "model_type"], e.target.value || undefined)}
+            onChange={(e) =>
+              patch(["subchat", "model_type"], e.target.value || undefined)
+            }
             placeholder="Default"
           />
         </Flex>
@@ -279,29 +361,41 @@ const SubchatTab: React.FC<{
 
       <Flex gap="4">
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">Max Steps</Text>
+          <Text size="2" weight="medium">
+            Max Steps
+          </Text>
           <TextField.Root
             type="number"
             value={safeNumber(subchat.max_steps)?.toString() ?? ""}
-            onChange={(e) => patch(["subchat", "max_steps"], parseIntSafe(e.target.value))}
+            onChange={(e) =>
+              patch(["subchat", "max_steps"], parseIntSafe(e.target.value))
+            }
             placeholder="Default"
           />
         </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">N Context</Text>
+          <Text size="2" weight="medium">
+            N Context
+          </Text>
           <TextField.Root
             type="number"
             value={safeNumber(subchat.n_ctx)?.toString() ?? ""}
-            onChange={(e) => patch(["subchat", "n_ctx"], parseIntSafe(e.target.value))}
+            onChange={(e) =>
+              patch(["subchat", "n_ctx"], parseIntSafe(e.target.value))
+            }
             placeholder="Default"
           />
         </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">Max New Tokens</Text>
+          <Text size="2" weight="medium">
+            Max New Tokens
+          </Text>
           <TextField.Root
             type="number"
             value={safeNumber(subchat.max_new_tokens)?.toString() ?? ""}
-            onChange={(e) => patch(["subchat", "max_new_tokens"], parseIntSafe(e.target.value))}
+            onChange={(e) =>
+              patch(["subchat", "max_new_tokens"], parseIntSafe(e.target.value))
+            }
             placeholder="Default"
           />
         </Flex>
@@ -309,29 +403,44 @@ const SubchatTab: React.FC<{
 
       <Flex gap="4">
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">Temperature</Text>
+          <Text size="2" weight="medium">
+            Temperature
+          </Text>
           <TextField.Root
             type="number"
             step="0.1"
             value={safeNumber(subchat.temperature)?.toString() ?? ""}
-            onChange={(e) => patch(["subchat", "temperature"], parseFloatSafe(e.target.value))}
+            onChange={(e) =>
+              patch(["subchat", "temperature"], parseFloatSafe(e.target.value))
+            }
             placeholder="Default"
           />
         </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">Reasoning Effort</Text>
+          <Text size="2" weight="medium">
+            Reasoning Effort
+          </Text>
           <TextField.Root
             value={safeString(subchat.reasoning_effort)}
-            onChange={(e) => patch(["subchat", "reasoning_effort"], e.target.value || undefined)}
+            onChange={(e) =>
+              patch(
+                ["subchat", "reasoning_effort"],
+                e.target.value || undefined,
+              )
+            }
             placeholder="low / medium / high"
           />
         </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">Tokens for RAG</Text>
+          <Text size="2" weight="medium">
+            Tokens for RAG
+          </Text>
           <TextField.Root
             type="number"
             value={safeNumber(subchat.tokens_for_rag)?.toString() ?? ""}
-            onChange={(e) => patch(["subchat", "tokens_for_rag"], parseIntSafe(e.target.value))}
+            onChange={(e) =>
+              patch(["subchat", "tokens_for_rag"], parseIntSafe(e.target.value))
+            }
             placeholder="Default"
           />
         </Flex>
@@ -347,20 +456,28 @@ const MessagesTab: React.FC<{
 }> = ({ messages, prompts, patch }) => (
   <>
     <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">System Prompt</Text>
+      <Text size="2" weight="medium">
+        System Prompt
+      </Text>
       <TextArea
         value={safeString(messages.system_prompt)}
-        onChange={(e) => patch(["messages", "system_prompt"], e.target.value || undefined)}
+        onChange={(e) =>
+          patch(["messages", "system_prompt"], e.target.value || undefined)
+        }
         placeholder="System prompt..."
         className={styles.promptTextarea}
       />
     </Flex>
 
     <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">User Template</Text>
+      <Text size="2" weight="medium">
+        User Template
+      </Text>
       <TextArea
         value={safeString(messages.user_template)}
-        onChange={(e) => patch(["messages", "user_template"], e.target.value || undefined)}
+        onChange={(e) =>
+          patch(["messages", "user_template"], e.target.value || undefined)
+        }
         placeholder="User message template..."
         rows={3}
       />
@@ -378,10 +495,22 @@ const MessagesTab: React.FC<{
       label="Post-Messages"
     />
 
-    <Text size="2" weight="medium" mt="2">Prompts</Text>
-    {(["solver", "reviewer", "guardrails", "gather_system", "gather_retry"] as const).map((key) => (
+    <Text size="2" weight="medium" mt="2">
+      Prompts
+    </Text>
+    {(
+      [
+        "solver",
+        "reviewer",
+        "guardrails",
+        "gather_system",
+        "gather_retry",
+      ] as const
+    ).map((key) => (
       <Flex key={key} direction="column" gap="1">
-        <Text size="1" color="gray">{key.replace("_", " ")}</Text>
+        <Text size="1" color="gray">
+          {key.replace("_", " ")}
+        </Text>
         <TextArea
           value={safeString(prompts[key])}
           onChange={(e) => patch(["prompts", key], e.target.value || undefined)}
@@ -403,11 +532,23 @@ const AdvancedTab: React.FC<{
   onExtraChange: (text: string) => void;
   onExtraApply: () => void;
   patch: PatchFn;
-}> = ({ base, matchModels, gatherFiles, extraJson, extraJsonDirty, extraJsonError, onExtraChange, onExtraApply, patch }) => {
+}> = ({
+  base,
+  matchModels,
+  gatherFiles,
+  extraJson,
+  extraJsonDirty,
+  extraJsonError,
+  onExtraChange,
+  onExtraApply,
+  patch,
+}) => {
   return (
     <>
       <Flex direction="column" gap="2">
-        <Text size="2" weight="medium">Base Subagent</Text>
+        <Text size="2" weight="medium">
+          Base Subagent
+        </Text>
         <TextField.Root
           value={base ?? ""}
           onChange={(e) => patch(["base"], e.target.value || undefined)}
@@ -422,31 +563,45 @@ const AdvancedTab: React.FC<{
         placeholder="Model pattern..."
       />
 
-      <Text size="2" weight="medium">Gather Files</Text>
+      <Text size="2" weight="medium">
+        Gather Files
+      </Text>
       <Flex gap="4">
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="1" color="gray">Subagent</Text>
+          <Text size="1" color="gray">
+            Subagent
+          </Text>
           <TextField.Root
             value={safeString(gatherFiles.subagent)}
-            onChange={(e) => patch(["gather_files", "subagent"], e.target.value || undefined)}
+            onChange={(e) =>
+              patch(["gather_files", "subagent"], e.target.value || undefined)
+            }
             placeholder="Subagent name"
           />
         </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="1" color="gray">Max Files</Text>
+          <Text size="1" color="gray">
+            Max Files
+          </Text>
           <TextField.Root
             type="number"
             value={safeNumber(gatherFiles.max_files)?.toString() ?? ""}
-            onChange={(e) => patch(["gather_files", "max_files"], parseIntSafe(e.target.value))}
+            onChange={(e) =>
+              patch(["gather_files", "max_files"], parseIntSafe(e.target.value))
+            }
             placeholder="Default"
           />
         </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="1" color="gray">Max Steps</Text>
+          <Text size="1" color="gray">
+            Max Steps
+          </Text>
           <TextField.Root
             type="number"
             value={safeNumber(gatherFiles.max_steps)?.toString() ?? ""}
-            onChange={(e) => patch(["gather_files", "max_steps"], parseIntSafe(e.target.value))}
+            onChange={(e) =>
+              patch(["gather_files", "max_steps"], parseIntSafe(e.target.value))
+            }
             placeholder="Default"
           />
         </Flex>
@@ -454,12 +609,18 @@ const AdvancedTab: React.FC<{
 
       <Flex direction="column" gap="2">
         <Flex justify="between" align="center">
-          <Text size="2" weight="medium">Extra Fields (JSON)</Text>
+          <Text size="2" weight="medium">
+            Extra Fields (JSON)
+          </Text>
           {extraJsonDirty && (
-            <Button size="1" variant="soft" onClick={onExtraApply}>Apply</Button>
+            <Button size="1" variant="soft" onClick={onExtraApply}>
+              Apply
+            </Button>
           )}
         </Flex>
-        <Text size="1" color="gray">Unknown/custom fields at top level</Text>
+        <Text size="1" color="gray">
+          Unknown/custom fields at top level
+        </Text>
         <TextArea
           value={extraJson}
           onChange={(e) => onExtraChange(e.target.value)}
@@ -467,7 +628,9 @@ const AdvancedTab: React.FC<{
           className={styles.extraFieldsEditor}
         />
         {extraJsonError && (
-          <Text size="1" color="red">{extraJsonError}</Text>
+          <Text size="1" color="red">
+            {extraJsonError}
+          </Text>
         )}
       </Flex>
     </>

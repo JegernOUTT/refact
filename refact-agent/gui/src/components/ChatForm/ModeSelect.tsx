@@ -1,5 +1,12 @@
 import React, { useRef, useEffect, useState } from "react";
-import { Flex, Text, Badge, Skeleton, Popover, Separator } from "@radix-ui/themes";
+import {
+  Flex,
+  Text,
+  Badge,
+  Skeleton,
+  Popover,
+  Separator,
+} from "@radix-ui/themes";
 import {
   useGetChatModesQuery,
   ChatModeInfo,
@@ -49,7 +56,8 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
         const containerHeight = container.clientHeight;
         const selectedTop = selected.offsetTop;
         const selectedHeight = selected.offsetHeight;
-        container.scrollTop = selectedTop - (containerHeight / 2) + (selectedHeight / 2);
+        container.scrollTop =
+          selectedTop - containerHeight / 2 + selectedHeight / 2;
         return true;
       }
       return false;
@@ -96,8 +104,12 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
       <Text size="1">{currentTitle}</Text>
       {toolsCount > 0 && (
         <>
-          <Text size="1" color="gray">·</Text>
-          <Text size="1" color="gray">{toolsCount} tools</Text>
+          <Text size="1" color="gray">
+            ·
+          </Text>
+          <Text size="1" color="gray">
+            {toolsCount} tools
+          </Text>
         </>
       )}
     </Flex>
@@ -107,10 +119,14 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
     <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
       <Popover.Trigger>
         <button
-          className={`${styles.trigger} ${isModeDisabled ? styles.disabled : ""}`}
+          className={`${styles.trigger} ${
+            isModeDisabled ? styles.disabled : ""
+          }`}
           disabled={isModeDisabled}
           type="button"
-          title={isModeLocked ? "Mode is locked after first message" : undefined}
+          title={
+            isModeLocked ? "Mode is locked after first message" : undefined
+          }
         >
           {triggerContent}
         </button>
@@ -127,7 +143,9 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
             const isSelected = effectiveMode === mode.id;
             return (
               <React.Fragment key={mode.id}>
-                {index > 0 && <Separator size="4" className={styles.separator} />}
+                {index > 0 && (
+                  <Separator size="4" className={styles.separator} />
+                )}
                 <ModeMenuItem
                   ref={isSelected ? selectedModeRef : undefined}
                   mode={mode}
@@ -167,13 +185,17 @@ const ModeMenuItem = React.forwardRef<HTMLButtonElement, ModeMenuItemProps>(
     return (
       <button
         ref={ref}
-        className={`${styles.item} ${isSelected ? styles.itemSelected : ""} ${disabled ? styles.itemDisabled : ""}`}
+        className={`${styles.item} ${isSelected ? styles.itemSelected : ""} ${
+          disabled ? styles.itemDisabled : ""
+        }`}
         onClick={onSelect}
         type="button"
         disabled={disabled}
       >
         <Flex direction="column" gap="1" style={{ width: "100%" }}>
-          <Text size="1" weight="medium">{mode.title}</Text>
+          <Text size="1" weight="medium">
+            {mode.title}
+          </Text>
 
           {mode.description && (
             <Text size="1" color="gray" className={styles.description}>
@@ -185,12 +207,23 @@ const ModeMenuItem = React.forwardRef<HTMLButtonElement, ModeMenuItemProps>(
 
           <Flex align="center" gap="1" wrap="wrap">
             {mode.ui.tags.slice(0, 2).map((tag) => (
-              <Badge key={tag} size="1" color="gray" variant="soft" className={styles.badge}>
+              <Badge
+                key={tag}
+                size="1"
+                color="gray"
+                variant="soft"
+                className={styles.badge}
+              >
                 {tag}
               </Badge>
             ))}
             {mode.tools_count > 0 && (
-              <Badge size="1" color="blue" variant="soft" className={styles.badge}>
+              <Badge
+                size="1"
+                color="blue"
+                variant="soft"
+                className={styles.badge}
+              >
                 {mode.tools_count} tools
               </Badge>
             )}
@@ -198,7 +231,7 @@ const ModeMenuItem = React.forwardRef<HTMLButtonElement, ModeMenuItemProps>(
         </Flex>
       </button>
     );
-  }
+  },
 );
 
 ModeMenuItem.displayName = "ModeMenuItem";

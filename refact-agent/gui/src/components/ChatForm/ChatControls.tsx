@@ -111,12 +111,7 @@ export const CapsSelect: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
   });
 
   return (
-    <Flex
-      gap="2"
-      align="center"
-      wrap="wrap"
-      ref={(x) => refs.setUseModel(x)}
-    >
+    <Flex gap="2" align="center" wrap="wrap" ref={(x) => refs.setUseModel(x)}>
       <Skeleton loading={caps.loading}>
         <Box>
           {allDisabled ? (

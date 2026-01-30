@@ -27,16 +27,17 @@ export const FileUploadContext = createContext<{
 export const DropzoneProvider: React.FC<
   React.PropsWithChildren<{ asChild?: boolean }>
 > = ({ asChild, ...props }) => {
-  const { setError, processAndInsertImages, processAndInsertTextFiles } = useAttachedImages();
+  const { setError, processAndInsertImages, processAndInsertTextFiles } =
+    useAttachedImages();
   const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]): void => {
       const imageFiles = acceptedFiles.filter(
-        (f) => f.type === "image/jpeg" || f.type === "image/png"
+        (f) => f.type === "image/jpeg" || f.type === "image/png",
       );
       const textFiles = acceptedFiles.filter(
-        (f) => f.type !== "image/jpeg" && f.type !== "image/png"
+        (f) => f.type !== "image/jpeg" && f.type !== "image/png",
       );
 
       if (imageFiles.length > 0) {
@@ -61,7 +62,12 @@ export const DropzoneProvider: React.FC<
         setError(rejectedFileMessage.join("\n"));
       }
     },
-    [processAndInsertImages, processAndInsertTextFiles, setError, isMultimodalitySupportedForCurrentModel],
+    [
+      processAndInsertImages,
+      processAndInsertTextFiles,
+      setError,
+      isMultimodalitySupportedForCurrentModel,
+    ],
   );
 
   // TODO: disable when chat is busy

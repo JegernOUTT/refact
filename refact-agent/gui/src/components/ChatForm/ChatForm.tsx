@@ -160,7 +160,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     return false;
   }, [allDisabled, isContextFull, isOnline]);
 
-  const { processAndInsertImages, textFiles, resetAllTextFiles } = useAttachedImages();
+  const { processAndInsertImages, textFiles, resetAllTextFiles } =
+    useAttachedImages();
   const handlePastingFile = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (!isMultimodalitySupportedForCurrentModel) return;
@@ -215,7 +216,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       const hasImages = attachedImages.length > 0;
       const hasTextFiles = textFiles.length > 0;
       const canSubmit =
-        (trimmedValue.length > 0 || hasImages || hasTextFiles) && isOnline && !allDisabled;
+        (trimmedValue.length > 0 || hasImages || hasTextFiles) &&
+        isOnline &&
+        !allDisabled;
 
       if (canSubmit) {
         const valueWithFiles = attachedFiles.addFilesToInput(trimmedValue);
@@ -423,7 +426,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         )}
         <Form
           disabled={disableSend}
-          className={classNames(styles.chatForm, styles.chatForm__form, className)}
+          className={classNames(
+            styles.chatForm,
+            styles.chatForm__form,
+            className,
+          )}
           onSubmit={() => handleSubmit("after_flow")}
         >
           <Box className={styles.textareaWrapper}>

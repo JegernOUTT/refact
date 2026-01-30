@@ -118,12 +118,7 @@ export function useChatActions() {
 
       if (messages.length === 0) {
         const mode = threadMode ?? DEFAULT_MODE;
-        await updateChatParams(
-          chatId,
-          { mode },
-          port,
-          apiKey ?? undefined,
-        );
+        await updateChatParams(chatId, { mode }, port, apiKey ?? undefined);
       }
 
       const shouldPrioritize = priority ?? sendImmediately;

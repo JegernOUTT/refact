@@ -1,5 +1,12 @@
 import React, { useCallback, useState, useEffect } from "react";
-import { Flex, Button, TextField, IconButton, Text, DropdownMenu } from "@radix-ui/themes";
+import {
+  Flex,
+  Button,
+  TextField,
+  IconButton,
+  Text,
+  DropdownMenu,
+} from "@radix-ui/themes";
 import { PlusIcon, TrashIcon, ChevronDownIcon } from "@radix-ui/react-icons";
 
 export type ToolConfirmRule = {
@@ -31,40 +38,57 @@ export const RulesTableEditor: React.FC<RulesTableEditorProps> = ({
   onChange,
   label = "Tool Confirmation Rules",
 }) => {
-  const [internal, setInternal] = useState<InternalRule[]>(() => toInternal(value));
+  const [internal, setInternal] = useState<InternalRule[]>(() =>
+    toInternal(value),
+  );
   const valueKey = JSON.stringify(value);
 
   useEffect(() => {
     setInternal(toInternal(value));
   }, [valueKey]);
 
-  const emit = useCallback((rules: InternalRule[]) => {
-    setInternal(rules);
-    onChange(toExternal(rules));
-  }, [onChange]);
+  const emit = useCallback(
+    (rules: InternalRule[]) => {
+      setInternal(rules);
+      onChange(toExternal(rules));
+    },
+    [onChange],
+  );
 
   const addRule = useCallback(() => {
     emit([...internal, { match: "*", action: "ask", _id: generateId() }]);
   }, [internal, emit]);
 
-  const removeRule = useCallback((id: string) => {
-    emit(internal.filter((r) => r._id !== id));
-  }, [internal, emit]);
+  const removeRule = useCallback(
+    (id: string) => {
+      emit(internal.filter((r) => r._id !== id));
+    },
+    [internal, emit],
+  );
 
-  const updateRule = useCallback((id: string, field: "match" | "action", fieldValue: string) => {
-    emit(internal.map((r) => r._id === id ? { ...r, [field]: fieldValue } : r));
-  }, [internal, emit]);
+  const updateRule = useCallback(
+    (id: string, field: "match" | "action", fieldValue: string) => {
+      emit(
+        internal.map((r) => (r._id === id ? { ...r, [field]: fieldValue } : r)),
+      );
+    },
+    [internal, emit],
+  );
 
   return (
     <Flex direction="column" gap="2">
       <Flex justify="between" align="center">
-        <Text size="2" weight="medium">{label}</Text>
+        <Text size="2" weight="medium">
+          {label}
+        </Text>
         <Button size="1" variant="soft" onClick={addRule}>
           <PlusIcon /> Add Rule
         </Button>
       </Flex>
       {internal.length === 0 ? (
-        <Text size="1" color="gray">No rules defined</Text>
+        <Text size="1" color="gray">
+          No rules defined
+        </Text>
       ) : (
         <Flex direction="column" gap="2">
           {internal.map((rule) => (
@@ -80,7 +104,9 @@ export const RulesTableEditor: React.FC<RulesTableEditorProps> = ({
                 <TextField.Root
                   size="1"
                   value={rule.action}
-                  onChange={(e) => updateRule(rule._id, "action", e.target.value)}
+                  onChange={(e) =>
+                    updateRule(rule._id, "action", e.target.value)
+                  }
                   placeholder="Action"
                   style={{ width: 70 }}
                 />
@@ -92,14 +118,22 @@ export const RulesTableEditor: React.FC<RulesTableEditorProps> = ({
                   </DropdownMenu.Trigger>
                   <DropdownMenu.Content>
                     {COMMON_ACTIONS.map((action) => (
-                      <DropdownMenu.Item key={action} onSelect={() => updateRule(rule._id, "action", action)}>
+                      <DropdownMenu.Item
+                        key={action}
+                        onSelect={() => updateRule(rule._id, "action", action)}
+                      >
                         {action}
                       </DropdownMenu.Item>
                     ))}
                   </DropdownMenu.Content>
                 </DropdownMenu.Root>
               </Flex>
-              <IconButton size="1" variant="ghost" color="red" onClick={() => removeRule(rule._id)}>
+              <IconButton
+                size="1"
+                variant="ghost"
+                color="red"
+                onClick={() => removeRule(rule._id)}
+              >
                 <TrashIcon />
               </IconButton>
             </Flex>

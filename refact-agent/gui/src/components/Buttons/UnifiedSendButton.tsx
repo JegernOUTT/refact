@@ -1,11 +1,5 @@
 import React from "react";
-import {
-  Flex,
-  Badge,
-  HoverCard,
-  Text,
-  IconButton,
-} from "@radix-ui/themes";
+import { Flex, Badge, HoverCard, Text, IconButton } from "@radix-ui/themes";
 import {
   PaperPlaneIcon,
   ClockIcon,

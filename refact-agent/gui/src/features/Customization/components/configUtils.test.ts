@@ -54,7 +54,10 @@ describe("applyPatch", () => {
 
   it("blocks __proto__ in path", () => {
     const obj = { a: 1 };
-    const result = applyPatch(obj, { path: ["__proto__", "polluted"], value: true });
+    const result = applyPatch(obj, {
+      path: ["__proto__", "polluted"],
+      value: true,
+    });
     expect(result).toEqual({ a: 1 });
     expect(Object.prototype).not.toHaveProperty("polluted");
   });
@@ -313,9 +316,15 @@ describe("validateConfigId", () => {
   });
 
   it("returns error for invalid characters", () => {
-    expect(validateConfigId("MyMode")).toBe("ID must contain only lowercase letters, digits, underscore, or hyphen");
-    expect(validateConfigId("my mode")).toBe("ID must contain only lowercase letters, digits, underscore, or hyphen");
-    expect(validateConfigId("mode!")).toBe("ID must contain only lowercase letters, digits, underscore, or hyphen");
+    expect(validateConfigId("MyMode")).toBe(
+      "ID must contain only lowercase letters, digits, underscore, or hyphen",
+    );
+    expect(validateConfigId("my mode")).toBe(
+      "ID must contain only lowercase letters, digits, underscore, or hyphen",
+    );
+    expect(validateConfigId("mode!")).toBe(
+      "ID must contain only lowercase letters, digits, underscore, or hyphen",
+    );
   });
 });
 
@@ -405,7 +414,9 @@ describe("isToolConfirmRule", () => {
   });
 
   it("returns false for invalid rule", () => {
-    expect(isToolConfirmRule({ match_pattern: "tree", action: "auto" })).toBe(false);
+    expect(isToolConfirmRule({ match_pattern: "tree", action: "auto" })).toBe(
+      false,
+    );
     expect(isToolConfirmRule({ match: "tree" })).toBe(false);
     expect(isToolConfirmRule("string")).toBe(false);
   });

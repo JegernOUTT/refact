@@ -101,8 +101,6 @@ export const Chat: React.FC<ChatProps> = ({
               onClose={maybeSendToSidebar}
             />
           </Container>
-
-
         </Flex>
       </Flex>
     </DropzoneProvider>

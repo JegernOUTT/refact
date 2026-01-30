@@ -1,5 +1,12 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Button, TextField, IconButton, Text, Badge } from "@radix-ui/themes";
+import {
+  Flex,
+  Button,
+  TextField,
+  IconButton,
+  Text,
+  Badge,
+} from "@radix-ui/themes";
 import { PlusIcon, Cross2Icon } from "@radix-ui/react-icons";
 import styles from "./editors.module.css";
 
@@ -21,36 +28,56 @@ export const StringListEditor: React.FC<StringListEditorProps> = ({
   const [inputValue, setInputValue] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
 
-  const addItem = useCallback((item: string) => {
-    const trimmed = item.trim();
-    if (trimmed && !value.includes(trimmed)) {
-      onChange([...value, trimmed]);
-    }
-    setInputValue("");
-    setShowSuggestions(false);
-  }, [value, onChange]);
+  const addItem = useCallback(
+    (item: string) => {
+      const trimmed = item.trim();
+      if (trimmed && !value.includes(trimmed)) {
+        onChange([...value, trimmed]);
+      }
+      setInputValue("");
+      setShowSuggestions(false);
+    },
+    [value, onChange],
+  );
 
-  const removeItem = useCallback((index: number) => {
-    onChange(value.filter((_, i) => i !== index));
-  }, [value, onChange]);
+  const removeItem = useCallback(
+    (index: number) => {
+      onChange(value.filter((_, i) => i !== index));
+    },
+    [value, onChange],
+  );
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      addItem(inputValue);
-    }
-  }, [inputValue, addItem]);
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        addItem(inputValue);
+      }
+    },
+    [inputValue, addItem],
+  );
 
-  const filteredSuggestions = suggestions.filter(
-    (s) => !value.includes(s) && s.toLowerCase().includes(inputValue.toLowerCase())
-  ).slice(0, 10);
+  const filteredSuggestions = suggestions
+    .filter(
+      (s) =>
+        !value.includes(s) &&
+        s.toLowerCase().includes(inputValue.toLowerCase()),
+    )
+    .slice(0, 10);
 
   return (
     <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">{label}</Text>
+      <Text size="2" weight="medium">
+        {label}
+      </Text>
       <Flex gap="1" wrap="wrap">
         {value.map((item, index) => (
-          <Badge key={index} size="2" variant="soft" className={styles.tagBadge}>
+          <Badge
+            key={index}
+            size="2"
+            variant="soft"
+            className={styles.tagBadge}
+          >
             {item}
             <IconButton
               size="1"
@@ -76,7 +103,12 @@ export const StringListEditor: React.FC<StringListEditorProps> = ({
           placeholder={placeholder}
           style={{ flex: 1 }}
         />
-        <Button size="2" variant="soft" onClick={() => addItem(inputValue)} disabled={!inputValue.trim()}>
+        <Button
+          size="2"
+          variant="soft"
+          onClick={() => addItem(inputValue)}
+          disabled={!inputValue.trim()}
+        >
           <PlusIcon />
         </Button>
         {showSuggestions && filteredSuggestions.length > 0 && (

@@ -49,7 +49,11 @@ const ImageThumbnail: React.FC<{
           />
         </Dialog.Trigger>
         <Dialog.Content maxWidth="800px">
-          <img style={{ objectFit: "contain", width: "100%" }} src={src} alt={name} />
+          <img
+            style={{ objectFit: "contain", width: "100%" }}
+            src={src}
+            alt={name}
+          />
         </Dialog.Content>
       </Dialog.Root>
       <IconButton
@@ -104,9 +108,14 @@ const FileCard: React.FC<{
 export const AttachmentsPreview: React.FC<AttachmentsPreviewProps> = ({
   attachedFiles,
 }) => {
-  const { images, removeImage, textFiles, removeTextFile } = useAttachedImages();
+  const { images, removeImage, textFiles, removeTextFile } =
+    useAttachedImages();
 
-  if (images.length === 0 && attachedFiles.files.length === 0 && textFiles.length === 0) {
+  if (
+    images.length === 0 &&
+    attachedFiles.files.length === 0 &&
+    textFiles.length === 0
+  ) {
     return null;
   }
 

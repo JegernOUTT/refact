@@ -1,6 +1,25 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
-import { Flex, Button, Tabs, Text, Badge, IconButton, Dialog, TextField, SegmentedControl, Card } from "@radix-ui/themes";
-import { ArrowLeftIcon, PlusIcon, TrashIcon, GlobeIcon, FileIcon, CodeIcon, MixerHorizontalIcon } from "@radix-ui/react-icons";
+import {
+  Flex,
+  Button,
+  Tabs,
+  Text,
+  Badge,
+  IconButton,
+  Dialog,
+  TextField,
+  SegmentedControl,
+  Card,
+} from "@radix-ui/themes";
+import {
+  ArrowLeftIcon,
+  PlusIcon,
+  TrashIcon,
+  GlobeIcon,
+  FileIcon,
+  CodeIcon,
+  MixerHorizontalIcon,
+} from "@radix-ui/react-icons";
 
 import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
@@ -21,7 +40,13 @@ import {
   ModeForm,
   SubagentForm,
 } from "./components";
-import { applyPatch, isPlainObject, sanitizeObject, ConfigPatch, validateConfigId } from "./components/configUtils";
+import {
+  applyPatch,
+  isPlainObject,
+  sanitizeObject,
+  ConfigPatch,
+  validateConfigId,
+} from "./components/configUtils";
 
 import styles from "./Customization.module.css";
 
@@ -57,7 +82,9 @@ const ConfigList: React.FC<{
           key={item.id}
           role="button"
           tabIndex={0}
-          className={`${styles.compactConfigItem} ${selectedId === item.id ? styles.selected : ""}`}
+          className={`${styles.compactConfigItem} ${
+            selectedId === item.id ? styles.selected : ""
+          }`}
           onClick={() => onSelect(item.id)}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
@@ -67,14 +94,34 @@ const ConfigList: React.FC<{
           }}
         >
           <Flex direction="column" gap="0" style={{ minWidth: 0, flex: 1 }}>
-            <Text size="1" weight="medium" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <Text
+              size="1"
+              weight="medium"
+              style={{
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
               {item.title}
             </Text>
             <Flex align="center" gap="1">
-              <Text size="1" color="gray" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <Text
+                size="1"
+                color="gray"
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {item.id}
               </Text>
-              <Badge size="1" color={item.scope === "global" ? "blue" : "green"} variant="soft">
+              <Badge
+                size="1"
+                color={item.scope === "global" ? "blue" : "green"}
+                variant="soft"
+              >
                 {item.scope === "global" ? "G" : "L"}
               </Badge>
             </Flex>
@@ -93,7 +140,9 @@ const ConfigList: React.FC<{
         </div>
       ))}
       {items.length === 0 && (
-        <Text size="1" color="gray">No configs found</Text>
+        <Text size="1" color="gray">
+          No configs found
+        </Text>
       )}
     </Flex>
   );
@@ -111,10 +160,14 @@ const ConfigEditor: React.FC<{
 }> = ({ kind, configId, configItem, onSaved }) => {
   const { data, isLoading, error } = useGetConfigQuery({ kind, id: configId });
   const [saveConfig, { isLoading: isSaving }] = useSaveConfigMutation();
-  const [configJson, setConfigJson] = useState<Record<string, unknown> | null>(null);
+  const [configJson, setConfigJson] = useState<Record<string, unknown> | null>(
+    null,
+  );
   const [yaml, setYaml] = useState<string>("");
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [targetScope, setTargetScope] = useState<"global" | "local">(configItem.scope);
+  const [targetScope, setTargetScope] = useState<"global" | "local">(
+    configItem.scope,
+  );
   const [view, setView] = useState<EditorView>("form");
   const [yamlParseError, setYamlParseError] = useState<string | null>(null);
   const yamlSyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -147,58 +200,75 @@ const ConfigEditor: React.FC<{
     setTargetScope(configItem.scope);
   }, [configItem.scope]);
 
-  const syncYamlToJson = useCallback(async (yamlStr: string, version: number) => {
-    try {
-      const jsYaml = await jsYamlPromise;
-      if (version !== syncVersionRef.current) return;
-      const parsed = jsYaml.load(yamlStr);
-      if (!isPlainObject(parsed)) {
-        setYamlParseError("Config must be an object");
-        return;
+  const syncYamlToJson = useCallback(
+    async (yamlStr: string, version: number) => {
+      try {
+        const jsYaml = await jsYamlPromise;
+        if (version !== syncVersionRef.current) return;
+        const parsed = jsYaml.load(yamlStr);
+        if (!isPlainObject(parsed)) {
+          setYamlParseError("Config must be an object");
+          return;
+        }
+        const sanitized = sanitizeObject(parsed) as Record<string, unknown>;
+        setConfigJson(sanitized);
+        setYamlParseError(null);
+      } catch (e) {
+        if (version !== syncVersionRef.current) return;
+        setYamlParseError(e instanceof Error ? e.message : String(e));
       }
-      const sanitized = sanitizeObject(parsed) as Record<string, unknown>;
-      setConfigJson(sanitized);
-      setYamlParseError(null);
-    } catch (e) {
-      if (version !== syncVersionRef.current) return;
-      setYamlParseError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+    },
+    [],
+  );
 
-  const syncJsonToYaml = useCallback(async (json: Record<string, unknown>, version: number) => {
-    try {
-      const jsYaml = await jsYamlPromise;
-      if (version !== syncVersionRef.current) return;
-      const yamlStr = jsYaml.dump(json, { indent: 2, lineWidth: -1, noRefs: true });
+  const syncJsonToYaml = useCallback(
+    async (json: Record<string, unknown>, version: number) => {
+      try {
+        const jsYaml = await jsYamlPromise;
+        if (version !== syncVersionRef.current) return;
+        const yamlStr = jsYaml.dump(json, {
+          indent: 2,
+          lineWidth: -1,
+          noRefs: true,
+        });
+        setYaml(yamlStr);
+        setYamlParseError(null);
+      } catch (e) {
+        if (version !== syncVersionRef.current) return;
+        setYamlParseError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [],
+  );
+
+  const handleYamlChange = useCallback(
+    (yamlStr: string) => {
       setYaml(yamlStr);
-      setYamlParseError(null);
-    } catch (e) {
-      if (version !== syncVersionRef.current) return;
-      setYamlParseError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
-  const handleYamlChange = useCallback((yamlStr: string) => {
-    setYaml(yamlStr);
-    if (yamlSyncTimeoutRef.current) clearTimeout(yamlSyncTimeoutRef.current);
-    yamlSyncTimeoutRef.current = setTimeout(() => {
-      const version = ++syncVersionRef.current;
-      void syncYamlToJson(yamlStr, version);
-    }, 300);
-  }, [syncYamlToJson]);
-
-  const handleFormPatch = useCallback((patch: ConfigPatch) => {
-    setConfigJson((prev) => {
-      if (!prev) return prev;
-      const updated = applyPatch(prev, patch);
       if (yamlSyncTimeoutRef.current) clearTimeout(yamlSyncTimeoutRef.current);
       yamlSyncTimeoutRef.current = setTimeout(() => {
         const version = ++syncVersionRef.current;
-        void syncJsonToYaml(updated, version);
+        void syncYamlToJson(yamlStr, version);
       }, 300);
-      return updated;
-    });
-  }, [syncJsonToYaml]);
+    },
+    [syncYamlToJson],
+  );
+
+  const handleFormPatch = useCallback(
+    (patch: ConfigPatch) => {
+      setConfigJson((prev) => {
+        if (!prev) return prev;
+        const updated = applyPatch(prev, patch);
+        if (yamlSyncTimeoutRef.current)
+          clearTimeout(yamlSyncTimeoutRef.current);
+        yamlSyncTimeoutRef.current = setTimeout(() => {
+          const version = ++syncVersionRef.current;
+          void syncJsonToYaml(updated, version);
+        }, 300);
+        return updated;
+      });
+    },
+    [syncJsonToYaml],
+  );
 
   const handleSave = useCallback(async () => {
     setSaveError(null);
@@ -207,7 +277,12 @@ const ConfigEditor: React.FC<{
       return;
     }
     try {
-      const result = await saveConfig({ kind, id: configId, config: configJson, scope: targetScope }).unwrap();
+      const result = await saveConfig({
+        kind,
+        id: configId,
+        config: configJson,
+        scope: targetScope,
+      }).unwrap();
       if (!result.ok && result.errors.length > 0) {
         setSaveError(result.errors.map((e) => e.error).join(", "));
       } else {
@@ -227,10 +302,22 @@ const ConfigEditor: React.FC<{
 
   return (
     <Flex direction="column" gap="2" className={styles.configEditor}>
-      <Flex justify="between" align="center" wrap="wrap" gap="2" className={styles.editorHeader}>
-        <Text size="2" weight="bold">{configId}</Text>
+      <Flex
+        justify="between"
+        align="center"
+        wrap="wrap"
+        gap="2"
+        className={styles.editorHeader}
+      >
+        <Text size="2" weight="bold">
+          {configId}
+        </Text>
         <Flex gap="1" align="center">
-          <SegmentedControl.Root size="1" value={view} onValueChange={(v) => setView(v as EditorView)}>
+          <SegmentedControl.Root
+            size="1"
+            value={view}
+            onValueChange={(v) => setView(v as EditorView)}
+          >
             <SegmentedControl.Item value="form">
               <MixerHorizontalIcon width={12} height={12} />
             </SegmentedControl.Item>
@@ -238,13 +325,25 @@ const ConfigEditor: React.FC<{
               <CodeIcon width={12} height={12} />
             </SegmentedControl.Item>
           </SegmentedControl.Root>
-          <Button size="1" onClick={() => void handleSave()} disabled={isSaving || !!yamlParseError}>
+          <Button
+            size="1"
+            onClick={() => void handleSave()}
+            disabled={isSaving || !!yamlParseError}
+          >
             {isSaving ? "..." : "Save"}
           </Button>
         </Flex>
       </Flex>
-      {saveError && <Text size="1" color="red">{saveError}</Text>}
-      {yamlParseError && <Text size="1" color="red">YAML: {yamlParseError}</Text>}
+      {saveError && (
+        <Text size="1" color="red">
+          {saveError}
+        </Text>
+      )}
+      {yamlParseError && (
+        <Text size="1" color="red">
+          YAML: {yamlParseError}
+        </Text>
+      )}
       <Flex align="center" gap="2" wrap="wrap" className={styles.scopeRow}>
         {canSaveToLocal ? (
           <SegmentedControl.Root
@@ -264,11 +363,19 @@ const ConfigEditor: React.FC<{
             <GlobeIcon width={10} height={10} />
           </Badge>
         )}
-        {scopeChanged && <Badge size="1" color="orange">→ {targetScope}</Badge>}
+        {scopeChanged && (
+          <Badge size="1" color="orange">
+            → {targetScope}
+          </Badge>
+        )}
       </Flex>
       {view === "form" ? (
         <div className={styles.formContainer}>
-          <FormEditor kind={kind} config={configJson} onPatch={handleFormPatch} />
+          <FormEditor
+            kind={kind}
+            config={configJson}
+            onPatch={handleFormPatch}
+          />
         </div>
       ) : (
         <textarea
@@ -307,7 +414,9 @@ const CreateConfigDialog: React.FC<{
   hasProjectRoot: boolean;
 }> = ({ kind, open, onOpenChange, onCreated, hasProjectRoot }) => {
   const [id, setId] = useState("");
-  const [scope, setScope] = useState<"global" | "local">(hasProjectRoot ? "local" : "global");
+  const [scope, setScope] = useState<"global" | "local">(
+    hasProjectRoot ? "local" : "global",
+  );
   const [createConfig, { isLoading }] = useCreateConfigMutation();
   const [error, setError] = useState<string | null>(null);
 
@@ -324,7 +433,12 @@ const CreateConfigDialog: React.FC<{
     }
     const defaultConfig = getDefaultConfig(kind, id);
     try {
-      const result = await createConfig({ kind, id, config: defaultConfig, scope }).unwrap();
+      const result = await createConfig({
+        kind,
+        id,
+        config: defaultConfig,
+        scope,
+      }).unwrap();
       if (!result.ok && result.errors.length > 0) {
         setError(result.errors.map((e) => e.error).join(", "));
       } else {
@@ -377,11 +491,17 @@ const CreateConfigDialog: React.FC<{
               </Badge>
             )}
           </Flex>
-          {error && <Text size="2" color="red">{error}</Text>}
+          {error && (
+            <Text size="2" color="red">
+              {error}
+            </Text>
+          )}
         </Flex>
         <Flex gap="3" mt="4" justify="end">
           <Dialog.Close>
-            <Button variant="soft" color="gray">Cancel</Button>
+            <Button variant="soft" color="gray">
+              Cancel
+            </Button>
           </Dialog.Close>
           <Button onClick={() => void handleCreate()} disabled={isLoading}>
             {isLoading ? "Creating..." : "Create"}
@@ -392,7 +512,10 @@ const CreateConfigDialog: React.FC<{
   );
 };
 
-function getDefaultConfig(kind: ConfigKind, id: string): Record<string, unknown> {
+function getDefaultConfig(
+  kind: ConfigKind,
+  id: string,
+): Record<string, unknown> {
   switch (kind) {
     case "modes":
       return {
@@ -443,7 +566,9 @@ export const Customization: React.FC<CustomizationProps> = ({
   initialConfigId,
 }) => {
   const [activeKind, setActiveKind] = useState<ConfigKind>(initialKind);
-  const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialConfigId ?? null);
+  const [selectedConfigId, setSelectedConfigId] = useState<string | null>(
+    initialConfigId ?? null,
+  );
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
 
   const { data: registry, isLoading, refetch } = useGetRegistryQuery(undefined);
@@ -452,26 +577,38 @@ export const Customization: React.FC<CustomizationProps> = ({
   const getItemsForKind = (kind: ConfigKind): ConfigItem[] => {
     if (!registry) return [];
     switch (kind) {
-      case "modes": return registry.modes;
-      case "subagents": return registry.subagents;
-      case "toolbox_commands": return registry.toolbox_commands;
-      case "code_lens": return registry.code_lens;
+      case "modes":
+        return registry.modes;
+      case "subagents":
+        return registry.subagents;
+      case "toolbox_commands":
+        return registry.toolbox_commands;
+      case "code_lens":
+        return registry.code_lens;
     }
   };
 
   const getAllItems = (): ConfigItem[] => {
     if (!registry) return [];
-    return [...registry.modes, ...registry.subagents, ...registry.toolbox_commands, ...registry.code_lens];
+    return [
+      ...registry.modes,
+      ...registry.subagents,
+      ...registry.toolbox_commands,
+      ...registry.code_lens,
+    ];
   };
 
-  const handleDelete = useCallback(async (id: string, scope: "global" | "local") => {
-    if (!confirm(`Delete ${id} from ${scope}?`)) return;
-    await deleteConfig({ kind: activeKind, id, scope });
-    if (selectedConfigId === id) {
-      setSelectedConfigId(null);
-    }
-    await refetch();
-  }, [activeKind, selectedConfigId, deleteConfig, refetch]);
+  const handleDelete = useCallback(
+    async (id: string, scope: "global" | "local") => {
+      if (!confirm(`Delete ${id} from ${scope}?`)) return;
+      await deleteConfig({ kind: activeKind, id, scope });
+      if (selectedConfigId === id) {
+        setSelectedConfigId(null);
+      }
+      await refetch();
+    },
+    [activeKind, selectedConfigId, deleteConfig, refetch],
+  );
 
   const handleTabChange = useCallback((value: string) => {
     setActiveKind(value as ConfigKind);
@@ -490,7 +627,12 @@ export const Customization: React.FC<CustomizationProps> = ({
           </Button>
         </Flex>
       ) : (
-        <Button mr="auto" variant="outline" onClick={backFromCustomization} mb="4">
+        <Button
+          mr="auto"
+          variant="outline"
+          onClick={backFromCustomization}
+          mb="4"
+        >
           Back
         </Button>
       )}
@@ -498,7 +640,8 @@ export const Customization: React.FC<CustomizationProps> = ({
       {registry?.errors && registry.errors.length > 0 && (
         <Card mb="3" style={{ backgroundColor: "var(--red-3)" }}>
           <Text size="2" color="red">
-            {registry.errors.length} config error(s): {registry.errors.map((e) => e.error).join(", ")}
+            {registry.errors.length} config error(s):{" "}
+            {registry.errors.map((e) => e.error).join(", ")}
           </Text>
         </Card>
       )}
@@ -527,7 +670,9 @@ export const Customization: React.FC<CustomizationProps> = ({
                 </ScrollArea>
               );
             }
-            const selectedItem = getItemsForKind(activeKind).find(i => i.id === selectedConfigId);
+            const selectedItem = getItemsForKind(activeKind).find(
+              (i) => i.id === selectedConfigId,
+            );
             if (!selectedItem) {
               return (
                 <ScrollArea scrollbars="vertical" className={styles.listPanel}>
@@ -568,7 +713,10 @@ export const Customization: React.FC<CustomizationProps> = ({
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
         onCreated={(id) => setSelectedConfigId(id)}
-        hasProjectRoot={registry?.has_project_root ?? getAllItems().some(i => i.local_path !== "")}
+        hasProjectRoot={
+          registry?.has_project_root ??
+          getAllItems().some((i) => i.local_path !== "")
+        }
       />
     </PageWrapper>
   );

@@ -48,7 +48,11 @@ export interface DeleteConfigResponse {
   errors: ErrorItem[];
 }
 
-export type ConfigKind = "modes" | "subagents" | "toolbox_commands" | "code_lens";
+export type ConfigKind =
+  | "modes"
+  | "subagents"
+  | "toolbox_commands"
+  | "code_lens";
 
 export const customizationApi = createApi({
   reducerPath: "customizationApi",
@@ -76,14 +80,22 @@ export const customizationApi = createApi({
           url: `http://127.0.0.1:${port}/v1/customization/registry`,
         });
         if (result.error) {
-          return { error: { status: result.error.status as number, data: String(result.error.data) } };
+          return {
+            error: {
+              status: result.error.status as number,
+              data: String(result.error.data),
+            },
+          };
         }
         return { data: result.data as RegistryResponse };
       },
       providesTags: ["Registry"],
     }),
 
-    getConfig: builder.query<ConfigDetailResponse, { kind: ConfigKind; id: string; scope?: "global" | "local" }>({
+    getConfig: builder.query<
+      ConfigDetailResponse,
+      { kind: ConfigKind; id: string; scope?: "global" | "local" }
+    >({
       queryFn: async ({ kind, id, scope }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
@@ -95,14 +107,29 @@ export const customizationApi = createApi({
           url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}${scopeParam}`,
         });
         if (result.error) {
-          return { error: { status: result.error.status as number, data: String(result.error.data) } };
+          return {
+            error: {
+              status: result.error.status as number,
+              data: String(result.error.data),
+            },
+          };
         }
         return { data: result.data as ConfigDetailResponse };
       },
-      providesTags: (_result, _error, { kind, id }) => [{ type: "Config", id: `${kind}/${id}` }],
+      providesTags: (_result, _error, { kind, id }) => [
+        { type: "Config", id: `${kind}/${id}` },
+      ],
     }),
 
-    saveConfig: builder.mutation<SaveConfigResponse, { kind: ConfigKind; id: string; config: Record<string, unknown>; scope?: "global" | "local" }>({
+    saveConfig: builder.mutation<
+      SaveConfigResponse,
+      {
+        kind: ConfigKind;
+        id: string;
+        config: Record<string, unknown>;
+        scope?: "global" | "local";
+      }
+    >({
       queryFn: async ({ kind, id, config, scope }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
@@ -115,14 +142,30 @@ export const customizationApi = createApi({
           body: { config, scope },
         });
         if (result.error) {
-          return { error: { status: result.error.status as number, data: String(result.error.data) } };
+          return {
+            error: {
+              status: result.error.status as number,
+              data: String(result.error.data),
+            },
+          };
         }
         return { data: result.data as SaveConfigResponse };
       },
-      invalidatesTags: (_result, _error, { kind, id }) => ["Registry", { type: "Config", id: `${kind}/${id}` }],
+      invalidatesTags: (_result, _error, { kind, id }) => [
+        "Registry",
+        { type: "Config", id: `${kind}/${id}` },
+      ],
     }),
 
-    createConfig: builder.mutation<SaveConfigResponse, { kind: ConfigKind; id: string; config: Record<string, unknown>; scope?: "global" | "local" }>({
+    createConfig: builder.mutation<
+      SaveConfigResponse,
+      {
+        kind: ConfigKind;
+        id: string;
+        config: Record<string, unknown>;
+        scope?: "global" | "local";
+      }
+    >({
       queryFn: async ({ kind, id, config, scope }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
@@ -135,14 +178,22 @@ export const customizationApi = createApi({
           body: { id, config, scope },
         });
         if (result.error) {
-          return { error: { status: result.error.status as number, data: String(result.error.data) } };
+          return {
+            error: {
+              status: result.error.status as number,
+              data: String(result.error.data),
+            },
+          };
         }
         return { data: result.data as SaveConfigResponse };
       },
       invalidatesTags: ["Registry"],
     }),
 
-    deleteConfig: builder.mutation<DeleteConfigResponse, { kind: ConfigKind; id: string; scope: "global" | "local" }>({
+    deleteConfig: builder.mutation<
+      DeleteConfigResponse,
+      { kind: ConfigKind; id: string; scope: "global" | "local" }
+    >({
       queryFn: async ({ kind, id, scope }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
@@ -154,11 +205,19 @@ export const customizationApi = createApi({
           method: "DELETE",
         });
         if (result.error) {
-          return { error: { status: result.error.status as number, data: String(result.error.data) } };
+          return {
+            error: {
+              status: result.error.status as number,
+              data: String(result.error.data),
+            },
+          };
         }
         return { data: result.data as DeleteConfigResponse };
       },
-      invalidatesTags: (_result, _error, { kind, id }) => ["Registry", { type: "Config", id: `${kind}/${id}` }],
+      invalidatesTags: (_result, _error, { kind, id }) => [
+        "Registry",
+        { type: "Config", id: `${kind}/${id}` },
+      ],
     }),
   }),
 });

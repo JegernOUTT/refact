@@ -38,7 +38,6 @@ import { selectSseConnectionForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
 import { ChatLoading } from "./ChatLoading";
 
-
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
   onStopStreaming: () => void;
