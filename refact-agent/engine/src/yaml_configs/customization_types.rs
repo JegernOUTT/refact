@@ -350,3 +350,281 @@ pub struct ProjectRegistry {
     pub code_lens: HashMap<String, CodeLensConfig>,
     pub errors: Vec<RegistryError>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_confirm_rule_serialization() {
+        let rule = ToolConfirmRule {
+            match_pattern: "tree".to_string(),
+            action: "auto".to_string(),
+        };
+
+        let yaml = serde_yaml::to_string(&rule).unwrap();
+        assert!(yaml.contains("match:"));
+        assert!(!yaml.contains("match_pattern:"));
+
+        let json = serde_json::to_string(&rule).unwrap();
+        assert!(json.contains("\"match\":"));
+        assert!(!json.contains("\"match_pattern\":"));
+    }
+
+    #[test]
+    fn test_tool_confirm_rule_deserialization() {
+        let yaml = "match: tree\naction: auto";
+        let rule: ToolConfirmRule = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(rule.match_pattern, "tree");
+        assert_eq!(rule.action, "auto");
+
+        let json = r#"{"match": "shell", "action": "ask"}"#;
+        let rule: ToolConfirmRule = serde_json::from_str(json).unwrap();
+        assert_eq!(rule.match_pattern, "shell");
+        assert_eq!(rule.action, "ask");
+    }
+
+    #[test]
+    fn test_mode_config_roundtrip() {
+        let yaml = r#"
+schema_version: 1
+id: test_mode
+title: Test Mode
+description: A test mode
+specific: false
+prompt: "Test prompt"
+tools:
+  - tree
+  - cat
+tool_confirm:
+  rules:
+    - match: "tree"
+      action: auto
+    - match: "shell"
+      action: ask
+"#;
+        let config: ModeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.id, "test_mode");
+        assert_eq!(config.tools, vec!["tree", "cat"]);
+        assert_eq!(config.tool_confirm.rules.len(), 2);
+        assert_eq!(config.tool_confirm.rules[0].match_pattern, "tree");
+        assert_eq!(config.tool_confirm.rules[0].action, "auto");
+
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(serialized.contains("match:"));
+        assert!(!serialized.contains("match_pattern:"));
+    }
+
+    #[test]
+    fn test_mode_override_apply() {
+        let base = ModeConfig {
+            schema_version: 1,
+            id: "base".to_string(),
+            title: "Base".to_string(),
+            description: "".to_string(),
+            specific: false,
+            prompt: "Base prompt".to_string(),
+            tools: vec!["tree".to_string(), "cat".to_string()],
+            llm_defaults: LlmDefaults {
+                max_new_tokens: Some(1000),
+                temperature: Some(0.5),
+                ..Default::default()
+            },
+            tool_confirm: ToolConfirmConfig::default(),
+            thread_defaults: ModeThreadDefaults::default(),
+            ui: ModeUi::default(),
+            base: None,
+            match_models: None,
+            override_config: None,
+        };
+
+        let override_cfg = ModeOverride {
+            prompt: Some("Override prompt".to_string()),
+            tools_add: Some(vec!["shell".to_string()]),
+            llm_defaults: Some(LlmDefaults {
+                temperature: Some(0.8),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = base.apply_override(&override_cfg);
+        assert_eq!(result.prompt, "Override prompt");
+        assert_eq!(result.tools, vec!["tree", "cat", "shell"]);
+        assert_eq!(result.llm_defaults.max_new_tokens, Some(1000));
+        assert_eq!(result.llm_defaults.temperature, Some(0.8));
+    }
+
+    #[test]
+    fn test_mode_override_tools_replace() {
+        let base = ModeConfig {
+            schema_version: 1,
+            id: "base".to_string(),
+            title: "".to_string(),
+            description: "".to_string(),
+            specific: false,
+            prompt: "".to_string(),
+            tools: vec!["tree".to_string(), "cat".to_string()],
+            llm_defaults: LlmDefaults::default(),
+            tool_confirm: ToolConfirmConfig::default(),
+            thread_defaults: ModeThreadDefaults::default(),
+            ui: ModeUi::default(),
+            base: None,
+            match_models: None,
+            override_config: None,
+        };
+
+        let override_cfg = ModeOverride {
+            tools_replace: Some(vec!["shell".to_string()]),
+            ..Default::default()
+        };
+
+        let result = base.apply_override(&override_cfg);
+        assert_eq!(result.tools, vec!["shell"]);
+    }
+
+    #[test]
+    fn test_mode_override_tools_remove() {
+        let base = ModeConfig {
+            schema_version: 1,
+            id: "base".to_string(),
+            title: "".to_string(),
+            description: "".to_string(),
+            specific: false,
+            prompt: "".to_string(),
+            tools: vec!["tree".to_string(), "cat".to_string(), "shell".to_string()],
+            llm_defaults: LlmDefaults::default(),
+            tool_confirm: ToolConfirmConfig::default(),
+            thread_defaults: ModeThreadDefaults::default(),
+            ui: ModeUi::default(),
+            base: None,
+            match_models: None,
+            override_config: None,
+        };
+
+        let override_cfg = ModeOverride {
+            tools_remove: Some(vec!["cat".to_string()]),
+            ..Default::default()
+        };
+
+        let result = base.apply_override(&override_cfg);
+        assert_eq!(result.tools, vec!["tree", "shell"]);
+    }
+
+    #[test]
+    fn test_subagent_config_extra_fields_preserved() {
+        let yaml = r#"
+schema_version: 1
+id: test_subagent
+title: Test
+expose_as_tool: true
+has_code: false
+subchat:
+  context_mode: bare
+custom_field: custom_value
+another_extra: 123
+"#;
+        let config: SubagentConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.id, "test_subagent");
+        assert!(config.extra.contains_key("custom_field"));
+        assert!(config.extra.contains_key("another_extra"));
+
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(serialized.contains("custom_field:"));
+        assert!(serialized.contains("another_extra:"));
+    }
+
+    #[test]
+    fn test_subagent_apply_override_preserves_extra() {
+        let base = SubagentConfig {
+            schema_version: 1,
+            id: "base".to_string(),
+            title: "Base".to_string(),
+            description: "".to_string(),
+            specific: false,
+            expose_as_tool: false,
+            has_code: false,
+            tool: None,
+            subchat: SubchatConfig::default(),
+            messages: SubagentMessages::default(),
+            prompts: SubagentPrompts::default(),
+            gather_files: GatherFilesConfig::default(),
+            tools: vec![],
+            base: None,
+            match_models: None,
+            extra: {
+                let mut m = HashMap::new();
+                m.insert("base_extra".to_string(), serde_yaml::Value::String("value".to_string()));
+                m
+            },
+        };
+
+        let override_cfg = SubagentConfig {
+            schema_version: 1,
+            id: "override".to_string(),
+            title: "Override".to_string(),
+            description: "".to_string(),
+            specific: false,
+            expose_as_tool: true,
+            has_code: false,
+            tool: None,
+            subchat: SubchatConfig::default(),
+            messages: SubagentMessages::default(),
+            prompts: SubagentPrompts::default(),
+            gather_files: GatherFilesConfig::default(),
+            tools: vec![],
+            base: Some("base".to_string()),
+            match_models: Some(vec!["gpt-*".to_string()]),
+            extra: {
+                let mut m = HashMap::new();
+                m.insert("override_extra".to_string(), serde_yaml::Value::String("new".to_string()));
+                m
+            },
+        };
+
+        let result = base.apply_override(&override_cfg);
+        assert_eq!(result.title, "Override");
+        assert!(result.expose_as_tool);
+        assert!(result.extra.contains_key("base_extra"));
+        assert!(result.extra.contains_key("override_extra"));
+    }
+
+    #[test]
+    fn test_toolbox_command_selection_needed() {
+        let yaml = r#"
+schema_version: 1
+id: test_cmd
+description: Test command
+selection_needed: [1, 100]
+messages: []
+"#;
+        let config: ToolboxCommandConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.selection_needed, Some((1, 100)));
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: ToolboxCommandConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.selection_needed, Some((1, 100)));
+    }
+
+    #[test]
+    fn test_code_lens_config() {
+        let yaml = r#"
+schema_version: 1
+id: test_lens
+label: Test Lens
+auto_submit: true
+new_tab: false
+messages:
+  - role: user
+    content: "Test message"
+"#;
+        let config: CodeLensConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.id, "test_lens");
+        assert_eq!(config.label, "Test Lens");
+        assert!(config.auto_submit);
+        assert!(!config.new_tab);
+        assert_eq!(config.messages.len(), 1);
+        assert_eq!(config.messages[0].role, "user");
+    }
+}
+

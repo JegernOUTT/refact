@@ -3,11 +3,11 @@ import { Flex, Button, TextField, IconButton, Text, DropdownMenu } from "@radix-
 import { PlusIcon, TrashIcon, ChevronDownIcon } from "@radix-ui/react-icons";
 
 export type ToolConfirmRule = {
-  match_pattern: string;
+  match: string;
   action: string;
 };
 
-type InternalRule = ToolConfirmRule & { _id: string };
+type InternalRule = { match: string; action: string; _id: string };
 
 type RulesTableEditorProps = {
   value: ToolConfirmRule[];
@@ -15,7 +15,7 @@ type RulesTableEditorProps = {
   label?: string;
 };
 
-const COMMON_ACTIONS = ["allow", "deny", "ask"];
+const COMMON_ACTIONS = ["auto", "allow", "deny", "ask"];
 
 let idCounter = 0;
 const generateId = () => `rule_${++idCounter}_${Date.now()}`;
@@ -32,13 +32,11 @@ export const RulesTableEditor: React.FC<RulesTableEditorProps> = ({
   label = "Tool Confirmation Rules",
 }) => {
   const [internal, setInternal] = useState<InternalRule[]>(() => toInternal(value));
+  const valueKey = JSON.stringify(value);
 
   useEffect(() => {
-    if (value.length !== internal.length) {
-      setInternal(toInternal(value));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value.length]);
+    setInternal(toInternal(value));
+  }, [valueKey]);
 
   const emit = useCallback((rules: InternalRule[]) => {
     setInternal(rules);
@@ -46,14 +44,14 @@ export const RulesTableEditor: React.FC<RulesTableEditorProps> = ({
   }, [onChange]);
 
   const addRule = useCallback(() => {
-    emit([...internal, { match_pattern: "*", action: "ask", _id: generateId() }]);
+    emit([...internal, { match: "*", action: "ask", _id: generateId() }]);
   }, [internal, emit]);
 
   const removeRule = useCallback((id: string) => {
     emit(internal.filter((r) => r._id !== id));
   }, [internal, emit]);
 
-  const updateRule = useCallback((id: string, field: keyof ToolConfirmRule, fieldValue: string) => {
+  const updateRule = useCallback((id: string, field: "match" | "action", fieldValue: string) => {
     emit(internal.map((r) => r._id === id ? { ...r, [field]: fieldValue } : r));
   }, [internal, emit]);
 
@@ -73,8 +71,8 @@ export const RulesTableEditor: React.FC<RulesTableEditorProps> = ({
             <Flex key={rule._id} gap="2" align="center" wrap="wrap">
               <TextField.Root
                 size="1"
-                value={rule.match_pattern}
-                onChange={(e) => updateRule(rule._id, "match_pattern", e.target.value)}
+                value={rule.match}
+                onChange={(e) => updateRule(rule._id, "match", e.target.value)}
                 placeholder="Pattern (e.g., shell:*)"
                 style={{ flex: 1, minWidth: 100 }}
               />

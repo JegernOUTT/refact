@@ -1,7 +1,7 @@
 import React, { useCallback } from "react";
 import { Flex, TextField, Text, Switch, TextArea } from "@radix-ui/themes";
-import { MessageListEditor, MessageTemplate } from "./MessageListEditor";
-import { ConfigPatch } from "./configUtils";
+import { MessageListEditor } from "./MessageListEditor";
+import { ConfigPatch, safeString, safeBoolean, safeMessageArray, safeSelectionRange } from "./configUtils";
 
 type ToolboxCommandFormProps = {
   config: Record<string, unknown>;
@@ -9,11 +9,11 @@ type ToolboxCommandFormProps = {
 };
 
 export const ToolboxCommandForm: React.FC<ToolboxCommandFormProps> = ({ config, onPatch }) => {
-  const description = typeof config.description === "string" ? config.description : "";
-  const selectionNeeded = Array.isArray(config.selection_needed) ? (config.selection_needed as [number, number]) : null;
-  const selectionUnwanted = typeof config.selection_unwanted === "boolean" ? config.selection_unwanted : false;
-  const insertAtCursor = typeof config.insert_at_cursor === "boolean" ? config.insert_at_cursor : false;
-  const messages = Array.isArray(config.messages) ? (config.messages as MessageTemplate[]) : [];
+  const description = safeString(config.description);
+  const selectionNeeded = safeSelectionRange(config.selection_needed);
+  const selectionUnwanted = safeBoolean(config.selection_unwanted);
+  const insertAtCursor = safeBoolean(config.insert_at_cursor);
+  const messages = safeMessageArray(config.messages);
 
   const hasSelectionRange = selectionNeeded !== null;
   const selectionMin = hasSelectionRange ? selectionNeeded[0] : 0;

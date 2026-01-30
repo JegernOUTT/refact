@@ -51,6 +51,7 @@ pub struct RegistryResponse {
     pub toolbox_commands: Vec<ConfigItem>,
     pub code_lens: Vec<ConfigItem>,
     pub errors: Vec<ErrorItem>,
+    pub has_project_root: bool,
 }
 
 #[derive(Serialize)]
@@ -110,23 +111,36 @@ pub async fn handle_v1_customization_registry(
         }
     };
 
+    let mut modes: Vec<_> = registry.modes.values().map(|m| {
+        make_config_item(&m.id, "modes", if m.title.is_empty() { &m.id } else { &m.title }, m.specific)
+    }).collect();
+    modes.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
+
+    let mut subagents: Vec<_> = registry.subagents.values().map(|s| {
+        make_config_item(&s.id, "subagents", if s.title.is_empty() { &s.id } else { &s.title }, s.specific)
+    }).collect();
+    subagents.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
+
+    let mut toolbox_commands: Vec<_> = registry.toolbox_commands.values().map(|t| {
+        make_config_item(&t.id, "toolbox_commands", &t.id, false)
+    }).collect();
+    toolbox_commands.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut code_lens: Vec<_> = registry.code_lens.values().map(|c| {
+        make_config_item(&c.id, "code_lens", if c.label.is_empty() { &c.id } else { &c.label }, false)
+    }).collect();
+    code_lens.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
+
     let response = RegistryResponse {
-        modes: registry.modes.values().map(|m| {
-            make_config_item(&m.id, "modes", if m.title.is_empty() { &m.id } else { &m.title }, m.specific)
-        }).collect(),
-        subagents: registry.subagents.values().map(|s| {
-            make_config_item(&s.id, "subagents", if s.title.is_empty() { &s.id } else { &s.title }, s.specific)
-        }).collect(),
-        toolbox_commands: registry.toolbox_commands.values().map(|t| {
-            make_config_item(&t.id, "toolbox_commands", &t.id, false)
-        }).collect(),
-        code_lens: registry.code_lens.values().map(|c| {
-            make_config_item(&c.id, "code_lens", if c.label.is_empty() { &c.id } else { &c.label }, false)
-        }).collect(),
+        modes,
+        subagents,
+        toolbox_commands,
+        code_lens,
         errors: registry.errors.iter().map(|e| ErrorItem {
             file_path: e.file_path.clone(),
             error: e.error.clone(),
         }).collect(),
+        has_project_root: project_root.is_some(),
     };
 
     json_response(StatusCode::OK, &response)

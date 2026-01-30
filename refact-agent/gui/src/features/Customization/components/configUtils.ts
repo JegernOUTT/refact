@@ -147,3 +147,55 @@ export function safeObject(value: unknown): Record<string, unknown> {
 export function isString(v: unknown): v is string {
   return typeof v === "string";
 }
+
+export type MessageTemplate = {
+  role: string;
+  content: string;
+};
+
+export function isMessageTemplate(v: unknown): v is MessageTemplate {
+  return isPlainObject(v) && typeof v.role === "string" && typeof v.content === "string";
+}
+
+export function safeMessageArray(value: unknown): MessageTemplate[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isMessageTemplate);
+}
+
+export function safeSelectionRange(value: unknown): [number, number] | null {
+  if (!Array.isArray(value) || value.length !== 2) return null;
+  const [min, max] = value;
+  if (typeof min !== "number" || typeof max !== "number") return null;
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+  return [min, max];
+}
+
+export function parseIntSafe(value: string): number | undefined {
+  if (!value) return undefined;
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+export function parseFloatSafe(value: string): number | undefined {
+  if (!value) return undefined;
+  const n = Number.parseFloat(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+export function isToolConfirmRule(v: unknown): v is { match: string; action: string } {
+  return isPlainObject(v) && typeof v.match === "string" && typeof v.action === "string";
+}
+
+export function safeToolConfirmRules(value: unknown): { match: string; action: string }[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isToolConfirmRule);
+}
+
+const ID_PATTERN = /^[a-z0-9_-]+$/;
+
+export function validateConfigId(id: string): string | null {
+  if (!id.trim()) return "ID is required";
+  if (id.includes("/") || id.includes("\\") || id.includes("..")) return "ID contains invalid characters";
+  if (!ID_PATTERN.test(id)) return "ID must contain only lowercase letters, digits, underscore, or hyphen";
+  return null;
+}

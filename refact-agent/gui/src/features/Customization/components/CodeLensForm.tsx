@@ -1,7 +1,7 @@
 import React, { useCallback } from "react";
 import { Flex, TextField, Text, Switch } from "@radix-ui/themes";
-import { MessageListEditor, MessageTemplate } from "./MessageListEditor";
-import { ConfigPatch } from "./configUtils";
+import { MessageListEditor } from "./MessageListEditor";
+import { ConfigPatch, safeString, safeBoolean, safeMessageArray } from "./configUtils";
 
 type CodeLensFormProps = {
   config: Record<string, unknown>;
@@ -9,10 +9,10 @@ type CodeLensFormProps = {
 };
 
 export const CodeLensForm: React.FC<CodeLensFormProps> = ({ config, onPatch }) => {
-  const label = typeof config.label === "string" ? config.label : "";
-  const autoSubmit = typeof config.auto_submit === "boolean" ? config.auto_submit : false;
-  const newTab = typeof config.new_tab === "boolean" ? config.new_tab : false;
-  const messages = Array.isArray(config.messages) ? (config.messages as MessageTemplate[]) : [];
+  const label = safeString(config.label);
+  const autoSubmit = safeBoolean(config.auto_submit);
+  const newTab = safeBoolean(config.new_tab);
+  const messages = safeMessageArray(config.messages);
 
   const patch = useCallback((path: (string | number)[], value: unknown) => {
     onPatch({ path, value });

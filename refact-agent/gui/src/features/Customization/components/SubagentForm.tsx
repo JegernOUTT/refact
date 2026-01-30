@@ -2,8 +2,8 @@ import React, { useState, useCallback, useEffect } from "react";
 import { Flex, TextField, Text, Switch, TextArea, Tabs, Button } from "@radix-ui/themes";
 import { StringListEditor } from "./StringListEditor";
 import { ToolParametersEditor, ToolParameter } from "./ToolParametersEditor";
-import { MessageListEditor, MessageTemplate } from "./MessageListEditor";
-import { ConfigPatch, extractSubagentExtra, computeExtraPatches, safeArray, safeString, safeBoolean, safeObject, isString, isPlainObject, sanitizeObject, safeNumber } from "./configUtils";
+import { MessageListEditor } from "./MessageListEditor";
+import { ConfigPatch, extractSubagentExtra, computeExtraPatches, safeArray, safeString, safeBoolean, safeObject, isString, isPlainObject, sanitizeObject, safeNumber, safeMessageArray, parseIntSafe, parseFloatSafe } from "./configUtils";
 import styles from "./editors.module.css";
 
 type SubagentFormProps = {
@@ -240,18 +240,6 @@ const SubchatTab: React.FC<{
   subchat: Record<string, unknown>;
   patch: PatchFn;
 }> = ({ subchat, patch }) => {
-  const parseIntSafe = (value: string): number | undefined => {
-    if (!value) return undefined;
-    const n = Number.parseInt(value, 10);
-    return Number.isFinite(n) ? n : undefined;
-  };
-
-  const parseFloatSafe = (value: string): number | undefined => {
-    if (!value) return undefined;
-    const n = Number.parseFloat(value);
-    return Number.isFinite(n) ? n : undefined;
-  };
-
   return (
     <>
       <Flex gap="4">
@@ -361,7 +349,7 @@ const MessagesTab: React.FC<{
     <Flex direction="column" gap="2">
       <Text size="2" weight="medium">System Prompt</Text>
       <TextArea
-        value={typeof messages.system_prompt === "string" ? messages.system_prompt : ""}
+        value={safeString(messages.system_prompt)}
         onChange={(e) => patch(["messages", "system_prompt"], e.target.value || undefined)}
         placeholder="System prompt..."
         className={styles.promptTextarea}
@@ -371,7 +359,7 @@ const MessagesTab: React.FC<{
     <Flex direction="column" gap="2">
       <Text size="2" weight="medium">User Template</Text>
       <TextArea
-        value={typeof messages.user_template === "string" ? messages.user_template : ""}
+        value={safeString(messages.user_template)}
         onChange={(e) => patch(["messages", "user_template"], e.target.value || undefined)}
         placeholder="User message template..."
         rows={3}
@@ -379,13 +367,13 @@ const MessagesTab: React.FC<{
     </Flex>
 
     <MessageListEditor
-      value={Array.isArray(messages.pre_messages) ? (messages.pre_messages as MessageTemplate[]) : []}
+      value={safeMessageArray(messages.pre_messages)}
       onChange={(m) => patch(["messages", "pre_messages"], m)}
       label="Pre-Messages"
     />
 
     <MessageListEditor
-      value={Array.isArray(messages.post_messages) ? (messages.post_messages as MessageTemplate[]) : []}
+      value={safeMessageArray(messages.post_messages)}
       onChange={(m) => patch(["messages", "post_messages"], m)}
       label="Post-Messages"
     />
@@ -395,7 +383,7 @@ const MessagesTab: React.FC<{
       <Flex key={key} direction="column" gap="1">
         <Text size="1" color="gray">{key.replace("_", " ")}</Text>
         <TextArea
-          value={typeof prompts[key] === "string" ? prompts[key] : ""}
+          value={safeString(prompts[key])}
           onChange={(e) => patch(["prompts", key], e.target.value || undefined)}
           placeholder={`${key} prompt...`}
           rows={2}
@@ -416,12 +404,6 @@ const AdvancedTab: React.FC<{
   onExtraApply: () => void;
   patch: PatchFn;
 }> = ({ base, matchModels, gatherFiles, extraJson, extraJsonDirty, extraJsonError, onExtraChange, onExtraApply, patch }) => {
-  const parseNumber = (value: string): number | undefined => {
-    if (!value) return undefined;
-    const n = Number.parseInt(value, 10);
-    return Number.isFinite(n) ? n : undefined;
-  };
-
   return (
     <>
       <Flex direction="column" gap="2">
@@ -455,7 +437,7 @@ const AdvancedTab: React.FC<{
           <TextField.Root
             type="number"
             value={safeNumber(gatherFiles.max_files)?.toString() ?? ""}
-            onChange={(e) => patch(["gather_files", "max_files"], parseNumber(e.target.value))}
+            onChange={(e) => patch(["gather_files", "max_files"], parseIntSafe(e.target.value))}
             placeholder="Default"
           />
         </Flex>
@@ -464,7 +446,7 @@ const AdvancedTab: React.FC<{
           <TextField.Root
             type="number"
             value={safeNumber(gatherFiles.max_steps)?.toString() ?? ""}
-            onChange={(e) => patch(["gather_files", "max_steps"], parseNumber(e.target.value))}
+            onChange={(e) => patch(["gather_files", "max_steps"], parseIntSafe(e.target.value))}
             placeholder="Default"
           />
         </Flex>

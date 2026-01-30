@@ -485,3 +485,96 @@ pub fn map_legacy_mode_to_id(mode_str: &str) -> &str {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_matches_pattern_exact() {
+        assert!(model_matches_pattern("gpt-4o", "gpt-4o"));
+        assert!(!model_matches_pattern("gpt-4o", "gpt-4"));
+    }
+
+    #[test]
+    fn test_model_matches_pattern_wildcard() {
+        assert!(model_matches_pattern("gpt-4o", "*"));
+        assert!(model_matches_pattern("claude-3", "*"));
+    }
+
+    #[test]
+    fn test_model_matches_pattern_prefix() {
+        assert!(model_matches_pattern("gpt-4o", "gpt-*"));
+        assert!(model_matches_pattern("gpt-4-turbo", "gpt-*"));
+        assert!(!model_matches_pattern("claude-3", "gpt-*"));
+    }
+
+    #[test]
+    fn test_glob_matches_exact() {
+        assert!(glob_matches("tree", "tree"));
+        assert!(!glob_matches("tree", "cat"));
+    }
+
+    #[test]
+    fn test_glob_matches_wildcard() {
+        assert!(glob_matches("*", "anything"));
+        assert!(glob_matches("*", "tree"));
+    }
+
+    #[test]
+    fn test_glob_matches_prefix() {
+        assert!(glob_matches("search_*", "search_pattern"));
+        assert!(glob_matches("search_*", "search_semantic"));
+        assert!(!glob_matches("search_*", "tree"));
+    }
+
+    #[test]
+    fn test_glob_matches_suffix() {
+        assert!(glob_matches("*_textdoc", "create_textdoc"));
+        assert!(glob_matches("*_textdoc", "update_textdoc"));
+        assert!(!glob_matches("*_textdoc", "tree"));
+    }
+
+    #[test]
+    fn test_match_tool_confirm_action() {
+        let rules = vec![
+            ToolConfirmRule { match_pattern: "tree".to_string(), action: "auto".to_string() },
+            ToolConfirmRule { match_pattern: "search_*".to_string(), action: "auto".to_string() },
+            ToolConfirmRule { match_pattern: "*".to_string(), action: "ask".to_string() },
+        ];
+
+        assert_eq!(match_tool_confirm_action(&rules, "tree"), Some("auto".to_string()));
+        assert_eq!(match_tool_confirm_action(&rules, "search_pattern"), Some("auto".to_string()));
+        assert_eq!(match_tool_confirm_action(&rules, "shell"), Some("ask".to_string()));
+    }
+
+    #[test]
+    fn test_match_tool_confirm_action_empty_rules() {
+        let rules: Vec<ToolConfirmRule> = vec![];
+        assert_eq!(match_tool_confirm_action(&rules, "tree"), None);
+    }
+
+    #[test]
+    fn test_map_legacy_mode_to_id() {
+        assert_eq!(map_legacy_mode_to_id("AGENT"), "agent");
+        assert_eq!(map_legacy_mode_to_id("EXPLORE"), "explore");
+        assert_eq!(map_legacy_mode_to_id("NO_TOOLS"), "explore");
+        assert_eq!(map_legacy_mode_to_id("CONFIGURE"), "configurator");
+        assert_eq!(map_legacy_mode_to_id("PROJECT_SUMMARY"), "project_summary");
+        assert_eq!(map_legacy_mode_to_id("TASK_PLANNER"), "task_planner");
+        assert_eq!(map_legacy_mode_to_id("TASK_AGENT"), "task_agent");
+    }
+
+    #[test]
+    fn test_map_legacy_mode_to_id_lowercase_passthrough() {
+        assert_eq!(map_legacy_mode_to_id("agent"), "agent");
+        assert_eq!(map_legacy_mode_to_id("custom_mode"), "custom_mode");
+        assert_eq!(map_legacy_mode_to_id("my-mode-123"), "my-mode-123");
+    }
+
+    #[test]
+    fn test_map_legacy_mode_to_id_invalid_fallback() {
+        assert_eq!(map_legacy_mode_to_id("Invalid Mode"), "agent");
+        assert_eq!(map_legacy_mode_to_id("Mode!"), "agent");
+    }
+}

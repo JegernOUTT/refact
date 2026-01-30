@@ -1,8 +1,8 @@
 import React, { useState, useCallback } from "react";
 import { Flex, TextField, Text, Switch, TextArea, Tabs } from "@radix-ui/themes";
 import { StringListEditor } from "./StringListEditor";
-import { RulesTableEditor, ToolConfirmRule } from "./RulesTableEditor";
-import { ConfigPatch, safeArray, safeString, safeBoolean, safeObject, isString } from "./configUtils";
+import { RulesTableEditor } from "./RulesTableEditor";
+import { ConfigPatch, safeArray, safeString, safeBoolean, safeObject, isString, safeToolConfirmRules } from "./configUtils";
 import styles from "./editors.module.css";
 
 type ModeFormProps = {
@@ -21,9 +21,7 @@ export const ModeForm: React.FC<ModeFormProps> = ({ config, onPatch, availableTo
   const tools = safeArray(config.tools, isString);
   const llmDefaults = safeObject(config.llm_defaults);
   const toolConfirmObj = safeObject(config.tool_confirm);
-  const toolConfirmRules = safeArray(toolConfirmObj.rules, (v): v is ToolConfirmRule =>
-    typeof v === "object" && v !== null && "match_pattern" in v && "action" in v
-  );
+  const toolConfirmRules = safeToolConfirmRules(toolConfirmObj.rules);
   const threadDefaults = safeObject(config.thread_defaults);
   const ui = safeObject(config.ui);
   const base = typeof config.base === "string" ? config.base : undefined;

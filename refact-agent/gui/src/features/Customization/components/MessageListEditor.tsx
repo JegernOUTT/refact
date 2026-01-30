@@ -33,13 +33,11 @@ export const MessageListEditor: React.FC<MessageListEditorProps> = ({
   label = "Messages",
 }) => {
   const [internal, setInternal] = useState<InternalMessage[]>(() => toInternal(value));
+  const valueKey = JSON.stringify(value);
 
   useEffect(() => {
-    if (value.length !== internal.length) {
-      setInternal(toInternal(value));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value.length]);
+    setInternal(toInternal(value));
+  }, [valueKey]);
 
   const emit = useCallback((msgs: InternalMessage[]) => {
     setInternal(msgs);

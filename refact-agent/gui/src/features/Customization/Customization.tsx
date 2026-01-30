@@ -21,7 +21,7 @@ import {
   ModeForm,
   SubagentForm,
 } from "./components";
-import { applyPatch, isPlainObject, sanitizeObject, ConfigPatch } from "./components/configUtils";
+import { applyPatch, isPlainObject, sanitizeObject, ConfigPatch, validateConfigId } from "./components/configUtils";
 
 import styles from "./Customization.module.css";
 
@@ -317,8 +317,9 @@ const CreateConfigDialog: React.FC<{
 
   const handleCreate = useCallback(async () => {
     setError(null);
-    if (!id.trim()) {
-      setError("ID is required");
+    const validationError = validateConfigId(id);
+    if (validationError) {
+      setError(validationError);
       return;
     }
     const defaultConfig = getDefaultConfig(kind, id);
