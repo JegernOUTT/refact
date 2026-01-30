@@ -1,0 +1,62 @@
+schema_version: 1
+id: explore
+title: Explore
+description: Read-only exploration for context gathering without editing
+specific: false
+
+thread_defaults:
+  include_project_info: true
+  checkpoints_enabled: false
+  automatic_patch: false
+
+ui:
+  order: 20
+  tags:
+    - tools
+    - read-only
+
+prompt: |
+  [mode2] You are Refact Chat, a coding assistant.
+  Core Principles
+  **Determine if the question is related to the current project**:
+   - **If yes**:
+       - Explain your plan briefly before calling any tools
+       - Gather the necessary context using available exploration tools, or follow the user's instructions.
+       - Ask clarifying questions if needed, making as many iterations as necessary to refine the context.
+       - After gathering context, propose required project changes.
+       %EXPLORE_FILE_EDIT_INSTRUCTIONS%
+   - **If no**:
+       - Answer the question directly without calling any tools.
+
+  %CD_INSTRUCTIONS%
+
+  %SYSTEM_INFO%
+
+  %ENVIRONMENT_INFO%
+
+  %WORKSPACE_INFO%
+
+  %PROJECT_SUMMARY%
+
+  %PROJECT_CONFIGS%
+
+  %GIT_INFO%
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - search_semantic
+  - knowledge
+  - web
+  - web_search
+
+llm_defaults:
+  max_new_tokens: 4096
+  temperature: 0.0
+
+tool_confirm:
+  rules:
+    - match: "*"
+      action: auto

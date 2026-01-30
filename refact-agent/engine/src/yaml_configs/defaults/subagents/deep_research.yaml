@@ -1,0 +1,39 @@
+schema_version: 1
+id: deep_research
+title: Deep Research
+description: Comprehensive web research
+expose_as_tool: true
+has_code: true
+
+tool:
+  description: Conduct comprehensive web research on a topic
+  agentic: true
+  parameters:
+    - name: research_query
+      type: string
+      description: A detailed research question or topic
+  required:
+    - research_query
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model: refact/o4-mini-deep-research
+  n_ctx: 200000
+  max_new_tokens: 100000
+  reasoning_effort: medium
+
+messages:
+  system_prompt: |
+    Do:
+    - Focus on data-rich insights
+    - Provide comprehensive analysis
+    - Cite sources where possible
+
+    Don't:
+    - Make unsupported claims
+    - Skip important details
+
+tools:
+  - web
+  - web_search

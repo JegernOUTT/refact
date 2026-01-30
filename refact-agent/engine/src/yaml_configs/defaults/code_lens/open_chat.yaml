@@ -1,0 +1,7 @@
+schema_version: 1
+id: open_chat
+label: Open Chat
+auto_submit: false
+new_tab: true
+
+messages: []

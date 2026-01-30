@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo } from "react";
 
 import { Flex, Card, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
@@ -58,13 +58,10 @@ import {
   selectIsWaiting,
   selectMessages,
   selectQueuedItems,
-  selectThreadToolUse,
-  selectToolUse,
   selectThreadImages,
 } from "../../features/Chat";
 import { telemetryApi } from "../../services/refact";
 import { push } from "../../features/Pages/pagesSlice";
-import { AgentCapabilities } from "./AgentCapabilities/AgentCapabilities";
 import { TokensPreview } from "./TokensPreview";
 import classNames from "classnames";
 import { useUsageCounter } from "../UsageCounter/useUsageCounter";
@@ -87,7 +84,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const isWaiting = useAppSelector(selectIsWaiting);
   const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
   const config = useConfig();
-  const toolUse = useAppSelector(selectToolUse);
   const globalError = useAppSelector(getErrorMessage);
   const globalErrorType = useAppSelector(getErrorType);
   const chatError = useAppSelector(selectChatError);
@@ -98,7 +94,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [isVoiceActive, setIsVoiceActive] = React.useState(false);
   const [liveTranscript, setLiveTranscript] = React.useState("");
   const [inputResetKey, setInputResetKey] = React.useState(0);
-  const [trajectoryOpen, setTrajectoryOpen] = useState(false);
   const isOnline = useIsOnline();
   const {
     isWarning,
@@ -106,12 +101,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     tokenPercentage,
     shouldShow: shouldShowUsage,
   } = useUsageCounter();
-
-  const openTrajectory = useCallback(() => {
-    setTrajectoryOpen(true);
-  }, []);
-
-  const threadToolUse = useAppSelector(selectThreadToolUse);
   const messages = useAppSelector(selectMessages);
   const queuedItems = useAppSelector(selectQueuedItems);
   const autoFocus = useAutoFocusOnce();
@@ -119,10 +108,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const shouldShowBalanceLow = useAppSelector(showBalanceLowCallout);
   const attachedImages = useAppSelector(selectThreadImages);
   const microphoneRef = React.useRef<MicrophoneButtonRef>(null);
-
-  const shouldAgentCapabilitiesBeShown = useMemo(() => {
-    return threadToolUse === "agent";
-  }, [threadToolUse]);
 
   const onClearError = useCallback(() => {
     dispatch(clearError());
@@ -400,13 +385,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         </Callout>
       )}
       {shouldShowUsage && isContextFull && (
-        <Callout type="error" preventClose mb="2" onClick={openTrajectory}>
+        <Callout type="error" preventClose mb="2">
           Context is full ({Math.round(tokenPercentage)}%). Please compress or
           handoff to continue.
         </Callout>
       )}
       {shouldShowUsage && isWarning && !isContextFull && (
-        <Callout type="warning" preventClose mb="2" onClick={openTrajectory}>
+        <Callout type="warning" preventClose mb="2">
           Context is almost full ({Math.round(tokenPercentage)}%). Consider
           compressing or handing off soon.
         </Callout>
@@ -426,12 +411,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           <Flex mb="3" direction="column">
             {helpInfo}
           </Flex>
-        )}
-        {shouldAgentCapabilitiesBeShown && (
-          <AgentCapabilities
-            trajectoryOpen={trajectoryOpen}
-            onTrajectoryOpenChange={setTrajectoryOpen}
-          />
         )}
         <Form
           disabled={disableSend}
@@ -485,15 +464,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 currentMessageQuery={attachedFiles.addFilesToInput(value)}
               />
               <Flex gap="2" align="center" justify="center">
-                {toolUse === "agent" && (
-                  <AgentIntegrationsButton
-                    title="Set up Agent Integrations"
-                    size="1"
-                    type="button"
-                    onClick={handleAgentIntegrationsClick}
-                    ref={(x) => refs.setSetupIntegrations(x)}
-                  />
-                )}
+                <AgentIntegrationsButton
+                  title="Set up Agent Integrations"
+                  size="1"
+                  type="button"
+                  onClick={handleAgentIntegrationsClick}
+                  ref={(x) => refs.setSetupIntegrations(x)}
+                />
                 {onClose && (
                   <BackToSideBarButton
                     disabled={isStreaming}

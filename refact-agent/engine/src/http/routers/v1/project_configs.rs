@@ -9,6 +9,7 @@ use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_registry::load_project_registry;
+use crate::yaml_configs::project_configs_bootstrap::project_configs_try_create_all;
 
 #[derive(Deserialize)]
 pub struct RescanRequest {
@@ -113,6 +114,57 @@ pub struct CodeLensInfo {
     pub label: String,
 }
 
+pub async fn handle_v1_project_configs_bootstrap(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let request: RescanRequest = serde_json::from_slice(&body_bytes).unwrap_or(RescanRequest { project_root: None });
+
+    let project_root = match request.project_root {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let dirs = get_project_dirs(gcx.clone()).await;
+            match dirs.first() {
+                Some(dir) => dir.clone(),
+                None => {
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::from(r#"{"error": "No project root available"}"#))
+                        .unwrap());
+                }
+            }
+        }
+    };
+
+    match project_configs_try_create_all(&project_root).await {
+        Ok(_) => {
+            let registry = load_project_registry(&project_root).await;
+            let response = RescanResponse {
+                ok: registry.errors.is_empty(),
+                modes_loaded: registry.modes.len(),
+                subagents_loaded: registry.subagents.len(),
+                toolbox_commands_loaded: registry.toolbox_commands.len(),
+                code_lens_loaded: registry.code_lens.len(),
+                errors: registry.errors.iter().map(|e| RegistryErrorResponse {
+                    file_path: e.file_path.clone(),
+                    error: e.error.clone(),
+                }).collect(),
+            };
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&response).unwrap()))
+                .unwrap())
+        }
+        Err(e) => {
+            Ok(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(format!(r#"{{"error": "{}"}}"#, e)))
+                .unwrap())
+        }
+    }
+}
+
 pub async fn handle_v1_project_configs_get(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Response<Body>, ScratchError> {
@@ -129,6 +181,7 @@ pub async fn handle_v1_project_configs_get(
         }
     };
 
+    let _ = project_configs_try_create_all(&project_root).await;
     let registry = load_project_registry(&project_root).await;
 
     let response = ProjectConfigsResponse {

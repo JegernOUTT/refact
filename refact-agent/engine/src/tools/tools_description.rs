@@ -37,7 +37,7 @@ pub fn command_should_be_denied(
     (false, "".to_string())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MatchConfirmDenyResult {
     PASS,
     CONFIRMATION,

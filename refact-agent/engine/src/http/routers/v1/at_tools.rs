@@ -10,7 +10,7 @@ use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
-    ChatMessage, ChatMeta, ChatMode, ChatToolCall, PostprocessSettings, SubchatParameters,
+    ChatMessage, ChatMeta, ChatToolCall, PostprocessSettings, SubchatParameters,
 };
 use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
 use crate::chat::types::ThreadParams;
@@ -351,7 +351,8 @@ pub async fn handle_v1_tools_execute(
         &tool_calls,
         &tools_execute_post.messages,
         &thread,
-        ChatMode::AGENT,
+        "agent",
+        Some(&thread.model),
         options,
     )
     .await;

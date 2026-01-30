@@ -1,0 +1,13 @@
+schema_version: 1
+id: summarize
+description: Summarize code in 1 paragraph
+selection_needed: [1, 50]
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      Summarize the code block below in 1 paragraph:
+      ```
+      %CODE_SELECTION%
+      ```

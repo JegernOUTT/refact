@@ -272,6 +272,10 @@ export const setAreFollowUpsEnabled = createAction<boolean>(
 
 export const setToolUse = createAction<ToolUse>("chatThread/setToolUse");
 
+export const setThreadMode = createAction<{ chatId: string; mode: string }>(
+  "chatThread/setThreadMode",
+);
+
 export const setEnabledCheckpoints = createAction<boolean>(
   "chat/setEnabledCheckpoints",
 );

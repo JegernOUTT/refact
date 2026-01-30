@@ -1,0 +1,13 @@
+schema_version: 1
+id: explain
+description: Explain code
+selection_needed: [1, 50]
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      Explain the code block below:
+      ```
+      %CODE_SELECTION%
+      ```

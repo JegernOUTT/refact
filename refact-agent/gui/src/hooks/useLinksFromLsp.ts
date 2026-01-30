@@ -11,7 +11,6 @@ import { useAppSelector } from "./useAppSelector";
 import { useGetCapsQuery } from "./useGetCapsQuery";
 import { useChatActions } from "./useChatActions";
 import {
-  chatModeToLspMode,
   selectAreFollowUpsEnabled,
   selectChatId,
   selectIntegration,
@@ -24,6 +23,7 @@ import {
   setIntegrationData,
   setIsNewChatSuggested,
 } from "../features/Chat";
+import { DEFAULT_MODE } from "../features/Chat/Thread/types";
 import { useGoToLink } from "./useGoToLink";
 import { setError } from "../features/Errors/errorsSlice";
 import { setInformation } from "../features/Errors/informationSlice";
@@ -84,7 +84,7 @@ export function useGetLinksFromLsp() {
       chat_id: chatId,
       messages,
       model: model ?? "",
-      mode: chatModeToLspMode({ defaultMode: threadMode }),
+      mode: threadMode ?? DEFAULT_MODE,
       current_config_file: maybeIntegration?.path,
     },
     { skip: skipLinksRequest },

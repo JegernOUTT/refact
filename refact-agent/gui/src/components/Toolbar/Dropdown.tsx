@@ -42,6 +42,7 @@ export type DropdownNavigationOptions =
   | "integrations"
   | "providers"
   | "knowledge graph"
+  | "customization"
   | "";
 
 type DropdownProps = {
@@ -85,8 +86,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
   const discordUrl = "https://www.smallcloud.ai/discord";
   const accountLink = linkForAccount(host);
   const openUrl = useOpenUrl();
-  const { openCustomizationFile, openPrivacyFile, setLoginMessage } =
-    useEventsBusForIDE();
+  const { openPrivacyFile, setLoginMessage } = useEventsBusForIDE();
 
   const handleProUpgradeClick = useCallback(() => {
     startPollingForUser();
@@ -279,12 +279,8 @@ export const Dropdown: React.FC<DropdownProps> = ({
           IDE Hotkeys
         </DropdownMenu.Item>
 
-        <DropdownMenu.Item
-          onSelect={() => {
-            void openCustomizationFile();
-          }}
-        >
-          Edit customization.yaml
+        <DropdownMenu.Item onSelect={() => handleNavigation("customization")}>
+          Customize Modes & Agents
         </DropdownMenu.Item>
 
         <DropdownMenu.Item

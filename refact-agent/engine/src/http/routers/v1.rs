@@ -84,7 +84,7 @@ use crate::http::routers::v1::trajectory_ops::{
     handle_transform_preview, handle_transform_apply, handle_handoff_preview, handle_handoff_apply,
 };
 use crate::http::routers::v1::project_configs::{
-    handle_v1_project_configs_get, handle_v1_project_configs_rescan,
+    handle_v1_project_configs_get, handle_v1_project_configs_rescan, handle_v1_project_configs_bootstrap,
 };
 
 mod ast;
@@ -122,6 +122,15 @@ pub mod vecdb;
 pub mod voice;
 mod workspace;
 mod project_configs;
+mod chat_modes;
+mod customization_editor;
+
+use crate::http::routers::v1::chat_modes::handle_v1_chat_modes;
+use crate::http::routers::v1::customization_editor::{
+    handle_v1_customization_registry, handle_v1_customization_get,
+    handle_v1_customization_save, handle_v1_customization_create,
+    handle_v1_customization_delete,
+};
 
 pub fn make_v1_router() -> Router {
     let builder = Router::new()
@@ -156,6 +165,13 @@ pub fn make_v1_router() -> Router {
         .route("/customization", get(handle_v1_customization))
         .route("/project-configs", get(handle_v1_project_configs_get))
         .route("/project-configs/rescan", post(handle_v1_project_configs_rescan))
+        .route("/project-configs/bootstrap", post(handle_v1_project_configs_bootstrap))
+        .route("/chat-modes", get(handle_v1_chat_modes))
+        .route("/customization/registry", get(handle_v1_customization_registry))
+        .route("/customization/:kind/:id", get(handle_v1_customization_get))
+        .route("/customization/:kind/:id", put(handle_v1_customization_save))
+        .route("/customization/:kind", post(handle_v1_customization_create))
+        .route("/customization/:kind/:id", delete(handle_v1_customization_delete))
         .route(
             "/sync-files-extract-tar",
             post(handle_v1_sync_files_extract_tar),

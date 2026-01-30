@@ -3,11 +3,12 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock as ARwLock;
 
-use crate::call_validation::ChatMode;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::integrations::running_integrations::load_integrations;
+use crate::yaml_configs::customization_registry::get_project_registry;
 
 use super::tools_description::{Tool, ToolGroup, ToolGroupCategory};
+use super::tool_config_subagent::ToolConfigSubagent;
 
 fn tool_available(
     tool: &Box<dyn Tool + Send>,
@@ -329,9 +330,33 @@ async fn get_integration_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGrou
     tool_groups
 }
 
+async fn get_config_subagent_tools(gcx: Arc<ARwLock<GlobalContext>>) -> ToolGroup {
+    let mut subagent_tools: Vec<Box<dyn Tool + Send>> = vec![];
+
+    if let Some(registry) = get_project_registry(gcx.clone()).await {
+        for (_, subagent_config) in registry.subagents {
+            if subagent_config.expose_as_tool && !subagent_config.has_code {
+                subagent_tools.push(Box::new(ToolConfigSubagent::new(subagent_config)));
+            }
+        }
+    }
+
+    ToolGroup {
+        name: "Config Subagents".to_string(),
+        description: "Subagent tools from project config".to_string(),
+        category: ToolGroupCategory::Builtin,
+        tools: subagent_tools,
+    }
+}
+
 pub async fn get_available_tool_groups(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
     let mut tools_all = get_builtin_tools(gcx.clone()).await;
-    tools_all.extend(get_integration_tools(gcx).await);
+    tools_all.extend(get_integration_tools(gcx.clone()).await);
+
+    let config_subagent_group = get_config_subagent_tools(gcx).await;
+    if !config_subagent_group.tools.is_empty() {
+        tools_all.push(config_subagent_group);
+    }
 
     tools_all
 }
@@ -344,127 +369,51 @@ pub async fn get_available_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<Box<dy
         .collect()
 }
 
-pub async fn get_available_tools_by_chat_mode(
+pub async fn get_tools_for_mode(
     gcx: Arc<ARwLock<GlobalContext>>,
-    chat_mode: ChatMode,
+    mode_id: &str,
+    model_id: Option<&str>,
 ) -> Vec<Box<dyn Tool + Send>> {
-    if chat_mode == ChatMode::NO_TOOLS {
+    use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
+    use std::collections::HashSet;
+
+    let mode_id = map_legacy_mode_to_id(mode_id);
+
+    let mode_config = match get_mode_config(gcx.clone(), mode_id, model_id).await {
+        Some(config) => config,
+        None => {
+            tracing::warn!("Mode '{}' not found, returning empty tools", mode_id);
+            return vec![];
+        }
+    };
+
+    if mode_config.tools.is_empty() {
         return vec![];
     }
 
-    let tools = get_available_tool_groups(gcx)
+    let allowed_tools: HashSet<&str> = mode_config.tools.iter().map(|s| s.as_str()).collect();
+
+    let all_tools: Vec<Box<dyn Tool + Send>> = get_available_tool_groups(gcx.clone())
         .await
         .into_iter()
         .flat_map(|g| g.tools)
-        .filter(|tool| tool.config().unwrap_or_default().enabled);
+        .filter(|tool| tool.config().unwrap_or_default().enabled)
+        .collect();
 
-    match chat_mode {
-        ChatMode::NO_TOOLS => unreachable!("Condition handled at the beginning of the function."),
-        ChatMode::EXPLORE => tools
-            .filter(|tool| !tool.tool_description().agentic)
-            .collect(),
-        ChatMode::TASK_PLANNER => {
-            let planner_whitelist = [
-                // Investigation tools
-                "tree",
-                "cat",
-                "search_pattern",
-                "search_symbol_definition",
-                "search_semantic",
-                "knowledge",
-                "search_trajectories",
-                "get_trajectory_context",
-                "web",
-                "shell",
-                "shell_service",
-                "subagent",
-                "deep_research",
-                "strategic_planning",
-                "update_textdoc",
-                // Board management
-                "task_board_get",
-                "task_board_create_card",
-                "task_board_update_card",
-                "task_board_delete_card",
-                "task_board_move_card",
-                "task_ready_cards",
-                // Execution
-                "task_spawn_agent",
-                "task_check_agents",
-                "task_merge_agent",
-                "task_mark_card_done",
-                "task_mark_card_failed",
-                // Task memory
-                "task_memory_save",
-                "task_memories_get",
-            ];
-            tools
-                .filter(|tool| planner_whitelist.contains(&tool.tool_description().name.as_str()))
-                .collect()
-        }
-        ChatMode::AGENT => {
-            let task_tools_blacklist = [
-                "task_init",
-                "task_board_get",
-                "task_board_create_card",
-                "task_board_update_card",
-                "task_board_move_card",
-                "task_board_delete_card",
-                "task_ready_cards",
-                "task_spawn_agent",
-                "task_check_agents",
-                "task_merge_agent",
-                "task_assign_agent",
-                "task_agent_update",
-                "task_agent_complete",
-                "task_agent_fail",
-                "task_mark_card_done",
-                "task_mark_card_failed",
-                "task_agent_finish",
-                "task_memory_save",
-                "task_memories_get",
-            ];
-            tools
-                .filter(|tool| {
-                    !task_tools_blacklist.contains(&tool.tool_description().name.as_str())
-                })
-                .collect()
-        }
-        ChatMode::TASK_AGENT => {
-            let agent_blacklist = [
-                "deep_research",
-                "strategic_planning",
-                "task_init",
-                "task_board_get",
-                "task_board_create_card",
-                "task_board_update_card",
-                "task_board_move_card",
-                "task_board_delete_card",
-                "task_ready_cards",
-                "task_spawn_agent",
-                "task_agent_update",
-                "task_agent_complete",
-                "task_agent_fail",
-                "task_assign_agent",
-                "task_check_agents",
-                "task_mark_card_done",
-                "task_mark_card_failed",
-            ];
-            tools
-                .filter(|tool| !agent_blacklist.contains(&tool.tool_description().name.as_str()))
-                .collect()
-        }
-        ChatMode::CONFIGURE => {
-            let blacklist = ["tree", "knowledge", "search"];
-            tools
-                .filter(|tool| !blacklist.contains(&tool.tool_description().name.as_str()))
-                .collect()
-        }
-        ChatMode::PROJECT_SUMMARY => {
-            let whitelist = ["cat", "tree"];
-            tools
-                .filter(|tool| whitelist.contains(&tool.tool_description().name.as_str()))
-                .collect()
-        }
-    }
+    let tool_order: HashMap<&str, usize> = mode_config.tools
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+
+    let mut result: Vec<Box<dyn Tool + Send>> = all_tools
+        .into_iter()
+        .filter(|tool| allowed_tools.contains(tool.tool_description().name.as_str()))
+        .collect();
+
+    result.sort_by_key(|tool| {
+        tool_order.get(tool.tool_description().name.as_str()).copied().unwrap_or(usize::MAX)
+    });
+
+    result
 }

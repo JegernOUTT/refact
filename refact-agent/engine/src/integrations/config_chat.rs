@@ -8,7 +8,7 @@ use crate::global_context::GlobalContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile, ChatMeta};
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use crate::integrations::yaml_schema::ISchema;
-use crate::tools::tools_list::get_available_tools_by_chat_mode;
+use crate::tools::tools_list::get_tools_for_mode;
 
 pub async fn mix_config_messages(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -206,7 +206,7 @@ pub async fn mix_config_messages(
             crate::scratchpads::chat_utils_prompts::system_prompt_add_extra_instructions(
                 gcx.clone(),
                 sp.text.clone(),
-                get_available_tools_by_chat_mode(gcx.clone(), chat_meta.chat_mode)
+                get_tools_for_mode(gcx.clone(), "configurator", None)
                     .await
                     .into_iter()
                     .map(|t| t.tool_description().name)

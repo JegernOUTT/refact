@@ -161,6 +161,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           success: true,
           error_message: "",
         });
+      } else if (to === "customization") {
+        dispatch(push({ name: "customization" }));
+        void sendTelemetryEvent({
+          scope: `openCustomization`,
+          success: true,
+          error_message: "",
+        });
       } else if (to === "chat") {
         dispatch(popBackTo({ name: "history" }));
         dispatch(push({ name: "chat" }));

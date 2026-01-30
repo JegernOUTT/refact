@@ -31,6 +31,8 @@ import {
   trajectoryApi,
   tasksApi,
 } from "../services/refact";
+import { chatModesApi } from "../services/refact/chatModes";
+import { customizationApi } from "../services/refact/customization";
 import { smallCloudApi } from "../services/smallcloud";
 import { reducer as fimReducer } from "../features/FIM/reducer";
 import { tourReducer } from "../features/Tour";
@@ -104,6 +106,8 @@ const rootReducer = combineSlices(
     [trajectoriesApi.reducerPath]: trajectoriesApi.reducer,
     [trajectoryApi.reducerPath]: trajectoryApi.reducer,
     [tasksApi.reducerPath]: tasksApi.reducer,
+    [chatModesApi.reducerPath]: chatModesApi.reducer,
+    [customizationApi.reducerPath]: customizationApi.reducer,
   },
   historySlice,
   errorSlice,
@@ -191,6 +195,8 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           trajectoriesApi.middleware,
           trajectoryApi.middleware,
           tasksApi.middleware,
+          chatModesApi.middleware,
+          customizationApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(listenerMiddleware.middleware);

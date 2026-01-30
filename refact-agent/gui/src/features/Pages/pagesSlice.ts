@@ -62,6 +62,12 @@ export interface KnowledgeGraphPage {
   name: "knowledge graph";
 }
 
+export interface CustomizationPage {
+  name: "customization";
+  kind?: "modes" | "subagents" | "toolbox_commands" | "code_lens";
+  configId?: string;
+}
+
 export interface IntegrationsSetupPage {
   name: "integrations page";
   projectPath?: string;
@@ -86,7 +92,8 @@ export type Page =
   | TasksListPage
   | TaskWorkspacePage
   | TaskAgentPage
-  | KnowledgeGraphPage;
+  | KnowledgeGraphPage
+  | CustomizationPage;
 
 export function isIntegrationSetupPage(
   page: Page,

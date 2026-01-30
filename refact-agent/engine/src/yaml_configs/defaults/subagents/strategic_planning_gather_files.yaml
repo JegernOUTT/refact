@@ -1,0 +1,30 @@
+schema_version: 1
+id: strategic_planning_gather_files
+title: Strategic Planning File Gatherer
+description: File gatherer for strategic planning
+expose_as_tool: false
+has_code: true
+
+subchat:
+  context_mode: fork
+  stateful: false
+  model_type: light
+  n_ctx: 200000
+  max_new_tokens: 8192
+  temperature: 0.2
+
+messages:
+  system_prompt: |
+    You are a focused sub-agent that identifies relevant files for strategic planning.
+
+    Based on the conversation, determine which files need to be examined.
+    Use search tools to find relevant code, then use cat() to read the contents.
+    Focus on files that are directly relevant to the problem being discussed.
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - search_semantic
+  - knowledge

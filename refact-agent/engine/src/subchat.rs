@@ -27,13 +27,15 @@ use crate::yaml_configs::customization_loader::load_customization;
 use crate::custom_error::YamlError;
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
     let mut paths = Vec::new();
     for msg in messages {
         if msg.role == "context_file" {
             match &msg.content {
                 ChatContent::ContextFiles(files) => {
                     for file in files {
-                        if !paths.contains(&file.file_name) {
+                        if seen.insert(file.file_name.clone()) {
                             paths.push(file.file_name.clone());
                         }
                     }
@@ -41,7 +43,7 @@ fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
                 ChatContent::SimpleText(text) => {
                     if let Ok(files) = serde_json::from_str::<Vec<ContextFile>>(text) {
                         for file in files {
-                            if !paths.contains(&file.file_name) {
+                            if seen.insert(file.file_name.clone()) {
                                 paths.push(file.file_name.clone());
                             }
                         }
@@ -82,7 +84,7 @@ impl ToolsPolicy {
         match self {
             ToolsPolicy::All => true,
             ToolsPolicy::None => false,
-            ToolsPolicy::Only(v) => v.contains(&tool_name.to_string()),
+            ToolsPolicy::Only(v) => v.iter().any(|t| t == tool_name),
         }
     }
 }
@@ -115,6 +117,7 @@ pub struct SubchatConfig {
     pub parent_tool_call_id: Option<String>,
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     pub abort_flag: Option<Arc<AtomicBool>>,
+    pub subchat_depth: usize,
 }
 
 pub struct SubchatResult {
@@ -132,6 +135,8 @@ pub async fn resolve_subchat_params(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_name: &str,
 ) -> Result<SubchatParameters, String> {
+    use crate::yaml_configs::customization_registry::get_subagent_config;
+
     let mut error_log: Vec<YamlError> = Vec::new();
     let customization = load_customization(gcx.clone(), true, &mut error_log).await;
 
@@ -143,7 +148,7 @@ pub async fn resolve_subchat_params(
         ));
     }
 
-    let params = customization
+    let mut params = customization
         .subchat_tool_parameters
         .get(tool_name)
         .cloned()
@@ -157,6 +162,38 @@ pub async fn resolve_subchat_params(
                     .collect::<Vec<_>>()
             )
         })?;
+
+    if let Some(subagent_config) = get_subagent_config(gcx.clone(), tool_name, None).await {
+        if let Some(n_ctx) = subagent_config.subchat.n_ctx {
+            params.subchat_n_ctx = n_ctx;
+        }
+        if let Some(max_new_tokens) = subagent_config.subchat.max_new_tokens {
+            params.subchat_max_new_tokens = max_new_tokens;
+        }
+        if let Some(tokens_for_rag) = subagent_config.subchat.tokens_for_rag {
+            params.subchat_tokens_for_rag = tokens_for_rag;
+        }
+        if let Some(temperature) = subagent_config.subchat.temperature {
+            params.subchat_temperature = Some(temperature);
+        }
+        if let Some(ref reasoning_effort) = subagent_config.subchat.reasoning_effort {
+            params.subchat_reasoning_effort = match reasoning_effort.to_lowercase().as_str() {
+                "low" => Some(crate::call_validation::ReasoningEffort::Low),
+                "high" => Some(crate::call_validation::ReasoningEffort::High),
+                _ => Some(crate::call_validation::ReasoningEffort::Medium),
+            };
+        }
+        if let Some(ref model_type) = subagent_config.subchat.model_type {
+            params.subchat_model_type = match model_type.to_lowercase().as_str() {
+                "light" => crate::call_validation::ChatModelType::Light,
+                "thinking" => crate::call_validation::ChatModelType::Thinking,
+                _ => crate::call_validation::ChatModelType::Default,
+            };
+        }
+        if let Some(ref model) = subagent_config.subchat.model {
+            params.subchat_model = model.clone();
+        }
+    }
 
     if params.subchat_n_ctx == 0 {
         return Err(format!(
@@ -236,6 +273,7 @@ pub async fn resolve_subchat_config(
         None,
         None,
         None,
+        0,
     )
     .await
 }
@@ -256,9 +294,14 @@ pub async fn resolve_subchat_config_with_parent(
     parent_tool_call_id: Option<String>,
     parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     abort_flag: Option<Arc<AtomicBool>>,
+    subchat_depth: usize,
 ) -> Result<SubchatConfig, String> {
+    use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
     if max_steps == 0 {
         return Err("max_steps must be > 0".to_string());
+    }
+    if subchat_depth >= MAX_SUBCHAT_DEPTH {
+        return Err(format!("subchat depth limit ({}) exceeded", MAX_SUBCHAT_DEPTH));
     }
 
     let params = resolve_subchat_params(gcx.clone(), tool_name).await?;
@@ -296,6 +339,7 @@ pub async fn resolve_subchat_config_with_parent(
         parent_tool_call_id,
         parent_subchat_tx,
         abort_flag,
+        subchat_depth,
     })
 }
 
@@ -340,7 +384,6 @@ pub async fn run_subchat(
         .await,
     ));
 
-    // Inject parent's subchat_tx so tool progress events flow to parent chat
     if let Some(ref parent_tx) = config.parent_subchat_tx {
         ccx.lock().await.subchat_tx = parent_tx.clone();
     }
@@ -640,7 +683,12 @@ fn truncate_args(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    format!("{}…", &s[..max])
+    let boundary = s.char_indices()
+        .take_while(|(i, _)| *i < max)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    format!("{}…", &s[..boundary])
 }
 
 async fn execute_pending_tool_calls(
@@ -719,7 +767,8 @@ async fn execute_pending_tool_calls(
         &allowed,
         &messages,
         &thread,
-        ChatMode::AGENT,
+        "agent",
+        Some(&thread.model),
         ExecuteToolsOptions::default(),
     )
     .await;
@@ -830,6 +879,7 @@ async fn subchat_stream(
         &t,
         messages.clone(),
         model_id,
+        "agent",
         tools,
         &meta,
         &mut parameters,

@@ -1,16 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { selectThreadToolUse } from "../features/Chat/Thread/selectors";
+import { selectThreadMode } from "../features/Chat/Thread/selectors";
 import { useAppSelector, useGetCapsQuery, useAppDispatch } from ".";
+import { useGetChatModesQuery } from "../services/refact/chatModes";
 
 import {
   getSelectedChatModel,
   setChatModel,
   setMaxNewTokens,
-  setToolUse,
-  ToolUse,
 } from "../features/Chat";
 
-// TODO: hard coded for now.
 export const PAID_AGENT_LIST = [
   "gpt-4o",
   "claude-3-5-sonnet",
@@ -20,20 +18,33 @@ export const PAID_AGENT_LIST = [
   "claude-3-7-sonnet",
 ];
 
-// TODO: hard coded for now. Unlimited usage models
 export const UNLIMITED_PRO_MODELS_LIST = ["gpt-4o-mini"];
 
 export function useCapsForToolUse() {
   const [wasAdjusted, setWasAdjusted] = useState(false);
   const caps = useGetCapsQuery();
-  const toolUse = useAppSelector(selectThreadToolUse);
+  const modesQuery = useGetChatModesQuery();
+  const currentMode = useAppSelector(selectThreadMode);
   const dispatch = useAppDispatch();
 
   const defaultCap = caps.data?.chat_default_model ?? "";
-
   const selectedModel = useAppSelector(getSelectedChatModel);
-
   const currentModel = selectedModel || defaultCap;
+
+  const modeInfo = useMemo(() => {
+    if (!modesQuery.data?.modes) return null;
+    return modesQuery.data.modes.find((m) => m.id === currentMode) ?? null;
+  }, [modesQuery.data?.modes, currentMode]);
+
+  const modeRequiresTools = useMemo(() => {
+    if (!modeInfo) return false;
+    return modeInfo.tools_count > 0;
+  }, [modeInfo]);
+
+  const modeRequiresAgent = useMemo(() => {
+    if (!modeInfo) return false;
+    return modeInfo.ui.tags.includes("editing");
+  }, [modeInfo]);
 
   const setCapModel = useCallback(
     (value: string) => {
@@ -77,40 +88,24 @@ export function useCapsForToolUse() {
     const models = caps.data?.chat_models ?? {};
     const items = Object.entries(models).reduce<string[]>(
       (acc, [key, value]) => {
-        if (toolUse === "explore" && value.supports_tools) {
-          return [...acc, key];
-        }
-        if (toolUse === "agent" && value.supports_agent) return [...acc, key];
-        if (toolUse === "quick") return [...acc, key];
-        return acc;
+        if (modeRequiresAgent && !value.supports_agent) return acc;
+        if (modeRequiresTools && !value.supports_tools) return acc;
+        return [...acc, key];
       },
       [],
     );
     return items;
-  }, [caps.data?.chat_models, toolUse]);
+  }, [caps.data?.chat_models, modeRequiresAgent, modeRequiresTools]);
 
   const usableModelsForPlan = useMemo(() => {
-    // TODO: keep filtering logic for the future BYOK + Cloud (to show different providers)
-    // if (user.data?.inference !== "FREE") return usableModels;
-    // if (!usage.aboveUsageLimit && toolUse === "agent") return usableModels;
     return usableModels.map((model) => {
-      // if (!PAID_AGENT_LIST.includes(model)) return model;
-
       return {
         value: model,
         disabled: false,
-        textValue:
-          // toolUse !== "agent" ? `${model} (Available in agent)` : undefined,
-          model,
+        textValue: model,
       };
     });
-    // return usableModels;
-  }, [
-    // user.data?.inference,
-    usableModels,
-    // toolUse,
-    // usage.aboveUsageLimit,
-  ]);
+  }, [usableModels]);
 
   useEffect(() => {
     if (usableModelsForPlan.length > 0) {
@@ -127,35 +122,9 @@ export function useCapsForToolUse() {
   }, [setCapModel, currentModel, usableModels, usableModelsForPlan]);
 
   useEffect(() => {
-    const determineNewToolUse = (): ToolUse | null => {
-      if (toolUse === "agent" && modelsSupportingAgent.length === 0) {
-        return "explore";
-      }
-      if (toolUse === "explore" && modelsSupportingTools.length === 0) {
-        return "quick";
-      }
-      return null;
-    };
-
-    const handleAutomaticToolUseChange = () => {
-      if (!caps.isSuccess || wasAdjusted) return;
-
-      const newToolUse = determineNewToolUse();
-      if (newToolUse) {
-        dispatch(setToolUse(newToolUse));
-      }
-      setWasAdjusted(true);
-    };
-
-    handleAutomaticToolUseChange();
-  }, [
-    dispatch,
-    wasAdjusted,
-    caps.isSuccess,
-    toolUse,
-    modelsSupportingAgent,
-    modelsSupportingTools,
-  ]);
+    if (!caps.isSuccess || wasAdjusted) return;
+    setWasAdjusted(true);
+  }, [caps.isSuccess, wasAdjusted]);
 
   return {
     usableModels,
@@ -166,5 +135,9 @@ export function useCapsForToolUse() {
     loading: !caps.data && (caps.isFetching || caps.isLoading),
     uninitialized: caps.isUninitialized,
     data: caps.data,
+    modelsSupportingTools,
+    modelsSupportingAgent,
+    modeRequiresTools,
+    modeRequiresAgent,
   };
 }

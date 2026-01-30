@@ -18,38 +18,22 @@ use super::system_context::{
 use crate::call_validation::{ChatMessage, ChatContent, ChatMode, ContextFile};
 use crate::tasks::storage::infer_task_id_from_chat_id;
 use crate::tools::tool_task_memory::load_task_memories;
+use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
 
-pub async fn get_default_system_prompt(
+pub async fn get_mode_system_prompt(
     gcx: Arc<ARwLock<GlobalContext>>,
-    chat_mode: ChatMode,
+    mode_id: &str,
+    model_id: Option<&str>,
 ) -> String {
-    let mut error_log = Vec::new();
-    let tconfig = crate::yaml_configs::customization_loader::load_customization(
-        gcx.clone(),
-        true,
-        &mut error_log,
-    )
-    .await;
-    for e in error_log.iter() {
-        tracing::error!("{e}");
-    }
-    let prompt_key = match chat_mode {
-        ChatMode::NO_TOOLS => "default",
-        ChatMode::EXPLORE => "exploration_tools",
-        ChatMode::AGENT => "agentic_tools",
-        ChatMode::CONFIGURE => "configurator",
-        ChatMode::PROJECT_SUMMARY => "project_summary",
-        ChatMode::TASK_PLANNER => "task_planner",
-        ChatMode::TASK_AGENT => "task_agent",
-    };
-    let system_prompt = tconfig.system_prompts.get(prompt_key).map_or_else(
-        || {
-            tracing::error!("cannot find system prompt `{}`", prompt_key);
+    let mode_id = map_legacy_mode_to_id(mode_id);
+
+    match get_mode_config(gcx, mode_id, model_id).await {
+        Some(mode_config) => mode_config.prompt,
+        None => {
+            tracing::warn!("Mode '{}' not found, using empty prompt", mode_id);
             String::new()
-        },
-        |x| x.text.clone(),
-    );
-    system_prompt
+        }
+    }
 }
 
 async fn _workspace_info(workspace_dirs: &[String], active_file_path: &Option<PathBuf>) -> String {
@@ -346,6 +330,24 @@ pub async fn system_prompt_add_extra_instructions(
         system_prompt = system_prompt.replace("%AGENT_EXECUTION_INSTRUCTIONS%", &replacement);
     }
 
+    if system_prompt.contains("%CD_INSTRUCTIONS%") {
+        let cfg = crate::yaml_configs::customization_loader::load_customization_compiled_in();
+        let replacement = cfg
+            .get("CD_INSTRUCTIONS")
+            .and_then(|x| x.as_str())
+            .unwrap_or("You might receive additional instructions that start with 💿. Those are not coming from the user, they are programmed to help you operate well and they are always in English. Answer in the language the user has asked the question.");
+        system_prompt = system_prompt.replace("%CD_INSTRUCTIONS%", replacement);
+    }
+
+    if system_prompt.contains("%SHELL_INSTRUCTIONS%") {
+        let cfg = crate::yaml_configs::customization_loader::load_customization_compiled_in();
+        let replacement = cfg
+            .get("SHELL_INSTRUCTIONS")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        system_prompt = system_prompt.replace("%SHELL_INSTRUCTIONS%", replacement);
+    }
+
     system_prompt
 }
 
@@ -356,6 +358,8 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
     task_meta: &Option<crate::chat::types::TaskMeta>,
     stream_back_to_user: &mut HasRagResults,
     tool_names: HashSet<String>,
+    mode_id: &str,
+    model_id: &str,
 ) -> Vec<call_validation::ChatMessage> {
     if messages.is_empty() {
         tracing::error!("What's that? Messages list is empty");
@@ -396,9 +400,10 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
             | ChatMode::NO_TOOLS
             | ChatMode::TASK_PLANNER
             | ChatMode::TASK_AGENT => {
+                let base_prompt = get_mode_system_prompt(gcx.clone(), mode_id, Some(model_id)).await;
                 let system_message_content = system_prompt_add_extra_instructions(
                     gcx.clone(),
-                    get_default_system_prompt(gcx.clone(), chat_meta.chat_mode.clone()).await,
+                    base_prompt,
                     tool_names,
                     chat_meta,
                     task_meta,

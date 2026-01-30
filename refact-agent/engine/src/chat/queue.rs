@@ -542,14 +542,14 @@ async fn handle_tool_decisions(
             session.set_runtime_state(SessionState::ExecutingTools, None);
         }
 
-        let chat_mode = super::generation::parse_chat_mode(&thread.mode);
         let (tool_results, _) = execute_tools_with_session(
             gcx.clone(),
             session_arc.clone(),
             &tool_calls_to_execute,
             &messages,
             &thread,
-            chat_mode,
+            &thread.mode,
+            Some(&thread.model),
             super::tools::ExecuteToolsOptions::default(),
         )
         .await;

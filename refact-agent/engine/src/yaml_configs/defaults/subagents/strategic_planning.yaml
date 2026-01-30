@@ -1,0 +1,40 @@
+schema_version: 1
+id: strategic_planning
+title: Strategic Planning
+description: Strategic planning with file gathering phase
+expose_as_tool: true
+has_code: true
+
+tool:
+  description: Strategically plan a solution for a complex problem
+  agentic: true
+  parameters: []
+  required: []
+
+subchat:
+  context_mode: fork
+  stateful: false
+  model_type: thinking
+  n_ctx: 400000
+  max_new_tokens: 128000
+  tokens_for_rag: 200000
+  reasoning_effort: high
+
+gather_files:
+  subagent: strategic_planning_gather_files
+  max_files: 30
+
+prompts:
+  solver: |
+    Your task is to identify and solve the problem stated in the conversation.
+
+    You are an expert strategic planner. Analyze the problem comprehensively.
+    Consider:
+    - Technical feasibility
+    - Edge cases and potential issues
+    - Implementation approach
+    - Testing strategy
+
+  guardrails: "💿 Now confirm the plan with the user"
+
+tools: []

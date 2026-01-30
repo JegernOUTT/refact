@@ -1,0 +1,33 @@
+schema_version: 1
+id: subagent_with_editing
+title: Subagent with Editing
+description: Subagent that can edit files
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: true
+  max_steps: 15
+  model_type: default
+  n_ctx: 200000
+  max_new_tokens: 16000
+  temperature: 0.0
+
+messages:
+  system_prompt: |
+    You are a focused sub-agent working on implementation tasks.
+    You can read, search, and modify files as needed.
+    Complete the task and report what was changed.
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - create_textdoc
+  - update_textdoc
+  - update_textdoc_anchored
+  - rm
+  - mv
+  - shell

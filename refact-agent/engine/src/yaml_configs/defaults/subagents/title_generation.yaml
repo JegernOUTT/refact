@@ -1,0 +1,21 @@
+schema_version: 1
+id: title_generation
+title: Title Generation
+description: Generate chat titles
+expose_as_tool: false
+has_code: true
+
+subchat:
+  context_mode: fork
+  stateful: false
+  model_type: light
+  n_ctx: 128000
+  max_new_tokens: 128
+  temperature: 0.2
+
+messages:
+  system_prompt: |
+    Generate a short, descriptive title for this conversation.
+    The title should be 3-7 words and capture the main topic.
+
+tools: []

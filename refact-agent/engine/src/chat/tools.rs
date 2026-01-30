@@ -9,12 +9,13 @@ use indexmap::IndexMap;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
-    ChatContent, ChatMessage, ChatMode, ChatToolCall, ContextFile, PostprocessSettings,
+    ChatContent, ChatMessage, ChatToolCall, ContextFile, PostprocessSettings,
     SubchatParameters,
 };
 use crate::global_context::GlobalContext;
 use crate::constants::CHAT_TOP_N;
 use crate::postprocessing::pp_tool_results::{postprocess_tool_results, ToolBudget};
+use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id, match_tool_confirm_action};
 
 #[derive(Default)]
 pub struct ExecuteToolsOptions {
@@ -231,7 +232,8 @@ mod tests {
 pub async fn process_tool_calls_once(
     gcx: Arc<ARwLock<GlobalContext>>,
     session_arc: Arc<AMutex<ChatSession>>,
-    chat_mode: ChatMode,
+    mode_id: &str,
+    model_id: Option<&str>,
 ) -> ToolStepOutcome {
     let (tool_calls, server_tool_calls, messages, thread) = {
         let session = session_arc.lock().await;
@@ -294,7 +296,7 @@ pub async fn process_tool_calls_once(
     );
 
     let (confirmations, denials) =
-        check_tools_confirmation(gcx.clone(), &tool_calls, &messages, chat_mode).await;
+        check_tools_confirmation(gcx.clone(), &tool_calls, &messages, mode_id, model_id).await;
 
     let denied_ids: Vec<String> = denials.iter().map(|d| d.tool_call_id.clone()).collect();
     if !denials.is_empty() {
@@ -315,9 +317,8 @@ pub async fn process_tool_calls_once(
     if !confirmations.is_empty() {
         let dominated_by_patch =
             thread.automatic_patch && confirmations.iter().all(|c| is_patch_like_tool(&c.command));
-        let autoapprove_all_tools = matches!(chat_mode, ChatMode::TASK_AGENT);
 
-        if !(dominated_by_patch || autoapprove_all_tools) {
+        if !dominated_by_patch {
             let mut session = session_arc.lock().await;
             session.set_paused_with_reasons(confirmations);
             return ToolStepOutcome::Paused;
@@ -345,7 +346,8 @@ pub async fn process_tool_calls_once(
         &tools_to_execute,
         &messages,
         &thread,
-        chat_mode,
+        mode_id,
+        model_id,
         ExecuteToolsOptions::default(),
     )
     .await;
@@ -366,7 +368,8 @@ pub async fn check_tools_confirmation(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_calls: &[crate::call_validation::ChatToolCall],
     messages: &[ChatMessage],
-    chat_mode: ChatMode,
+    mode_id: &str,
+    model_id: Option<&str>,
 ) -> (Vec<PauseReason>, Vec<PauseReason>) {
     use crate::tools::tools_description::MatchConfirmDenyResult;
 
@@ -388,8 +391,15 @@ pub async fn check_tools_confirmation(
         .await,
     ));
 
+    let mode_id = map_legacy_mode_to_id(mode_id);
+    let mode_config = get_mode_config(gcx.clone(), mode_id, model_id).await;
+    let tool_confirm_rules = mode_config
+        .as_ref()
+        .map(|m| m.tool_confirm.rules.as_slice())
+        .unwrap_or(&[]);
+
     let all_tools =
-        crate::tools::tools_list::get_available_tools_by_chat_mode(gcx.clone(), chat_mode)
+        crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id)
             .await
             .into_iter()
             .map(|tool| {
@@ -425,9 +435,12 @@ pub async fn check_tools_confirmation(
                 }
             };
 
-        match tool.match_against_confirm_deny(ccx.clone(), &args).await {
-            Ok(result) => match result.result {
-                MatchConfirmDenyResult::DENY => {
+        let tool_result = tool.match_against_confirm_deny(ccx.clone(), &args).await;
+        let mode_action = match_tool_confirm_action(tool_confirm_rules, &tool_call.function.name);
+
+        match tool_result {
+            Ok(result) => {
+                if result.result == MatchConfirmDenyResult::DENY {
                     denials.push(PauseReason {
                         reason_type: "denial".to_string(),
                         command: result.command,
@@ -435,23 +448,55 @@ pub async fn check_tools_confirmation(
                         tool_call_id: tool_call.id.clone(),
                         integr_config_path: tool.has_config_path(),
                     });
+                    continue;
                 }
-                MatchConfirmDenyResult::CONFIRMATION => {
-                    confirmations.push(PauseReason {
-                        reason_type: "confirmation".to_string(),
-                        command: result.command,
-                        rule: result.rule,
-                        tool_call_id: tool_call.id.clone(),
-                        integr_config_path: tool.has_config_path(),
-                    });
+
+                let final_action = match mode_action.as_deref() {
+                    Some("deny") => "deny",
+                    Some("ask") => "ask",
+                    Some("auto") => "auto",
+                    _ => match result.result {
+                        MatchConfirmDenyResult::CONFIRMATION => "ask",
+                        MatchConfirmDenyResult::PASS => "auto",
+                        MatchConfirmDenyResult::DENY => "deny",
+                    },
+                };
+
+                let rule_text = match mode_action.as_deref() {
+                    Some(action) => format!("mode policy: {}", action),
+                    None => result.rule.clone(),
+                };
+
+                match final_action {
+                    "deny" => {
+                        denials.push(PauseReason {
+                            reason_type: "denial".to_string(),
+                            command: result.command,
+                            rule: rule_text,
+                            tool_call_id: tool_call.id.clone(),
+                            integr_config_path: tool.has_config_path(),
+                        });
+                    }
+                    "ask" => {
+                        confirmations.push(PauseReason {
+                            reason_type: "confirmation".to_string(),
+                            command: result.command,
+                            rule: rule_text,
+                            tool_call_id: tool_call.id.clone(),
+                            integr_config_path: tool.has_config_path(),
+                        });
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Err(e) => {
-                info!(
-                    "Error checking confirmation for {}: {}",
-                    tool_call.function.name, e
-                );
+                denials.push(PauseReason {
+                    reason_type: "denial".to_string(),
+                    command: tool_call.function.name.clone(),
+                    rule: format!("confirmation check failed: {}", e),
+                    tool_call_id: tool_call.id.clone(),
+                    integr_config_path: tool.has_config_path(),
+                });
             }
         }
     }
@@ -465,7 +510,8 @@ pub async fn execute_tools_with_session(
     tool_calls: &[ChatToolCall],
     messages: &[ChatMessage],
     thread: &ThreadParams,
-    chat_mode: ChatMode,
+    mode_id: &str,
+    model_id: Option<&str>,
     options: ExecuteToolsOptions,
 ) -> (Vec<ChatMessage>, bool) {
     if tool_calls.is_empty() {
@@ -531,7 +577,8 @@ pub async fn execute_tools_with_session(
         gcx,
         ccx,
         tool_calls,
-        chat_mode,
+        mode_id,
+        model_id,
         budget,
         options,
         &prompt_messages,
@@ -560,7 +607,8 @@ async fn execute_tools_inner(
     gcx: Arc<ARwLock<GlobalContext>>,
     ccx: Arc<AMutex<AtCommandsContext>>,
     tool_calls: &[ChatToolCall],
-    chat_mode: ChatMode,
+    mode_id: &str,
+    model_id: Option<&str>,
     budget: ToolBudget,
     options: ExecuteToolsOptions,
     messages: &[ChatMessage],
@@ -568,7 +616,7 @@ async fn execute_tools_inner(
     let max_parallel = limits().max_parallel_tools;
 
     let available_tool_names: std::collections::HashSet<String> =
-        crate::tools::tools_list::get_available_tools_by_chat_mode(gcx.clone(), chat_mode)
+        crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id)
             .await
             .into_iter()
             .map(|tool| tool.tool_description().name)
@@ -730,7 +778,8 @@ pub async fn execute_tools(
     tool_calls: &[ChatToolCall],
     messages: &[ChatMessage],
     thread: &ThreadParams,
-    chat_mode: ChatMode,
+    mode_id: &str,
+    model_id: Option<&str>,
     options: ExecuteToolsOptions,
 ) -> (Vec<ChatMessage>, bool) {
     if tool_calls.is_empty() {
@@ -779,5 +828,5 @@ pub async fn execute_tools(
         }
     }
 
-    execute_tools_inner(gcx, ccx, tool_calls, chat_mode, budget, options, messages).await
+    execute_tools_inner(gcx, ccx, tool_calls, mode_id, model_id, budget, options, messages).await
 }

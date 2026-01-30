@@ -1,0 +1,21 @@
+schema_version: 1
+id: commit_message
+title: Commit Message
+description: Generate git commit messages
+expose_as_tool: false
+has_code: true
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 200000
+  max_new_tokens: 4096
+  temperature: 0.2
+
+messages:
+  system_prompt: |
+    Generate a clear and concise git commit message based on the provided diff.
+    Follow conventional commit format when appropriate.
+
+tools: []

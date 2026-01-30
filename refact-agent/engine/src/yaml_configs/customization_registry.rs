@@ -1,8 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use tokio::sync::RwLock as ARwLock;
+
+use crate::files_correction::get_project_dirs;
+use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_types::*;
+use crate::yaml_configs::project_configs_bootstrap::project_configs_try_create_all;
 
 #[derive(Debug, Clone)]
 pub struct RegistryCache {
@@ -50,21 +56,18 @@ pub async fn load_project_registry(project_root: &Path) -> ProjectRegistry {
 }
 
 async fn load_modes(dir: &Path, registry: &mut ProjectRegistry) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let paths = collect_yaml_paths(dir).await;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-            continue;
-        }
-
-        match load_yaml_file::<ModeConfig>(&path) {
+    for path in paths {
+        match load_yaml_file::<ModeConfig>(&path).await {
             Ok(config) => {
                 if config.base.is_some() && config.match_models.is_some() {
                     registry.mode_overrides.push(config);
+                } else if registry.modes.contains_key(&config.id) {
+                    registry.errors.push(RegistryError {
+                        file_path: path.display().to_string(),
+                        error: format!("duplicate mode id '{}'", config.id),
+                    });
                 } else {
                     registry.modes.insert(config.id.clone(), config);
                 }
@@ -80,21 +83,18 @@ async fn load_modes(dir: &Path, registry: &mut ProjectRegistry) {
 }
 
 async fn load_subagents(dir: &Path, registry: &mut ProjectRegistry) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let paths = collect_yaml_paths(dir).await;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-            continue;
-        }
-
-        match load_yaml_file::<SubagentConfig>(&path) {
+    for path in paths {
+        match load_yaml_file::<SubagentConfig>(&path).await {
             Ok(config) => {
                 if config.base.is_some() && config.match_models.is_some() {
                     registry.subagent_overrides.push(config);
+                } else if registry.subagents.contains_key(&config.id) {
+                    registry.errors.push(RegistryError {
+                        file_path: path.display().to_string(),
+                        error: format!("duplicate subagent id '{}'", config.id),
+                    });
                 } else {
                     registry.subagents.insert(config.id.clone(), config);
                 }
@@ -110,20 +110,19 @@ async fn load_subagents(dir: &Path, registry: &mut ProjectRegistry) {
 }
 
 async fn load_toolbox_commands(dir: &Path, registry: &mut ProjectRegistry) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let paths = collect_yaml_paths(dir).await;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-            continue;
-        }
-
-        match load_yaml_file::<ToolboxCommandConfig>(&path) {
+    for path in paths {
+        match load_yaml_file::<ToolboxCommandConfig>(&path).await {
             Ok(config) => {
-                registry.toolbox_commands.insert(config.id.clone(), config);
+                if registry.toolbox_commands.contains_key(&config.id) {
+                    registry.errors.push(RegistryError {
+                        file_path: path.display().to_string(),
+                        error: format!("duplicate toolbox_command id '{}'", config.id),
+                    });
+                } else {
+                    registry.toolbox_commands.insert(config.id.clone(), config);
+                }
             }
             Err(e) => {
                 registry.errors.push(RegistryError {
@@ -136,20 +135,19 @@ async fn load_toolbox_commands(dir: &Path, registry: &mut ProjectRegistry) {
 }
 
 async fn load_code_lens(dir: &Path, registry: &mut ProjectRegistry) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let paths = collect_yaml_paths(dir).await;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-            continue;
-        }
-
-        match load_yaml_file::<CodeLensConfig>(&path) {
+    for path in paths {
+        match load_yaml_file::<CodeLensConfig>(&path).await {
             Ok(config) => {
-                registry.code_lens.insert(config.id.clone(), config);
+                if registry.code_lens.contains_key(&config.id) {
+                    registry.errors.push(RegistryError {
+                        file_path: path.display().to_string(),
+                        error: format!("duplicate code_lens id '{}'", config.id),
+                    });
+                } else {
+                    registry.code_lens.insert(config.id.clone(), config);
+                }
             }
             Err(e) => {
                 registry.errors.push(RegistryError {
@@ -161,8 +159,26 @@ async fn load_code_lens(dir: &Path, registry: &mut ProjectRegistry) {
     }
 }
 
-fn load_yaml_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
-    let content = std::fs::read_to_string(path)
+async fn collect_yaml_paths(dir: &Path) -> Vec<PathBuf> {
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut paths = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+async fn load_yaml_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let content = tokio::fs::read_to_string(path)
+        .await
         .map_err(|e| format!("Failed to read file: {}", e))?;
     serde_yaml::from_str(&content)
         .map_err(|e| format!("Failed to parse YAML: {}", e))
@@ -221,7 +237,7 @@ pub fn resolve_subagent_for_model(
         });
 
     match matching_override {
-        Some(override_config) => Some(override_config.clone()),
+        Some(override_config) => Some(base.apply_override(override_config)),
         None => Some(base.clone()),
     }
 }
@@ -259,4 +275,71 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
         return name.ends_with(suffix);
     }
     pattern == name
+}
+
+pub async fn get_project_registry(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> Option<ProjectRegistry> {
+    let dirs = get_project_dirs(gcx.clone()).await;
+    let project_root = dirs.first()?.clone();
+
+    {
+        let gcx_locked = gcx.read().await;
+        let cache_result = gcx_locked.project_registry_cache.read();
+        if let Ok(cache) = cache_result {
+            if let Some(cached) = cache.get(&project_root) {
+                return Some(cached.registry.clone());
+            }
+        }
+    }
+
+    let _ = project_configs_try_create_all(&project_root).await;
+    let registry = load_project_registry(&project_root).await;
+
+    {
+        let gcx_locked = gcx.read().await;
+        let cache_result = gcx_locked.project_registry_cache.write();
+        if let Ok(mut cache) = cache_result {
+            cache.insert(project_root, registry.clone());
+        }
+    }
+
+    Some(registry)
+}
+
+pub async fn get_mode_config(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    mode_id: &str,
+    model_id: Option<&str>,
+) -> Option<ModeConfig> {
+    let registry = get_project_registry(gcx).await?;
+    resolve_mode_for_model(&registry, mode_id, model_id)
+}
+
+pub async fn get_subagent_config(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    subagent_id: &str,
+    model_id: Option<&str>,
+) -> Option<SubagentConfig> {
+    let registry = get_project_registry(gcx).await?;
+    resolve_subagent_for_model(&registry, subagent_id, model_id)
+}
+
+pub fn map_legacy_mode_to_id(mode_str: &str) -> &str {
+    match mode_str.to_uppercase().as_str() {
+        "NO_TOOLS" => "explore",
+        "EXPLORE" => "explore",
+        "AGENT" => "agent",
+        "CONFIGURE" => "configurator",
+        "PROJECT_SUMMARY" => "project_summary",
+        "TASK_PLANNER" => "task_planner",
+        "TASK_AGENT" => "task_agent",
+        _ => {
+            if mode_str.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+                mode_str
+            } else {
+                "agent"
+            }
+        }
+    }
 }

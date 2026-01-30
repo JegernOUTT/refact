@@ -20,6 +20,8 @@ use crate::at_commands::at_tree::AtTree;
 use crate::at_commands::at_web::AtWeb;
 use crate::at_commands::execute_at::AtCommandMember;
 
+pub const MAX_SUBCHAT_DEPTH: usize = 5;
+
 pub struct AtCommandsContext {
     pub global_context: Arc<ARwLock<GlobalContext>>,
     pub n_ctx: usize,
@@ -35,6 +37,7 @@ pub struct AtCommandsContext {
     pub root_chat_id: String,
     pub current_model: String,
     pub task_meta: Option<TaskMeta>,
+    pub subchat_depth: usize,
 
     pub at_commands: HashMap<String, Arc<dyn AtCommand + Send>>,
     pub subchat_tool_parameters: IndexMap<String, SubchatParameters>,
@@ -99,6 +102,7 @@ impl AtCommandsContext {
             root_chat_id: effective_root,
             current_model,
             task_meta,
+            subchat_depth: 0,
             at_commands: at_commands_dict(global_context.clone()).await,
             subchat_tool_parameters: IndexMap::new(),
             postprocess_parameters: PostprocessSettings::new(),

@@ -7,9 +7,9 @@ import {
   selectThreadImages,
   selectSendImmediately,
   selectMessages,
-  selectThreadToolUse,
   selectThreadMode,
 } from "../features/Chat/Thread/selectors";
+import { DEFAULT_MODE } from "../features/Chat/Thread/types";
 import { resetThreadImages, setSendImmediately } from "../features/Chat/Thread";
 import {
   sendUserMessage,
@@ -70,7 +70,6 @@ export function useChatActions() {
   const attachedImages = useAppSelector(selectThreadImages);
   const sendImmediately = useAppSelector(selectSendImmediately);
   const messages = useAppSelector(selectMessages);
-  const threadToolUse = useAppSelector(selectThreadToolUse);
   const threadMode = useAppSelector(selectThreadMode);
 
   /**
@@ -117,10 +116,11 @@ export function useChatActions() {
           : content.length === 0;
       if (isEmpty) return;
 
-      if (messages.length === 0 && threadToolUse && threadMode) {
+      if (messages.length === 0) {
+        const mode = threadMode ?? DEFAULT_MODE;
         await updateChatParams(
           chatId,
-          { tool_use: threadToolUse, mode: threadMode },
+          { mode },
           port,
           apiKey ?? undefined,
         );
@@ -145,7 +145,6 @@ export function useChatActions() {
       dispatch,
       sendImmediately,
       messages,
-      threadToolUse,
       threadMode,
     ],
   );

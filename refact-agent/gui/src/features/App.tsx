@@ -42,6 +42,7 @@ import { integrationsApi } from "../services/refact";
 import { LoginPage } from "./Login";
 import { TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
+import { Customization } from "./Customization";
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
 
 import styles from "./App.module.css";
@@ -282,6 +283,15 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         )}
         {!pageSwitching && renderedPage.name === "knowledge graph" && (
           <KnowledgeWorkspace />
+        )}
+        {!pageSwitching && renderedPage.name === "customization" && (
+          <Customization
+            backFromCustomization={goBack}
+            tabbed={config.tabbed}
+            host={config.host}
+            initialKind={renderedPage.kind}
+            initialConfigId={renderedPage.configId}
+          />
         )}
       </PageWrapper>
       {renderedPage.name !== "welcome" && (

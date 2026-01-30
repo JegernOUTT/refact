@@ -1,0 +1,13 @@
+schema_version: 1
+id: bugs
+description: Find and fix bugs
+selection_needed: [1, 50]
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      Find and fix bugs in the code block below:
+      ```
+      %CODE_SELECTION%
+      ```

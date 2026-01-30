@@ -1,0 +1,55 @@
+schema_version: 1
+id: subagent
+title: Subagent
+description: General-purpose focused subagent
+expose_as_tool: true
+has_code: true
+
+tool:
+  description: Delegate a specific task to a sub-agent that works independently
+  agentic: true
+  parameters:
+    - name: task
+      type: string
+      description: Clear description of what the subagent should do
+    - name: expected_result
+      type: string
+      description: Description of what the successful result should look like
+    - name: tools
+      type: string
+      description: Comma-separated list of tool names the subagent should use
+    - name: max_steps
+      type: string
+      description: Maximum number of steps the subagent can make (default 10)
+  required:
+    - task
+    - expected_result
+
+subchat:
+  context_mode: bare
+  stateful: true
+  max_steps: 10
+  model_type: light
+  n_ctx: 200000
+  max_new_tokens: 16000
+  temperature: 0.2
+
+messages:
+  system_prompt: |
+    You are a focused sub-agent working on a specific task delegated by a parent agent.
+
+    Guidelines:
+    - Complete your assigned task efficiently
+    - Report findings clearly and concisely
+    - Stay focused on the specific task given
+    - Use available tools as needed
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - search_semantic
+  - knowledge
+  - web
+  - web_search

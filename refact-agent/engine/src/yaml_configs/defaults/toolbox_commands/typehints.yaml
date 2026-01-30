@@ -1,0 +1,13 @@
+schema_version: 1
+id: typehints
+description: Add type hints
+selection_needed: [1, 50]
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      Add type hints to the code block below:
+      ```
+      %CODE_SELECTION%
+      ```

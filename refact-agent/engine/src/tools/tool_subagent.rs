@@ -161,7 +161,7 @@ impl Tool for ToolSubagent {
         };
         let max_steps = max_steps.min(50).max(1);
 
-        let (gcx, parent_chat_id, parent_root_chat_id, parent_subchat_tx, parent_abort_flag) = {
+        let (gcx, parent_chat_id, parent_root_chat_id, parent_subchat_tx, parent_abort_flag, current_depth) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.global_context.clone(),
@@ -169,8 +169,26 @@ impl Tool for ToolSubagent {
                 ccx_lock.root_chat_id.clone(),
                 ccx_lock.subchat_tx.clone(),
                 ccx_lock.abort_flag.clone(),
+                ccx_lock.subchat_depth,
             )
         };
+
+        use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
+        if current_depth >= MAX_SUBCHAT_DEPTH {
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(format!(
+                        "Error: Maximum subagent recursion depth ({}) exceeded",
+                        MAX_SUBCHAT_DEPTH
+                    )),
+                    tool_call_id: tool_call_id.clone(),
+                    tool_failed: Some(true),
+                    ..Default::default()
+                })],
+            ));
+        }
 
         let has_editing_tools = tools_contain_file_editing(&tools);
         let config_name = if has_editing_tools {
@@ -211,6 +229,7 @@ impl Tool for ToolSubagent {
             Some(tool_call_id.clone()),
             Some(parent_subchat_tx),
             Some(parent_abort_flag),
+            current_depth + 1,
         )
         .await?;
 

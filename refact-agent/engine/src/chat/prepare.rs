@@ -11,7 +11,6 @@ use crate::caps::{resolve_chat_model, ChatModelRecord};
 use crate::global_context::GlobalContext;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
-use crate::call_validation::ChatMode;
 use crate::tools::tools_description::ToolDesc;
 use super::tools::execute_tools;
 use super::types::ThreadParams;
@@ -67,6 +66,7 @@ pub async fn prepare_chat_passthrough(
     t: &HasTokenizerAndEot,
     messages: Vec<ChatMessage>,
     model_id: &str,
+    mode_id: &str,
     tools: Vec<ToolDesc>,
     meta: &ChatMeta,
     sampling_parameters: &mut SamplingParameters,
@@ -115,6 +115,8 @@ pub async fn prepare_chat_passthrough(
             &task_meta,
             &mut has_rag_results,
             prompt_tool_names,
+            mode_id,
+            model_id,
         )
         .await
     } else {
@@ -157,7 +159,8 @@ pub async fn prepare_chat_passthrough(
                             &filtered_calls,
                             &messages,
                             &thread,
-                            ChatMode::AGENT,
+                            "agent",
+                            Some(&thread.model),
                             super::tools::ExecuteToolsOptions::default(),
                         )
                         .await;

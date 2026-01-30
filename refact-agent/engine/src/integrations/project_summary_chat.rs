@@ -5,7 +5,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ChatMeta};
 use crate::integrations::setting_up_integrations::integrations_all;
 use crate::scratchpads::chat_utils_prompts::system_prompt_add_extra_instructions;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
-use crate::tools::tools_list::get_available_tools_by_chat_mode;
+use crate::tools::tools_list::get_tools_for_mode;
 
 pub async fn mix_project_summary_messages(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -55,7 +55,7 @@ pub async fn mix_project_summary_messages(
     sp_text = system_prompt_add_extra_instructions(
         gcx.clone(),
         sp_text,
-        get_available_tools_by_chat_mode(gcx.clone(), chat_meta.chat_mode)
+        get_tools_for_mode(gcx.clone(), "project_summary", None)
             .await
             .into_iter()
             .map(|t| t.tool_description().name)
@@ -63,7 +63,7 @@ pub async fn mix_project_summary_messages(
         chat_meta,
         &None,
     )
-    .await; // print inside
+    .await;
 
     let system_message = ChatMessage {
         role: "system".to_string(),

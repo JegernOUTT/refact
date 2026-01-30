@@ -26,6 +26,7 @@ use crate::privacy::PrivacySettings;
 use crate::telemetry::telemetry_structs;
 use crate::background_tasks::BackgroundTasksHolder;
 use crate::voice::SharedVoiceService;
+use crate::yaml_configs::customization_registry::RegistryCacheManager;
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct CommandLine {
@@ -295,6 +296,7 @@ pub struct GlobalContext {
     pub task_events_seq: Option<Arc<std::sync::atomic::AtomicU64>>,
     pub chat_sessions: crate::chat::SessionsMap,
     pub voice_service: SharedVoiceService,
+    pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
 }
 
 pub type SharedGlobalContext = Arc<ARwLock<GlobalContext>>; // TODO: remove this type alias, confusing
@@ -584,6 +586,7 @@ pub async fn create_global_context(
         task_events_seq: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))),
         chat_sessions: crate::chat::create_sessions_map(),
         voice_service: crate::voice::VoiceService::new(),
+        project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
     };
     let gcx = Arc::new(ARwLock::new(cx));
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
@@ -682,6 +685,7 @@ pub mod tests {
             task_events_seq: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))),
             chat_sessions: crate::chat::create_sessions_map(),
             voice_service: crate::voice::VoiceService::new(),
+            project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
         };
 
         Arc::new(ARwLock::new(cx))

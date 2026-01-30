@@ -39,7 +39,7 @@ export type ChatThread = {
   isTitleGenerated?: boolean;
   boost_reasoning?: boolean;
   integration?: IntegrationMeta | null;
-  mode?: LspChatMode;
+  mode?: ChatModeId;
   project_name?: string;
   last_user_message_id?: string;
   new_chat_suggested: SuggestedChat;
@@ -67,6 +67,34 @@ export type SuggestedChat = {
 };
 
 export type ToolUse = "quick" | "explore" | "agent";
+
+export type ChatModeId = string;
+
+export const DEFAULT_MODE: ChatModeId = "agent";
+
+export function normalizeLegacyMode(mode: string | undefined): ChatModeId {
+  if (!mode) return DEFAULT_MODE;
+  const upper = mode.toUpperCase();
+  switch (upper) {
+    case "NO_TOOLS":
+      return "explore";
+    case "EXPLORE":
+      return "explore";
+    case "AGENT":
+      return "agent";
+    case "CONFIGURE":
+      return "configurator";
+    case "PROJECT_SUMMARY":
+      return "project_summary";
+    case "TASK_PLANNER":
+      return "task_planner";
+    case "TASK_AGENT":
+      return "task_agent";
+    default:
+      if (mode === mode.toLowerCase()) return mode;
+      return DEFAULT_MODE;
+  }
+}
 
 export type ThreadConfirmation = {
   pause: boolean;
@@ -159,42 +187,7 @@ export function isToolUse(str: string): str is ToolUse {
   return str === "quick" || str === "explore" || str === "agent";
 }
 
-export type LspChatMode =
-  | "NO_TOOLS"
-  | "EXPLORE"
-  | "AGENT"
-  | "CONFIGURE"
-  | "PROJECT_SUMMARY";
-
-export function isLspChatMode(mode: string): mode is LspChatMode {
-  return (
-    mode === "NO_TOOLS" ||
-    mode === "EXPLORE" ||
-    mode === "AGENT" ||
-    mode === "CONFIGURE" ||
-    mode === "PROJECT_SUMMARY"
-  );
-}
-
-export function chatModeToLspMode({
-  toolUse,
-  mode,
-  defaultMode,
-}: {
-  toolUse?: ToolUse;
-  mode?: LspChatMode;
-  defaultMode?: LspChatMode;
-}): LspChatMode {
-  if (defaultMode) {
-    return defaultMode;
-  }
-  if (mode) {
-    return mode;
-  }
-  if (toolUse === "agent") return "AGENT";
-  if (toolUse === "quick") return "NO_TOOLS";
-  return "EXPLORE";
-}
+export type LspChatMode = string;
 
 // Helper to detect server-executed tools (already executed by LLM provider)
 // These tools have IDs starting with "srvtoolu_" and should NOT be sent to backend for execution

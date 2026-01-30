@@ -16,6 +16,7 @@ use super::content::validate_content_with_attachments;
 use super::queue::process_command_queue;
 use super::trajectory_ops::sanitize_messages_for_model_switch;
 use super::trajectories::validate_trajectory_id;
+use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
 
 pub async fn handle_v1_chat_subscribe(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
@@ -144,8 +145,45 @@ pub async fn handle_v1_chat_command(
 
     if let ChatCommand::SetParams { ref patch } = request.command {
         let old_model = session.thread.model.clone();
-        let (changed, sanitized_patch) =
+        let old_mode = session.thread.mode.clone();
+        let (mut changed, sanitized_patch) =
             super::queue::apply_setparams_patch(&mut session.thread, patch);
+
+        let mode_in_patch = patch.get("mode").and_then(|v| v.as_str());
+        if let Some(mode_str) = mode_in_patch {
+            let normalized_mode = map_legacy_mode_to_id(mode_str);
+            if session.thread.mode != normalized_mode {
+                session.thread.mode = normalized_mode.to_string();
+                changed = true;
+            }
+        }
+
+        let mode_changed = session.thread.mode != old_mode;
+        if mode_changed {
+            let model_id = if session.thread.model.is_empty() { None } else { Some(session.thread.model.as_str()) };
+            if let Some(mode_config) = get_mode_config(gcx.clone(), &session.thread.mode, model_id).await {
+                let defaults = &mode_config.thread_defaults;
+                if let Some(v) = defaults.include_project_info {
+                    if session.thread.include_project_info != v {
+                        session.thread.include_project_info = v;
+                        changed = true;
+                    }
+                }
+                if let Some(v) = defaults.checkpoints_enabled {
+                    if session.thread.checkpoints_enabled != v {
+                        session.thread.checkpoints_enabled = v;
+                        changed = true;
+                    }
+                }
+                if let Some(v) = defaults.automatic_patch {
+                    if session.thread.automatic_patch != v {
+                        session.thread.automatic_patch = v;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
         if session.thread.model != old_model {
             sanitize_messages_for_model_switch(&mut session.messages);
         }
@@ -161,11 +199,17 @@ pub async fn handle_v1_chat_command(
                 session.set_title(title, is_gen);
             }
         }
-        // Strip title-related keys from thread_updated (titles go via sidebar SSE only)
+
         let mut patch_for_chat_sse = sanitized_patch;
         if let Some(obj) = patch_for_chat_sse.as_object_mut() {
             obj.remove("title");
             obj.remove("is_title_generated");
+            if mode_changed {
+                obj.insert("mode".to_string(), serde_json::json!(session.thread.mode));
+                obj.insert("include_project_info".to_string(), serde_json::json!(session.thread.include_project_info));
+                obj.insert("checkpoints_enabled".to_string(), serde_json::json!(session.thread.checkpoints_enabled));
+                obj.insert("automatic_patch".to_string(), serde_json::json!(session.thread.automatic_patch));
+            }
         }
         session.emit(ChatEvent::ThreadUpdated {
             params: patch_for_chat_sse,

@@ -6,7 +6,7 @@ import {
 import {
   backUpMessages,
   ChatThread,
-  isLspChatMode,
+  normalizeLegacyMode,
   maybeAppendToolCallResultFromIdeToMessages,
   setChatMode,
   SuggestedChat,
@@ -180,8 +180,7 @@ function getFirstUserContentFromChat(messages: ChatThread["messages"]): string {
 
 function chatThreadToHistoryItem(thread: ChatThread): ChatHistoryItem {
   const now = new Date().toISOString();
-  const updatedMode =
-    thread.mode && !isLspChatMode(thread.mode) ? "AGENT" : thread.mode;
+  const updatedMode = normalizeLegacyMode(thread.mode);
 
   return {
     ...thread,

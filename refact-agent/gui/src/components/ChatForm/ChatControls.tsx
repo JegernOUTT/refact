@@ -6,8 +6,6 @@ import {
   Link,
   Skeleton,
   Box,
-  Switch,
-  Badge,
   Button,
 } from "@radix-ui/themes";
 import { Select, type SelectProps } from "../Select";
@@ -18,292 +16,26 @@ import classNames from "classnames";
 import { PromptSelect } from "./PromptSelect";
 import { Checkbox } from "../Checkbox";
 import {
-  ExclamationTriangleIcon,
   LockClosedIcon,
   LockOpen1Icon,
   QuestionMarkCircledIcon,
 } from "@radix-ui/react-icons";
 import { useTourRefs } from "../../features/Tour";
-import { ToolUseSwitch } from "./ToolUseSwitch";
+import { ModeSelect } from "./ModeSelect";
 import {
-  ToolUse,
-  selectAreFollowUpsEnabled,
-  selectAutomaticPatch,
   selectChatId,
-  selectCheckpointsEnabled,
   selectIsStreaming,
   selectIsWaiting,
   selectMessages,
-  selectToolUse,
-  selectIncludeProjectInfo,
-  setAreFollowUpsEnabled,
-  setAutomaticPatch,
-  setEnabledCheckpoints,
-  setToolUse,
-  setIncludeProjectInfo,
+  selectThreadMode,
+  setThreadMode,
 } from "../../features/Chat/Thread";
+import { DEFAULT_MODE } from "../../features/Chat/Thread/types";
 import { useAppSelector, useAppDispatch, useCapsForToolUse } from "../../hooks";
 import { useAttachedFiles } from "./useCheckBoxes";
 import { push } from "../../features/Pages/pagesSlice";
 import { RichModelSelectItem } from "../Select/RichModelSelectItem";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
-
-export const ApplyPatchSwitch: React.FC = () => {
-  const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
-  const isPatchAutomatic = useAppSelector(selectAutomaticPatch);
-
-  const handleAutomaticPatchChange = (checked: boolean) => {
-    dispatch(setAutomaticPatch({ chatId, value: checked }));
-  };
-
-  return (
-    <Flex
-      gap="4"
-      align="center"
-      wrap="wrap"
-      flexGrow="1"
-      flexShrink="0"
-      width="100%"
-      justify="between"
-    >
-      <Text size="2" mr="auto">
-        Patch files without confirmation
-      </Text>
-      <Flex gap="2" align="center">
-        <Switch
-          size="1"
-          title="Enable/disable automatic patch calls by Agent"
-          checked={isPatchAutomatic}
-          onCheckedChange={handleAutomaticPatchChange}
-        />
-        <HoverCard.Root>
-          <HoverCard.Trigger>
-            <QuestionMarkCircledIcon style={{ marginLeft: 4 }} />
-          </HoverCard.Trigger>
-          <HoverCard.Content side="top" align="end" size="1" maxWidth="280px">
-            <Text weight="bold" size="2">
-              Enabled
-            </Text>
-            <Text as="p" size="1">
-              When enabled, Refact Agent will automatically apply changes to
-              files without asking for your confirmation.
-            </Text>
-            <Text as="div" mt="2" size="2" weight="bold">
-              Disabled
-            </Text>
-            <Text as="p" size="1">
-              When disabled, Refact Agent will ask for your confirmation before
-              applying any unsaved changes.
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
-      </Flex>
-    </Flex>
-  );
-};
-export const AgentRollbackSwitch: React.FC = () => {
-  const dispatch = useAppDispatch();
-  const isAgentRollbackEnabled = useAppSelector(selectCheckpointsEnabled);
-
-  const handleAgentRollbackChange = (checked: boolean) => {
-    dispatch(setEnabledCheckpoints(checked));
-  };
-
-  return (
-    <Flex
-      gap="4"
-      align="center"
-      wrap="wrap"
-      flexGrow="1"
-      flexShrink="0"
-      width="100%"
-      justify="between"
-    >
-      <Text size="2" mr="auto">
-        Changes rollback
-      </Text>
-      <Flex gap="2" align="center">
-        <Switch
-          size="1"
-          title="Enable/disable changed rollback made by Agent"
-          checked={isAgentRollbackEnabled}
-          onCheckedChange={handleAgentRollbackChange}
-        />
-        <HoverCard.Root>
-          <HoverCard.Trigger>
-            <QuestionMarkCircledIcon style={{ marginLeft: 4 }} />
-          </HoverCard.Trigger>
-          <HoverCard.Content side="top" align="end" size="1" maxWidth="280px">
-            <Flex direction="column" gap="2">
-              <Text as="p" size="1">
-                When enabled, Refact Agent will automatically make snapshots of
-                files between your messages
-              </Text>
-              <Text as="p" size="1">
-                You can rollback file changes to checkpoints taken when you sent
-                messages to Agent
-              </Text>
-              <Badge
-                color="yellow"
-                asChild
-                style={{
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                <Flex gap="2" py="1" px="2" align="center">
-                  <ExclamationTriangleIcon
-                    width={16}
-                    height={16}
-                    style={{ flexGrow: 1, flexShrink: 0 }}
-                  />
-                  <Text as="p" size="1">
-                    Warning: may slow down performance of Agent in large
-                    projects
-                  </Text>
-                </Flex>
-              </Badge>
-            </Flex>
-          </HoverCard.Content>
-        </HoverCard.Root>
-      </Flex>
-    </Flex>
-  );
-};
-export const FollowUpsSwitch: React.FC = () => {
-  const dispatch = useAppDispatch();
-  const areFollowUpsEnabled = useAppSelector(selectAreFollowUpsEnabled);
-
-  const handleFollowUpsEnabledChange = (checked: boolean) => {
-    dispatch(setAreFollowUpsEnabled(checked));
-  };
-
-  return (
-    <Flex
-      gap="4"
-      align="center"
-      wrap="wrap"
-      flexGrow="1"
-      flexShrink="0"
-      width="100%"
-      justify="between"
-    >
-      <Text size="2" mr="auto">
-        Follow-Ups messages
-      </Text>
-      <Flex gap="2" align="center">
-        <Switch
-          size="1"
-          title="Enable/disable follow-ups messages generation by Agent"
-          checked={areFollowUpsEnabled}
-          onCheckedChange={handleFollowUpsEnabledChange}
-        />
-        <HoverCard.Root>
-          <HoverCard.Trigger>
-            <QuestionMarkCircledIcon style={{ marginLeft: 4 }} />
-          </HoverCard.Trigger>
-          <HoverCard.Content side="top" align="end" size="1" maxWidth="280px">
-            <Flex direction="column" gap="2">
-              <Text as="p" size="1">
-                When enabled, Refact Agent will automatically generate related
-                follow-ups to the conversation
-              </Text>
-              <Badge
-                color="yellow"
-                asChild
-                style={{
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                <Flex gap="2" p="2" align="center">
-                  <ExclamationTriangleIcon
-                    width={16}
-                    height={16}
-                    style={{ flexGrow: 1, flexShrink: 0 }}
-                  />
-                  <Text as="p" size="1">
-                    Warning: may increase coins spending
-                  </Text>
-                </Flex>
-              </Badge>
-            </Flex>
-          </HoverCard.Content>
-        </HoverCard.Root>
-      </Flex>
-    </Flex>
-  );
-};
-
-export const ProjectInfoSwitch: React.FC = () => {
-  const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
-  const messages = useAppSelector(selectMessages);
-  const includeProjectInfo = useAppSelector(selectIncludeProjectInfo);
-
-  const handleIncludeProjectInfoChange = (checked: boolean) => {
-    dispatch(setIncludeProjectInfo({ chatId, value: checked }));
-  };
-
-  const isNewChat = messages.length === 0;
-
-  return (
-    <Flex
-      gap="4"
-      align="center"
-      wrap="wrap"
-      flexGrow="1"
-      flexShrink="0"
-      width="100%"
-      justify="between"
-    >
-      <Text size="2" mr="auto">
-        Include project info
-      </Text>
-      <Flex gap="2" align="center">
-        <Switch
-          size="1"
-          title="Include project context information"
-          checked={includeProjectInfo ?? true}
-          onCheckedChange={handleIncludeProjectInfoChange}
-          disabled={!isNewChat}
-        />
-        <HoverCard.Root>
-          <HoverCard.Trigger>
-            <QuestionMarkCircledIcon style={{ marginLeft: 4 }} />
-          </HoverCard.Trigger>
-          <HoverCard.Content side="top" align="end" size="1" maxWidth="280px">
-            <Flex direction="column" gap="2">
-              <Text as="p" size="1">
-                When enabled, extra project context information will be included
-                at the start of the chat to help the AI understand your codebase
-                better
-              </Text>
-              <Badge
-                color="yellow"
-                asChild
-                style={{
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                <Flex gap="2" p="2" align="center">
-                  <ExclamationTriangleIcon
-                    width={16}
-                    height={16}
-                    style={{ flexGrow: 1, flexShrink: 0 }}
-                  />
-                  <Text as="p" size="1">
-                    Note: This can consume a significant amount of tokens
-                    initially. Only available when starting a new chat.
-                  </Text>
-                </Flex>
-              </Badge>
-            </Flex>
-          </HoverCard.Content>
-        </HoverCard.Root>
-      </Flex>
-    </Flex>
-  );
-};
 
 export const CapsSelect: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
   const refs = useTourRefs();
@@ -387,9 +119,6 @@ export const CapsSelect: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
       gap="2"
       align="center"
       wrap="wrap"
-      // flexGrow="1"
-      // flexShrink="0"
-      // width="100%"
       ref={(x) => refs.setUseModel(x)}
     >
       <Skeleton loading={caps.loading}>
@@ -476,7 +205,6 @@ const ChatControlCheckBox: React.FC<{
       >
         {label}
         {fileName && (
-          // TODO: negative margin ?
           <Flex ml="-3px">
             <TruncateLeft>{fileName}</TruncateLeft>
           </Flex>
@@ -522,10 +250,11 @@ export const ChatControls: React.FC<ChatControlsProps> = ({
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
   const messages = useAppSelector(selectMessages);
-  const toolUse = useAppSelector(selectToolUse);
-  const onSetToolUse = useCallback(
-    (value: ToolUse) => dispatch(setToolUse(value)),
-    [dispatch],
+  const chatId = useAppSelector(selectChatId);
+  const threadMode = useAppSelector(selectThreadMode);
+  const onSetMode = useCallback(
+    (modeId: string) => dispatch(setThreadMode({ chatId, mode: modeId })),
+    [dispatch, chatId],
   );
 
   const showControls = useMemo(
@@ -579,13 +308,11 @@ export const ChatControls: React.FC<ChatControlsProps> = ({
       )}
 
       {showControls && (
-        <Flex gap="2" direction="column">
-          <ToolUseSwitch
-            ref={(x) => refs.setUseTools(x)}
-            toolUse={toolUse}
-            setToolUse={onSetToolUse}
+        <Flex gap="2" direction="column" ref={(x) => refs.setUseTools(x)}>
+          <ModeSelect
+            selectedMode={threadMode ?? DEFAULT_MODE}
+            onModeChange={onSetMode}
           />
-          {/* <CapsSelect /> */}
           <PromptSelect />
         </Flex>
       )}

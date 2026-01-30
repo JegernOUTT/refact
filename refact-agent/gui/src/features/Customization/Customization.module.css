@@ -1,0 +1,40 @@
+.configList {
+  padding: var(--space-2);
+}
+
+.configItem {
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.configItem:hover {
+  background-color: var(--gray-a3);
+}
+
+.configItem.selected {
+  background-color: var(--accent-a4);
+  border-color: var(--accent-8);
+}
+
+.configEditor {
+  padding: var(--space-3);
+  height: 100%;
+}
+
+.yamlEditor {
+  flex: 1;
+  min-height: 400px;
+  font-family: var(--code-font-family);
+  font-size: var(--font-size-2);
+  padding: var(--space-3);
+  border: 1px solid var(--gray-6);
+  border-radius: var(--radius-2);
+  background-color: var(--gray-2);
+  color: var(--gray-12);
+  resize: vertical;
+}
+
+.yamlEditor:focus {
+  outline: none;
+  border-color: var(--accent-8);
+}

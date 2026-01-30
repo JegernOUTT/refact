@@ -5,15 +5,15 @@ import {
   ChatThreadRuntime,
   IntegrationMeta,
   ToolUse,
-  LspChatMode,
-  chatModeToLspMode,
-  isLspChatMode,
+  ChatModeId,
   isToolUse,
+  normalizeLegacyMode,
 } from "./types";
 import { v4 as uuidv4 } from "uuid";
 import { getLastThreadParams } from "../../../utils/threadStorage";
 import {
   setToolUse,
+  setThreadMode,
   enableSend,
   clearChatError,
   setChatModel,
@@ -77,7 +77,7 @@ import { capsApi } from "../../../services/refact";
 const createChatThread = (
   tool_use: ToolUse,
   integration?: IntegrationMeta | null,
-  mode?: LspChatMode,
+  mode?: ChatModeId,
 ): ChatThread => {
   return {
     id: uuidv4(),
@@ -100,7 +100,7 @@ const createChatThread = (
 const createThreadRuntime = (
   tool_use: ToolUse,
   integration?: IntegrationMeta | null,
-  mode?: LspChatMode,
+  mode?: ChatModeId,
 ): ChatThreadRuntime => {
   return {
     thread: createChatThread(tool_use, integration, mode),
@@ -124,14 +124,12 @@ const createThreadRuntime = (
 };
 
 const getThreadMode = ({
-  tool_use,
   integration,
 }: {
-  tool_use?: ToolUse;
   integration?: IntegrationMeta | null;
 }) => {
-  if (integration) return "CONFIGURE";
-  return chatModeToLspMode({ toolUse: tool_use });
+  if (integration) return "configurator";
+  return "agent";
 };
 
 const normalizeMessage = (msg: ChatMessages[number]): ChatMessages[number] => {
@@ -183,10 +181,12 @@ const getCurrentRuntime = (
 export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(setToolUse, (state, action) => {
     state.tool_use = action.payload;
-    const rt = getCurrentRuntime(state);
+  });
+
+  builder.addCase(setThreadMode, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
     if (rt && rt.thread.messages.length === 0) {
-      rt.thread.tool_use = action.payload;
-      rt.thread.mode = chatModeToLspMode({ toolUse: action.payload });
+      rt.thread.mode = action.payload.mode;
     }
   });
 
@@ -222,7 +222,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const currentRt = getCurrentRuntime(state);
     const lastParams = getLastThreadParams();
 
-    const mode = getThreadMode({ tool_use: state.tool_use });
+    const mode = getThreadMode({});
     const newRuntime = createThreadRuntime(state.tool_use, null, mode);
 
     newRuntime.thread.model = lastParams.model ?? currentRt?.thread.model ?? "";
@@ -265,7 +265,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         existingRt.thread.title = title;
       }
       if (mode) {
-        existingRt.thread.mode = mode as LspChatMode;
+        existingRt.thread.mode = normalizeLegacyMode(mode);
       }
       if (taskMeta) {
         existingRt.thread.task_meta = taskMeta;
@@ -280,9 +280,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const currentRt = getCurrentRuntime(state);
     const lastParams = getLastThreadParams();
 
-    const effectiveMode = mode
-      ? (mode as LspChatMode)
-      : getThreadMode({ tool_use: "agent" });
+    const effectiveMode = mode ?? getThreadMode({});
     const newRuntime = createThreadRuntime("agent", null, effectiveMode);
 
     newRuntime.thread.id = id;
@@ -402,10 +400,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       return;
     }
 
-    const mode =
-      action.payload.mode && isLspChatMode(action.payload.mode)
-        ? action.payload.mode
-        : "AGENT";
+    const mode = normalizeLegacyMode(action.payload.mode);
     const newRuntime: ChatThreadRuntime = {
       thread: {
         id: action.payload.id,
@@ -540,7 +535,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const newRuntime = createThreadRuntime(
       "agent",
       action.payload.integration,
-      "CONFIGURE",
+      "configurator",
     );
     newRuntime.thread.last_user_message_id = action.payload.request_attempt_id;
     newRuntime.thread.messages = action.payload.messages;
@@ -719,11 +714,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
             : existing?.tool_use && isToolUse(existing.tool_use)
               ? existing.tool_use
               : "agent",
-          mode: isLspChatMode(backendMode)
-            ? backendMode
-            : existing?.mode && isLspChatMode(existing.mode)
-              ? existing.mode
-              : "AGENT",
+          mode: normalizeLegacyMode(backendMode || existing?.mode),
           boost_reasoning: event.thread.boost_reasoning,
           context_tokens_cap:
             event.thread.context_tokens_cap ?? existing?.context_tokens_cap,
@@ -786,9 +777,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         if ("model" in params && typeof params.model === "string")
           rt.thread.model = params.model;
         if ("mode" in params && typeof params.mode === "string") {
-          rt.thread.mode = isLspChatMode(params.mode)
-            ? params.mode
-            : rt.thread.mode;
+          rt.thread.mode = normalizeLegacyMode(params.mode);
         }
         if (
           "boost_reasoning" in params &&

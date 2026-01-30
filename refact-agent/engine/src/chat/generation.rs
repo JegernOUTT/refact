@@ -132,12 +132,12 @@ pub fn start_generation(
 
             maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
 
-            let chat_mode = {
+            let (mode_id, model_id) = {
                 let session = session_arc.lock().await;
-                parse_chat_mode(&session.thread.mode)
+                (session.thread.mode.clone(), session.thread.model.clone())
             };
 
-            match process_tool_calls_once(gcx.clone(), session_arc.clone(), chat_mode).await {
+            match process_tool_calls_once(gcx.clone(), session_arc.clone(), &mode_id, Some(&model_id)).await {
                 ToolStepOutcome::NoToolCalls => {
                     if inject_priority_messages_if_any(gcx.clone(), session_arc.clone()).await {
                         continue;
@@ -178,29 +178,12 @@ pub async fn run_llm_generation(
 ) -> Result<(), String> {
     let chat_mode = parse_chat_mode(&thread.mode);
 
-    let tools: Vec<crate::tools::tools_description::ToolDesc> = {
-        let all_tools: Vec<_> =
-            crate::tools::tools_list::get_available_tools_by_chat_mode(gcx.clone(), chat_mode)
-                .await
-                .into_iter()
-                .map(|tool| tool.tool_description())
-                .collect();
-
-        if thread.tool_use.is_empty() || thread.tool_use == "agent" {
-            all_tools
-        } else {
-            let allowed: std::collections::HashSet<String> = thread
-                .tool_use
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            all_tools
-                .into_iter()
-                .filter(|t| allowed.contains(&t.name))
-                .collect()
-        }
-    };
+    let tools: Vec<crate::tools::tools_description::ToolDesc> =
+        crate::tools::tools_list::get_tools_for_mode(gcx.clone(), &thread.mode, Some(&thread.model))
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description())
+            .collect();
 
     info!("session generation: tools count = {}", tools.len());
 
@@ -262,6 +245,8 @@ pub async fn run_llm_generation(
                 &thread.task_meta,
                 &mut has_rag_results,
                 tool_names,
+                &thread.mode,
+                &thread.model,
             )
             .await;
 
@@ -396,6 +381,7 @@ pub async fn run_llm_generation(
         &t,
         messages,
         &model_rec.base.id,
+        &thread.mode,
         tools,
         &meta,
         &mut parameters,

@@ -1,6 +1,8 @@
 pub mod scope_utils;
 pub mod tools_description;
 pub mod tools_list;
+pub mod tool_helpers;
+pub mod subagent_phases;
 
 mod tool_add_workspace_folder;
 mod tool_ast_definition;
@@ -17,6 +19,7 @@ mod tool_shell_service;
 mod tool_strategic_planning;
 mod tool_code_review;
 mod tool_subagent;
+pub mod tool_config_subagent;
 mod tool_trajectory_context;
 mod tool_tree;
 mod tool_web;

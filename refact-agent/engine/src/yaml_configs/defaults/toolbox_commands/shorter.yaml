@@ -1,0 +1,13 @@
+schema_version: 1
+id: shorter
+description: Make code shorter
+selection_needed: [1, 50]
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      Rewrite the code block below shorter
+      ```
+      %CODE_SELECTION%
+      ```
