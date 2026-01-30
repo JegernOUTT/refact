@@ -1,0 +1,75 @@
+.container {
+  padding: var(--space-2);
+  padding-bottom: 0;
+}
+
+.thumbnailContainer {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.thumbnail {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.removeButton {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.thumbnailContainer:hover .removeButton {
+  opacity: 1;
+}
+
+.fileCard {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background-color: var(--gray-a3);
+  border-radius: 4px;
+  max-width: 160px;
+}
+
+.fileCardContent {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.fileExtension {
+  color: var(--gray-11);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.fileName {
+  color: var(--gray-11);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fileRemoveButton {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+}

@@ -36,4 +36,6 @@ prompts:
     - Missing tests
     - Edge cases not handled
 
+  guardrails: "💿 Review complete. Present findings to the user."
+
 tools: []

@@ -9,6 +9,11 @@ export type ImageFile = {
   type: string;
 };
 
+export type TextFile = {
+  name: string;
+  content: string;
+};
+
 export type ToolConfirmationStatus = {
   wasInteracted: boolean;
   confirmationStatus: boolean;
@@ -111,6 +116,7 @@ export type ChatThreadRuntime = {
   queued_items: QueuedItem[];
   send_immediately: boolean;
   attached_images: ImageFile[];
+  attached_text_files: TextFile[];
   confirmation: ThreadConfirmation;
   /** Whether the initial snapshot has been received from the backend */
   snapshot_received: boolean;

@@ -15,7 +15,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::postprocessing::pp_command_output::OutputFilter;
-use crate::tasks::storage::get_task_dir;
+use crate::tasks::storage::find_task_dir;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use tokio::sync::RwLock as ARwLock;
 
@@ -26,7 +26,7 @@ pub async fn get_task_memories_dir(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,
 ) -> Result<PathBuf, String> {
-    let task_dir = get_task_dir(gcx, task_id).await?;
+    let task_dir = find_task_dir(gcx, task_id).await?;
     Ok(task_dir.join(MEMORIES_DIR))
 }
 

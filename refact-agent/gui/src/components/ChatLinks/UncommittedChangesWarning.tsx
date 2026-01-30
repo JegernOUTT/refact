@@ -20,7 +20,7 @@ export const UncommittedChangesWarning: React.FC = () => {
   const information = useAppSelector(getInformationMessage);
   const currentMode = useAppSelector(selectThreadMode);
   const messages = useAppSelector(selectMessages);
-  const modesQuery = useGetChatModesQuery();
+  const modesQuery = useGetChatModesQuery(undefined);
 
   const modeHasEditing = React.useMemo(() => {
     if (!modesQuery.data?.modes) return false;

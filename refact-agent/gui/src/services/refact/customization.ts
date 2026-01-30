@@ -7,6 +7,11 @@ export interface ConfigItem {
   title: string;
   file_path: string;
   specific: boolean;
+  scope: "global" | "local";
+  global_path: string;
+  local_path: string;
+  global_exists: boolean;
+  local_exists: boolean;
 }
 
 export interface ErrorItem {
@@ -20,22 +25,26 @@ export interface RegistryResponse {
   toolbox_commands: ConfigItem[];
   code_lens: ConfigItem[];
   errors: ErrorItem[];
+  has_project_root?: boolean;
 }
 
 export interface ConfigDetailResponse {
   config: Record<string, unknown>;
   file_path: string;
   raw_yaml: string;
+  scope: "global" | "local";
 }
 
 export interface SaveConfigResponse {
   ok: boolean;
   file_path: string;
+  scope: "global" | "local";
   errors: ErrorItem[];
 }
 
 export interface DeleteConfigResponse {
   ok: boolean;
+  scope: "global" | "local";
   errors: ErrorItem[];
 }
 
@@ -56,7 +65,7 @@ export const customizationApi = createApi({
     },
   }),
   endpoints: (builder) => ({
-    getRegistry: builder.query<RegistryResponse, void>({
+    getRegistry: builder.query<RegistryResponse, undefined>({
       queryFn: async (_arg, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
@@ -74,15 +83,16 @@ export const customizationApi = createApi({
       providesTags: ["Registry"],
     }),
 
-    getConfig: builder.query<ConfigDetailResponse, { kind: ConfigKind; id: string }>({
-      queryFn: async ({ kind, id }, api, _opts, baseQuery) => {
+    getConfig: builder.query<ConfigDetailResponse, { kind: ConfigKind; id: string; scope?: "global" | "local" }>({
+      queryFn: async ({ kind, id, scope }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
         if (!port) {
           return { error: { status: 500, data: "Missing lspPort in config" } };
         }
+        const scopeParam = scope ? `?scope=${scope}` : "";
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}`,
+          url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}${scopeParam}`,
         });
         if (result.error) {
           return { error: { status: result.error.status as number, data: String(result.error.data) } };
@@ -92,8 +102,8 @@ export const customizationApi = createApi({
       providesTags: (_result, _error, { kind, id }) => [{ type: "Config", id: `${kind}/${id}` }],
     }),
 
-    saveConfig: builder.mutation<SaveConfigResponse, { kind: ConfigKind; id: string; config: Record<string, unknown> }>({
-      queryFn: async ({ kind, id, config }, api, _opts, baseQuery) => {
+    saveConfig: builder.mutation<SaveConfigResponse, { kind: ConfigKind; id: string; config: Record<string, unknown>; scope?: "global" | "local" }>({
+      queryFn: async ({ kind, id, config, scope }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
         if (!port) {
@@ -102,7 +112,7 @@ export const customizationApi = createApi({
         const result = await baseQuery({
           url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}`,
           method: "PUT",
-          body: { config },
+          body: { config, scope },
         });
         if (result.error) {
           return { error: { status: result.error.status as number, data: String(result.error.data) } };
@@ -112,8 +122,8 @@ export const customizationApi = createApi({
       invalidatesTags: (_result, _error, { kind, id }) => ["Registry", { type: "Config", id: `${kind}/${id}` }],
     }),
 
-    createConfig: builder.mutation<SaveConfigResponse, { kind: ConfigKind; id: string; config: Record<string, unknown> }>({
-      queryFn: async ({ kind, id, config }, api, _opts, baseQuery) => {
+    createConfig: builder.mutation<SaveConfigResponse, { kind: ConfigKind; id: string; config: Record<string, unknown>; scope?: "global" | "local" }>({
+      queryFn: async ({ kind, id, config, scope }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
         if (!port) {
@@ -122,7 +132,7 @@ export const customizationApi = createApi({
         const result = await baseQuery({
           url: `http://127.0.0.1:${port}/v1/customization/${kind}`,
           method: "POST",
-          body: { id, config },
+          body: { id, config, scope },
         });
         if (result.error) {
           return { error: { status: result.error.status as number, data: String(result.error.data) } };
@@ -132,15 +142,15 @@ export const customizationApi = createApi({
       invalidatesTags: ["Registry"],
     }),
 
-    deleteConfig: builder.mutation<DeleteConfigResponse, { kind: ConfigKind; id: string }>({
-      queryFn: async ({ kind, id }, api, _opts, baseQuery) => {
+    deleteConfig: builder.mutation<DeleteConfigResponse, { kind: ConfigKind; id: string; scope: "global" | "local" }>({
+      queryFn: async ({ kind, id, scope }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
         if (!port) {
           return { error: { status: 500, data: "Missing lspPort in config" } };
         }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}`,
+          url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}?scope=${scope}`,
           method: "DELETE",
         });
         if (result.error) {

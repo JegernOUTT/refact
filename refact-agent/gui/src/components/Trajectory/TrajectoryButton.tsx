@@ -25,10 +25,11 @@ export const TrajectoryButton: React.FC<TrajectoryButtonProps> = ({
 
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
-      <HoverCard.Root>
+      <HoverCard.Root openDelay={300}>
         <HoverCard.Trigger>
           <Popover.Trigger>
             <IconButton
+              type="button"
               variant="ghost"
               size="1"
               data-testid="trajectory-button"

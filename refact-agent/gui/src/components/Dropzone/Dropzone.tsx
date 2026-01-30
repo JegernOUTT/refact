@@ -27,13 +27,29 @@ export const FileUploadContext = createContext<{
 export const DropzoneProvider: React.FC<
   React.PropsWithChildren<{ asChild?: boolean }>
 > = ({ asChild, ...props }) => {
-  const { setError, processAndInsertImages } = useAttachedImages();
+  const { setError, processAndInsertImages, processAndInsertTextFiles } = useAttachedImages();
   const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]): void => {
-      if (!isMultimodalitySupportedForCurrentModel) return;
-      processAndInsertImages(acceptedFiles);
+      const imageFiles = acceptedFiles.filter(
+        (f) => f.type === "image/jpeg" || f.type === "image/png"
+      );
+      const textFiles = acceptedFiles.filter(
+        (f) => f.type !== "image/jpeg" && f.type !== "image/png"
+      );
+
+      if (imageFiles.length > 0) {
+        if (!isMultimodalitySupportedForCurrentModel) {
+          setError("Current model does not support images");
+        } else {
+          processAndInsertImages(imageFiles);
+        }
+      }
+
+      if (textFiles.length > 0) {
+        processAndInsertTextFiles(textFiles);
+      }
 
       if (fileRejections.length) {
         const rejectedFileMessage = fileRejections.map((file) => {
@@ -45,7 +61,7 @@ export const DropzoneProvider: React.FC<
         setError(rejectedFileMessage.join("\n"));
       }
     },
-    [processAndInsertImages, setError, isMultimodalitySupportedForCurrentModel],
+    [processAndInsertImages, processAndInsertTextFiles, setError, isMultimodalitySupportedForCurrentModel],
   );
 
   // TODO: disable when chat is busy
@@ -53,19 +69,6 @@ export const DropzoneProvider: React.FC<
     disabled: false,
     noClick: true,
     noKeyboard: true,
-    accept: {
-      // "image/*": []
-      // "image/apng": [],
-      // "image/avif": [],
-      // "image/gif": [],
-      "image/jpeg": [],
-      "image/png": [],
-      // "image/svg+xml": [],
-      // "image/webp": [],
-      // "image/bmp": [],
-      // "image/x-icon": [],
-      // "image/tiff": []
-    },
     onDrop,
   });
 
@@ -145,7 +148,7 @@ export const FileList: React.FC<FileListProps> = ({ attachedFiles }) => {
   const { images, removeImage } = useAttachedImages();
   if (images.length === 0 && attachedFiles.files.length === 0) return null;
   return (
-    <Flex wrap="wrap" gap="1" py="2" data-testid="attached_file_list">
+    <Flex wrap="wrap" gap="1" data-testid="attached_file_list">
       {images.map((file, index) => {
         const key = `image-${file.name}-${index}`;
         return (
@@ -176,6 +179,7 @@ const FileButton: React.FC<{ fileName: string; onClick: () => void }> = ({
 }) => {
   return (
     <Button
+      type="button"
       variant="soft"
       radius="full"
       size="1"

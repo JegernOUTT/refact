@@ -309,12 +309,19 @@ impl Default for ChatMeta {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Copy)]
 #[allow(non_camel_case_types)]
 pub enum ChatMode {
+    #[serde(alias = "no_tools")]
     NO_TOOLS,
+    #[serde(alias = "explore")]
     EXPLORE,
+    #[serde(alias = "agent")]
     AGENT,
+    #[serde(alias = "configure", alias = "configurator")]
     CONFIGURE,
+    #[serde(alias = "project_summary")]
     PROJECT_SUMMARY,
+    #[serde(alias = "task_planner")]
     TASK_PLANNER,
+    #[serde(alias = "task_agent")]
     TASK_AGENT,
 }
 

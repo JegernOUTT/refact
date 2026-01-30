@@ -1,5 +1,6 @@
 import React, { useMemo, useEffect, useRef, useState } from "react";
 import { Flex, Text } from "@radix-ui/themes";
+import { ArrowDownIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
 
 import { useAppSelector } from "../../hooks";
@@ -7,7 +8,6 @@ import {
   selectIsStreaming,
   selectIsWaiting,
   selectMessages,
-  selectThreadMaximumTokens,
   selectStreamVersion,
 } from "../../features/Chat";
 import {
@@ -16,7 +16,6 @@ import {
   isUserMessage,
 } from "../../services/refact";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
-import { useUsageCounter } from "./useUsageCounter";
 
 import styles from "./StreamingTokenCounter.module.css";
 
@@ -55,13 +54,9 @@ export const StreamingTokenCounter: React.FC = () => {
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
   const messages = useAppSelector(selectMessages);
-  const maxContextTokens = useAppSelector(selectThreadMaximumTokens) ?? 0;
   // Subscribe to stream_version to force re-renders on every delta
   // The value itself is not used, but subscribing triggers re-renders
   void useAppSelector(selectStreamVersion);
-
-  const { currentSessionTokens, isContextFromPreviousMessage } =
-    useUsageCounter();
 
   const [visible, setVisible] = useState(() => isStreaming || isWaiting);
   const [displayTokens, setDisplayTokens] = useState(0);
@@ -103,15 +98,6 @@ export const StreamingTokenCounter: React.FC = () => {
   const outputTokens: number =
     actualOutputTokens > 0 ? actualOutputTokens : estimatedOutputTokens;
 
-  const actualContextTokens = usage?.prompt_tokens ?? 0;
-  const contextTokens =
-    actualContextTokens > 0 ? actualContextTokens : currentSessionTokens;
-
-  const contextPercentage = useMemo(() => {
-    if (!maxContextTokens || maxContextTokens === 0) return 0;
-    return Math.min(999, Math.round((contextTokens / maxContextTokens) * 100));
-  }, [contextTokens, maxContextTokens]);
-
   const hasAnyOutput = allText.length > 0 || outputTokens > 0;
   const hasFinalUsage =
     (usage?.prompt_tokens ?? 0) > 0 || (usage?.completion_tokens ?? 0) > 0;
@@ -124,22 +110,15 @@ export const StreamingTokenCounter: React.FC = () => {
 
     if (isStreaming || isWaiting) {
       setVisible(true);
-      return;
-    }
-
-    if (hasAnyOutput && !hasFinalUsage) {
+    } else if (hasAnyOutput && !hasFinalUsage) {
       setVisible(true);
       hideTimerRef.current = window.setTimeout(() => setVisible(false), 60_000);
-      return;
-    }
-
-    if (hasFinalUsage) {
+    } else if (hasFinalUsage) {
       setVisible(true);
       hideTimerRef.current = window.setTimeout(() => setVisible(false), 2_000);
-      return;
+    } else {
+      setVisible(false);
     }
-
-    setVisible(false);
 
     return () => {
       if (hideTimerRef.current) {
@@ -167,7 +146,9 @@ export const StreamingTokenCounter: React.FC = () => {
 
   if (!visible) return null;
 
-  const showPlaceholder = allText.length === 0 && (isStreaming || isWaiting);
+  const hasNoOutput = allText.length === 0 && outputTokens === 0;
+  if (hasNoOutput) return null;
+
   const isOutputEstimate = actualOutputTokens === 0;
 
   const tokensToDisplay =
@@ -175,35 +156,18 @@ export const StreamingTokenCounter: React.FC = () => {
 
   return (
     <Flex align="center" gap="1" className={styles.inlineContainer}>
-      <Text className={styles.separator}>|</Text>
-
       <Text
         key={pulseKey}
+        size="1"
+        color="gray"
         className={classNames(styles.tokenValue, {
           [styles.animateValue]: tokensToDisplay > 0,
         })}
       >
-        {showPlaceholder
-          ? "…"
-          : `${isOutputEstimate ? "~" : ""}${formatNumberToFixed(
-              tokensToDisplay,
-            )}`}
+        {isOutputEstimate ? "~" : ""}
+        {formatNumberToFixed(tokensToDisplay)}
       </Text>
-
-      {contextTokens > 0 && maxContextTokens > 0 && (
-        <Text
-          className={classNames(styles.contextPercent, {
-            [styles.fallback]: isContextFromPreviousMessage,
-            [styles.warning]:
-              contextPercentage >= 70 && !isContextFromPreviousMessage,
-            [styles.critical]:
-              contextPercentage >= 90 && !isContextFromPreviousMessage,
-          })}
-        >
-          ({isOutputEstimate || isContextFromPreviousMessage ? "~" : ""}
-          {contextPercentage}%)
-        </Text>
-      )}
+      <ArrowDownIcon width={12} height={12} />
     </Flex>
   );
 };

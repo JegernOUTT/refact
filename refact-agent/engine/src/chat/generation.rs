@@ -27,7 +27,7 @@ pub fn parse_chat_mode(mode: &str) -> ChatMode {
         "AGENT" => ChatMode::AGENT,
         "NO_TOOLS" => ChatMode::NO_TOOLS,
         "EXPLORE" => ChatMode::EXPLORE,
-        "CONFIGURE" => ChatMode::CONFIGURE,
+        "CONFIGURE" | "CONFIGURATOR" => ChatMode::CONFIGURE,
         "PROJECT_SUMMARY" => ChatMode::PROJECT_SUMMARY,
         "TASK_PLANNER" => ChatMode::TASK_PLANNER,
         "TASK_AGENT" => ChatMode::TASK_AGENT,

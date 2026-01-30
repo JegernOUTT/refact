@@ -23,7 +23,7 @@ export const UNLIMITED_PRO_MODELS_LIST = ["gpt-4o-mini"];
 export function useCapsForToolUse() {
   const [wasAdjusted, setWasAdjusted] = useState(false);
   const caps = useGetCapsQuery();
-  const modesQuery = useGetChatModesQuery();
+  const modesQuery = useGetChatModesQuery(undefined);
   const currentMode = useAppSelector(selectThreadMode);
   const dispatch = useAppDispatch();
 

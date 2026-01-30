@@ -267,7 +267,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
           id: chatId,
           title: "Updated Title",
           model: "gpt-4o",
-          mode: "EXPLORE",
+          mode: "explore",
           tool_use: "explore",
           boost_reasoning: true,
           context_tokens_cap: 4096,
@@ -294,7 +294,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       // But thread params are updated
       expect(runtime.thread.title).toBe("Updated Title");
       expect(runtime.thread.model).toBe("gpt-4o");
-      expect(runtime.thread.mode).toBe("EXPLORE");
+      expect(runtime.thread.mode).toBe("explore");
     });
   });
 

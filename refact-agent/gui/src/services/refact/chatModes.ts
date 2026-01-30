@@ -43,7 +43,7 @@ export const chatModesApi = createApi({
     },
   }),
   endpoints: (builder) => ({
-    getChatModes: builder.query<ChatModesResponse, void>({
+    getChatModes: builder.query<ChatModesResponse, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;

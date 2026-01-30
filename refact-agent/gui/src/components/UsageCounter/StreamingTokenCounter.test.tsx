@@ -66,7 +66,7 @@ describe("StreamingTokenCounter", () => {
       expect(container.firstChild).toBeNull();
     });
 
-    it("should show immediately when waiting (before first assistant message)", () => {
+    it("should be hidden when waiting (before first assistant message)", () => {
       const store = createTestStore({
         streaming: false,
         waiting: true,
@@ -78,14 +78,14 @@ describe("StreamingTokenCounter", () => {
         ],
       });
 
-      render(
+      const { container } = render(
         <Provider store={store}>
           <StreamingTokenCounter />
         </Provider>,
       );
 
-      // Should show placeholder "…"
-      expect(screen.getByText("…")).toBeInTheDocument();
+      // Should be hidden when no assistant output yet
+      expect(container.firstChild).toBeNull();
     });
 
     it("should show immediately when streaming starts", () => {
@@ -116,7 +116,7 @@ describe("StreamingTokenCounter", () => {
   });
 
   describe("Token counting", () => {
-    it("should show placeholder when no assistant message yet", () => {
+    it("should be hidden when no assistant message yet", () => {
       const store = createTestStore({
         streaming: false,
         waiting: true,
@@ -128,13 +128,14 @@ describe("StreamingTokenCounter", () => {
         ],
       });
 
-      render(
+      const { container } = render(
         <Provider store={store}>
           <StreamingTokenCounter />
         </Provider>,
       );
 
-      expect(screen.getByText("…")).toBeInTheDocument();
+      // Hidden when no assistant output
+      expect(container.firstChild).toBeNull();
     });
 
     it("should show estimated tokens during streaming", () => {
@@ -197,7 +198,7 @@ describe("StreamingTokenCounter", () => {
   });
 
   describe("Context percentage", () => {
-    it("should show fallback context when waiting for new assistant", () => {
+    it("should be hidden when waiting for new assistant after previous turn", () => {
       const store = createTestStore({
         streaming: false,
         waiting: true,
@@ -224,19 +225,17 @@ describe("StreamingTokenCounter", () => {
         ],
       });
 
-      render(
+      const { container } = render(
         <Provider store={store}>
           <StreamingTokenCounter />
         </Provider>,
       );
 
-      // Should show placeholder and fallback context percentage
-      expect(screen.getByText("…")).toBeInTheDocument();
-      // Context from previous message: 1000/8000 = 12.5% → 13%
-      expect(screen.getByText(/~13%/)).toBeInTheDocument();
+      // Hidden when waiting for new assistant (no current output)
+      expect(container.firstChild).toBeNull();
     });
 
-    it("should show current context when assistant message exists", () => {
+    it("should show actual tokens when assistant message has usage", () => {
       const store = createTestStore({
         streaming: true,
         waiting: false,
@@ -264,11 +263,11 @@ describe("StreamingTokenCounter", () => {
         </Provider>,
       );
 
-      // Should show actual context: 2000/8000 = 25%
-      expect(screen.getByText("(25%)")).toBeInTheDocument();
+      // Should show actual completion tokens (no ~ prefix)
+      expect(screen.getByText("5")).toBeInTheDocument();
     });
 
-    it("should show warning percentage at 70%", () => {
+    it("should show actual tokens at high usage", () => {
       const store = createTestStore({
         streaming: true,
         waiting: false,
@@ -282,9 +281,9 @@ describe("StreamingTokenCounter", () => {
             role: "assistant",
             content: "Response",
             usage: {
-              completion_tokens: 5,
-              prompt_tokens: 5600, // 70%
-              total_tokens: 5605,
+              completion_tokens: 100,
+              prompt_tokens: 5600,
+              total_tokens: 5700,
             },
           } as AssistantMessage,
         ],
@@ -296,11 +295,11 @@ describe("StreamingTokenCounter", () => {
         </Provider>,
       );
 
-      // Just verify the percentage is shown (CSS class is applied via CSS Modules)
-      expect(screen.getByText("(70%)")).toBeInTheDocument();
+      // Should show actual completion tokens
+      expect(screen.getByText("100")).toBeInTheDocument();
     });
 
-    it("should show critical percentage at 90%", () => {
+    it("should show actual tokens at very high usage", () => {
       const store = createTestStore({
         streaming: true,
         waiting: false,
@@ -314,9 +313,9 @@ describe("StreamingTokenCounter", () => {
             role: "assistant",
             content: "Response",
             usage: {
-              completion_tokens: 5,
-              prompt_tokens: 7200, // 90%
-              total_tokens: 7205,
+              completion_tokens: 200,
+              prompt_tokens: 7200,
+              total_tokens: 7400,
             },
           } as AssistantMessage,
         ],
@@ -328,13 +327,13 @@ describe("StreamingTokenCounter", () => {
         </Provider>,
       );
 
-      // Just verify the percentage is shown (CSS class is applied via CSS Modules)
-      expect(screen.getByText("(90%)")).toBeInTheDocument();
+      // Should show actual completion tokens
+      expect(screen.getByText("200")).toBeInTheDocument();
     });
   });
 
   describe("Turn detection", () => {
-    it("should detect waiting for NEW assistant (user after assistant)", () => {
+    it("should be hidden when waiting for NEW assistant (user after assistant)", () => {
       const store = createTestStore({
         streaming: false,
         waiting: true,
@@ -360,14 +359,14 @@ describe("StreamingTokenCounter", () => {
         ],
       });
 
-      render(
+      const { container } = render(
         <Provider store={store}>
           <StreamingTokenCounter />
         </Provider>,
       );
 
-      // Should show placeholder (not continuing previous assistant)
-      expect(screen.getByText("…")).toBeInTheDocument();
+      // Hidden when waiting for new assistant (no current output)
+      expect(container.firstChild).toBeNull();
     });
 
     it("should use current assistant when continuing same turn", () => {

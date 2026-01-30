@@ -331,7 +331,7 @@ async fn save_trajectory_snapshot_with_parent(
     }
 
     let file_path = if let Some(ref task_meta) = snapshot.task_meta {
-        let task_dir = crate::tasks::storage::get_task_dir(gcx.clone(), &task_meta.task_id).await?;
+        let task_dir = crate::tasks::storage::find_task_dir(gcx.clone(), &task_meta.task_id).await?;
         let traj_dir = crate::tasks::storage::get_task_trajectory_dir(
             &task_dir,
             &task_meta.role,
@@ -355,9 +355,7 @@ async fn save_trajectory_snapshot_with_parent(
     tokio::fs::write(&tmp_path, &json_str)
         .await
         .map_err(|e| format!("Failed to write trajectory: {}", e))?;
-    tokio::fs::rename(&tmp_path, &file_path)
-        .await
-        .map_err(|e| format!("Failed to rename trajectory: {}", e))?;
+    crate::chat::trajectories::atomic_write_file(&tmp_path, &file_path).await?;
 
     tracing::info!(
         "Saved handoff trajectory {} (parent: {}, link: {}) to {:?}",

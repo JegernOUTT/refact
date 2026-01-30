@@ -8,8 +8,8 @@ use tokio::sync::RwLock as ARwLock;
 use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
-use crate::yaml_configs::customization_registry::load_project_registry;
-use crate::yaml_configs::project_configs_bootstrap::project_configs_try_create_all;
+use crate::yaml_configs::customization_registry::load_merged_registry;
+use crate::yaml_configs::project_configs_bootstrap::{global_configs_try_create_all, project_configs_ensure_dirs};
 
 #[derive(Deserialize)]
 pub struct RescanRequest {
@@ -33,29 +33,56 @@ pub struct RegistryErrorResponse {
     pub error: String,
 }
 
+fn json_error_response(status: StatusCode, message: &str) -> Response<Body> {
+    let body = serde_json::json!({"error": message});
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn validate_project_root(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    requested: Option<String>,
+) -> Result<std::path::PathBuf, Response<Body>> {
+    let dirs = get_project_dirs(gcx).await;
+    match requested {
+        Some(path) => {
+            let requested_path = std::path::PathBuf::from(&path);
+            let canonical_requested = requested_path.canonicalize()
+                .unwrap_or_else(|_| requested_path.clone());
+            let matched = dirs.iter().any(|d| {
+                d.canonicalize().unwrap_or_else(|_| d.clone()) == canonical_requested
+            });
+            if matched {
+                Ok(requested_path)
+            } else {
+                Err(json_error_response(StatusCode::BAD_REQUEST, "Invalid project root: not a workspace directory"))
+            }
+        }
+        None => {
+            dirs.into_iter().next().ok_or_else(|| {
+                json_error_response(StatusCode::BAD_REQUEST, "No project root available")
+            })
+        }
+    }
+}
+
 pub async fn handle_v1_project_configs_rescan(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-    let request: RescanRequest = serde_json::from_slice(&body_bytes).unwrap_or(RescanRequest { project_root: None });
+    let request: RescanRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let project_root = match request.project_root {
-        Some(path) => std::path::PathBuf::from(path),
-        None => {
-            let dirs = get_project_dirs(gcx.clone()).await;
-            match dirs.first() {
-                Some(dir) => dir.clone(),
-                None => {
-                    return Ok(Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .body(Body::from(r#"{"error": "No project root available"}"#))
-                        .unwrap());
-                }
-            }
-        }
+    let project_root = match validate_project_root(gcx.clone(), request.project_root).await {
+        Ok(path) => path,
+        Err(response) => return Ok(response),
     };
 
-    let registry = load_project_registry(&project_root).await;
+    let config_dir = gcx.read().await.config_dir.clone();
+    let registry = load_merged_registry(&config_dir, Some(&project_root)).await;
 
     let response = RescanResponse {
         ok: registry.errors.is_empty(),
@@ -118,27 +145,19 @@ pub async fn handle_v1_project_configs_bootstrap(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-    let request: RescanRequest = serde_json::from_slice(&body_bytes).unwrap_or(RescanRequest { project_root: None });
+    let request: RescanRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let project_root = match request.project_root {
-        Some(path) => std::path::PathBuf::from(path),
-        None => {
-            let dirs = get_project_dirs(gcx.clone()).await;
-            match dirs.first() {
-                Some(dir) => dir.clone(),
-                None => {
-                    return Ok(Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .body(Body::from(r#"{"error": "No project root available"}"#))
-                        .unwrap());
-                }
-            }
-        }
+    let project_root = match validate_project_root(gcx.clone(), request.project_root).await {
+        Ok(path) => path,
+        Err(response) => return Ok(response),
     };
 
-    match project_configs_try_create_all(&project_root).await {
+    let config_dir = gcx.read().await.config_dir.clone();
+    let _ = global_configs_try_create_all(&config_dir).await;
+    match project_configs_ensure_dirs(&project_root).await {
         Ok(_) => {
-            let registry = load_project_registry(&project_root).await;
+            let registry = load_merged_registry(&config_dir, Some(&project_root)).await;
             let response = RescanResponse {
                 ok: registry.errors.is_empty(),
                 modes_loaded: registry.modes.len(),
@@ -157,10 +176,7 @@ pub async fn handle_v1_project_configs_bootstrap(
                 .unwrap())
         }
         Err(e) => {
-            Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(format!(r#"{{"error": "{}"}}"#, e)))
-                .unwrap())
+            Ok(json_error_response(StatusCode::INTERNAL_SERVER_ERROR, &e))
         }
     }
 }
@@ -181,8 +197,10 @@ pub async fn handle_v1_project_configs_get(
         }
     };
 
-    let _ = project_configs_try_create_all(&project_root).await;
-    let registry = load_project_registry(&project_root).await;
+    let config_dir = gcx.read().await.config_dir.clone();
+    let _ = global_configs_try_create_all(&config_dir).await;
+    let _ = project_configs_ensure_dirs(&project_root).await;
+    let registry = load_merged_registry(&config_dir, Some(&project_root)).await;
 
     let response = ProjectConfigsResponse {
         modes: registry.modes.values()

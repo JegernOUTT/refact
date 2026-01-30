@@ -12,3 +12,4 @@ export { ThinkingButton } from "./ThinkingButton";
 export { ContextCapButton } from "./ContextCapButton";
 export { FadedButton } from "./FadedButton";
 export { SendButtonWithDropdown } from "./SendButton";
+export { UnifiedSendButton } from "./UnifiedSendButton";

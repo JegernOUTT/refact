@@ -1,20 +1,10 @@
-/* Compact inline version for inside Stop button */
 .inlineContainer {
-  font-family: var(--font-mono);
-  font-size: 12px;
   font-variant-numeric: tabular-nums;
-  color: inherit;
-  opacity: 0.9;
-}
-
-.separator {
-  opacity: 0.5;
-  margin: 0 2px;
+  color: var(--gray-11);
 }
 
 .tokenValue {
-  font-weight: 500;
-  min-width: 24px;
+  font-weight: 400;
 }
 
 .animateValue {
@@ -24,32 +14,10 @@
 @keyframes tokenPulse {
   0% {
     opacity: 1;
-    transform: scale(1.08);
+    transform: scale(1.05);
   }
   100% {
-    opacity: 0.9;
+    opacity: 1;
     transform: scale(1);
   }
-}
-
-.contextPercent {
-  opacity: 0.8;
-  font-size: 11px;
-}
-
-.contextPercent.warning {
-  color: var(--yellow-11);
-  opacity: 1;
-}
-
-.contextPercent.critical {
-  color: var(--red-11);
-  opacity: 1;
-  font-weight: 600;
-}
-
-.contextPercent.fallback {
-  color: var(--gray-11);
-  opacity: 0.6;
-  font-size: 11px;
 }

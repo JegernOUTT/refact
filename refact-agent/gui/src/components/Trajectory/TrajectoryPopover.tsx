@@ -59,7 +59,7 @@ export const TrajectoryPopoverContent: React.FC<
   };
 
   return (
-    <Popover.Content side="top" align="end" sideOffset={8}>
+    <Popover.Content side="bottom" align="end" sideOffset={8} className={styles.popoverContent}>
       <Tabs.Root value={activeTab} onValueChange={handleTabChange}>
         <Tabs.List className={styles.tabsList}>
           <Tabs.Trigger value="compress" className={styles.tabsTrigger}>
@@ -71,7 +71,7 @@ export const TrajectoryPopoverContent: React.FC<
         </Tabs.List>
 
         <Tabs.Content value="compress">
-          <Box className={styles.optionsSection}>
+          <div className={styles.optionsSection}>
             <Text as="label" size="2">
               <Flex gap="2" align="center">
                 <Checkbox
@@ -94,8 +94,9 @@ export const TrajectoryPopoverContent: React.FC<
               as="label"
               size="2"
               color={transformOptions.drop_all_context ? "gray" : undefined}
+              style={{ marginLeft: "24px" }}
             >
-              <Flex gap="2" align="center" ml="4">
+              <Flex gap="2" align="center">
                 <Checkbox
                   checked={transformOptions.dedup_and_compress_context}
                   disabled={transformOptions.drop_all_context}
@@ -148,7 +149,7 @@ export const TrajectoryPopoverContent: React.FC<
                 Drop project information
               </Flex>
             </Text>
-          </Box>
+          </div>
 
           {transformPreview && (
             <Box className={styles.previewSection}>
@@ -198,7 +199,7 @@ export const TrajectoryPopoverContent: React.FC<
         </Tabs.Content>
 
         <Tabs.Content value="handoff">
-          <Box className={styles.optionsSection}>
+          <div className={styles.optionsSection}>
             <Text as="label" size="2">
               <Flex gap="2" align="center">
                 <Checkbox
@@ -269,7 +270,7 @@ export const TrajectoryPopoverContent: React.FC<
                 Include all user messages + responses
               </Flex>
             </Text>
-          </Box>
+          </div>
 
           {handoffPreview && (
             <Box className={styles.previewSection}>

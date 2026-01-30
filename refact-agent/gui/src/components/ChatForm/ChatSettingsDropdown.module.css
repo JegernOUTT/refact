@@ -1,0 +1,139 @@
+.trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  color: var(--gray-12);
+  transition: background-color 0.15s ease;
+}
+
+.trigger:hover:not(.disabled) {
+  background-color: var(--gray-a3);
+}
+
+.trigger.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.triggerContent {
+  max-width: 320px;
+}
+
+.modelName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--gray-9);
+  width: 12px;
+  height: 12px;
+}
+
+.content {
+  min-width: 300px;
+  max-width: 400px;
+  max-height: 480px;
+  overflow-y: auto;
+  padding: var(--space-2);
+}
+
+.section {
+  padding: var(--space-2) 0;
+}
+
+.section:first-child {
+  padding-top: 0;
+}
+
+.section:last-child {
+  padding-bottom: 0;
+}
+
+.sectionHeader {
+  display: block;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+}
+
+.groupHeader {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  opacity: 0.7;
+}
+
+.groupSeparator {
+  margin: var(--space-1) 0;
+}
+
+.modelList {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background-color 0.15s ease;
+}
+
+.item:hover:not(:disabled):not(.itemDisabled) {
+  background-color: var(--gray-a3);
+}
+
+.item:disabled,
+.item.itemDisabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.itemSelected {
+  background-color: var(--accent-a3);
+}
+
+.itemSelected:hover:not(:disabled):not(.itemDisabled) {
+  background-color: var(--accent-a4);
+}
+
+.itemModelName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.badge {
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+.sliderContainer {
+  padding: 0 var(--space-1);
+}
+
+.slider {
+  flex: 1;
+}

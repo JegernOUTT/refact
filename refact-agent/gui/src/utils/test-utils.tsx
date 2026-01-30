@@ -35,6 +35,7 @@ const createTestThreadRuntime = (): ChatThreadRuntime => {
     queued_items: [],
     send_immediately: false,
     attached_images: [],
+    attached_text_files: [],
     confirmation: {
       pause: false,
       pause_reasons: [],

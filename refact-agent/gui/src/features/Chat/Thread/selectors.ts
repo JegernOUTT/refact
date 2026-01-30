@@ -344,6 +344,15 @@ export const selectThreadImages = (state: RootState) =>
 export const selectThreadImagesById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.attached_images ?? EMPTY_IMAGES;
 
+const EMPTY_TEXT_FILES: import("./types").TextFile[] = [];
+
+export const selectThreadTextFiles = (state: RootState) =>
+  state.chat.threads[state.chat.current_thread_id]?.attached_text_files ??
+  EMPTY_TEXT_FILES;
+
+export const selectThreadTextFilesById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.attached_text_files ?? EMPTY_TEXT_FILES;
+
 export const selectSseRefreshRequested = (state: RootState) =>
   state.chat.sse_refresh_requested;
 

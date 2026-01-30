@@ -8,9 +8,16 @@ use tokio::sync::RwLock as ARwLock;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_types::*;
-use crate::yaml_configs::project_configs_bootstrap::project_configs_try_create_all;
+use crate::yaml_configs::project_configs_bootstrap::{global_configs_try_create_all, project_configs_ensure_dirs, compute_checksum, get_default_checksum};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigScope {
+    Global,
+    Local,
+}
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RegistryCache {
     pub project_root: PathBuf,
     pub registry: ProjectRegistry,
@@ -18,7 +25,7 @@ pub struct RegistryCache {
 }
 
 pub struct RegistryCacheManager {
-    cache: HashMap<PathBuf, RegistryCache>,
+    pub cache: HashMap<PathBuf, RegistryCache>,
 }
 
 impl RegistryCacheManager {
@@ -38,27 +45,87 @@ impl RegistryCacheManager {
         });
     }
 
+    #[allow(dead_code)]
     pub fn remove(&mut self, project_root: &Path) {
         self.cache.remove(project_root);
     }
 }
 
-pub async fn load_project_registry(project_root: &Path) -> ProjectRegistry {
+pub async fn load_registry_from_dir(dir: &Path) -> ProjectRegistry {
     let mut registry = ProjectRegistry::default();
-    let refact_dir = project_root.join(".refact");
 
-    load_modes(&refact_dir.join("modes"), &mut registry).await;
-    load_subagents(&refact_dir.join("subagents"), &mut registry).await;
-    load_toolbox_commands(&refact_dir.join("toolbox_commands"), &mut registry).await;
-    load_code_lens(&refact_dir.join("code_lens"), &mut registry).await;
+    load_modes(&dir.join("modes"), &mut registry, false).await;
+    load_subagents(&dir.join("subagents"), &mut registry, false).await;
+    load_toolbox_commands(&dir.join("toolbox_commands"), &mut registry).await;
+    load_code_lens(&dir.join("code_lens"), &mut registry).await;
 
     registry
 }
 
-async fn load_modes(dir: &Path, registry: &mut ProjectRegistry) {
+pub async fn load_merged_registry(global_dir: &Path, local_dir: Option<&Path>) -> ProjectRegistry {
+    let global_registry = load_registry_from_dir(global_dir).await;
+
+    let local_registry = match local_dir {
+        Some(dir) => {
+            let refact_dir = dir.join(".refact");
+            load_local_registry_skip_defaults(&refact_dir).await
+        }
+        None => ProjectRegistry::default(),
+    };
+
+    merge_registries(global_registry, local_registry)
+}
+
+async fn load_local_registry_skip_defaults(refact_dir: &Path) -> ProjectRegistry {
+    let mut registry = ProjectRegistry::default();
+
+    load_modes_skip_defaults(&refact_dir.join("modes"), &mut registry).await;
+    load_subagents_skip_defaults(&refact_dir.join("subagents"), &mut registry).await;
+    load_toolbox_commands_skip_defaults(&refact_dir.join("toolbox_commands"), &mut registry).await;
+    load_code_lens_skip_defaults(&refact_dir.join("code_lens"), &mut registry).await;
+
+    registry
+}
+
+fn merge_registries(global: ProjectRegistry, local: ProjectRegistry) -> ProjectRegistry {
+    let mut merged = global;
+
+    for (id, config) in local.modes {
+        merged.modes.insert(id, config);
+    }
+
+    let mut all_overrides = local.mode_overrides;
+    all_overrides.extend(merged.mode_overrides);
+    merged.mode_overrides = all_overrides;
+
+    for (id, config) in local.subagents {
+        merged.subagents.insert(id, config);
+    }
+
+    let mut all_subagent_overrides = local.subagent_overrides;
+    all_subagent_overrides.extend(merged.subagent_overrides);
+    merged.subagent_overrides = all_subagent_overrides;
+
+    for (id, config) in local.toolbox_commands {
+        merged.toolbox_commands.insert(id, config);
+    }
+
+    for (id, config) in local.code_lens {
+        merged.code_lens.insert(id, config);
+    }
+
+    merged.errors.extend(local.errors);
+
+    merged
+}
+
+async fn load_modes(dir: &Path, registry: &mut ProjectRegistry, skip_defaults: bool) {
     let paths = collect_yaml_paths(dir).await;
 
     for path in paths {
+        if skip_defaults && is_unchanged_default(&path, "modes").await {
+            continue;
+        }
         match load_yaml_file::<ModeConfig>(&path).await {
             Ok(config) => {
                 if config.base.is_some() && config.match_models.is_some() {
@@ -82,10 +149,17 @@ async fn load_modes(dir: &Path, registry: &mut ProjectRegistry) {
     }
 }
 
-async fn load_subagents(dir: &Path, registry: &mut ProjectRegistry) {
+async fn load_modes_skip_defaults(dir: &Path, registry: &mut ProjectRegistry) {
+    load_modes(dir, registry, true).await;
+}
+
+async fn load_subagents(dir: &Path, registry: &mut ProjectRegistry, skip_defaults: bool) {
     let paths = collect_yaml_paths(dir).await;
 
     for path in paths {
+        if skip_defaults && is_unchanged_default(&path, "subagents").await {
+            continue;
+        }
         match load_yaml_file::<SubagentConfig>(&path).await {
             Ok(config) => {
                 if config.base.is_some() && config.match_models.is_some() {
@@ -109,10 +183,25 @@ async fn load_subagents(dir: &Path, registry: &mut ProjectRegistry) {
     }
 }
 
+async fn load_subagents_skip_defaults(dir: &Path, registry: &mut ProjectRegistry) {
+    load_subagents(dir, registry, true).await;
+}
+
 async fn load_toolbox_commands(dir: &Path, registry: &mut ProjectRegistry) {
+    load_toolbox_commands_inner(dir, registry, false).await;
+}
+
+async fn load_toolbox_commands_skip_defaults(dir: &Path, registry: &mut ProjectRegistry) {
+    load_toolbox_commands_inner(dir, registry, true).await;
+}
+
+async fn load_toolbox_commands_inner(dir: &Path, registry: &mut ProjectRegistry, skip_defaults: bool) {
     let paths = collect_yaml_paths(dir).await;
 
     for path in paths {
+        if skip_defaults && is_unchanged_default(&path, "toolbox_commands").await {
+            continue;
+        }
         match load_yaml_file::<ToolboxCommandConfig>(&path).await {
             Ok(config) => {
                 if registry.toolbox_commands.contains_key(&config.id) {
@@ -135,9 +224,20 @@ async fn load_toolbox_commands(dir: &Path, registry: &mut ProjectRegistry) {
 }
 
 async fn load_code_lens(dir: &Path, registry: &mut ProjectRegistry) {
+    load_code_lens_inner(dir, registry, false).await;
+}
+
+async fn load_code_lens_skip_defaults(dir: &Path, registry: &mut ProjectRegistry) {
+    load_code_lens_inner(dir, registry, true).await;
+}
+
+async fn load_code_lens_inner(dir: &Path, registry: &mut ProjectRegistry, skip_defaults: bool) {
     let paths = collect_yaml_paths(dir).await;
 
     for path in paths {
+        if skip_defaults && is_unchanged_default(&path, "code_lens").await {
+            continue;
+        }
         match load_yaml_file::<CodeLensConfig>(&path).await {
             Ok(config) => {
                 if registry.code_lens.contains_key(&config.id) {
@@ -182,6 +282,25 @@ async fn load_yaml_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T
         .map_err(|e| format!("Failed to read file: {}", e))?;
     serde_yaml::from_str(&content)
         .map_err(|e| format!("Failed to parse YAML: {}", e))
+}
+
+async fn is_unchanged_default(path: &Path, kind: &str) -> bool {
+    let filename = match path.file_name().and_then(|f| f.to_str()) {
+        Some(f) => f,
+        None => return false,
+    };
+
+    let default_checksum = match get_default_checksum(kind, filename) {
+        Some(c) => c,
+        None => return false,
+    };
+
+    let content = match tokio::fs::read_to_string(path).await {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    compute_checksum(&content) == default_checksum
 }
 
 pub fn resolve_mode_for_model(
@@ -280,31 +399,54 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 pub async fn get_project_registry(
     gcx: Arc<ARwLock<GlobalContext>>,
 ) -> Option<ProjectRegistry> {
+    let config_dir = gcx.read().await.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
-    let project_root = dirs.first()?.clone();
+    let project_root = dirs.first().cloned();
+
+    let cache_key = project_root.clone().unwrap_or_else(|| config_dir.clone());
 
     {
         let gcx_locked = gcx.read().await;
         let cache_result = gcx_locked.project_registry_cache.read();
         if let Ok(cache) = cache_result {
-            if let Some(cached) = cache.get(&project_root) {
+            if let Some(cached) = cache.get(&cache_key) {
                 return Some(cached.registry.clone());
             }
         }
     }
 
-    let _ = project_configs_try_create_all(&project_root).await;
-    let registry = load_project_registry(&project_root).await;
+    let _ = global_configs_try_create_all(&config_dir).await;
+    if let Some(ref root) = project_root {
+        let _ = project_configs_ensure_dirs(root).await;
+    }
+
+    let registry = load_merged_registry(&config_dir, project_root.as_deref()).await;
 
     {
         let gcx_locked = gcx.read().await;
         let cache_result = gcx_locked.project_registry_cache.write();
         if let Ok(mut cache) = cache_result {
-            cache.insert(project_root, registry.clone());
+            cache.insert(cache_key, registry.clone());
         }
     }
 
     Some(registry)
+}
+
+#[allow(dead_code)]
+pub async fn get_global_registry(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> ProjectRegistry {
+    let config_dir = gcx.read().await.config_dir.clone();
+    let _ = global_configs_try_create_all(&config_dir).await;
+    load_registry_from_dir(&config_dir).await
+}
+
+pub async fn invalidate_all_registry_caches(gcx: Arc<ARwLock<GlobalContext>>) {
+    let cache_arc = gcx.read().await.project_registry_cache.clone();
+    if let Ok(mut cache) = cache_arc.write() {
+        cache.cache.clear();
+    };
 }
 
 pub async fn get_mode_config(

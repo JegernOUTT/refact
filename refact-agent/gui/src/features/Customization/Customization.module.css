@@ -1,10 +1,11 @@
 .configList {
-  padding: var(--space-2);
+  padding: var(--space-1);
 }
 
 .configItem {
   cursor: pointer;
   transition: background-color 0.15s;
+  padding: var(--space-2);
 }
 
 .configItem:hover {
@@ -17,16 +18,28 @@
 }
 
 .configEditor {
-  padding: var(--space-3);
-  height: 100%;
+  padding: var(--space-2);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.formContainer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .yamlEditor {
   flex: 1;
-  min-height: 400px;
+  min-height: 300px;
   font-family: var(--code-font-family);
-  font-size: var(--font-size-2);
-  padding: var(--space-3);
+  font-size: var(--font-size-1);
+  padding: var(--space-2);
   border: 1px solid var(--gray-6);
   border-radius: var(--radius-2);
   background-color: var(--gray-2);
@@ -37,4 +50,59 @@
 .yamlEditor:focus {
   outline: none;
   border-color: var(--accent-8);
+}
+
+.editorHeader {
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.scopeRow {
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.panelContainer {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 200px);
+  min-height: 300px;
+}
+
+.listPanel {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.editorPanel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.backButton {
+  margin-bottom: var(--space-2);
+  flex-shrink: 0;
+}
+
+.compactConfigItem {
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-2);
+  transition: background-color 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.compactConfigItem:hover {
+  background-color: var(--gray-a3);
+}
+
+.compactConfigItem.selected {
+  background-color: var(--accent-a4);
 }

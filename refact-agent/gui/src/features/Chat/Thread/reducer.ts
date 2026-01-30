@@ -53,6 +53,9 @@ import {
   addThreadImage,
   removeThreadImageByIndex,
   resetThreadImages,
+  addThreadTextFile,
+  removeThreadTextFileByIndex,
+  resetThreadTextFiles,
   applyChatEvent,
   requestSseRefresh,
   clearSseRefreshRequest,
@@ -111,6 +114,7 @@ const createThreadRuntime = (
     queued_items: [],
     send_immediately: false,
     attached_images: [],
+    attached_text_files: [],
     confirmation: {
       pause: false,
       pause_reasons: [],
@@ -418,6 +422,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       queued_items: [],
       send_immediately: false,
       attached_images: [],
+      attached_text_files: [],
       confirmation: {
         pause: false,
         pause_reasons: [],
@@ -441,6 +446,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const existingRt = getRuntime(state, id);
 
     if (!existingRt) {
+      // eslint-disable-next-line no-console
       console.warn(`[switchToThread] No runtime for ${id}`);
     }
 
@@ -673,6 +679,29 @@ export const chatReducer = createReducer(initialState, (builder) => {
     }
   });
 
+  builder.addCase(addThreadTextFile, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (rt) {
+      rt.attached_text_files.push(action.payload.file);
+    }
+  });
+
+  builder.addCase(removeThreadTextFileByIndex, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (rt) {
+      rt.attached_text_files = rt.attached_text_files.filter(
+        (_, index) => index !== action.payload.index,
+      );
+    }
+  });
+
+  builder.addCase(resetThreadTextFiles, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (rt) {
+      rt.attached_text_files = [];
+    }
+  });
+
   builder.addCase(applyChatEvent, (state, action) => {
     const { chat_id, ...event } = action.payload;
 
@@ -748,6 +777,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
             .queued_items as ChatThreadRuntime["queued_items"],
           send_immediately: existingRuntime?.send_immediately ?? false,
           attached_images: existingRuntime?.attached_images ?? [],
+          attached_text_files: existingRuntime?.attached_text_files ?? [],
           confirmation: {
             pause: event.runtime.paused,
             pause_reasons: event.runtime

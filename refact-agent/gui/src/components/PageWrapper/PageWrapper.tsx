@@ -18,14 +18,14 @@ export const PageWrapper: React.FC<PageWrapperProps> = ({
   style,
 }) => {
   const xPadding = useMemo(() => {
-    if (host === "web") return { initial: "8", xl: "9" };
+    if (host === "web") return { initial: "4", xl: "6" };
     return {
       initial: "2",
       xs: "2",
-      sm: "4",
-      md: "8",
-      lg: "8",
-      xl: "9",
+      sm: "3",
+      md: "4",
+      lg: "5",
+      xl: "6",
     };
   }, [host]);
 

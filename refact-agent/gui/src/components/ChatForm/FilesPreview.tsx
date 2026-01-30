@@ -45,7 +45,7 @@ export const FilesPreview: React.FC<{
 }> = ({ files }) => {
   if (!files || files.length === 0) return null;
   return (
-    <Box p="2" pb="0">
+    <Box>
       {files.map((file, i) => {
         const key =
           typeof file === "string"

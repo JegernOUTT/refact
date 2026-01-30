@@ -170,6 +170,7 @@ export function useTrajectoryOps() {
 
       return true;
     } catch (error) {
+      // eslint-disable-next-line no-console
       console.error("[handleApplyHandoff]", error);
       return false;
     }

@@ -259,11 +259,6 @@ const DefaultHoverTriggerContent: React.FC<{
   coinsCacheCreation,
   tokenMap,
 }) => {
-  const hasContent =
-    (totalCoins !== undefined && totalCoins > 0) || maxContextTokens > 0;
-
-  if (!hasContent) return null;
-
   return (
     <Flex align="center" gap="3">
       {totalCoins !== undefined && totalCoins > 0 && (
@@ -285,49 +280,47 @@ const DefaultHoverTriggerContent: React.FC<{
           </HoverCard.Content>
         </HoverCard.Root>
       )}
-      {maxContextTokens > 0 && (
-        <Popover.Root>
-          <Popover.Trigger>
-            <Flex align="center" gap="1" style={{ cursor: "pointer" }}>
-              <CircularProgress
-                value={currentSessionTokens}
-                max={maxContextTokens}
-                size={18}
-                strokeWidth={2.5}
-              />
-              <Text size="1" color="gray">
-                {formatNumberToFixed(currentSessionTokens)}
-              </Text>
-            </Flex>
-          </Popover.Trigger>
-          <Popover.Content
-            size="1"
-            side="top"
-            align="center"
-            style={{ minWidth: "280px" }}
-          >
-            <Tabs.Root defaultValue="summary">
-              <Tabs.List size="1">
-                <Tabs.Trigger value="summary">Summary</Tabs.Trigger>
-                <Tabs.Trigger value="map">Breakdown</Tabs.Trigger>
-              </Tabs.List>
-              <Box pt="2">
-                <Tabs.Content value="summary">
-                  <TokensHoverContent
-                    currentSessionTokens={currentSessionTokens}
-                    maxContextTokens={maxContextTokens}
-                    inputTokens={inputTokens}
-                    outputTokens={outputTokens}
-                  />
-                </Tabs.Content>
-                <Tabs.Content value="map">
-                  <TokensMapContent tokenMap={tokenMap} />
-                </Tabs.Content>
-              </Box>
-            </Tabs.Root>
-          </Popover.Content>
-        </Popover.Root>
-      )}
+      <Popover.Root>
+        <Popover.Trigger>
+          <Flex align="center" gap="1" style={{ cursor: "pointer" }}>
+            <CircularProgress
+              value={maxContextTokens > 0 ? currentSessionTokens : 0}
+              max={maxContextTokens > 0 ? maxContextTokens : 1}
+              size={18}
+              strokeWidth={2.5}
+            />
+            <Text size="1" color="gray">
+              {formatNumberToFixed(currentSessionTokens)}
+            </Text>
+          </Flex>
+        </Popover.Trigger>
+        <Popover.Content
+          size="1"
+          side="top"
+          align="center"
+          style={{ minWidth: "280px" }}
+        >
+          <Tabs.Root defaultValue="summary">
+            <Tabs.List size="1">
+              <Tabs.Trigger value="summary">Summary</Tabs.Trigger>
+              <Tabs.Trigger value="map">Breakdown</Tabs.Trigger>
+            </Tabs.List>
+            <Box pt="2">
+              <Tabs.Content value="summary">
+                <TokensHoverContent
+                  currentSessionTokens={currentSessionTokens}
+                  maxContextTokens={maxContextTokens}
+                  inputTokens={inputTokens}
+                  outputTokens={outputTokens}
+                />
+              </Tabs.Content>
+              <Tabs.Content value="map">
+                <TokensMapContent tokenMap={tokenMap} />
+              </Tabs.Content>
+            </Box>
+          </Tabs.Root>
+        </Popover.Content>
+      </Popover.Root>
     </Flex>
   );
 };
@@ -398,10 +391,8 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
 
   const shouldUsageBeHidden = useMemo(() => {
     if (isInline) return false;
-    const hasCoins = totalCoins > 0;
-    const hasContext = currentSessionTokens > 0;
-    return !hasCoins && !hasContext;
-  }, [totalCoins, currentSessionTokens, isInline]);
+    return false;
+  }, [isInline]);
 
   useEffectOnce(() => {
     const handleScroll = (event: WheelEvent) => {

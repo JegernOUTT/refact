@@ -14,13 +14,13 @@ describe("StreamingTokenCounter", () => {
     expect(content).toContain("window.clearTimeout(hideTimerRef.current)");
   });
 
-  it("clamps contextPercentage to max 999", () => {
+  it("uses formatNumberToFixed for token display", () => {
     const filePath = path.resolve(
       __dirname,
       "../components/UsageCounter/StreamingTokenCounter.tsx",
     );
     const content = fs.readFileSync(filePath, "utf-8");
 
-    expect(content).toContain("Math.min(999,");
+    expect(content).toContain("formatNumberToFixed");
   });
 });

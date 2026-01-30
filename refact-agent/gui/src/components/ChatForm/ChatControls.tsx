@@ -21,17 +21,13 @@ import {
   QuestionMarkCircledIcon,
 } from "@radix-ui/react-icons";
 import { useTourRefs } from "../../features/Tour";
-import { ModeSelect } from "./ModeSelect";
 import {
-  selectChatId,
   selectIsStreaming,
   selectIsWaiting,
   selectMessages,
-  selectThreadMode,
-  setThreadMode,
 } from "../../features/Chat/Thread";
-import { DEFAULT_MODE } from "../../features/Chat/Thread/types";
-import { useAppSelector, useAppDispatch, useCapsForToolUse } from "../../hooks";
+import { useAppSelector, useCapsForToolUse } from "../../hooks";
+import { useAppDispatch } from "../../hooks";
 import { useAttachedFiles } from "./useCheckBoxes";
 import { push } from "../../features/Pages/pagesSlice";
 import { RichModelSelectItem } from "../Select/RichModelSelectItem";
@@ -246,16 +242,9 @@ export const ChatControls: React.FC<ChatControlsProps> = ({
   attachedFiles,
 }) => {
   const refs = useTourRefs();
-  const dispatch = useAppDispatch();
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
   const messages = useAppSelector(selectMessages);
-  const chatId = useAppSelector(selectChatId);
-  const threadMode = useAppSelector(selectThreadMode);
-  const onSetMode = useCallback(
-    (modeId: string) => dispatch(setThreadMode({ chatId, mode: modeId })),
-    [dispatch, chatId],
-  );
 
   const showControls = useMemo(
     () => messages.length === 0 && !isStreaming && !isWaiting,
@@ -264,8 +253,7 @@ export const ChatControls: React.FC<ChatControlsProps> = ({
 
   return (
     <Flex
-      pt="2"
-      pb="2"
+      pt="1"
       gap="2"
       direction="column"
       align="start"
@@ -309,10 +297,6 @@ export const ChatControls: React.FC<ChatControlsProps> = ({
 
       {showControls && (
         <Flex gap="2" direction="column" ref={(x) => refs.setUseTools(x)}>
-          <ModeSelect
-            selectedMode={threadMode ?? DEFAULT_MODE}
-            onModeChange={onSetMode}
-          />
           <PromptSelect />
         </Flex>
       )}

@@ -27,19 +27,17 @@ import {
   selectSnapshotReceivedById,
   selectThreadById,
   selectChatId,
-  selectThreadConfirmationById,
   selectThreadPauseById,
 } from "../../features/Chat/Thread/selectors";
 import { GroupedDiffs } from "./DiffContent";
 import { popBackTo } from "../../features/Pages/pagesSlice";
 import { ChatLinks, UncommittedChangesWarning } from "../ChatLinks";
-import { telemetryApi } from "../../services/refact/telemetry";
 import { PlaceHolderText } from "./PlaceHolderText";
 import { QueuedMessage } from "./QueuedMessage";
 import { selectSseConnectionForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
 import { ChatLoading } from "./ChatLoading";
-import { StreamingTokenCounter } from "../UsageCounter";
+
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -64,9 +62,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
   const switching = chatId !== renderChatId;
 
-  const pauseReasonsWithPause = useAppSelector((s) =>
-    selectThreadConfirmationById(s, renderChatId),
-  );
   const messages = useAppSelector((s) => selectMessagesById(s, renderChatId));
   const queuedItems = useAppSelector((s) =>
     selectQueuedItemsById(s, renderChatId),
@@ -85,8 +80,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
   const isConfig = thread !== null && thread.mode === "CONFIGURE";
   const isWaiting = useAppSelector((s) => selectIsWaitingById(s, renderChatId));
-  const [sendTelemetryEvent] =
-    telemetryApi.useLazySendTelemetryChatEventQuery();
   const integrationMeta = useAppSelector(selectIntegration);
   const isWaitingForConfirmation = useAppSelector((s) =>
     selectThreadPauseById(s, renderChatId),
@@ -117,15 +110,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     thread?.integration?.name,
     thread?.integration?.path,
   ]);
-
-  const handleManualStopStreamingClick = useCallback(() => {
-    onStopStreaming();
-    void sendTelemetryEvent({
-      scope: `stopStreaming`,
-      success: true,
-      error_message: "",
-    });
-  }, [onStopStreaming, sendTelemetryEvent]);
 
   const shouldConfigButtonBeVisible = useMemo(() => {
     return isConfig && !integrationMeta?.path?.includes("project_summary");
@@ -184,18 +168,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       >
         <ScrollArea scrollbars="horizontal">
           <Flex align="start" gap="3" pb="2">
-            {(isWaiting || isStreaming) && !pauseReasonsWithPause.pause && (
-              <Button
-                color="red"
-                title="stop streaming"
-                onClick={handleManualStopStreamingClick}
-              >
-                <Flex align="center" gap="2">
-                  Stop
-                  <StreamingTokenCounter />
-                </Flex>
-              </Button>
-            )}
             {shouldConfigButtonBeVisible && (
               <Button
                 color="gray"

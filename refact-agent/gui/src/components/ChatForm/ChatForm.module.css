@@ -3,18 +3,38 @@
 }
 
 .chatForm {
-  box-shadow: inset 0 0 0 1px var(--gray-a7);
-  border: 1px solid var(--gray-a7);
+  border: 1px solid var(--gray-a4);
   border-radius: 6px;
   flex-shrink: 0;
   overflow: hidden;
-  --interactive-group-height: 17px;
-  min-height: calc(100% + var(--interactive-group-height));
   background-color: var(--color-surface);
 }
 
 .chatForm__form :global(.rt-TextAreaRoot) {
   background-color: unset;
+}
+
+.textareaWrapper {
+  position: relative;
+}
+
+.contextIndicator {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.contextIndicator > * {
+  pointer-events: auto;
+}
+
+.textareaWrapper :global(.rt-TextAreaInput) {
+  min-height: 100px;
+  padding: var(--space-3);
+  padding-top: calc(var(--space-3) + 24px);
+  padding-right: 160px;
 }
 
 .file {

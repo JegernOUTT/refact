@@ -457,6 +457,7 @@ export const CHAT_CONFIG_THREAD: Chat = {
       queued_items: [],
       send_immediately: false,
       attached_images: [],
+      attached_text_files: [],
       confirmation: {
         pause: false,
         pause_reasons: [],

@@ -5,6 +5,7 @@ import {
   type PayloadWithId,
   type ToolUse,
   type ImageFile,
+  type TextFile,
   IntegrationMeta,
   LspChatMode,
   PayloadWithChatAndMessageId,
@@ -256,6 +257,19 @@ export const removeThreadImageByIndex = createAction<{
 
 export const resetThreadImages = createAction<PayloadWithId>(
   "chatThread/resetImages",
+);
+
+export const addThreadTextFile = createAction<{ id: string; file: TextFile }>(
+  "chatThread/addTextFile",
+);
+
+export const removeThreadTextFileByIndex = createAction<{
+  id: string;
+  index: number;
+}>("chatThread/removeTextFileByIndex");
+
+export const resetThreadTextFiles = createAction<PayloadWithId>(
+  "chatThread/resetTextFiles",
 );
 
 export const clearChatError = createAction<PayloadWithId>(

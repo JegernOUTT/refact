@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from "react";
 import { ChatForm, ChatFormProps } from "../ChatForm";
 import { ChatContent } from "../ChatContent";
-import { Flex, Button, Text, Card } from "@radix-ui/themes";
+import { Flex, Button, Card, Container } from "@radix-ui/themes";
 import { useAppSelector, useAppDispatch, useChatActions } from "../../hooks";
 import { type Config } from "../../features/Config/configSlice";
 import {
@@ -9,15 +9,10 @@ import {
   selectIsStreaming,
   selectPreventSend,
   selectChatId,
-  selectMessages,
-  selectThreadMode,
 } from "../../features/Chat/Thread";
-import { ThreadHistoryButton } from "../Buttons";
-import { push } from "../../features/Pages/pagesSlice";
 import { DropzoneProvider } from "../Dropzone";
 import { useCheckpoints } from "../../hooks/useCheckpoints";
 import { Checkpoints } from "../../features/Checkpoints";
-import { EnhancedModelSelector } from "./EnhancedModelSelector";
 
 export type ChatProps = {
   host: Config["host"];
@@ -42,13 +37,7 @@ export const Chat: React.FC<ChatProps> = ({
 
   const { submit, abort, retryFromIndex } = useChatActions();
 
-  const chatMode = useAppSelector(selectThreadMode);
-  const messages = useAppSelector(selectMessages);
-
   const { shouldCheckpointsPopupBeShown } = useCheckpoints();
-
-  const [isDebugChatHistoryVisible, setIsDebugChatHistoryVisible] =
-    useState(false);
 
   const preventSend = useAppSelector(selectPreventSend);
   const onEnableSend = () => dispatch(enableSend({ id: chatId }));
@@ -63,10 +52,6 @@ export const Chat: React.FC<ChatProps> = ({
     },
     [submit, isViewingRawJSON],
   );
-
-  const handleThreadHistoryPage = useCallback(() => {
-    dispatch(push({ name: "thread history page", chatId }));
-  }, [chatId, dispatch]);
 
   const handleAbort = useCallback(() => {
     void abort();
@@ -109,43 +94,15 @@ export const Chat: React.FC<ChatProps> = ({
             </Flex>
           )}
 
-          <ChatForm
-            key={chatId}
-            onSubmit={handleSubmit}
-            onClose={maybeSendToSidebar}
-          />
+          <Container>
+            <ChatForm
+              key={chatId}
+              onSubmit={handleSubmit}
+              onClose={maybeSendToSidebar}
+            />
+          </Container>
 
-          <Flex justify="between" pl="1" pr="1" pt="1">
-            {messages.length > 0 && (
-              <Flex align="center" justify="between" width="100%">
-                <Flex align="center" gap="2">
-                  <EnhancedModelSelector disabled={isStreaming} />
-                  <Text size="1" color="gray">
-                    •
-                  </Text>
-                  <Text
-                    size="1"
-                    color="gray"
-                    onClick={() =>
-                      setIsDebugChatHistoryVisible((prev) => !prev)
-                    }
-                    style={{ cursor: "pointer" }}
-                  >
-                    mode: {chatMode}
-                  </Text>
-                </Flex>
-                {messages.length !== 0 &&
-                  !isStreaming &&
-                  isDebugChatHistoryVisible && (
-                    <ThreadHistoryButton
-                      title="View history of current thread"
-                      size="1"
-                      onClick={handleThreadHistoryPage}
-                    />
-                  )}
-              </Flex>
-            )}
-          </Flex>
+
         </Flex>
       </Flex>
     </DropzoneProvider>

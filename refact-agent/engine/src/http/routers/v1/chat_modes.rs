@@ -8,8 +8,8 @@ use tokio::sync::RwLock as ARwLock;
 use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
-use crate::yaml_configs::customization_registry::load_project_registry;
-use crate::yaml_configs::project_configs_bootstrap::project_configs_try_create_all;
+use crate::yaml_configs::customization_registry::load_merged_registry;
+use crate::yaml_configs::project_configs_bootstrap::{global_configs_try_create_all, project_configs_ensure_dirs};
 
 #[derive(Serialize)]
 pub struct ChatModesResponse {
@@ -72,8 +72,10 @@ pub async fn handle_v1_chat_modes(
         }
     };
 
-    let _ = project_configs_try_create_all(&project_root).await;
-    let registry = load_project_registry(&project_root).await;
+    let config_dir = gcx.read().await.config_dir.clone();
+    let _ = global_configs_try_create_all(&config_dir).await;
+    let _ = project_configs_ensure_dirs(&project_root).await;
+    let registry = load_merged_registry(&config_dir, Some(&project_root)).await;
 
     let mut modes: Vec<ChatModeInfo> = registry.modes.values()
         .filter(|m| !m.specific)

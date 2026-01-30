@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::Arc;
 use chrono::{Local, Duration};
 use regex::Regex;
@@ -12,6 +12,10 @@ use walkdir::WalkDir;
 
 use std::collections::HashMap;
 
+fn path_contains_component(path: &Path, component: &str) -> bool {
+    path.components().any(|c| c.as_os_str() == component)
+}
+
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::find_trajectory_path;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
@@ -22,6 +26,13 @@ use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 use crate::knowledge_graph::kg_subchat::{enrich_knowledge_metadata, check_deprecation};
 use crate::knowledge_graph::build_knowledge_graph;
 use crate::vecdb::vdb_structs::VecdbSearch;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum StorageScope {
+    Local,
+    Global,
+}
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MemoRecord {
@@ -151,19 +162,42 @@ pub fn create_frontmatter(
     }
 }
 
+pub async fn get_global_knowledge_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
+    let config_dir = gcx.read().await.config_dir.clone();
+    config_dir.join("knowledge")
+}
+
 async fn get_all_knowledge_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
-    get_project_dirs(gcx)
+    let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
         .await
         .into_iter()
         .map(|p| p.join(KNOWLEDGE_FOLDER_NAME))
         .filter(|p| p.exists())
-        .collect()
+        .collect();
+
+    let global_dir = get_global_knowledge_dir(gcx).await;
+    if global_dir.exists() {
+        dirs.push(global_dir);
+    }
+
+    dirs
 }
 
 async fn get_first_knowledge_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
     Ok(workspace_root.join(KNOWLEDGE_FOLDER_NAME))
+}
+
+#[allow(dead_code)]
+pub async fn get_knowledge_dir_for_scope(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    scope: StorageScope,
+) -> Result<PathBuf, String> {
+    match scope {
+        StorageScope::Local => get_first_knowledge_dir(gcx).await,
+        StorageScope::Global => Ok(get_global_knowledge_dir(gcx).await),
+    }
 }
 
 pub async fn memories_add(
@@ -225,7 +259,7 @@ pub async fn load_memories_by_tags(
             if !path.is_file() {
                 continue;
             }
-            if path.to_string_lossy().contains("/archive/") {
+            if path_contains_component(path, "archive") {
                 continue;
             }
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -347,11 +381,16 @@ pub async fn memories_search(
         None => None,
     };
 
-    for rec in search_result.results.iter() {
-        let path_str = rec.file_path.to_string_lossy().to_string();
-        let score = 1.0 - (rec.distance / 2.0).min(1.0);
+    let trajectory_dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx.clone()).await;
 
-        if path_str.contains(KNOWLEDGE_FOLDER_NAME) && !path_str.contains("/archive/") {
+    for rec in search_result.results.iter() {
+        let score = 1.0 - (rec.distance / 2.0).min(1.0);
+        let is_knowledge = knowledge_dirs.iter().any(|d| rec.file_path.starts_with(d))
+            && !path_contains_component(&rec.file_path, "archive");
+        let is_trajectory = trajectory_dirs.iter().any(|d| rec.file_path.starts_with(d))
+            && rec.file_path.extension().map(|e| e == "json").unwrap_or(false);
+
+        if is_knowledge {
             knowledge_matches
                 .entry(rec.file_path.clone())
                 .and_modify(|m| {
@@ -360,7 +399,7 @@ pub async fn memories_search(
                     }
                 })
                 .or_insert(KnowledgeMatch { best_score: score });
-        } else if path_str.contains(".refact/trajectories/") && path_str.ends_with(".json") {
+        } else if is_trajectory {
             let traj_id = rec
                 .file_path
                 .file_stem()
@@ -572,7 +611,7 @@ async fn memories_search_fallback(
             if !path.is_file() {
                 continue;
             }
-            if path.to_string_lossy().contains("/archive/") {
+            if path_contains_component(path, "archive") {
                 continue;
             }
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");

@@ -1,0 +1,126 @@
+.messageItem {
+  padding: var(--space-2);
+  border: 1px solid var(--gray-6);
+  border-radius: var(--radius-2);
+  background-color: var(--gray-2);
+}
+
+.messageContent {
+  font-family: var(--code-font-family);
+  font-size: var(--font-size-1);
+  min-height: 60px;
+}
+
+.tagBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-right: var(--space-1);
+}
+
+.tagRemove {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  min-height: 14px;
+}
+
+.suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 40px;
+  max-height: 150px;
+  overflow-y: auto;
+  background-color: var(--gray-1);
+  border: 1px solid var(--gray-6);
+  border-radius: var(--radius-2);
+  z-index: 100;
+  box-shadow: var(--shadow-3);
+}
+
+.suggestionItem {
+  display: block;
+  width: 100%;
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: var(--font-size-1);
+  color: var(--gray-12);
+}
+
+.suggestionItem:hover {
+  background-color: var(--accent-a3);
+}
+
+.formSection {
+  padding: var(--space-2);
+  border: 1px solid var(--gray-5);
+  border-radius: var(--radius-2);
+  background-color: var(--gray-1);
+}
+
+.promptTextarea {
+  min-height: 100px;
+  font-family: var(--code-font-family);
+  font-size: var(--font-size-1);
+}
+
+.promptTextareaExpand {
+  flex: 1;
+  min-height: 100px;
+  font-family: var(--code-font-family);
+  font-size: var(--font-size-1);
+  resize: none;
+  overflow-y: auto;
+}
+
+.formTabContent {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  overflow-y: auto;
+}
+
+.formTabContentExpanding {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  overflow: hidden;
+}
+
+.expandingField {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 100px;
+  gap: var(--space-1);
+  overflow: hidden;
+}
+
+.extraFieldsEditor {
+  min-height: 80px;
+  font-family: var(--code-font-family);
+  font-size: var(--font-size-1);
+}
+
+.compactField {
+  min-width: 0;
+}
+
+.fieldRow {
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.fieldRow > * {
+  min-width: 80px;
+}

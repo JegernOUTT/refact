@@ -1,72 +1,88 @@
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
+use tokio::fs;
 use tracing::{info, warn};
 
 const CHECKSUM_FILE: &str = "default-checksums.yaml";
 
-pub async fn project_configs_try_create_all(project_root: &Path) -> Result<(), String> {
+pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), String> {
+    if !config_dir.exists() {
+        return Err("Config dir does not exist".to_string());
+    }
+
+    let dirs = ["modes", "subagents", "toolbox_commands", "code_lens", "knowledge", "trajectories", "tasks"];
+    for dir in &dirs {
+        let dir_path = config_dir.join(dir);
+        if let Err(e) = fs::create_dir_all(&dir_path).await {
+            warn!("Failed to create directory {:?}: {}", dir_path, e);
+        }
+    }
+
+    let checksums_path = config_dir.join(CHECKSUM_FILE);
+    let existing_checksums = load_checksums(&checksums_path).await;
+    let mut new_checksums: HashMap<String, String> = HashMap::new();
+
+    for (filename, content) in get_default_modes() {
+        write_default_if_unchanged(&config_dir.join("modes").join(filename), content, &existing_checksums, &mut new_checksums).await;
+    }
+
+    for (filename, content) in get_default_subagents() {
+        write_default_if_unchanged(&config_dir.join("subagents").join(filename), content, &existing_checksums, &mut new_checksums).await;
+    }
+
+    for (filename, content) in get_default_toolbox_commands() {
+        write_default_if_unchanged(&config_dir.join("toolbox_commands").join(filename), content, &existing_checksums, &mut new_checksums).await;
+    }
+
+    for (filename, content) in get_default_code_lens() {
+        write_default_if_unchanged(&config_dir.join("code_lens").join(filename), content, &existing_checksums, &mut new_checksums).await;
+    }
+
+    save_checksums(&checksums_path, &new_checksums).await;
+
+    info!("Global configs created/updated in {:?}", config_dir);
+    Ok(())
+}
+
+pub async fn project_configs_ensure_dirs(project_root: &Path) -> Result<(), String> {
     let refact_dir = project_root.join(".refact");
 
     if !project_root.exists() {
         return Err("Project root does not exist".to_string());
     }
 
-    let dirs = ["modes", "subagents", "toolbox_commands", "code_lens"];
+    let dirs = ["modes", "subagents", "toolbox_commands", "code_lens", "knowledge", "trajectories", "tasks"];
     for dir in &dirs {
         let dir_path = refact_dir.join(dir);
-        if let Err(e) = fs::create_dir_all(&dir_path) {
+        if let Err(e) = fs::create_dir_all(&dir_path).await {
             warn!("Failed to create directory {:?}: {}", dir_path, e);
         }
     }
 
-    let checksums_path = refact_dir.join(CHECKSUM_FILE);
-    let existing_checksums = load_checksums(&checksums_path);
-    let mut new_checksums: HashMap<String, String> = HashMap::new();
-
-    for (filename, content) in get_default_modes() {
-        write_default_if_unchanged(&refact_dir.join("modes").join(filename), content, &existing_checksums, &mut new_checksums);
-    }
-
-    for (filename, content) in get_default_subagents() {
-        write_default_if_unchanged(&refact_dir.join("subagents").join(filename), content, &existing_checksums, &mut new_checksums);
-    }
-
-    for (filename, content) in get_default_toolbox_commands() {
-        write_default_if_unchanged(&refact_dir.join("toolbox_commands").join(filename), content, &existing_checksums, &mut new_checksums);
-    }
-
-    for (filename, content) in get_default_code_lens() {
-        write_default_if_unchanged(&refact_dir.join("code_lens").join(filename), content, &existing_checksums, &mut new_checksums);
-    }
-
-    save_checksums(&checksums_path, &new_checksums);
-
-    info!("Project configs created/updated in {:?}", refact_dir);
     Ok(())
 }
 
-fn load_checksums(path: &Path) -> HashMap<String, String> {
+async fn load_checksums(path: &Path) -> HashMap<String, String> {
     if !path.exists() {
         return HashMap::new();
     }
-    match fs::read_to_string(path) {
+    match fs::read_to_string(path).await {
         Ok(content) => serde_yaml::from_str(&content).unwrap_or_default(),
         Err(_) => HashMap::new(),
     }
 }
 
-fn save_checksums(path: &Path, checksums: &HashMap<String, String>) {
+async fn save_checksums(path: &Path, checksums: &HashMap<String, String>) {
     if let Ok(content) = serde_yaml::to_string(checksums) {
-        let _ = fs::write(path, content);
+        let _ = fs::write(path, content).await;
     }
 }
 
-fn compute_checksum(content: &str) -> String {
+pub fn compute_checksum(content: &str) -> String {
     format!("{:x}", md5::compute(content.as_bytes()))
 }
 
-fn write_default_if_unchanged(
+async fn write_default_if_unchanged(
     path: &Path,
     content: &str,
     existing_checksums: &HashMap<String, String>,
@@ -78,21 +94,37 @@ fn write_default_if_unchanged(
     new_checksums.insert(path_str.clone(), new_checksum.clone());
 
     if path.exists() {
-        if let Ok(existing_content) = fs::read_to_string(path) {
-            let existing_file_checksum = compute_checksum(&existing_content);
-            if let Some(old_default_checksum) = existing_checksums.get(&path_str) {
-                if &existing_file_checksum != old_default_checksum {
+        match fs::read_to_string(path).await {
+            Ok(existing_content) => {
+                let existing_file_checksum = compute_checksum(&existing_content);
+                if let Some(old_default_checksum) = existing_checksums.get(&path_str) {
+                    if &existing_file_checksum != old_default_checksum {
+                        return;
+                    }
+                } else {
                     return;
                 }
-            } else {
-                return;
             }
+            Err(_) => return,
         }
     }
 
-    if let Err(e) = fs::write(path, content) {
+    if let Err(e) = fs::write(path, content).await {
         warn!("Failed to write {:?}: {}", path, e);
     }
+}
+
+pub fn get_default_checksum(kind: &str, filename: &str) -> Option<String> {
+    let defaults = match kind {
+        "modes" => get_default_modes(),
+        "subagents" => get_default_subagents(),
+        "toolbox_commands" => get_default_toolbox_commands(),
+        "code_lens" => get_default_code_lens(),
+        _ => return None,
+    };
+    defaults.iter()
+        .find(|(name, _)| *name == filename)
+        .map(|(_, content)| compute_checksum(content))
 }
 
 fn get_default_modes() -> Vec<(&'static str, &'static str)> {

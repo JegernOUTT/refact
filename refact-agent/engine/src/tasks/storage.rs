@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use git2::Repository;
@@ -14,6 +14,18 @@ use super::types::{TaskMeta, TaskBoard, TaskStatus, TrajectoryInfo};
 use super::events::{TaskEvent, emit_task_event};
 
 const TASKS_DIR: &str = "tasks";
+
+async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    if dest_path.exists() {
+        fs::remove_file(dest_path)
+            .await
+            .map_err(|e| format!("Failed to remove existing file: {}", e))?;
+    }
+    fs::rename(tmp_path, dest_path)
+        .await
+        .map_err(|e| format!("Failed to rename: {}", e))
+}
 
 static BOARD_LOCKS: std::sync::OnceLock<AMutex<HashMap<String, Arc<AMutex<()>>>>> =
     std::sync::OnceLock::new();
@@ -36,6 +48,41 @@ pub async fn get_tasks_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, 
     Ok(workspace_root.join(".refact").join(TASKS_DIR))
 }
 
+pub async fn get_global_tasks_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
+    let config_dir = gcx.read().await.config_dir.clone();
+    config_dir.join(TASKS_DIR)
+}
+
+pub async fn get_all_tasks_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
+        .await
+        .into_iter()
+        .map(|p| p.join(".refact").join(TASKS_DIR))
+        .filter(|p| p.exists())
+        .collect();
+
+    let global_dir = get_global_tasks_dir(gcx).await;
+    if global_dir.exists() {
+        dirs.push(global_dir);
+    }
+
+    dirs
+}
+
+pub async fn find_task_dir(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    task_id: &str,
+) -> Result<PathBuf, String> {
+    validate_task_id(task_id)?;
+    for tasks_dir in get_all_tasks_dirs(gcx).await {
+        let candidate = tasks_dir.join(task_id);
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("Task not found: {}", task_id))
+}
+
 pub async fn ensure_tasks_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
     let dir = get_tasks_dir(gcx).await?;
     if !dir.exists() {
@@ -48,44 +95,44 @@ pub fn validate_task_id(task_id: &str) -> Result<(), String> {
     if task_id.is_empty() {
         return Err("Task ID cannot be empty".into());
     }
-    if task_id.contains('/') || task_id.contains('\\') || task_id.contains("..") {
-        return Err("Task ID contains invalid characters".into());
-    }
-    if task_id.len() > 100 {
+    if task_id.len() > 128 {
         return Err("Task ID too long".into());
+    }
+    if !task_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("Task ID must contain only alphanumeric characters, hyphens, or underscores".into());
     }
     Ok(())
 }
 
-pub async fn get_task_dir(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    task_id: &str,
-) -> Result<PathBuf, String> {
-    validate_task_id(task_id)?;
-    let tasks_dir = get_tasks_dir(gcx).await?;
-    Ok(tasks_dir.join(task_id))
-}
-
 pub async fn list_tasks(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Vec<TaskMeta>, String> {
-    let tasks_dir = match get_tasks_dir(gcx.clone()).await {
-        Ok(dir) => dir,
-        Err(_) => return Ok(vec![]),
-    };
-    if !tasks_dir.exists() {
-        return Ok(vec![]);
-    }
+    let tasks_dirs = get_all_tasks_dirs(gcx.clone()).await;
 
     let mut tasks = vec![];
-    let mut entries = fs::read_dir(&tasks_dir).await.map_err(|e| e.to_string())?;
+    let mut seen_ids = HashSet::new();
 
-    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
-        let path = entry.path();
-        if path.is_dir() {
-            let meta_path = path.join("meta.yaml");
-            if meta_path.exists() {
-                match load_task_meta_from_path(&meta_path).await {
-                    Ok(meta) => tasks.push(meta),
-                    Err(e) => warn!("Failed to load task meta from {:?}: {}", meta_path, e),
+    for tasks_dir in tasks_dirs {
+        if !tasks_dir.exists() {
+            continue;
+        }
+
+        let mut entries = match fs::read_dir(&tasks_dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir() {
+                let meta_path = path.join("meta.yaml");
+                if meta_path.exists() {
+                    match load_task_meta_from_path(&meta_path).await {
+                        Ok(meta) => {
+                            if seen_ids.insert(meta.id.clone()) {
+                                tasks.push(meta);
+                            }
+                        }
+                        Err(e) => warn!("Failed to load task meta from {:?}: {}", meta_path, e),
+                    }
                 }
             }
         }
@@ -104,7 +151,7 @@ pub async fn load_task_meta(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,
 ) -> Result<TaskMeta, String> {
-    let task_dir = get_task_dir(gcx, task_id).await?;
+    let task_dir = find_task_dir(gcx, task_id).await?;
     let meta_path = task_dir.join("meta.yaml");
     load_task_meta_from_path(&meta_path).await
 }
@@ -114,7 +161,7 @@ pub async fn save_task_meta(
     task_id: &str,
     meta: &TaskMeta,
 ) -> Result<(), String> {
-    let task_dir = get_task_dir(gcx, task_id).await?;
+    let task_dir = find_task_dir(gcx, task_id).await?;
     let meta_path = task_dir.join("meta.yaml");
     let content = serde_yaml::to_string(meta).map_err(|e| e.to_string())?;
     fs::write(&meta_path, content)
@@ -126,7 +173,7 @@ pub async fn load_board(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,
 ) -> Result<TaskBoard, String> {
-    let task_dir = get_task_dir(gcx, task_id).await?;
+    let task_dir = find_task_dir(gcx, task_id).await?;
     let board_path = task_dir.join("board.yaml");
     if !board_path.exists() {
         return Ok(TaskBoard::default());
@@ -142,16 +189,14 @@ pub async fn save_board(
     task_id: &str,
     board: &TaskBoard,
 ) -> Result<(), String> {
-    let task_dir = get_task_dir(gcx, task_id).await?;
+    let task_dir = find_task_dir(gcx, task_id).await?;
     let board_path = task_dir.join("board.yaml");
     let tmp_path = task_dir.join("board.yaml.tmp");
     let content = serde_yaml::to_string(board).map_err(|e| e.to_string())?;
     fs::write(&tmp_path, &content)
         .await
         .map_err(|e| e.to_string())?;
-    fs::rename(&tmp_path, &board_path)
-        .await
-        .map_err(|e| e.to_string())
+    atomic_write_file(&tmp_path, &board_path).await
 }
 
 pub async fn update_board_atomic<F, T>(
@@ -186,7 +231,7 @@ pub async fn load_planner_instructions(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,
 ) -> Result<String, String> {
-    let task_dir = get_task_dir(gcx, task_id).await?;
+    let task_dir = find_task_dir(gcx, task_id).await?;
     let path = task_dir.join("planner_instructions.md");
     if !path.exists() {
         return Ok(String::new());
@@ -199,7 +244,7 @@ pub async fn save_planner_instructions(
     task_id: &str,
     content: &str,
 ) -> Result<(), String> {
-    let task_dir = get_task_dir(gcx, task_id).await?;
+    let task_dir = find_task_dir(gcx, task_id).await?;
     let path = task_dir.join("planner_instructions.md");
     fs::write(&path, content).await.map_err(|e| e.to_string())
 }
@@ -297,12 +342,10 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
 }
 
 pub async fn delete_task(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str) -> Result<(), String> {
-    let task_dir = get_task_dir(gcx.clone(), task_id).await?;
-    if task_dir.exists() {
-        fs::remove_dir_all(&task_dir)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    fs::remove_dir_all(&task_dir)
+        .await
+        .map_err(|e| e.to_string())?;
     emit_task_event(
         gcx,
         TaskEvent::TaskDeleted {
@@ -377,7 +420,7 @@ pub async fn list_task_trajectories(
     role: &str,
     agent_id: Option<&str>,
 ) -> Result<Vec<TrajectoryInfo>, String> {
-    let task_dir = get_task_dir(gcx.clone(), task_id).await?;
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
     let traj_dir = get_task_trajectory_dir(&task_dir, role, agent_id);
 
     if !traj_dir.exists() {

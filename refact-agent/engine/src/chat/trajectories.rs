@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
-use axum::extract::Path;
+use axum::extract::Path as AxumPath;
 use axum::http::{Response, StatusCode};
 use axum::Extension;
 use hyper::Body;
@@ -18,6 +18,18 @@ use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
 use crate::subchat::run_subchat_once;
+
+pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    if dest_path.exists() {
+        fs::remove_file(dest_path)
+            .await
+            .map_err(|e| format!("Failed to remove existing file: {}", e))?;
+    }
+    fs::rename(tmp_path, dest_path)
+        .await
+        .map_err(|e| format!("Failed to rename: {}", e))
+}
 
 use super::types::{ThreadParams, SessionState, ChatSession};
 use super::config::timeouts;
@@ -181,20 +193,34 @@ pub async fn get_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Pa
     Ok(workspace_root.join(".refact").join("trajectories"))
 }
 
+pub async fn get_global_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
+    let config_dir = gcx.read().await.config_dir.clone();
+    config_dir.join("trajectories")
+}
+
 pub async fn get_all_trajectories_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
-    get_project_dirs(gcx)
+    let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
         .await
         .into_iter()
         .map(|p| p.join(".refact").join("trajectories"))
         .filter(|p| p.exists())
-        .collect()
+        .collect();
+
+    let global_dir = get_global_trajectories_dir(gcx).await;
+    if global_dir.exists() {
+        dirs.push(global_dir);
+    }
+
+    dirs
 }
 
-async fn get_trajectories_dir_from_weak(
+async fn get_all_trajectories_dirs_from_weak(
     gcx_weak: &Weak<ARwLock<GlobalContext>>,
-) -> Option<PathBuf> {
-    let gcx = gcx_weak.upgrade()?;
-    get_trajectories_dir(gcx).await.ok()
+) -> Vec<PathBuf> {
+    match gcx_weak.upgrade() {
+        Some(gcx) => get_all_trajectories_dirs(gcx).await,
+        None => vec![],
+    }
 }
 
 fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
@@ -219,7 +245,8 @@ pub async fn find_trajectory_path(gcx: Arc<ARwLock<GlobalContext>>, chat_id: &st
         return Some(path);
     }
 
-    if let Ok(tasks_dir) = crate::tasks::storage::get_tasks_dir(gcx.clone()).await {
+    let tasks_dirs = crate::tasks::storage::get_all_tasks_dirs(gcx.clone()).await;
+    for tasks_dir in tasks_dirs {
         if tasks_dir.exists() {
             if let Ok(mut entries) = tokio::fs::read_dir(&tasks_dir).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
@@ -432,7 +459,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         "task_meta": serde_json::to_value(&task_meta).unwrap_or_default(),
     });
 
-    let task_dir = crate::tasks::storage::get_task_dir(gcx.clone(), task_id).await?;
+    let task_dir = crate::tasks::storage::find_task_dir(gcx.clone(), task_id).await?;
     let traj_dir = crate::tasks::storage::get_task_trajectory_dir(&task_dir, "planner", None);
     tokio::fs::create_dir_all(&traj_dir)
         .await
@@ -445,9 +472,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
     tokio::fs::write(&tmp_path, &json_str)
         .await
         .map_err(|e| format!("Failed to write trajectory: {}", e))?;
-    tokio::fs::rename(&tmp_path, &file_path)
-        .await
-        .map_err(|e| format!("Failed to rename trajectory: {}", e))?;
+    atomic_write_file(&tmp_path, &file_path).await?;
 
     info!(
         "Created initial planner trajectory for task {} at {:?}",
@@ -538,7 +563,7 @@ pub async fn save_trajectory_snapshot(
     }
 
     let file_path = if let Some(ref task_meta) = snapshot.task_meta {
-        let task_dir = crate::tasks::storage::get_task_dir(gcx.clone(), &task_meta.task_id).await?;
+        let task_dir = crate::tasks::storage::find_task_dir(gcx.clone(), &task_meta.task_id).await?;
         let traj_dir = crate::tasks::storage::get_task_trajectory_dir(
             &task_dir,
             &task_meta.role,
@@ -562,9 +587,7 @@ pub async fn save_trajectory_snapshot(
     tokio::fs::write(&tmp_path, &json_str)
         .await
         .map_err(|e| format!("Failed to write trajectory: {}", e))?;
-    tokio::fs::rename(&tmp_path, &file_path)
-        .await
-        .map_err(|e| format!("Failed to rename trajectory: {}", e))?;
+    atomic_write_file(&tmp_path, &file_path).await?;
 
     info!(
         "Saved trajectory for chat {} ({} messages) to {:?}",
@@ -821,17 +844,16 @@ pub fn start_trajectory_watcher(gcx: Arc<ARwLock<GlobalContext>>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, bool)>();
 
     tokio::spawn(async move {
-        let trajectories_dir = match get_trajectories_dir_from_weak(&gcx_weak).await {
-            Some(dir) => dir,
-            None => {
-                warn!("No workspace folder found, trajectory watcher not started");
-                return;
-            }
-        };
-
-        if let Err(e) = tokio::fs::create_dir_all(&trajectories_dir).await {
-            warn!("Failed to create trajectories dir for watcher: {}", e);
+        let trajectories_dirs = get_all_trajectories_dirs_from_weak(&gcx_weak).await;
+        if trajectories_dirs.is_empty() {
+            warn!("No trajectories directories found, trajectory watcher not started");
             return;
+        }
+
+        for dir in &trajectories_dirs {
+            if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                warn!("Failed to create trajectories dir {:?} for watcher: {}", dir, e);
+            }
         }
 
         let tx_clone = tx.clone();
@@ -871,14 +893,15 @@ pub fn start_trajectory_watcher(gcx: Arc<ARwLock<GlobalContext>>) {
         let _watcher = Arc::new(std::sync::Mutex::new(watcher));
         {
             let mut w = _watcher.lock().unwrap();
-            if let Err(e) = w.watch(&trajectories_dir, RecursiveMode::NonRecursive) {
-                warn!("Failed to watch trajectories dir: {}", e);
-                return;
+            for dir in &trajectories_dirs {
+                if let Err(e) = w.watch(dir, RecursiveMode::NonRecursive) {
+                    warn!("Failed to watch trajectories dir {:?}: {}", dir, e);
+                }
             }
         }
         info!(
-            "Trajectory watcher started for {}",
-            trajectories_dir.display()
+            "Trajectory watcher started for {} directories",
+            trajectories_dirs.len()
         );
 
         let mut pending: std::collections::HashMap<String, (Instant, bool)> =
@@ -947,9 +970,7 @@ async fn atomic_write_json(path: &PathBuf, data: &impl Serialize) -> Result<(), 
     fs::write(&tmp_path, &json)
         .await
         .map_err(|e| e.to_string())?;
-    fs::rename(&tmp_path, path)
-        .await
-        .map_err(|e| e.to_string())?;
+    atomic_write_file(&tmp_path, path).await?;
     Ok(())
 }
 
@@ -1480,26 +1501,27 @@ pub async fn handle_v1_trajectories_list(
         None => None,
     };
 
-    let trajectories_dir = get_trajectories_dir(gcx.clone())
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let mut all_items: Vec<TrajectoryMeta> = Vec::new();
-    if trajectories_dir.exists() {
-        let mut entries = fs::read_dir(&trajectories_dir)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        {
+    let mut seen_ids = std::collections::HashSet::new();
+
+    for trajectories_dir in get_all_trajectories_dirs(gcx.clone()).await {
+        if !trajectories_dir.exists() {
+            continue;
+        }
+        let mut entries = match fs::read_dir(&trajectories_dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
             if let Ok(content) = fs::read_to_string(&path).await {
                 if let Ok(data) = serde_json::from_str::<TrajectoryData>(&content) {
-                    all_items.push(trajectory_data_to_meta(&data));
+                    if seen_ids.insert(data.id.clone()) {
+                        all_items.push(trajectory_data_to_meta(&data));
+                    }
                 }
             }
         }
@@ -1560,23 +1582,26 @@ pub async fn list_all_trajectories_meta(
     gcx: Arc<ARwLock<GlobalContext>>,
 ) -> Result<Vec<TrajectoryMeta>, String> {
     let mut result: Vec<TrajectoryMeta> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
-    let trajectories_dir = get_trajectories_dir(gcx.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if trajectories_dir.exists() {
-        let mut entries = fs::read_dir(&trajectories_dir)
-            .await
-            .map_err(|e| e.to_string())?;
-        while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+    for trajectories_dir in get_all_trajectories_dirs(gcx.clone()).await {
+        if !trajectories_dir.exists() {
+            continue;
+        }
+        let mut entries = match fs::read_dir(&trajectories_dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
             if let Ok(content) = fs::read_to_string(&path).await {
                 if let Ok(data) = serde_json::from_str::<TrajectoryData>(&content) {
-                    result.push(trajectory_data_to_meta(&data));
+                    if seen_ids.insert(data.id.clone()) {
+                        result.push(trajectory_data_to_meta(&data));
+                    }
                 }
             }
         }
@@ -1597,53 +1622,58 @@ pub async fn handle_v1_trajectories_all(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Response<Body>, ScratchError> {
     let mut result: Vec<TrajectoryMeta> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
-    let trajectories_dir = get_trajectories_dir(gcx.clone())
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if trajectories_dir.exists() {
-        let mut entries = fs::read_dir(&trajectories_dir)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        {
+    for trajectories_dir in get_all_trajectories_dirs(gcx.clone()).await {
+        if !trajectories_dir.exists() {
+            continue;
+        }
+        let mut entries = match fs::read_dir(&trajectories_dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
             if let Ok(content) = fs::read_to_string(&path).await {
                 if let Ok(data) = serde_json::from_str::<TrajectoryData>(&content) {
-                    result.push(trajectory_data_to_meta(&data));
+                    if seen_ids.insert(data.id.clone()) {
+                        result.push(trajectory_data_to_meta(&data));
+                    }
                 }
             }
         }
     }
 
-    if let Ok(tasks_dir) = crate::tasks::storage::get_tasks_dir(gcx.clone()).await {
-        if tasks_dir.exists() {
-            if let Ok(mut task_entries) = fs::read_dir(&tasks_dir).await {
-                while let Ok(Some(task_entry)) = task_entries.next_entry().await {
-                    let task_dir = task_entry.path();
-                    if !task_dir.is_dir() {
-                        continue;
-                    }
-                    let task_id = task_dir
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string();
+    for tasks_dir in crate::tasks::storage::get_all_tasks_dirs(gcx.clone()).await {
+        if !tasks_dir.exists() {
+            continue;
+        }
+        let mut task_entries = match fs::read_dir(&tasks_dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        while let Ok(Some(task_entry)) = task_entries.next_entry().await {
+            let task_dir = task_entry.path();
+            if !task_dir.is_dir() {
+                continue;
+            }
+            let task_id = task_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
 
-                    for role in &["planner", "agents"] {
-                        let role_dir = task_dir.join("trajectories").join(role);
-                        if !role_dir.exists() {
-                            continue;
-                        }
-                        let trajectories =
-                            collect_task_trajectories(&role_dir, &task_id, role, None).await;
-                        result.extend(trajectories);
+            for role in &["planner", "agents"] {
+                let role_dir = task_dir.join("trajectories").join(role);
+                if !role_dir.exists() {
+                    continue;
+                }
+                for traj in collect_task_trajectories(&role_dir, &task_id, role, None).await {
+                    if seen_ids.insert(traj.id.clone()) {
+                        result.push(traj);
                     }
                 }
             }
@@ -1735,7 +1765,7 @@ async fn collect_task_trajectories(
 
 pub async fn handle_v1_trajectories_get(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
-    Path(id): Path<String>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<Response<Body>, ScratchError> {
     validate_trajectory_id(&id)?;
     let file_path = find_trajectory_path(gcx, &id).await.ok_or_else(|| {
@@ -1753,7 +1783,7 @@ pub async fn handle_v1_trajectories_get(
 
 pub async fn handle_v1_trajectories_save(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
-    Path(id): Path<String>,
+    AxumPath(id): AxumPath<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     validate_trajectory_id(&id)?;
@@ -1841,7 +1871,7 @@ pub async fn handle_v1_trajectories_save(
 
 pub async fn handle_v1_trajectories_delete(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
-    Path(id): Path<String>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<Response<Body>, ScratchError> {
     validate_trajectory_id(&id)?;
     let file_path = find_trajectory_path(gcx.clone(), &id)

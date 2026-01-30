@@ -793,7 +793,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
         seq: "2",
         type: "thread_updated",
         model: "gpt-4",
-        mode: "AGENT",
+        mode: "agent",
         boost_reasoning: true,
       };
 
@@ -801,7 +801,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
       const runtime = state.threads[chatId]!;
 
       expect(runtime.thread.model).toBe("gpt-4");
-      expect(runtime.thread.mode).toBe("AGENT");
+      expect(runtime.thread.mode).toBe("agent");
       expect(runtime.thread.boost_reasoning).toBe(true);
     });
   });
