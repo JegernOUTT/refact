@@ -82,7 +82,9 @@ pub struct ThreadParams {
     #[serde(default)]
     pub is_title_generated: bool,
     #[serde(default)]
-    pub automatic_patch: bool,
+    pub auto_approve_editing_tools: bool,
+    #[serde(default)]
+    pub auto_approve_dangerous_commands: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_meta: Option<TaskMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,14 +101,15 @@ impl Default for ThreadParams {
             id: Uuid::new_v4().to_string(),
             title: "New Chat".to_string(),
             model: String::new(),
-            mode: "AGENT".to_string(),
+            mode: "agent".to_string(),
             tool_use: "agent".to_string(),
             boost_reasoning: false,
             context_tokens_cap: None,
             include_project_info: true,
             checkpoints_enabled: true,
             is_title_generated: false,
-            automatic_patch: false,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
             task_meta: None,
             parent_id: None,
             link_type: None,
@@ -133,6 +136,12 @@ pub struct RuntimeState {
     pub pause_reasons: Vec<PauseReason>,
     #[serde(default)]
     pub queued_items: Vec<QueuedItem>,
+    #[serde(default, skip_serializing)]
+    pub auto_approved_tool_ids: Vec<String>,
+    #[serde(default, skip_serializing)]
+    pub accepted_tool_ids: Vec<String>,
+    #[serde(default, skip_serializing)]
+    pub paused_message_index: Option<usize>,
 }
 
 impl Default for RuntimeState {
@@ -144,6 +153,9 @@ impl Default for RuntimeState {
             queue_size: 0,
             pause_reasons: Vec::new(),
             queued_items: Vec::new(),
+            auto_approved_tool_ids: Vec::new(),
+            accepted_tool_ids: Vec::new(),
+            paused_message_index: None,
         }
     }
 }
@@ -152,6 +164,7 @@ impl Default for RuntimeState {
 pub struct PauseReason {
     #[serde(rename = "type")]
     pub reason_type: String,
+    pub tool_name: String,
     pub command: String,
     pub rule: String,
     pub tool_call_id: String,
@@ -456,7 +469,7 @@ mod tests {
     fn test_thread_params_default() {
         let params = ThreadParams::default();
         assert_eq!(params.title, "New Chat");
-        assert_eq!(params.mode, "AGENT");
+        assert_eq!(params.mode, "agent");
         assert_eq!(params.tool_use, "agent");
         assert!(!params.boost_reasoning);
         assert!(params.include_project_info);
@@ -656,6 +669,7 @@ mod tests {
     fn test_pause_reason_serde() {
         let reason = PauseReason {
             reason_type: "confirmation".into(),
+            tool_name: "shell".into(),
             command: "shell".into(),
             rule: "ask".into(),
             tool_call_id: "tc1".into(),
@@ -663,6 +677,7 @@ mod tests {
         };
         let json = serde_json::to_value(&reason).unwrap();
         assert_eq!(json["type"], "confirmation");
+        assert_eq!(json["tool_name"], "shell");
         assert_eq!(json["integr_config_path"], "/path");
     }
 

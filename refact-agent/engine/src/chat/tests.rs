@@ -691,6 +691,7 @@ mod tests {
         let event = ChatEvent::PauseRequired {
             reasons: vec![PauseReason {
                 reason_type: "confirmation".to_string(),
+                tool_name: "shell".to_string(),
                 command: "shell".to_string(),
                 rule: "deny_all".to_string(),
                 tool_call_id: "tc-1".to_string(),

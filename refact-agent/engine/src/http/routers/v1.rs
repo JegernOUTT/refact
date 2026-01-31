@@ -124,12 +124,17 @@ mod workspace;
 mod project_configs;
 mod chat_modes;
 mod customization_editor;
+mod project_information;
 
 use crate::http::routers::v1::chat_modes::handle_v1_chat_modes;
 use crate::http::routers::v1::customization_editor::{
     handle_v1_customization_registry, handle_v1_customization_get,
     handle_v1_customization_save, handle_v1_customization_create,
     handle_v1_customization_delete,
+};
+use crate::http::routers::v1::project_information::{
+    handle_v1_project_information_get, handle_v1_project_information_save,
+    handle_v1_project_information_preview,
 };
 
 pub fn make_v1_router() -> Router {
@@ -328,7 +333,10 @@ pub fn make_v1_router() -> Router {
         .route(
             "/chats/:chat_id/trajectory/handoff/apply",
             post(handle_handoff_apply),
-        );
+        )
+        .route("/project-information", get(handle_v1_project_information_get))
+        .route("/project-information", post(handle_v1_project_information_save))
+        .route("/project-information/preview", post(handle_v1_project_information_preview));
 
     builder.layer(axum::middleware::from_fn(telemetry_middleware))
 }

@@ -335,18 +335,18 @@ export const ModeForm: React.FC<ModeFormProps> = ({
                 <Switch
                   size="1"
                   checked={
-                    typeof threadDefaults.automatic_patch === "boolean"
-                      ? threadDefaults.automatic_patch
+                    typeof threadDefaults.auto_approve_editing_tools === "boolean"
+                      ? threadDefaults.auto_approve_editing_tools
                       : false
                   }
                   onCheckedChange={(checked) =>
                     patch(
-                      ["thread_defaults", "automatic_patch"],
+                      ["thread_defaults", "auto_approve_editing_tools"],
                       checked || undefined,
                     )
                   }
                 />
-                <Text size="1">Auto Patch</Text>
+                <Text size="1">Auto Approve Editing</Text>
               </Flex>
             </Flex>
           </Flex>

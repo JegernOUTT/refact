@@ -38,7 +38,9 @@ pub struct ModeThreadDefaults {
     #[serde(default)]
     pub checkpoints_enabled: Option<bool>,
     #[serde(default)]
-    pub automatic_patch: Option<bool>,
+    pub auto_approve_editing_tools: Option<bool>,
+    #[serde(default)]
+    pub auto_approve_dangerous_commands: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -133,7 +135,8 @@ impl ModeConfig {
         if let Some(td) = &override_config.thread_defaults {
             if let Some(v) = td.include_project_info { result.thread_defaults.include_project_info = Some(v); }
             if let Some(v) = td.checkpoints_enabled { result.thread_defaults.checkpoints_enabled = Some(v); }
-            if let Some(v) = td.automatic_patch { result.thread_defaults.automatic_patch = Some(v); }
+            if let Some(v) = td.auto_approve_editing_tools { result.thread_defaults.auto_approve_editing_tools = Some(v); }
+            if let Some(v) = td.auto_approve_dangerous_commands { result.thread_defaults.auto_approve_dangerous_commands = Some(v); }
         }
         result
     }

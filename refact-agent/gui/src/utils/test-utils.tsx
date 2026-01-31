@@ -23,7 +23,7 @@ const createTestThreadRuntime = (): ChatThreadRuntime => {
       tool_use: "explore",
       new_chat_suggested: { wasSuggested: false },
       boost_reasoning: false,
-      automatic_patch: false,
+
       increase_max_tokens: false,
       include_project_info: true,
       context_tokens_cap: undefined,

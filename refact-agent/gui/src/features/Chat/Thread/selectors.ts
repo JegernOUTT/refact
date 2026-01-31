@@ -47,7 +47,7 @@ export const selectCurrentThreadId = (state: RootState) =>
   state.chat.current_thread_id;
 export const selectOpenThreadIds = (state: RootState) =>
   state.chat.open_thread_ids;
-export const selectAllThreads = (state: RootState) => state.chat.threads;
+export const selectAllThreads = (state: RootState): Record<string, ChatThreadRuntime | undefined> => state.chat.threads;
 
 export type TabDisplayData = {
   id: string;
@@ -113,9 +113,6 @@ export const selectToolUse = (state: RootState) => state.chat.tool_use;
 
 export const selectThreadToolUse = (state: RootState) =>
   state.chat.threads[state.chat.current_thread_id]?.thread.tool_use;
-
-export const selectAutomaticPatch = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.automatic_patch;
 
 export const selectAutoApproveEditingTools = (state: RootState) =>
   state.chat.threads[state.chat.current_thread_id]?.thread

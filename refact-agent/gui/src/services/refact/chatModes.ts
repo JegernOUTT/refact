@@ -4,7 +4,8 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 export type ChatModeThreadDefaults = {
   include_project_info: boolean;
   checkpoints_enabled: boolean;
-  automatic_patch: boolean;
+  auto_approve_editing_tools: boolean;
+  auto_approve_dangerous_commands: boolean;
 };
 
 export type ChatModeUi = {

@@ -48,7 +48,6 @@ export type ChatThread = {
   project_name?: string;
   last_user_message_id?: string;
   new_chat_suggested: SuggestedChat;
-  automatic_patch?: boolean;
   auto_approve_editing_tools?: boolean;
   auto_approve_dangerous_commands?: boolean;
   currentMaximumContextTokens?: number;

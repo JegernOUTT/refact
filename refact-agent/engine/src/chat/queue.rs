@@ -175,9 +175,15 @@ pub fn apply_setparams_patch(
             changed = true;
         }
     }
-    if let Some(auto_patch) = patch.get("automatic_patch").and_then(|v| v.as_bool()) {
-        if thread.automatic_patch != auto_patch {
-            thread.automatic_patch = auto_patch;
+    if let Some(val) = patch.get("auto_approve_editing_tools").and_then(|v| v.as_bool()) {
+        if thread.auto_approve_editing_tools != val {
+            thread.auto_approve_editing_tools = val;
+            changed = true;
+        }
+    }
+    if let Some(val) = patch.get("auto_approve_dangerous_commands").and_then(|v| v.as_bool()) {
+        if thread.auto_approve_dangerous_commands != val {
+            thread.auto_approve_dangerous_commands = val;
             changed = true;
         }
     }
@@ -495,10 +501,18 @@ async fn handle_tool_decisions(
     session_arc: Arc<AMutex<ChatSession>>,
     decisions: &[ToolDecisionItem],
 ) {
-    let (accepted_ids, has_remaining_pauses, tool_calls_to_execute, messages, thread) = {
+    let (auto_approved_ids, has_remaining_pauses, tool_calls_to_execute, messages, thread, any_rejected) = {
         let mut session = session_arc.lock().await;
+        let auto_approved = session.runtime.auto_approved_tool_ids.clone();
+        let paused_msg_idx = session.runtime.paused_message_index;
         let accepted = session.process_tool_decisions(decisions);
-        let remaining = !session.runtime.pause_reasons.is_empty();
+        let any_rejected = decisions.iter().any(|d| !d.accepted);
+
+        for id in &accepted {
+            if !session.runtime.accepted_tool_ids.contains(id) {
+                session.runtime.accepted_tool_ids.push(id.clone());
+            }
+        }
 
         for decision in decisions {
             if !decision.accepted {
@@ -514,21 +528,37 @@ async fn handle_tool_decisions(
             }
         }
 
-        let tool_calls: Vec<crate::call_validation::ChatToolCall> = session
-            .messages
-            .iter()
-            .filter_map(|m| m.tool_calls.as_ref())
-            .flatten()
-            .filter(|tc| accepted.contains(&tc.id))
-            .cloned()
-            .collect();
+        let remaining = !session.runtime.pause_reasons.is_empty();
+
+        let mut ids_to_execute: std::collections::HashSet<String> = session.runtime.accepted_tool_ids.iter().cloned().collect();
+        if !any_rejected && !remaining {
+            for id in &auto_approved {
+                ids_to_execute.insert(id.clone());
+            }
+        }
+
+        let tool_calls: Vec<crate::call_validation::ChatToolCall> = if let Some(msg_idx) = paused_msg_idx {
+            session.messages.get(msg_idx)
+                .and_then(|m| m.tool_calls.as_ref())
+                .map(|tcs| tcs.iter().filter(|tc| ids_to_execute.contains(&tc.id)).cloned().collect())
+                .unwrap_or_default()
+        } else {
+            session.messages
+                .iter()
+                .filter_map(|m| m.tool_calls.as_ref())
+                .flatten()
+                .filter(|tc| ids_to_execute.contains(&tc.id))
+                .cloned()
+                .collect()
+        };
 
         (
-            accepted,
+            auto_approved,
             remaining,
             tool_calls,
             session.messages.clone(),
             session.thread.clone(),
+            any_rejected,
         )
     };
 
@@ -536,7 +566,33 @@ async fn handle_tool_decisions(
         return;
     }
 
-    if !accepted_ids.is_empty() && !tool_calls_to_execute.is_empty() {
+    {
+        let mut session = session_arc.lock().await;
+        session.runtime.accepted_tool_ids.clear();
+        session.runtime.auto_approved_tool_ids.clear();
+        session.runtime.paused_message_index = None;
+    }
+
+    if any_rejected && !auto_approved_ids.is_empty() {
+        let mut session = session_arc.lock().await;
+        for id in &auto_approved_ids {
+            let already_handled = session.messages.iter().any(|m| m.role == "tool" && m.tool_call_id == *id);
+            if already_handled {
+                continue;
+            }
+            let tool_message = ChatMessage {
+                message_id: Uuid::new_v4().to_string(),
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("Tool execution skipped due to user rejection of related tools".to_string()),
+                tool_call_id: id.clone(),
+                tool_failed: Some(true),
+                ..Default::default()
+            };
+            session.add_message(tool_message);
+        }
+    }
+
+    if !tool_calls_to_execute.is_empty() {
         {
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::ExecutingTools, None);
@@ -565,8 +621,8 @@ async fn handle_tool_decisions(
         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
     }
 
-    let any_accepted = decisions.iter().any(|d| d.accepted);
-    if any_accepted {
+    let should_resume = !tool_calls_to_execute.is_empty() || any_rejected;
+    if should_resume {
         start_generation(gcx, session_arc).await;
     } else {
         {
@@ -774,15 +830,6 @@ mod tests {
         let (changed, _) = apply_setparams_patch(&mut thread, &patch);
         assert!(changed);
         assert!(!thread.checkpoints_enabled);
-    }
-
-    #[test]
-    fn test_apply_setparams_automatic_patch() {
-        let mut thread = ThreadParams::default();
-        let patch = json!({"automatic_patch": true});
-        let (changed, _) = apply_setparams_patch(&mut thread, &patch);
-        assert!(changed);
-        assert!(thread.automatic_patch);
     }
 
     #[test]

@@ -175,9 +175,15 @@ pub async fn handle_v1_chat_command(
                         changed = true;
                     }
                 }
-                if let Some(v) = defaults.automatic_patch {
-                    if session.thread.automatic_patch != v {
-                        session.thread.automatic_patch = v;
+                if let Some(v) = defaults.auto_approve_editing_tools {
+                    if session.thread.auto_approve_editing_tools != v {
+                        session.thread.auto_approve_editing_tools = v;
+                        changed = true;
+                    }
+                }
+                if let Some(v) = defaults.auto_approve_dangerous_commands {
+                    if session.thread.auto_approve_dangerous_commands != v {
+                        session.thread.auto_approve_dangerous_commands = v;
                         changed = true;
                     }
                 }
@@ -208,7 +214,8 @@ pub async fn handle_v1_chat_command(
                 obj.insert("mode".to_string(), serde_json::json!(session.thread.mode));
                 obj.insert("include_project_info".to_string(), serde_json::json!(session.thread.include_project_info));
                 obj.insert("checkpoints_enabled".to_string(), serde_json::json!(session.thread.checkpoints_enabled));
-                obj.insert("automatic_patch".to_string(), serde_json::json!(session.thread.automatic_patch));
+                obj.insert("auto_approve_editing_tools".to_string(), serde_json::json!(session.thread.auto_approve_editing_tools));
+                obj.insert("auto_approve_dangerous_commands".to_string(), serde_json::json!(session.thread.auto_approve_dangerous_commands));
             }
         }
         session.emit(ChatEvent::ThreadUpdated {

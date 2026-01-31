@@ -190,7 +190,6 @@ function chatThreadToHistoryItem(thread: ChatThread): ChatHistoryItem {
     integration: thread.integration,
     currentMaximumContextTokens: thread.currentMaximumContextTokens,
     isTitleGenerated: thread.isTitleGenerated,
-    automatic_patch: thread.automatic_patch,
     mode: updatedMode,
     task_id: thread.task_meta?.task_id,
   };
@@ -235,7 +234,6 @@ function trajectoryMetaToHistoryItem(meta: TrajectoryMeta): ChatHistoryItem {
     context_tokens_cap: undefined,
     include_project_info: true,
     increase_max_tokens: false,
-    automatic_patch: false,
     project_name: undefined,
     isTitleGenerated: false,
     createdAt: meta.created_at,
@@ -380,7 +378,6 @@ export const historySlice = createSlice({
         context_tokens_cap: undefined,
         include_project_info: true,
         increase_max_tokens: false,
-        automatic_patch: false,
         project_name: undefined,
         isTitleGenerated: false,
         createdAt: now,

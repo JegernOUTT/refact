@@ -43,7 +43,6 @@ export type TrajectoryData = {
   context_tokens_cap?: number;
   include_project_info?: boolean;
   increase_max_tokens?: boolean;
-  automatic_patch?: boolean;
   project_name?: string;
   isTitleGenerated?: boolean;
 };
@@ -103,7 +102,6 @@ export function chatThreadToTrajectoryData(
     context_tokens_cap: thread.context_tokens_cap,
     include_project_info: thread.include_project_info,
     increase_max_tokens: thread.increase_max_tokens,
-    automatic_patch: thread.automatic_patch,
     project_name: thread.project_name,
     isTitleGenerated: thread.isTitleGenerated,
   };
@@ -121,7 +119,6 @@ export function trajectoryDataToChatThread(data: TrajectoryData): ChatThread {
     context_tokens_cap: data.context_tokens_cap,
     include_project_info: data.include_project_info ?? true,
     increase_max_tokens: data.increase_max_tokens ?? false,
-    automatic_patch: data.automatic_patch ?? false,
     project_name: data.project_name,
     isTitleGenerated: data.isTitleGenerated,
     createdAt: data.created_at,

@@ -20,7 +20,6 @@ export type ThreadParams = {
   checkpoints_enabled: boolean;
   is_title_generated: boolean;
   use_compression?: boolean;
-  automatic_patch?: boolean;
   auto_approve_editing_tools?: boolean;
   auto_approve_dangerous_commands?: boolean;
   task_meta?: {

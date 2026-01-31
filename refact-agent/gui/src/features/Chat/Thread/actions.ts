@@ -298,10 +298,6 @@ export const setBoostReasoning = createAction<PayloadWithChatAndBoolean>(
   "chatThread/setBoostReasoning",
 );
 
-export const setAutomaticPatch = createAction<PayloadWithChatAndBoolean>(
-  "chatThread/setAutomaticPatch",
-);
-
 export const setAutoApproveEditingTools = createAction<PayloadWithChatAndBoolean>(
   "chatThread/setAutoApproveEditingTools",
 );

@@ -53,7 +53,7 @@ fn is_server_executed_tool(tool_call_id: &str) -> bool {
     tool_call_id.starts_with("srvtoolu_")
 }
 
-const PATCH_LIKE_TOOLS: &[&str] = &[
+const EDITING_TOOLS: &[&str] = &[
     "patch",
     "text_edit",
     "create_textdoc",
@@ -64,10 +64,20 @@ const PATCH_LIKE_TOOLS: &[&str] = &[
     "update_textdoc_anchored",
     "apply_patch",
     "undo_textdoc",
+    "mv",
 ];
 
-fn is_patch_like_tool(command: &str) -> bool {
-    PATCH_LIKE_TOOLS.contains(&command)
+const DANGEROUS_TOOLS: &[&str] = &[
+    "shell",
+    "rm",
+];
+
+fn is_editing_tool(tool_name: &str) -> bool {
+    EDITING_TOOLS.contains(&tool_name)
+}
+
+fn is_dangerous_tool(tool_name: &str) -> bool {
+    DANGEROUS_TOOLS.contains(&tool_name)
 }
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
@@ -209,23 +219,38 @@ mod tests {
     }
 
     #[test]
-    fn test_is_patch_like_tool() {
-        assert!(is_patch_like_tool("patch"));
-        assert!(is_patch_like_tool("text_edit"));
-        assert!(is_patch_like_tool("create_textdoc"));
-        assert!(is_patch_like_tool("update_textdoc"));
-        assert!(is_patch_like_tool("update_textdoc_regex"));
-        assert!(is_patch_like_tool("update_textdoc_by_lines"));
-        assert!(is_patch_like_tool("undo_textdoc"));
+    fn test_is_editing_tool() {
+        assert!(is_editing_tool("patch"));
+        assert!(is_editing_tool("text_edit"));
+        assert!(is_editing_tool("create_textdoc"));
+        assert!(is_editing_tool("update_textdoc"));
+        assert!(is_editing_tool("update_textdoc_regex"));
+        assert!(is_editing_tool("update_textdoc_by_lines"));
+        assert!(is_editing_tool("undo_textdoc"));
+        assert!(is_editing_tool("mv"));
     }
 
     #[test]
-    fn test_is_not_patch_like_tool() {
-        assert!(!is_patch_like_tool("shell"));
-        assert!(!is_patch_like_tool("cat"));
-        assert!(!is_patch_like_tool("search"));
-        assert!(!is_patch_like_tool(""));
-        assert!(!is_patch_like_tool("PATCH"));
+    fn test_is_not_editing_tool() {
+        assert!(!is_editing_tool("shell"));
+        assert!(!is_editing_tool("cat"));
+        assert!(!is_editing_tool("search"));
+        assert!(!is_editing_tool(""));
+        assert!(!is_editing_tool("PATCH"));
+    }
+
+    #[test]
+    fn test_is_dangerous_tool() {
+        assert!(is_dangerous_tool("shell"));
+        assert!(is_dangerous_tool("rm"));
+    }
+
+    #[test]
+    fn test_is_not_dangerous_tool() {
+        assert!(!is_dangerous_tool("cat"));
+        assert!(!is_dangerous_tool("mv"));
+        assert!(!is_dangerous_tool("patch"));
+        assert!(!is_dangerous_tool(""));
     }
 }
 
@@ -235,8 +260,9 @@ pub async fn process_tool_calls_once(
     mode_id: &str,
     model_id: Option<&str>,
 ) -> ToolStepOutcome {
-    let (tool_calls, server_tool_calls, messages, thread) = {
+    let (tool_calls, server_tool_calls, messages, thread, tool_message_index) = {
         let session = session_arc.lock().await;
+        let msg_count = session.messages.len();
         let last_msg = session.messages.last();
         match last_msg {
             Some(m) if m.role == "assistant" && m.tool_calls.is_some() => {
@@ -249,6 +275,7 @@ pub async fn process_tool_calls_once(
                     server_calls,
                     session.messages.clone(),
                     session.thread.clone(),
+                    msg_count.saturating_sub(1),
                 )
             }
             _ => return ToolStepOutcome::NoToolCalls,
@@ -298,7 +325,7 @@ pub async fn process_tool_calls_once(
     let (confirmations, denials) =
         check_tools_confirmation(gcx.clone(), &tool_calls, &messages, mode_id, model_id).await;
 
-    let denied_ids: Vec<String> = denials.iter().map(|d| d.tool_call_id.clone()).collect();
+    let denied_ids: std::collections::HashSet<String> = denials.iter().map(|d| d.tool_call_id.clone()).collect();
     if !denials.is_empty() {
         let mut session = session_arc.lock().await;
         for denial in &denials {
@@ -315,12 +342,18 @@ pub async fn process_tool_calls_once(
     }
 
     if !confirmations.is_empty() {
-        let dominated_by_patch =
-            thread.automatic_patch && confirmations.iter().all(|c| is_patch_like_tool(&c.command));
+        let (auto_approved, remaining): (Vec<_>, Vec<_>) = confirmations
+            .into_iter()
+            .partition(|c| {
+                let auto_editing = thread.auto_approve_editing_tools && is_editing_tool(&c.tool_name);
+                let auto_dangerous = thread.auto_approve_dangerous_commands && is_dangerous_tool(&c.tool_name);
+                auto_editing || auto_dangerous
+            });
 
-        if !dominated_by_patch {
+        if !remaining.is_empty() {
+            let auto_approved_ids: Vec<String> = auto_approved.iter().map(|c| c.tool_call_id.clone()).collect();
             let mut session = session_arc.lock().await;
-            session.set_paused_with_reasons(confirmations);
+            session.set_paused_with_reasons_and_auto_approved(remaining, auto_approved_ids, Some(tool_message_index));
             return ToolStepOutcome::Paused;
         }
     }
@@ -426,6 +459,7 @@ pub async fn check_tools_confirmation(
                 Err(e) => {
                     denials.push(PauseReason {
                         reason_type: "denial".to_string(),
+                        tool_name: tool_call.function.name.clone(),
                         command: tool_call.function.name.clone(),
                         rule: format!("Failed to parse arguments: {}", e),
                         tool_call_id: tool_call.id.clone(),
@@ -443,6 +477,7 @@ pub async fn check_tools_confirmation(
                 if result.result == MatchConfirmDenyResult::DENY {
                     denials.push(PauseReason {
                         reason_type: "denial".to_string(),
+                        tool_name: tool_call.function.name.clone(),
                         command: result.command,
                         rule: result.rule,
                         tool_call_id: tool_call.id.clone(),
@@ -471,6 +506,7 @@ pub async fn check_tools_confirmation(
                     "deny" => {
                         denials.push(PauseReason {
                             reason_type: "denial".to_string(),
+                            tool_name: tool_call.function.name.clone(),
                             command: result.command,
                             rule: rule_text,
                             tool_call_id: tool_call.id.clone(),
@@ -480,6 +516,7 @@ pub async fn check_tools_confirmation(
                     "ask" => {
                         confirmations.push(PauseReason {
                             reason_type: "confirmation".to_string(),
+                            tool_name: tool_call.function.name.clone(),
                             command: result.command,
                             rule: rule_text,
                             tool_call_id: tool_call.id.clone(),
@@ -492,6 +529,7 @@ pub async fn check_tools_confirmation(
             Err(e) => {
                 denials.push(PauseReason {
                     reason_type: "denial".to_string(),
+                    tool_name: tool_call.function.name.clone(),
                     command: tool_call.function.name.clone(),
                     rule: format!("confirmation check failed: {}", e),
                     tool_call_id: tool_call.id.clone(),

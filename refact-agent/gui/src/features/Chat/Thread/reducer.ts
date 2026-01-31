@@ -31,7 +31,6 @@ import {
   setIntegrationData,
   setIsWaitingForResponse,
   setMaxNewTokens,
-  setAutomaticPatch,
   setAutoApproveEditingTools,
   setAutoApproveDangerousCommands,
   setLastUserMessageId,
@@ -95,7 +94,6 @@ const createChatThread = (
     mode,
     new_chat_suggested: { wasSuggested: false },
     boost_reasoning: false,
-    automatic_patch: false,
     increase_max_tokens: false,
     include_project_info: true,
     context_tokens_cap: undefined,
@@ -234,7 +232,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
     newRuntime.thread.model = lastParams.model ?? currentRt?.thread.model ?? "";
     newRuntime.thread.boost_reasoning =
       lastParams.boost_reasoning ?? currentRt?.thread.boost_reasoning ?? false;
-    newRuntime.thread.automatic_patch = false;
     newRuntime.thread.increase_max_tokens =
       lastParams.increase_max_tokens ??
       currentRt?.thread.increase_max_tokens ??
@@ -294,7 +291,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       model ?? lastParams.model ?? currentRt?.thread.model ?? "";
     newRuntime.thread.boost_reasoning =
       lastParams.boost_reasoning ?? currentRt?.thread.boost_reasoning ?? false;
-    newRuntime.thread.automatic_patch = false;
     newRuntime.thread.increase_max_tokens =
       lastParams.increase_max_tokens ??
       currentRt?.thread.increase_max_tokens ??
@@ -329,11 +325,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       rt.error = null;
       rt.thread.messages = action.payload.messages;
     }
-  });
-
-  builder.addCase(setAutomaticPatch, (state, action) => {
-    const rt = getRuntime(state, action.payload.chatId);
-    if (rt) rt.thread.automatic_patch = action.payload.value;
   });
 
   builder.addCase(setAutoApproveEditingTools, (state, action) => {
@@ -764,8 +755,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
           isTitleGenerated:
             existingRuntime?.thread.isTitleGenerated ??
             event.thread.is_title_generated,
-          automatic_patch:
-            event.thread.automatic_patch ?? existing?.automatic_patch ?? false,
           auto_approve_editing_tools:
             event.thread.auto_approve_editing_tools ??
             existing?.auto_approve_editing_tools ??
@@ -855,11 +844,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
           typeof params.checkpoints_enabled === "boolean"
         )
           rt.thread.checkpoints_enabled = params.checkpoints_enabled;
-        if (
-          "automatic_patch" in params &&
-          typeof params.automatic_patch === "boolean"
-        )
-          rt.thread.automatic_patch = params.automatic_patch;
         if (
           "auto_approve_editing_tools" in params &&
           typeof params.auto_approve_editing_tools === "boolean"

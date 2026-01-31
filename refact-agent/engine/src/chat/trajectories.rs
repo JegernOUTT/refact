@@ -154,7 +154,6 @@ pub struct TrajectorySnapshot {
     pub context_tokens_cap: Option<usize>,
     pub include_project_info: bool,
     pub is_title_generated: bool,
-    pub automatic_patch: bool,
     pub version: u64,
     pub task_meta: Option<super::types::TaskMeta>,
     pub parent_id: Option<String>,
@@ -177,7 +176,6 @@ impl TrajectorySnapshot {
             context_tokens_cap: session.thread.context_tokens_cap,
             include_project_info: session.thread.include_project_info,
             is_title_generated: session.thread.is_title_generated,
-            automatic_patch: session.thread.automatic_patch,
             version: session.trajectory_version,
             task_meta: session.thread.task_meta.clone(),
             parent_id: session.thread.parent_id.clone(),
@@ -346,10 +344,6 @@ pub async fn load_trajectory_for_chat(
             .get("isTitleGenerated")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        automatic_patch: t
-            .get("automatic_patch")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
         auto_approve_editing_tools: t
             .get("auto_approve_editing_tools")
             .and_then(|v| v.as_bool())
@@ -463,7 +457,6 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         "context_tokens_cap": null,
         "include_project_info": true,
         "isTitleGenerated": false,
-        "automatic_patch": false,
         "task_meta": serde_json::to_value(&task_meta).unwrap_or_default(),
     });
 
@@ -511,7 +504,6 @@ pub async fn save_trajectory_as(
         context_tokens_cap: thread.context_tokens_cap,
         include_project_info: thread.include_project_info,
         is_title_generated: thread.is_title_generated,
-        automatic_patch: thread.automatic_patch,
         version: 1,
         task_meta: thread.task_meta.clone(),
         parent_id: thread.parent_id.clone(),
@@ -552,7 +544,6 @@ pub async fn save_trajectory_snapshot(
         "context_tokens_cap": snapshot.context_tokens_cap,
         "include_project_info": snapshot.include_project_info,
         "isTitleGenerated": snapshot.is_title_generated,
-        "automatic_patch": snapshot.automatic_patch,
     });
 
     if let Some(ref parent_id) = snapshot.parent_id {
@@ -2295,7 +2286,8 @@ mod tests {
                 include_project_info: false,
                 checkpoints_enabled: true,
                 is_title_generated: true,
-                automatic_patch: false,
+                auto_approve_editing_tools: false,
+                auto_approve_dangerous_commands: false,
                 task_meta: None,
                 parent_id: Some("parent-chat-id".to_string()),
                 link_type: Some("subagent".to_string()),

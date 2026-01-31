@@ -31,7 +31,8 @@ pub struct ChatModeInfo {
 pub struct ChatModeThreadDefaults {
     pub include_project_info: bool,
     pub checkpoints_enabled: bool,
-    pub automatic_patch: bool,
+    pub auto_approve_editing_tools: bool,
+    pub auto_approve_dangerous_commands: bool,
 }
 
 #[derive(Serialize)]
@@ -79,7 +80,8 @@ pub async fn handle_v1_chat_modes(
             thread_defaults: ChatModeThreadDefaults {
                 include_project_info: m.thread_defaults.include_project_info.unwrap_or(true),
                 checkpoints_enabled: m.thread_defaults.checkpoints_enabled.unwrap_or(true),
-                automatic_patch: m.thread_defaults.automatic_patch.unwrap_or(false),
+                auto_approve_editing_tools: m.thread_defaults.auto_approve_editing_tools.unwrap_or(false),
+                auto_approve_dangerous_commands: m.thread_defaults.auto_approve_dangerous_commands.unwrap_or(false),
             },
             ui: ChatModeUi {
                 order: m.ui.order.unwrap_or(100),

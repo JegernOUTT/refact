@@ -361,7 +361,6 @@ impl Tool for ToolTaskSpawnAgent {
                 include_project_info: true,
                 checkpoints_enabled: false,
                 is_title_generated: true,
-                automatic_patch: false,
                 auto_approve_editing_tools: true,
                 auto_approve_dangerous_commands: false,
                 task_meta: Some(TaskMeta {

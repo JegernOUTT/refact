@@ -23,7 +23,7 @@ function createHistoryItem(
     boost_reasoning: false,
     include_project_info: true,
     increase_max_tokens: false,
-    automatic_patch: false,
+
     last_user_message_id: "",
     ...overrides,
   };

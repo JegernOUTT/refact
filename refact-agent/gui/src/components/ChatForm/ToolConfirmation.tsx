@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { useAppDispatch, useAppSelector, useChatActions } from "../../hooks";
 import { Card, Button, Text, Flex } from "@radix-ui/themes";
 import { Markdown } from "../Markdown";
@@ -13,7 +13,7 @@ import {
 import {
   selectChatId,
   selectMessages,
-  setAutomaticPatch,
+  setAutoApproveEditingTools,
 } from "../../features/Chat";
 import { PATCH_LIKE_FUNCTIONS } from "./constants";
 
@@ -58,6 +58,7 @@ type ResolvedPauseReason = {
   tool_call_id: string;
   type: string;
   toolName: string;
+  command: string;
   rule: string;
   integr_config_path: string | null;
 };
@@ -96,6 +97,7 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
         tool_call_id: r.tool_call_id,
         type: r.type,
         toolName: toolName ?? "unknown",
+        command: r.command,
         rule: r.rule,
         integr_config_path: r.integr_config_path,
       };
@@ -110,7 +112,7 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   const types = resolvedReasons.map((r) => r.type);
   const rules = [...new Set(resolvedReasons.map((r) => r.rule))];
 
-  const isPatchConfirmation = resolvedReasons.some((r) =>
+  const isPatchConfirmation = resolvedReasons.every((r) =>
     PATCH_LIKE_FUNCTIONS.includes(r.toolName),
   );
 
@@ -146,9 +148,26 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
     void respondToTools(decisions);
   }, [respondToTools, toolCallIds]);
 
-  const handleAllowForThisChat = useCallback(() => {
-    dispatch(setAutomaticPatch({ chatId, value: true }));
-    confirmToolUsage();
+  const [isSettingAutoApprove, setIsSettingAutoApprove] = useState(false);
+
+  const handleAllowForThisChat = useCallback(async () => {
+    setIsSettingAutoApprove(true);
+    try {
+      const { sendChatCommand } = await import("../../services/refact/chatCommands");
+      const state = (await import("../../app/store")).store.getState();
+      const port = state.config.lspPort;
+      const apiKey = state.config.apiKey;
+      if (port && chatId) {
+        await sendChatCommand(chatId, port, apiKey ?? undefined, {
+          type: "set_params",
+          patch: { auto_approve_editing_tools: true },
+        });
+      }
+      dispatch(setAutoApproveEditingTools({ chatId, value: true }));
+      confirmToolUsage();
+    } finally {
+      setIsSettingAutoApprove(false);
+    }
   }, [dispatch, chatId, confirmToolUsage]);
 
   const handleReject = useCallback(() => {
@@ -171,6 +190,7 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
         handleAllowForThisChat={handleAllowForThisChat}
         rejectToolUsage={handleReject}
         confirmToolUsage={confirmToolUsage}
+        isSettingAutoApprove={isSettingAutoApprove}
       />
     );
   }
@@ -194,7 +214,14 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
             <Text>Model {allConfirmation ? "wants" : "tried"} to run:</Text>
           </Flex>
           {resolvedReasons.map((r) => (
-            <Markdown key={r.tool_call_id}>{`\`${r.toolName}\``}</Markdown>
+            <Flex key={r.tool_call_id} direction="column" gap="1">
+              <Markdown>{`\`${r.toolName}\``}</Markdown>
+              {r.command && r.command !== r.toolName && (
+                <Text size="1" color="gray" style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+                  {r.command.length > 200 ? r.command.slice(0, 200) + "..." : r.command}
+                </Text>
+              )}
+            </Flex>
           ))}
           <Text className={styles.ToolConfirmationText}>
             <Markdown color="indigo">{message.concat("\n\n")}</Markdown>
@@ -250,6 +277,7 @@ type PatchConfirmationProps = {
   handleAllowForThisChat: () => void;
   rejectToolUsage: () => void;
   confirmToolUsage: () => void;
+  isSettingAutoApprove?: boolean;
 };
 
 const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
@@ -258,6 +286,7 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
   handleAllowForThisChat,
   confirmToolUsage,
   rejectToolUsage,
+  isSettingAutoApprove,
 }) => {
   const messageForPatch = useMemo(() => {
     const filenames: string[] = [];
@@ -308,8 +337,9 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
               variant="surface"
               size="1"
               onClick={handleAllowForThisChat}
+              disabled={isSettingAutoApprove}
             >
-              Allow for This Chat
+              {isSettingAutoApprove ? "Setting..." : "Allow for This Chat"}
             </Button>
             <Button
               color="grass"

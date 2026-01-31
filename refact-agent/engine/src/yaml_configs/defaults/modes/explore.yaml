@@ -7,7 +7,6 @@ specific: false
 thread_defaults:
   include_project_info: true
   checkpoints_enabled: false
-  automatic_patch: false
 
 ui:
   order: 20

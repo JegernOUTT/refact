@@ -24,7 +24,6 @@ import {
   setToolUse,
   setChatMode,
   setChatModel,
-  setAutomaticPatch,
   setAutoApproveEditingTools,
   setAutoApproveDangerousCommands,
   setIncreaseMaxTokens,
@@ -604,30 +603,6 @@ startListening({
 });
 
 startListening({
-  actionCreator: setAutomaticPatch,
-  effect: async (action, listenerApi) => {
-    const state = listenerApi.getState();
-    const port = state.config.lspPort;
-    const apiKey = state.config.apiKey;
-    const chatId = action.payload.chatId;
-
-    if (!port || !chatId) return;
-
-    try {
-      const { sendChatCommand } = await import(
-        "../services/refact/chatCommands"
-      );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
-        type: "set_params",
-        patch: { automatic_patch: action.payload.value },
-      });
-    } catch {
-      /* ignore */
-    }
-  },
-});
-
-startListening({
   actionCreator: setAutoApproveEditingTools,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
@@ -872,8 +847,6 @@ startListening({
     if (runtime.thread.mode) patch.mode = runtime.thread.mode;
     if (runtime.thread.boost_reasoning !== undefined)
       patch.boost_reasoning = runtime.thread.boost_reasoning;
-    if (runtime.thread.automatic_patch !== undefined)
-      patch.automatic_patch = runtime.thread.automatic_patch;
     if (runtime.thread.include_project_info !== undefined)
       patch.include_project_info = runtime.thread.include_project_info;
     if (runtime.thread.context_tokens_cap !== undefined)
@@ -897,8 +870,12 @@ startListening({
   effect: (action, listenerApi) => {
     const taskId = action.meta.arg.originalArgs;
     const state = listenerApi.getState();
+    const threads = state.chat.threads as Record<
+      string,
+      { thread: { task_meta?: { task_id: string }; is_task_chat?: boolean; id: string } } | undefined
+    >;
 
-    for (const [threadId, runtime] of Object.entries(state.chat.threads)) {
+    for (const [threadId, runtime] of Object.entries(threads)) {
       if (!runtime) continue;
       const thread = runtime.thread;
       if (

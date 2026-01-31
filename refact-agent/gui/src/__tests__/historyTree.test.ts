@@ -18,7 +18,7 @@ const createItem = (
   context_tokens_cap: undefined,
   include_project_info: true,
   increase_max_tokens: false,
-  automatic_patch: false,
+
   project_name: undefined,
   isTitleGenerated: true,
   createdAt: "2024-01-01T00:00:00Z",

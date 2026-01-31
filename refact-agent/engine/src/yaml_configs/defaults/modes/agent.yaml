@@ -7,7 +7,8 @@ specific: false
 thread_defaults:
   include_project_info: true
   checkpoints_enabled: true
-  automatic_patch: false
+  auto_approve_editing_tools: true
+  auto_approve_dangerous_commands: false
 
 ui:
   order: 10

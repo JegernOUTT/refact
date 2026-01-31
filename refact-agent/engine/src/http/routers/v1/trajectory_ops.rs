@@ -267,7 +267,6 @@ pub async fn handle_handoff_apply(
         context_tokens_cap: thread.context_tokens_cap,
         include_project_info: thread.include_project_info,
         is_title_generated: false,
-        automatic_patch: thread.automatic_patch,
         version: 1,
         task_meta,
         parent_id: Some(chat_id.clone()),
@@ -317,7 +316,6 @@ async fn save_trajectory_snapshot_with_parent(
         "context_tokens_cap": snapshot.context_tokens_cap,
         "include_project_info": snapshot.include_project_info,
         "isTitleGenerated": snapshot.is_title_generated,
-        "automatic_patch": snapshot.automatic_patch,
         "parent_id": parent_id,
         "link_type": link_type,
     });

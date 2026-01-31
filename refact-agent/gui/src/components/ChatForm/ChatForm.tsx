@@ -1,15 +1,15 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 
-import { Flex, Box, Text } from "@radix-ui/themes";
+import { Flex, Card, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
 
 import {
   BackToSideBarButton,
   AgentIntegrationsButton,
-  UnifiedSendButton,
+  ThinkingButton,
+  ContextCapButton,
+  SendButtonWithDropdown,
 } from "../Buttons";
-import { StreamingTokenCounter, UsageCounter } from "../UsageCounter";
-import { TrajectoryButton } from "../Trajectory";
 import { TextArea } from "../TextArea";
 import { Form } from "./Form";
 import {
@@ -18,14 +18,11 @@ import {
   useConfig,
   useCapsForToolUse,
   useAutoFocusOnce,
-  useChatActions,
 } from "../../hooks";
 import { ErrorCallout, Callout } from "../Callout";
 import { ComboBox } from "../ComboBox";
 import { FilesPreview } from "./FilesPreview";
-import { ChatControls } from "./ChatControls";
-import { ChatSettingsDropdown } from "./ChatSettingsDropdown";
-import { ModeSelect } from "./ModeSelect";
+import { CapsSelect, ChatControls } from "./ChatControls";
 import { addCheckboxValuesToInput } from "./utils";
 import { useCommandCompletionAndPreviewFiles } from "./useCommandCompletionAndPreviewFiles";
 import { useAppSelector, useAppDispatch } from "../../hooks";
@@ -49,7 +46,8 @@ import {
 } from "../Callout/Callout";
 import { ToolConfirmation } from "./ToolConfirmation";
 import { selectThreadConfirmation } from "../../features/Chat";
-import { AttachImagesButton } from "../Dropzone";
+import { AttachImagesButton, FileList } from "../Dropzone";
+import { ResendButton } from "../ChatContent/ResendButton";
 import { MicrophoneButton, MicrophoneButtonRef } from "./MicrophoneButton";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import {
@@ -61,15 +59,13 @@ import {
   selectMessages,
   selectQueuedItems,
   selectThreadImages,
-  selectThreadMode,
-  setThreadMode,
 } from "../../features/Chat";
 import { telemetryApi } from "../../services/refact";
 import { push } from "../../features/Pages/pagesSlice";
-import { AttachmentsPreview } from "./AttachmentsPreview";
-import { useUsageCounter } from "../UsageCounter/useUsageCounter";
-
+import { TokensPreview } from "./TokensPreview";
 import classNames from "classnames";
+import { useUsageCounter } from "../UsageCounter/useUsageCounter";
+import { ChatInputTopControls } from "./ChatInputTopControls";
 
 export type SendPolicy = "immediate" | "after_flow";
 
@@ -87,8 +83,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const dispatch = useAppDispatch();
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
-  const caps = useCapsForToolUse();
-  const { isMultimodalitySupportedForCurrentModel } = caps;
+  const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
   const config = useConfig();
   const globalError = useAppSelector(getErrorMessage);
   const globalErrorType = useAppSelector(getErrorType);
@@ -101,27 +96,15 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [liveTranscript, setLiveTranscript] = React.useState("");
   const [inputResetKey, setInputResetKey] = React.useState(0);
   const isOnline = useIsOnline();
-  const { isContextFull } = useUsageCounter();
+  const {
+    isWarning,
+    isContextFull,
+    tokenPercentage,
+    shouldShow: shouldShowUsage,
+  } = useUsageCounter();
   const messages = useAppSelector(selectMessages);
   const queuedItems = useAppSelector(selectQueuedItems);
-  const threadMode = useAppSelector(selectThreadMode);
   const autoFocus = useAutoFocusOnce();
-  const { abort, regenerate } = useChatActions();
-
-  const onSetMode = useCallback(
-    (modeId: string) => {
-      if (chatId) {
-        dispatch(setThreadMode({ chatId, mode: modeId }));
-      }
-    },
-    [dispatch, chatId],
-  );
-
-  const isModeDisabled = useMemo(
-    () => isStreaming || isWaiting,
-    [isStreaming, isWaiting],
-  );
-  // Note: Mode is also locked after first message (see ModeSelect component)
   const attachedFiles = useAttachedFiles();
   const shouldShowBalanceLow = useAppSelector(showBalanceLowCallout);
   const attachedImages = useAppSelector(selectThreadImages);
@@ -133,6 +116,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       dispatch(clearChatError({ id: chatId }));
     }
   }, [dispatch, chatId]);
+
+  const caps = useCapsForToolUse();
 
   const allDisabled = caps.usableModelsForPlan.every((option) => {
     if (typeof option === "string") return false;
@@ -160,8 +145,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     return false;
   }, [allDisabled, isContextFull, isOnline]);
 
-  const { processAndInsertImages, textFiles, resetAllTextFiles } =
-    useAttachedImages();
+  const isModelSelectVisible = useMemo(() => messages.length < 1, [messages]);
+
+  const { processAndInsertImages } = useAttachedImages();
   const handlePastingFile = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (!isMultimodalitySupportedForCurrentModel) return;
@@ -214,20 +200,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     (sendPolicy: SendPolicy = "after_flow") => {
       const trimmedValue = value.trim();
       const hasImages = attachedImages.length > 0;
-      const hasTextFiles = textFiles.length > 0;
       const canSubmit =
-        (trimmedValue.length > 0 || hasImages || hasTextFiles) &&
-        isOnline &&
-        !allDisabled;
+        (trimmedValue.length > 0 || hasImages) && isOnline && !allDisabled;
 
       if (canSubmit) {
         const valueWithFiles = attachedFiles.addFilesToInput(trimmedValue);
-        const valueWithTextFiles = textFiles.reduce((acc, file) => {
-          const ext = file.name.split(".").pop() ?? "";
-          return `\`\`\`${ext} ${file.name}\n${file.content}\n\`\`\`\n\n${acc}`;
-        }, valueWithFiles);
         const valueIncludingChecks = addCheckboxValuesToInput(
-          valueWithTextFiles,
+          valueWithFiles,
           checkboxes,
         );
         setLineSelectionInteracted(false);
@@ -236,7 +215,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         setInputResetKey((k) => k + 1);
         unCheckAll();
         attachedFiles.removeAll();
-        resetAllTextFiles();
       }
     },
     [
@@ -244,11 +222,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       allDisabled,
       isOnline,
       attachedImages,
-      textFiles,
       attachedFiles,
       checkboxes,
       setLineSelectionInteracted,
-      resetAllTextFiles,
       onSubmit,
       setValue,
       unCheckAll,
@@ -394,7 +370,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   }
 
   return (
-    <Box style={{ flexShrink: 0, position: "relative" }}>
+    <Card mt="1" style={{ flexShrink: 0, position: "relative" }}>
       {globalErrorType === "balance" && (
         <BallanceCallOut
           mt="0"
@@ -409,10 +385,23 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           Oops, seems that connection was lost... Check your internet connection
         </Callout>
       )}
+      {shouldShowUsage && isContextFull && (
+        <Callout type="error" preventClose mb="2">
+          Context is full ({Math.round(tokenPercentage)}%). Please compress or
+          handoff to continue.
+        </Callout>
+      )}
+      {shouldShowUsage && isWarning && !isContextFull && (
+        <Callout type="warning" preventClose mb="2">
+          Context is almost full ({Math.round(tokenPercentage)}%). Consider
+          compressing or handing off soon.
+        </Callout>
+      )}
 
       <Flex
         ref={(x) => refs.setChat(x)}
         style={{
+          // TODO: direction can be done with prop `direction`
           flexDirection: "column",
           alignSelf: "stretch",
           flex: 1,
@@ -426,125 +415,118 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         )}
         <Form
           disabled={disableSend}
-          className={classNames(
-            styles.chatForm,
-            styles.chatForm__form,
-            className,
-          )}
+          className={classNames(styles.chatForm__form, className)}
           onSubmit={() => handleSubmit("after_flow")}
         >
-          <Box className={styles.textareaWrapper}>
-            <Box className={styles.contextIndicator}>
-              <Flex align="center" gap="2">
-                <StreamingTokenCounter />
-                <UsageCounter />
-                <TrajectoryButton />
-              </Flex>
-            </Box>
+          <FilesPreview files={previewFiles} />
 
-            <AttachmentsPreview attachedFiles={attachedFiles} />
-            <FilesPreview files={previewFiles} />
+          <ChatInputTopControls />
 
-            <ComboBox
-              key={inputResetKey}
-              onHelpClick={handleHelpCommand}
-              commands={commands}
-              requestCommandsCompletion={requestCompletion}
-              value={
-                isVoiceActive && liveTranscript
-                  ? value.trim()
-                    ? `${value}\n${liveTranscript}`
-                    : liveTranscript
-                  : value
-              }
-              onChange={handleChange}
-              onSubmit={(event) => {
-                handleEnter(event);
-              }}
-              placeholder={
-                isVoiceActive
-                  ? "Listening..."
-                  : commands.completions.length < 1
-                    ? "Type @ for commands"
-                    : ""
-              }
-              render={(props) => (
-                <TextArea
-                  data-testid="chat-form-textarea"
-                  required={true}
-                  {...props}
-                  autoFocus={autoFocus}
-                  readOnly={isVoiceActive}
-                  style={{ boxShadow: "none", outline: "none" }}
-                  onPaste={handlePastingFile}
-                />
-              )}
-            />
-          </Box>
-          <Flex gap="2" wrap="wrap" py="2" px="3" align="center">
-            <ChatSettingsDropdown />
-            <ModeSelect
-              selectedMode={threadMode ?? "AGENT"}
-              onModeChange={onSetMode}
-              disabled={isModeDisabled}
-            />
-
-            <Flex justify="end" flexGrow="1" wrap="wrap" gap="2" align="center">
-              <AgentIntegrationsButton
-                title="Set up Agent Integrations"
-                size="1"
-                type="button"
-                onClick={handleAgentIntegrationsClick}
-                ref={(x) => refs.setSetupIntegrations(x)}
+          <ComboBox
+            key={inputResetKey}
+            onHelpClick={handleHelpCommand}
+            commands={commands}
+            requestCommandsCompletion={requestCompletion}
+            value={
+              isVoiceActive && liveTranscript
+                ? value.trim()
+                  ? `${value}\n${liveTranscript}`
+                  : liveTranscript
+                : value
+            }
+            onChange={handleChange}
+            onSubmit={(event) => {
+              handleEnter(event);
+            }}
+            placeholder={
+              isVoiceActive
+                ? "Listening..."
+                : commands.completions.length < 1
+                  ? "Type @ for commands"
+                  : ""
+            }
+            render={(props) => (
+              <TextArea
+                data-testid="chat-form-textarea"
+                required={true}
+                {...props}
+                autoFocus={autoFocus}
+                readOnly={isVoiceActive}
+                style={{ boxShadow: "none", outline: "none" }}
+                onPaste={handlePastingFile}
               />
-              {onClose && (
-                <BackToSideBarButton
-                  disabled={isStreaming}
-                  title="Return to sidebar"
+            )}
+          />
+          <Flex gap="2" wrap="wrap" py="1" px="2" align="center">
+            {isModelSelectVisible && <CapsSelect />}
+            <ContextCapButton />
+
+            <Flex justify="end" flexGrow="1" wrap="wrap" gap="2">
+              <ThinkingButton />
+              <TokensPreview
+                currentMessageQuery={attachedFiles.addFilesToInput(value)}
+              />
+              <Flex gap="2" align="center" justify="center">
+                <AgentIntegrationsButton
+                  title="Set up Agent Integrations"
                   size="1"
-                  onClick={onClose}
+                  type="button"
+                  onClick={handleAgentIntegrationsClick}
+                  ref={(x) => refs.setSetupIntegrations(x)}
                 />
-              )}
-              {config.features?.images !== false &&
-                isMultimodalitySupportedForCurrentModel && (
-                  <AttachImagesButton />
+                {onClose && (
+                  <BackToSideBarButton
+                    disabled={isStreaming}
+                    title="Return to sidebar"
+                    size="1"
+                    onClick={onClose}
+                  />
                 )}
-              <MicrophoneButton
-                ref={microphoneRef}
-                onTranscript={(text) => {
-                  setValue((prev) => {
-                    if (prev.trim()) {
-                      return `${prev}\n${text}`;
-                    }
-                    return text;
-                  });
-                }}
-                onLiveTranscript={handleLiveTranscript}
-                onRecordingChange={handleRecordingChange}
-                disabled={disableMicrophone}
-              />
-              <UnifiedSendButton
-                disabled={isVoiceActive || !isOnline || allDisabled}
-                isStreaming={isStreaming || isWaiting}
-                hasText={value.trim().length > 0 || attachedImages.length > 0}
-                hasMessages={messages.length > 0}
-                queuedCount={queuedItems.length}
-                onSend={() => handleSubmit("after_flow")}
-                onSendImmediately={handleSendImmediately}
-                onStop={() => void abort()}
-                onResend={() => void regenerate()}
-              />
+                {config.features?.images !== false &&
+                  isMultimodalitySupportedForCurrentModel && (
+                    <AttachImagesButton />
+                  )}
+                <MicrophoneButton
+                  ref={microphoneRef}
+                  onTranscript={(text) => {
+                    setValue((prev) => {
+                      if (prev.trim()) {
+                        return `${prev}\n${text}`;
+                      }
+                      return text;
+                    });
+                  }}
+                  onLiveTranscript={handleLiveTranscript}
+                  onRecordingChange={handleRecordingChange}
+                  disabled={disableMicrophone}
+                />
+                <ResendButton />
+                <SendButtonWithDropdown
+                  disabled={
+                    isVoiceActive ||
+                    !isOnline ||
+                    allDisabled ||
+                    (value.trim().length === 0 && attachedImages.length === 0)
+                  }
+                  isStreaming={isStreaming || isWaiting}
+                  queuedCount={queuedItems.length}
+                  onSend={() => handleSubmit("after_flow")}
+                  onSendImmediately={handleSendImmediately}
+                />
+              </Flex>
             </Flex>
           </Flex>
         </Form>
       </Flex>
+      <FileList attachedFiles={attachedFiles} />
 
       <ChatControls
+        // handle adding files
         host={config.host}
         checkboxes={checkboxes}
         onCheckedChange={onToggleCheckbox}
         attachedFiles={attachedFiles}
       />
-    </Box>
+    </Card>
   );
 };

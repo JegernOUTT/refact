@@ -224,6 +224,9 @@ impl ChatSession {
 
         if state != SessionState::Paused && (was_paused || had_pause_reasons) {
             self.runtime.pause_reasons.clear();
+            self.runtime.auto_approved_tool_ids.clear();
+            self.runtime.accepted_tool_ids.clear();
+            self.runtime.paused_message_index = None;
             self.emit(ChatEvent::PauseCleared {});
         }
 
@@ -286,8 +289,11 @@ impl ChatSession {
         });
     }
 
-    pub fn set_paused_with_reasons(&mut self, reasons: Vec<PauseReason>) {
+    pub fn set_paused_with_reasons_and_auto_approved(&mut self, reasons: Vec<PauseReason>, auto_approved_ids: Vec<String>, message_index: Option<usize>) {
         self.runtime.pause_reasons = reasons.clone();
+        self.runtime.auto_approved_tool_ids = auto_approved_ids;
+        self.runtime.accepted_tool_ids.clear();
+        self.runtime.paused_message_index = message_index;
         self.emit(ChatEvent::PauseRequired { reasons });
         self.set_runtime_state(SessionState::Paused, None);
     }
@@ -558,7 +564,7 @@ pub async fn get_or_create_session_with_trajectory(
 
     let trajectory_events_tx = gcx.read().await.trajectory_events_tx.clone();
 
-    let (mut session, _is_new) = if let Some(loaded) =
+    let (mut session, is_new) = if let Some(loaded) =
         super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id).await
     {
         info!(
@@ -580,6 +586,28 @@ pub async fn get_or_create_session_with_trajectory(
         s.increment_version();
         (s, true)
     };
+
+    if is_new {
+        if let Some(mode_config) = crate::yaml_configs::customization_registry::get_mode_config(
+            gcx.clone(),
+            &session.thread.mode,
+            None,
+        ).await {
+            let defaults = &mode_config.thread_defaults;
+            if let Some(v) = defaults.include_project_info {
+                session.thread.include_project_info = v;
+            }
+            if let Some(v) = defaults.checkpoints_enabled {
+                session.thread.checkpoints_enabled = v;
+            }
+            if let Some(v) = defaults.auto_approve_editing_tools {
+                session.thread.auto_approve_editing_tools = v;
+            }
+            if let Some(v) = defaults.auto_approve_dangerous_commands {
+                session.thread.auto_approve_dangerous_commands = v;
+            }
+        }
+    }
 
     session.trajectory_events_tx = trajectory_events_tx.clone();
 
@@ -1043,6 +1071,7 @@ mod tests {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "test".into(),
+            tool_name: "test_tool".into(),
             command: "cmd".into(),
             rule: "rule".into(),
             tool_call_id: "tc1".into(),
@@ -1055,19 +1084,22 @@ mod tests {
     }
 
     #[test]
-    fn test_set_paused_with_reasons() {
+    fn test_set_paused_with_reasons_and_auto_approved() {
         let mut session = make_session();
         let mut rx = session.subscribe();
         let reasons = vec![PauseReason {
             reason_type: "confirmation".into(),
+            tool_name: "shell".into(),
             command: "shell".into(),
             rule: "ask".into(),
             tool_call_id: "tc1".into(),
             integr_config_path: None,
         }];
-        session.set_paused_with_reasons(reasons.clone());
+        session.set_paused_with_reasons_and_auto_approved(reasons.clone(), vec!["tc2".into()], Some(0));
         assert_eq!(session.runtime.state, SessionState::Paused);
         assert_eq!(session.runtime.pause_reasons.len(), 1);
+        assert_eq!(session.runtime.auto_approved_tool_ids, vec!["tc2".to_string()]);
+        assert_eq!(session.runtime.paused_message_index, Some(0));
         let mut found_pause_required = false;
         while let Ok(env) = rx.try_recv() {
             if matches!(env.event, ChatEvent::PauseRequired { .. }) {
@@ -1091,6 +1123,7 @@ mod tests {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "test".into(),
+            tool_name: "test_tool".into(),
             command: "cmd".into(),
             rule: "rule".into(),
             tool_call_id: "tc1".into(),
@@ -1105,6 +1138,7 @@ mod tests {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "test".into(),
+            tool_name: "test_tool".into(),
             command: "cmd".into(),
             rule: "rule".into(),
             tool_call_id: "tc1".into(),
@@ -1112,6 +1146,7 @@ mod tests {
         });
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "test".into(),
+            tool_name: "test_tool".into(),
             command: "cmd".into(),
             rule: "rule".into(),
             tool_call_id: "tc2".into(),
@@ -1132,6 +1167,7 @@ mod tests {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "test".into(),
+            tool_name: "test_tool".into(),
             command: "cmd".into(),
             rule: "rule".into(),
             tool_call_id: "tc1".into(),
@@ -1152,6 +1188,7 @@ mod tests {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "test".into(),
+            tool_name: "test_tool".into(),
             command: "cmd".into(),
             rule: "rule".into(),
             tool_call_id: "tc1".into(),
@@ -1171,6 +1208,7 @@ mod tests {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "test".into(),
+            tool_name: "test_tool".into(),
             command: "cmd".into(),
             rule: "rule".into(),
             tool_call_id: "tc1".into(),
