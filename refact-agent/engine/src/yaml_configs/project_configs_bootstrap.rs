@@ -149,6 +149,14 @@ fn get_default_subagents() -> Vec<(&'static str, &'static str)> {
         ("deep_research.yaml", include_str!("defaults/subagents/deep_research.yaml")),
         ("title_generation.yaml", include_str!("defaults/subagents/title_generation.yaml")),
         ("commit_message.yaml", include_str!("defaults/subagents/commit_message.yaml")),
+        ("kg_enrich.yaml", include_str!("defaults/subagents/kg_enrich.yaml")),
+        ("kg_deprecate.yaml", include_str!("defaults/subagents/kg_deprecate.yaml")),
+        ("code_edit.yaml", include_str!("defaults/subagents/code_edit.yaml")),
+        ("compress_trajectory.yaml", include_str!("defaults/subagents/compress_trajectory.yaml")),
+        ("follow_up.yaml", include_str!("defaults/subagents/follow_up.yaml")),
+        ("http_subchat.yaml", include_str!("defaults/subagents/http_subchat.yaml")),
+        ("http_subchat_single.yaml", include_str!("defaults/subagents/http_subchat_single.yaml")),
+        ("memo_extraction.yaml", include_str!("defaults/subagents/memo_extraction.yaml")),
     ]
 }
 
@@ -161,6 +169,7 @@ fn get_default_toolbox_commands() -> Vec<(&'static str, &'static str)> {
         ("explain.yaml", include_str!("defaults/toolbox_commands/explain.yaml")),
         ("summarize.yaml", include_str!("defaults/toolbox_commands/summarize.yaml")),
         ("typos.yaml", include_str!("defaults/toolbox_commands/typos.yaml")),
+        ("help.yaml", include_str!("defaults/toolbox_commands/help.yaml")),
     ]
 }
 

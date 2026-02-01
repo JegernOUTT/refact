@@ -23,8 +23,7 @@ use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
 use crate::chat::types::ThreadParams;
 use crate::chat::trajectories::save_trajectory_as;
 use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
-use crate::yaml_configs::customization_loader::load_customization;
-use crate::custom_error::YamlError;
+
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     use std::collections::HashSet;
@@ -137,63 +136,44 @@ pub async fn resolve_subchat_params(
 ) -> Result<SubchatParameters, String> {
     use crate::yaml_configs::customization_registry::get_subagent_config;
 
-    let mut error_log: Vec<YamlError> = Vec::new();
-    let customization = load_customization(gcx.clone(), true, &mut error_log).await;
-
-    if !error_log.is_empty() {
-        let errors: Vec<String> = error_log.iter().map(|e| e.to_string()).collect();
-        return Err(format!(
-            "YAML errors while loading customization: {}",
-            errors.join("; ")
-        ));
-    }
-
-    let mut params = customization
-        .subchat_tool_parameters
-        .get(tool_name)
-        .cloned()
+    let subagent_config = get_subagent_config(gcx.clone(), tool_name, None).await
         .ok_or_else(|| {
-            format!(
-                "subchat params for tool '{}' not found in customization YAML. Available: {:?}",
-                tool_name,
-                customization
-                    .subchat_tool_parameters
-                    .keys()
-                    .collect::<Vec<_>>()
-            )
+            format!("subchat params for '{}' not found in subagents registry", tool_name)
         })?;
 
-    if let Some(subagent_config) = get_subagent_config(gcx.clone(), tool_name, None).await {
-        if let Some(n_ctx) = subagent_config.subchat.n_ctx {
-            params.subchat_n_ctx = n_ctx;
-        }
-        if let Some(max_new_tokens) = subagent_config.subchat.max_new_tokens {
-            params.subchat_max_new_tokens = max_new_tokens;
-        }
-        if let Some(tokens_for_rag) = subagent_config.subchat.tokens_for_rag {
-            params.subchat_tokens_for_rag = tokens_for_rag;
-        }
-        if let Some(temperature) = subagent_config.subchat.temperature {
-            params.subchat_temperature = Some(temperature);
-        }
-        if let Some(ref reasoning_effort) = subagent_config.subchat.reasoning_effort {
-            params.subchat_reasoning_effort = match reasoning_effort.to_lowercase().as_str() {
-                "low" => Some(crate::call_validation::ReasoningEffort::Low),
-                "high" => Some(crate::call_validation::ReasoningEffort::High),
-                _ => Some(crate::call_validation::ReasoningEffort::Medium),
-            };
-        }
-        if let Some(ref model_type) = subagent_config.subchat.model_type {
-            params.subchat_model_type = match model_type.to_lowercase().as_str() {
-                "light" => crate::call_validation::ChatModelType::Light,
-                "thinking" => crate::call_validation::ChatModelType::Thinking,
-                _ => crate::call_validation::ChatModelType::Default,
-            };
-        }
-        if let Some(ref model) = subagent_config.subchat.model {
-            params.subchat_model = model.clone();
-        }
-    }
+    let subchat = &subagent_config.subchat;
+
+    let model_type = match subchat.model_type.as_deref() {
+        Some(mt) if mt.eq_ignore_ascii_case("light") => ChatModelType::Light,
+        Some(mt) if mt.eq_ignore_ascii_case("thinking") => ChatModelType::Thinking,
+        Some(mt) if mt.eq_ignore_ascii_case("default") => ChatModelType::Default,
+        Some(mt) => return Err(format!(
+            "invalid model_type '{}' for '{}', expected: light, default, thinking",
+            mt, tool_name
+        )),
+        None => ChatModelType::Default,
+    };
+
+    let reasoning_effort = match subchat.reasoning_effort.as_deref() {
+        Some(re) if re.eq_ignore_ascii_case("low") => Some(ReasoningEffort::Low),
+        Some(re) if re.eq_ignore_ascii_case("medium") => Some(ReasoningEffort::Medium),
+        Some(re) if re.eq_ignore_ascii_case("high") => Some(ReasoningEffort::High),
+        Some(re) => return Err(format!(
+            "invalid reasoning_effort '{}' for '{}', expected: low, medium, high",
+            re, tool_name
+        )),
+        None => None,
+    };
+
+    let params = SubchatParameters {
+        subchat_model_type: model_type,
+        subchat_model: subchat.model.clone().unwrap_or_default(),
+        subchat_n_ctx: subchat.n_ctx.unwrap_or(0),
+        subchat_max_new_tokens: subchat.max_new_tokens.unwrap_or(0),
+        subchat_temperature: subchat.temperature,
+        subchat_tokens_for_rag: subchat.tokens_for_rag.unwrap_or(0),
+        subchat_reasoning_effort: reasoning_effort,
+    };
 
     if params.subchat_n_ctx == 0 {
         return Err(format!(

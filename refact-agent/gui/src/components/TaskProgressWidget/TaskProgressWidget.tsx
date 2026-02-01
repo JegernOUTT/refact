@@ -1,7 +1,6 @@
 import React, { useCallback } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { Flex, Text, Box, Separator } from "@radix-ui/themes";
-import { CheckboxIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
 
 import { useAppSelector, useAppDispatch } from "../../hooks";
@@ -17,8 +16,9 @@ import {
 } from "../../features/Chat/Thread";
 import type { TodoItem, TodoStatus } from "../../features/Chat/Thread/types";
 import { Chevron } from "../Collapsible";
-import { AnimatedText } from "../Text";
+
 import { StatusDot, type StatusDotState } from "../StatusDot";
+import { CircularProgress } from "../ChatHistory/CircularProgress";
 import styles from "./TaskProgressWidget.module.css";
 
 function getStatusDotState(
@@ -79,35 +79,10 @@ const TaskRow: React.FC<TaskRowProps> = ({ task, isStreaming }) => {
       className={classNames(styles.taskRow, { [styles.active]: isActive })}
     >
       <StatusIcon status={task.status} isStreaming={isStreaming && isActive} />
-      <Text size="2" style={{ flex: 1 }}>
+      <Text size="1" style={{ flex: 1 }}>
         {task.content}
       </Text>
     </Flex>
-  );
-};
-
-type ProgressBarProps = {
-  done: number;
-  total: number;
-  animating?: boolean;
-};
-
-const ProgressBar: React.FC<ProgressBarProps> = ({
-  done,
-  total,
-  animating = false,
-}) => {
-  const percent = total > 0 ? (done / total) * 100 : 0;
-
-  return (
-    <Box className={styles.progressBar}>
-      <Box
-        className={classNames(styles.progressFill, {
-          [styles.animating]: animating,
-        })}
-        style={{ width: `${percent}%` }}
-      />
-    </Box>
   );
 };
 
@@ -132,67 +107,48 @@ export const TaskProgressWidget: React.FC = () => {
 
   if (!everUsed) return null;
 
-  const hasActive = tasks.some((t) => t.status === "in_progress");
-  const isAnimating = hasActive && isStreaming;
-
   return (
     <Box className={styles.widget}>
       <Collapsible.Root open={isExpanded} onOpenChange={handleOpenChange}>
         <Collapsible.Trigger asChild>
           <Flex className={styles.header} align="center" gap="3" px="3" py="2">
-            <AnimatedText as="div" size="1" animating={isAnimating}>
-              <Flex align="center" gap="2" style={{ flex: 1 }}>
-                <CheckboxIcon
-                  width={14}
-                  height={14}
-                  className={styles.headerIcon}
-                />
+            <Flex align="center" gap="2" style={{ flex: 1 }}>
+              {!isExpanded && hasTasks && (
+                <>
+                  <Flex gap="1" align="center">
+                    {tasks.map((task) => (
+                      <StatusIcon
+                        key={task.id}
+                        status={task.status}
+                        isStreaming={
+                          task.status === "in_progress" && isStreaming
+                        }
+                      />
+                    ))}
+                  </Flex>
 
-                {!isExpanded && hasTasks && (
-                  <>
-                    <Flex gap="1" align="center">
-                      {tasks.map((task) => (
-                        <StatusIcon
-                          key={task.id}
-                          status={task.status}
-                          isStreaming={
-                            task.status === "in_progress" && isStreaming
-                          }
-                        />
-                      ))}
-                    </Flex>
+                  <CircularProgress done={done} total={total} size={14} />
 
-                    <Text size="1" color="gray">
-                      {done}/{total}
+                  {activeTitle && (
+                    <Text size="1" color="gray" className={styles.activeHint}>
+                      {activeTitle}
                     </Text>
+                  )}
+                </>
+              )}
 
-                    <ProgressBar
-                      done={done}
-                      total={total}
-                      animating={isAnimating}
-                    />
+              {!isExpanded && !hasTasks && (
+                <Text size="1" color="gray">
+                  Tasks cleared
+                </Text>
+              )}
 
-                    {activeTitle && (
-                      <Text size="1" color="gray" className={styles.activeHint}>
-                        {activeTitle}
-                      </Text>
-                    )}
-                  </>
-                )}
-
-                {!isExpanded && !hasTasks && (
-                  <Text size="1" color="gray">
-                    Tasks cleared
-                  </Text>
-                )}
-
-                {isExpanded && (
-                  <Text size="1" weight="medium">
-                    Task Progress
-                  </Text>
-                )}
-              </Flex>
-            </AnimatedText>
+              {isExpanded && (
+                <Text size="1" weight="medium">
+                  Task Progress
+                </Text>
+              )}
+            </Flex>
 
             <Chevron open={isExpanded} />
           </Flex>

@@ -1,0 +1,131 @@
+.card {
+  overflow: hidden;
+}
+
+.header {
+  padding: var(--space-1) 0;
+  cursor: pointer;
+  user-select: none;
+  min-height: 24px;
+  transition: filter 0.15s ease;
+}
+
+.header:hover {
+  filter: brightness(1.3);
+}
+
+.icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  min-width: 20px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.summary {
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contentWrapper {
+  overflow: hidden;
+}
+
+.content {
+  padding: var(--space-2) 0 var(--space-1);
+}
+
+.section {
+  margin-bottom: var(--space-2);
+}
+
+.sectionHeader {
+  margin-bottom: var(--space-1);
+}
+
+.sectionIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--gray-9);
+}
+
+.sectionIcon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.sectionTitle {
+  color: var(--gray-9);
+}
+
+.sectionContent {
+  padding-left: var(--space-3);
+}
+
+.fileItem {
+  overflow: hidden;
+}
+
+.fileHeader {
+  padding: var(--space-1) 0;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.fileHeader:hover {
+  filter: brightness(1.3);
+}
+
+.fileName {
+  font-family: var(--code-font-family);
+  color: var(--accent-11);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileName:hover {
+  text-decoration: underline;
+}
+
+.relevance {
+  color: var(--gray-9);
+  flex-shrink: 0;
+}
+
+.fileContent {
+  max-height: 300px;
+  overflow-y: auto;
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+}
+
+.fileContent::-webkit-scrollbar {
+  width: 6px;
+}
+
+.fileContent::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.fileContent::-webkit-scrollbar-thumb {
+  background: var(--gray-a5);
+  border-radius: 3px;
+}
+
+.fileContent::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-a7);
+}

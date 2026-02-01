@@ -1,11 +1,12 @@
 import React from "react";
-import { Flex, Badge, HoverCard, Text, IconButton } from "@radix-ui/themes";
+import { Flex, Badge, HoverCard, Text } from "@radix-ui/themes";
 import {
   PaperPlaneIcon,
   ClockIcon,
   LightningBoltIcon,
   StopIcon,
 } from "@radix-ui/react-icons";
+import classNames from "classnames";
 import styles from "./UnifiedSendButton.module.css";
 
 type UnifiedSendButtonProps = {
@@ -67,18 +68,17 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
           )}
           <HoverCard.Root>
             <HoverCard.Trigger>
-              <IconButton
-                variant="soft"
-                color="red"
-                size="1"
+              <button
                 type="button"
+                className={classNames(styles.iconButton, styles.stop)}
                 onClick={(e) => {
                   e.preventDefault();
                   onStop();
                 }}
+                aria-label="Stop generation"
               >
                 <StopIcon />
-              </IconButton>
+              </button>
             </HoverCard.Trigger>
             <HoverCard.Content size="1" side="top">
               <Text as="p" size="2">
@@ -88,20 +88,18 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
           </HoverCard.Root>
           <HoverCard.Root>
             <HoverCard.Trigger>
-              <IconButton
-                variant="soft"
-                color="blue"
-                disabled={disabled}
-                size="1"
+              <button
                 type="button"
+                className={classNames(styles.iconButton, styles.priority)}
+                disabled={disabled}
                 onClick={(e) => {
                   e.preventDefault();
                   onSendImmediately();
                 }}
-                className={styles.sendButton}
+                aria-label="Send immediately"
               >
                 <LightningBoltIcon />
-              </IconButton>
+              </button>
             </HoverCard.Trigger>
             <HoverCard.Content size="1" side="top">
               <Text as="p" size="2">
@@ -111,20 +109,18 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
           </HoverCard.Root>
           <HoverCard.Root>
             <HoverCard.Trigger>
-              <IconButton
-                variant="soft"
-                color="green"
+              <button
+                type="button"
+                className={classNames(styles.iconButton, styles.queue)}
                 disabled={disabled}
-                size="1"
-                type="submit"
                 onClick={(e) => {
                   e.preventDefault();
                   onSend();
                 }}
-                className={styles.sendButton}
+                aria-label="Queue message"
               >
                 <ClockIcon />
-              </IconButton>
+              </button>
             </HoverCard.Trigger>
             <HoverCard.Content size="1" side="top">
               <Text as="p" size="2">
@@ -151,18 +147,17 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
         )}
         <HoverCard.Root>
           <HoverCard.Trigger>
-            <IconButton
-              variant="soft"
-              color="red"
-              size="1"
+            <button
               type="button"
+              className={classNames(styles.iconButton, styles.stop)}
               onClick={(e) => {
                 e.preventDefault();
                 onStop();
               }}
+              aria-label="Stop generation"
             >
               <StopIcon />
-            </IconButton>
+            </button>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="top">
             <Text as="p" size="2">
@@ -190,18 +185,18 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
         )}
         <HoverCard.Root>
           <HoverCard.Trigger>
-            <IconButton
-              variant="ghost"
-              disabled={disabled}
-              size="1"
+            <button
               type="button"
+              className={styles.iconButton}
+              disabled={disabled}
               onClick={(e) => {
                 e.preventDefault();
                 onResend();
               }}
+              aria-label="Resend last messages"
             >
               <ResendIcon />
-            </IconButton>
+            </button>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="top">
             <Text as="p" size="2">
@@ -228,19 +223,18 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
       )}
       <HoverCard.Root>
         <HoverCard.Trigger>
-          <IconButton
-            variant="ghost"
+          <button
+            type="button"
+            className={classNames(styles.iconButton, styles.send)}
             disabled={disabled}
-            title={undefined}
-            size="1"
-            type="submit"
             onClick={(e) => {
               e.preventDefault();
               onSend();
             }}
+            aria-label="Send message"
           >
             <PaperPlaneIcon />
-          </IconButton>
+          </button>
         </HoverCard.Trigger>
         <HoverCard.Content size="1" side="top">
           <Text as="p" size="2">

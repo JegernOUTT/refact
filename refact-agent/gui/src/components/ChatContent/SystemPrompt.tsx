@@ -1,45 +1,52 @@
-import React from "react";
-import { Container, Box, Text, Flex } from "@radix-ui/themes";
-import * as Collapsible from "@radix-ui/react-collapsible";
-import { Chevron } from "../Collapsible";
-import { Markdown } from "./ContextFiles";
+import React, { useState, useCallback } from "react";
+import { Box, Text, Flex } from "@radix-ui/themes";
+import { motion, AnimatePresence } from "framer-motion";
+import { ReaderIcon } from "@radix-ui/react-icons";
+import { Markdown } from "../Markdown";
+import styles from "./SystemPrompt.module.css";
 
 export const SystemPrompt: React.FC<{
   content: string;
 }> = ({ content }) => {
-  const [open, setOpen] = React.useState(false);
+  const [isOpen, setIsOpen] = useState(false);
+
+  const handleToggle = useCallback(() => {
+    setIsOpen((prev) => !prev);
+  }, []);
 
   if (!content.trim()) return null;
 
   return (
-    <Container>
-      <Collapsible.Root open={open} onOpenChange={setOpen}>
-        <Collapsible.Trigger asChild>
-          <Flex gap="2" align="end" py="1" style={{ cursor: "pointer" }}>
-            <Flex gap="2" align="start" style={{ flex: 1 }}>
-              <Text weight="light" size="1" style={{ color: "var(--gray-10)" }}>
-                📋
-              </Text>
-              <Text weight="light" size="1" style={{ color: "var(--gray-10)" }}>
-                System prompt
-              </Text>
-            </Flex>
-            <Chevron open={open} />
-          </Flex>
-        </Collapsible.Trigger>
-        <Collapsible.Content>
-          <Box
-            pl="2"
-            style={{
-              borderLeft: "1px solid var(--gray-a4)",
-              maxHeight: "400px",
-              overflow: "auto",
-            }}
+    <div className={styles.card}>
+      <Flex
+        className={styles.header}
+        align="center"
+        gap="2"
+        onClick={handleToggle}
+      >
+        <span className={styles.icon}>
+          <ReaderIcon />
+        </span>
+        <Text size="1" className={styles.summary}>
+          System prompt
+        </Text>
+      </Flex>
+
+      <AnimatePresence initial={false}>
+        {isOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeInOut" }}
+            className={styles.contentWrapper}
           >
-            <Markdown>{content}</Markdown>
-          </Box>
-        </Collapsible.Content>
-      </Collapsible.Root>
-    </Container>
+            <Box className={styles.content}>
+              <Markdown>{content}</Markdown>
+            </Box>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 };

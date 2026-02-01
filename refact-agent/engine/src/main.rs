@@ -15,7 +15,7 @@ use crate::background_tasks::start_background_tasks;
 use crate::lsp::spawn_lsp_task;
 use crate::telemetry::{basic_transmit, snippets_transmit};
 use crate::yaml_configs::create_configs::yaml_configs_try_create_all;
-use crate::yaml_configs::customization_loader::load_customization;
+use crate::yaml_configs::customization_registry::get_project_registry;
 use sqlite_vec::sqlite3_vec_init;
 use rusqlite::ffi::sqlite3_auto_extension;
 
@@ -189,13 +189,14 @@ async fn main() {
     }
 
     if cmdline.print_customization {
-        // used in JB
-        let mut error_log = Vec::new();
-        let cust = load_customization(gcx.clone(), false, &mut error_log).await;
-        for e in error_log.iter() {
-            eprintln!("{e}");
+        if let Some(registry) = get_project_registry(gcx.clone()).await {
+            for e in registry.errors.iter() {
+                eprintln!("{}: {}", e.file_path, e.error);
+            }
+            println!("{}", serde_json::to_string_pretty(&registry).unwrap());
+        } else {
+            eprintln!("Failed to load project registry");
         }
-        println!("{}", serde_json::to_string_pretty(&cust).unwrap());
         std::process::exit(0);
     }
 

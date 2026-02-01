@@ -1,0 +1,15 @@
+schema_version: 1
+id: code_edit
+title: Code Edit
+description: Generate code edits
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 200000
+  max_new_tokens: 16000
+  temperature: 0.0
+  tokens_for_rag: 0
+
+tools: []

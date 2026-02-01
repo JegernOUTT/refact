@@ -98,7 +98,12 @@ const _Markdown: React.FC<MarkdownProps> = ({
         );
       },
       li({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <li {...props} className={classNames(styles.list_item, props.className)} />;
+        return (
+          <li
+            {...props}
+            className={classNames(styles.list_item, props.className)}
+          />
+        );
       },
       code({ style: _style, color: _color, ...props }) {
         return (
@@ -209,7 +214,14 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <Table.Cell {...props} />;
       },
     };
-  }, [canHaveInteractiveElements, color, internalLinkContext, showLineNumbers, wrap, onCopyClick]);
+  }, [
+    canHaveInteractiveElements,
+    color,
+    internalLinkContext,
+    showLineNumbers,
+    wrap,
+    onCopyClick,
+  ]);
   return (
     <ReactMarkdown
       className={styles.markdown}

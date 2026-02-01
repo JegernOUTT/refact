@@ -180,20 +180,17 @@ pub async fn mix_config_messages(
         }
     };
 
-    let mut error_log = Vec::new();
-    let custom = crate::yaml_configs::customization_loader::load_customization(
+    let sp_text = match crate::yaml_configs::customization_registry::get_mode_config(
         gcx.clone(),
-        true,
-        &mut error_log,
-    )
-    .await;
-    // XXX: let model know there are errors
-    for e in error_log.iter() {
-        tracing::error!("{e}");
-    }
-
-    let sp: &crate::yaml_configs::customization_loader::SystemPrompt =
-        custom.system_prompts.get("configurator").unwrap();
+        "configurator",
+        None,
+    ).await {
+        Some(mode_config) => mode_config.prompt,
+        None => {
+            tracing::error!("Mode 'configurator' not found");
+            String::new()
+        }
+    };
 
     let context_file_message = ChatMessage {
         role: "context_file".to_string(),
@@ -205,7 +202,7 @@ pub async fn mix_config_messages(
         content: ChatContent::SimpleText(
             crate::scratchpads::chat_utils_prompts::system_prompt_add_extra_instructions(
                 gcx.clone(),
-                sp.text.clone(),
+                sp_text,
                 get_tools_for_mode(gcx.clone(), "configurator", None)
                     .await
                     .into_iter()

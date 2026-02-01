@@ -1,7 +1,9 @@
 import React, { useCallback, useMemo, useEffect, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import {
+  ChatContextFile,
   ChatMessages,
+  DiffChunk,
   DiffMessage,
   isChatContextFileMessage,
   isDiffMessage,
@@ -17,7 +19,6 @@ import { ContextFiles } from "./ContextFiles";
 import { SystemPrompt } from "./SystemPrompt";
 import { AssistantInput } from "./AssistantInput";
 import { PlainText } from "./PlainText";
-import { MessageUsageInfo } from "./MessageUsageInfo";
 import { useAppDispatch, useAppSelector, useDiffFileReload } from "../../hooks";
 import {
   selectIntegration,
@@ -42,7 +43,10 @@ import { QueuedMessage } from "./QueuedMessage";
 import { selectSseConnectionForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
 import { ChatLoading } from "./ChatLoading";
-import { removeMessage, branchFromChat } from "../../services/refact/chatCommands";
+import {
+  removeMessage,
+  branchFromChat,
+} from "../../services/refact/chatCommands";
 import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
 
 export type ChatContentProps = {
@@ -123,12 +127,15 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
   const handleDelete = useCallback(
     (messageId: string) => {
-      void removeMessage(renderChatId, messageId, lspPort, apiKey ?? undefined).catch(
-        (err) => {
-          // eslint-disable-next-line no-console
-          console.error("Failed to delete message:", err);
-        },
-      );
+      void removeMessage(
+        renderChatId,
+        messageId,
+        lspPort,
+        apiKey ?? undefined,
+      ).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error("Failed to delete message:", err);
+      });
     },
     [renderChatId, lspPort, apiKey],
   );
@@ -192,7 +199,12 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         )}
         {!showLoading &&
           messages.length > 0 &&
-          renderMessagesFast(messages, onRetryWrapper, handleBranch, handleDelete)}
+          renderMessagesFast(
+            messages,
+            onRetryWrapper,
+            handleBranch,
+            handleDelete,
+          )}
         <Container>
           <UncommittedChangesWarning />
         </Container>
@@ -290,6 +302,56 @@ function renderMessagesFast(
       const key = getMessageKey(head, i);
       const contextFilesAfter: React.ReactNode[] = [];
       const diffMessagesAfter: DiffMessage[] = [];
+      const contextFilesByToolId: Record<string, ChatContextFile[]> = {};
+      const diffsByToolId: Record<string, DiffChunk[]> = {};
+
+      const READ_TOOLS = new Set([
+        "cat",
+        "tree",
+        "search_pattern",
+        "search_semantic",
+        "search_symbol_definition",
+        "web",
+        "web_search",
+        "knowledge",
+        "search_trajectories",
+        "get_trajectory_context",
+      ]);
+
+      const EDIT_TOOLS = new Set([
+        "create_textdoc",
+        "update_textdoc",
+        "replace_textdoc",
+        "update_textdoc_regex",
+        "update_textdoc_by_lines",
+        "update_textdoc_anchored",
+        "apply_patch",
+        "undo_textdoc",
+        "rm",
+      ]);
+
+      const toolCalls = head.tool_calls ?? [];
+      const eligibleToolCalls = toolCalls.filter(
+        (tc) => tc.id && tc.function.name && READ_TOOLS.has(tc.function.name),
+      );
+      const eligibleToolIds = new Set(
+        eligibleToolCalls
+          .map((tc) => tc.id)
+          .filter((id): id is string => Boolean(id)),
+      );
+      const lastEligibleToolId =
+        eligibleToolCalls.length > 0
+          ? eligibleToolCalls[eligibleToolCalls.length - 1].id
+          : null;
+
+      const editToolCalls = toolCalls.filter(
+        (tc) => tc.id && tc.function.name && EDIT_TOOLS.has(tc.function.name),
+      );
+      const editToolIds = new Set(
+        editToolCalls
+          .map((tc) => tc.id)
+          .filter((id): id is string => Boolean(id)),
+      );
 
       let j = i + 1;
       while (j < messages.length) {
@@ -307,20 +369,46 @@ function renderMessagesFast(
           ) {
             break;
           }
-          const ctxKey = getMessageKey(nextMsg, j);
-          contextFilesAfter.push(
-            <ContextFiles
-              key={ctxKey}
-              files={nextMsg.content}
-              toolCallId={nextMsg.tool_call_id}
-            />,
-          );
+
+          let targetToolId: string | null = null;
+
+          if (
+            nextMsg.tool_call_id &&
+            eligibleToolIds.has(nextMsg.tool_call_id)
+          ) {
+            targetToolId = nextMsg.tool_call_id;
+          } else if (!nextMsg.tool_call_id && lastEligibleToolId) {
+            targetToolId = lastEligibleToolId;
+          }
+
+          if (targetToolId) {
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            contextFilesByToolId[targetToolId] = (
+              contextFilesByToolId[targetToolId] || []
+            ).concat(nextMsg.content);
+          } else {
+            const ctxKey = getMessageKey(nextMsg, j);
+            contextFilesAfter.push(
+              <ContextFiles
+                key={ctxKey}
+                files={nextMsg.content}
+                toolCallId={nextMsg.tool_call_id}
+              />,
+            );
+          }
           j++;
           continue;
         }
 
         if (isDiffMessage(nextMsg)) {
-          diffMessagesAfter.push(nextMsg);
+          if (nextMsg.tool_call_id && editToolIds.has(nextMsg.tool_call_id)) {
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            diffsByToolId[nextMsg.tool_call_id] = (
+              diffsByToolId[nextMsg.tool_call_id] || []
+            ).concat(nextMsg.content);
+          } else {
+            diffMessagesAfter.push(nextMsg);
+          }
           j++;
           continue;
         }
@@ -340,6 +428,13 @@ function renderMessagesFast(
           messageId={head.message_id}
           onBranch={onBranch}
           onDelete={onDelete}
+          contextFilesByToolId={contextFilesByToolId}
+          diffsByToolId={diffsByToolId}
+          usage={head.usage}
+          metering_coins_prompt={head.metering_coins_prompt}
+          metering_coins_generated={head.metering_coins_generated}
+          metering_coins_cache_creation={head.metering_coins_cache_creation}
+          metering_coins_cache_read={head.metering_coins_cache_read}
         />,
       );
 
@@ -352,18 +447,6 @@ function renderMessagesFast(
           <GroupedDiffs key={`diffs-${key}`} diffs={diffMessagesAfter} />,
         );
       }
-
-      nodes.push(
-        <Container key={`usage-${key}`}>
-          <MessageUsageInfo
-            usage={head.usage}
-            metering_coins_prompt={head.metering_coins_prompt}
-            metering_coins_generated={head.metering_coins_generated}
-            metering_coins_cache_creation={head.metering_coins_cache_creation}
-            metering_coins_cache_read={head.metering_coins_cache_read}
-          />
-        </Container>,
-      );
 
       i = j - 1;
       continue;

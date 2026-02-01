@@ -4,7 +4,8 @@ import React, {
   useImperativeHandle,
   forwardRef,
 } from "react";
-import { IconButton, Spinner, HoverCard, Text } from "@radix-ui/themes";
+import { Spinner, HoverCard, Text } from "@radix-ui/themes";
+import classNames from "classnames";
 import { useVoiceInput } from "../../hooks/useVoiceInput";
 import { useAppDispatch } from "../../hooks";
 import { setError } from "../../features/Errors/errorsSlice";
@@ -81,24 +82,20 @@ export const MicrophoneButton = forwardRef<
   return (
     <HoverCard.Root>
       <HoverCard.Trigger>
-        <IconButton
+        <button
           type="button"
-          variant={isActive ? "solid" : "ghost"}
-          color={isActive ? "red" : undefined}
-          size="1"
-          title={undefined}
           disabled={!!disabled || isDownloading || isFinishing}
           onClick={() => void toggleRecording()}
-          className={
-            isRecording
-              ? styles.recording
-              : isFinishing
-                ? styles.finishing
-                : undefined
-          }
+          className={classNames(
+            styles.iconButton,
+            isActive && styles.active,
+            isRecording && styles.recording,
+            isFinishing && styles.finishing,
+          )}
+          aria-label="Voice input"
         >
           {isDownloading ? <Spinner size="1" /> : <MicrophoneIcon />}
-        </IconButton>
+        </button>
       </HoverCard.Trigger>
       <HoverCard.Content size="1" side="top">
         <Text as="p" size="2">

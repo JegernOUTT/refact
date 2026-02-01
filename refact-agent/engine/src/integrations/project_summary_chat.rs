@@ -15,20 +15,17 @@ pub async fn mix_project_summary_messages(
 ) {
     assert!(messages[0].role != "system"); // we are here to add this, can't already exist
 
-    let mut error_log = Vec::new();
-    let custom = crate::yaml_configs::customization_loader::load_customization(
+    let mut sp_text = match crate::yaml_configs::customization_registry::get_mode_config(
         gcx.clone(),
-        true,
-        &mut error_log,
-    )
-    .await;
-    for e in error_log.iter() {
-        tracing::error!("{e}");
-    }
-
-    let sp: &crate::yaml_configs::customization_loader::SystemPrompt =
-        custom.system_prompts.get("project_summary").unwrap();
-    let mut sp_text = sp.text.clone();
+        "project_summary",
+        None,
+    ).await {
+        Some(mode_config) => mode_config.prompt,
+        None => {
+            tracing::error!("Mode 'project_summary' not found");
+            String::new()
+        }
+    };
 
     if sp_text.contains("%ALL_INTEGRATIONS%") {
         let allow_experimental = gcx.read().await.cmdline.experimental;

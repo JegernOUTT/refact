@@ -1,7 +1,8 @@
 import React, { useState } from "react";
-import { HoverCard, IconButton, Popover, Text } from "@radix-ui/themes";
+import { HoverCard, Popover, Text } from "@radix-ui/themes";
 import { ArchiveIcon } from "@radix-ui/react-icons";
 import { TrajectoryPopoverContent } from "./TrajectoryPopover";
+import styles from "./TrajectoryButton.module.css";
 
 type TrajectoryButtonProps = {
   forceOpen?: boolean;
@@ -28,15 +29,14 @@ export const TrajectoryButton: React.FC<TrajectoryButtonProps> = ({
       <HoverCard.Root openDelay={300}>
         <HoverCard.Trigger>
           <Popover.Trigger>
-            <IconButton
+            <button
               type="button"
-              variant="ghost"
-              size="1"
+              className={styles.iconButton}
               data-testid="trajectory-button"
-              aria-label="Open trajectory options"
+              aria-label="Compress or Handoff"
             >
               <ArchiveIcon />
-            </IconButton>
+            </button>
           </Popover.Trigger>
         </HoverCard.Trigger>
         <HoverCard.Content size="1" side="bottom">

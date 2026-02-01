@@ -6,6 +6,7 @@ pub mod history_limit;
 pub mod openai_convert;
 mod openai_merge;
 pub mod prepare;
+pub mod prompt_snippets;
 pub mod prompts;
 mod queue;
 mod session;

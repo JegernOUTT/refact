@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { Flex, IconButton, Text, HoverCard } from "@radix-ui/themes";
+import { Flex, Text, HoverCard } from "@radix-ui/themes";
 import {
   InfoCircledIcon,
   LockClosedIcon,
@@ -9,6 +9,8 @@ import {
   ExclamationTriangleIcon,
   PlusIcon,
 } from "@radix-ui/react-icons";
+import styles from "./ChatInputTopControls.module.css";
+import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectAutoApproveEditingTools,
@@ -74,17 +76,17 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
       <Flex gap="1" align="center" wrap="wrap">
         <HoverCard.Root>
           <HoverCard.Trigger>
-            <IconButton
+            <button
               type="button"
-              size="1"
-              variant={includeProjectInfo ? "soft" : "ghost"}
-              color={includeProjectInfo ? undefined : "gray"}
               onClick={() => setDialogOpen(true)}
               aria-label="Configure project information"
-              style={{ width: 24, height: 24 }}
+              className={classNames(
+                styles.iconButton,
+                includeProjectInfo && styles.active,
+              )}
             >
               <InfoCircledIcon />
-            </IconButton>
+            </button>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="top">
             <Text as="p" size="2">
@@ -95,19 +97,19 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
 
         <HoverCard.Root>
           <HoverCard.Trigger>
-            <IconButton
+            <button
               type="button"
-              size="1"
-              variant={autoApproveEditing ? "soft" : "ghost"}
-              color={autoApproveEditing ? undefined : "gray"}
               onClick={() => handleEditingChange(!autoApproveEditing)}
               disabled={!chatId}
               aria-label="Auto-approve file editing tools"
               aria-pressed={autoApproveEditing}
-              style={{ width: 24, height: 24 }}
+              className={classNames(
+                styles.iconButton,
+                autoApproveEditing && styles.active,
+              )}
             >
               <Pencil2Icon />
-            </IconButton>
+            </button>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="top">
             <Text as="p" size="2">
@@ -118,19 +120,19 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
 
         <HoverCard.Root>
           <HoverCard.Trigger>
-            <IconButton
+            <button
               type="button"
-              size="1"
-              variant={autoApproveDangerous ? "soft" : "ghost"}
-              color={autoApproveDangerous ? "red" : "gray"}
               onClick={() => handleDangerousChange(!autoApproveDangerous)}
               disabled={!chatId}
               aria-label="Auto-approve dangerous commands"
               aria-pressed={autoApproveDangerous}
-              style={{ width: 24, height: 24 }}
+              className={classNames(
+                styles.iconButton,
+                autoApproveDangerous && styles.danger,
+              )}
             >
               <ExclamationTriangleIcon />
-            </IconButton>
+            </button>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="top">
             <Text as="p" size="2">
@@ -176,18 +178,18 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
         {showAttachButton && (
           <HoverCard.Root>
             <HoverCard.Trigger>
-              <IconButton
+              <button
                 type="button"
-                size="1"
-                variant={attachedFiles.attached ? "soft" : "ghost"}
-                color={attachedFiles.attached ? undefined : "gray"}
                 onClick={attachedFiles.addFile}
                 disabled={attachedFiles.attached}
                 aria-label={`Attach ${attachedFiles.activeFile.name}`}
-                style={{ width: 24, height: 24 }}
+                className={classNames(
+                  styles.iconButton,
+                  attachedFiles.attached && styles.active,
+                )}
               >
                 <PlusIcon />
-              </IconButton>
+              </button>
             </HoverCard.Trigger>
             <HoverCard.Content size="1" side="top">
               <Text as="p" size="2">

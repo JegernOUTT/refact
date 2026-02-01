@@ -299,17 +299,7 @@ pub async fn system_prompt_add_extra_instructions(
     }
 
     if system_prompt.contains("%KNOWLEDGE_INSTRUCTIONS%") {
-        if include_project_info {
-            let cfg = crate::yaml_configs::customization_loader::load_customization_compiled_in();
-            let knowledge_instructions = cfg
-                .get("KNOWLEDGE_INSTRUCTIONS_META")
-                .map(|x| x.as_str().unwrap_or("").to_string())
-                .unwrap_or("".to_string());
-            system_prompt =
-                system_prompt.replace("%KNOWLEDGE_INSTRUCTIONS%", &knowledge_instructions);
-        } else {
-            system_prompt = system_prompt.replace("%KNOWLEDGE_INSTRUCTIONS%", "");
-        }
+        system_prompt = system_prompt.replace("%KNOWLEDGE_INSTRUCTIONS%", "");
     }
 
     if system_prompt.contains("%PROJECT_SUMMARY%") {
@@ -344,51 +334,35 @@ pub async fn system_prompt_add_extra_instructions(
     }
 
     if system_prompt.contains("%AGENT_EXPLORATION_INSTRUCTIONS%") {
-        let cfg = crate::yaml_configs::customization_loader::load_customization_compiled_in();
-        let replacement = cfg
-            .get("AGENT_EXPLORATION_INSTRUCTIONS")
-            .and_then(|x| x.as_str())
-            .unwrap_or("- Call available tools to find relevant files.\n");
-        system_prompt = system_prompt.replace("%AGENT_EXPLORATION_INSTRUCTIONS%", replacement);
+        system_prompt = system_prompt.replace(
+            "%AGENT_EXPLORATION_INSTRUCTIONS%",
+            super::prompt_snippets::AGENT_EXPLORATION_INSTRUCTIONS
+        );
     }
 
     if system_prompt.contains("%AGENT_EXECUTION_INSTRUCTIONS%") {
         let has_edit_tools =
             tool_names.contains("create_textdoc") || tool_names.contains("update_textdoc");
         let replacement = if has_edit_tools {
-            let cfg = crate::yaml_configs::customization_loader::load_customization_compiled_in();
-            cfg.get("AGENT_EXECUTION_INSTRUCTIONS")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string()
+            super::prompt_snippets::AGENT_EXECUTION_INSTRUCTIONS
         } else {
-            "  - Propose the changes to the user
-    - the suspected root cause
-    - the exact files/functions to modify or create
-    - the new or updated tests to add
-    - the expected outcome and success criteria
-"
-            .to_string()
+            super::prompt_snippets::AGENT_EXECUTION_INSTRUCTIONS_NO_TOOLS
         };
-        system_prompt = system_prompt.replace("%AGENT_EXECUTION_INSTRUCTIONS%", &replacement);
+        system_prompt = system_prompt.replace("%AGENT_EXECUTION_INSTRUCTIONS%", replacement);
     }
 
     if system_prompt.contains("%CD_INSTRUCTIONS%") {
-        let cfg = crate::yaml_configs::customization_loader::load_customization_compiled_in();
-        let replacement = cfg
-            .get("CD_INSTRUCTIONS")
-            .and_then(|x| x.as_str())
-            .unwrap_or("You might receive additional instructions that start with 💿. Those are not coming from the user, they are programmed to help you operate well and they are always in English. Answer in the language the user has asked the question.");
-        system_prompt = system_prompt.replace("%CD_INSTRUCTIONS%", replacement);
+        system_prompt = system_prompt.replace(
+            "%CD_INSTRUCTIONS%",
+            super::prompt_snippets::CD_INSTRUCTIONS
+        );
     }
 
     if system_prompt.contains("%SHELL_INSTRUCTIONS%") {
-        let cfg = crate::yaml_configs::customization_loader::load_customization_compiled_in();
-        let replacement = cfg
-            .get("SHELL_INSTRUCTIONS")
-            .and_then(|x| x.as_str())
-            .unwrap_or("");
-        system_prompt = system_prompt.replace("%SHELL_INSTRUCTIONS%", replacement);
+        system_prompt = system_prompt.replace(
+            "%SHELL_INSTRUCTIONS%",
+            super::prompt_snippets::SHELL_INSTRUCTIONS
+        );
     }
 
     system_prompt

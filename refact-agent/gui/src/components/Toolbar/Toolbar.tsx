@@ -1,6 +1,7 @@
-import { IconButton, TextField, HoverCard, Text } from "@radix-ui/themes";
+import { TextField, HoverCard, Text } from "@radix-ui/themes";
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
 import { Cross1Icon, PlusIcon, CheckboxIcon } from "@radix-ui/react-icons";
+import classNames from "classnames";
 import { RefactIcon } from "../../images";
 import { newChatAction } from "../../events";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
@@ -375,18 +376,18 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       <div className={styles.toolbarSection}>
         <HoverCard.Root>
           <HoverCard.Trigger>
-            <IconButton
-              size="1"
-              variant="ghost"
-              className={styles.homeButton}
+            <button
+              type="button"
+              className={classNames(styles.iconButton, styles.homeButton)}
               ref={(x) => refs.setBack(x)}
               onClick={() => {
                 setRenameState(null);
                 goToTab({ type: "dashboard" });
               }}
+              aria-label="Home"
             >
               <RefactIcon style={{ color: "#E7150D" }} />
-            </IconButton>
+            </button>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="bottom">
             <Text as="p" size="2">
@@ -533,9 +534,14 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
         <HoverCard.Root>
           <HoverCard.Trigger>
-            <IconButton size="1" variant="ghost" onClick={onCreateNewTask}>
+            <button
+              type="button"
+              className={styles.iconButton}
+              onClick={onCreateNewTask}
+              aria-label="New Task"
+            >
               <CheckboxIcon />
-            </IconButton>
+            </button>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="bottom">
             <Text as="p" size="2">
@@ -546,15 +552,16 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
         <HoverCard.Root>
           <HoverCard.Trigger>
-            <IconButton
-              size="1"
-              variant="ghost"
+            <button
+              type="button"
+              className={styles.iconButton}
               ref={(x) => refs.setNewChat(x)}
               onClick={onCreateNewChat}
               disabled={!newChatEnabled}
+              aria-label="New Chat"
             >
               <PlusIcon />
-            </IconButton>
+            </button>
           </HoverCard.Trigger>
           <HoverCard.Content size="1" side="bottom">
             <Text as="p" size="2">

@@ -581,8 +581,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             <Flex justify="end" flexGrow="1" wrap="wrap" gap="2" align="center">
               <AgentIntegrationsButton
                 title="Set up Agent Integrations"
-                size="1"
-                type="button"
                 onClick={handleAgentIntegrationsClick}
                 ref={(x) => refs.setSetupIntegrations(x)}
               />
@@ -590,7 +588,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 <BackToSideBarButton
                   disabled={isStreaming}
                   title="Return to sidebar"
-                  size="1"
                   onClick={onClose}
                 />
               )}

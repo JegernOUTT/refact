@@ -345,7 +345,7 @@ pub struct RegistryError {
     pub error: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ProjectRegistry {
     pub modes: HashMap<String, ModeConfig>,
     pub mode_overrides: Vec<ModeConfig>,

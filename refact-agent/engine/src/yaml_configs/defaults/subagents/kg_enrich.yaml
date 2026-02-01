@@ -1,0 +1,15 @@
+schema_version: 1
+id: kg_enrich
+title: Knowledge Graph Enrich
+description: Enrich knowledge graph entries with metadata
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 32000
+  max_new_tokens: 4096
+  temperature: 0.0
+  tokens_for_rag: 0
+
+tools: []

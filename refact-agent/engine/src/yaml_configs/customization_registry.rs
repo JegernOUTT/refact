@@ -577,4 +577,94 @@ mod tests {
         assert_eq!(map_legacy_mode_to_id("Invalid Mode"), "agent");
         assert_eq!(map_legacy_mode_to_id("Mode!"), "agent");
     }
+
+    #[test]
+    fn test_registry_has_required_subagents() {
+        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+
+        let required_subagents = vec![
+            "subagent",
+            "subagent_with_editing",
+            "code_review",
+            "code_review_gather_files",
+            "strategic_planning",
+            "strategic_planning_gather_files",
+            "deep_research",
+            "commit_message",
+            "title_generation",
+            "kg_enrich",
+            "kg_deprecate",
+            "code_edit",
+            "compress_trajectory",
+            "follow_up",
+            "http_subchat",
+            "http_subchat_single",
+            "memo_extraction",
+        ];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = global_configs_try_create_all(config_dir).await;
+            let registry = load_registry_from_dir(config_dir).await;
+
+            for id in &required_subagents {
+                assert!(
+                    registry.subagents.contains_key(*id),
+                    "Missing required subagent: {}. Available: {:?}",
+                    id,
+                    registry.subagents.keys().collect::<Vec<_>>()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_registry_subagents_have_valid_subchat_params() {
+        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = global_configs_try_create_all(config_dir).await;
+            let registry = load_registry_from_dir(config_dir).await;
+
+            for (id, config) in &registry.subagents {
+                assert!(
+                    config.subchat.n_ctx.unwrap_or(0) > 0,
+                    "Subagent '{}' has invalid n_ctx",
+                    id
+                );
+                assert!(
+                    config.subchat.max_new_tokens.unwrap_or(0) > 0,
+                    "Subagent '{}' has invalid max_new_tokens",
+                    id
+                );
+                if let Some(ref model_type) = config.subchat.model_type {
+                    let valid = model_type.eq_ignore_ascii_case("light")
+                        || model_type.eq_ignore_ascii_case("default")
+                        || model_type.eq_ignore_ascii_case("thinking");
+                    assert!(
+                        valid,
+                        "Subagent '{}' has invalid model_type: {}",
+                        id, model_type
+                    );
+                }
+                if let Some(ref reasoning_effort) = config.subchat.reasoning_effort {
+                    let valid = reasoning_effort.eq_ignore_ascii_case("low")
+                        || reasoning_effort.eq_ignore_ascii_case("medium")
+                        || reasoning_effort.eq_ignore_ascii_case("high");
+                    assert!(
+                        valid,
+                        "Subagent '{}' has invalid reasoning_effort: {}",
+                        id, reasoning_effort
+                    );
+                }
+            }
+        });
+    }
 }

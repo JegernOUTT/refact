@@ -8,6 +8,7 @@ import {
 } from "@radix-ui/react-icons";
 import classNames from "classnames";
 import styles from "./button.module.css";
+import iconStyles from "./iconButton.module.css";
 import { useOpenUrl } from "../../hooks/useOpenUrl";
 import { useAppSelector } from "../../hooks";
 import { selectApiKey } from "../../features/Config/configSlice";
@@ -21,15 +22,23 @@ export const PaperPlaneButton: React.FC<IconButtonProps> = (props) => (
     <PaperPlaneIcon />
   </IconButton>
 );
+type PlainButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
+
 export const AgentIntegrationsButton = forwardRef<
   HTMLButtonElement,
-  IconButtonProps
+  PlainButtonProps
 >((props, ref) => (
   <HoverCard.Root>
     <HoverCard.Trigger>
-      <IconButton variant="ghost" {...props} ref={ref}>
+      <button
+        type="button"
+        className={iconStyles.iconButton}
+        aria-label="Set up Agent Integrations"
+        {...props}
+        ref={ref}
+      >
         <PuzzleIcon />
-      </IconButton>
+      </button>
     </HoverCard.Trigger>
     <HoverCard.Content size="1" side="top">
       <Text as="p" size="2">
@@ -47,12 +56,17 @@ export const ThreadHistoryButton: React.FC<IconButtonProps> = (props) => (
   </IconButton>
 );
 
-export const BackToSideBarButton: React.FC<IconButtonProps> = (props) => (
+export const BackToSideBarButton: React.FC<PlainButtonProps> = (props) => (
   <HoverCard.Root>
     <HoverCard.Trigger>
-      <IconButton variant="ghost" {...props}>
+      <button
+        type="button"
+        className={iconStyles.iconButton}
+        aria-label="Return to sidebar"
+        {...props}
+      >
         <ExitIcon style={{ transform: "scaleX(-1)" }} />
-      </IconButton>
+      </button>
     </HoverCard.Trigger>
     <HoverCard.Content size="1" side="top">
       <Text as="p" size="2">

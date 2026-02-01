@@ -1,0 +1,15 @@
+schema_version: 1
+id: memo_extraction
+title: Memo Extraction
+description: Extract memos from chat trajectories
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 200000
+  max_new_tokens: 8192
+  temperature: 0.2
+  tokens_for_rag: 0
+
+tools: []

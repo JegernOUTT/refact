@@ -115,7 +115,9 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
         {...preTagProps}
       >
         {highlightedHtml ? (
-          <div className={classNames(styles.shiki_code, wrap && styles.code_wrap)}>
+          <div
+            className={classNames(styles.shiki_code, wrap && styles.code_wrap)}
+          >
             {showLineNumbers && (
               <div className={styles.line_numbers}>
                 {textWithOutIndent?.split("\n").map((_, i) => (
@@ -128,7 +130,11 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
             <code
               ref={codeRef}
               className={classNames(styles.code, styles.code_block)}
-              dangerouslySetInnerHTML={{ __html: stripShikiBackground(extractCodeContent(highlightedHtml)) }}
+              dangerouslySetInnerHTML={{
+                __html: stripShikiBackground(
+                  extractCodeContent(highlightedHtml),
+                ),
+              }}
             />
           </div>
         ) : (

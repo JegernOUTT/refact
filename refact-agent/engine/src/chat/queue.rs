@@ -731,8 +731,13 @@ async fn handle_tool_decisions(
         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
     }
 
-    let should_resume = !tool_calls_to_execute.is_empty() || any_rejected;
-    if should_resume {
+    if any_rejected {
+        {
+            let mut session = session_arc.lock().await;
+            session.set_runtime_state(SessionState::Idle, None);
+        }
+        maybe_save_trajectory(gcx, session_arc).await;
+    } else if !tool_calls_to_execute.is_empty() {
         start_generation(gcx, session_arc).await;
     } else {
         {

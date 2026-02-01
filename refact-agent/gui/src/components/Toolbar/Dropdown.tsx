@@ -14,7 +14,6 @@ import {
   DropdownMenu,
   Flex,
   HoverCard,
-  IconButton,
   // Select,
   Text,
 } from "@radix-ui/themes";
@@ -24,6 +23,7 @@ import {
   QuestionMarkCircledIcon,
   GearIcon,
 } from "@radix-ui/react-icons";
+import styles from "./Toolbar.module.css";
 
 import { PuzzleIcon } from "../../images/PuzzleIcon";
 import { Coin } from "../../images";
@@ -69,7 +69,6 @@ function linkForAccount(host: Config["host"]): string {
 export const Dropdown: React.FC<DropdownProps> = ({
   handleNavigation,
   triggerClassName,
-  useGhostTrigger,
 }: DropdownProps) => {
   const refs = useTourRefs();
   const user = useGetUser();
@@ -109,23 +108,14 @@ export const Dropdown: React.FC<DropdownProps> = ({
       <HoverCard.Root>
         <HoverCard.Trigger>
           <DropdownMenu.Trigger>
-            {triggerClassName ? (
-              <button
-                type="button"
-                className={triggerClassName}
-                ref={(x) => refs.setMore(x)}
-              >
-                <HamburgerMenuIcon />
-              </button>
-            ) : (
-              <IconButton
-                size="1"
-                variant={useGhostTrigger ? "ghost" : "outline"}
-                ref={(x) => refs.setMore(x)}
-              >
-                <HamburgerMenuIcon />
-              </IconButton>
-            )}
+            <button
+              type="button"
+              className={triggerClassName ?? styles.iconButton}
+              ref={(x) => refs.setMore(x)}
+              aria-label="Menu"
+            >
+              <HamburgerMenuIcon />
+            </button>
           </DropdownMenu.Trigger>
         </HoverCard.Trigger>
         <HoverCard.Content size="1" side="bottom">

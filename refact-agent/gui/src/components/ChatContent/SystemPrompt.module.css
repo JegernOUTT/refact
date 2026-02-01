@@ -1,0 +1,64 @@
+.card {
+  overflow: hidden;
+}
+
+.header {
+  padding: var(--space-1) 0;
+  cursor: pointer;
+  user-select: none;
+  min-height: 24px;
+  transition: filter 0.15s ease;
+}
+
+.header:hover {
+  filter: brightness(1.3);
+}
+
+.icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  min-width: 20px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.summary {
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contentWrapper {
+  overflow: hidden;
+}
+
+.content {
+  padding: var(--space-2) 0 var(--space-1);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.content::-webkit-scrollbar-thumb {
+  background: var(--gray-a5);
+  border-radius: 3px;
+}
+
+.content::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-a7);
+}

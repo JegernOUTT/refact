@@ -15,20 +15,43 @@
   gap: 2px;
 }
 
-.toolbarSection :global(.rt-IconButton) {
-  flex-shrink: 0;
+.iconButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--gray-11);
+  cursor: pointer;
+  transition: filter 0.15s ease;
+  flex-shrink: 0;
 }
 
-.toolbarSection :global(.rt-IconButton):focus-visible {
+.iconButton svg {
+  width: 15px;
+  height: 15px;
+}
+
+.iconButton:hover:not(:disabled) {
+  filter: brightness(1.5);
+}
+
+.iconButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.iconButton:focus-visible {
   outline: 2px solid var(--accent-8);
   outline-offset: -2px;
   box-shadow: none;
 }
 
 .homeButton:hover {
-  background: rgba(231, 21, 13, 0.15);
+  filter: brightness(1.2);
 }
 
 .toolbarDivider {

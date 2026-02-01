@@ -40,7 +40,11 @@ export const PreTag: React.FC<React.PropsWithChildren<PreTagProps>> = ({
 }) => {
   if (onCopyClick) {
     return (
-      <PreTagWithButtons onCopyClick={onCopyClick} className={className} {...rest}>
+      <PreTagWithButtons
+        onCopyClick={onCopyClick}
+        className={className}
+        {...rest}
+      >
         {children}
       </PreTagWithButtons>
     );

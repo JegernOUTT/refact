@@ -1,0 +1,33 @@
+.query {
+  font-family: var(--code-font-family);
+  font-size: 0.95em;
+  color: var(--accent-11);
+}
+
+.count {
+  color: var(--gray-10);
+}
+
+.resultContent {
+  max-height: 300px;
+  overflow-y: auto;
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+}
+
+.resultContent::-webkit-scrollbar {
+  width: 6px;
+}
+
+.resultContent::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.resultContent::-webkit-scrollbar-thumb {
+  background: var(--gray-a5);
+  border-radius: 3px;
+}
+
+.resultContent::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-a7);
+}

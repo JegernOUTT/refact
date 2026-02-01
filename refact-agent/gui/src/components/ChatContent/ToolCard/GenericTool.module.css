@@ -1,0 +1,34 @@
+.args {
+  color: var(--gray-11);
+  font-family: var(--code-font-family);
+  font-size: inherit;
+}
+
+.resultContent {
+  max-height: 300px;
+  overflow-y: auto;
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+}
+
+.resultContent::-webkit-scrollbar {
+  width: 6px;
+}
+
+.resultContent::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.resultContent::-webkit-scrollbar-thumb {
+  background: var(--gray-a5);
+  border-radius: 3px;
+}
+
+.resultContent::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-a7);
+}
+
+.markdownContent {
+  padding: var(--space-2);
+  font-size: var(--font-size-1);
+}

@@ -156,7 +156,11 @@ export function useShiki() {
   );
 
   const highlightSync = useCallback(
-    (code: string, language: string, isDark: boolean): ShikiHighlightResult | null => {
+    (
+      code: string,
+      language: string,
+      isDark: boolean,
+    ): ShikiHighlightResult | null => {
       if (!highlighter) return null;
 
       const normalizedLang = normalizeLanguage(language);

@@ -1,0 +1,49 @@
+.stats {
+  color: var(--gray-11);
+  font-family: var(--code-font-family);
+}
+
+.taskList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+}
+
+.taskItem {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+}
+
+.taskItem svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.pending {
+  color: var(--gray-11);
+}
+
+.inProgress {
+  color: var(--accent-11);
+  animation: spin 1s linear infinite;
+}
+
+.completed {
+  color: var(--green-11);
+}
+
+.failed {
+  color: var(--red-11);
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

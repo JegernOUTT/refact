@@ -29,12 +29,6 @@ Your summary should include the following sections:
 
 Here's an example of how your output should be structured:
 
-<example>
-<analysis>
-[Your thought process, ensuring all points are covered thoroughly and accurately]
-</analysis>
-
-<summary>
 1. Primary Request and Intent:
    [Detailed description]
 
@@ -65,9 +59,6 @@ Here's an example of how your output should be structured:
 
 7. Optional Next Step:
    [Optional Next step to take]
-
-</summary>
-</example>
 
 Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response."#;
 pub async fn compress_trajectory(

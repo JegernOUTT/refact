@@ -11,7 +11,7 @@ describe("TrajectoryButton", () => {
 
   it("has correct aria-label", () => {
     render(<TrajectoryButton />);
-    const button = screen.getByLabelText("Open trajectory options");
+    const button = screen.getByLabelText("Compress or Handoff");
     expect(button).toBeInTheDocument();
   });
 });

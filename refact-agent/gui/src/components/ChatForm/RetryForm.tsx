@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Button, Flex, Box, IconButton } from "@radix-ui/themes";
 import { FileRejection, useDropzone } from "react-dropzone";
 import { TextArea } from "../TextArea";
@@ -8,11 +14,7 @@ import {
   UserImage,
   UserMessage,
 } from "../../services/refact";
-import {
-  Cross2Icon,
-  CheckIcon,
-  PlusIcon,
-} from "@radix-ui/react-icons";
+import { Cross2Icon, CheckIcon, PlusIcon } from "@radix-ui/react-icons";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { selectIsStreaming, selectIsWaiting } from "../../features/Chat";
 import styles from "./ChatForm.module.css";
@@ -115,7 +117,9 @@ export const RetryForm: React.FC<{
         content.push({ type: "text" as const, text: trimmedText });
       }
       content.push(...imageValue);
-      props.onSubmit(content.length === 1 && trimmedText ? trimmedText : content);
+      props.onSubmit(
+        content.length === 1 && trimmedText ? trimmedText : content,
+      );
     }
   }, [textValue, imageValue, props]);
 
@@ -136,7 +140,10 @@ export const RetryForm: React.FC<{
       // Enter without Shift: submit
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
-        if (!disableInput && (textValue.trim().length > 0 || imageValue.length > 0)) {
+        if (
+          !disableInput &&
+          (textValue.trim().length > 0 || imageValue.length > 0)
+        ) {
           handleRetry();
         }
         return;
@@ -154,7 +161,10 @@ export const RetryForm: React.FC<{
   }, []);
 
   return (
-    <Box ref={formRef} className={classNames(styles.chatForm, styles.chatFormCompact)}>
+    <Box
+      ref={formRef}
+      className={classNames(styles.chatForm, styles.chatFormCompact)}
+    >
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -216,7 +226,10 @@ export const RetryForm: React.FC<{
             variant="solid"
             size="1"
             type="submit"
-            disabled={disableInput || (textValue.trim().length === 0 && imageValue.length === 0)}
+            disabled={
+              disableInput ||
+              (textValue.trim().length === 0 && imageValue.length === 0)
+            }
           >
             <CheckIcon width={14} height={14} />
             Submit

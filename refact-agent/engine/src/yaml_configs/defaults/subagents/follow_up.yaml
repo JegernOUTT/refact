@@ -1,0 +1,15 @@
+schema_version: 1
+id: follow_up
+title: Follow Up
+description: Generate follow-up suggestions
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 32000
+  max_new_tokens: 1024
+  temperature: 0.2
+  tokens_for_rag: 0
+
+tools: []

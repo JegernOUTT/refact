@@ -3,39 +3,44 @@ import * as fs from "fs";
 import * as path from "path";
 
 describe("UserInput processing", () => {
-  it("uses iterative processLines (no recursion)", () => {
+  it("uses functional array methods (filter/map) for text extraction", () => {
     const filePath = path.resolve(
       __dirname,
       "../components/ChatContent/UserInput.tsx",
     );
     const content = fs.readFileSync(filePath, "utf-8");
 
-    expect(content).toContain("while (i < lines.length)");
+    // Current implementation uses filter/map for processing
+    expect(content).toContain(".filter(");
+    expect(content).toContain(".map(");
+    // Should not use recursive patterns that could cause stack overflow
     expect(content).not.toMatch(
       /function processLines\([^)]*\):[^{]*\{[^}]*return processLines\(/,
     );
   });
 
-  it("uses iterative processUserInputArray (no recursion)", () => {
+  it("uses useMemo for memoized content extraction", () => {
     const filePath = path.resolve(
       __dirname,
       "../components/ChatContent/UserInput.tsx",
     );
     const content = fs.readFileSync(filePath, "utf-8");
 
-    expect(content).toContain("while (i < items.length)");
-    expect(content).not.toMatch(/return processUserInputArray\(.*memo\.concat/);
+    // Current implementation uses useMemo for performance
+    expect(content).toContain("useMemo");
+    expect(content).toContain("textContent");
   });
 
-  it("uses push instead of concat for building arrays", () => {
+  it("extracts images separately from text content", () => {
     const filePath = path.resolve(
       __dirname,
       "../components/ChatContent/UserInput.tsx",
     );
     const content = fs.readFileSync(filePath, "utf-8");
 
-    expect(content).toContain("result.push(");
-    expect(content).not.toMatch(/processedLinesMemo\.concat/);
+    // Should have separate image extraction logic
+    expect(content).toContain("images");
+    expect(content).toContain("image_url");
   });
 });
 

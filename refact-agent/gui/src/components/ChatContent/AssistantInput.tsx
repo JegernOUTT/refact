@@ -1,25 +1,20 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo } from "react";
 import { Markdown } from "../Markdown";
 
+import { Box, Flex, Text, Link, Card } from "@radix-ui/themes";
 import {
-  Container,
-  Box,
-  Flex,
-  Text,
-  Link,
-  Card,
-  IconButton,
-} from "@radix-ui/themes";
-import { CopyIcon, CornerTopRightIcon, TrashIcon } from "@radix-ui/react-icons";
-import {
+  ChatContextFile,
+  DiffChunk,
   ThinkingBlock,
   ToolCall,
+  Usage,
   WebSearchCitation,
 } from "../../services/refact";
 import { ToolContent } from "./ToolsContent";
 import { fallbackCopying } from "../../utils/fallbackCopying";
 import { telemetryApi } from "../../services/refact/telemetry";
 import { ReasoningContent } from "./ReasoningContent";
+import { MessageFooter, MessageWrapper } from "./MessageFooter";
 
 type ChatInputProps = {
   message: string | null;
@@ -31,6 +26,13 @@ type ChatInputProps = {
   messageId?: string;
   onBranch?: (messageId: string) => void;
   onDelete?: (messageId: string) => void;
+  contextFilesByToolId?: Record<string, ChatContextFile[]>;
+  diffsByToolId?: Record<string, DiffChunk[]>;
+  usage?: Usage | null;
+  metering_coins_prompt?: number;
+  metering_coins_generated?: number;
+  metering_coins_cache_creation?: number;
+  metering_coins_cache_read?: number;
 };
 
 export const AssistantInput: React.FC<ChatInputProps> = ({
@@ -43,8 +45,14 @@ export const AssistantInput: React.FC<ChatInputProps> = ({
   messageId,
   onBranch,
   onDelete,
+  contextFilesByToolId,
+  diffsByToolId,
+  usage,
+  metering_coins_prompt,
+  metering_coins_generated,
+  metering_coins_cache_creation,
+  metering_coins_cache_read,
 }) => {
-  const [isHovered, setIsHovered] = useState(false);
   const [sendTelemetryEvent] =
     telemetryApi.useLazySendTelemetryChatEventQuery();
 
@@ -114,66 +122,8 @@ export const AssistantInput: React.FC<ChatInputProps> = ({
     }
   }, [message, handleCopy]);
 
-  const handleBranch = useCallback(() => {
-    if (messageId && onBranch) {
-      onBranch(messageId);
-    }
-  }, [messageId, onBranch]);
-
-  const handleDelete = useCallback(() => {
-    if (messageId && onDelete) {
-      onDelete(messageId);
-    }
-  }, [messageId, onDelete]);
-
   return (
-    <Container
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-    >
-      <Flex
-        justify="end"
-        gap="1"
-        align="center"
-        style={{
-          opacity: isHovered ? 1 : 0,
-          visibility: isHovered ? "visible" : "hidden",
-          transition: "opacity 0.15s, visibility 0.15s",
-        }}
-      >
-        <IconButton
-          title="Copy message"
-          variant="ghost"
-          size="1"
-          style={{ width: 20, height: 20 }}
-          onClick={handleCopyMessage}
-        >
-          <CopyIcon width={12} height={12} />
-        </IconButton>
-        {onBranch && messageId && (
-          <IconButton
-            title="Branch from here"
-            variant="ghost"
-            size="1"
-            style={{ width: 20, height: 20 }}
-            onClick={handleBranch}
-          >
-            <CornerTopRightIcon width={12} height={12} />
-          </IconButton>
-        )}
-        {onDelete && messageId && (
-          <IconButton
-            title="Delete message"
-            variant="ghost"
-            size="1"
-            color="red"
-            style={{ width: 20, height: 20 }}
-            onClick={handleDelete}
-          >
-            <TrashIcon width={12} height={12} />
-          </IconButton>
-        )}
-      </Flex>
+    <MessageWrapper>
       {combinedReasoning && (
         <ReasoningContent
           reasoningContent={combinedReasoning}
@@ -239,7 +189,24 @@ export const AssistantInput: React.FC<ChatInputProps> = ({
           </Flex>
         </Card>
       )}
-      {toolCalls && <ToolContent toolCalls={toolCalls} />}
-    </Container>
+      {toolCalls && (
+        <ToolContent
+          toolCalls={toolCalls}
+          contextFilesByToolId={contextFilesByToolId}
+          diffsByToolId={diffsByToolId}
+        />
+      )}
+      <MessageFooter
+        messageId={messageId}
+        onCopy={message ? handleCopyMessage : undefined}
+        onBranch={onBranch}
+        onDelete={onDelete}
+        usage={usage}
+        metering_coins_prompt={metering_coins_prompt}
+        metering_coins_generated={metering_coins_generated}
+        metering_coins_cache_creation={metering_coins_cache_creation}
+        metering_coins_cache_read={metering_coins_cache_read}
+      />
+    </MessageWrapper>
   );
 };
