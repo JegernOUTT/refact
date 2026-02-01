@@ -1,25 +1,9 @@
 import React, { useCallback, useMemo } from "react";
-import {
-  Text,
-  Flex,
-  HoverCard,
-  Link,
-  Skeleton,
-  Box,
-  Button,
-} from "@radix-ui/themes";
+import { Text, Flex, Skeleton, Box } from "@radix-ui/themes";
 import { Select, type SelectProps } from "../Select";
-import { type Config } from "../../features/Config/configSlice";
-import { TruncateLeft } from "../Text";
 import styles from "./ChatForm.module.css";
 import classNames from "classnames";
 import { PromptSelect } from "./PromptSelect";
-import { Checkbox } from "../Checkbox";
-import {
-  LockClosedIcon,
-  LockOpen1Icon,
-  QuestionMarkCircledIcon,
-} from "@radix-ui/react-icons";
 import { useTourRefs } from "../../features/Tour";
 import {
   selectIsStreaming,
@@ -28,7 +12,6 @@ import {
 } from "../../features/Chat/Thread";
 import { useAppSelector, useCapsForToolUse } from "../../hooks";
 import { useAppDispatch } from "../../hooks";
-import { useAttachedFiles } from "./useCheckBoxes";
 import { push } from "../../features/Pages/pagesSlice";
 import { RichModelSelectItem } from "../Select/RichModelSelectItem";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
@@ -133,109 +116,7 @@ export const CapsSelect: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
   );
 };
 
-type CheckboxHelp = {
-  text: string;
-  link?: string;
-  linkText?: string;
-};
-
-export type Checkbox = {
-  name: string;
-  label: string;
-  checked: boolean;
-  value?: string;
-  disabled: boolean;
-  fileName?: string;
-  hide?: boolean;
-  info?: CheckboxHelp;
-  locked?: boolean;
-};
-
-export type ChatControlsProps = {
-  checkboxes: Record<string, Checkbox>;
-  onCheckedChange: (
-    name: keyof ChatControlsProps["checkboxes"],
-    checked: boolean | string,
-  ) => void;
-
-  host: Config["host"];
-  attachedFiles: ReturnType<typeof useAttachedFiles>;
-};
-
-const ChatControlCheckBox: React.FC<{
-  name: string;
-  checked: boolean;
-  disabled?: boolean;
-  onCheckChange: (value: boolean | string) => void;
-  label: string;
-  fileName?: string;
-  infoText?: string;
-  href?: string;
-  linkText?: string;
-  locked?: boolean;
-}> = ({
-  name,
-  checked,
-  disabled,
-  onCheckChange,
-  label,
-  fileName,
-  infoText,
-  href,
-  linkText,
-  locked,
-}) => {
-  return (
-    <Flex justify="between">
-      <Checkbox
-        size="1"
-        name={name}
-        checked={checked}
-        disabled={disabled}
-        onCheckedChange={onCheckChange}
-      >
-        {label}
-        {fileName && (
-          <Flex ml="-3px">
-            <TruncateLeft>{fileName}</TruncateLeft>
-          </Flex>
-        )}
-        {locked && <LockClosedIcon opacity="0.6" />}
-        {locked === false && <LockOpen1Icon opacity="0.6" />}
-      </Checkbox>
-      {infoText && (
-        <HoverCard.Root>
-          <HoverCard.Trigger>
-            <QuestionMarkCircledIcon style={{ marginLeft: 4 }} />
-          </HoverCard.Trigger>
-          <HoverCard.Content maxWidth="240px" size="1">
-            <Flex direction="column" gap="4">
-              <Text as="div" size="1">
-                {infoText}
-              </Text>
-
-              {href && linkText && (
-                <Text size="1">
-                  Read more on our{" "}
-                  <Link size="1" href={href}>
-                    {linkText}
-                  </Link>
-                </Text>
-              )}
-            </Flex>
-          </HoverCard.Content>
-        </HoverCard.Root>
-      )}
-    </Flex>
-  );
-};
-
-export const ChatControls: React.FC<ChatControlsProps> = ({
-  checkboxes,
-  onCheckedChange,
-  host,
-  attachedFiles,
-}) => {
+export const ChatControls: React.FC = () => {
   const refs = useTourRefs();
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
@@ -246,6 +127,11 @@ export const ChatControls: React.FC<ChatControlsProps> = ({
     [isStreaming, isWaiting, messages],
   );
 
+  // Only show PromptSelect when there are no messages
+  if (!showControls) {
+    return null;
+  }
+
   return (
     <Flex
       pt="1"
@@ -254,47 +140,9 @@ export const ChatControls: React.FC<ChatControlsProps> = ({
       align="start"
       className={classNames(styles.controls)}
     >
-      {Object.entries(checkboxes).map(([key, checkbox]) => {
-        if (host === "web" && checkbox.name === "file_upload") {
-          return null;
-        }
-        if (checkbox.hide === true) {
-          return null;
-        }
-        return (
-          <ChatControlCheckBox
-            key={key}
-            name={checkbox.name}
-            label={checkbox.label}
-            checked={checkbox.checked}
-            disabled={checkbox.disabled}
-            onCheckChange={(value) => onCheckedChange(key, value)}
-            infoText={checkbox.info?.text}
-            href={checkbox.info?.link}
-            linkText={checkbox.info?.linkText}
-            fileName={checkbox.fileName}
-            locked={checkbox.locked}
-          />
-        );
-      })}
-
-      {host !== "web" && (
-        <Button
-          title="Attach current file"
-          onClick={attachedFiles.addFile}
-          disabled={!attachedFiles.activeFile.name || attachedFiles.attached}
-          size="1"
-          radius="medium"
-        >
-          Attach: {attachedFiles.activeFile.name}
-        </Button>
-      )}
-
-      {showControls && (
-        <Flex gap="2" direction="column" ref={(x) => refs.setUseTools(x)}>
-          <PromptSelect />
-        </Flex>
-      )}
+      <Flex gap="2" direction="column" ref={(x) => refs.setUseTools(x)}>
+        <PromptSelect />
+      </Flex>
     </Flex>
   );
 };

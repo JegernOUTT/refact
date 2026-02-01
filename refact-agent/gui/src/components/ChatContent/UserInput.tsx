@@ -3,13 +3,20 @@ import { Button, Container, Flex, IconButton, Text } from "@radix-ui/themes";
 import React, { useCallback, useMemo, useState } from "react";
 import { selectMessages } from "../../features/Chat";
 import { CheckpointButton } from "../../features/Checkpoints";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector, useEventsBusForIDE } from "../../hooks";
+import { selectHost } from "../../features/Config/configSlice";
 import {
   isUserMessage,
   ProcessedUserMessageContentWithImages,
   UserMessageContentWithImage,
   type UserMessage,
 } from "../../services/refact";
+import {
+  parseLine,
+  tokenToChipInfo,
+  getAtCommandTokens,
+} from "../../utils/atCommands";
+import { AtCommandChip } from "../AtCommands";
 
 import { RetryForm } from "../ChatForm";
 import { DialogImage } from "../DialogImage";
@@ -31,6 +38,8 @@ export const UserInput: React.FC<UserInputProps> = ({
   onRetry,
 }) => {
   const messages = useAppSelector(selectMessages);
+  const host = useAppSelector(selectHost);
+  const { queryPathThenOpenFile } = useEventsBusForIDE();
 
   const [showTextArea, setShowTextArea] = useState(false);
   const [isEditButtonVisible, setIsEditButtonVisible] = useState(false);
@@ -53,8 +62,7 @@ export const UserInput: React.FC<UserInputProps> = ({
     [isEditButtonVisible],
   );
 
-  // const lines = children.split("\n"); // won't work if it's an array
-  const elements = process(children);
+  const elements = process(children, host, queryPathThenOpenFile);
   const isString = typeof children === "string";
   const linesLength = isString ? children.split("\n").length : Infinity;
 
@@ -137,14 +145,95 @@ export const UserInput: React.FC<UserInputProps> = ({
   );
 };
 
-function process(items: UserInputProps["children"]) {
+function process(
+  items: UserInputProps["children"],
+  host: string,
+  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>,
+) {
   if (typeof items !== "string") {
-    return processUserInputArray(items);
+    return processUserInputArray(items, host, onOpenFile);
   }
-  return processLines(items.split("\n"));
+  return processLines(items.split("\n"), host, onOpenFile);
 }
 
-function processLines(lines: string[]): JSX.Element[] {
+function renderLineWithChips(
+  line: string,
+  key: string,
+  host: string,
+  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>,
+  allAtTokens: ReturnType<typeof getAtCommandTokens>,
+): JSX.Element {
+  const parsed = parseLine(line);
+  const hasAtCommands = parsed.tokens.some((t) => t.kind === "at");
+
+  if (!hasAtCommands) {
+    return (
+      <Text
+        size="2"
+        as="div"
+        key={key}
+        wrap="balance"
+        className={styles.break_word}
+      >
+        {line}
+      </Text>
+    );
+  }
+
+  const elements = parsed.tokens.map((token, idx) => {
+    if (token.kind === "text") {
+      return <span key={`${key}-text-${idx}`}>{token.text}</span>;
+    }
+
+    const chip = tokenToChipInfo(token, host === "web", allAtTokens);
+
+    const handleClick = () => {
+      if (token.type === "file" && token.arg) {
+        void onOpenFile({
+          file_path: token.arg,
+          line: token.lineRange?.line1,
+        });
+      } else if (token.type === "web" && token.arg) {
+        window.open(
+          token.arg.startsWith("http") ? token.arg : `https://${token.arg}`,
+          "_blank",
+          "noopener,noreferrer",
+        );
+      }
+    };
+
+    return (
+      <AtCommandChip
+        key={`${key}-chip-${idx}`}
+        chip={chip}
+        onClick={handleClick}
+      />
+    );
+  });
+
+  return (
+    <Text
+      size="2"
+      as="div"
+      key={key}
+      wrap="balance"
+      className={styles.break_word}
+    >
+      {elements}
+    </Text>
+  );
+}
+
+function processLines(
+  lines: string[],
+  host: string,
+  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>,
+): JSX.Element[] {
+  const allParsedLines = lines
+    .filter((line) => !line.trimStart().startsWith("```"))
+    .map((line) => parseLine(line));
+  const allAtTokens = getAtCommandTokens(allParsedLines);
+
   const result: JSX.Element[] = [];
   let i = 0;
 
@@ -152,17 +241,9 @@ function processLines(lines: string[]): JSX.Element[] {
     const line = lines[i];
     const key = `line-${result.length + 1}`;
 
-    if (!line.startsWith("```")) {
+    if (!line.trimStart().startsWith("```")) {
       result.push(
-        <Text
-          size="2"
-          as="div"
-          key={key}
-          wrap="balance"
-          className={styles.break_word}
-        >
-          {line}
-        </Text>,
+        renderLineWithChips(line, key, host, onOpenFile, allAtTokens),
       );
       i++;
       continue;
@@ -170,7 +251,7 @@ function processLines(lines: string[]): JSX.Element[] {
 
     let endIndex = -1;
     for (let j = i + 1; j < lines.length; j++) {
-      if (lines[j].startsWith("```")) {
+      if (lines[j].trimStart().startsWith("```")) {
         endIndex = j;
         break;
       }
@@ -178,15 +259,7 @@ function processLines(lines: string[]): JSX.Element[] {
 
     if (endIndex === -1) {
       result.push(
-        <Text
-          size="2"
-          as="div"
-          key={key}
-          wrap="balance"
-          className={styles.break_word}
-        >
-          {line}
-        </Text>,
+        renderLineWithChips(line, key, host, onOpenFile, allAtTokens),
       );
       i++;
       continue;
@@ -217,6 +290,8 @@ function processUserInputArray(
     | UserMessageContentWithImage
     | ProcessedUserMessageContentWithImages
   )[],
+  host: string,
+  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>,
 ): JSX.Element[] {
   const result: JSX.Element[] = [];
   let i = 0;
@@ -225,14 +300,22 @@ function processUserInputArray(
     const head = items[i];
 
     if ("type" in head && head.type === "text") {
-      const processedLines = processLines(head.text.split("\n"));
+      const processedLines = processLines(
+        head.text.split("\n"),
+        host,
+        onOpenFile,
+      );
       for (const el of processedLines) result.push(el);
       i++;
       continue;
     }
 
     if ("m_type" in head && head.m_type === "text") {
-      const processedLines = processLines(head.m_content.split("\n"));
+      const processedLines = processLines(
+        head.m_content.split("\n"),
+        host,
+        onOpenFile,
+      );
       for (const el of processedLines) result.push(el);
       i++;
       continue;

@@ -1,6 +1,18 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Switch, Text, Button, Tooltip } from "@radix-ui/themes";
-import { InfoCircledIcon } from "@radix-ui/react-icons";
+import {
+  Flex,
+  Switch,
+  Text,
+  Button,
+  Tooltip,
+  HoverCard,
+} from "@radix-ui/themes";
+import {
+  InfoCircledIcon,
+  LockClosedIcon,
+  LockOpen1Icon,
+  QuestionMarkCircledIcon,
+} from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectAutoApproveEditingTools,
@@ -13,9 +25,25 @@ import {
   setAutoApproveDangerousCommands,
 } from "../../features/Chat/Thread/actions";
 import { ProjectInformationDialog } from "./ProjectInformationDialog";
+import { selectHost } from "../../features/Config/configSlice";
+import { Checkbox } from "../Checkbox";
+import { TruncateLeft } from "../Text";
+import type { Checkbox as CheckboxType } from "./useCheckBoxes";
+import type { useAttachedFiles } from "./useCheckBoxes";
 
-export const ChatInputTopControls: React.FC = () => {
+export type ChatInputTopControlsProps = {
+  checkboxes: Record<string, CheckboxType>;
+  onCheckedChange: (name: string, checked: boolean | string) => void;
+  attachedFiles: ReturnType<typeof useAttachedFiles>;
+};
+
+export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
+  checkboxes,
+  onCheckedChange,
+  attachedFiles,
+}) => {
   const dispatch = useAppDispatch();
+  const host = useAppSelector(selectHost);
   const chatId = useAppSelector(selectCurrentThreadId);
   const autoApproveEditing = useAppSelector(selectAutoApproveEditingTools);
   const autoApproveDangerous = useAppSelector(
@@ -42,9 +70,13 @@ export const ChatInputTopControls: React.FC = () => {
     [dispatch, chatId],
   );
 
+  const selectedLinesCheckbox = checkboxes.selected_lines;
+  const showSelectedLines = host !== "web" && !selectedLinesCheckbox.hide;
+  const showAttachButton = host !== "web" && attachedFiles.activeFile.name;
+
   return (
     <>
-      <Flex gap="4" align="center" wrap="wrap" px="2" py="1">
+      <Flex gap="3" align="center" wrap="wrap">
         <Tooltip content="Configure what project information is included in chat context">
           <Button
             variant="ghost"
@@ -53,11 +85,11 @@ export const ChatInputTopControls: React.FC = () => {
             color={includeProjectInfo ? undefined : "gray"}
           >
             <InfoCircledIcon />
-            Project Info
+            <Text size="1">Project Info</Text>
           </Button>
         </Tooltip>
 
-        <Flex align="center" gap="2">
+        <Flex align="center" gap="1">
           <Switch
             size="1"
             checked={autoApproveEditing}
@@ -68,7 +100,7 @@ export const ChatInputTopControls: React.FC = () => {
           </Tooltip>
         </Flex>
 
-        <Flex align="center" gap="2">
+        <Flex align="center" gap="1">
           <Switch
             size="1"
             checked={autoApproveDangerous}
@@ -80,6 +112,54 @@ export const ChatInputTopControls: React.FC = () => {
             </Text>
           </Tooltip>
         </Flex>
+
+        {showSelectedLines && (
+          <Flex align="center" gap="1">
+            <Checkbox
+              size="1"
+              name={selectedLinesCheckbox.name}
+              checked={selectedLinesCheckbox.checked}
+              disabled={selectedLinesCheckbox.disabled}
+              onCheckedChange={(value) =>
+                onCheckedChange(selectedLinesCheckbox.name, value)
+              }
+            >
+              <Text size="1">{selectedLinesCheckbox.label}</Text>
+              {selectedLinesCheckbox.locked && <LockClosedIcon opacity="0.6" />}
+              {selectedLinesCheckbox.locked === false && (
+                <LockOpen1Icon opacity="0.6" />
+              )}
+            </Checkbox>
+            {selectedLinesCheckbox.info && (
+              <HoverCard.Root>
+                <HoverCard.Trigger>
+                  <QuestionMarkCircledIcon
+                    style={{ cursor: "help", opacity: 0.6 }}
+                  />
+                </HoverCard.Trigger>
+                <HoverCard.Content maxWidth="240px" size="1">
+                  <Text as="div" size="1">
+                    {selectedLinesCheckbox.info.text}
+                  </Text>
+                </HoverCard.Content>
+              </HoverCard.Root>
+            )}
+          </Flex>
+        )}
+
+        {showAttachButton && (
+          <Button
+            variant="ghost"
+            size="1"
+            onClick={attachedFiles.addFile}
+            disabled={attachedFiles.attached}
+          >
+            <Text size="1">
+              Attach:{" "}
+              <TruncateLeft>{attachedFiles.activeFile.name}</TruncateLeft>
+            </Text>
+          </Button>
+        )}
       </Flex>
 
       <ProjectInformationDialog

@@ -185,3 +185,12 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.plainTextTrigger {
+  cursor: pointer;
+  color: var(--gray-10);
+}
+
+.plainTextTrigger:hover {
+  color: var(--gray-11);
+}

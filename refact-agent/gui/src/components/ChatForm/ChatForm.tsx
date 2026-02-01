@@ -10,7 +10,9 @@ import {
 } from "../Buttons";
 import { StreamingTokenCounter, UsageCounter } from "../UsageCounter";
 import { TrajectoryButton } from "../Trajectory";
-import { TextArea } from "../TextArea";
+import { TextAreaWithChips } from "../TextAreaWithChips";
+import { selectHost } from "../../features/Config/configSlice";
+import { useEventsBusForIDE } from "../../hooks";
 import { Form } from "./Form";
 import {
   useOnPressedEnter,
@@ -91,6 +93,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const caps = useCapsForToolUse();
   const { isMultimodalitySupportedForCurrentModel } = caps;
   const config = useConfig();
+  const host = useAppSelector(selectHost);
+  const { queryPathThenOpenFile } = useEventsBusForIDE();
   const globalError = useAppSelector(getErrorMessage);
   const globalErrorType = useAppSelector(getErrorType);
   const chatError = useAppSelector(selectChatError);
@@ -436,10 +440,17 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         >
           <Box className={styles.textareaWrapper}>
             <Box className={styles.contextIndicator}>
-              <Flex align="center" gap="2">
-                <StreamingTokenCounter />
-                <UsageCounter />
-                <TrajectoryButton />
+              <Flex align="center" gap="2" justify="between" wrap="wrap">
+                <ChatInputTopControls
+                  checkboxes={checkboxes}
+                  onCheckedChange={onToggleCheckbox}
+                  attachedFiles={attachedFiles}
+                />
+                <Flex align="center" gap="2">
+                  <StreamingTokenCounter />
+                  <UsageCounter />
+                  <TrajectoryButton />
+                </Flex>
               </Flex>
             </Box>
 
@@ -470,10 +481,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                     : ""
               }
               render={(props) => (
-                <TextArea
+                <TextAreaWithChips
                   data-testid="chat-form-textarea"
                   required={true}
                   {...props}
+                  host={host}
+                  onOpenFile={queryPathThenOpenFile}
                   autoFocus={autoFocus}
                   readOnly={isVoiceActive}
                   style={{ boxShadow: "none", outline: "none" }}
@@ -482,7 +495,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               )}
             />
           </Box>
-          <ChatInputTopControls />
           <Flex gap="2" wrap="wrap" py="2" px="3" align="center">
             <ChatSettingsDropdown />
             <ModeSelect
@@ -541,12 +553,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         </Form>
       </Flex>
 
-      <ChatControls
-        host={config.host}
-        checkboxes={checkboxes}
-        onCheckedChange={onToggleCheckbox}
-        attachedFiles={attachedFiles}
-      />
+      <ChatControls />
     </Box>
   );
 };
