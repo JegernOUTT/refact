@@ -48,11 +48,11 @@ async function getHighlighter(): Promise<Highlighter> {
     themes: [LIGHT_THEME, DARK_THEME],
     langs: INITIAL_LANGUAGES,
   })
-    .then((h) => {
+    .then((h: Highlighter) => {
       highlighterInstance = h;
       return h;
     })
-    .catch((err) => {
+    .catch((err: unknown) => {
       highlighterPromise = null;
       throw err;
     });
@@ -105,14 +105,14 @@ export function useShiki() {
 
     let mounted = true;
 
-    getHighlighter()
-      .then((h) => {
+    void getHighlighter()
+      .then((h: Highlighter) => {
         if (mounted) {
           setHighlighter(h);
           setIsLoading(false);
         }
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         if (mounted) {
           setError(err instanceof Error ? err : new Error(String(err)));
           setIsLoading(false);
@@ -134,18 +134,31 @@ export function useShiki() {
       const normalizedLang = normalizeLanguage(language);
       const theme = isDark ? DARK_THEME : LIGHT_THEME;
 
-      const loadedLangs = h.getLoadedLanguages();
+      const loadedLangs = (
+        h as unknown as { getLoadedLanguages(): BundledLanguage[] }
+      ).getLoadedLanguages();
       let finalLang = normalizedLang;
 
       if (!loadedLangs.includes(normalizedLang as BundledLanguage)) {
         try {
-          await h.loadLanguage(normalizedLang as BundledLanguage);
+          await (
+            h as unknown as {
+              loadLanguage(lang: BundledLanguage): Promise<void>;
+            }
+          ).loadLanguage(normalizedLang as BundledLanguage);
         } catch {
           finalLang = "plaintext";
         }
       }
 
-      const html = h.codeToHtml(code, {
+      const html = (
+        h as unknown as {
+          codeToHtml(
+            code: string,
+            options: { lang: string; theme: BundledTheme },
+          ): string;
+        }
+      ).codeToHtml(code, {
         lang: finalLang,
         theme,
       });
@@ -165,13 +178,22 @@ export function useShiki() {
 
       const normalizedLang = normalizeLanguage(language);
       const theme = isDark ? DARK_THEME : LIGHT_THEME;
-      const loadedLangs = highlighter.getLoadedLanguages();
+      const loadedLangs = (
+        highlighter as unknown as { getLoadedLanguages(): BundledLanguage[] }
+      ).getLoadedLanguages();
 
       const finalLang = loadedLangs.includes(normalizedLang as BundledLanguage)
         ? normalizedLang
         : "plaintext";
 
-      const html = highlighter.codeToHtml(code, {
+      const html = (
+        highlighter as unknown as {
+          codeToHtml(
+            code: string,
+            options: { lang: string; theme: BundledTheme },
+          ): string;
+        }
+      ).codeToHtml(code, {
         lang: finalLang,
         theme,
       });

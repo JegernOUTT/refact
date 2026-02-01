@@ -417,6 +417,19 @@ function renderMessagesFast(
         break;
       }
 
+      const cleanContextFilesByToolId: Record<string, ChatContextFile[]> = {};
+      const cleanDiffsByToolId: Record<string, DiffChunk[]> = {};
+      for (const [toolId, files] of Object.entries(contextFilesByToolId)) {
+        if (files !== undefined) {
+          cleanContextFilesByToolId[toolId] = files;
+        }
+      }
+      for (const [toolId, diffs] of Object.entries(diffsByToolId)) {
+        if (diffs !== undefined) {
+          cleanDiffsByToolId[toolId] = diffs;
+        }
+      }
+
       nodes.push(
         <AssistantInput
           key={key}
@@ -429,8 +442,8 @@ function renderMessagesFast(
           messageId={head.message_id}
           onBranch={onBranch}
           onDelete={onDelete}
-          contextFilesByToolId={contextFilesByToolId}
-          diffsByToolId={diffsByToolId}
+          contextFilesByToolId={cleanContextFilesByToolId}
+          diffsByToolId={cleanDiffsByToolId}
           usage={head.usage}
           metering_coins_prompt={head.metering_coins_prompt}
           metering_coins_generated={head.metering_coins_generated}
@@ -438,7 +451,6 @@ function renderMessagesFast(
           metering_coins_cache_read={head.metering_coins_cache_read}
         />,
       );
-
       for (const ctxNode of contextFilesAfter) {
         nodes.push(ctxNode);
       }
