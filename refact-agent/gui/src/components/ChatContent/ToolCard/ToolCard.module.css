@@ -44,6 +44,24 @@
 
 .contentWrapper {
   overflow: hidden;
+  /* Force GPU layer for JCEF compatibility */
+  transform: translateZ(0);
+  /* CSS-based collapse animation using grid */
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.2s ease-out,
+    opacity 0.15s ease-out;
+}
+
+.contentWrapperOpen {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.contentInner {
+  overflow: hidden;
 }
 
 .content {
@@ -51,16 +69,41 @@
   padding-left: var(--space-4);
 }
 
-@keyframes pulse {
+/* Running state - subtle text fade */
+@keyframes subtlePulse {
   0%,
   100% {
-    opacity: 1;
+    opacity: 0.9;
   }
   50% {
-    opacity: 0.5;
+    opacity: 0.6;
   }
 }
 
 .running .summary {
-  animation: pulse 1.5s ease-in-out infinite;
+  color: var(--gray-11);
+  animation: subtlePulse 2s ease-in-out infinite;
+}
+
+/* Completion - no animation, just ensure normal state */
+.completed {
+  /* Intentionally no animation - completion is implicit */
+}
+
+/* Error - subtle color change, no shake */
+.error .summary {
+  color: var(--red-11);
+}
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .running .summary,
+  .completed,
+  .error {
+    animation: none;
+  }
+
+  .contentWrapper {
+    transition: none;
+  }
 }

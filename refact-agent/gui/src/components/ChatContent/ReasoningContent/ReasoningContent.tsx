@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
 import { Flex, Text, Spinner } from "@radix-ui/themes";
+import classNames from "classnames";
 import { LightningBoltIcon } from "@radix-ui/react-icons";
 
 import { Markdown } from "../../Markdown";
+import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 
 import styles from "./ReasoningContent.module.css";
 
@@ -132,12 +133,15 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
       ? `Thought for ${formatDuration(thinkingDuration)}`
       : "Thought";
 
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
+
   return (
     <div className={styles.card}>
       <Flex
-        className={`${styles.header} ${
-          isActivelyThinking ? styles.thinking : ""
-        }`}
+        className={classNames(
+          styles.header,
+          isActivelyThinking && styles.thinking,
+        )}
         align="center"
         gap="2"
         onClick={handleToggle}
@@ -150,15 +154,14 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
         </Text>
       </Flex>
 
-      <AnimatePresence initial={false}>
-        {isOpen && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-            className={styles.contentWrapper}
-          >
+      {shouldRender && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
             <div
               ref={contentRef}
               className={styles.content}
@@ -173,9 +176,9 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
                 </Markdown>
               </Text>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

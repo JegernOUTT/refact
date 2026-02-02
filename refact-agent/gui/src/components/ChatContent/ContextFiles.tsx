@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from "react";
 import { Flex, Box, Text } from "@radix-ui/themes";
-import { motion, AnimatePresence } from "framer-motion";
+import classNames from "classnames";
 import ReactMarkDown from "react-markdown";
 import {
   FileIcon,
@@ -12,6 +12,7 @@ import { ChatContextFile } from "../../services/refact";
 import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import { filename } from "../../utils";
 import { useEventsBusForIDE } from "../../hooks";
+import { useDelayedUnmount } from "../shared/useDelayedUnmount";
 import styles from "./ContextFiles.module.css";
 
 // Re-export Markdown for backward compatibility
@@ -152,6 +153,7 @@ const FileItem: React.FC<{
   variant: ContextVariant;
 }> = ({ file, onOpenFile, variant }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
   const extension = getExtensionFromName(file.file_name);
 
   const displayName =
@@ -196,23 +198,22 @@ const FileItem: React.FC<{
         )}
       </Flex>
 
-      <AnimatePresence initial={false}>
-        {isOpen && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-            className={styles.contentWrapper}
-          >
+      {shouldRender && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
             <Box className={styles.fileContent}>
               <ShikiCodeBlock showLineNumbers={false}>
                 {`\`\`\`${extension}\n${file.file_content}\n\`\`\``}
               </ShikiCodeBlock>
             </Box>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -364,6 +365,7 @@ const _ContextFiles: React.FC<{
 
   const isControlled = controlledOpen !== undefined;
   const isOpen = isControlled ? controlledOpen : internalOpen;
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
 
   const handleToggle = useCallback(() => {
     if (isControlled && onOpenChange) {
@@ -420,15 +422,14 @@ const _ContextFiles: React.FC<{
         </Text>
       </Flex>
 
-      <AnimatePresence initial={false}>
-        {isOpen && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-            className={styles.contentWrapper}
-          >
+      {shouldRender && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
             <Box className={styles.content}>
               <FilesContent
                 files={files}
@@ -436,9 +437,9 @@ const _ContextFiles: React.FC<{
                 variant={variant}
               />
             </Box>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

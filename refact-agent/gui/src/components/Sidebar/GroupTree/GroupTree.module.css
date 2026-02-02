@@ -24,14 +24,13 @@ div > .sidebarTree {
   outline-offset: -2px;
 }
 
-/* TODO: still doesn't work properly for last item in the tree */
-/* Animation for collapse/expand - target all possible elements */
+/* Animation for collapse/expand */
 .sidebarTree [role="treeitem"],
 .sidebarTree [aria-expanded="true"],
-.sidebarTree [aria-expanded="false"],
-.sidebarTree div,
-.sidebarTree svg {
-  transition: all 0.2s ease;
+.sidebarTree [aria-expanded="false"] {
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
 }
 
 /* Give folder rows a slightly different appearance */

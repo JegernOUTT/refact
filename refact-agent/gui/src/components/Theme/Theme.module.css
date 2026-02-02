@@ -1,6 +1,6 @@
 .themeToggle {
   position: fixed;
-  z-index: 999;
+  z-index: var(--z-fixed, 400);
   right: 15px;
   top: 15px;
   display: flex;

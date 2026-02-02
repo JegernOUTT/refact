@@ -81,12 +81,8 @@
   word-break: break-word;
 }
 
-.tool_result {
-  width: 100%;
-}
-
 .diff {
-  background: #252525;
+  background: var(--gray-2);
   max-width: unset;
 }
 
@@ -132,29 +128,19 @@
     DejaVu Sans Mono,
     Bitstream Vera Sans Mono,
     Courier New;
-  color: #c6cdd5;
+  color: var(--gray-11);
 }
 
 .diff_line_number {
   min-width: 50px;
   padding-right: 8px;
   text-align: end;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  -khtml-user-select: none;
-  -moz-user-select: none;
-  -ms-user-select: none;
   user-select: none;
 }
 
 .diff_sign {
   padding-left: 6px;
   padding-right: 6px;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  -khtml-user-select: none;
-  -moz-user-select: none;
-  -ms-user-select: none;
   user-select: none;
 }
 
@@ -162,9 +148,8 @@
   flex: 1;
 }
 
-/** TODO: it seems the background doesn't grow inside of the scroll area */
-
 .tool_result {
+  width: 100%;
   margin-top: var(--space-1);
   box-sizing: border-box;
 }
@@ -240,27 +225,6 @@
 }
 
 .virtuosoScroller {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
   height: 100%;
-}
-
-.virtuosoScroller::-webkit-scrollbar {
-  width: 5px;
-}
-
-.virtuosoScroller::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.virtuosoScroller::-webkit-scrollbar-thumb {
-  background-color: var(--gray-a3);
-  border-radius: 2px;
-  transition: background-color 150ms ease-out;
-}
-
-.virtuosoScroller:hover::-webkit-scrollbar-thumb {
-  background-color: var(--gray-a5);
-}
-
-.virtuosoScroller::-webkit-scrollbar-thumb:active {
-  background-color: var(--gray-a7);
 }

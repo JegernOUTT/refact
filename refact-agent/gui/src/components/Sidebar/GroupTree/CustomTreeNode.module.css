@@ -1,11 +1,12 @@
 .treeNode {
   --left-padding: 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-2);
   height: 100%;
   width: calc(100% - var(--left-padding));
   box-sizing: border-box;
   cursor: pointer;
-  /* padding-left: 12px !important; */
   margin-left: var(--left-padding);
-  transition: all 0.2s ease;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
 }

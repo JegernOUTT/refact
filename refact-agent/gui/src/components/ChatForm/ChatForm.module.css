@@ -1,5 +1,5 @@
 .button {
-  color: #000;
+  color: var(--gray-12);
 }
 
 .chatForm {

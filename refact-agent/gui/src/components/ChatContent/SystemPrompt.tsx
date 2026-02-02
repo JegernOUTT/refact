@@ -1,14 +1,16 @@
 import React, { useState, useCallback } from "react";
 import { Box, Text, Flex } from "@radix-ui/themes";
-import { motion, AnimatePresence } from "framer-motion";
+import classNames from "classnames";
 import { ReaderIcon } from "@radix-ui/react-icons";
 import { Markdown } from "../Markdown";
+import { useDelayedUnmount } from "../shared/useDelayedUnmount";
 import styles from "./SystemPrompt.module.css";
 
 export const SystemPrompt: React.FC<{
   content: string;
 }> = ({ content }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
 
   const handleToggle = useCallback(() => {
     setIsOpen((prev) => !prev);
@@ -32,21 +34,20 @@ export const SystemPrompt: React.FC<{
         </Text>
       </Flex>
 
-      <AnimatePresence initial={false}>
-        {isOpen && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-            className={styles.contentWrapper}
-          >
+      {shouldRender && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
             <Box className={styles.content}>
               <Markdown>{content}</Markdown>
             </Box>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

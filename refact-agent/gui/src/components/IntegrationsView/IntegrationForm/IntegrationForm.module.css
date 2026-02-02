@@ -1,12 +1,15 @@
 .button {
   cursor: pointer;
   padding: 0 0.75rem;
-  transition: all 0.3s ease-in-out;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    opacity 0.15s ease;
 }
 
 .disabledButton {
   cursor: not-allowed;
-  backdrop-filter: blur(1000px);
+  backdrop-filter: blur(16px);
 }
 
 .DockerIcon {

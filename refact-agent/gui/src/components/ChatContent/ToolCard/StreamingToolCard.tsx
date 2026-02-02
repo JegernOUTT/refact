@@ -1,11 +1,12 @@
 import React, { useMemo } from "react";
-import { motion, AnimatePresence } from "framer-motion";
 import { Flex, Text, Box, Spinner } from "@radix-ui/themes";
+import classNames from "classnames";
 import { useAutoExpandCollapse, ToolStatus } from "./useAutoExpandCollapse";
 import { useAppSelector } from "../../../hooks";
 import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
+import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import styles from "./StreamingToolCard.module.css";
 
 const MAX_MD_RENDER_CHARS = 50_000;
@@ -57,15 +58,18 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     content.length <= MAX_MD_RENDER_CHARS &&
     looksLikeMarkdown(content);
 
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
+    isOpen && !!content,
+    200,
+  );
+
   return (
-    <motion.div
-      className={styles.card}
-      initial={{ opacity: 0, y: -10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
-    >
+    <div className={styles.card}>
       <Flex
-        className={`${styles.header} ${status === "error" ? styles.error : ""}`}
+        className={classNames(
+          styles.header,
+          status === "error" && styles.error,
+        )}
         align="center"
         gap="2"
         onClick={onToggle}
@@ -75,9 +79,10 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
         </span>
         <Text
           size="1"
-          className={`${styles.summary} ${
-            status === "running" ? styles.running : ""
-          }`}
+          className={classNames(
+            styles.summary,
+            status === "running" && styles.running,
+          )}
         >
           {summary}
         </Text>
@@ -93,15 +98,14 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
         )}
       </Flex>
 
-      <AnimatePresence initial={false}>
-        {isOpen && content && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-            className={styles.contentWrapper}
-          >
+      {shouldRender && content && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
             <Box className={styles.content}>
               {shouldRenderMarkdown ? (
                 <Text size="2">
@@ -113,10 +117,10 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
                 </ShikiCodeBlock>
               )}
             </Box>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 };
 

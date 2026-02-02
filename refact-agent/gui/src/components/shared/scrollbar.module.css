@@ -1,0 +1,29 @@
+/* Shared scrollbar styles - use via composes: scrollbarThin from '../shared/scrollbar.module.css' */
+
+.scrollbarThin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--gray-a3) transparent;
+}
+
+.scrollbarThin::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.scrollbarThin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbarThin::-webkit-scrollbar-thumb {
+  background-color: var(--gray-a3);
+  border-radius: 2px;
+  transition: background-color 150ms ease-out;
+}
+
+.scrollbarThin:hover::-webkit-scrollbar-thumb {
+  background-color: var(--gray-a5);
+}
+
+.scrollbarThin::-webkit-scrollbar-thumb:active {
+  background-color: var(--gray-a7);
+}

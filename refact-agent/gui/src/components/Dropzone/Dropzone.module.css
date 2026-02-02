@@ -1,28 +1,4 @@
+/* Use shared iconButton */
 .iconButton {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--gray-11);
-  cursor: pointer;
-  transition: filter 0.15s ease;
-  flex-shrink: 0;
-}
-
-.iconButton svg {
-  width: 15px;
-  height: 15px;
-}
-
-.iconButton:hover:not(:disabled) {
-  filter: brightness(1.5);
-}
-
-.iconButton:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+  composes: iconButton from "../shared/iconButton.module.css";
 }

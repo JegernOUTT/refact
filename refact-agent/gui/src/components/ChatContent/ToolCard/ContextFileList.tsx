@@ -1,10 +1,11 @@
 import React, { useState, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
 import { FileTextIcon } from "@radix-ui/react-icons";
 import { Box, Flex, Text } from "@radix-ui/themes";
+import classNames from "classnames";
 import { ChatContextFile } from "../../../services/refact/types";
 import { useEventsBusForIDE } from "../../../hooks";
 import { ShikiCodeBlock } from "../../Markdown";
+import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import styles from "./ContextFileList.module.css";
 
 function filename(path: string): string {
@@ -40,6 +41,7 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
   onOpenFile,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
   const displayName = formatFileName(file.file_name, file.line1, file.line2);
   const extension = getExtensionFromName(file.file_name);
 
@@ -69,15 +71,14 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
         </Text>
       </Flex>
 
-      <AnimatePresence initial={false}>
-        {isOpen && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-            className={styles.contentWrapper}
-          >
+      {shouldRender && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
             <Box className={styles.content}>
               <ShikiCodeBlock
                 className={extension ? `language-${extension}` : undefined}
@@ -86,9 +87,9 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
                 {file.file_content}
               </ShikiCodeBlock>
             </Box>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

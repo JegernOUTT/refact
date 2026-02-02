@@ -1,4 +1,10 @@
-import React, { useCallback, useMemo, useEffect, useState, useRef } from "react";
+import React, {
+  useCallback,
+  useMemo,
+  useEffect,
+  useState,
+  useRef,
+} from "react";
 import { v4 as uuidv4 } from "uuid";
 import {
   AssistantMessage,
@@ -242,7 +248,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               usage={item.message.usage}
               metering_coins_prompt={item.message.metering_coins_prompt}
               metering_coins_generated={item.message.metering_coins_generated}
-              metering_coins_cache_creation={item.message.metering_coins_cache_creation}
+              metering_coins_cache_creation={
+                item.message.metering_coins_cache_creation
+              }
               metering_coins_cache_read={item.message.metering_coins_cache_read}
               isStreaming={item.isStreaming}
             />
@@ -580,7 +588,10 @@ function buildDisplayItems(
           if (nextMsg.tool_call_id && editToolIds.has(nextMsg.tool_call_id)) {
             // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
             const prevDiffs = diffsByToolId[nextMsg.tool_call_id] || [];
-            diffsByToolId[nextMsg.tool_call_id] = [...prevDiffs, ...nextMsg.content];
+            diffsByToolId[nextMsg.tool_call_id] = [
+              ...prevDiffs,
+              ...nextMsg.content,
+            ];
           } else {
             diffMessagesAfter.push(nextMsg);
           }
@@ -731,5 +742,3 @@ function computeHiddenQaMessageIndices(messages: ChatMessages): Set<number> {
 
   return hiddenIndices;
 }
-
-

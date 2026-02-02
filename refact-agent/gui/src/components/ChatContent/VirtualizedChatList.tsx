@@ -52,9 +52,7 @@ export function VirtualizedChatList<T extends { key: string }>({
   const computeItemKey = useCallback((_index: number, item: T) => item.key, []);
 
   const itemContent = useCallback(
-    (_index: number, item: T) => (
-      <Container>{renderItem(item)}</Container>
-    ),
+    (_index: number, item: T) => <Container>{renderItem(item)}</Container>,
     [renderItem],
   );
 

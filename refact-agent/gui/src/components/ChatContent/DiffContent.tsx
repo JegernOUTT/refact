@@ -296,7 +296,11 @@ type GroupedDiffsProps = {
   onOpenChange?: (open: boolean) => void;
 };
 
-const _GroupedDiffs: React.FC<GroupedDiffsProps> = ({ diffs, open, onOpenChange }) => {
+const _GroupedDiffs: React.FC<GroupedDiffsProps> = ({
+  diffs,
+  open,
+  onOpenChange,
+}) => {
   const chunks: DiffMessage["content"] = [];
   for (const diff of diffs) {
     chunks.push(...diff.content);
@@ -307,7 +311,11 @@ const _GroupedDiffs: React.FC<GroupedDiffsProps> = ({ diffs, open, onOpenChange 
   return (
     <Container>
       <Flex direction="column" gap="4" py="4">
-        <DiffContent diffs={groupedByFileName} open={open} onOpenChange={onOpenChange} />
+        <DiffContent
+          diffs={groupedByFileName}
+          open={open}
+          onOpenChange={onOpenChange}
+        />
       </Flex>
     </Container>
   );

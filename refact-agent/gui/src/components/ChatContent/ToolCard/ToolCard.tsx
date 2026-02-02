@@ -1,7 +1,7 @@
 import React from "react";
-import { motion, AnimatePresence } from "framer-motion";
 import { Flex, Text, Spinner } from "@radix-ui/themes";
 import classNames from "classnames";
+import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import styles from "./ToolCard.module.css";
 
 export type ToolStatus = "running" | "success" | "error";
@@ -27,11 +27,15 @@ export const ToolCard: React.FC<ToolCardProps> = ({
   children,
   className,
 }) => {
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
+
   return (
     <div
       className={classNames(
         styles.card,
         status === "running" && styles.running,
+        status === "success" && styles.completed,
+        status === "error" && styles.error,
         className,
       )}
     >
@@ -51,19 +55,18 @@ export const ToolCard: React.FC<ToolCardProps> = ({
         )}
       </Flex>
 
-      <AnimatePresence initial={false}>
-        {isOpen && children && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-            className={styles.contentWrapper}
-          >
+      {shouldRender && children && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
             <div className={styles.content}>{children}</div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

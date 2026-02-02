@@ -38,27 +38,29 @@
 
 .contentWrapper {
   overflow: hidden;
+  /* Force GPU layer for JCEF compatibility */
+  transform: translateZ(0);
+  /* CSS-based collapse animation using grid */
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.2s ease-out,
+    opacity 0.15s ease-out;
+}
+
+.contentWrapperOpen {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.contentInner {
+  overflow: hidden;
 }
 
 .content {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
   padding: var(--space-2) 0 var(--space-1);
   max-height: 400px;
   overflow-y: auto;
-}
-
-.content::-webkit-scrollbar {
-  width: 6px;
-}
-
-.content::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.content::-webkit-scrollbar-thumb {
-  background: var(--gray-a5);
-  border-radius: 3px;
-}
-
-.content::-webkit-scrollbar-thumb:hover {
-  background: var(--gray-a7);
 }

@@ -3,6 +3,7 @@ import { Theme as RadixTheme } from "@radix-ui/themes";
 import { MoonIcon, SunIcon } from "@radix-ui/react-icons";
 import "@radix-ui/themes/styles.css";
 import "./theme-config.css";
+import "../shared/tokens.css";
 import styles from "./Theme.module.css";
 import { useAppearance, useConfig } from "../../hooks";
 
