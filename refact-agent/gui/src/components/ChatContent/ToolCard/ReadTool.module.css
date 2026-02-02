@@ -5,6 +5,12 @@
   cursor: pointer;
 }
 
+.args {
+  color: var(--gray-11);
+  font-family: var(--code-font-family);
+  font-size: inherit;
+}
+
 .filename:hover {
   text-decoration: underline;
 }

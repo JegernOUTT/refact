@@ -12,8 +12,6 @@
 .resultContent {
   max-height: 300px;
   overflow-y: auto;
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
 }
 
 .resultContent::-webkit-scrollbar {

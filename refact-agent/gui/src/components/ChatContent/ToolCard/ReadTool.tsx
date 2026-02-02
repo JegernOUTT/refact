@@ -80,16 +80,6 @@ export const ReadTool: React.FC<ReadToolProps> = ({
       ? maybeResult.content
       : null;
 
-  const meta = useMemo(() => {
-    if (paths.length <= 1) return null;
-    return (
-      paths
-        .slice(0, 2)
-        .map((p) => basename(p))
-        .join(", ") + (paths.length > 2 ? `, +${paths.length - 2}` : "")
-    );
-  }, [paths]);
-
   const summary = useMemo(() => {
     if (paths.length === 0) return "Read file";
     if (paths.length === 1) {
@@ -105,14 +95,23 @@ export const ReadTool: React.FC<ReadToolProps> = ({
         </>
       );
     }
-    return <>Read {paths.length} files</>;
+    const fileList =
+      paths
+        .slice(0, 2)
+        .map((p) => basename(p))
+        .join(", ") + (paths.length > 2 ? `, +${paths.length - 2}` : "");
+    return (
+      <>
+        Read {paths.length} files{" "}
+        <span className={styles.args}>{fileList}</span>
+      </>
+    );
   }, [paths, handleFileClick]);
 
   return (
     <ToolCard
       icon={<FileTextIcon />}
       summary={summary}
-      meta={meta}
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}

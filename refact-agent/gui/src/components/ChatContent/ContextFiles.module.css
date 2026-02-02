@@ -42,6 +42,7 @@
 
 .content {
   padding: var(--space-2) 0 var(--space-1);
+  padding-left: var(--space-4);
 }
 
 .section {
@@ -109,8 +110,7 @@
 .fileContent {
   max-height: 300px;
   overflow-y: auto;
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
+  margin-left: var(--space-3);
 }
 
 .fileContent::-webkit-scrollbar {
