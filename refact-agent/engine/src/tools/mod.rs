@@ -26,6 +26,8 @@ mod tool_web;
 
 pub mod file_edit;
 mod tool_create_knowledge;
+mod tool_task_done;
+mod tool_ask_questions;
 mod tool_tasks;
 mod tool_task_agent;
 mod tool_task_agent_finish;

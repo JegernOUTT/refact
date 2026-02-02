@@ -1,6 +1,6 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useState, useEffect } from "react";
 import { Box, Text, IconButton, Dialog, Tooltip } from "@radix-ui/themes";
-import { Cross1Icon, CopyIcon } from "@radix-ui/react-icons";
+import { Cross1Icon, CopyIcon, CheckIcon } from "@radix-ui/react-icons";
 import styles from "./AttachmentTile.module.css";
 
 const isMac =
@@ -9,9 +9,27 @@ const isMac =
 const copyShortcut = isMac ? "⌘C" : "Ctrl+C";
 
 async function copyToClipboard(text: string): Promise<boolean> {
+  // Try modern clipboard API first
   try {
     await navigator.clipboard.writeText(text);
     return true;
+  } catch {
+    // Fall through to fallback
+  }
+
+  // Fallback for iframes and older browsers
+  try {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.position = "fixed";
+    textArea.style.left = "-9999px";
+    textArea.style.top = "-9999px";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    const success = document.execCommand("copy");
+    document.body.removeChild(textArea);
+    return success;
   } catch {
     return false;
   }
@@ -171,12 +189,23 @@ const FileTile: React.FC<{
   const ext = getExtension(name);
   const colorKey = getExtensionColor(ext.toLowerCase());
   const displayName = truncateFilename(name);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (copied) {
+      const timer = setTimeout(() => setCopied(false), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [copied]);
 
   const handleCopy = useCallback(
-    (e: React.MouseEvent | React.KeyboardEvent) => {
+    async (e: React.MouseEvent | React.KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      void copyToClipboard(copyText);
+      const success = await copyToClipboard(copyText);
+      if (success) {
+        setCopied(true);
+      }
     },
     [copyText],
   );
@@ -184,7 +213,7 @@ const FileTile: React.FC<{
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "c") {
-        handleCopy(e);
+        void handleCopy(e);
       }
       if (e.key === "Enter" && onOpen) {
         e.preventDefault();
@@ -221,12 +250,16 @@ const FileTile: React.FC<{
           type="button"
           size="1"
           variant="ghost"
-          color="gray"
+          color={copied ? "green" : "gray"}
           className={styles.copyButton}
-          onClick={handleCopy}
-          aria-label="Copy path"
+          onClick={(e) => void handleCopy(e)}
+          aria-label={copied ? "Copied!" : "Copy path"}
         >
-          <CopyIcon width={10} height={10} />
+          {copied ? (
+            <CheckIcon width={10} height={10} />
+          ) : (
+            <CopyIcon width={10} height={10} />
+          )}
         </IconButton>
         {onRemove && (
           <IconButton
@@ -254,11 +287,23 @@ const PlainTextTile: React.FC<{
   preview: string;
   copyText: string;
 }> = ({ label, preview, copyText }) => {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (copied) {
+      const timer = setTimeout(() => setCopied(false), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [copied]);
+
   const handleCopy = useCallback(
-    (e: React.MouseEvent | React.KeyboardEvent) => {
+    async (e: React.MouseEvent | React.KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      void copyToClipboard(copyText);
+      const success = await copyToClipboard(copyText);
+      if (success) {
+        setCopied(true);
+      }
     },
     [copyText],
   );
@@ -266,14 +311,14 @@ const PlainTextTile: React.FC<{
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "c") {
-        handleCopy(e);
+        void handleCopy(e);
       }
     },
     [handleCopy],
   );
 
   return (
-    <Tooltip content={`${copyShortcut} to copy`}>
+    <Tooltip content={copied ? "Copied!" : `${copyShortcut} to copy`}>
       <Box
         className={`${styles.tile} ${styles.plainTextTile}`}
         tabIndex={0}
@@ -292,12 +337,16 @@ const PlainTextTile: React.FC<{
           type="button"
           size="1"
           variant="ghost"
-          color="gray"
+          color={copied ? "green" : "gray"}
           className={styles.copyButton}
-          onClick={handleCopy}
-          aria-label="Copy content"
+          onClick={(e) => void handleCopy(e)}
+          aria-label={copied ? "Copied!" : "Copy content"}
         >
-          <CopyIcon width={10} height={10} />
+          {copied ? (
+            <CheckIcon width={10} height={10} />
+          ) : (
+            <CopyIcon width={10} height={10} />
+          )}
         </IconButton>
       </Box>
     </Tooltip>

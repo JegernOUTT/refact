@@ -36,6 +36,8 @@ pub enum SessionState {
     ExecutingTools,
     Paused,
     WaitingIde,
+    WaitingUserInput,
+    Completed,
     Error,
 }
 
@@ -53,6 +55,8 @@ impl std::fmt::Display for SessionState {
             SessionState::ExecutingTools => write!(f, "executing_tools"),
             SessionState::Paused => write!(f, "paused"),
             SessionState::WaitingIde => write!(f, "waiting_ide"),
+            SessionState::WaitingUserInput => write!(f, "waiting_user_input"),
+            SessionState::Completed => write!(f, "completed"),
             SessionState::Error => write!(f, "error"),
         }
     }

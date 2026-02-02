@@ -205,6 +205,15 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
                 config_path: config_path.clone(),
             },
         ),
+        Box::new(crate::tools::tool_task_done::ToolTaskDone {
+            config_path: config_path.clone(),
+        }),
+    ];
+
+    let interaction_tools: Vec<Box<dyn Tool + Send>> = vec![
+        Box::new(crate::tools::tool_ask_questions::ToolAskQuestions {
+            config_path: config_path.clone(),
+        }),
     ];
 
     let task_tools: Vec<Box<dyn Tool + Send>> = vec![
@@ -265,6 +274,12 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
             description: "Knowledge tools".to_string(),
             category: ToolGroupCategory::Builtin,
             tools: knowledge_tools,
+        },
+        ToolGroup {
+            name: "Interaction".to_string(),
+            description: "User interaction tools".to_string(),
+            category: ToolGroupCategory::Builtin,
+            tools: interaction_tools,
         },
         ToolGroup {
             name: "Task Management".to_string(),

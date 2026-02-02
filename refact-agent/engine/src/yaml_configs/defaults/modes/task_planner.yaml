@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 3
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -179,6 +179,10 @@ prompt: |
   - Choosing between options → compare approaches
   - Checking version compatibility → verify requirements
 
+  ## Asking Questions
+  Use `ask_questions()` to get user input when you need clarification or confirmation.
+  Example: `ask_questions(questions='[{"id":"plan","type":"yes_no","text":"Does this plan look right?"}]')`
+
   %CD_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -225,6 +229,7 @@ tools:
   - task_mark_card_failed
   - task_memory_save
   - task_memories_get
+  - ask_questions
 
 llm_defaults:
   max_new_tokens: 8192

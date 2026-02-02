@@ -163,7 +163,7 @@ pub struct CommandLine {
     pub only_create_yaml_configs: bool,
     #[structopt(
         long,
-        help = "Print combined customization settings from both system defaults and customization.yaml."
+        help = "Print combined project registry (modes, subagents, toolbox commands, code lens)."
     )]
     pub print_customization: bool,
 
@@ -294,6 +294,7 @@ pub struct GlobalContext {
     pub task_events_tx:
         Option<tokio::sync::broadcast::Sender<crate::tasks::events::TaskEventEnvelope>>,
     pub task_events_seq: Option<Arc<std::sync::atomic::AtomicU64>>,
+    pub notification_events_tx: Option<tokio::sync::broadcast::Sender<crate::http::routers::v1::sidebar::NotificationEvent>>,
     pub chat_sessions: crate::chat::SessionsMap,
     pub voice_service: SharedVoiceService,
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
@@ -584,6 +585,7 @@ pub async fn create_global_context(
         trajectory_events_tx: Some(tokio::sync::broadcast::channel(1024).0),
         task_events_tx: Some(tokio::sync::broadcast::channel(1024).0),
         task_events_seq: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))),
+        notification_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         chat_sessions: crate::chat::create_sessions_map(),
         voice_service: crate::voice::VoiceService::new(),
         project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),

@@ -83,6 +83,28 @@ export const ideClearActiveTeamsGroup = createAction<undefined>(
   "ide/clearActiveTeamsGroup",
 );
 
+export const ideTaskDone = createAction<{
+  chatId: string;
+  toolCallId: string;
+  summary: string;
+  knowledgePath?: string;
+}>("ide/taskDone");
+
+export const ideAskQuestions = createAction<{
+  chatId: string;
+  toolCallId: string;
+  questions: {
+    id: string;
+    type: string;
+    text: string;
+    options?: string[];
+  }[];
+}>("ide/askQuestions");
+
+export const ideSwitchToThread = createAction<{
+  chatId: string;
+}>("ide/switchToThread");
+
 export const useEventsBusForIDE = () => {
   const [sendTelemetryEvent] =
     telemetryApi.useLazySendTelemetryChatEventQuery();
@@ -294,6 +316,41 @@ export const useEventsBusForIDE = () => {
     postMessage(action);
   }, [postMessage]);
 
+  const notifyTaskDone = useCallback(
+    (
+      chatId: string,
+      toolCallId: string,
+      summary: string,
+      knowledgePath?: string,
+    ) => {
+      const action = ideTaskDone({
+        chatId,
+        toolCallId,
+        summary,
+        knowledgePath,
+      });
+      postMessage(action);
+    },
+    [postMessage],
+  );
+
+  const notifyAskQuestions = useCallback(
+    (
+      chatId: string,
+      toolCallId: string,
+      questions: {
+        id: string;
+        type: string;
+        text: string;
+        options?: string[];
+      }[],
+    ) => {
+      const action = ideAskQuestions({ chatId, toolCallId, questions });
+      postMessage(action);
+    },
+    [postMessage],
+  );
+
   return {
     diffPasteBack,
     openSettings,
@@ -318,5 +375,7 @@ export const useEventsBusForIDE = () => {
     setLoginMessage,
     setActiveTeamsGroupInIDE,
     clearActiveTeamsGroupInIDE,
+    notifyTaskDone,
+    notifyAskQuestions,
   };
 };

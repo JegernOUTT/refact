@@ -27,6 +27,7 @@ pub enum ToolStepOutcome {
     NoToolCalls,
     Paused,
     Continue,
+    Stop,
 }
 
 use super::types::*;
@@ -570,16 +571,29 @@ pub async fn process_tool_calls_once(
     )
     .await;
 
+    let mut final_state = SessionState::Idle;
+    for tool_call in &tools_to_execute {
+        match tool_call.function.name.as_str() {
+            "ask_questions" => final_state = SessionState::WaitingUserInput,
+            "task_done" => final_state = SessionState::Completed,
+            _ => {}
+        }
+    }
+
     {
         let mut session = session_arc.lock().await;
         for result_msg in tool_results {
             session.add_message(result_msg);
         }
-        session.set_runtime_state(SessionState::Idle, None);
+        session.set_runtime_state(final_state, None);
     }
 
     maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-    ToolStepOutcome::Continue
+
+    match final_state {
+        SessionState::Completed | SessionState::WaitingUserInput => ToolStepOutcome::Stop,
+        _ => ToolStepOutcome::Continue,
+    }
 }
 
 pub async fn check_tools_confirmation(

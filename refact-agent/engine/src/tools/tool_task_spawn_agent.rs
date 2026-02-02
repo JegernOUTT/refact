@@ -190,7 +190,6 @@ impl Tool for ToolTaskSpawnAgent {
                 source_type: ToolSourceType::Builtin,
                 config_path: String::new(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "Spawn an agent to work on a specific task card. The agent runs in the background as a real chat session. Returns immediately with a hyperlink to view the agent's progress. The agent will call task_agent_finish() when done.".to_string(),

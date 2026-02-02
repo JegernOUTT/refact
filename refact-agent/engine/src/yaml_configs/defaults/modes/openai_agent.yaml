@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 3
 id: openai_agent
 title: OpenAI Agent
 description: Optimized for GPT-4o/GPT-5 models using OpenAI Codex-style agentic workflow
@@ -168,6 +168,10 @@ override:
 
     **For code review:** use `code_review()` after significant changes
 
+    **Completing Tasks & Asking Questions:**
+    - `task_done(report, summary, files_changed)` - Mark task complete with detailed report. Saves to knowledge base automatically.
+    - `ask_questions(questions)` - Get user input. JSON array with types: yes_no, single_select, multi_select, free_text.
+
     **Do it yourself when:**
     - Making final decisions based on gathered context
     - Edits and write operations
@@ -214,6 +218,8 @@ override:
     - strategic_planning
     - code_review
     - deep_research
+    - task_done
+    - ask_questions
 
   tool_confirm:
     rules:
@@ -229,3 +235,7 @@ override:
         action: auto
       - match: "apply_patch"
         action: ask
+      - match: "task_done"
+        action: auto
+      - match: "ask_questions"
+        action: auto

@@ -38,6 +38,8 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
   const userToggledRef = useRef(false);
   const wasThinkingRef = useRef(false);
   const durationCapturedRef = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const userScrolledRef = useRef(false);
 
   // Track thinking duration - stop when message content starts appearing
   useEffect(() => {
@@ -86,6 +88,37 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
     }
   }, [isStreaming, reasoningContent, thinkingDuration]);
 
+  // Auto-scroll to bottom while streaming
+  useEffect(() => {
+    if (
+      isStreaming &&
+      isOpen &&
+      contentRef.current &&
+      !userScrolledRef.current
+    ) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [reasoningContent, isStreaming, isOpen]);
+
+  // Reset user scroll flag when streaming starts
+  useEffect(() => {
+    if (isStreaming) {
+      userScrolledRef.current = false;
+    }
+  }, [isStreaming]);
+
+  // Handle user scroll to disable auto-scroll
+  const handleScroll = useCallback(() => {
+    if (contentRef.current && isStreaming) {
+      const { scrollTop, scrollHeight, clientHeight } = contentRef.current;
+      // If user scrolled up (not at bottom), disable auto-scroll
+      const isAtBottom = scrollHeight - scrollTop - clientHeight < 20;
+      if (!isAtBottom) {
+        userScrolledRef.current = true;
+      }
+    }
+  }, [isStreaming]);
+
   const handleToggle = useCallback(() => {
     userToggledRef.current = true;
     setIsOpen((prev) => !prev);
@@ -126,7 +159,11 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
             transition={{ duration: 0.2, ease: "easeInOut" }}
             className={styles.contentWrapper}
           >
-            <div className={styles.content}>
+            <div
+              ref={contentRef}
+              className={styles.content}
+              onScroll={handleScroll}
+            >
               <Text size="2" color="gray">
                 <Markdown
                   canHaveInteractiveElements={true}

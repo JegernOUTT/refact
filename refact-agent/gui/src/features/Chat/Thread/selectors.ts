@@ -39,6 +39,11 @@ function deriveSessionStateFromRuntime(
   rt: ChatThreadRuntime | undefined,
 ): SessionState | undefined {
   if (!rt) return undefined;
+  // Use stored session_state if available (for waiting_user_input, completed, etc.)
+  if (rt.session_state) {
+    return rt.session_state as SessionState;
+  }
+  // Fallback to derived state from booleans
   if (rt.error) return "error";
   if (rt.confirmation.pause) return "paused";
   if (rt.streaming) return "generating";

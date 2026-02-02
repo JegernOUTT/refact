@@ -403,7 +403,6 @@ impl Tool for ToolMv {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: false,
             description: "Moves or renames files and directories. If a simple rename fails due to a cross-device error and the source is a file, it falls back to copying and deleting. Use overwrite=true to replace an existing target.".to_string(),

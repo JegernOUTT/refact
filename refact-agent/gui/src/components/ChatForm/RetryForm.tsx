@@ -24,7 +24,12 @@ import {
   UserImage,
   UserMessage,
 } from "../../services/refact";
-import { Cross2Icon, CheckIcon, PlusIcon, ChevronDownIcon } from "@radix-ui/react-icons";
+import {
+  Cross2Icon,
+  CheckIcon,
+  PlusIcon,
+  ChevronDownIcon,
+} from "@radix-ui/react-icons";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { selectIsStreaming, selectIsWaiting } from "../../features/Chat";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
@@ -416,7 +421,11 @@ const RetryModelSelector: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
           disabled={disabled}
           type="button"
         >
-          <Flex align="center" gap="1" className={dropdownStyles.triggerContent}>
+          <Flex
+            align="center"
+            gap="1"
+            className={dropdownStyles.triggerContent}
+          >
             <Text size="1" className={dropdownStyles.modelName}>
               {currentModelName}
             </Text>
@@ -436,9 +445,16 @@ const RetryModelSelector: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
             {groupedModels.map((group, groupIndex) => (
               <React.Fragment key={group.provider}>
                 {groupIndex > 0 && (
-                  <Separator size="4" className={dropdownStyles.groupSeparator} />
+                  <Separator
+                    size="4"
+                    className={dropdownStyles.groupSeparator}
+                  />
                 )}
-                <Text size="1" color="gray" className={dropdownStyles.groupHeader}>
+                <Text
+                  size="1"
+                  color="gray"
+                  className={dropdownStyles.groupHeader}
+                >
                   {group.displayName}
                 </Text>
                 {group.models.map((model) => {
@@ -452,7 +468,7 @@ const RetryModelSelector: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
                         [dropdownStyles.itemDisabled]: model.disabled,
                       })}
                       onClick={() => handleModelSelect(model.value)}
-                      disabled={disabled || model.disabled}
+                      disabled={disabled ?? model.disabled}
                       type="button"
                     >
                       <Flex align="center" gap="1">

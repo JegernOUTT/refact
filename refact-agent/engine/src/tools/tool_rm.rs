@@ -347,7 +347,6 @@ impl Tool for ToolRm {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: false,
             description: "Deletes a file or directory. Use recursive=true for directories. Set dry_run=true to preview without deletion.".to_string(),

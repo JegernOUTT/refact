@@ -6,6 +6,7 @@ import {
   ChevronRightIcon,
   PauseIcon,
   CrossCircledIcon,
+  CheckCircledIcon,
 } from "@radix-ui/react-icons";
 import { CloseButton } from "../Buttons/Buttons";
 import { IconButton } from "@radix-ui/themes";
@@ -52,9 +53,10 @@ export const HistoryItem: React.FC<{
   }, [historyItem.messages]);
 
   const statusState = getStatusFromSessionState(historyItem.session_state);
-  const isWorking = statusState === "streaming";
-  const isPaused = statusState === "paused";
+  const isWorking = statusState === "in_progress";
+  const isPaused = statusState === "needs_attention";
   const isError = statusState === "error";
+  const isCompleted = statusState === "completed";
   return (
     <Box style={{ position: "relative", width: "100%" }}>
       <Card
@@ -89,6 +91,11 @@ export const HistoryItem: React.FC<{
             {!isWorking && !isPaused && isError && (
               <CrossCircledIcon
                 style={{ minWidth: 16, minHeight: 16, color: "var(--red-9)" }}
+              />
+            )}
+            {!isWorking && !isPaused && !isError && isCompleted && (
+              <CheckCircledIcon
+                style={{ minWidth: 16, minHeight: 16, color: "var(--green-9)" }}
               />
             )}
             <Text

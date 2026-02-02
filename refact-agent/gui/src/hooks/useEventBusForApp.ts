@@ -15,8 +15,9 @@ import {
   push,
   selectPages,
 } from "../features/Pages/pagesSlice";
-import { ideToolCallResponse } from "./useEventBusForIDE";
+import { ideToolCallResponse, ideSwitchToThread } from "./useEventBusForIDE";
 import { createAction } from "@reduxjs/toolkit/react";
+import { switchToThread } from "../features/Chat/Thread/actions";
 
 export const ideAttachFileToChat = createAction<string>("ide/attachFileToChat");
 
@@ -62,6 +63,13 @@ export function useEventBusForApp() {
 
       if (ideToolCallResponse.match(event.data)) {
         dispatch(event.data);
+      }
+
+      if (ideSwitchToThread.match(event.data)) {
+        if (!isPageInHistory({ pages }, "chat")) {
+          dispatch(push({ name: "chat" }));
+        }
+        dispatch(switchToThread({ id: event.data.payload.chatId }));
       }
 
       // TODO: ideToolEditResponse.

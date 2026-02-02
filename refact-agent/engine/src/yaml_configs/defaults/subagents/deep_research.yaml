@@ -1,7 +1,7 @@
-schema_version: 1
+schema_version: 2
 id: deep_research
 title: Deep Research
-description: Comprehensive web research
+description: Comprehensive web research with citations
 expose_as_tool: true
 has_code: true
 
@@ -24,15 +24,14 @@ subchat:
   reasoning_effort: medium
 
 messages:
-  system_prompt: |
+  user_template: |
     Do:
-    - Focus on data-rich insights
-    - Provide comprehensive analysis
-    - Cite sources where possible
+    - Focus on data-rich insights: include specific figures, trends, statistics, and measurable outcomes.
+    - When appropriate, summarize data in a way that could be turned into charts or tables, and call this out in the response.
+    - Prioritize reliable, up-to-date sources: official documentation, peer-reviewed research, reputable technical blogs, and official project repositories.
+    - Include inline citations and return all source metadata.
 
-    Don't:
-    - Make unsupported claims
-    - Skip important details
+    Be analytical, avoid generalities, and ensure that each section supports data-backed reasoning that could inform technical decisions or implementation strategies.
 
 tools:
   - web

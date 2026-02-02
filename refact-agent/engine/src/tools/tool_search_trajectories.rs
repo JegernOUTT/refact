@@ -27,7 +27,6 @@ impl Tool for ToolSearchTrajectories {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: true,
             description: "Search past chat trajectories for relevant patterns, solutions, and context. Returns matching trajectory IDs with message ranges that can be expanded using get_trajectory_context.".to_string(),

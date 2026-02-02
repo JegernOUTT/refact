@@ -1,9 +1,25 @@
+use rust_embed::RustEmbed;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::fs;
 use tracing::{info, warn};
 
 const CHECKSUM_FILE: &str = "default-checksums.yaml";
+
+#[derive(RustEmbed)]
+#[folder = "src/yaml_configs/defaults/"]
+struct DefaultConfigs;
+
+#[derive(Deserialize)]
+struct SchemaVersionOnly {
+    #[serde(default = "default_schema_version")]
+    schema_version: u32,
+}
+
+fn default_schema_version() -> u32 {
+    1
+}
 
 pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), String> {
     if !config_dir.exists() {
@@ -22,20 +38,11 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
     let existing_checksums = load_checksums(&checksums_path).await;
     let mut new_checksums: HashMap<String, String> = HashMap::new();
 
-    for (filename, content) in get_default_modes() {
-        write_default_if_unchanged(&config_dir.join("modes").join(filename), content, &existing_checksums, &mut new_checksums).await;
-    }
-
-    for (filename, content) in get_default_subagents() {
-        write_default_if_unchanged(&config_dir.join("subagents").join(filename), content, &existing_checksums, &mut new_checksums).await;
-    }
-
-    for (filename, content) in get_default_toolbox_commands() {
-        write_default_if_unchanged(&config_dir.join("toolbox_commands").join(filename), content, &existing_checksums, &mut new_checksums).await;
-    }
-
-    for (filename, content) in get_default_code_lens() {
-        write_default_if_unchanged(&config_dir.join("code_lens").join(filename), content, &existing_checksums, &mut new_checksums).await;
+    for kind in &["modes", "subagents", "toolbox_commands", "code_lens"] {
+        for (filename, content) in get_defaults_for_kind(kind) {
+            let target_path = config_dir.join(kind).join(&filename);
+            write_default_if_unchanged(&target_path, &content, &existing_checksums, &mut new_checksums).await;
+        }
     }
 
     save_checksums(&checksums_path, &new_checksums).await;
@@ -82,6 +89,12 @@ pub fn compute_checksum(content: &str) -> String {
     format!("{:x}", md5::compute(content.as_bytes()))
 }
 
+fn extract_schema_version(content: &str) -> u32 {
+    serde_yaml::from_str::<SchemaVersionOnly>(content)
+        .map(|v| v.schema_version)
+        .unwrap_or(1)
+}
+
 async fn write_default_if_unchanged(
     path: &Path,
     content: &str,
@@ -90,93 +103,85 @@ async fn write_default_if_unchanged(
 ) {
     let path_str = path.to_string_lossy().to_string();
     let new_checksum = compute_checksum(content);
+    let default_version = extract_schema_version(content);
 
     new_checksums.insert(path_str.clone(), new_checksum.clone());
 
     if path.exists() {
-        match fs::read_to_string(path).await {
-            Ok(existing_content) => {
-                let existing_file_checksum = compute_checksum(&existing_content);
-                if let Some(old_default_checksum) = existing_checksums.get(&path_str) {
-                    if &existing_file_checksum != old_default_checksum {
-                        return;
-                    }
-                } else {
-                    return;
-                }
-            }
+        let existing_content = match fs::read_to_string(path).await {
+            Ok(c) => c,
             Err(_) => return,
+        };
+
+        let existing_file_checksum = compute_checksum(&existing_content);
+        let existing_version = extract_schema_version(&existing_content);
+
+        // Version precedence: always upgrade if default is newer
+        if default_version > existing_version {
+            info!(
+                "Upgrading config {:?} from v{} to v{}",
+                path.file_name().unwrap_or_default(),
+                existing_version,
+                default_version
+            );
+            if let Err(e) = fs::write(path, content).await {
+                warn!("Failed to write {:?}: {}", path, e);
+            }
+            return;
         }
+
+        // If versions are equal, use checksums to detect user modifications
+        if default_version == existing_version {
+            let is_user_modified = match existing_checksums.get(&path_str) {
+                Some(old_default_checksum) => &existing_file_checksum != old_default_checksum,
+                None => true,
+            };
+
+            if is_user_modified {
+                return; // User modified, preserve their changes
+            }
+
+            // Checksum matches, update to new default of same version
+            if let Err(e) = fs::write(path, content).await {
+                warn!("Failed to write {:?}: {}", path, e);
+            }
+            return;
+        }
+
+        // default_version < existing_version: keep existing (user has newer version)
+        return;
     }
 
+    // File doesn't exist, write it
     if let Err(e) = fs::write(path, content).await {
         warn!("Failed to write {:?}: {}", path, e);
     }
 }
 
+fn get_defaults_for_kind(kind: &str) -> Vec<(String, String)> {
+    let prefix = format!("{}/", kind);
+    DefaultConfigs::iter()
+        .filter(|path| {
+            path.starts_with(&prefix)
+                && (path.ends_with(".yaml") || path.ends_with(".yml"))
+                && !path.ends_with(".example")
+                && !path.contains(".yaml.example")
+        })
+        .filter_map(|path| {
+            let filename = path.strip_prefix(&prefix)?.to_string();
+            if filename.contains('/') {
+                return None;
+            }
+            let content = DefaultConfigs::get(&path)?;
+            let content_str = std::str::from_utf8(content.data.as_ref()).ok()?;
+            Some((filename, content_str.to_string()))
+        })
+        .collect()
+}
+
 pub fn get_default_checksum(kind: &str, filename: &str) -> Option<String> {
-    let defaults = match kind {
-        "modes" => get_default_modes(),
-        "subagents" => get_default_subagents(),
-        "toolbox_commands" => get_default_toolbox_commands(),
-        "code_lens" => get_default_code_lens(),
-        _ => return None,
-    };
-    defaults.iter()
-        .find(|(name, _)| *name == filename)
-        .map(|(_, content)| compute_checksum(content))
-}
-
-fn get_default_modes() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("agent.yaml", include_str!("defaults/modes/agent.yaml")),
-        ("explore.yaml", include_str!("defaults/modes/explore.yaml")),
-        ("task_planner.yaml", include_str!("defaults/modes/task_planner.yaml")),
-        ("task_agent.yaml", include_str!("defaults/modes/task_agent.yaml")),
-        ("configurator.yaml", include_str!("defaults/modes/configurator.yaml")),
-        ("project_summary.yaml", include_str!("defaults/modes/project_summary.yaml")),
-    ]
-}
-
-fn get_default_subagents() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("subagent.yaml", include_str!("defaults/subagents/subagent.yaml")),
-        ("subagent_with_editing.yaml", include_str!("defaults/subagents/subagent_with_editing.yaml")),
-        ("strategic_planning.yaml", include_str!("defaults/subagents/strategic_planning.yaml")),
-        ("strategic_planning_gather_files.yaml", include_str!("defaults/subagents/strategic_planning_gather_files.yaml")),
-        ("code_review.yaml", include_str!("defaults/subagents/code_review.yaml")),
-        ("code_review_gather_files.yaml", include_str!("defaults/subagents/code_review_gather_files.yaml")),
-        ("deep_research.yaml", include_str!("defaults/subagents/deep_research.yaml")),
-        ("title_generation.yaml", include_str!("defaults/subagents/title_generation.yaml")),
-        ("commit_message.yaml", include_str!("defaults/subagents/commit_message.yaml")),
-        ("kg_enrich.yaml", include_str!("defaults/subagents/kg_enrich.yaml")),
-        ("kg_deprecate.yaml", include_str!("defaults/subagents/kg_deprecate.yaml")),
-        ("code_edit.yaml", include_str!("defaults/subagents/code_edit.yaml")),
-        ("compress_trajectory.yaml", include_str!("defaults/subagents/compress_trajectory.yaml")),
-        ("follow_up.yaml", include_str!("defaults/subagents/follow_up.yaml")),
-        ("http_subchat.yaml", include_str!("defaults/subagents/http_subchat.yaml")),
-        ("http_subchat_single.yaml", include_str!("defaults/subagents/http_subchat_single.yaml")),
-        ("memo_extraction.yaml", include_str!("defaults/subagents/memo_extraction.yaml")),
-    ]
-}
-
-fn get_default_toolbox_commands() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("shorter.yaml", include_str!("defaults/toolbox_commands/shorter.yaml")),
-        ("bugs.yaml", include_str!("defaults/toolbox_commands/bugs.yaml")),
-        ("comment.yaml", include_str!("defaults/toolbox_commands/comment.yaml")),
-        ("typehints.yaml", include_str!("defaults/toolbox_commands/typehints.yaml")),
-        ("explain.yaml", include_str!("defaults/toolbox_commands/explain.yaml")),
-        ("summarize.yaml", include_str!("defaults/toolbox_commands/summarize.yaml")),
-        ("typos.yaml", include_str!("defaults/toolbox_commands/typos.yaml")),
-        ("help.yaml", include_str!("defaults/toolbox_commands/help.yaml")),
-    ]
-}
-
-fn get_default_code_lens() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("open_chat.yaml", include_str!("defaults/code_lens/open_chat.yaml")),
-        ("problems.yaml", include_str!("defaults/code_lens/problems.yaml")),
-        ("explain.yaml", include_str!("defaults/code_lens/explain.yaml")),
-    ]
+    let path = format!("{}/{}", kind, filename);
+    let file = DefaultConfigs::get(&path)?;
+    let content = std::str::from_utf8(file.data.as_ref()).ok()?;
+    Some(compute_checksum(content))
 }

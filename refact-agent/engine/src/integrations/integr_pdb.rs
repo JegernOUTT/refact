@@ -236,7 +236,6 @@ impl Tool for ToolPdb {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "Python debugger for inspecting variables and exploring what the program really does. This tool executes only one command at a time. Start with python -m pdb ...".to_string(),

@@ -563,7 +563,6 @@ impl Tool for ToolShellService {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "Manage background services (start/stop/status/logs/restart). Use this for long-running processes like web servers, databases, or any command that runs until Ctrl+C. For one-time commands, use the shell tool instead.".to_string(),

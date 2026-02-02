@@ -18,6 +18,7 @@ use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
 use crate::subchat::run_subchat_once;
+use crate::yaml_configs::customization_registry::get_subagent_config;
 
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
@@ -35,7 +36,7 @@ use super::types::{ThreadParams, SessionState, ChatSession};
 use super::config::timeouts;
 use super::SessionsMap;
 
-const TITLE_GENERATION_PROMPT: &str = "Summarize this chat in 2-4 words. Prefer filenames, classes, entities, and avoid generic terms. Write only the title, nothing else.";
+const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrajectoryEvent {
@@ -1176,13 +1177,30 @@ async fn generate_title_llm(
     if context.trim().is_empty() {
         return None;
     }
+
+    let subagent_config = match get_subagent_config(gcx.clone(), TITLE_GENERATION_SUBAGENT_ID, None).await {
+        Some(config) => config,
+        None => {
+            warn!("subagent config '{}' not found", TITLE_GENERATION_SUBAGENT_ID);
+            return None;
+        }
+    };
+
+    let title_prompt = match subagent_config.messages.user_template.as_ref() {
+        Some(prompt) => prompt,
+        None => {
+            warn!("messages.user_template not defined for subagent '{}'", TITLE_GENERATION_SUBAGENT_ID);
+            return None;
+        }
+    };
+
     let prompt = format!(
         "Chat conversation:\n{}\n\n{}",
-        context, TITLE_GENERATION_PROMPT
+        context, title_prompt
     );
     let chat_messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
-    match run_subchat_once(gcx, "title_generation", chat_messages).await {
+    match run_subchat_once(gcx, TITLE_GENERATION_SUBAGENT_ID, chat_messages).await {
         Ok(result) => {
             if let Some(last_msg) = result.messages.last() {
                 let raw_title = last_msg.content.content_text_only();

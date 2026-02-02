@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: configurator
 title: Configurator
 description: Integration configuration wizard
@@ -52,7 +52,6 @@ tools:
   - search_pattern
   - create_textdoc
   - update_textdoc
-
 llm_defaults:
   max_new_tokens: 4096
   temperature: 0.0

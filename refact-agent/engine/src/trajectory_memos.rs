@@ -12,39 +12,12 @@ use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::memories::{memories_add, create_frontmatter};
 use crate::subchat::run_subchat_once;
+use crate::yaml_configs::customization_registry::get_subagent_config;
 
 const ABANDONED_THRESHOLD_HOURS: i64 = 2;
 const CHECK_INTERVAL_SECS: u64 = 300;
 const TRAJECTORIES_FOLDER: &str = ".refact/trajectories";
-
-const EXTRACTION_PROMPT: &str = r#"Analyze this conversation and provide:
-
-1. FIRST LINE: A JSON with overview and title:
-{"overview": "<2-3 sentence summary of what was accomplished>", "title": "<2-4 word descriptive title>"}
-
-2. FOLLOWING LINES: Extract separate, useful memory items (3-10 max):
-{"type": "<type>", "content": "<concise insight>"}
-
-Types for memory items:
-- pattern: Reusable code patterns or approaches discovered
-- preference: User preferences about coding style, communication, tools
-- lesson: What went wrong and how it was fixed
-- decision: Important architectural or design decisions made
-- insight: General useful observations about the codebase or project
-
-Rules:
-- Overview should capture the main goal and outcome
-- Title should be descriptive and specific (e.g., "Fix Auth Middleware" not "Bug Fix")
-- Each memory item should be self-contained and actionable
-- Keep content concise (1-3 sentences max)
-- Only extract genuinely useful, reusable knowledge
-- Skip trivial details or conversation noise
-
-Example output:
-{"overview": "Implemented a custom VecDB splitter for trajectory files to enable semantic search over past conversations. Added two new tools for searching and retrieving trajectory context.", "title": "Trajectory Search Tools"}
-{"type": "pattern", "content": "When implementing async file operations in this project, use tokio::fs instead of std::fs to avoid blocking."}
-{"type": "preference", "content": "User prefers concise code without excessive comments."}
-"#;
+const SUBAGENT_ID: &str = "memo_extraction";
 
 pub async fn trajectory_memos_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     loop {
@@ -262,6 +235,14 @@ async fn extract_memos_and_meta(
     current_title: &str,
     is_title_generated: bool,
 ) -> Result<ExtractionResult, String> {
+    let subagent_config = get_subagent_config(gcx.clone(), SUBAGENT_ID, None)
+        .await
+        .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
+
+    let extraction_prompt = subagent_config.messages.user_template
+        .as_ref()
+        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", SUBAGENT_ID))?;
+
     let title_hint = if is_title_generated {
         format!("\n\nNote: The current title \"{}\" was auto-generated. Please provide a better descriptive title.", current_title)
     } else {
@@ -270,11 +251,11 @@ async fn extract_memos_and_meta(
 
     messages.push(ChatMessage {
         role: "user".to_string(),
-        content: ChatContent::SimpleText(format!("{}{}", EXTRACTION_PROMPT, title_hint)),
+        content: ChatContent::SimpleText(format!("{}{}", extraction_prompt, title_hint)),
         ..Default::default()
     });
 
-    let result = run_subchat_once(gcx, "memo_extraction", messages)
+    let result = run_subchat_once(gcx, SUBAGENT_ID, messages)
         .await
         .map_err(|e| e.to_string())?;
 

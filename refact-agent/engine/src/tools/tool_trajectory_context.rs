@@ -28,7 +28,6 @@ impl Tool for ToolTrajectoryContext {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: true,
             description:

@@ -31,7 +31,6 @@ impl Tool for ToolGetKnowledge {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: true,
             description: "Searches project knowledge base for relevant information. Uses semantic search and knowledge graph expansion.".to_string(),

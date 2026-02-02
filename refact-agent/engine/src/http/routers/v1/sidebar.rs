@@ -14,6 +14,33 @@ use crate::tasks::events::TaskEvent;
 use crate::tasks::types::TaskMeta;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NotificationEvent {
+    TaskDone {
+        chat_id: String,
+        tool_call_id: String,
+        summary: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        knowledge_path: Option<String>,
+    },
+    AskQuestions {
+        chat_id: String,
+        tool_call_id: String,
+        questions: Vec<NotificationQuestion>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationQuestion {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub question_type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "category", rename_all = "snake_case")]
 pub enum SidebarEvent {
     Snapshot {
@@ -22,6 +49,7 @@ pub enum SidebarEvent {
     },
     Trajectory(TrajectoryEvent),
     Task(TaskEvent),
+    Notification(NotificationEvent),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,7 +70,7 @@ async fn fetch_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> Result<(Vec<Traject
 pub async fn handle_sidebar_subscribe(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Response<Body>, ScratchError> {
-    let (trajectory_rx, task_rx, seq_counter) = {
+    let (trajectory_rx, task_rx, notification_rx, seq_counter) = {
         let gcx_locked = gcx.read().await;
 
         let trajectory_rx = gcx_locked
@@ -55,7 +83,12 @@ pub async fn handle_sidebar_subscribe(
             .as_ref()
             .map(|tx| tx.subscribe());
 
-        if trajectory_rx.is_none() && task_rx.is_none() {
+        let notification_rx = gcx_locked
+            .notification_events_tx
+            .as_ref()
+            .map(|tx| tx.subscribe());
+
+        if trajectory_rx.is_none() && task_rx.is_none() && notification_rx.is_none() {
             return Err(ScratchError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Sidebar events not available".to_string(),
@@ -63,7 +96,7 @@ pub async fn handle_sidebar_subscribe(
         }
 
         let seq_counter = Arc::new(AtomicU64::new(0));
-        (trajectory_rx, task_rx, seq_counter)
+        (trajectory_rx, task_rx, notification_rx, seq_counter)
     };
 
     let (trajectories, tasks) = fetch_snapshot(gcx.clone())
@@ -83,6 +116,7 @@ pub async fn handle_sidebar_subscribe(
 
         let mut trajectory_rx = trajectory_rx;
         let mut task_rx = task_rx;
+        let mut notification_rx = notification_rx;
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -121,7 +155,7 @@ pub async fn handle_sidebar_subscribe(
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             trajectory_rx = None;
-                            if task_rx.is_none() {
+                            if task_rx.is_none() && notification_rx.is_none() {
                                 break;
                             }
                         }
@@ -161,7 +195,35 @@ pub async fn handle_sidebar_subscribe(
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             task_rx = None;
-                            if trajectory_rx.is_none() {
+                            if trajectory_rx.is_none() && notification_rx.is_none() {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                result = async {
+                    match &mut notification_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Ok(event) => {
+                            let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
+                            let envelope = SidebarEventEnvelope {
+                                seq,
+                                event: SidebarEvent::Notification(event),
+                            };
+                            if let Ok(json) = serde_json::to_string(&envelope) {
+                                yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            notification_rx = None;
+                            if trajectory_rx.is_none() && task_rx.is_none() {
                                 break;
                             }
                         }

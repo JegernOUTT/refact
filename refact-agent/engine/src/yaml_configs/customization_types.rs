@@ -291,6 +291,12 @@ pub struct SubagentPrompts {
     pub gather_system: Option<String>,
     #[serde(default)]
     pub gather_retry: Option<String>,
+    /// Prompt for generating commit message from diff only
+    #[serde(default)]
+    pub diff_only: Option<String>,
+    /// Prompt for generating commit message when user provides context
+    #[serde(default)]
+    pub diff_with_user_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

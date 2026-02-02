@@ -48,6 +48,8 @@ import {
   FileOpTool,
   TasksTool,
   GenericTool,
+  TaskDoneTool,
+  AskQuestionsTool,
 } from "./ToolCard";
 
 function parseProgressEntry(entry: string): { step?: string; lines: string[] } {
@@ -705,6 +707,40 @@ function processToolCalls(
   if (head.function.name === "tasks_set") {
     const elem = (
       <TasksTool key={`tasks-tool-${processed.length}`} toolCall={head} />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "task_done") {
+    const elem = (
+      <TaskDoneTool
+        key={`task-done-tool-${processed.length}`}
+        toolCall={head}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "ask_questions") {
+    const elem = (
+      <AskQuestionsTool
+        key={`ask-questions-tool-${processed.length}`}
+        toolCall={head}
+      />
     );
     return processToolCalls(
       tail,

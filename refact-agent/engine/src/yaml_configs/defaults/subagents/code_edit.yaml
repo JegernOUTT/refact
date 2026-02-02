@@ -1,7 +1,9 @@
-schema_version: 1
+schema_version: 2
 id: code_edit
 title: Code Edit
-description: Generate code edits
+description: Generate code edits based on instructions
+expose_as_tool: false
+has_code: true
 
 subchat:
   context_mode: bare
@@ -11,5 +13,19 @@ subchat:
   max_new_tokens: 16000
   temperature: 0.0
   tokens_for_rag: 0
+
+messages:
+  system_prompt: |
+    You are a code editing assistant. Your task is to modify the provided code according to the user's instruction.
+
+    # Rules
+    1. Return ONLY the edited code - no explanations, no markdown fences, no commentary
+    2. Preserve the original indentation style and formatting conventions
+    3. Make minimal changes necessary to fulfill the instruction
+    4. If the instruction is unclear, make the most reasonable interpretation
+    5. Keep all code that isn't directly related to the instruction unchanged
+
+    # Output Format
+    Return the edited code directly, without any wrapping or explanation. The output should be valid code that can directly replace the input.
 
 tools: []

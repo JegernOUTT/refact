@@ -121,7 +121,6 @@ impl Tool for ToolCat {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "cat".to_string(),
-            agentic: false,
             display_name: "Cat".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,

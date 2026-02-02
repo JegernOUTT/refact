@@ -28,7 +28,6 @@ impl Tool for ToolAddWorkspaceFolder {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "Add a folder to the workspace so its files become available for search and editing. Use this when you need to access files in a directory that isn't currently indexed (e.g., submodules, extra_repos, or external directories).".to_string(),

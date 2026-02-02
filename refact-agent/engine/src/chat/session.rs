@@ -96,7 +96,11 @@ impl ChatSession {
     }
 
     pub fn is_idle_for_cleanup(&self) -> bool {
-        self.runtime.state == SessionState::Idle
+        let is_idle_like = matches!(
+            self.runtime.state,
+            SessionState::Idle | SessionState::Completed | SessionState::WaitingUserInput
+        );
+        is_idle_like
             && self.command_queue.is_empty()
             && self.last_activity.elapsed() > session_idle_timeout()
     }
@@ -271,6 +275,8 @@ impl ChatSession {
                 SessionState::ExecutingTools => "executing_tools",
                 SessionState::Paused => "paused",
                 SessionState::WaitingIde => "waiting_ide",
+                SessionState::WaitingUserInput => "waiting_user_input",
+                SessionState::Completed => "completed",
                 SessionState::Error => "error",
             };
             let effective_root = self.thread.root_chat_id.clone().unwrap_or_else(|| self.chat_id.clone());

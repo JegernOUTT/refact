@@ -68,16 +68,22 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   }, [toolCall.function.arguments]);
 
   const status: ToolStatus = useMemo(() => {
-    if (!maybeResult) return "running";
-    if (
-      typeof maybeResult === "object" &&
-      "tool_failed" in maybeResult &&
-      maybeResult.tool_failed
-    ) {
-      return "error";
+    if (maybeResult) {
+      if (
+        typeof maybeResult === "object" &&
+        "tool_failed" in maybeResult &&
+        maybeResult.tool_failed
+      ) {
+        return "error";
+      }
+      return "success";
     }
-    return "success";
-  }, [maybeResult]);
+    // rm tool returns diff message (not tool message) when deleting files with content
+    if (toolDiffs.length > 0) {
+      return "success";
+    }
+    return "running";
+  }, [maybeResult, toolDiffs]);
 
   const handleToggle = useCallback(() => {
     setIsOpen((prev) => !prev);

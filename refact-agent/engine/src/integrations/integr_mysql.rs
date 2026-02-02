@@ -159,7 +159,6 @@ impl Tool for ToolMysql {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "MySQL integration, can run a single query per call.".to_string(),

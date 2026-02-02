@@ -139,7 +139,6 @@ impl Tool for ToolAstDefinition {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: true,
             description: "Find definition of a symbol in the project using AST".to_string(),

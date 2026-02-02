@@ -83,8 +83,6 @@ pub struct ToolSource {
 pub struct ToolDesc {
     pub name: String,
     #[serde(default)]
-    pub agentic: bool,
-    #[serde(default)]
     pub experimental: bool,
     #[serde(default)]
     pub allow_parallel: bool,

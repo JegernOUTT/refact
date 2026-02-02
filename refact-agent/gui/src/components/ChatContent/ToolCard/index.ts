@@ -16,5 +16,7 @@ export { EditTool } from "./EditTool";
 export { FileOpTool } from "./FileOpTool";
 export { TasksTool } from "./TasksTool";
 export { GenericTool } from "./GenericTool";
+export { TaskDoneTool } from "./TaskDoneTool";
+export { AskQuestionsTool } from "./AskQuestionsTool";
 export { useAutoExpandCollapse } from "./useAutoExpandCollapse";
 export { truncateMiddle, basename } from "./utils";

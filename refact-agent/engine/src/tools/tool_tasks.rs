@@ -44,7 +44,6 @@ impl Tool for ToolTasksSet {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "Set the task progress list shown to the user. Use to track multi-step work. \

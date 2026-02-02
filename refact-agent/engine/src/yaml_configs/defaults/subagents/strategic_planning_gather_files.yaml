@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: strategic_planning_gather_files
 title: Strategic Planning File Gatherer
 description: File gatherer for strategic planning

@@ -6,16 +6,25 @@ export type SessionState =
   | "executing_tools"
   | "paused"
   | "waiting_ide"
+  | "waiting_user_input"
+  | "completed"
   | "error";
 
 export function getStatusFromSessionState(
   sessionState?: string | null,
 ): StatusDotState {
   if (sessionState === "generating" || sessionState === "executing_tools") {
-    return "streaming";
+    return "in_progress";
   }
-  if (sessionState === "paused" || sessionState === "waiting_ide") {
-    return "paused";
+  if (
+    sessionState === "paused" ||
+    sessionState === "waiting_ide" ||
+    sessionState === "waiting_user_input"
+  ) {
+    return "needs_attention";
+  }
+  if (sessionState === "completed") {
+    return "completed";
   }
   if (sessionState === "error") {
     return "error";
@@ -25,10 +34,16 @@ export function getStatusFromSessionState(
 
 export function getStatusTooltip(sessionState?: string | null): string {
   if (sessionState === "generating" || sessionState === "executing_tools") {
-    return "Generating response...";
+    return "In progress...";
+  }
+  if (sessionState === "waiting_user_input") {
+    return "Waiting for your answer";
   }
   if (sessionState === "paused" || sessionState === "waiting_ide") {
-    return "Waiting for confirmation";
+    return "Needs your attention";
+  }
+  if (sessionState === "completed") {
+    return "Task completed";
   }
   if (sessionState === "error") {
     return "An error occurred";

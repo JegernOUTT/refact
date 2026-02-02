@@ -132,6 +132,8 @@ export type ChatThreadRuntime = {
   snapshot_received: boolean;
   /** Task progress widget expanded/collapsed state */
   task_widget_expanded: boolean;
+  /** Actual session state from backend (for waiting_user_input, completed, etc.) */
+  session_state?: string;
 };
 
 export type Chat = {

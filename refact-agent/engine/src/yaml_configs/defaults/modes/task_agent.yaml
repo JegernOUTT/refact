@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 3
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -79,6 +79,10 @@ prompt: |
   If you discover something useful (API quirk, environment issue, non-obvious pattern), save it:
   `task_memory_save(content="...", title="...")`
 
+  ## Asking Questions
+  Use `ask_questions()` if you need clarification before proceeding. Stops execution until user responds.
+  Example: `ask_questions(questions='[{"id":"q1","type":"yes_no","text":"Should I add tests?"}]')`
+
   ## Failure
   If impossible → `task_agent_finish(success=false, report="reason")`
 
@@ -104,6 +108,7 @@ tools:
   - mv
   - task_agent_finish
   - task_memory_save
+  - ask_questions
 
 llm_defaults:
   max_new_tokens: 8192

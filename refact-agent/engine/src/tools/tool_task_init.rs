@@ -66,7 +66,6 @@ impl Tool for ToolTaskInit {
                 source_type: ToolSourceType::Builtin,
                 config_path: String::new(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "Create a new task workspace for planning and orchestrating work."

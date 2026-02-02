@@ -158,7 +158,6 @@ impl Tool for ToolPostgres {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "PostgreSQL integration, can run a single query per call.".to_string(),

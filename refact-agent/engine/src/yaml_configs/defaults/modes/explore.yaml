@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 3
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -29,6 +29,8 @@ prompt: |
    - **If no**:
        - Answer the question directly without calling any tools.
 
+  Use `ask_questions()` when you need user input (yes/no, single/multi select, free text). Example: `ask_questions(questions='[{"id":"q1","type":"yes_no","text":"Continue?"}]')`
+
   %CD_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -52,6 +54,7 @@ tools:
   - knowledge
   - web
   - web_search
+  - ask_questions
 
 llm_defaults:
   max_new_tokens: 4096

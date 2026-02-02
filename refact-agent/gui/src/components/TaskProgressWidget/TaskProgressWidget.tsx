@@ -27,7 +27,7 @@ function getStatusDotState(
 ): StatusDotState {
   switch (status) {
     case "in_progress":
-      return "paused"; // Blue pulsing for in-progress tasks
+      return "in_progress"; // Blue pulsing for in-progress tasks
     case "completed":
       return "completed"; // Green solid for completed
     case "failed":

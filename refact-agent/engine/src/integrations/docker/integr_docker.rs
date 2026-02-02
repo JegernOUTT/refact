@@ -180,7 +180,6 @@ impl Tool for ToolDocker {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: true,
             allow_parallel: false,
             description: "Access to docker cli, in a non-interactive way, don't open a shell."

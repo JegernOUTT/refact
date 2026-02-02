@@ -96,8 +96,11 @@ export const useCheckpoints = () => {
       const currentChatId = chatId;
       const currentChatMode = chatMode;
       try {
-        const previewedChanges =
-          await previewChangesFromCheckpoints(checkpoints, currentChatId, currentChatMode).unwrap();
+        const previewedChanges = await previewChangesFromCheckpoints(
+          checkpoints,
+          currentChatId,
+          currentChatMode,
+        ).unwrap();
         void sendTelemetryEvent({
           scope: `rollbackChanges/preview`,
           success: true,
@@ -128,80 +131,90 @@ export const useCheckpoints = () => {
         });
       }
     },
-    [dispatch, previewChangesFromCheckpoints, sendTelemetryEvent, messages, chatId, chatMode],
+    [
+      dispatch,
+      previewChangesFromCheckpoints,
+      sendTelemetryEvent,
+      messages,
+      chatId,
+      chatMode,
+    ],
   );
 
-  const handleFix = useCallback(async (restoreMode: RestoreMode = "files_and_messages") => {
-    try {
-      // Use chat_id and mode stored at preview time, not current state
-      const response = await restoreChangesFromCheckpoints(
-        latestRestoredCheckpointsResult.current_checkpoints,
-        latestRestoredCheckpointsResult.chat_id,
-        latestRestoredCheckpointsResult.chat_mode,
-      ).unwrap();
-      if (response.success) {
-        void sendTelemetryEvent({
-          scope: `rollbackChanges/confirmed`,
-          success: true,
-          error_message: "",
-        });
-
-        if (configIdeHost === "jetbrains") {
-          const files =
-            latestRestoredCheckpointsResult.reverted_changes.flatMap(
-              (change) => change.files_changed,
-            );
-          files.forEach((file) => {
-            setForceReloadFileByPath(file.absolute_path);
-          });
-        }
-
-        dispatch(setIsCheckpointsPopupIsVisible(false));
-      } else {
-        dispatch(setCheckpointsErrorLog(response.error_log));
-        return;
-      }
-
-      // Only undo messages if restoreMode is "files_and_messages"
-      if (restoreMode === "files_and_messages") {
-        if (shouldNewChatBeStarted || !maybeMessageIndex) {
-          const actions = [newChatAction(), deleteChatById(chatId)];
-          actions.forEach((action) => dispatch(action));
-        } else {
-          const usefulMessages = messages.slice(0, maybeMessageIndex);
-          dispatch(
-            backUpMessages({
-              id: chatId,
-              messages: usefulMessages,
-            }),
-          );
-        }
-      }
-      // If restoreMode is "files_only", we don't touch the messages
-    } catch (error) {
-      void sendTelemetryEvent({
-        scope: `rollbackChanges/failed`,
-        success: false,
-        error_message: `rollback: failed to apply previewed changes from checkpoints. checkpoints: ${JSON.stringify(
+  const handleFix = useCallback(
+    async (restoreMode: RestoreMode = "files_and_messages") => {
+      try {
+        // Use chat_id and mode stored at preview time, not current state
+        const response = await restoreChangesFromCheckpoints(
           latestRestoredCheckpointsResult.current_checkpoints,
-        )}`,
-      });
-    }
-  }, [
-    dispatch,
-    sendTelemetryEvent,
-    setForceReloadFileByPath,
-    restoreChangesFromCheckpoints,
-    configIdeHost,
-    shouldNewChatBeStarted,
-    maybeMessageIndex,
-    chatId,
-    messages,
-    latestRestoredCheckpointsResult.current_checkpoints,
-    latestRestoredCheckpointsResult.reverted_changes,
-    latestRestoredCheckpointsResult.chat_id,
-    latestRestoredCheckpointsResult.chat_mode,
-  ]);
+          latestRestoredCheckpointsResult.chat_id,
+          latestRestoredCheckpointsResult.chat_mode,
+        ).unwrap();
+        if (response.success) {
+          void sendTelemetryEvent({
+            scope: `rollbackChanges/confirmed`,
+            success: true,
+            error_message: "",
+          });
+
+          if (configIdeHost === "jetbrains") {
+            const files =
+              latestRestoredCheckpointsResult.reverted_changes.flatMap(
+                (change) => change.files_changed,
+              );
+            files.forEach((file) => {
+              setForceReloadFileByPath(file.absolute_path);
+            });
+          }
+
+          dispatch(setIsCheckpointsPopupIsVisible(false));
+        } else {
+          dispatch(setCheckpointsErrorLog(response.error_log));
+          return;
+        }
+
+        // Only undo messages if restoreMode is "files_and_messages"
+        if (restoreMode === "files_and_messages") {
+          if (shouldNewChatBeStarted || !maybeMessageIndex) {
+            const actions = [newChatAction(), deleteChatById(chatId)];
+            actions.forEach((action) => dispatch(action));
+          } else {
+            const usefulMessages = messages.slice(0, maybeMessageIndex);
+            dispatch(
+              backUpMessages({
+                id: chatId,
+                messages: usefulMessages,
+              }),
+            );
+          }
+        }
+        // If restoreMode is "files_only", we don't touch the messages
+      } catch (error) {
+        void sendTelemetryEvent({
+          scope: `rollbackChanges/failed`,
+          success: false,
+          error_message: `rollback: failed to apply previewed changes from checkpoints. checkpoints: ${JSON.stringify(
+            latestRestoredCheckpointsResult.current_checkpoints,
+          )}`,
+        });
+      }
+    },
+    [
+      dispatch,
+      sendTelemetryEvent,
+      setForceReloadFileByPath,
+      restoreChangesFromCheckpoints,
+      configIdeHost,
+      shouldNewChatBeStarted,
+      maybeMessageIndex,
+      chatId,
+      messages,
+      latestRestoredCheckpointsResult.current_checkpoints,
+      latestRestoredCheckpointsResult.reverted_changes,
+      latestRestoredCheckpointsResult.chat_id,
+      latestRestoredCheckpointsResult.chat_mode,
+    ],
+  );
 
   return {
     shouldCheckpointsPopupBeShown,

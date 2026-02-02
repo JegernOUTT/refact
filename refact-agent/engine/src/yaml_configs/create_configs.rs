@@ -27,10 +27,6 @@ pub async fn yaml_configs_try_create_all(gcx: Arc<ARwLock<GlobalContext>>) -> St
     }
 
     let files = vec![
-        (
-            "customization.yaml",
-            include_str!("default_customization.yaml"),
-        ),
         ("privacy.yaml", include_str!("default_privacy.yaml")),
         ("indexing.yaml", include_str!("default_indexing.yaml")),
         (

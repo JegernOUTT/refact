@@ -3,11 +3,10 @@ import { HoverCard, Text } from "@radix-ui/themes";
 import styles from "./StatusDot.module.css";
 
 export type StatusDotState =
-  | "streaming"
-  | "paused"
-  | "error"
   | "idle"
-  | "unread"
+  | "in_progress"
+  | "needs_attention"
+  | "error"
   | "completed";
 
 export interface StatusDotProps {
@@ -17,20 +16,18 @@ export interface StatusDotProps {
 }
 
 const STATE_TOOLTIPS: Record<StatusDotState, string> = {
-  streaming: "Generating response...",
-  paused: "Waiting for confirmation",
-  error: "An error occurred",
   idle: "Idle",
-  unread: "Unread messages",
+  in_progress: "In progress...",
+  needs_attention: "Needs your attention",
+  error: "An error occurred",
   completed: "Completed",
 };
 
 const STATE_CLASS_MAP: Record<StatusDotState, string> = {
-  streaming: styles.streaming,
-  paused: styles.paused,
-  error: styles.error,
   idle: styles.idle,
-  unread: styles.unread,
+  in_progress: styles.inProgress,
+  needs_attention: styles.needsAttention,
+  error: styles.error,
   completed: styles.completed,
 };
 

@@ -142,61 +142,80 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
         </HoverCard.Root>
 
         {showSelectedLines && (
-          <Flex align="center" gap="1">
-            <Checkbox
-              size="1"
-              name={selectedLinesCheckbox.name}
-              checked={selectedLinesCheckbox.checked}
-              disabled={selectedLinesCheckbox.disabled}
-              onCheckedChange={(value) =>
-                onCheckedChange(selectedLinesCheckbox.name, value)
-              }
-            >
-              <Text size="1">{selectedLinesCheckbox.label}</Text>
-              {selectedLinesCheckbox.locked && <LockClosedIcon opacity="0.6" />}
-              {selectedLinesCheckbox.locked === false && (
-                <LockOpen1Icon opacity="0.6" />
+          <>
+            <span className={styles.divider}>|</span>
+            <Flex align="center" gap="1" className={styles.selectedLinesGroup}>
+              <Checkbox
+                size="1"
+                name={selectedLinesCheckbox.name}
+                checked={selectedLinesCheckbox.checked}
+                disabled={selectedLinesCheckbox.disabled}
+                onCheckedChange={(value) =>
+                  onCheckedChange(selectedLinesCheckbox.name, value)
+                }
+              >
+                <Text size="1">{selectedLinesCheckbox.label}</Text>
+              </Checkbox>
+              <button
+                type="button"
+                className={styles.lockButton}
+                onClick={() =>
+                  onCheckedChange(
+                    selectedLinesCheckbox.name,
+                    !selectedLinesCheckbox.checked,
+                  )
+                }
+                disabled={selectedLinesCheckbox.disabled}
+                aria-label={
+                  selectedLinesCheckbox.locked ? "Locked" : "Unlocked"
+                }
+              >
+                {selectedLinesCheckbox.locked && <LockClosedIcon />}
+                {selectedLinesCheckbox.locked === false && <LockOpen1Icon />}
+              </button>
+              {selectedLinesCheckbox.info && (
+                <HoverCard.Root>
+                  <HoverCard.Trigger>
+                    <button type="button" className={styles.helpButton}>
+                      <QuestionMarkCircledIcon />
+                    </button>
+                  </HoverCard.Trigger>
+                  <HoverCard.Content maxWidth="240px" size="1">
+                    <Text as="div" size="1">
+                      {selectedLinesCheckbox.info.text}
+                    </Text>
+                  </HoverCard.Content>
+                </HoverCard.Root>
               )}
-            </Checkbox>
-            {selectedLinesCheckbox.info && (
-              <HoverCard.Root>
-                <HoverCard.Trigger>
-                  <QuestionMarkCircledIcon
-                    style={{ cursor: "help", opacity: 0.6 }}
-                  />
-                </HoverCard.Trigger>
-                <HoverCard.Content maxWidth="240px" size="1">
-                  <Text as="div" size="1">
-                    {selectedLinesCheckbox.info.text}
-                  </Text>
-                </HoverCard.Content>
-              </HoverCard.Root>
-            )}
-          </Flex>
+            </Flex>
+          </>
         )}
 
         {showAttachButton && (
-          <HoverCard.Root>
-            <HoverCard.Trigger>
-              <button
-                type="button"
-                onClick={attachedFiles.addFile}
-                disabled={attachedFiles.attached}
-                aria-label={`Attach ${attachedFiles.activeFile.name}`}
-                className={classNames(
-                  styles.iconButton,
-                  attachedFiles.attached && styles.active,
-                )}
-              >
-                <PlusIcon />
-              </button>
-            </HoverCard.Trigger>
-            <HoverCard.Content size="1" side="top">
-              <Text as="p" size="2">
-                Attach: {attachedFiles.activeFile.name}
-              </Text>
-            </HoverCard.Content>
-          </HoverCard.Root>
+          <>
+            <span className={styles.divider}>|</span>
+            <HoverCard.Root>
+              <HoverCard.Trigger>
+                <button
+                  type="button"
+                  onClick={attachedFiles.addFile}
+                  disabled={attachedFiles.attached}
+                  aria-label={`Attach ${attachedFiles.activeFile.name}`}
+                  className={classNames(
+                    styles.iconButton,
+                    attachedFiles.attached && styles.active,
+                  )}
+                >
+                  <PlusIcon />
+                </button>
+              </HoverCard.Trigger>
+              <HoverCard.Content size="1" side="top">
+                <Text as="p" size="2">
+                  Attach: {attachedFiles.activeFile.name}
+                </Text>
+              </HoverCard.Content>
+            </HoverCard.Root>
+          </>
         )}
       </Flex>
 

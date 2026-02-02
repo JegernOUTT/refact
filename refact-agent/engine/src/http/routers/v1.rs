@@ -108,7 +108,7 @@ mod knowledge_ops;
 pub mod links;
 pub mod lsp_like_handlers;
 pub mod providers;
-mod sidebar;
+pub mod sidebar;
 pub mod snippet_accepted;
 pub mod status;
 pub mod sync_files;

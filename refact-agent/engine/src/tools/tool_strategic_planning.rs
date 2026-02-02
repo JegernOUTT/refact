@@ -247,7 +247,6 @@ impl Tool for ToolStrategicPlanning {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: true,
             description: "Strategically plan a solution for a complex problem or create a comprehensive approach. Automatically identifies relevant files from the codebase.".to_string(),

@@ -142,7 +142,6 @@ impl Tool for ToolTaskAgentFinish {
                 source_type: ToolSourceType::Builtin,
                 config_path: String::new(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: false,
             description: "Mark the current card as completed or failed. Task agents MUST call this exactly once when finished. This updates the task board and notifies the planner.".to_string(),

@@ -449,7 +449,6 @@ impl Tool for ToolService {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: self.cfg.description.clone(),

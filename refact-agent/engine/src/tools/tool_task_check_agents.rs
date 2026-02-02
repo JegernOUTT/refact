@@ -99,6 +99,8 @@ fn format_agent_status(status: &AgentStatus) -> String {
             Some(SessionState::ExecutingTools) => ("⚙️", "Executing tools"),
             Some(SessionState::Paused) => ("⏸️", "Paused (awaiting confirmation)"),
             Some(SessionState::WaitingIde) => ("⏳", "Waiting for IDE"),
+            Some(SessionState::WaitingUserInput) => ("❓", "Waiting for user input"),
+            Some(SessionState::Completed) => ("✅", "Completed"),
             Some(SessionState::Error) => ("⚠️", "Error state (will be marked as failed)"),
             Some(SessionState::Idle) => ("💤", "Idle (waiting)"),
             None => (
@@ -148,7 +150,6 @@ impl Tool for ToolTaskCheckAgents {
                 source_type: ToolSourceType::Builtin,
                 config_path: String::new(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: true,
             description: "Check the status of all spawned agents for a task. Shows their board status (primary) and live session state (if available). Agents mark themselves done via task_agent_finish(). Agents that fail (streaming errors, timeouts, stuck) are automatically marked as failed.".to_string(),

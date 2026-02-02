@@ -43,6 +43,8 @@ export type ChatHistoryItem = Omit<ChatThread, "new_chat_suggested"> & {
     | "executing_tools"
     | "paused"
     | "waiting_ide"
+    | "waiting_user_input"
+    | "completed"
     | "error";
   message_count?: number;
   root_chat_id?: string;

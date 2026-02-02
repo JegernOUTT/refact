@@ -55,6 +55,8 @@ import { CONFIG_PATH_URL, FULL_PATH_URL } from "../services/refact/consts";
 import {
   ideToolCallResponse,
   ideForceReloadProjectTreeFiles,
+  ideTaskDone,
+  ideAskQuestions,
 } from "../hooks/useEventBusForIDE";
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import {
@@ -571,6 +573,107 @@ startListening({
           toolCallId: event.tool_call_id,
           toolName: event.tool_name,
           args: event.args,
+        }),
+      );
+    }
+  },
+});
+
+// Type definitions for tool message content
+interface TaskDoneContent {
+  type: "task_done";
+  summary?: string;
+  knowledge_path?: string;
+}
+
+interface AskQuestionsContent {
+  type: "ask_questions";
+  questions: { id: string; type: string; text: string; options?: string[] }[];
+}
+
+type ToolMessageContent =
+  | TaskDoneContent
+  | AskQuestionsContent
+  | { type: string };
+
+function isTaskDoneContent(
+  content: ToolMessageContent,
+): content is TaskDoneContent {
+  return content.type === "task_done";
+}
+
+function isAskQuestionsContent(
+  content: ToolMessageContent,
+): content is AskQuestionsContent {
+  return (
+    content.type === "ask_questions" &&
+    "questions" in content &&
+    Array.isArray(content.questions)
+  );
+}
+
+let cachedPostMessage: ((message: Record<string, unknown>) => void) | null =
+  null;
+
+function getPostMessageForHost(): (message: Record<string, unknown>) => void {
+  if (cachedPostMessage) return cachedPostMessage;
+  if (window.acquireVsCodeApi) {
+    cachedPostMessage = window.acquireVsCodeApi().postMessage;
+  } else if (window.postIntellijMessage) {
+    cachedPostMessage = window.postIntellijMessage;
+  } else {
+    cachedPostMessage = (msg) => window.postMessage(msg, "*");
+  }
+  return cachedPostMessage;
+}
+
+function isIdeHost(): boolean {
+  return !!(window.acquireVsCodeApi ?? window.postIntellijMessage);
+}
+
+function safeParseJson(str: string): unknown {
+  try {
+    return JSON.parse(str);
+  } catch {
+    return undefined;
+  }
+}
+
+startListening({
+  actionCreator: applyChatEvent,
+  effect: (action) => {
+    if (!isIdeHost()) return;
+
+    const event = action.payload;
+    if (event.type !== "message_added") return;
+
+    const msg = event.message;
+    if (!isToolMessage(msg)) return;
+    if (typeof msg.content !== "string") return;
+
+    const parsed = safeParseJson(msg.content);
+    if (!parsed || typeof parsed !== "object") return;
+
+    const content = parsed as ToolMessageContent;
+    const chatId = event.chat_id;
+    const toolCallId = msg.tool_call_id;
+    const postToIde = getPostMessageForHost();
+
+    if (isTaskDoneContent(content)) {
+      postToIde(
+        ideTaskDone({
+          chatId,
+          toolCallId,
+          summary: content.summary ?? "Task completed",
+          knowledgePath: content.knowledge_path,
+        }),
+      );
+    } else if (isAskQuestionsContent(content)) {
+      postToIde(
+        ideAskQuestions({
+          chatId,
+          toolCallId,
+          questions: content.questions,
         }),
       );
     }

@@ -195,7 +195,6 @@ impl Tool for ToolUndoTextDoc {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: false,
             description: "Undo recent file edits from this session. Reverts to previous version."

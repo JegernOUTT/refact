@@ -1,0 +1,153 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use async_trait::async_trait;
+use serde_json::Value;
+use tokio::sync::Mutex as AMutex;
+
+use crate::at_commands::at_commands::AtCommandsContext;
+use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
+use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
+use crate::memories::{memories_add_enriched, EnrichmentParams};
+use crate::http::routers::v1::sidebar::NotificationEvent;
+
+pub struct ToolTaskDone {
+    pub config_path: String,
+}
+
+#[async_trait]
+impl Tool for ToolTaskDone {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "task_done".to_string(),
+            display_name: "Task Done".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Mark the current task as complete with a detailed report. Automatically saves to knowledge base. Use as the FINAL action when a task is fully completed.".to_string(),
+            parameters: vec![
+                ToolParam {
+                    name: "report".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Detailed markdown report of what was accomplished".to_string(),
+                },
+                ToolParam {
+                    name: "summary".to_string(),
+                    param_type: "string".to_string(),
+                    description: "One-line summary for notifications and titles".to_string(),
+                },
+                ToolParam {
+                    name: "files_changed".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Comma-separated list or JSON array of file paths that were modified".to_string(),
+                },
+            ],
+            parameters_required: vec!["report".to_string(), "summary".to_string()],
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let report = match args.get("report") {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => return Err(format!("argument `report` is not a string: {:?}", v)),
+            None => return Err("argument `report` is missing".to_string()),
+        };
+
+        let summary = match args.get("summary") {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => return Err(format!("argument `summary` is not a string: {:?}", v)),
+            None => return Err("argument `summary` is missing".to_string()),
+        };
+
+        let files_changed: Vec<String> = match args.get("files_changed") {
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
+            Some(Value::String(s)) => {
+                let trimmed = s.trim();
+                if trimmed.starts_with('[') {
+                    serde_json::from_str::<Vec<String>>(trimmed).unwrap_or_else(|_| {
+                        s.split(',')
+                            .map(|f| f.trim().to_string())
+                            .filter(|f| !f.is_empty())
+                            .collect()
+                    })
+                } else {
+                    s.split(',')
+                        .map(|f| f.trim().to_string())
+                        .filter(|f| !f.is_empty())
+                        .collect()
+                }
+            }
+            _ => vec![],
+        };
+
+        let enrichment_params = EnrichmentParams {
+            base_tags: vec!["task-report".to_string()],
+            base_filenames: files_changed.clone(),
+            base_kind: "task-report".to_string(),
+            base_title: Some(summary.clone()),
+        };
+
+        let knowledge_path = memories_add_enriched(ccx.clone(), &report, enrichment_params).await?;
+
+        {
+            let ccx_lock = ccx.lock().await;
+            ccx_lock.abort_flag.store(true, Ordering::SeqCst);
+        }
+
+        let chat_id = {
+            let ccx_lock = ccx.lock().await;
+            ccx_lock.chat_id.clone()
+        };
+
+        {
+            let ccx_lock = ccx.lock().await;
+            let gcx = ccx_lock.global_context.read().await;
+            if let Some(ref tx) = gcx.notification_events_tx {
+                let _ = tx.send(NotificationEvent::TaskDone {
+                    chat_id: chat_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                    summary: summary.clone(),
+                    knowledge_path: Some(knowledge_path.display().to_string()),
+                });
+            }
+        }
+
+        let result = serde_json::json!({
+            "type": "task_done",
+            "summary": summary,
+            "report": report,
+            "files_changed": files_changed,
+            "knowledge_path": knowledge_path.display().to_string(),
+        });
+
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(result.to_string()),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            })],
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec!["knowledge".to_string()]
+    }
+}

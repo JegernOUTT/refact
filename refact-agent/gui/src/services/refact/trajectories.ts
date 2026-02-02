@@ -23,6 +23,8 @@ export type TrajectoryMeta = {
     | "executing_tools"
     | "paused"
     | "waiting_ide"
+    | "waiting_user_input"
+    | "completed"
     | "error";
   root_chat_id?: string;
   total_coins?: number;
@@ -62,6 +64,8 @@ export type TrajectoryEvent = {
     | "executing_tools"
     | "paused"
     | "waiting_ide"
+    | "waiting_user_input"
+    | "completed"
     | "error";
   error?: string;
   message_count?: number;

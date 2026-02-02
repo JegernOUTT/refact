@@ -1,9 +1,9 @@
-schema_version: 1
+schema_version: 2
 id: title_generation
 title: Title Generation
-description: Generate chat titles
+description: Generate concise chat titles
 expose_as_tool: false
-has_code: true
+has_code: false
 
 subchat:
   context_mode: fork
@@ -14,8 +14,7 @@ subchat:
   temperature: 0.2
 
 messages:
-  system_prompt: |
-    Generate a short, descriptive title for this conversation.
-    The title should be 3-7 words and capture the main topic.
+  user_template: |
+    Summarize this chat in 2-4 words. Prefer filenames, classes, entities, and avoid generic terms. Write only the title, nothing else.
 
 tools: []

@@ -6,6 +6,8 @@ export type SessionState =
   | "executing_tools"
   | "paused"
   | "waiting_ide"
+  | "waiting_user_input"
+  | "completed"
   | "error";
 
 export type ThreadParams = {

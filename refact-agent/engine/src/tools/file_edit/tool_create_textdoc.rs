@@ -151,7 +151,6 @@ impl Tool for ToolCreateTextDoc {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: false,
             description: "Creates a new text document or code or completely replaces the content of an existing document. Avoid trailing spaces and tabs.".to_string(),

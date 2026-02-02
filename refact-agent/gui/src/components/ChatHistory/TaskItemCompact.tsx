@@ -24,19 +24,19 @@ function getTaskStatusDotState(task: TaskMeta): StatusDotState {
   const plannerState = task.planner_session_state;
 
   if (plannerState === "generating" || plannerState === "executing_tools") {
-    return "streaming";
+    return "in_progress";
   }
   if (plannerState === "paused" || plannerState === "waiting_ide") {
-    return "paused";
+    return "needs_attention";
   }
   if (plannerState === "error" || task.status === "abandoned") {
     return "error";
   }
   if (task.status === "completed") {
-    return "idle";
+    return "completed";
   }
   if (task.agents_active > 0) {
-    return "streaming";
+    return "in_progress";
   }
   return "idle";
 }

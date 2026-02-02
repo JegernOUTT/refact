@@ -227,7 +227,6 @@ impl Tool for ToolCodeReview {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: true,
             description: "Perform a thorough code review. Automatically identifies relevant files and checks for bugs, integration issues, missing tests, code style, and consistency.".to_string(),

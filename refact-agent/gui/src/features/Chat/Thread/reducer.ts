@@ -532,6 +532,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (!rt) return;
 
     const sessionState = action.payload.session_state;
+    rt.session_state = sessionState;
     rt.streaming = sessionState === "generating";
     rt.waiting_for_response =
       sessionState === "generating" ||
@@ -544,14 +545,23 @@ export const chatReducer = createReducer(initialState, (builder) => {
       if (rt.confirmation.pause_reasons.length === 0) {
         state.sse_refresh_requested = action.payload.id;
       }
-    } else if (sessionState === "idle" || sessionState === "error") {
+    } else if (
+      sessionState === "idle" ||
+      sessionState === "error" ||
+      sessionState === "completed" ||
+      sessionState === "waiting_user_input"
+    ) {
       rt.confirmation.pause = false;
       rt.confirmation.pause_reasons = [];
     }
 
     if (sessionState === "error") {
       rt.error = action.payload.error ?? "An error occurred";
-    } else if (sessionState === "idle") {
+    } else if (
+      sessionState === "idle" ||
+      sessionState === "completed" ||
+      sessionState === "waiting_user_input"
+    ) {
       rt.error = null;
     }
   });
@@ -803,6 +813,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
         const newRt: ChatThreadRuntime = {
           thread,
+          session_state: snapshotState,
           streaming: snapshotStreaming,
           waiting_for_response: snapshotWaiting,
           prevent_send: false,

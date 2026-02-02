@@ -1,7 +1,9 @@
-schema_version: 1
+schema_version: 2
 id: kg_deprecate
 title: Knowledge Graph Deprecate
 description: Check and deprecate outdated knowledge entries
+expose_as_tool: false
+has_code: false
 
 subchat:
   context_mode: bare
@@ -11,5 +13,33 @@ subchat:
   max_new_tokens: 4096
   temperature: 0.0
   tokens_for_rag: 0
+
+messages:
+  user_template: |
+    A new knowledge document was created. Determine if any existing documents should be deprecated.
+
+    NEW DOCUMENT:
+    Title: {new_title}
+    Tags: {new_tags}
+    Files: {new_files}
+    Content snippet: {new_snippet}
+
+    CANDIDATE DOCUMENTS TO POTENTIALLY DEPRECATE:
+    {candidates}
+
+    For each candidate, decide if it should be deprecated because:
+    - It covers the same topic and the new doc is more complete/updated
+    - It references the same files with outdated information
+    - It's a duplicate or near-duplicate
+
+    Return JSON:
+    {
+      "deprecate": [
+        {"target_id": "...", "reason": "...", "confidence": 0.0-1.0}
+      ],
+      "keep": ["id1", "id2"]
+    }
+
+    Only deprecate with confidence >= 0.75. JSON only:
 
 tools: []

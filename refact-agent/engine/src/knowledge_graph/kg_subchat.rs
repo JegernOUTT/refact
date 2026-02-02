@@ -5,8 +5,12 @@ use tokio::sync::RwLock as ARwLock;
 use crate::call_validation::ChatMessage;
 use crate::global_context::GlobalContext;
 use crate::subchat::run_subchat_once;
+use crate::yaml_configs::customization_registry::get_subagent_config;
 
 use super::kg_structs::KnowledgeDoc;
+
+const KG_ENRICH_SUBAGENT_ID: &str = "kg_enrich";
+const KG_DEPRECATE_SUBAGENT_ID: &str = "kg_deprecate";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnrichmentResult {
@@ -42,56 +46,6 @@ pub struct DeprecationResult {
     pub keep: Vec<String>,
 }
 
-const ENRICHMENT_PROMPT: &str = r#"Analyze the following knowledge content and extract metadata.
-
-CONTENT:
-{content}
-
-EXTRACTED ENTITIES (backticked identifiers found):
-{entities}
-
-CANDIDATE FILES (from workspace, pick only relevant ones):
-{candidate_files}
-
-CANDIDATE RELATED DOCS (from knowledge base, pick only relevant ones):
-{candidate_docs}
-
-Return a JSON object with:
-- title: a concise title for this knowledge (max 80 chars)
-- tags: array of relevant tags (lowercase, max 8 tags)
-- filenames: array of file paths this knowledge relates to (only from candidates)
-- kind: one of "code", "decision", "domain", "process" (based on content)
-- links: array of related doc IDs (only from candidates)
-- review_after_days: suggested review period (90 for code/decision, 180 for domain)
-
-JSON only, no explanation:"#;
-
-const DEPRECATION_PROMPT: &str = r#"A new knowledge document was created. Determine if any existing documents should be deprecated.
-
-NEW DOCUMENT:
-Title: {new_title}
-Tags: {new_tags}
-Files: {new_files}
-Content snippet: {new_snippet}
-
-CANDIDATE DOCUMENTS TO POTENTIALLY DEPRECATE:
-{candidates}
-
-For each candidate, decide if it should be deprecated because:
-- It covers the same topic and the new doc is more complete/updated
-- It references the same files with outdated information
-- It's a duplicate or near-duplicate
-
-Return JSON:
-{{
-  "deprecate": [
-    {{"target_id": "...", "reason": "...", "confidence": 0.0-1.0}}
-  ],
-  "keep": ["id1", "id2"]
-}}
-
-Only deprecate with confidence >= 0.75. JSON only:"#;
-
 pub async fn enrich_knowledge_metadata(
     gcx: Arc<ARwLock<GlobalContext>>,
     content: &str,
@@ -99,6 +53,14 @@ pub async fn enrich_knowledge_metadata(
     candidate_files: &[String],
     candidate_docs: &[(String, String)],
 ) -> Result<EnrichmentResult, String> {
+    let subagent_config = get_subagent_config(gcx.clone(), KG_ENRICH_SUBAGENT_ID, None)
+        .await
+        .ok_or_else(|| format!("subagent config '{}' not found", KG_ENRICH_SUBAGENT_ID))?;
+
+    let enrichment_template = subagent_config.messages.user_template
+        .as_ref()
+        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", KG_ENRICH_SUBAGENT_ID))?;
+
     let entities_str = entities.join(", ");
     let files_str = candidate_files
         .iter()
@@ -113,7 +75,7 @@ pub async fn enrich_knowledge_metadata(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let prompt = ENRICHMENT_PROMPT
+    let prompt = enrichment_template
         .replace("{content}", &content.chars().take(2000).collect::<String>())
         .replace("{entities}", &entities_str)
         .replace("{candidate_files}", &files_str)
@@ -121,7 +83,7 @@ pub async fn enrich_knowledge_metadata(
 
     let messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
-    let result = run_subchat_once(gcx, "kg_enrich", messages).await?;
+    let result = run_subchat_once(gcx, KG_ENRICH_SUBAGENT_ID, messages).await?;
 
     let response = result
         .messages
@@ -151,6 +113,14 @@ pub async fn check_deprecation(
         });
     }
 
+    let subagent_config = get_subagent_config(gcx.clone(), KG_DEPRECATE_SUBAGENT_ID, None)
+        .await
+        .ok_or_else(|| format!("subagent config '{}' not found", KG_DEPRECATE_SUBAGENT_ID))?;
+
+    let deprecation_template = subagent_config.messages.user_template
+        .as_ref()
+        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", KG_DEPRECATE_SUBAGENT_ID))?;
+
     let candidates_str = candidates
         .iter()
         .map(|doc| {
@@ -171,7 +141,7 @@ pub async fn check_deprecation(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let prompt = DEPRECATION_PROMPT
+    let prompt = deprecation_template
         .replace("{new_title}", new_doc_title)
         .replace("{new_tags}", &new_doc_tags.join(", "))
         .replace("{new_files}", &new_doc_files.join(", "))
@@ -183,7 +153,7 @@ pub async fn check_deprecation(
 
     let messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
-    let result = run_subchat_once(gcx, "kg_deprecate", messages).await?;
+    let result = run_subchat_once(gcx, KG_DEPRECATE_SUBAGENT_ID, messages).await?;
 
     let response = result
         .messages

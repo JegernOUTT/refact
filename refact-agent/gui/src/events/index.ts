@@ -84,6 +84,9 @@ export {
   ideSetLoginMessage,
   ideSetActiveTeamsGroup,
   ideClearActiveTeamsGroup,
+  ideTaskDone,
+  ideAskQuestions,
+  ideSwitchToThread,
 } from "../hooks/useEventBusForIDE";
 
 export { ideAttachFileToChat } from "../hooks/useEventBusForApp";

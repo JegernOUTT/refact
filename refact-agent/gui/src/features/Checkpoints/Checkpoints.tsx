@@ -26,7 +26,8 @@ export const Checkpoints = () => {
     errorLog,
   } = useCheckpoints();
 
-  const [restoreMode, setRestoreMode] = useState<RestoreMode>("files_and_messages");
+  const [restoreMode, setRestoreMode] =
+    useState<RestoreMode>("files_and_messages");
 
   const clientTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const formattedDate = formatDateOrTimeBasedOnToday(
@@ -114,7 +115,9 @@ export const Checkpoints = () => {
         )}
 
         <Flex direction="column" gap="2" mt="4">
-          <Text size="2" weight="medium">Restore options:</Text>
+          <Text size="2" weight="medium">
+            Restore options:
+          </Text>
           <RadioGroup.Root
             value={restoreMode}
             onValueChange={(value) => setRestoreMode(value as RestoreMode)}
@@ -136,12 +139,7 @@ export const Checkpoints = () => {
           </RadioGroup.Root>
         </Flex>
 
-        <Flex
-          gap="3"
-          mt="4"
-          justify="between"
-          wrap="wrap"
-        >
+        <Flex gap="3" mt="4" justify="between" wrap="wrap">
           <Flex gap="3" wrap="wrap" justify="start">
             <Button
               type="button"

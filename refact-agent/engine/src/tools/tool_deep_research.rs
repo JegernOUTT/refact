@@ -11,22 +11,17 @@ use crate::tools::tools_description::{
 use crate::call_validation::{ChatMessage, ChatContent, ChatUsage, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::global_context::GlobalContext;
+use crate::yaml_configs::customization_registry::get_subagent_config;
 use tokio::sync::RwLock as ARwLock;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::memories::{memories_add_enriched, EnrichmentParams};
 use crate::postprocessing::pp_command_output::OutputFilter;
 
+const SUBAGENT_ID: &str = "deep_research";
+
 pub struct ToolDeepResearch {
     pub config_path: String,
 }
-
-static RESEARCHER_PROMPT: &str = r#"Do:
-- Focus on data-rich insights: include specific figures, trends, statistics, and measurable outcomes.
-- When appropriate, summarize data in a way that could be turned into charts or tables, and call this out in the response.
-- Prioritize reliable, up-to-date sources: official documentation, peer-reviewed research, reputable technical blogs, and official project repositories.
-- Include inline citations and return all source metadata.
-
-Be analytical, avoid generalities, and ensure that each section supports data-backed reasoning that could inform technical decisions or implementation strategies."#;
 
 static ENTERTAINMENT_MESSAGES: &[&str] = &[
     "1/9: 🔬 Deep research in progress... This may take up to 30 minutes, please be patient!",
@@ -104,12 +99,20 @@ async fn execute_deep_research(
     let cancel_token = tokio_util::sync::CancellationToken::new();
     spawn_entertainment_task(subchat_tx, tool_call_id.clone(), cancel_token.clone());
 
+    let subagent_config = get_subagent_config(gcx.clone(), SUBAGENT_ID, None)
+        .await
+        .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
+
+    let researcher_prompt = subagent_config.messages.user_template
+        .as_ref()
+        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", SUBAGENT_ID))?;
+
     let messages = vec![
-        ChatMessage::new("user".to_string(), RESEARCHER_PROMPT.to_string()),
+        ChatMessage::new("user".to_string(), researcher_prompt.clone()),
         ChatMessage::new("user".to_string(), research_query),
     ];
 
-    let result = run_subchat_once(gcx, "deep_research", messages).await;
+    let result = run_subchat_once(gcx, SUBAGENT_ID, messages).await;
 
     cancel_token.cancel();
 
@@ -137,7 +140,6 @@ impl Tool for ToolDeepResearch {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: true,
             description: "Conduct comprehensive web research on a topic. Use this tool when you need up-to-date information from the internet, market analysis, technical documentation research, or synthesis of information from multiple web sources. The research takes several minutes and produces a detailed, citation-rich report. Do NOT use for questions about the current codebase - use code exploration tools instead.".to_string(),

@@ -44,7 +44,6 @@ impl Tool for ToolSearch {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: true,
             description: "Find semantically similar pieces of code or text using vector database (semantic search)".to_string(),

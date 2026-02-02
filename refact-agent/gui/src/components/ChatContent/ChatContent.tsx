@@ -273,6 +273,56 @@ function getMessageKey(message: ChatMessages[number], index: number): string {
   return `${message.role}-${index}`;
 }
 
+function extractUserMessageText(content: UserMessage["content"]): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  for (const item of content) {
+    if ("type" in item && item.type === "text" && "text" in item) {
+      return item.text;
+    }
+    if ("m_type" in item && item.m_type === "text" && "m_content" in item) {
+      return String(item.m_content);
+    }
+  }
+  return "";
+}
+
+function computeHiddenQaMessageIndices(messages: ChatMessages): Set<number> {
+  const hiddenIndices = new Set<number>();
+  const askQuestionsToolIds = new Map<string, number>();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role === "assistant" && "tool_calls" in msg && msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        if (tc.function.name === "ask_questions" && tc.id) {
+          askQuestionsToolIds.set(tc.id, i);
+        }
+      }
+    }
+  }
+
+  for (const [toolCallId, assistantIdx] of askQuestionsToolIds) {
+    let foundToolResult = false;
+    for (let j = assistantIdx + 1; j < messages.length; j++) {
+      const msg = messages[j];
+      if (isToolMessage(msg) && msg.tool_call_id === toolCallId) {
+        foundToolResult = true;
+        continue;
+      }
+      if (foundToolResult && msg.role === "user") {
+        const contentStr = extractUserMessageText(msg.content);
+        if (contentStr.startsWith(`[QA:${toolCallId}]`)) {
+          hiddenIndices.add(j);
+        }
+        break;
+      }
+    }
+  }
+
+  return hiddenIndices;
+}
+
 function renderMessagesFast(
   messages: ChatMessages,
   onRetry: (index: number, question: UserMessage["content"]) => void,
@@ -283,9 +333,12 @@ function renderMessagesFast(
   const nodes: React.ReactNode[] = [];
   if (messages.length === 0) return nodes;
 
+  const hiddenQaIndices = computeHiddenQaMessageIndices(messages);
+
   let lastUserIdx = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") {
+    const msg = messages[i];
+    if (msg.role === "user" && !hiddenQaIndices.has(i)) {
       lastUserIdx = i;
       break;
     }
@@ -477,6 +530,10 @@ function renderMessagesFast(
     }
 
     if (head.role === "user") {
+      if (hiddenQaIndices.has(i)) {
+        continue;
+      }
+
       const key = getMessageKey(head, i);
 
       if (i === lastUserIdx) {

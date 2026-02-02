@@ -169,7 +169,6 @@ impl Tool for ToolUpdateTextDocRegex {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
             allow_parallel: false,
             description: "Updates an existing document using pattern matching. By default treats pattern as literal text (literal:true). Set literal:false for regex.".to_string(),

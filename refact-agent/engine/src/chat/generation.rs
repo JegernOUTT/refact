@@ -152,6 +152,7 @@ pub fn start_generation(
                     break;
                 }
                 ToolStepOutcome::Paused => break,
+                ToolStepOutcome::Stop => break,
                 ToolStepOutcome::Continue => {
                     inject_priority_messages_if_any(gcx.clone(), session_arc.clone()).await;
                 }

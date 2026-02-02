@@ -219,6 +219,8 @@ export const updateChatRuntimeFromSessionState = createAction<{
     | "executing_tools"
     | "paused"
     | "waiting_ide"
+    | "waiting_user_input"
+    | "completed"
     | "error";
   error?: string;
 }>("chatThread/updateChatRuntimeFromSessionState");

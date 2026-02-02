@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 3
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -160,6 +160,11 @@ prompt: |
     - Use `web()` to fetch a specific URL/document or `web_search()` for quick lookups
     - Do NOT use `deep_research` for questions about the current project's code - delegate to subagent instead
 
+  **Completing Tasks & Asking Questions**
+    - Use `task_done()` as the FINAL action when a task is fully completed. Takes `report` (detailed markdown), `summary` (one-line for notifications), and optionally `files_changed`. Automatically saves to knowledge base.
+    - Use `ask_questions()` when you need user input to proceed. Stops generation until user responds. Question types: yes_no, single_select, multi_select, free_text.
+      Example: `ask_questions(questions='[{"id":"q1","type":"yes_no","text":"Continue?"}]')`
+
   **BEST PRACTICES**
     - Do not use subagents to execute the plan, ie modify files.
     - Avoid commenting at all costs unless the user directly asks for it.
@@ -209,6 +214,8 @@ tools:
   - code_review
   - deep_research
   - tasks_set
+  - task_done
+  - ask_questions
 
 llm_defaults:
   max_new_tokens: 4096
@@ -227,4 +234,8 @@ tool_confirm:
     - match: "web*"
       action: auto
     - match: "tasks_set"
+      action: auto
+    - match: "task_done"
+      action: auto
+    - match: "ask_questions"
       action: auto

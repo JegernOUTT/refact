@@ -9,6 +9,7 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::subchat::run_subchat;
 use crate::postprocessing::pp_command_output::OutputFilter;
+use crate::yaml_configs::customization_registry::get_subagent_config;
 
 const FILE_EDITING_TOOLS: &[&str] = &[
     "create_textdoc",
@@ -30,23 +31,6 @@ fn tools_contain_file_editing(tools: &[String]) -> bool {
 pub struct ToolSubagent {
     pub config_path: String,
 }
-
-static SUBAGENT_SYSTEM_PROMPT: &str = r#"You are a focused sub-agent executing a specific task. You have been delegated this task by a parent agent.
-
-Your task is clearly defined below. Execute it efficiently and report your findings.
-
-Guidelines:
-- Stay focused on the assigned task only
-- Use the provided tools to accomplish the task
-- Be thorough but efficient - you have a limited step budget
-- Report progress and findings clearly
-- When you achieve the expected result, summarize what you found/did
-- If you cannot complete the task, explain why and what you tried
-
-Do NOT:
-- Deviate from the assigned task
-- Ask clarifying questions - work with what you have
-- Exceed your step budget unnecessarily"#;
 
 fn build_task_prompt(
     task: &str,
@@ -93,7 +77,6 @@ impl Tool for ToolSubagent {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: true,
             description: "Delegate a specific task to a sub-agent that works independently. Use this when you need to perform a focused task that requires multiple tool calls without cluttering the main conversation. The subagent has its own context and does not see the parent conversation.".to_string(),
@@ -236,10 +219,18 @@ impl Tool for ToolSubagent {
 
         let user_prompt = build_task_prompt(&task, &expected_result, &tools, max_steps);
 
+        let subagent_config = get_subagent_config(gcx.clone(), config_name, None)
+            .await
+            .ok_or_else(|| format!("subagent config '{}' not found", config_name))?;
+
+        let system_prompt = subagent_config.messages.system_prompt
+            .as_ref()
+            .ok_or_else(|| format!("messages.system_prompt not defined for subagent '{}'", config_name))?;
+
         let messages = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: ChatContent::SimpleText(SUBAGENT_SYSTEM_PROMPT.to_string()),
+                content: ChatContent::SimpleText(system_prompt.clone()),
                 ..Default::default()
             },
             ChatMessage {

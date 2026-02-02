@@ -89,7 +89,6 @@ impl Tool for ToolGithub {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "Access to gh command line command, to fetch issues, review PRs.".to_string(),

@@ -318,7 +318,6 @@ impl Tool for ToolChrome {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
             allow_parallel: false,
             description: "A real web browser with graphical interface.".to_string(),
