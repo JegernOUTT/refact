@@ -15,6 +15,7 @@ use crate::caps::providers::{
     CapsProvider,
 };
 use crate::caps::self_hosted::SelfHostedCaps;
+use crate::llm::WireFormat;
 
 pub const CAPS_FILENAME: &str = "refact-caps";
 pub const CAPS_FILENAME_FALLBACK: &str = "coding_assistant_caps.json";
@@ -35,6 +36,8 @@ pub struct BaseModelRecord {
     pub endpoint: String,
     #[serde(default, skip_serializing)]
     pub endpoint_style: String,
+    #[serde(default, skip_serializing)]
+    pub wire_format: WireFormat,
     #[serde(default, skip_serializing)]
     pub api_key: String,
     #[serde(default, skip_serializing)]

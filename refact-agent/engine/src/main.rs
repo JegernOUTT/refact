@@ -50,8 +50,8 @@ mod tools;
 mod vecdb;
 
 mod fetch_embedding;
-mod forward_to_hf_endpoint;
 mod forward_to_openai_endpoint;
+mod llm;
 mod restream;
 
 mod call_validation;

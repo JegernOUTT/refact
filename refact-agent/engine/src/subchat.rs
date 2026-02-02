@@ -864,22 +864,17 @@ async fn subchat_stream(
         &meta,
         &mut parameters,
         &options,
-        &None,
     )
     .await?;
 
     let t1 = std::time::Instant::now();
 
     let params = StreamRunParams {
-        prompt: prepared.prompt,
+        llm_request: prepared.llm_request,
         model_rec: model_rec.base.clone(),
-        sampling: parameters,
-        meta: if model_rec.base.support_metadata {
-            Some(meta)
-        } else {
-            None
-        },
         abort_flag: Some(abort_flag),
+        supports_tools: model_rec.supports_tools,
+        supports_reasoning: model_rec.supports_reasoning.is_some(),
     };
 
     let mut collector = NoopCollector;

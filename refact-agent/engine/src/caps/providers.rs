@@ -14,6 +14,7 @@ use crate::caps::{
 use crate::custom_error::{MapErrToString, YamlError};
 use crate::global_context::{CommandLine, GlobalContext};
 use crate::caps::self_hosted::SelfHostedCaps;
+use crate::llm::adapter::WireFormat;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CapsProvider {
@@ -23,6 +24,9 @@ pub struct CapsProvider {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub supports_completion: bool,
+
+    #[serde(default)]
+    pub wire_format: WireFormat,
 
     #[serde(default = "default_endpoint_style")]
     pub endpoint_style: String,
@@ -67,6 +71,7 @@ pub struct CapsProvider {
 impl CapsProvider {
     pub fn apply_override(&mut self, value: serde_yaml::Value) -> Result<(), String> {
         set_field_if_exists::<bool>(&mut self.enabled, "enabled", &value)?;
+        set_field_if_exists::<WireFormat>(&mut self.wire_format, "wire_format", &value)?;
         set_field_if_exists::<String>(&mut self.endpoint_style, "endpoint_style", &value)?;
         set_field_if_exists::<String>(
             &mut self.completion_endpoint,
@@ -507,6 +512,7 @@ pub fn add_models_to_caps(caps: &mut CodeAssistantCaps, providers: Vec<CapsProvi
         base_model_rec.endpoint = endpoint.replace("$MODEL", model_name);
         base_model_rec.support_metadata = provider.support_metadata;
         base_model_rec.endpoint_style = provider.endpoint_style.clone();
+        base_model_rec.wire_format = provider.wire_format;
     }
 
     for mut provider in providers {

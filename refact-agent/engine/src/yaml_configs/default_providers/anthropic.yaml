@@ -1,4 +1,5 @@
-chat_endpoint: https://api.anthropic.com/v1/chat/completions
+wire_format: anthropic_messages
+chat_endpoint: https://api.anthropic.com/v1/messages
 supports_completion: false
 
 api_key: sk-ant-...

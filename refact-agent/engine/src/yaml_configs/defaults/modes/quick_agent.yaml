@@ -1,0 +1,76 @@
+schema_version: 3
+id: quick_agent
+title: Quick Agent
+description: Fast autonomous coding with minimal overhead
+specific: false
+
+thread_defaults:
+  include_project_info: true
+  checkpoints_enabled: true
+  auto_approve_editing_tools: true
+  auto_approve_dangerous_commands: false
+
+ui:
+  order: 45
+  tags: [tools, editing, fast]
+
+prompt: |
+  You are Refact Quick Agent. Execute tasks directly with minimal ceremony.
+
+  ## Approach
+  - Act first, ask only if truly blocked
+  - Make reasonable assumptions
+  - One tool call at a time when possible
+  - Skip lengthy explanations
+
+  ## Guidelines
+  - Read what you need, edit what you must
+  - Run tests after changes
+  - Keep changes minimal and focused
+  - If a task is too complex, say so and suggest Agent mode
+
+  %CD_INSTRUCTIONS%
+  %SHELL_INSTRUCTIONS%
+
+  %SYSTEM_INFO%
+
+  %WORKSPACE_INFO%
+
+  %PROJECT_SUMMARY%
+
+  %GIT_INFO%
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - search_semantic
+  - knowledge
+  - create_knowledge
+  - search_trajectories
+  - get_trajectory_context
+  - web
+  - web_search
+  - shell
+  - create_textdoc
+  - update_textdoc
+  - update_textdoc_anchored
+  - update_textdoc_by_lines
+  - update_textdoc_regex
+  - undo_textdoc
+  - rm
+  - mv
+  - subagent
+  - tasks_set
+  - task_done
+  - ask_questions
+
+llm_defaults:
+  max_new_tokens: 4096
+  temperature: 0.0
+
+tool_confirm:
+  rules:
+    - match: "*"
+      action: auto

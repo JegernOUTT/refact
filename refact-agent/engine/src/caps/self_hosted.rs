@@ -378,6 +378,7 @@ impl SelfHostedCaps {
             name: self.cloud_name.clone(),
             enabled: true,
             supports_completion: true,
+            wire_format: Default::default(),
             endpoint_style: "openai".to_string(),
             completion_endpoint: self.completion.endpoint.clone(),
             chat_endpoint: self.chat.endpoint.clone(),

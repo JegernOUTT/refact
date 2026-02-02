@@ -50,14 +50,7 @@ pub async fn scratchpad_interaction_not_stream_json(
         save_url = "only-det-messages".to_string();
         Ok(Value::Object(serde_json::Map::new()))
     } else if model_rec.endpoint_style == "hf" {
-        crate::forward_to_hf_endpoint::forward_to_hf_style_endpoint(
-            &model_rec,
-            prompt,
-            &client,
-            &parameters,
-            meta,
-        )
-        .await
+        Err("HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style.".to_string())
     } else {
         crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint(
             &model_rec,
@@ -382,13 +375,7 @@ pub async fn scratchpad_interaction_stream(
             }
             // info!("prompt: {:?}", prompt);
             let event_source_maybe = if model_rec.endpoint_style == "hf" {
-                crate::forward_to_hf_endpoint::forward_to_hf_style_endpoint_streaming(
-                    &model_rec,
-                    &prompt,
-                    &client,
-                    &my_parameters,
-                    meta
-                ).await
+                Err("HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style.".to_string())
             } else {
                 crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint_streaming(
                     &model_rec,

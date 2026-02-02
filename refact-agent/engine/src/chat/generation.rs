@@ -9,6 +9,7 @@ use crate::call_validation::{
     ChatContent, ChatMessage, ChatMeta, ChatMode, ChatUsage, SamplingParameters,
 };
 use crate::global_context::GlobalContext;
+use crate::llm::LlmRequest;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::constants::CHAT_TOP_N;
 use crate::http::routers::v1::knowledge_enrichment::enrich_messages_with_knowledge;
@@ -387,7 +388,6 @@ pub async fn run_llm_generation(
         &meta,
         &mut parameters,
         &options,
-        &None,
     )
     .await?;
 
@@ -411,11 +411,9 @@ pub async fn run_llm_generation(
     run_streaming_generation(
         gcx,
         session_arc,
-        prepared.prompt,
-        model_rec.base.clone(),
-        parameters,
+        prepared.llm_request,
+        &model_rec,
         abort_flag,
-        chat_mode,
     )
     .await
 }
@@ -423,50 +421,29 @@ pub async fn run_llm_generation(
 async fn run_streaming_generation(
     gcx: Arc<ARwLock<GlobalContext>>,
     session_arc: Arc<AMutex<ChatSession>>,
-    prompt: String,
-    model_rec: crate::caps::BaseModelRecord,
-    mut parameters: SamplingParameters,
+    mut llm_request: LlmRequest,
+    model_rec: &crate::caps::ChatModelRecord,
     abort_flag: Arc<AtomicBool>,
-    chat_mode: ChatMode,
 ) -> Result<(), String> {
-    info!("session generation: prompt length = {}", prompt.len());
-
-    let (chat_id, context_tokens_cap, include_project_info) = {
-        let session = session_arc.lock().await;
-        (
-            session.chat_id.clone(),
-            session.thread.context_tokens_cap,
-            session.thread.include_project_info,
-        )
-    };
-
-    let meta = Some(ChatMeta {
-        chat_id,
-        chat_mode,
-        chat_remote: false,
-        current_config_file: String::new(),
-        context_tokens_cap,
-        include_project_info,
-        request_attempt_id: Uuid::new_v4().to_string(),
-    });
+    info!("session generation: model={}, messages={}", llm_request.model_id, llm_request.messages.len());
 
     const TEMPERATURE_BUMP: f32 = 0.1;
     const MAX_TEMPERATURE: f32 = 0.5;
-    let base_temp = parameters.temperature.unwrap_or(0.0).min(MAX_TEMPERATURE);
+    let base_temp = llm_request.params.temperature.unwrap_or(0.0).min(MAX_TEMPERATURE);
     let max_attempts = ((MAX_TEMPERATURE - base_temp) / TEMPERATURE_BUMP).floor() as usize + 1;
     let mut attempt = 0;
 
     let result = loop {
         attempt += 1;
         let current_temp = base_temp + TEMPERATURE_BUMP * (attempt - 1) as f32;
-        parameters.temperature = Some(current_temp);
+        llm_request.params.temperature = Some(current_temp);
 
         let params = StreamRunParams {
-            prompt: prompt.clone(),
-            model_rec: model_rec.clone(),
-            sampling: parameters.clone(),
-            meta: meta.clone(),
+            llm_request: llm_request.clone(),
+            model_rec: model_rec.base.clone(),
             abort_flag: Some(abort_flag.clone()),
+            supports_tools: model_rec.supports_tools,
+            supports_reasoning: model_rec.supports_reasoning.is_some(),
         };
 
         enum CollectorEvent {

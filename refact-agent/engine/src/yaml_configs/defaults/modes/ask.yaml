@@ -1,0 +1,44 @@
+schema_version: 3
+id: ask
+title: Ask
+description: Quick Q&A with web research capability
+specific: false
+
+thread_defaults:
+  include_project_info: false
+  checkpoints_enabled: false
+  auto_approve_editing_tools: false
+  auto_approve_dangerous_commands: false
+
+ui:
+  order: 5
+  tags: [chat, research]
+
+prompt: |
+  You are Refact Assistant. Answer questions directly and concisely.
+
+  For factual questions, use your knowledge. For current information, APIs, or technical accuracy, use web tools.
+
+  Guidelines:
+  - Be direct and helpful
+  - Use `web_search` for quick lookups
+  - Use `deep_research` for comprehensive topics requiring multiple sources
+  - Use `web` to fetch specific URLs
+  - If the question requires codebase access, suggest switching to Explore or Agent mode
+
+  %SYSTEM_INFO%
+
+tools:
+  - web
+  - web_search
+  - deep_research
+  - ask_questions
+
+llm_defaults:
+  max_new_tokens: 2048
+  temperature: 0.3
+
+tool_confirm:
+  rules:
+    - match: "*"
+      action: auto

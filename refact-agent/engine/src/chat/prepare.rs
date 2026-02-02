@@ -9,6 +9,7 @@ use crate::at_commands::execute_at::run_at_commands_locally;
 use crate::call_validation::{ChatMessage, ChatMeta, ReasoningEffort, SamplingParameters};
 use crate::caps::{resolve_chat_model, ChatModelRecord};
 use crate::global_context::GlobalContext;
+use crate::llm::{LlmRequest, CanonicalToolChoice, CommonParams, ReasoningIntent};
 use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use crate::tools::tools_description::ToolDesc;
@@ -17,11 +18,10 @@ use super::types::ThreadParams;
 
 use super::history_limit::fix_and_limit_messages_history;
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
-use super::openai_convert::convert_messages_to_openai_format;
 use super::config::tokens;
 
 pub struct PreparedChat {
-    pub prompt: String,
+    pub llm_request: LlmRequest,
     pub limited_messages: Vec<ChatMessage>,
     pub rag_results: Vec<serde_json::Value>,
 }
@@ -71,7 +71,6 @@ pub async fn prepare_chat_passthrough(
     meta: &ChatMeta,
     sampling_parameters: &mut SamplingParameters,
     options: &ChatPrepareOptions,
-    style: &Option<String>,
 ) -> Result<PreparedChat, String> {
     let mut has_rag_results = HasRagResults::new();
     let tool_names: HashSet<String> = tools.iter().map(|x| x.name.clone()).collect();
@@ -138,16 +137,32 @@ pub async fn prepare_chat_passthrough(
     };
 
     // 5. Tool prerun - restricted to allowed tools only
+    // Safety: Only execute tool calls from the last message if:
+    //   - It's an assistant message with pending tool calls
+    //   - The tool calls have not been answered yet (no subsequent tool result messages)
+    // This prevents executing tools from injected/external assistant messages.
     if options.supports_tools && options.allow_tool_prerun {
         if let Some(last_msg) = messages.last() {
             if last_msg.role == "assistant" {
                 if let Some(ref tool_calls) = last_msg.tool_calls {
-                    let filtered_calls: Vec<_> = tool_calls
+                    // Verify these tool calls are pending (no tool results exist for them)
+                    let pending_call_ids: HashSet<String> = tool_calls
                         .iter()
+                        .map(|tc| tc.id.clone())
+                        .collect();
+                    let answered_call_ids: HashSet<String> = messages
+                        .iter()
+                        .filter(|m| m.role == "tool")
+                        .map(|m| m.tool_call_id.clone())
+                        .collect();
+                    let unanswered_calls: Vec<_> = tool_calls
+                        .iter()
+                        .filter(|tc| !answered_call_ids.contains(&tc.id))
                         .filter(|tc| tool_names.contains(&tc.function.name))
                         .cloned()
                         .collect();
-                    if !filtered_calls.is_empty() {
+
+                    if !unanswered_calls.is_empty() && pending_call_ids.len() == unanswered_calls.len() + answered_call_ids.iter().filter(|id| pending_call_ids.contains(*id)).count() {
                         let thread = ThreadParams {
                             id: meta.chat_id.clone(),
                             model: model_id.to_string(),
@@ -156,7 +171,7 @@ pub async fn prepare_chat_passthrough(
                         };
                         let (tool_results, _) = execute_tools(
                             gcx.clone(),
-                            &filtered_calls,
+                            &unanswered_calls,
                             &messages,
                             &thread,
                             "agent",
@@ -171,8 +186,7 @@ pub async fn prepare_chat_passthrough(
         }
     }
 
-    // 6. Build tools JSON - only insert key if there are tools
-    let mut big_json = json!({});
+    // 6. Build tools list
     let filtered_tools: Vec<ToolDesc> = if options.supports_tools {
         tools
             .iter()
@@ -187,22 +201,6 @@ pub async fn prepare_chat_passthrough(
         .iter()
         .map(|tool| tool.clone().into_openai_style(strict_tools))
         .collect();
-    if !openai_tools.is_empty() {
-        big_json["tools"] = json!(openai_tools);
-        if let Some(ref tool_choice) = options.tool_choice {
-            big_json["tool_choice"] = match tool_choice {
-                ToolChoice::Auto => json!("auto"),
-                ToolChoice::None => json!("none"),
-                ToolChoice::Required => json!("required"),
-                ToolChoice::Function { name } => {
-                    json!({"type": "function", "function": {"name": name}})
-                }
-            };
-        }
-        if let Some(parallel) = options.parallel_tool_calls {
-            big_json["parallel_tool_calls"] = json!(parallel);
-        }
-    }
 
     // 7. History validation and fixing
     let limited_msgs = fix_and_limit_messages_history(&messages, sampling_parameters)?;
@@ -211,22 +209,38 @@ pub async fn prepare_chat_passthrough(
     let limited_adapted_msgs =
         strip_thinking_blocks_if_disabled(limited_msgs, sampling_parameters, &model_record);
 
-    // 9. Convert to OpenAI format
-    let converted_messages = convert_messages_to_openai_format(
-        limited_adapted_msgs.clone(),
-        style,
-        &model_record.base.id,
-    );
+    // 9. Build LlmRequest
+    // Enforce n=1 for chat - multi-choice not supported in streaming accumulation
+    let common_params = CommonParams {
+        max_tokens: sampling_parameters.max_new_tokens,
+        temperature: sampling_parameters.temperature,
+        stop: sampling_parameters.stop.clone(),
+        n: Some(1),
+    };
 
-    big_json["messages"] = json!(converted_messages);
+    let reasoning = sampling_params_to_reasoning_intent(sampling_parameters, &model_record);
 
-    // 10. Serialize without panic
-    let body =
-        serde_json::to_string(&big_json).map_err(|e| format!("JSON serialization error: {}", e))?;
-    let prompt = format!("PASSTHROUGH {}", body);
+    let tool_choice = options.tool_choice.as_ref().map(|tc| match tc {
+        ToolChoice::Auto => CanonicalToolChoice::Auto,
+        ToolChoice::None => CanonicalToolChoice::None,
+        ToolChoice::Required => CanonicalToolChoice::Required,
+        ToolChoice::Function { name } => CanonicalToolChoice::Function { name: name.clone() },
+    });
+
+    let llm_request = LlmRequest {
+        model_id: model_id.to_string(),
+        messages: limited_adapted_msgs.clone(),
+        params: common_params,
+        reasoning,
+        tools: if openai_tools.is_empty() { None } else { Some(openai_tools) },
+        tool_choice,
+        parallel_tool_calls: options.parallel_tool_calls.unwrap_or(false),
+        stream: true,
+        extra_body: None,
+    };
 
     Ok(PreparedChat {
-        prompt,
+        llm_request,
         limited_messages: limited_adapted_msgs,
         rag_results: has_rag_results.in_json,
     })
@@ -251,7 +265,13 @@ fn adapt_sampling_for_reasoning_models(
             if sampling_parameters.max_new_tokens <= 8192 {
                 sampling_parameters.max_new_tokens *= 2;
             }
-            sampling_parameters.temperature = model_record.default_temperature;
+            // Clear incompatible reasoning fields
+            sampling_parameters.thinking = None;
+            sampling_parameters.enable_thinking = None;
+            // Only override temperature if model has a default
+            if let Some(temp) = model_record.default_temperature {
+                sampling_parameters.temperature = Some(temp);
+            }
         }
         "anthropic" => {
             let min_budget = tokens().min_budget_tokens;
@@ -269,17 +289,73 @@ fn adapt_sampling_for_reasoning_models(
                     "budget_tokens": budget_tokens,
                 }));
             }
+            // Clear incompatible reasoning fields
             sampling_parameters.reasoning_effort = None;
+            sampling_parameters.enable_thinking = None;
         }
         "qwen" => {
             sampling_parameters.enable_thinking =
                 Some(model_record.supports_boost_reasoning && sampling_parameters.boost_reasoning);
-            sampling_parameters.temperature = model_record.default_temperature;
+            // Clear incompatible reasoning fields
+            sampling_parameters.reasoning_effort = None;
+            sampling_parameters.thinking = None;
+            // Only override temperature if model has a default
+            if let Some(temp) = model_record.default_temperature {
+                sampling_parameters.temperature = Some(temp);
+            }
         }
         _ => {
-            sampling_parameters.temperature = model_record.default_temperature;
+            // Clear all reasoning fields for unknown types
+            sampling_parameters.reasoning_effort = None;
+            sampling_parameters.thinking = None;
+            sampling_parameters.enable_thinking = None;
+            // Only override temperature if model has a default
+            if let Some(temp) = model_record.default_temperature {
+                sampling_parameters.temperature = Some(temp);
+            }
         }
     };
+}
+
+fn sampling_params_to_reasoning_intent(
+    sampling_parameters: &SamplingParameters,
+    model_record: &ChatModelRecord,
+) -> ReasoningIntent {
+    // If model doesn't support reasoning, return Off
+    if model_record.supports_reasoning.is_none() {
+        return ReasoningIntent::Off;
+    }
+
+    // Check OpenAI-style reasoning_effort
+    if let Some(ref effort) = sampling_parameters.reasoning_effort {
+        return match effort {
+            ReasoningEffort::Low => ReasoningIntent::Low,
+            ReasoningEffort::Medium => ReasoningIntent::Medium,
+            ReasoningEffort::High => ReasoningIntent::High,
+        };
+    }
+
+    // Check Anthropic-style thinking with budget_tokens
+    if let Some(ref thinking) = sampling_parameters.thinking {
+        if thinking.get("type").and_then(|t| t.as_str()) == Some("enabled") {
+            if let Some(budget) = thinking.get("budget_tokens").and_then(|b| b.as_u64()) {
+                return ReasoningIntent::BudgetTokens(budget as usize);
+            }
+            return ReasoningIntent::Medium;
+        }
+    }
+
+    // Check Qwen-style enable_thinking
+    if sampling_parameters.enable_thinking == Some(true) {
+        return ReasoningIntent::Medium;
+    }
+
+    // Check boost_reasoning flag
+    if sampling_parameters.boost_reasoning && model_record.supports_boost_reasoning {
+        return ReasoningIntent::Medium;
+    }
+
+    ReasoningIntent::Off
 }
 
 fn is_thinking_enabled(sampling_parameters: &SamplingParameters) -> bool {
