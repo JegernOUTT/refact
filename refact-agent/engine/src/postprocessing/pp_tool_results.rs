@@ -15,6 +15,7 @@ use crate::postprocessing::pp_plain_text::postprocess_plain_text;
 use crate::tokens::count_text_tokens_with_fallback;
 
 const MIN_CONTEXT_SIZE: usize = 8192;
+const MAX_TOOL_BUDGET: usize = 16384;
 
 #[derive(Debug)]
 pub struct ToolBudget {
@@ -30,7 +31,7 @@ impl ToolBudget {
                 n_ctx, MIN_CONTEXT_SIZE
             ));
         }
-        let total = (n_ctx / 2).max(4096);
+        let total = (n_ctx / 2).max(4096).min(MAX_TOOL_BUDGET);
         Ok(Self {
             tokens_for_code: total,
             tokens_for_text: total * 30 / 100,
@@ -341,6 +342,7 @@ async fn postprocess_context_file_results(
 }
 
 const MIN_PER_FILE_BUDGET: usize = 50;
+const MAX_PER_FILE_BUDGET: usize = 2048;
 
 async fn fill_skip_pp_files_with_budget(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -353,14 +355,27 @@ async fn fill_skip_pp_files_with_budget(
         return (vec![], vec![]);
     }
 
-    let max_files_by_budget = (tokens_limit / MIN_PER_FILE_BUDGET).max(1);
-    let files_to_skip = if files.len() > max_files_by_budget {
-        files.len() - max_files_by_budget
-    } else {
-        0
-    };
+    if tokens_limit < MIN_PER_FILE_BUDGET {
+        return (
+            vec![],
+            vec![format!(
+                "⚠️ {} files skipped: token budget ({}) below minimum ({})",
+                files.len(),
+                tokens_limit,
+                MIN_PER_FILE_BUDGET
+            )],
+        );
+    }
+
+    let max_files_by_budget = tokens_limit / MIN_PER_FILE_BUDGET;
+    let files_to_skip = files.len().saturating_sub(max_files_by_budget);
     let files: Vec<_> = files.into_iter().take(max_files_by_budget).collect();
-    let per_file_budget = (tokens_limit / files.len().max(1)).max(MIN_PER_FILE_BUDGET);
+    
+    if files.is_empty() {
+        return (vec![], vec![format!("⚠️ {} files skipped due to token budget constraints", files_to_skip)]);
+    }
+    
+    let per_file_budget = (tokens_limit / files.len()).min(MAX_PER_FILE_BUDGET);
     let mut result = Vec::new();
     let mut notes = Vec::new();
 
@@ -651,9 +666,10 @@ mod tests {
         assert!(budget_small.is_err());
         assert!(budget_small.unwrap_err().contains("below minimum"));
 
+        // Large context models are capped at MAX_TOOL_BUDGET (16384) to prevent bloated context
         let budget_large = ToolBudget::try_from_n_ctx(128000).unwrap();
-        assert_eq!(budget_large.tokens_for_code, 64000);
-        assert_eq!(budget_large.tokens_for_text, 19200);
+        assert_eq!(budget_large.tokens_for_code, 16384);
+        assert_eq!(budget_large.tokens_for_text, 4915);
     }
 
     #[test]

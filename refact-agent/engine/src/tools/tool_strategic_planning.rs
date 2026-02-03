@@ -210,11 +210,13 @@ async fn execute_strategic_planning(
 
     let solution_content = format!("{}# Solution\n{}", files_section, initial_solution.content.to_text_with_image_placeholders());
 
+    let root_chat_id = ccx.lock().await.root_chat_id.clone();
     let enrichment_params = EnrichmentParams {
         base_tags: vec!["planning".to_string(), "strategic".to_string()],
         base_filenames: filenames,
         base_kind: "decision".to_string(),
         base_title: Some("Strategic Plan".to_string()),
+        source_chat_id: (!root_chat_id.is_empty()).then_some(root_chat_id),
     };
 
     let memory_note = match memories_add_enriched(ccx.clone(), &solution_content, enrichment_params).await {

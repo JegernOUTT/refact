@@ -159,6 +159,7 @@ pub fn create_frontmatter(
         superseded_by: None,
         deprecated_at: None,
         review_after: Some(review_after),
+        source_chat_id: None,
     }
 }
 
@@ -342,6 +343,12 @@ pub async fn memories_search(
 ) -> Result<Vec<MemoRecord>, String> {
     let knowledge_dirs = get_all_knowledge_dirs(gcx.clone()).await;
 
+    let mut root_cache: HashMap<String, String> = HashMap::new();
+    let exclude_root = match exclude_trajectory_id {
+        Some(id) => Some(resolve_root_chat_id(gcx.clone(), id, &mut root_cache).await),
+        None => None,
+    };
+
     let vecdb_arc = {
         let gcx_read = gcx.read().await;
         gcx_read.vec_db.clone()
@@ -350,7 +357,7 @@ pub async fn memories_search(
     let vecdb_guard = vecdb_arc.lock().await;
     if vecdb_guard.is_none() {
         drop(vecdb_guard);
-        return memories_search_fallback(gcx, query, top_n_memories, &knowledge_dirs).await;
+        return memories_search_fallback(gcx, query, top_n_memories, &knowledge_dirs, exclude_root.as_deref()).await;
     }
 
     let vecdb = vecdb_guard.as_ref().unwrap();
@@ -374,12 +381,6 @@ pub async fn memories_search(
 
     let mut knowledge_matches: HashMap<PathBuf, KnowledgeMatch> = HashMap::new();
     let mut trajectory_matches: HashMap<PathBuf, TrajectoryMatch> = HashMap::new();
-
-    let mut root_cache: HashMap<String, String> = HashMap::new();
-    let exclude_root = match exclude_trajectory_id {
-        Some(id) => Some(resolve_root_chat_id(gcx.clone(), id, &mut root_cache).await),
-        None => None,
-    };
 
     let trajectory_dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx.clone()).await;
 
@@ -456,6 +457,13 @@ pub async fn memories_search(
         let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
         if frontmatter.is_archived() || frontmatter.is_deprecated() {
             continue;
+        }
+
+        if let (Some(ref ex_root), Some(ref source_id)) = (&exclude_root, &frontmatter.source_chat_id) {
+            if source_id == ex_root {
+                tracing::debug!("Excluding knowledge created by current chat: {:?}", file_path);
+                continue;
+            }
         }
 
         let content = text[content_start..].trim().to_string();
@@ -582,7 +590,7 @@ pub async fn memories_search(
         return Ok(records);
     }
 
-    memories_search_fallback(gcx, query, top_n_memories, &knowledge_dirs).await
+    memories_search_fallback(gcx, query, top_n_memories, &knowledge_dirs, exclude_root.as_deref()).await
 }
 
 async fn memories_search_fallback(
@@ -590,6 +598,7 @@ async fn memories_search_fallback(
     query: &str,
     top_n: usize,
     knowledge_dirs: &[PathBuf],
+    exclude_root: Option<&str>,
 ) -> Result<Vec<MemoRecord>, String> {
     let query_lower = query.to_lowercase();
     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
@@ -637,6 +646,13 @@ async fn memories_search_fallback(
             let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
             if frontmatter.is_archived() || frontmatter.is_deprecated() {
                 continue;
+            }
+
+            if let (Some(ex_root), Some(ref source_id)) = (exclude_root, &frontmatter.source_chat_id) {
+                if source_id == ex_root {
+                    tracing::debug!("Fallback: excluding knowledge created by current chat: {:?}", path);
+                    continue;
+                }
             }
 
             let id = frontmatter
@@ -765,6 +781,7 @@ pub struct EnrichmentParams {
     pub base_filenames: Vec<String>,
     pub base_kind: String,
     pub base_title: Option<String>,
+    pub source_chat_id: Option<String>,
 }
 
 pub async fn memories_add_enriched(
@@ -886,6 +903,7 @@ pub async fn memories_add_enriched(
                 .format("%Y-%m-%d")
                 .to_string(),
         ),
+        source_chat_id: params.source_chat_id.clone(),
     };
 
     let file_path = memories_add(gcx.clone(), &frontmatter, content).await?;

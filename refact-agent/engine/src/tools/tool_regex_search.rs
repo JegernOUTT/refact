@@ -67,16 +67,13 @@ const MAX_CONCURRENT_FILE_READS: usize = 32;
 async fn search_files_with_regex(
     gcx: Arc<ARwLock<GlobalContext>>,
     pattern: &str,
-    scope: &String,
+    files_to_search: &[String],
 ) -> Result<Vec<ContextFile>, String> {
     let regex = Regex::new(pattern).map_err(|e| format!("Invalid regex pattern: {}", e))?;
-    let files_to_search = resolve_scope(gcx.clone(), scope)
-        .await
-        .and_then(|files| validate_scope_files(files, scope))?;
     let regex_arc = Arc::new(regex);
 
     // Use bounded concurrency to avoid overwhelming I/O with thousands of files
-    let results: Vec<Vec<ContextFile>> = stream::iter(files_to_search)
+    let results: Vec<Vec<ContextFile>> = stream::iter(files_to_search.iter().cloned())
         .map(|file_path| {
             let gcx_clone = gcx.clone();
             let regex_clone = regex_arc.clone();
@@ -261,41 +258,42 @@ impl Tool for ToolRegexSearch {
             .collect();
         path_matches.sort();
 
+        const MAX_PATH_MATCHES_TO_LIST: usize = 25;
+        const MAX_PATH_MATCHES_TO_ATTACH: usize = 10;
+        const PATH_MATCH_PREVIEW_LINES: usize = 30;
+
         all_content.push_str("Path matches (file/folder names):\n");
         if path_matches.is_empty() {
             all_content.push_str("  No files or folders matched by name.\n");
         } else {
-            for path in &path_matches {
+            for path in path_matches.iter().take(MAX_PATH_MATCHES_TO_LIST) {
                 all_content.push_str(&format!("  {}\n", path));
+            }
+            if path_matches.len() > MAX_PATH_MATCHES_TO_LIST {
+                all_content.push_str(&format!(
+                    "  ... and {} more path matches\n",
+                    path_matches.len() - MAX_PATH_MATCHES_TO_LIST
+                ));
             }
         }
 
-        // --- Add ContextFiles for path matches (files only) ---
-        for path in &path_matches {
-            match get_file_text_from_memory_or_disk(gcx.clone(), &PathBuf::from(path)).await {
-                Ok(text) => {
-                    let total_lines = text.lines().count();
-                    let cf = ContextFile {
-                        file_name: path.clone(),
-                        file_content: "".to_string(),
-                        line1: 1,
-                        line2: total_lines.max(1),
-                        file_rev: None,
-                        symbols: vec![],
-                        gradient_type: 4,
-                        usefulness: 80.0,
-                        skip_pp: false,
-                    };
-                    all_search_results.push(cf);
-                }
-                Err(_) => {
-                    tracing::warn!("Failed to read file '{}'. Skipping...", path);
-                }
-            }
+        for path in path_matches.iter().take(MAX_PATH_MATCHES_TO_ATTACH) {
+            let cf = ContextFile {
+                file_name: path.clone(),
+                file_content: "".to_string(),
+                line1: 1,
+                line2: PATH_MATCH_PREVIEW_LINES,
+                file_rev: None,
+                symbols: vec![],
+                gradient_type: 4,
+                usefulness: 80.0,
+                skip_pp: true,
+            };
+            all_search_results.push(cf);
         }
 
         let search_results =
-            search_files_with_regex(gcx.clone(), &pattern, &scope).await?;
+            search_files_with_regex(gcx.clone(), &pattern, &files_in_scope).await?;
         all_content.push_str("\nText matches inside files:\n");
         if search_results.is_empty() {
             all_content.push_str("  No text matches found in any file.\n");

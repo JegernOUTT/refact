@@ -84,11 +84,13 @@ impl Tool for ToolCreateKnowledge {
             _ => vec![],
         };
 
+        let root_chat_id = ccx.lock().await.root_chat_id.clone();
         let enrichment_params = EnrichmentParams {
             base_tags: user_tags,
             base_filenames: user_filenames,
             base_kind: "knowledge".to_string(),
             base_title: None,
+            source_chat_id: (!root_chat_id.is_empty()).then_some(root_chat_id),
         };
 
         let file_path = memories_add_enriched(ccx.clone(), &content, enrichment_params).await?;

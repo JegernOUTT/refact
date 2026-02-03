@@ -95,29 +95,31 @@ impl Tool for ToolTaskDone {
             _ => vec![],
         };
 
+        let (root_chat_id, chat_id, abort_flag, gcx) = {
+            let ccx_lock = ccx.lock().await;
+            (
+                ccx_lock.root_chat_id.clone(),
+                ccx_lock.chat_id.clone(),
+                ccx_lock.abort_flag.clone(),
+                ccx_lock.global_context.clone(),
+            )
+        };
+
         let enrichment_params = EnrichmentParams {
             base_tags: vec!["task-report".to_string()],
             base_filenames: files_changed.clone(),
             base_kind: "task-report".to_string(),
             base_title: Some(summary.clone()),
+            source_chat_id: (!root_chat_id.is_empty()).then_some(root_chat_id),
         };
 
         let knowledge_path = memories_add_enriched(ccx.clone(), &report, enrichment_params).await?;
 
-        {
-            let ccx_lock = ccx.lock().await;
-            ccx_lock.abort_flag.store(true, Ordering::SeqCst);
-        }
-
-        let chat_id = {
-            let ccx_lock = ccx.lock().await;
-            ccx_lock.chat_id.clone()
-        };
+        abort_flag.store(true, Ordering::SeqCst);
 
         {
-            let ccx_lock = ccx.lock().await;
-            let gcx = ccx_lock.global_context.read().await;
-            if let Some(ref tx) = gcx.notification_events_tx {
+            let gcx_read = gcx.read().await;
+            if let Some(ref tx) = gcx_read.notification_events_tx {
                 let _ = tx.send(NotificationEvent::TaskDone {
                     chat_id: chat_id.clone(),
                     tool_call_id: tool_call_id.clone(),

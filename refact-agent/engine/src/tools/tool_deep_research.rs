@@ -196,11 +196,13 @@ impl Tool for ToolDeepResearch {
         } else {
             research_query.clone()
         };
+        let root_chat_id = ccx.lock().await.root_chat_id.clone();
         let enrichment_params = EnrichmentParams {
             base_tags: vec!["research".to_string(), "deep-research".to_string()],
             base_filenames: vec![],
             base_kind: "research".to_string(),
             base_title: Some(title),
+            source_chat_id: (!root_chat_id.is_empty()).then_some(root_chat_id),
         };
         let memory_note =
             match memories_add_enriched(ccx.clone(), &research_content, enrichment_params).await {
