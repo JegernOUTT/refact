@@ -107,6 +107,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {tasks.length > 0 && (
         <Box className={styles.taskList}>

@@ -8,8 +8,8 @@ import styles from "../Select/select.module.css";
 
 export type ModelSelectorProps = {
   disabled?: boolean;
-  value?: string;
-  onValueChange?: (model: string) => void;
+  value: string | undefined;
+  onValueChange: (model: string) => void;
   label?: string;
   showLabel?: boolean;
   compact?: boolean;
@@ -25,13 +25,11 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   compact = true,
   defaultValue,
 }) => {
-  const isControlled = onValueChange !== undefined || value !== undefined;
   const capsForToolUse = useCapsForToolUse();
   const { data: caps } = useGetCapsQuery(undefined);
 
   const capsData = caps ?? capsForToolUse.data;
 
-  // Always use the same filtered model list as the main chat selector
   const usableModels = capsForToolUse.usableModelsForPlan;
 
   const groupedModels = useMemo(
@@ -40,12 +38,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   );
 
   const defaultModel = defaultValue ?? capsData?.chat_default_model ?? "";
-  const effectiveValue = isControlled
-    ? value ?? defaultModel
-    : capsForToolUse.currentModel;
-  const handleChange = isControlled
-    ? (model: string) => onValueChange?.(model)
-    : capsForToolUse.setCapModel;
+  const effectiveValue = value ?? defaultModel;
   const currentModelName = effectiveValue.replace(/^refact\//, "");
 
   if (!capsData || groupedModels.length === 0) {
@@ -67,7 +60,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         )}
         <Select.Root
           value={effectiveValue}
-          onValueChange={handleChange}
+          onValueChange={onValueChange}
           disabled={disabled}
           size="1"
         >
@@ -126,7 +119,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
       )}
       <Select.Root
         value={effectiveValue}
-        onValueChange={handleChange}
+        onValueChange={onValueChange}
         disabled={disabled}
         size="2"
       >

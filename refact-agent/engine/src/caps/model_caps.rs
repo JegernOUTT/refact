@@ -15,7 +15,7 @@ fn get_refresh_lock() -> &'static AMutex<()> {
     REFRESH_LOCK.get_or_init(|| AMutex::new(()))
 }
 
-const SMALLCLOUD_MODEL_CAPS_URL: &str = "https://www.smallcloud.ai/v1/model-capabilities";
+const SMALLCLOUD_MODEL_CAPS_URL: &str = "https://inference.smallcloud.ai/v1/model-capabilities";
 const CACHE_FILENAME: &str = "model-capabilities.json";
 const CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -55,7 +55,8 @@ pub struct ResolvedCaps {
 pub enum ReasoningType {
     None,
     Openai,
-    Anthropic,
+    AnthropicBudget,
+    AnthropicEffort,
     Deepseek,
     Xai,
     Qwen,
@@ -630,8 +631,8 @@ mod tests {
         let json = serde_json::to_string(&ReasoningType::Openai).unwrap();
         assert_eq!(json, "\"openai\"");
 
-        let parsed: ReasoningType = serde_json::from_str("\"anthropic\"").unwrap();
-        assert_eq!(parsed, ReasoningType::Anthropic);
+        let parsed: ReasoningType = serde_json::from_str("\"anthropic_budget\"").unwrap();
+        assert_eq!(parsed, ReasoningType::AnthropicBudget);
     }
 
     #[test]

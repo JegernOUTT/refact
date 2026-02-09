@@ -325,6 +325,7 @@ export const EditTool: React.FC<EditToolProps> = ({ toolCall, diffs = [] }) => {
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {status === "error" &&
         maybeResult?.content &&

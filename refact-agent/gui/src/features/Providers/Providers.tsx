@@ -1,6 +1,5 @@
 import React from "react";
-import { Flex, Button } from "@radix-ui/themes";
-import { ArrowLeftIcon } from "@radix-ui/react-icons";
+import { Flex } from "@radix-ui/themes";
 
 import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
@@ -20,7 +19,6 @@ export type ProvidersProps = {
 export const Providers: React.FC<ProvidersProps> = ({
   backFromProviders,
   host,
-  tabbed,
 }) => {
   const { data: configuredProvidersData, isSuccess } =
     useGetConfiguredProvidersQuery();
@@ -34,18 +32,6 @@ export const Providers: React.FC<ProvidersProps> = ({
         marginTop: 0,
       }}
     >
-      {host === "vscode" && !tabbed ? (
-        <Flex gap="2" pb="3">
-          <Button variant="surface" onClick={backFromProviders}>
-            <ArrowLeftIcon width="16" height="16" />
-            Back
-          </Button>
-        </Flex>
-      ) : (
-        <Button mr="auto" variant="outline" onClick={backFromProviders} mb="4">
-          Back
-        </Button>
-      )}
       <ScrollArea scrollbars="vertical" fullHeight>
         <Flex
           direction="column"
@@ -59,6 +45,7 @@ export const Providers: React.FC<ProvidersProps> = ({
           <ProviderUpdateProvider>
             <ProvidersView
               configuredProviders={configuredProvidersData.providers}
+              backFromProviders={backFromProviders}
             />
           </ProviderUpdateProvider>
         </Flex>

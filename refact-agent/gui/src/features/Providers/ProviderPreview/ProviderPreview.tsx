@@ -9,6 +9,8 @@ import { getProviderName } from "../getProviderName";
 import type { ProviderListItem } from "../../../services/refact";
 import { DeletePopover } from "../../../components/DeletePopover";
 
+const UNDELETABLE_PROVIDERS = ["refact", "refact_self_hosted"];
+
 export type ProviderPreviewProps = {
   configuredProviders: ProviderListItem[];
   currentProvider: ProviderListItem;
@@ -28,21 +30,25 @@ export const ProviderPreview: React.FC<ProviderPreviewProps> = ({
     isSavingProvider,
   } = useProviderPreview(handleSetCurrentProvider);
 
+  const showDelete = !UNDELETABLE_PROVIDERS.includes(currentProvider.name);
+
   return (
     <Flex direction="column" align="start" height="100%">
       <Flex justify="between" align="center" width="100%" mb="4">
         <Heading as="h2" size="3">
           {getProviderName(currentProvider)} Configuration
         </Heading>
-        <DeletePopover
-          itemName={getProviderName(currentProvider)}
-          isDisabled={currentProvider.readonly}
-          isDeleting={isDeletingProvider}
-          deleteBy={currentProvider.name}
-          handleDelete={(providerName: string) =>
-            void handleDeleteProvider(providerName)
-          }
-        />
+        {showDelete && (
+          <DeletePopover
+            itemName={getProviderName(currentProvider)}
+            isDisabled={currentProvider.readonly}
+            isDeleting={isDeletingProvider}
+            deleteBy={currentProvider.name}
+            handleDelete={(providerName: string) =>
+              void handleDeleteProvider(providerName)
+            }
+          />
+        )}
       </Flex>
       <ProviderForm
         currentProvider={currentProvider}

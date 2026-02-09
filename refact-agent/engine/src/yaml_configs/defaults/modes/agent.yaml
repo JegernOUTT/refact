@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -200,6 +200,7 @@ prompt: |
 tools:
   - tree
   - cat
+  - add_workspace_folder
   - search_pattern
   - search_symbol_definition
   - search_semantic

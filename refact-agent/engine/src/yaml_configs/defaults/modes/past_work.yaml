@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: past_work
 title: Past Work
 description: Search conversation history and project knowledge
@@ -61,6 +61,7 @@ prompt: |
   %SYSTEM_INFO%
 
 tools:
+  - add_workspace_folder
   - search_trajectories
   - get_trajectory_context
   - knowledge

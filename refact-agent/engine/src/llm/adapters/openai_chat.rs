@@ -52,8 +52,10 @@ impl LlmWireAdapter for OpenAiChatAdapter {
             body["stream_options"] = json!({"include_usage": true});
         }
 
-        if let Some(temp) = req.params.temperature {
-            body["temperature"] = json!(temp);
+        if settings.supports_temperature {
+            if let Some(temp) = req.params.temperature {
+                body["temperature"] = json!(temp);
+            }
         }
 
         if let Some(freq_penalty) = req.params.frequency_penalty {
@@ -75,7 +77,9 @@ impl LlmWireAdapter for OpenAiChatAdapter {
                     if let Some(choice) = &req.tool_choice {
                         body["tool_choice"] = tool_choice_to_openai(choice);
                     }
-                    body["parallel_tool_calls"] = json!(req.parallel_tool_calls);
+                    if req.parallel_tool_calls {
+                        body["parallel_tool_calls"] = json!(true);
+                    }
                 }
             }
         } else if req.tools.is_some() {
@@ -231,7 +235,6 @@ fn convert_messages_to_openai(messages: &[crate::call_validation::ChatMessage]) 
             let role = match msg.role.as_str() {
                 "user" | "assistant" | "system" | "tool" => msg.role.clone(),
                 "diff" => "tool".to_string(),  // diff messages are tool results
-                "plain_text" | "cd_instruction" | "context_file" => "user".to_string(),
                 _ => return None,
             };
 
@@ -269,18 +272,8 @@ fn convert_messages_to_openai(messages: &[crate::call_validation::ChatMessage]) 
                         .collect();
                     obj["content"] = json!(content);
                 }
-                crate::call_validation::ChatContent::ContextFiles(files) => {
-                    let text = files
-                        .iter()
-                        .map(|f| {
-                            format!(
-                                "{}:{}-{}\n```\n{}```",
-                                f.file_name, f.line1, f.line2, f.file_content
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    obj["content"] = json!(text);
+                crate::call_validation::ChatContent::ContextFiles(_) => {
+                    obj["content"] = json!(msg.content.content_text_only());
                 }
             }
 
@@ -306,6 +299,12 @@ fn convert_messages_to_openai(messages: &[crate::call_validation::ChatMessage]) 
 
             if !msg.tool_call_id.is_empty() {
                 obj["tool_call_id"] = json!(msg.tool_call_id);
+            }
+
+            if let Some(reasoning) = &msg.reasoning_content {
+                if !reasoning.is_empty() {
+                    obj["reasoning_content"] = json!(reasoning);
+                }
             }
 
             Some(obj)
@@ -388,6 +387,8 @@ mod tests {
             model_name: "gpt-4".to_string(),
             supports_tools: true,
             supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
             supports_max_completion_tokens: false,
             support_metadata: false,
             eof_is_done: false,
@@ -551,23 +552,6 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_messages_context_file_becomes_user() {
-        let messages = vec![
-            ChatMessage::new("system".to_string(), "You are helpful".to_string()),
-            ChatMessage::new("context_file".to_string(), "file content here".to_string()),
-            ChatMessage::new("user".to_string(), "What is this?".to_string()),
-        ];
-
-        let converted = convert_messages_to_openai(&messages);
-
-        assert_eq!(converted.len(), 3);
-        assert_eq!(converted[0]["role"], "system");
-        assert_eq!(converted[1]["role"], "user");
-        assert_eq!(converted[1]["content"], "file content here");
-        assert_eq!(converted[2]["role"], "user");
-    }
-
-    #[test]
     fn test_extra_body_protected_fields_ignored() {
         let adapter = OpenAiChatAdapter;
         let mut req = LlmRequest::new("gpt-4".to_string(), vec![
@@ -683,5 +667,40 @@ mod tests {
             assert_eq!(citation.get("url").and_then(|v| v.as_str()), Some("https://example.com"));
             assert_eq!(citation.get("title").and_then(|v| v.as_str()), Some("Example"));
         }
+    }
+
+    #[test]
+    fn test_reasoning_content_included_in_assistant() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Solve this".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("The answer".to_string()),
+                reasoning_content: Some("Let me reason through this...".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_openai(&messages);
+
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[1]["reasoning_content"], "Let me reason through this...");
+        assert_eq!(converted[1]["content"], "The answer");
+    }
+
+    #[test]
+    fn test_reasoning_content_not_included_when_absent() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Hi".to_string()),
+                reasoning_content: None,
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_openai(&messages);
+
+        assert!(converted[0].get("reasoning_content").is_none());
     }
 }

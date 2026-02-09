@@ -179,6 +179,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {content && (
         <Box className={styles.resultContent}>

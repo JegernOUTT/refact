@@ -10,6 +10,7 @@ import { Usage } from "../../services/refact";
 import { Checkpoint } from "../../features/Checkpoints/types";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
 import { calculateUsageInputTokens } from "../../utils/calculateUsageInputTokens";
+import { formatUsd } from "../../utils/getMetering";
 import { Coin } from "../../images";
 import { CheckpointButton } from "../../features/Checkpoints";
 import styles from "./MessageFooter.module.css";
@@ -57,6 +58,18 @@ const CoinDisplay: React.FC<{ label: string; value: number }> = ({
   </Flex>
 );
 
+const UsdDisplay: React.FC<{ label: string; value: number | undefined }> = ({
+  label,
+  value,
+}) => (
+  <Flex align="center" justify="between" width="100%" gap="4">
+    <Text size="1" weight="bold">
+      {label}
+    </Text>
+    <Text size="1">{formatUsd(value)}</Text>
+  </Flex>
+);
+
 export const MessageFooter: React.FC<MessageFooterProps> = ({
   messageId,
   onCopy,
@@ -93,8 +106,19 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
     metering_coins_cache_creation +
     metering_coins_cache_read;
 
-  const contextTokens = usage?.prompt_tokens ?? 0;
-  const hasUsageInfo = (usage && contextTokens > 0) ?? totalCoins > 0;
+  const meteringUsd = usage?.metering_usd;
+  const hasUsd = meteringUsd !== undefined && meteringUsd.total_usd > 0;
+  const showCoins = !hasUsd && totalCoins > 0;
+
+  const contextTokens = calculateUsageInputTokens({
+    usage,
+    keys: [
+      "prompt_tokens",
+      "cache_creation_input_tokens",
+      "cache_read_input_tokens",
+    ],
+  });
+  const hasUsageInfo = Boolean(usage && contextTokens > 0) || showCoins || hasUsd;
 
   return (
     <div className={styles.footerLane}>
@@ -145,10 +169,15 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
                     <span>{formatNumberToFixed(contextTokens)}</span>
                   </div>
                 )}
-                {totalCoins > 0 && (
+                {showCoins && (
                   <div className={styles.footerItem}>
                     <Coin />
                     <span>{Math.round(totalCoins)}</span>
+                  </div>
+                )}
+                {hasUsd && (
+                  <div className={styles.footerItem}>
+                    <span>{formatUsd(meteringUsd.total_usd)}</span>
                   </div>
                 )}
               </Flex>
@@ -176,7 +205,7 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
                   </>
                 )}
 
-                {totalCoins > 0 && (
+                {showCoins && (
                   <>
                     <Box
                       my="2"
@@ -216,6 +245,31 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
                         label="Cache creation"
                         value={metering_coins_cache_creation}
                       />
+                    )}
+                  </>
+                )}
+
+                {hasUsd && (
+                  <>
+                    <Box
+                      my="2"
+                      style={{ borderTop: "1px solid var(--gray-a6)" }}
+                    />
+                    <Flex align="center" justify="between" width="100%" mb="1">
+                      <Text size="2" weight="bold">
+                        Cost
+                      </Text>
+                      <Text size="2">
+                        {formatUsd(meteringUsd.total_usd)}
+                      </Text>
+                    </Flex>
+                    <UsdDisplay label="Prompt" value={meteringUsd.prompt_usd} />
+                    <UsdDisplay label="Completion" value={meteringUsd.generated_usd} />
+                    {meteringUsd.cache_read_usd !== undefined && meteringUsd.cache_read_usd > 0 && (
+                      <UsdDisplay label="Cache read" value={meteringUsd.cache_read_usd} />
+                    )}
+                    {meteringUsd.cache_creation_usd !== undefined && meteringUsd.cache_creation_usd > 0 && (
+                      <UsdDisplay label="Cache creation" value={meteringUsd.cache_creation_usd} />
                     )}
                   </>
                 )}

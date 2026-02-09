@@ -14,6 +14,7 @@ export const iconsMap: Record<string, JSX.Element> = {
   refact: <RefactIcon />,
   refact_self_hosted: <RefactIcon />,
   openai: <OpenAIIcon />,
+  openai_responses: <OpenAIIcon />,
   anthropic: <AnthropicIcon />,
   google_gemini: <GeminiIcon />,
   openrouter: <OpenRouterIcon />,
@@ -22,5 +23,6 @@ export const iconsMap: Record<string, JSX.Element> = {
   ollama: <OllamaIcon />,
   lmstudio: <LMStudioIcon />,
   xai: <XaiIcon />,
+  xai_responses: <XaiIcon />,
   custom: <CustomIcon />,
 };

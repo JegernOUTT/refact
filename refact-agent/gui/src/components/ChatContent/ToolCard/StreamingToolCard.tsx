@@ -7,6 +7,7 @@ import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
 import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
+import { ToolCallTooltip } from "./ToolCallTooltip";
 import styles from "./StreamingToolCard.module.css";
 
 const MAX_MD_RENDER_CHARS = 50_000;
@@ -64,40 +65,44 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     animate,
   );
 
+  const header = (
+    <Flex
+      className={classNames(
+        styles.header,
+        status === "error" && styles.error,
+      )}
+      align="center"
+      gap="2"
+      onClick={onToggle}
+    >
+      <span className={styles.icon}>
+        {status === "running" ? <Spinner size="1" /> : icon}
+      </span>
+      <Text
+        size="1"
+        className={classNames(
+          styles.summary,
+          status === "running" && styles.running,
+        )}
+      >
+        {summary}
+      </Text>
+      {meta && (
+        <Text size="1" color="gray" className={styles.meta}>
+          {meta}
+        </Text>
+      )}
+      {status === "error" && (
+        <Text size="1" color="red" className={styles.errorBadge}>
+          failed
+        </Text>
+      )}
+    </Flex>
+  );
+
   return (
     <div className={styles.card}>
-      <Flex
-        className={classNames(
-          styles.header,
-          status === "error" && styles.error,
-        )}
-        align="center"
-        gap="2"
-        onClick={onToggle}
-      >
-        <span className={styles.icon}>
-          {status === "running" ? <Spinner size="1" /> : icon}
-        </span>
-        <Text
-          size="1"
-          className={classNames(
-            styles.summary,
-            status === "running" && styles.running,
-          )}
-        >
-          {summary}
-        </Text>
-        {meta && (
-          <Text size="1" color="gray" className={styles.meta}>
-            {meta}
-          </Text>
-        )}
-        {status === "error" && (
-          <Text size="1" color="red" className={styles.errorBadge}>
-            failed
-          </Text>
-        )}
-      </Flex>
+      <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
 
       {shouldRender && content && (
         <div

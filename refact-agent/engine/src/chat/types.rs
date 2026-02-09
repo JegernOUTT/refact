@@ -79,8 +79,8 @@ pub struct ThreadParams {
     pub model: String,
     pub mode: String,
     pub tool_use: String,
-    #[serde(default)]
-    pub boost_reasoning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boost_reasoning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,7 +120,7 @@ impl Default for ThreadParams {
             model: String::new(),
             mode: "agent".to_string(),
             tool_use: "agent".to_string(),
-            boost_reasoning: false,
+            boost_reasoning: None,
             reasoning_effort: None,
             thinking_budget: None,
             temperature: None,
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(params.title, "New Chat");
         assert_eq!(params.mode, "agent");
         assert_eq!(params.tool_use, "agent");
-        assert!(!params.boost_reasoning);
+        assert!(params.boost_reasoning.is_none());
         assert!(params.reasoning_effort.is_none());
         assert!(params.temperature.is_none());
         assert!(params.frequency_penalty.is_none());

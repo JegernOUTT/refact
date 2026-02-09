@@ -131,7 +131,7 @@ export function VirtualizedChatList<T extends { key: string }>({
             : undefined
         }
         atBottomThreshold={50}
-        increaseViewportBy={{ top: 200, bottom: 200 }}
+        increaseViewportBy={{ top: 5000, bottom: 5000 }}
       />
       {showFollowButton && <ScrollToBottomButton onClick={handleFollowClick} />}
     </Box>

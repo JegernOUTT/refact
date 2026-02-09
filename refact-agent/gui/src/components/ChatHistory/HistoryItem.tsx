@@ -12,7 +12,7 @@ import { CloseButton } from "../Buttons/Buttons";
 import { IconButton } from "@radix-ui/themes";
 import { OpenInNewWindowIcon } from "@radix-ui/react-icons";
 import type { ChatHistoryItem } from "../../features/History/historySlice";
-import { getTotalCostMeteringForMessages } from "../../utils/getMetering";
+import { getTotalCostMeteringForMessages, getTotalUsdMeteringForMessages, formatUsd } from "../../utils/getMetering";
 import { Coin } from "../../images";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 
@@ -39,17 +39,21 @@ export const HistoryItem: React.FC<{
 }) => {
   const dateCreated = new Date(historyItem.createdAt);
   const dateTimeString = dateCreated.toLocaleString();
-  const totalCost = useMemo(() => {
+  const totalCoins = useMemo(() => {
     const totals = getTotalCostMeteringForMessages(historyItem.messages);
-
     if (totals === null) return null;
-
-    return (
+    const sum =
       totals.metering_coins_cache_creation +
       totals.metering_coins_cache_read +
       totals.metering_coins_generated +
-      totals.metering_coins_prompt
-    );
+      totals.metering_coins_prompt;
+    return sum > 0 ? sum : null;
+  }, [historyItem.messages]);
+
+  const totalUsd = useMemo(() => {
+    const usd = getTotalUsdMeteringForMessages(historyItem.messages);
+    if (usd === null || usd.total_usd <= 0) return null;
+    return usd.total_usd;
   }, [historyItem.messages]);
 
   const statusState = getStatusFromSessionState(historyItem.session_state);
@@ -125,12 +129,20 @@ export const HistoryItem: React.FC<{
               >
                 <ChatBubbleIcon /> {historyItem.message_count ?? 0}
               </Text>
-              {totalCost !== null && (
+              {totalCoins !== null && totalUsd === null && (
                 <Text
                   size="1"
                   style={{ display: "flex", gap: "4px", alignItems: "center" }}
                 >
-                  <Coin width="15px" height="15px" /> {Math.round(totalCost)}
+                  <Coin width="15px" height="15px" /> {Math.round(totalCoins)}
+                </Text>
+              )}
+              {totalUsd !== null && (
+                <Text
+                  size="1"
+                  style={{ display: "flex", gap: "4px", alignItems: "center" }}
+                >
+                  {formatUsd(totalUsd)}
                 </Text>
               )}
             </Flex>

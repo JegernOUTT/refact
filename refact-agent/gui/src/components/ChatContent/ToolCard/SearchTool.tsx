@@ -157,6 +157,7 @@ export const SearchTool: React.FC<SearchToolProps> = ({
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {content && (
         <Box className={styles.resultContent}>

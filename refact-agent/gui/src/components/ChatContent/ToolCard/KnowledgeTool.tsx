@@ -138,6 +138,7 @@ export const KnowledgeTool: React.FC<KnowledgeToolProps> = ({
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {content && (
         <Box className={styles.resultContent}>

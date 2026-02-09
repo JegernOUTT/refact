@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -38,6 +38,7 @@ prompt: |
   %SHELL_INSTRUCTIONS%
 
 tools:
+  - add_workspace_folder
   - shell
 
 tool_confirm:

@@ -31,6 +31,39 @@ import {
 import { selectLspPort, selectApiKey } from "../../Config/configSlice";
 import { selectCurrentThreadId } from "./selectors";
 
+function buildThreadParamsPatch(
+  thread: ChatThread,
+  isNewChat: boolean,
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  if (isNewChat) {
+    if (thread.tool_use) patch.tool_use = thread.tool_use;
+    if (thread.mode) patch.mode = thread.mode;
+  }
+  if (thread.model) patch.model = thread.model;
+  if (thread.boost_reasoning !== undefined)
+    patch.boost_reasoning = thread.boost_reasoning;
+  if (thread.include_project_info !== undefined)
+    patch.include_project_info = thread.include_project_info;
+  if (thread.context_tokens_cap !== undefined)
+    patch.context_tokens_cap = thread.context_tokens_cap;
+  if (thread.temperature != null)
+    patch.temperature = thread.temperature;
+  if (thread.frequency_penalty != null)
+    patch.frequency_penalty = thread.frequency_penalty;
+  if (thread.max_tokens != null)
+    patch.max_tokens = thread.max_tokens;
+  if (thread.reasoning_effort != null)
+    patch.reasoning_effort = thread.reasoning_effort;
+  if (thread.thinking_budget != null)
+    patch.thinking_budget = thread.thinking_budget;
+  if (thread.parallel_tool_calls != null)
+    patch.parallel_tool_calls = thread.parallel_tool_calls;
+  return patch;
+}
+
+export { buildThreadParamsPatch };
+
 function toMessageContent(
   content: import("../../../services/refact/types").UserMessage["content"],
 ): MessageContent {
@@ -83,15 +116,8 @@ export const sendIdeMessagesToCurrentChat = createAsyncThunk(
     const runtime = state.chat.threads[chatId];
     if (!runtime) return;
 
-    const patch: Record<string, unknown> = {};
-
-    if (runtime.thread.messages.length === 0) {
-      if (runtime.thread.tool_use) patch.tool_use = runtime.thread.tool_use;
-      if (runtime.thread.mode) patch.mode = runtime.thread.mode;
-    }
-    if (runtime.thread.model) patch.model = runtime.thread.model;
-    if (runtime.thread.boost_reasoning !== undefined)
-      patch.boost_reasoning = runtime.thread.boost_reasoning;
+    const isNewChat = runtime.thread.messages.length === 0;
+    const patch = buildThreadParamsPatch(runtime.thread, isNewChat);
 
     if (Object.keys(patch).length > 0) {
       await sendChatCommand(chatId, port, apiKey, {
@@ -139,9 +165,7 @@ export const newChatWithInitialMessages = createAsyncThunk(
 
     const runtime = state.chat.threads[chatId];
     if (runtime && runtime.thread.messages.length === 0) {
-      const patch: Record<string, unknown> = {};
-      if (runtime.thread.tool_use) patch.tool_use = runtime.thread.tool_use;
-      if (runtime.thread.mode) patch.mode = runtime.thread.mode;
+      const patch = buildThreadParamsPatch(runtime.thread, true);
       if (Object.keys(patch).length > 0) {
         await sendChatCommand(chatId, port, apiKey, {
           type: "set_params",

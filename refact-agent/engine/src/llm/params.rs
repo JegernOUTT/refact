@@ -76,6 +76,16 @@ impl ReasoningIntent {
             Self::BudgetTokens(n) => Some(*n),
         }
     }
+
+    pub fn to_anthropic_effort(&self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::BudgetTokens(_) => Some("high"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +100,18 @@ mod tests {
         assert_eq!(ReasoningIntent::High.to_openai_effort(), Some("high"));
         assert_eq!(
             ReasoningIntent::BudgetTokens(5000).to_openai_effort(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn test_reasoning_intent_anthropic_effort() {
+        assert_eq!(ReasoningIntent::Off.to_anthropic_effort(), None);
+        assert_eq!(ReasoningIntent::Low.to_anthropic_effort(), Some("low"));
+        assert_eq!(ReasoningIntent::Medium.to_anthropic_effort(), Some("medium"));
+        assert_eq!(ReasoningIntent::High.to_anthropic_effort(), Some("high"));
+        assert_eq!(
+            ReasoningIntent::BudgetTokens(5000).to_anthropic_effort(),
             Some("high")
         );
     }

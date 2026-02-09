@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -213,6 +213,7 @@ prompt: |
 tools:
   - tree
   - cat
+  - add_workspace_folder
   - search_pattern
   - search_symbol_definition
   - search_semantic

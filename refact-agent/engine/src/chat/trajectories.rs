@@ -176,6 +176,12 @@ pub struct TrajectorySnapshot {
     pub parent_id: Option<String>,
     pub link_type: Option<String>,
     pub root_chat_id: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub thinking_budget: Option<usize>,
+    pub temperature: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    pub max_tokens: Option<usize>,
+    pub parallel_tool_calls: Option<bool>,
 }
 
 impl TrajectorySnapshot {
@@ -188,7 +194,7 @@ impl TrajectorySnapshot {
             tool_use: session.thread.tool_use.clone(),
             messages: session.messages.clone(),
             created_at: session.created_at.clone(),
-            boost_reasoning: session.thread.boost_reasoning,
+            boost_reasoning: session.thread.boost_reasoning.unwrap_or(false),
             checkpoints_enabled: session.thread.checkpoints_enabled,
             context_tokens_cap: session.thread.context_tokens_cap,
             include_project_info: session.thread.include_project_info,
@@ -200,6 +206,12 @@ impl TrajectorySnapshot {
             parent_id: session.thread.parent_id.clone(),
             link_type: session.thread.link_type.clone(),
             root_chat_id: session.thread.root_chat_id.clone(),
+            reasoning_effort: session.thread.reasoning_effort.clone(),
+            thinking_budget: session.thread.thinking_budget,
+            temperature: session.thread.temperature,
+            frequency_penalty: session.thread.frequency_penalty,
+            max_tokens: session.thread.max_tokens,
+            parallel_tool_calls: session.thread.parallel_tool_calls,
         }
     }
 }
@@ -371,8 +383,7 @@ pub async fn load_trajectory_for_chat(
             .to_string(),
         boost_reasoning: t
             .get("boost_reasoning")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+            .and_then(|v| v.as_bool()),
         context_tokens_cap: t
             .get("context_tokens_cap")
             .and_then(|v| v.as_u64())
@@ -574,7 +585,7 @@ pub async fn save_trajectory_as(
         tool_use: thread.tool_use.clone(),
         messages: messages.to_vec(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        boost_reasoning: thread.boost_reasoning,
+        boost_reasoning: thread.boost_reasoning.unwrap_or(false),
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
         include_project_info: thread.include_project_info,
@@ -586,6 +597,12 @@ pub async fn save_trajectory_as(
         parent_id: thread.parent_id.clone(),
         link_type: thread.link_type.clone(),
         root_chat_id: thread.root_chat_id.clone(),
+        reasoning_effort: thread.reasoning_effort.clone(),
+        thinking_budget: thread.thinking_budget,
+        temperature: thread.temperature,
+        frequency_penalty: thread.frequency_penalty,
+        max_tokens: thread.max_tokens,
+        parallel_tool_calls: thread.parallel_tool_calls,
     };
     if let Err(e) = save_trajectory_snapshot(gcx, snapshot).await {
         warn!("Failed to save trajectory: {}", e);
@@ -624,6 +641,25 @@ pub async fn save_trajectory_snapshot(
         "auto_approve_editing_tools": snapshot.auto_approve_editing_tools,
         "auto_approve_dangerous_commands": snapshot.auto_approve_dangerous_commands,
     });
+
+    if let Some(ref effort) = snapshot.reasoning_effort {
+        trajectory["reasoning_effort"] = serde_json::Value::String(effort.clone());
+    }
+    if let Some(budget) = snapshot.thinking_budget {
+        trajectory["thinking_budget"] = json!(budget);
+    }
+    if let Some(temp) = snapshot.temperature {
+        trajectory["temperature"] = json!(temp);
+    }
+    if let Some(freq) = snapshot.frequency_penalty {
+        trajectory["frequency_penalty"] = json!(freq);
+    }
+    if let Some(max_t) = snapshot.max_tokens {
+        trajectory["max_tokens"] = json!(max_t);
+    }
+    if let Some(parallel) = snapshot.parallel_tool_calls {
+        trajectory["parallel_tool_calls"] = json!(parallel);
+    }
 
     if let Some(ref parent_id) = snapshot.parent_id {
         trajectory["parent_id"] = serde_json::Value::String(parent_id.clone());
@@ -2555,7 +2591,7 @@ mod tests {
                 model: "gpt-4".to_string(),
                 mode: "AGENT".to_string(),
                 tool_use: "agent".to_string(),
-                boost_reasoning: true,
+                boost_reasoning: Some(true),
                 reasoning_effort: None,
                 thinking_budget: None,
                 temperature: None,

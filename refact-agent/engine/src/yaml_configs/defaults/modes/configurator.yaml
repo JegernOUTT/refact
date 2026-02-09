@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: configurator
 title: Configurator
 description: Integration configuration wizard
@@ -49,6 +49,7 @@ prompt: |
 tools:
   - tree
   - cat
+  - add_workspace_folder
   - search_pattern
   - create_textdoc
   - update_textdoc

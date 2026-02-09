@@ -10,7 +10,7 @@ use crate::global_context::GlobalContext;
 
 use super::types::*;
 use super::content::parse_content_with_attachments;
-use super::generation::start_generation;
+use super::generation::{start_generation, prepare_session_preamble_and_knowledge};
 use super::tools::execute_tools_with_session;
 use super::trajectories::maybe_save_trajectory;
 
@@ -158,8 +158,8 @@ pub fn apply_setparams_patch(
         }
     }
     if let Some(boost) = patch.get("boost_reasoning").and_then(|v| v.as_bool()) {
-        if thread.boost_reasoning != boost {
-            thread.boost_reasoning = boost;
+        if thread.boost_reasoning != Some(boost) {
+            thread.boost_reasoning = Some(boost);
             changed = true;
         }
     }
@@ -495,6 +495,7 @@ pub async fn process_command_queue(
                 }
 
                 maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
                 start_generation(gcx.clone(), session_arc.clone()).await;
             }
             ChatCommand::RetryFromIndex {
@@ -515,6 +516,7 @@ pub async fn process_command_queue(
                 drop(session);
 
                 maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
                 start_generation(gcx.clone(), session_arc.clone()).await;
             }
             ChatCommand::SetParams { patch } => {
@@ -610,6 +612,7 @@ pub async fn process_command_queue(
                         session.truncate_messages(idx + 1);
                         drop(session);
                         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                        prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
                         start_generation(gcx.clone(), session_arc.clone()).await;
                     }
                 }
@@ -627,11 +630,13 @@ pub async fn process_command_queue(
                         session.truncate_messages(idx);
                         drop(session);
                         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                        prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
                         start_generation(gcx.clone(), session_arc.clone()).await;
                     }
                 }
             }
             ChatCommand::Regenerate {} => {
+                prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
                 start_generation(gcx.clone(), session_arc.clone()).await;
             }
             ChatCommand::RestoreMessages { messages } => {
@@ -1025,7 +1030,7 @@ mod tests {
         let patch = json!({"boost_reasoning": true});
         let (changed, _) = apply_setparams_patch(&mut thread, &patch);
         assert!(changed);
-        assert!(thread.boost_reasoning);
+        assert_eq!(thread.boost_reasoning, Some(true));
     }
 
     #[test]
@@ -1096,7 +1101,7 @@ mod tests {
         assert!(changed);
         assert_eq!(thread.model, "claude-3");
         assert_eq!(thread.mode, "EXPLORE");
-        assert!(thread.boost_reasoning);
+        assert_eq!(thread.boost_reasoning, Some(true));
     }
 
     #[test]

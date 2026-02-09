@@ -124,29 +124,6 @@ export type ProviderDefaults = {
   embedding_model?: string;
 };
 
-export type Provider = {
-  name: string;
-  endpoint_style: "openai" | "hf";
-  chat_endpoint: string;
-  completion_endpoint: string;
-  embedding_endpoint: string;
-  api_key: string;
-
-  chat_default_model: string;
-  chat_thinking_model: string;
-  chat_light_model: string;
-
-  enabled: boolean;
-  readonly: boolean;
-  supports_completion?: boolean;
-};
-
-export type SimplifiedProvider<
-  T extends keyof Provider | undefined = undefined,
-> = [T] extends [undefined]
-  ? Partial<Provider>
-  : Required<Pick<Provider, T & keyof Provider>>;
-
 export type ErrorLogInstance = {
   path: string;
   error_line: number;
@@ -742,53 +719,6 @@ function isProviderDefaults(data: unknown): data is ProviderDefaults {
   )
     return false;
   if (hasProperty(obj, "detail")) return false;
-  return true;
-}
-
-export function isProvider(data: unknown): data is Provider {
-  if (typeof data !== "object" || data === null) return false;
-
-  if (
-    !hasProperty(data, "name") ||
-    !hasProperty(data, "endpoint_style") ||
-    !hasProperty(data, "chat_endpoint") ||
-    !hasProperty(data, "completion_endpoint") ||
-    !hasProperty(data, "embedding_endpoint") ||
-    !hasProperty(data, "api_key") ||
-    !hasProperty(data, "chat_default_model") ||
-    !hasProperty(data, "chat_thinking_model") ||
-    !hasProperty(data, "chat_light_model") ||
-    !hasProperty(data, "enabled")
-  )
-    return false;
-
-  if (typeof data.name !== "string") return false;
-  if (data.endpoint_style !== "openai" && data.endpoint_style !== "hf")
-    return false;
-  if (typeof data.chat_endpoint !== "string") return false;
-  if (typeof data.completion_endpoint !== "string") return false;
-  if (typeof data.embedding_endpoint !== "string") return false;
-  if (typeof data.api_key !== "string") return false;
-  if (typeof data.chat_default_model !== "string") return false;
-  if (typeof data.chat_thinking_model !== "string") return false;
-  if (typeof data.chat_light_model !== "string") return false;
-  if (typeof data.enabled !== "boolean") return false;
-
-  return true;
-}
-
-export function isConfiguredProvidersResponse(
-  data: unknown,
-): data is ConfiguredProvidersResponse {
-  return isProviderListResponse(data);
-}
-
-export function isProviderTemplatesResponse(
-  data: unknown,
-): data is { provider_templates: { name: string }[] } {
-  if (typeof data !== "object" || data === null) return false;
-  if (!hasProperty(data, "provider_templates")) return false;
-  if (!Array.isArray(data.provider_templates)) return false;
   return true;
 }
 

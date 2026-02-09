@@ -112,6 +112,10 @@ available:
         })
     }
 
+    fn is_hidden_from_list(&self) -> bool {
+        true
+    }
+
     fn model_source(&self) -> ModelSource {
         ModelSource::ModelCaps
     }

@@ -356,7 +356,7 @@ impl Tool for ToolTaskSpawnAgent {
                 model: model.clone(),
                 mode: "TASK_AGENT".to_string(),
                 tool_use: "agent".to_string(),
-                boost_reasoning: false,
+                boost_reasoning: Some(false),
                 context_tokens_cap: None,
                 include_project_info: true,
                 checkpoints_enabled: false,

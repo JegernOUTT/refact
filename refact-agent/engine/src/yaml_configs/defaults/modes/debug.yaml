@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -83,6 +83,7 @@ prompt: |
 tools:
   - tree
   - cat
+  - add_workspace_folder
   - search_pattern
   - search_symbol_definition
   - search_semantic

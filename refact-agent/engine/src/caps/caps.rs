@@ -120,6 +120,8 @@ pub struct ChatModelRecord {
     pub max_output_tokens: Option<usize>,
     #[serde(default)]
     pub supports_strict_tools: bool,
+    #[serde(default = "default_true")]
+    pub supports_temperature: bool,
 }
 
 pub fn default_chat_scratchpad() -> String {
@@ -267,6 +269,9 @@ pub struct CodeAssistantCaps {
 
     #[serde(skip)]
     pub model_caps: Arc<HashMap<String, ModelCapabilities>>,
+
+    #[serde(skip)]
+    pub user_defaults: ProviderDefaults,
 }
 
 fn default_telemetry_retrieve_my_own() -> String {
@@ -451,7 +456,8 @@ fn build_chat_model_record(
         let reasoning = match caps.reasoning {
             ReasoningType::None => None,
             ReasoningType::Openai => Some("openai".to_string()),
-            ReasoningType::Anthropic => Some("anthropic".to_string()),
+            ReasoningType::AnthropicBudget => Some("anthropic_budget".to_string()),
+            ReasoningType::AnthropicEffort => Some("anthropic_effort".to_string()),
             ReasoningType::Deepseek => Some("deepseek".to_string()),
             ReasoningType::Xai => Some("xai".to_string()),
             ReasoningType::Qwen => Some("qwen".to_string()),
@@ -542,6 +548,11 @@ fn build_chat_model_record(
             .as_ref()
             .map(|r| r.caps.supports_strict_tools)
             .unwrap_or(false),
+        supports_temperature: resolved_caps
+            .as_ref()
+            .map(|r| r.caps.supports_temperature)
+            .unwrap_or(false),
+        
     }
 }
 
@@ -626,6 +637,30 @@ pub async fn populate_chat_models_from_providers(
                 caps.defaults.chat_default_model = first_model_id.clone();
             }
         }
+
+        let need_new_light = caps.defaults.chat_light_model.is_empty()
+            || !caps
+                .chat_models
+                .contains_key(&caps.defaults.chat_light_model);
+        if need_new_light && !caps.defaults.chat_default_model.is_empty() {
+            info!(
+                "Light model '{}' not available, falling back to default '{}'",
+                caps.defaults.chat_light_model, caps.defaults.chat_default_model
+            );
+            caps.defaults.chat_light_model = caps.defaults.chat_default_model.clone();
+        }
+
+        let need_new_thinking = caps.defaults.chat_thinking_model.is_empty()
+            || !caps
+                .chat_models
+                .contains_key(&caps.defaults.chat_thinking_model);
+        if need_new_thinking && !caps.defaults.chat_default_model.is_empty() {
+            info!(
+                "Thinking model '{}' not available, falling back to default '{}'",
+                caps.defaults.chat_thinking_model, caps.defaults.chat_default_model
+            );
+            caps.defaults.chat_thinking_model = caps.defaults.chat_default_model.clone();
+        }
     }
 }
 
@@ -644,11 +679,6 @@ fn convert_self_hosted_caps_if_needed(
         return Ok(caps_value);
     }
 
-    tracing::info!("Detected self-hosted caps format, converting to provider format");
-
-    let cloud_name = obj.get("cloud_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("self-hosted");
     let support_metadata = obj.get("support_metadata")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -791,6 +821,13 @@ pub async fn load_caps(
     if caps.cloud_name == "refact" {
         server_provider.wire_format = WireFormat::Refact;
         server_provider.support_metadata = true;
+        if let Some(pricing_obj) = caps.metadata.pricing.as_object() {
+            for model_name in pricing_obj.keys() {
+                if !server_provider.running_models.contains(model_name) {
+                    server_provider.running_models.push(model_name.clone());
+                }
+            }
+        }
     }
     let server_providers = vec![server_provider];
 
@@ -819,36 +856,53 @@ pub async fn load_caps(
 
     match ProviderDefaults::load(&config_dir).await {
         Ok(user_defaults) => {
+            let resolve_user_model = |model: &str, chat_models: &IndexMap<String, Arc<ChatModelRecord>>| -> Option<String> {
+                if model.is_empty() {
+                    return None;
+                }
+                if chat_models.contains_key(model) {
+                    return Some(model.to_string());
+                }
+                if !model.contains('/') {
+                    for key in chat_models.keys() {
+                        if let Some(name) = key.split('/').last() {
+                            if name == model {
+                                return Some(key.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            };
+
             if let Some(model) = &user_defaults.chat.model {
-                if !model.is_empty() && caps.chat_models.contains_key(model) {
-                    caps.defaults.chat_default_model = model.clone();
-                } else if !model.is_empty() {
-                    warn!(
-                        "User default chat model '{}' not found in available models, ignoring",
-                        model
-                    );
+                match resolve_user_model(model, &caps.chat_models) {
+                    Some(resolved) => caps.defaults.chat_default_model = resolved,
+                    None if !model.is_empty() => warn!(
+                        "User default chat model '{}' not found in available models, ignoring", model
+                    ),
+                    _ => {}
                 }
             }
             if let Some(model) = &user_defaults.chat_light.model {
-                if !model.is_empty() && caps.chat_models.contains_key(model) {
-                    caps.defaults.chat_light_model = model.clone();
-                } else if !model.is_empty() {
-                    warn!(
-                        "User default light model '{}' not found in available models, ignoring",
-                        model
-                    );
+                match resolve_user_model(model, &caps.chat_models) {
+                    Some(resolved) => caps.defaults.chat_light_model = resolved,
+                    None if !model.is_empty() => warn!(
+                        "User default light model '{}' not found in available models, ignoring", model
+                    ),
+                    _ => {}
                 }
             }
             if let Some(model) = &user_defaults.chat_thinking.model {
-                if !model.is_empty() && caps.chat_models.contains_key(model) {
-                    caps.defaults.chat_thinking_model = model.clone();
-                } else if !model.is_empty() {
-                    warn!(
-                        "User default thinking model '{}' not found in available models, ignoring",
-                        model
-                    );
+                match resolve_user_model(model, &caps.chat_models) {
+                    Some(resolved) => caps.defaults.chat_thinking_model = resolved,
+                    None if !model.is_empty() => warn!(
+                        "User default thinking model '{}' not found in available models, ignoring", model
+                    ),
+                    _ => {}
                 }
             }
+            caps.user_defaults = user_defaults;
         }
         Err(e) => {
             warn!(
@@ -1021,7 +1075,8 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
     record.supports_reasoning = match caps.reasoning {
         crate::caps::model_caps::ReasoningType::None => None,
         crate::caps::model_caps::ReasoningType::Openai => Some("openai".to_string()),
-        crate::caps::model_caps::ReasoningType::Anthropic => Some("anthropic".to_string()),
+        crate::caps::model_caps::ReasoningType::AnthropicBudget => Some("anthropic_budget".to_string()),
+        crate::caps::model_caps::ReasoningType::AnthropicEffort => Some("anthropic_effort".to_string()),
         crate::caps::model_caps::ReasoningType::Deepseek => Some("deepseek".to_string()),
         crate::caps::model_caps::ReasoningType::Xai => Some("xai".to_string()),
         crate::caps::model_caps::ReasoningType::Qwen => Some("qwen".to_string()),
@@ -1033,6 +1088,7 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
 
     record.supports_boost_reasoning = caps.supports_reasoning_effort;
     record.supports_agent = caps.supports_tools;
+    record.supports_temperature = caps.supports_temperature;
 }
 
 pub fn resolve_completion_model<'a>(

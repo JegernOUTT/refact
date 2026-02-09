@@ -34,6 +34,22 @@ pub struct ProviderDefaults {
 }
 
 impl ProviderDefaults {
+    pub fn defaults_for_model(
+        &self,
+        model_id: &str,
+        _chat_default_model: &str,
+        chat_light_model: &str,
+        chat_thinking_model: &str,
+    ) -> &ModelTypeDefaults {
+        if !chat_thinking_model.is_empty() && model_id == chat_thinking_model {
+            &self.chat_thinking
+        } else if !chat_light_model.is_empty() && model_id == chat_light_model {
+            &self.chat_light
+        } else {
+            &self.chat
+        }
+    }
+
     pub async fn load(config_dir: &Path) -> Result<Self, String> {
         let defaults_path = config_dir.join("providers.d").join("defaults.yaml");
         match tokio::fs::read_to_string(&defaults_path).await {

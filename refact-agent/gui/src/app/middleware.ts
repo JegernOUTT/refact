@@ -1048,40 +1048,10 @@ startListening({
   },
 });
 
-startListening({
-  actionCreator: newChatAction,
-  effect: async (_action, listenerApi) => {
-    const state = listenerApi.getState();
-    const chatId = state.chat.current_thread_id;
-    const runtime = state.chat.threads[chatId];
-    const port = state.config.lspPort;
-    const apiKey = state.config.apiKey;
-
-    if (!runtime || !port || !chatId) return;
-
-    const patch: Record<string, unknown> = {};
-    if (runtime.thread.model) patch.model = runtime.thread.model;
-    if (runtime.thread.tool_use) patch.tool_use = runtime.thread.tool_use;
-    if (runtime.thread.mode) patch.mode = runtime.thread.mode;
-    if (runtime.thread.boost_reasoning !== undefined)
-      patch.boost_reasoning = runtime.thread.boost_reasoning;
-    if (runtime.thread.include_project_info !== undefined)
-      patch.include_project_info = runtime.thread.include_project_info;
-    if (runtime.thread.context_tokens_cap !== undefined)
-      patch.context_tokens_cap = runtime.thread.context_tokens_cap;
-
-    if (Object.keys(patch).length === 0) return;
-
-    try {
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
-        type: "set_params",
-        patch,
-      });
-    } catch {
-      // Best effort - ignore if backend rejects
-    }
-  },
-});
+// Thread params (model, temperature, etc.) are now sent synchronously
+// before the user_message in each submit code path (actions.ts, useChatActions.ts),
+// eliminating the race condition where this async listener could fire
+// after the user_message had already triggered generation.
 
 startListening({
   matcher: tasksApi.endpoints.deleteTask.matchFulfilled,

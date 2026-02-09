@@ -574,6 +574,23 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (!rt) return;
 
     const sessionState = action.payload.session_state;
+
+    // When a thread has an active chat SSE subscription (snapshot_received),
+    // the chat SSE channel (applyChatEvent → runtime_updated) is the
+    // authoritative source for runtime state. The sidebar SSE can deliver
+    // stale trajectory events (e.g. "generating") that arrive AFTER the chat
+    // SSE has already moved to "waiting_user_input" or "completed", causing
+    // boolean flags to be incorrectly overwritten. Skip boolean/flag updates
+    // for threads with an active chat SSE; only update session_state for
+    // display purposes (tabs, StatusDot).
+    if (rt.snapshot_received) {
+      rt.session_state = sessionState;
+      if (sessionState === "error") {
+        rt.error = action.payload.error ?? "An error occurred";
+      }
+      return;
+    }
+
     rt.session_state = sessionState;
     rt.streaming = sessionState === "generating";
     rt.waiting_for_response =

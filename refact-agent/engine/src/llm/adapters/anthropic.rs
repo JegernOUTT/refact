@@ -7,7 +7,8 @@ use crate::llm::canonical::{CanonicalToolChoice, LlmRequest, LlmStreamDelta};
 use crate::llm::params::CacheControl;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_THINKING_BUDGET: usize = 10000;
+const DEFAULT_THINKING_BUDGET: usize = 8192;
+const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 
 const PROTECTED_FIELDS: &[&str] = &["model", "messages", "stream", "system", "tools", "tool_choice"];
 
@@ -30,6 +31,8 @@ impl LlmWireAdapter for AnthropicAdapter {
             "anthropic-version",
             HeaderValue::from_static(ANTHROPIC_VERSION),
         );
+
+        let is_effort_mode = settings.reasoning_type.as_deref() == Some("anthropic_effort");
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
 
@@ -57,7 +60,8 @@ impl LlmWireAdapter for AnthropicAdapter {
         if settings.supports_tools {
             if let Some(tools) = &req.tools {
                 if !tools.is_empty() {
-                    body["tools"] = convert_tools_to_anthropic(tools);
+                    let converted_tools = convert_tools_to_anthropic(tools);
+                    body["tools"] = converted_tools;
                     if let Some(choice) = &req.tool_choice {
                         body["tool_choice"] = tool_choice_to_anthropic(choice);
                     }
@@ -66,20 +70,48 @@ impl LlmWireAdapter for AnthropicAdapter {
         }
 
         if settings.supports_reasoning {
-            if let Some(budget) = req.reasoning.to_anthropic_budget(DEFAULT_THINKING_BUDGET) {
-                body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
-                // Anthropic requires max_tokens > thinking.budget_tokens
-                let current_max = req.params.max_tokens;
-                if current_max <= budget {
-                    // Set max_tokens to budget + reasonable output buffer (at least 1024 tokens for response)
-                    let adjusted_max = budget + std::cmp::max(current_max, 1024);
-                    body["max_tokens"] = json!(adjusted_max);
-                    tracing::debug!(
-                        "Adjusted max_tokens from {} to {} (thinking budget: {})",
-                        current_max, adjusted_max, budget
-                    );
+            if is_effort_mode {
+                match &req.reasoning {
+                    crate::llm::params::ReasoningIntent::BudgetTokens(n) => {
+                        body["thinking"] = json!({"type": "enabled", "budget_tokens": *n});
+                        let current_max = req.params.max_tokens;
+                        if current_max <= *n {
+                            let adjusted_max = *n + std::cmp::max(current_max, 1024);
+                            body["max_tokens"] = json!(adjusted_max);
+                            tracing::debug!(
+                                "Adjusted max_tokens from {} to {} (thinking budget: {})",
+                                current_max, adjusted_max, n
+                            );
+                        }
+                    }
+                    _ => {
+                        if let Some(effort) = req.reasoning.to_anthropic_effort() {
+                            body["thinking"] = json!({"type": "adaptive"});
+                            body["output_config"] = json!({"effort": effort});
+                        }
+                    }
+                }
+            } else {
+                if let Some(budget) = req.reasoning.to_anthropic_budget(DEFAULT_THINKING_BUDGET) {
+                    body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+                    let current_max = req.params.max_tokens;
+                    if current_max <= budget {
+                        let adjusted_max = budget + std::cmp::max(current_max, 1024);
+                        body["max_tokens"] = json!(adjusted_max);
+                        tracing::debug!(
+                            "Adjusted max_tokens from {} to {} (thinking budget: {})",
+                            current_max, adjusted_max, budget
+                        );
+                    }
                 }
             }
+        }
+
+        if body.get("thinking").and_then(|t| t.get("type")).and_then(|t| t.as_str()) == Some("enabled") {
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static(INTERLEAVED_THINKING_BETA),
+            );
         }
 
         if let Some(extra) = &req.extra_body {
@@ -288,12 +320,45 @@ fn convert_to_anthropic(
                 system_text = Some(msg.content.content_text_only());
             }
             "user" | "assistant" => {
-                flush_tool_results(&mut result, &mut pending_tool_results);
-                let content = msg_content_to_anthropic(&msg.content);
-                let mut obj = json!({"role": msg.role, "content": content});
+                let mut content = Vec::new();
+                // Merge pending tool_results into user message to avoid consecutive user blocks
+                if msg.role == "user" && !pending_tool_results.is_empty() {
+                    content.extend(pending_tool_results.drain(..));
+                } else {
+                    flush_tool_results(&mut result, &mut pending_tool_results);
+                }
+                if msg.role == "assistant" {
+                    if let Some(blocks) = &msg.thinking_blocks {
+                        for block in blocks {
+                            if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
+                                match block_type {
+                                    "thinking" => {
+                                        let mut tb = json!({"type": "thinking"});
+                                        if let Some(thinking) = block.get("thinking") {
+                                            tb["thinking"] = thinking.clone();
+                                        }
+                                        if let Some(sig) = block.get("signature") {
+                                            tb["signature"] = sig.clone();
+                                        }
+                                        content.push(tb);
+                                    }
+                                    "redacted_thinking" => {
+                                        let mut rb = json!({"type": "redacted_thinking"});
+                                        if let Some(data) = block.get("data") {
+                                            rb["data"] = data.clone();
+                                        }
+                                        content.push(rb);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                content.extend(msg_content_to_anthropic(&msg.content));
                 if msg.role == "assistant" {
                     if let Some(tcs) = &msg.tool_calls {
-                        let blocks: Vec<Value> = tcs.iter()
+                        let tool_blocks: Vec<Value> = tcs.iter()
                             .filter(|tc| !tc.id.starts_with("srvtoolu_"))  // Filter server-executed tools
                             .map(|tc| {
                                 let input = match serde_json::from_str::<Value>(&tc.function.arguments) {
@@ -313,28 +378,22 @@ fn convert_to_anthropic(
                                     "input": input
                                 })
                             }).collect();
-                        if !blocks.is_empty() {
-                            if let Some(arr) = obj["content"].as_array_mut() {
-                                arr.extend(blocks);
-                            }
-                        }
+                        content.extend(tool_blocks);
                     }
                 }
-                result.push(obj);
+                let content = sanitize_anthropic_content(content);
+                result.push(json!({"role": msg.role, "content": content}));
             }
             "tool" | "diff" => {
                 if !msg.tool_call_id.starts_with("srvtoolu_") {  // Filter server-executed tool results
+                    let tool_text = msg.content.content_text_only();
+                    let tool_text = if tool_text.is_empty() { "(empty)".to_string() } else { tool_text };
                     pending_tool_results.push(json!({
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id,
-                        "content": msg.content.content_text_only()
+                        "content": tool_text
                     }));
                 }
-            }
-            "plain_text" | "cd_instruction" | "context_file" => {
-                flush_tool_results(&mut result, &mut pending_tool_results);
-                let content = msg_content_to_anthropic(&msg.content);
-                result.push(json!({"role": "user", "content": content}));
             }
             _ => {}
         }
@@ -346,12 +405,52 @@ fn convert_to_anthropic(
         CacheControl::Ephemeral => json!([{
             "type": "text",
             "text": text,
-            "cache_control": {"type": "ephemeral"}
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
         }]),
         CacheControl::Off => json!(text),
     });
 
+    // Apply cache breakpoints for prefix-based caching.
+    // Anthropic caches are prefix-based: the hash at each breakpoint covers ALL previous blocks.
+    // Up to 4 breakpoints allowed; combined with the system breakpoint = 3 message breakpoints.
+    //
+    // CRITICAL: breakpoints must be STABLE across consecutive calls. If a message has
+    // cache_control in call N but not in call N+1, the prefix hash changes and cache misses.
+    //
+    // In agentic flows the pattern is [user, assistant, user(tool_results), assistant, ...]
+    // with only one real user message at [0]. A "moving" middle breakpoint (e.g. last assistant
+    // before last user) shifts forward every call, removing cache_control from the previous
+    // position and invalidating the entire prefix after [0].
+    //
+    // Strategy: only two message breakpoints (+ system = 3 total):
+    //   1. [0] — first message. Stable across all calls.
+    //   2. [-1] — last message. Changes each call but caches the full prefix.
+    if cache == CacheControl::Ephemeral && !result.is_empty() {
+        let len = result.len();
+        let mut breakpoint_indices = vec![0, len - 1];
+        breakpoint_indices.dedup();
+
+        for &idx in &breakpoint_indices {
+            add_cache_control_to_last_block(&mut result[idx]);
+        }
+    }
+
     (system, result)
+}
+
+/// Adds `cache_control` to the last content block of an Anthropic message.
+/// Each message has a "content" array of blocks; the breakpoint goes on the last one.
+fn add_cache_control_to_last_block(message: &mut Value) {
+    let cc = json!({"type": "ephemeral", "ttl": "1h"});
+    if let Some(content) = message.get_mut("content") {
+        if let Some(arr) = content.as_array_mut() {
+            if let Some(last_block) = arr.last_mut() {
+                if let Some(obj) = last_block.as_object_mut() {
+                    obj.insert("cache_control".to_string(), cc);
+                }
+            }
+        }
+    }
 }
 
 fn flush_tool_results(result: &mut Vec<Value>, pending: &mut Vec<Value>) {
@@ -362,6 +461,21 @@ fn flush_tool_results(result: &mut Vec<Value>, pending: &mut Vec<Value>) {
         "role": "user",
         "content": pending.drain(..).collect::<Vec<_>>()
     }));
+}
+
+/// Anthropic rejects `{"type":"text","text":""}` content blocks with 400 Bad Request.
+/// This removes empty text blocks, keeping non-text blocks (images, etc.) intact.
+/// If nothing remains, inserts a placeholder so the message stays valid.
+fn sanitize_anthropic_content(mut blocks: Vec<Value>) -> Vec<Value> {
+    blocks.retain(|block| {
+        let is_empty_text = block.get("type").and_then(|t| t.as_str()) == Some("text")
+            && block.get("text").and_then(|t| t.as_str()).map_or(false, |s| s.is_empty());
+        !is_empty_text
+    });
+    if blocks.is_empty() {
+        blocks.push(json!({"type": "text", "text": "(empty)"}));
+    }
+    blocks
 }
 
 fn msg_content_to_anthropic(content: &crate::call_validation::ChatContent) -> Vec<Value> {
@@ -376,11 +490,8 @@ fn msg_content_to_anthropic(content: &crate::call_validation::ChatContent) -> Ve
                 }
             }).collect()
         }
-        crate::call_validation::ChatContent::ContextFiles(files) => {
-            let text = files.iter()
-                .map(|f| format!("{}:{}-{}\n```\n{}```", f.file_name, f.line1, f.line2, f.file_content))
-                .collect::<Vec<_>>().join("\n\n");
-            vec![json!({"type": "text", "text": text})]
+        crate::call_validation::ChatContent::ContextFiles(_) => {
+            vec![json!({"type": "text", "text": content.content_text_only()})]
         }
     }
 }
@@ -446,6 +557,8 @@ mod tests {
             model_name: "claude-3-sonnet".to_string(),
             supports_tools: true,
             supports_reasoning: true,
+            reasoning_type: Some("anthropic_budget".to_string()),
+            supports_temperature: true,
             supports_max_completion_tokens: false,
             support_metadata: false,
             eof_is_done: false,
@@ -459,6 +572,52 @@ mod tests {
         let http = adapter.build_http(&req, &settings()).unwrap();
         assert!(http.headers.get("x-api-key").is_some());
         assert!(http.headers.get("anthropic-version").is_some());
+    }
+
+    #[test]
+    fn test_interleaved_thinking_beta_header() {
+        use crate::llm::params::ReasoningIntent;
+
+        let adapter = AnthropicAdapter;
+
+        let req_with_reasoning = LlmRequest::new(
+            "claude".to_string(),
+            vec![ChatMessage::new("user".to_string(), "test".to_string())],
+        ).with_reasoning(ReasoningIntent::High);
+
+        let http = adapter.build_http(&req_with_reasoning, &settings()).unwrap();
+        let beta = http.headers.get("anthropic-beta").map(|v| v.to_str().unwrap().to_string());
+        assert_eq!(beta, Some(INTERLEAVED_THINKING_BETA.to_string()));
+    }
+
+    #[test]
+    fn test_no_beta_header_without_reasoning() {
+        let adapter = AnthropicAdapter;
+
+        let req_no_reasoning = LlmRequest::new(
+            "claude".to_string(),
+            vec![ChatMessage::new("user".to_string(), "test".to_string())],
+        );
+
+        let http = adapter.build_http(&req_no_reasoning, &settings()).unwrap();
+        assert!(http.headers.get("anthropic-beta").is_none());
+    }
+
+    #[test]
+    fn test_no_beta_header_when_reasoning_not_supported() {
+        use crate::llm::params::ReasoningIntent;
+
+        let adapter = AnthropicAdapter;
+        let mut no_reasoning_settings = settings();
+        no_reasoning_settings.supports_reasoning = false;
+
+        let req = LlmRequest::new(
+            "claude".to_string(),
+            vec![ChatMessage::new("user".to_string(), "test".to_string())],
+        ).with_reasoning(ReasoningIntent::High);
+
+        let http = adapter.build_http(&req, &no_reasoning_settings).unwrap();
+        assert!(http.headers.get("anthropic-beta").is_none());
     }
 
     #[test]
@@ -480,9 +639,11 @@ mod tests {
         ];
         let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
         let expected =
-            json!([{"type": "text", "text": "Be helpful", "cache_control": {"type": "ephemeral"}}]);
+            json!([{"type": "text", "text": "Be helpful", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]);
         assert_eq!(system, Some(expected));
         assert_eq!(msgs.len(), 1);
+        // Single message should get cache breakpoint at [0]
+        assert!(msgs[0]["content"][0].get("cache_control").is_some());
     }
 
     #[test]
@@ -658,6 +819,54 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_result_merged_into_following_user() {
+        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
+
+        // Simulates post-linearization input: tool reply followed by user message
+        // (linearizer folds cf into tool; real user message stays separate)
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("calling tool".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: ChatToolFunction {
+                        name: "search".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    index: None,
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("tool output".to_string()),
+                tool_call_id: "call_1".to_string(),
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "now fix it".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        // Should be 3 messages: user, assistant, user(tool_result + text)
+        // NOT 4: user, assistant, user(tool_result), user(text)
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["role"], "user");
+
+        let content = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "call_1");
+        assert_eq!(content[0]["content"], "tool output");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "now fix it");
+    }
+
+    #[test]
     fn test_diff_role_as_tool_result() {
         let messages = vec![
             ChatMessage::new("user".to_string(), "Edit file".to_string()),
@@ -785,57 +994,333 @@ mod tests {
     }
 
     #[test]
-    fn test_context_file_role_converted_to_user() {
-        use crate::call_validation::{ChatContent, ContextFile};
+    fn test_cache_breakpoints_on_messages() {
+        // After linearization: user, assistant+tool_use, tool_result, user
+        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
 
         let messages = vec![
             ChatMessage::new("system".to_string(), "Be helpful".to_string()),
+            ChatMessage::new("user".to_string(), "What does this do?".to_string()),
             ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(vec![
-                    ContextFile {
-                        file_name: "src/main.rs".to_string(),
-                        file_content: "fn main() {}".to_string(),
-                        line1: 1,
-                        line2: 1,
-                        ..Default::default()
-                    }
-                ]),
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Let me check".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: ChatToolFunction {
+                        name: "tool_a".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    index: None,
+                }]),
                 ..Default::default()
             },
-            ChatMessage::new("user".to_string(), "Explain this code".to_string()),
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("Result".to_string()),
+                tool_call_id: "call_1".to_string(),
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "Thanks, now explain".to_string()),
+        ];
+
+        let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+
+        // System should have cache_control with 1h TTL
+        let sys = system.unwrap();
+        assert_eq!(sys[0]["cache_control"]["ttl"], "1h");
+
+        // Messages: [0]=user, [1]=assistant+tool_use, [2]=user(tool_result+text)
+        // Tool result is merged into the following user message (no consecutive user blocks)
+        assert_eq!(msgs.len(), 3);
+
+        // [0]=user always gets breakpoint for stable prefix caching
+        assert!(msgs[0]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some(),
+            "First user message should have cache breakpoint for stable prefix");
+
+        // [1]=assistant has NO breakpoint (middle breakpoints are unstable in agentic flows)
+        assert!(msgs[1]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_none(),
+            "Assistant should NOT have cache breakpoint (only [0] and [-1])");
+
+        // [2]=user(tool_result+text) is [-1] → breakpoint
+        assert!(msgs[2]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some(),
+            "Last message should have cache breakpoint");
+
+        // Verify the merged user message contains both tool_result and text
+        let last_content = msgs[2]["content"].as_array().unwrap();
+        let has_tool_result = last_content.iter().any(|b| b["type"] == "tool_result");
+        let has_text = last_content.iter().any(|b| b["type"] == "text");
+        assert!(has_tool_result, "Merged user message should contain tool_result");
+        assert!(has_text, "Merged user message should contain user text");
+    }
+
+    #[test]
+    fn test_cache_breakpoints_single_message() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+
+        assert_eq!(msgs.len(), 1);
+        // Single message gets breakpoint at [-1]
+        assert!(msgs[0]["content"][0].get("cache_control").is_some());
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn test_cache_breakpoints_two_messages() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ChatMessage::new("assistant".to_string(), "Hi there".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+
+        assert_eq!(msgs.len(), 2);
+        // Two messages: [0] (always) and [-1] get breakpoints
+        assert!(msgs[0]["content"][0].get("cache_control").is_some());
+        assert!(msgs[1]["content"][0].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn test_no_cache_breakpoints_when_off() {
+        let messages = vec![
+            ChatMessage::new("system".to_string(), "Be helpful".to_string()),
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ChatMessage::new("assistant".to_string(), "Hi".to_string()),
+            ChatMessage::new("user".to_string(), "Thanks".to_string()),
         ];
 
         let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
 
+        // System should be plain text, no cache_control
         assert_eq!(system, Some(json!("Be helpful")));
-        // Should have 2 messages: context_file converted to user + actual user message
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0]["role"], "user");
-        // The context file content should be converted to text
-        let content = msgs[0]["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "text");
-        assert!(content[0]["text"].as_str().unwrap().contains("src/main.rs"));
-        assert!(content[0]["text"].as_str().unwrap().contains("fn main() {}"));
+
+        // No messages should have cache_control
+        for msg in &msgs {
+            if let Some(content) = msg["content"].as_array() {
+                for block in content {
+                    assert!(block.get("cache_control").is_none(),
+                        "No cache breakpoints expected when CacheControl::Off");
+                }
+            }
+        }
     }
 
     #[test]
-    fn test_context_file_simple_text_converted() {
+    fn test_cache_breakpoint_on_tool_use_last_block() {
+        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
+
         let messages = vec![
+            ChatMessage::new("user".to_string(), "Do something".to_string()),
             ChatMessage {
-                role: "context_file".to_string(),
-                content: crate::call_validation::ChatContent::SimpleText("file content here".to_string()),
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: ChatToolFunction {
+                        name: "get_weather".to_string(),
+                        arguments: r#"{"city":"London"}"#.to_string(),
+                    },
+                    index: None,
+                }]),
                 ..Default::default()
             },
-            ChatMessage::new("user".to_string(), "What is this?".to_string()),
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("Sunny, 20C".to_string()),
+                tool_call_id: "call_1".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+
+        // [0]=user, [1]=assistant(text+tool_use), [2]=tool_result(user)
+        assert_eq!(msgs.len(), 3);
+
+        // [0]=user gets breakpoint (always first message)
+        assert!(msgs[0]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some(),
+            "First user message should have cache breakpoint");
+
+        // [1]=assistant has NO breakpoint (only [0] and [-1] get breakpoints)
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        let last_block = assistant_content.last().unwrap();
+        assert_eq!(last_block["type"], "tool_use");
+        assert!(last_block.get("cache_control").is_none(),
+            "Assistant should NOT have cache breakpoint (middle breakpoints are unstable)");
+    }
+
+    #[test]
+    fn test_thinking_blocks_included_in_assistant() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Solve this".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("The answer is 42".to_string()),
+                thinking_blocks: Some(vec![json!({
+                    "type": "thinking",
+                    "thinking": "Let me work through this...",
+                    "signature": "abc123signature"
+                })]),
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "Explain more".to_string()),
         ];
 
         let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
 
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0]["role"], "user");
-        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        // Thinking block should come first, then text
+        assert_eq!(assistant_content[0]["type"], "thinking");
+        assert_eq!(assistant_content[0]["thinking"], "Let me work through this...");
+        assert_eq!(assistant_content[0]["signature"], "abc123signature");
+        assert_eq!(assistant_content[1]["type"], "text");
+        assert_eq!(assistant_content[1]["text"], "The answer is 42");
+    }
+
+    #[test]
+    fn test_thinking_blocks_before_tool_use() {
+        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
+
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Search for X".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                thinking_blocks: Some(vec![json!({
+                    "type": "thinking",
+                    "thinking": "I should search for X",
+                    "signature": "sig_search"
+                })]),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: ChatToolFunction {
+                        name: "search".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    index: None,
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("Found results".to_string()),
+                tool_call_id: "call_1".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        // assistant content: [thinking, (empty text removed), tool_use]
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(assistant_content[0]["type"], "thinking");
+        assert_eq!(assistant_content[0]["signature"], "sig_search");
+        // Last block should be tool_use (empty text sanitized away)
+        let last = assistant_content.last().unwrap();
+        assert_eq!(last["type"], "tool_use");
+    }
+
+    #[test]
+    fn test_redacted_thinking_blocks() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Test".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Response".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({
+                        "type": "thinking",
+                        "thinking": "Normal thinking",
+                        "signature": "sig1"
+                    }),
+                    json!({
+                        "type": "redacted_thinking",
+                        "data": "encrypted_data_here"
+                    }),
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        let content = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "Normal thinking");
+        assert_eq!(content[1]["type"], "redacted_thinking");
+        assert_eq!(content[1]["data"], "encrypted_data_here");
+        assert_eq!(content[2]["type"], "text");
+    }
+
+    #[test]
+    fn test_no_thinking_blocks_when_none() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Hi there".to_string()),
+                thinking_blocks: None,
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        let content = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[0]["text"], "file content here");
+    }
+
+    #[test]
+    fn test_thinking_blocks_cache_breakpoint_on_last_block() {
+        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
+
+        // Simulate call 2: user + assistant(thinking+tool_use) + tool_result
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Do something".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                thinking_blocks: Some(vec![json!({
+                    "type": "thinking",
+                    "thinking": "Let me think...",
+                    "signature": "sig_abc"
+                })]),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: ChatToolFunction {
+                        name: "tool_a".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    index: None,
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("Result".to_string()),
+                tool_call_id: "call_1".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+
+        // Assistant content: [thinking, tool_use] (empty text sanitized)
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        // No breakpoint on assistant (only [0] and [-1] get breakpoints)
+        let last_block = assistant_content.last().unwrap();
+        assert_eq!(last_block["type"], "tool_use");
+        assert!(last_block.get("cache_control").is_none(),
+            "Assistant should NOT have cache breakpoint (only [0] and [-1])");
+        assert!(assistant_content[0].get("cache_control").is_none(),
+            "Thinking block should not have cache_control");
     }
 }

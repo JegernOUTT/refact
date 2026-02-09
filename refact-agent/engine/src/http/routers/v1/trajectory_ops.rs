@@ -279,7 +279,7 @@ pub async fn handle_handoff_apply(
         tool_use: thread.tool_use.clone(),
         messages: selected_messages,
         created_at: now,
-        boost_reasoning: thread.boost_reasoning,
+        boost_reasoning: thread.boost_reasoning.unwrap_or(false),
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
         include_project_info: thread.include_project_info,
@@ -291,6 +291,12 @@ pub async fn handle_handoff_apply(
         parent_id: Some(chat_id.clone()),
         link_type: Some("handoff".to_string()),
         root_chat_id: thread.root_chat_id.clone().or_else(|| Some(chat_id.clone())),
+        reasoning_effort: thread.reasoning_effort.clone(),
+        thinking_budget: thread.thinking_budget,
+        temperature: thread.temperature,
+        frequency_penalty: thread.frequency_penalty,
+        max_tokens: thread.max_tokens,
+        parallel_tool_calls: thread.parallel_tool_calls,
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "handoff")
@@ -448,7 +454,7 @@ pub async fn handle_mode_transition_apply(
         tool_use: thread.tool_use.clone(),
         messages: new_messages.clone(),
         created_at: now,
-        boost_reasoning: thread.boost_reasoning,
+        boost_reasoning: thread.boost_reasoning.unwrap_or(false),
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
         include_project_info: thread.include_project_info,
@@ -460,6 +466,12 @@ pub async fn handle_mode_transition_apply(
         parent_id: Some(chat_id.clone()),
         link_type: Some("mode_transition".to_string()),
         root_chat_id: thread.root_chat_id.clone().or_else(|| Some(chat_id.clone())),
+        reasoning_effort: thread.reasoning_effort.clone(),
+        thinking_budget: thread.thinking_budget,
+        temperature: thread.temperature,
+        frequency_penalty: thread.frequency_penalty,
+        max_tokens: thread.max_tokens,
+        parallel_tool_calls: thread.parallel_tool_calls,
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "mode_transition")

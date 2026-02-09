@@ -115,6 +115,7 @@ export const ReadTool: React.FC<ReadToolProps> = ({
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {content && (
         <Box className={styles.resultContent}>

@@ -97,6 +97,7 @@ export const ListTool: React.FC<ListToolProps> = ({
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {content && (
         <Box className={styles.resultContent}>

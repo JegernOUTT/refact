@@ -9,7 +9,7 @@ use tokio::sync::RwLock as ARwLock;
 use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
 use crate::global_context::GlobalContext;
-use crate::llm::{LlmRequest, LlmStreamDelta, get_adapter, safe_truncate, sanitize_request_for_logging, sanitize_headers_for_logging};
+use crate::llm::{LlmRequest, LlmStreamDelta, get_adapter, safe_truncate};
 use crate::llm::adapter::{AdapterSettings, StreamParseError};
 
 use super::types::{DeltaOp, stream_heartbeat, stream_idle_timeout, stream_total_timeout};
@@ -75,6 +75,8 @@ pub struct StreamRunParams {
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub supports_tools: bool,
     pub supports_reasoning: bool,
+    pub reasoning_type: Option<String>,
+    pub supports_temperature: bool,
 }
 
 #[derive(Default, Clone)]
@@ -122,7 +124,6 @@ pub async fn run_llm_stream<C: StreamCollector>(
 
     let _ = slowdown_arc.acquire().await;
 
-    // Build adapter settings from model record
     let wire_format = params.model_rec.wire_format;
     let adapter = get_adapter(wire_format);
 
@@ -133,12 +134,13 @@ pub async fn run_llm_stream<C: StreamCollector>(
         model_name: params.model_rec.name.clone(),
         supports_tools: params.supports_tools,
         supports_reasoning: params.supports_reasoning,
+        reasoning_type: params.reasoning_type.clone(),
+        supports_temperature: params.supports_temperature,
         supports_max_completion_tokens: params.model_rec.supports_max_completion_tokens,
         support_metadata: params.model_rec.support_metadata,
         eof_is_done: params.model_rec.eof_is_done,
     };
 
-    // Build HTTP request using adapter
     let http_parts = adapter.build_http(&params.llm_request, &adapter_settings)
         .map_err(|e| format!("Failed to build LLM request: {}", e))?;
 
@@ -146,11 +148,10 @@ pub async fn run_llm_stream<C: StreamCollector>(
         return Err("LLM endpoint URL is empty".to_string());
     }
 
-    // Log sanitized request for debugging (redacts secrets and truncates content)
     tracing::debug!(
         url = %http_parts.url,
-        headers = ?sanitize_headers_for_logging(&http_parts.headers),
-        body = %sanitize_request_for_logging(&http_parts.body),
+        model = %params.llm_request.model_id,
+        messages_count = params.llm_request.messages.len(),
         "LLM streaming request"
     );
 
@@ -286,7 +287,6 @@ pub async fn run_llm_stream<C: StreamCollector>(
         .enumerate()
         .map(|(idx, acc)| {
             collector.on_finish(idx, acc.finish_reason.clone());
-
             // Merge accumulated reasoning text into thinking_blocks if present.
             // This is required for Anthropic tool calling - the thinking_blocks must contain
             // both the thinking text AND the signature for multi-turn conversations.

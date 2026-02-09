@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: project_summary
 title: Project Summary
 description: Generate project summary and integrations
@@ -81,6 +81,7 @@ prompt: |
 tools:
   - tree
   - cat
+  - add_workspace_folder
   - create_textdoc
 
 tool_confirm:

@@ -45,6 +45,8 @@ pub struct AdapterSettings {
     pub model_name: String,
     pub supports_tools: bool,
     pub supports_reasoning: bool,
+    pub reasoning_type: Option<String>,
+    pub supports_temperature: bool,
     pub supports_max_completion_tokens: bool,
     pub support_metadata: bool,
     pub eof_is_done: bool,

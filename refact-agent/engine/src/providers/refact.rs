@@ -1,15 +1,12 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::RwLock as ARwLock;
 
-use crate::global_context::GlobalContext;
 use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
-use crate::providers::traits::{AvailableModel, ModelSource, ProviderRuntime, ProviderTrait};
+use crate::providers::traits::{ModelSource, ProviderRuntime, ProviderTrait};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RefactProvider {
@@ -132,7 +129,7 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::Api
+        ModelSource::ModelCaps
     }
 
     fn disabled_models(&self) -> &[String] {
@@ -144,36 +141,3 @@ available:
     }
 }
 
-
-pub async fn fetch_refact_cloud_models(
-    gcx: Arc<ARwLock<GlobalContext>>,
-) -> Result<Vec<AvailableModel>, String> {
-    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
-        .await
-        .map_err(|e| format!("Failed to load caps: {}", e))?;
-
-    let mut models: Vec<AvailableModel> = caps.chat_models
-        .iter()
-        .filter(|(id, _)| id.starts_with("refact/"))
-        .map(|(id, record)| {
-            let model_name = id.strip_prefix("refact/").unwrap_or(id);
-            let pricing = caps.metadata.pricing.get(model_name)
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
-            AvailableModel {
-                id: model_name.to_string(),
-                display_name: None,
-                n_ctx: record.base.n_ctx,
-                supports_tools: record.supports_tools,
-                supports_multimodality: record.supports_multimodality,
-                supports_reasoning: record.supports_reasoning.clone(),
-                tokenizer: if record.base.tokenizer.is_empty() { None } else { Some(record.base.tokenizer.clone()) },
-                enabled: false,
-                is_custom: false,
-                pricing,
-            }
-        })
-        .collect();
-
-    models.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(models)
-}

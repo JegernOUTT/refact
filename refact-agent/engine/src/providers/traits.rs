@@ -113,7 +113,8 @@ impl AvailableModel {
         let reasoning = match caps.reasoning {
             crate::caps::model_caps::ReasoningType::None => None,
             crate::caps::model_caps::ReasoningType::Openai => Some("openai".to_string()),
-            crate::caps::model_caps::ReasoningType::Anthropic => Some("anthropic".to_string()),
+            crate::caps::model_caps::ReasoningType::AnthropicBudget => Some("anthropic_budget".to_string()),
+            crate::caps::model_caps::ReasoningType::AnthropicEffort => Some("anthropic_effort".to_string()),
             crate::caps::model_caps::ReasoningType::Deepseek => Some("deepseek".to_string()),
             crate::caps::model_caps::ReasoningType::Xai => Some("xai".to_string()),
             crate::caps::model_caps::ReasoningType::Qwen => Some("qwen".to_string()),
@@ -245,6 +246,12 @@ pub trait ProviderTrait: Send + Sync {
         false
     }
 
+    /// Whether this provider should be hidden from the providers list UI.
+    /// Used for response-API variants that are merged into their parent provider.
+    fn is_hidden_from_list(&self) -> bool {
+        false
+    }
+
     // Model discovery methods
     fn model_source(&self) -> ModelSource {
         ModelSource::ModelCaps
@@ -291,13 +298,16 @@ pub trait ProviderTrait: Send + Sync {
 
         let regex_opt: Option<Regex> = self.model_filter_regex().and_then(get_cached_regex);
 
-        if let Some(regex) = regex_opt {
-            for (name, caps) in model_caps {
-                if regex.is_match(name) {
-                    let enabled = enabled_set.contains(name.as_str());
-                    let pricing = self.model_pricing(name);
-                    models_map.insert(name.clone(), AvailableModel::from_caps(name, caps, enabled, pricing));
-                }
+        for (name, caps) in model_caps {
+            let matches = match &regex_opt {
+                Some(regex) => regex.is_match(name),
+                None => true,
+            };
+            if matches {
+                let disabled = self.disabled_models().contains(&name.to_string());
+                let enabled = if disabled { false } else { enabled_set.is_empty() || enabled_set.contains(name.as_str()) };
+                let pricing = self.model_pricing(name);
+                models_map.insert(name.clone(), AvailableModel::from_caps(name, caps, enabled, pricing));
             }
         }
 

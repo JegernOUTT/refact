@@ -48,8 +48,10 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             body["instructions"] = json!(inst);
         }
 
-        if let Some(temp) = req.params.temperature {
-            body["temperature"] = json!(temp);
+        if settings.supports_temperature {
+            if let Some(temp) = req.params.temperature {
+                body["temperature"] = json!(temp);
+            }
         }
 
         if let Some(freq_penalty) = req.params.frequency_penalty {
@@ -63,7 +65,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                     if let Some(choice) = &req.tool_choice {
                         body["tool_choice"] = tool_choice_to_responses(choice);
                     }
-                    body["parallel_tool_calls"] = json!(req.parallel_tool_calls);
+                    if req.parallel_tool_calls {
+                        body["parallel_tool_calls"] = json!(true);
+                    }
                 }
             }
         } else if req.tools.is_some() {
@@ -301,7 +305,7 @@ fn convert_to_responses_format(
                 }
                 instructions = Some(msg.content.content_text_only());
             }
-            "user" | "plain_text" | "cd_instruction" | "context_file" => {
+            "user" => {
                 let content = msg_content_to_responses(&msg.content);
                 input_messages.push(json!({
                     "type": "message",
@@ -372,18 +376,8 @@ fn msg_content_to_responses(content: &crate::call_validation::ChatContent) -> Ve
                 }
             })
             .collect(),
-        crate::call_validation::ChatContent::ContextFiles(files) => {
-            let text = files
-                .iter()
-                .map(|f| {
-                    format!(
-                        "{}:{}-{}\n```\n{}```",
-                        f.file_name, f.line1, f.line2, f.file_content
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            vec![json!({"type": "input_text", "text": text})]
+        crate::call_validation::ChatContent::ContextFiles(_) => {
+            vec![json!({"type": "input_text", "text": content.content_text_only()})]
         }
     }
 }
@@ -540,6 +534,8 @@ mod tests {
             model_name: "gpt-4.1".to_string(),
             supports_tools: true,
             supports_reasoning: true,
+            reasoning_type: Some("openai".to_string()),
+            supports_temperature: true,
             supports_max_completion_tokens: false,
             support_metadata: false,
             eof_is_done: false,
@@ -783,28 +779,6 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_context_file_to_user() {
-        let messages = vec![
-            ChatMessage::new("system".to_string(), "Be helpful".to_string()),
-            ChatMessage::new("context_file".to_string(), "file content here".to_string()),
-            ChatMessage::new("user".to_string(), "What is this?".to_string()),
-        ];
-
-        let (input, instructions) = convert_to_responses_format(&messages);
-
-        assert_eq!(instructions, Some("Be helpful".to_string()));
-        let input_arr = input.as_array().unwrap();
-        assert_eq!(input_arr.len(), 2);
-        // Verify uniform type: "message" format
-        assert_eq!(input_arr[0]["type"], "message");
-        assert_eq!(input_arr[0]["role"], "user");
-        assert_eq!(input_arr[0]["content"][0]["type"], "input_text");
-        assert_eq!(input_arr[0]["content"][0]["text"], "file content here");
-        assert_eq!(input_arr[1]["type"], "message");
-        assert_eq!(input_arr[1]["role"], "user");
-    }
-
-    #[test]
     fn test_convert_messages_uniform_type() {
         let messages = vec![
             ChatMessage::new("user".to_string(), "Hello".to_string()),
@@ -814,8 +788,7 @@ mod tests {
                 tool_calls: None,
                 ..Default::default()
             },
-            ChatMessage::new("plain_text".to_string(), "Some plain text".to_string()),
-            ChatMessage::new("cd_instruction".to_string(), "An instruction".to_string()),
+            ChatMessage::new("user".to_string(), "Follow up question".to_string()),
         ];
 
         let (input, _) = convert_to_responses_format(&messages);
@@ -831,8 +804,6 @@ mod tests {
         assert_eq!(input_arr[1]["content"], "Hi there");
         assert_eq!(input_arr[2]["type"], "message");
         assert_eq!(input_arr[2]["role"], "user");
-        assert_eq!(input_arr[3]["type"], "message");
-        assert_eq!(input_arr[3]["role"], "user");
     }
 
     #[test]

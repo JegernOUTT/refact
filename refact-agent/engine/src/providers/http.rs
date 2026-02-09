@@ -10,7 +10,7 @@ use tokio::sync::RwLock as ARwLock;
 use crate::caps::model_caps::get_model_caps;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
-use crate::providers::refact::fetch_refact_cloud_models;
+
 
 fn json_response(status: StatusCode, body: &impl Serialize) -> Result<Response<Body>, ScratchError> {
     let json = serde_json::to_string(body)
@@ -56,6 +56,9 @@ pub async fn handle_v1_providers_list(
     let mut providers = Vec::new();
     for name in PROVIDER_NAMES {
         if let Some(provider) = registry.get(name) {
+            if provider.is_hidden_from_list() {
+                continue;
+            }
             let (enabled, readonly) = match provider.build_runtime() {
                 Ok(runtime) => (runtime.enabled, provider.is_readonly()),
                 Err(_) => (false, provider.is_readonly()),
@@ -68,6 +71,9 @@ pub async fn handle_v1_providers_list(
                 model_count: provider.enabled_models().len(),
             });
         } else if let Some(default_provider) = create_provider(name) {
+            if default_provider.is_hidden_from_list() {
+                continue;
+            }
             providers.push(ProviderListItem {
                 name: default_provider.name(),
                 display_name: default_provider.display_name(),
@@ -479,42 +485,10 @@ pub async fn handle_v1_provider_available_models(
             }
         }
         ModelSource::Api => {
-            if params.name == "refact" {
-                match fetch_refact_cloud_models(gcx.clone()).await {
-                    Ok(models) => {
-                        let disabled_set: std::collections::HashSet<_> =
-                            provider.disabled_models().iter().map(|s| s.as_str()).collect();
-
-                        let mut models_map: std::collections::HashMap<String, AvailableModel> = models
-                            .into_iter()
-                            .map(|mut m| {
-                                m.enabled = !disabled_set.contains(m.id.as_str());
-                                (m.id.clone(), m)
-                            })
-                            .collect();
-
-                        for custom in provider.get_custom_models_only() {
-                            models_map.insert(custom.id.clone(), custom);
-                        }
-
-                        let mut available_models: Vec<AvailableModel> = models_map.into_values().collect();
-                        available_models.sort_by(|a, b| a.id.cmp(&b.id));
-                        (available_models, None)
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to fetch Refact Cloud models: {}", e);
-                        (
-                            provider.get_custom_models_only(),
-                            Some(format!("Failed to fetch models: {}", e))
-                        )
-                    }
-                }
-            } else {
-                (
-                    provider.get_custom_models_only(),
-                    Some("API-based model discovery not yet implemented for this provider.".to_string())
-                )
-            }
+            (
+                provider.get_custom_models_only(),
+                Some("API-based model discovery not yet implemented for this provider.".to_string())
+            )
         }
         ModelSource::Local => {
             (

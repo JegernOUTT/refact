@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -212,7 +212,11 @@ pub async fn prepare_chat_passthrough(
     let limited_adapted_msgs =
         strip_thinking_blocks_if_disabled(limited_msgs, sampling_parameters, &model_record);
 
-    // 9. Build LlmRequest
+    // 9. Linearize thread: merge consecutive user-like messages for cache-friendly
+    //    strict role alternation (system/user/assistant/user/assistant/...)
+    let linearized_msgs = super::linearize::linearize_thread_for_llm(&limited_adapted_msgs);
+
+    // 10. Build LlmRequest
     // Enforce n=1 for chat - multi-choice not supported in streaming accumulation
     let common_params = CommonParams {
         max_tokens: sampling_parameters.max_new_tokens,
@@ -231,7 +235,7 @@ pub async fn prepare_chat_passthrough(
         ToolChoice::Function { name } => CanonicalToolChoice::Function { name: name.clone() },
     });
 
-    let mut llm_request = LlmRequest::new(model_id.to_string(), limited_adapted_msgs.clone())
+    let mut llm_request = LlmRequest::new(model_id.to_string(), linearized_msgs.clone())
         .with_params(common_params)
         .with_tools(openai_tools, tool_choice)
         .with_reasoning(reasoning)
@@ -245,7 +249,7 @@ pub async fn prepare_chat_passthrough(
 
     Ok(PreparedChat {
         llm_request,
-        limited_messages: limited_adapted_msgs,
+        limited_messages: linearized_msgs,
         rag_results: has_rag_results.in_json,
     })
 }
@@ -297,24 +301,31 @@ fn adapt_sampling_for_reasoning_models(
             sampling_parameters.thinking = None;
             sampling_parameters.enable_thinking = None;
         }
-        "anthropic" => {
-            let min_budget = tokens().min_budget_tokens;
-            let budget_tokens = if sampling_parameters.max_new_tokens > min_budget {
-                (sampling_parameters.max_new_tokens / 2).max(min_budget)
-            } else {
-                0
-            };
-            let should_enable_thinking = (model_record.supports_boost_reasoning
-                && sampling_parameters.boost_reasoning)
-                || sampling_parameters.reasoning_effort.is_some();
-            if should_enable_thinking && budget_tokens > 0 {
-                sampling_parameters.thinking = Some(json!({
-                    "type": "enabled",
-                    "budget_tokens": budget_tokens,
-                }));
+        "anthropic_budget" => {
+            if sampling_parameters.thinking_budget.is_none()
+                && model_record.supports_boost_reasoning
+                && sampling_parameters.boost_reasoning
+            {
+                let min_budget = tokens().min_budget_tokens;
+                let budget = if sampling_parameters.max_new_tokens > min_budget {
+                    (sampling_parameters.max_new_tokens / 2).max(min_budget)
+                } else {
+                    min_budget
+                };
+                sampling_parameters.thinking_budget = Some(budget);
             }
-            // Clear incompatible reasoning fields
             sampling_parameters.reasoning_effort = None;
+            sampling_parameters.thinking = None;
+            sampling_parameters.enable_thinking = None;
+        }
+        "anthropic_effort" => {
+            if sampling_parameters.reasoning_effort.is_none()
+                && model_record.supports_boost_reasoning
+                && sampling_parameters.boost_reasoning
+            {
+                sampling_parameters.reasoning_effort = Some(ReasoningEffort::High);
+            }
+            sampling_parameters.thinking = None;
             sampling_parameters.enable_thinking = None;
         }
         "qwen" => {
@@ -354,18 +365,18 @@ fn sampling_params_to_reasoning_intent(
         return ReasoningIntent::Off;
     }
 
-    // Check OpenAI-style reasoning_effort
+    // Check thinking_budget (from frontend UI) — explicit tokens always win
+    if let Some(budget) = sampling_parameters.thinking_budget {
+        return ReasoningIntent::BudgetTokens(budget);
+    }
+
+    // Check reasoning_effort (OpenAI-style or Anthropic effort)
     if let Some(ref effort) = sampling_parameters.reasoning_effort {
         return match effort {
             ReasoningEffort::Low => ReasoningIntent::Low,
             ReasoningEffort::Medium => ReasoningIntent::Medium,
             ReasoningEffort::High => ReasoningIntent::High,
         };
-    }
-
-    // Check thinking_budget (from frontend UI)
-    if let Some(budget) = sampling_parameters.thinking_budget {
-        return ReasoningIntent::BudgetTokens(budget);
     }
 
     // Check Anthropic-style thinking with budget_tokens (legacy API)
@@ -401,6 +412,7 @@ fn is_thinking_enabled(sampling_parameters: &SamplingParameters) -> bool {
         .map(|t| t == "enabled")
         .unwrap_or(false)
         || sampling_parameters.reasoning_effort.is_some()
+        || sampling_parameters.thinking_budget.is_some()
         || sampling_parameters.enable_thinking == Some(true)
 }
 
@@ -414,6 +426,7 @@ fn strip_thinking_blocks_if_disabled(
             .into_iter()
             .map(|mut msg| {
                 msg.thinking_blocks = None;
+                msg.reasoning_content = None;
                 msg
             })
             .collect()
@@ -505,7 +518,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_blocks_when_thinking_disabled() {
-        let model = make_model_record(Some("anthropic"));
+        let model = make_model_record(Some("anthropic_budget"));
         let params = make_sampling_params();
         let msgs = vec![ChatMessage {
             thinking_blocks: Some(vec![serde_json::json!({"type": "thinking"})]),
@@ -518,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_blocks_preserves_when_enabled() {
-        let model = make_model_record(Some("anthropic"));
+        let model = make_model_record(Some("anthropic_budget"));
         let mut params = make_sampling_params();
         params.thinking = Some(serde_json::json!({"type": "enabled", "budget_tokens": 1024}));
         let msgs = vec![ChatMessage {
@@ -544,7 +557,7 @@ mod tests {
         }];
         let result = strip_thinking_blocks_if_disabled(msgs, &params, &model);
         assert_eq!(result[0].role, "assistant");
-        assert_eq!(result[0].reasoning_content, Some("reasoning".into()));
+        assert_eq!(result[0].reasoning_content, None);
         assert_eq!(result[0].citations.len(), 1);
         assert!(result[0].thinking_blocks.is_none());
     }
@@ -610,38 +623,57 @@ mod tests {
     }
 
     #[test]
-    fn test_adapt_sampling_anthropic_sets_thinking() {
+    fn test_adapt_sampling_anthropic_budget_boost_reasoning() {
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
         params.max_new_tokens = 4096;
-        let model = make_model_record(Some("anthropic"));
+        let model = make_model_record(Some("anthropic_budget"));
         adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert!(params.thinking.is_some());
-        let thinking = params.thinking.unwrap();
-        assert_eq!(thinking["type"], "enabled");
-        assert_eq!(thinking["budget_tokens"], 2048);
+        assert!(params.thinking_budget.is_some());
+        assert!(params.thinking_budget.unwrap() > 0);
+        assert!(params.reasoning_effort.is_none());
+        assert!(params.thinking.is_none());
+        assert!(params.enable_thinking.is_none());
+    }
+
+    #[test]
+    fn test_adapt_sampling_anthropic_budget_explicit_budget_preserved() {
+        let mut params = make_sampling_params();
+        params.thinking_budget = Some(5000);
+        let model = make_model_record(Some("anthropic_budget"));
+        adapt_sampling_for_reasoning_models(&mut params, &model);
+        assert_eq!(params.thinking_budget, Some(5000));
+        assert!(params.reasoning_effort.is_none());
+        assert!(params.thinking.is_none());
+    }
+
+    #[test]
+    fn test_adapt_sampling_anthropic_budget_no_boost_no_budget() {
+        let mut params = make_sampling_params();
+        let model = make_model_record(Some("anthropic_budget"));
+        adapt_sampling_for_reasoning_models(&mut params, &model);
+        assert!(params.thinking_budget.is_none());
         assert!(params.reasoning_effort.is_none());
     }
 
     #[test]
-    fn test_adapt_sampling_anthropic_min_budget() {
+    fn test_adapt_sampling_anthropic_effort_boost_reasoning() {
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
-        params.max_new_tokens = 2048;
-        let model = make_model_record(Some("anthropic"));
+        let model = make_model_record(Some("anthropic_effort"));
         adapt_sampling_for_reasoning_models(&mut params, &model);
-        let thinking = params.thinking.unwrap();
-        assert_eq!(thinking["budget_tokens"], tokens().min_budget_tokens);
+        assert_eq!(params.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert!(params.thinking.is_none());
+        assert!(params.enable_thinking.is_none());
     }
 
     #[test]
-    fn test_adapt_sampling_anthropic_no_thinking_if_too_small() {
+    fn test_adapt_sampling_anthropic_effort_preserves_reasoning_effort() {
         let mut params = make_sampling_params();
-        params.boost_reasoning = true;
-        params.max_new_tokens = 512;
-        let model = make_model_record(Some("anthropic"));
+        params.reasoning_effort = Some(ReasoningEffort::High);
+        let model = make_model_record(Some("anthropic_effort"));
         adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert!(params.thinking.is_none());
+        assert_eq!(params.reasoning_effort, Some(ReasoningEffort::High));
     }
 
     #[test]

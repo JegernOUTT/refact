@@ -66,6 +66,7 @@ export const TaskDoneTool: React.FC<TaskDoneToolProps> = ({ toolCall }) => {
       isOpen={isOpen}
       onToggle={handleToggle}
       className={styles.taskDoneCard}
+      toolCall={toolCall}
     >
       {data && (
         <Box className={styles.content}>

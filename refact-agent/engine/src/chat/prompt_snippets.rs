@@ -1,3 +1,5 @@
+// todo agent: get rid of these, integrate directly to mode prompts
+
 pub const CD_INSTRUCTIONS: &str = r#"You might receive additional instructions that start with 💿. Those are not coming from the user, they are programmed to help you operate
 well and they are always in English. Answer in the language the user has asked the question."#;
 

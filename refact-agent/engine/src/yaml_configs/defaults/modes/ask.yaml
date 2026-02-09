@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: ask
 title: Ask
 description: Quick Q&A with web research capability
@@ -45,6 +45,7 @@ prompt: |
   %SYSTEM_INFO%
 
 tools:
+  - add_workspace_folder
   - web
   - web_search
   - deep_research

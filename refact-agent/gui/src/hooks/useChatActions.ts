@@ -4,13 +4,13 @@ import { useAppDispatch } from "./useAppDispatch";
 import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
 import {
   selectChatId,
+  selectThread,
   selectThreadImages,
   selectSendImmediately,
   selectMessages,
-  selectThreadMode,
 } from "../features/Chat/Thread/selectors";
-import { DEFAULT_MODE } from "../features/Chat/Thread/types";
 import { resetThreadImages, setSendImmediately } from "../features/Chat/Thread";
+import { buildThreadParamsPatch } from "../features/Chat/Thread/actions";
 import {
   sendUserMessage,
   retryFromIndex as retryFromIndexApi,
@@ -67,10 +67,11 @@ export function useChatActions() {
   const port = useAppSelector(selectLspPort);
   const apiKey = useAppSelector(selectApiKey);
   const chatId = useAppSelector(selectChatId);
+  const thread = useAppSelector(selectThread);
   const attachedImages = useAppSelector(selectThreadImages);
   const sendImmediately = useAppSelector(selectSendImmediately);
   const messages = useAppSelector(selectMessages);
-  const threadMode = useAppSelector(selectThreadMode);
+
 
   /**
    * Build message content with attached images if any.
@@ -116,9 +117,11 @@ export function useChatActions() {
           : content.length === 0;
       if (isEmpty) return;
 
-      if (messages.length === 0) {
-        const mode = threadMode ?? DEFAULT_MODE;
-        await updateChatParams(chatId, { mode }, port, apiKey ?? undefined);
+      if (messages.length === 0 && thread) {
+        const patch = buildThreadParamsPatch(thread, true);
+        if (Object.keys(patch).length > 0) {
+          await updateChatParams(chatId, patch, port, apiKey ?? undefined);
+        }
       }
 
       const shouldPrioritize = priority ?? sendImmediately;
@@ -140,7 +143,7 @@ export function useChatActions() {
       dispatch,
       sendImmediately,
       messages,
-      threadMode,
+      thread,
     ],
   );
 

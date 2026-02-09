@@ -21,8 +21,13 @@ export function useAutoExpandCollapse({
   const [animate, setAnimate] = useState(false);
   const userToggledRef = useRef(false);
   const prevStatusRef = useRef(status);
+  const finalizedRef = useRef(status !== "running");
 
   useEffect(() => {
+    if (finalizedRef.current) {
+      return;
+    }
+
     if (status === "running" && prevStatusRef.current !== "running") {
       if (!userToggledRef.current) {
         setAnimate(false);
@@ -31,11 +36,13 @@ export function useAutoExpandCollapse({
     }
 
     if (status !== "running" && prevStatusRef.current === "running") {
+      finalizedRef.current = true;
       const timer = setTimeout(() => {
         setAnimate(false);
         setIsOpen(false);
         userToggledRef.current = false;
       }, collapseDelayMs);
+      prevStatusRef.current = status;
       return () => clearTimeout(timer);
     }
 

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use serde_json::Value;
-use std::time::Instant;
 use serde::{Serialize, Deserialize};
 use crate::call_validation::{ChatMessage, ChatContent, ContextFile, SamplingParameters};
 use crate::nicer_logs::first_n_chars;
@@ -439,15 +438,9 @@ pub fn fix_and_limit_messages_history(
     messages: &Vec<ChatMessage>,
     sampling_parameters_to_patch: &mut SamplingParameters,
 ) -> Result<Vec<ChatMessage>, String> {
-    let start_time = Instant::now();
-
     let mut mutable_messages = messages.clone();
     replace_broken_tool_call_messages(&mut mutable_messages, sampling_parameters_to_patch, 16000);
     remove_invalid_tool_calls_and_tool_calls_results(&mut mutable_messages);
-
-    let total_duration = start_time.elapsed();
-    tracing::info!("History validation time: {:?}", total_duration);
-
     validate_chat_history(&mutable_messages)
 }
 

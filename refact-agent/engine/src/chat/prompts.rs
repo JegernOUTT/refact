@@ -475,11 +475,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         }
     }
 
-    tracing::info!(
-        "\n\nSYSTEM PROMPT MIXER chat_mode={:?}\n{:#?}",
-        chat_meta.chat_mode,
-        messages
-    );
+    tracing::info!("\n\nSYSTEM PROMPT MIXER chat_mode={:?}", chat_meta.chat_mode);
     messages
 }
 

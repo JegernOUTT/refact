@@ -314,7 +314,7 @@
             "supports_multimodality": true,
             "supports_clicks": true,
             "supports_agent": true,
-            "supports_reasoning": "anthropic",
+            "supports_reasoning": "anthropic_budget",
             "supports_boost_reasoning": true,
             "scratchpad": "PASSTHROUGH",
             "similar_models": [

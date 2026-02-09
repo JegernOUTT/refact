@@ -26,6 +26,176 @@ use super::config::tokens;
 
 
 
+pub async fn prepare_session_preamble_and_knowledge(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    session_arc: Arc<AMutex<ChatSession>>,
+) {
+    let (thread, chat_id, has_system, has_project_context) = {
+        let session = session_arc.lock().await;
+        let has_sys = session.messages.first().map(|m| m.role == "system").unwrap_or(false);
+        let has_proj = session.messages.iter().any(|m| {
+            m.role == "context_file"
+                && m.tool_call_id == crate::chat::system_context::PROJECT_CONTEXT_MARKER
+        });
+        (session.thread.clone(), session.chat_id.clone(), has_sys, has_proj)
+    };
+
+    let needs_preamble = !has_system || (!has_project_context && thread.include_project_info);
+
+    if needs_preamble {
+        let tools: Vec<crate::tools::tools_description::ToolDesc> =
+            crate::tools::tools_list::get_tools_for_mode(gcx.clone(), &thread.mode, Some(&thread.model))
+                .await
+                .into_iter()
+                .map(|tool| tool.tool_description())
+                .collect();
+        let tool_names: std::collections::HashSet<String> =
+            tools.iter().map(|t| t.name.clone()).collect();
+
+        let meta = ChatMeta {
+            chat_id: chat_id.clone(),
+            chat_mode: thread.mode.clone(),
+            chat_remote: false,
+            current_config_file: String::new(),
+            context_tokens_cap: thread.context_tokens_cap,
+            include_project_info: thread.include_project_info,
+            request_attempt_id: Uuid::new_v4().to_string(),
+        };
+
+        let messages = {
+            let session = session_arc.lock().await;
+            session.messages.clone()
+        };
+        let mut has_rag_results = crate::scratchpads::scratchpad_utils::HasRagResults::new();
+        let messages_with_preamble =
+            prepend_the_right_system_prompt_and_maybe_more_initial_messages(
+                gcx.clone(),
+                messages,
+                &meta,
+                &thread.task_meta,
+                &mut has_rag_results,
+                tool_names,
+                &thread.mode,
+                &thread.model,
+            )
+            .await;
+
+        let first_conv_idx = messages_with_preamble
+            .iter()
+            .position(|m| m.role == "user" || m.role == "assistant")
+            .unwrap_or(messages_with_preamble.len());
+
+        if first_conv_idx > 0 {
+            let mut session = session_arc.lock().await;
+
+            let mut system_insert_idx = 0;
+            let mut context_insert_idx = session
+                .messages
+                .iter()
+                .position(|m| m.role == "system")
+                .map(|i| i + 1)
+                .unwrap_or(0);
+
+            let mut inserted = 0;
+            for msg in messages_with_preamble.iter().take(first_conv_idx) {
+                if msg.role == "assistant" {
+                    continue;
+                }
+                if msg.role == "system"
+                    && session.messages.first().map(|m| m.role == "system").unwrap_or(false)
+                {
+                    continue;
+                }
+                if msg.role == "cd_instruction"
+                    && session.messages.iter().any(|m| m.role == "cd_instruction")
+                {
+                    continue;
+                }
+                if msg.role == "context_file"
+                    && session
+                        .messages
+                        .iter()
+                        .any(|m| m.role == "context_file" && m.tool_call_id == msg.tool_call_id)
+                {
+                    continue;
+                }
+                let insert_idx = if msg.role == "system" {
+                    let idx = system_insert_idx;
+                    system_insert_idx += 1;
+                    context_insert_idx += 1;
+                    idx
+                } else {
+                    let idx = context_insert_idx;
+                    context_insert_idx += 1;
+                    idx
+                };
+                session.insert_message(insert_idx, msg.clone());
+                inserted += 1;
+            }
+            if inserted > 0 {
+                info!("Saved {} preamble messages to session", inserted);
+            }
+        }
+    }
+
+    // Knowledge enrichment for agentic mode
+    let last_is_user = {
+        let session = session_arc.lock().await;
+        session.messages.last().map(|m| m.role == "user").unwrap_or(false)
+    };
+    if is_agentic_mode_id(&thread.mode) && last_is_user {
+        let mut messages = {
+            let session = session_arc.lock().await;
+            session.messages.clone()
+        };
+        let msg_count_before = messages.len();
+        enrich_messages_with_knowledge(gcx.clone(), &mut messages, Some(&chat_id)).await;
+        if messages.len() > msg_count_before {
+            let local_last_user_idx = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
+            if local_last_user_idx > 0 {
+                let enriched_msg = &messages[local_last_user_idx - 1];
+                if enriched_msg.role == "context_file" {
+                    let mut session = session_arc.lock().await;
+                    let session_last_user_idx = session
+                        .messages
+                        .iter()
+                        .rposition(|m| m.role == "user")
+                        .unwrap_or(0);
+                    session.insert_message(session_last_user_idx, enriched_msg.clone());
+                    info!(
+                        "Saved knowledge enrichment context_file to session at index {}",
+                        session_last_user_idx
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub fn save_rag_results_to_session(
+    session: &mut ChatSession,
+    rag_results: &[serde_json::Value],
+) {
+    let last_user_idx = session.messages.iter().rposition(|m| m.role == "user");
+    if let Some(insert_idx) = last_user_idx {
+        let existing_content: std::collections::HashSet<String> = session.messages.iter()
+            .filter(|m| m.role == "context_file" || m.role == "plain_text")
+            .map(|m| m.content.content_text_only())
+            .collect();
+        let mut offset = 0;
+        for rag_msg_json in rag_results {
+            if let Ok(msg) = serde_json::from_value::<ChatMessage>(rag_msg_json.clone()) {
+                if (msg.role == "context_file" || msg.role == "plain_text")
+                    && !existing_content.contains(&msg.content.content_text_only())
+                {
+                    session.insert_message(insert_idx + offset, msg);
+                    offset += 1;
+                }
+            }
+        }
+    }
+}
+
 fn tail_needs_assistant(messages: &[ChatMessage]) -> bool {
     let mut saw_toolish = false;
 
@@ -58,10 +228,9 @@ pub fn start_generation(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         loop {
-            let (messages, thread, chat_id) = {
+            let (thread, chat_id) = {
                 let session = session_arc.lock().await;
                 (
-                    session.messages.clone(),
                     session.thread.clone(),
                     session.chat_id.clone(),
                 )
@@ -84,7 +253,6 @@ pub fn start_generation(
             let generation_result = run_llm_generation(
                 gcx.clone(),
                 session_arc.clone(),
-                messages,
                 thread,
                 chat_id.clone(),
                 abort_flag.clone(),
@@ -163,13 +331,10 @@ pub fn start_generation(
 pub async fn run_llm_generation(
     gcx: Arc<ARwLock<GlobalContext>>,
     session_arc: Arc<AMutex<ChatSession>>,
-    messages: Vec<ChatMessage>,
     thread: ThreadParams,
     chat_id: String,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
-
-
     let tools: Vec<crate::tools::tools_description::ToolDesc> =
         crate::tools::tools_list::get_tools_for_mode(gcx.clone(), &thread.mode, Some(&thread.model))
             .await
@@ -182,7 +347,7 @@ pub async fn run_llm_generation(
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
         .await
         .map_err(|e| e.message)?;
-    let model_rec = crate::caps::resolve_chat_model(caps, &thread.model)?;
+    let model_rec = crate::caps::resolve_chat_model(caps.clone(), &thread.model)?;
 
     let model_n_ctx = if model_rec.base.n_ctx > 0 {
         model_rec.base.n_ctx
@@ -206,155 +371,25 @@ pub async fn run_llm_generation(
         request_attempt_id: Uuid::new_v4().to_string(),
     };
 
-    let mut messages = messages;
-
-    let (session_has_system, session_has_project_context) = {
+    let messages = {
         let session = session_arc.lock().await;
-        let has_system = session
-            .messages
-            .first()
-            .map(|m| m.role == "system")
-            .unwrap_or(false);
-        let has_project_ctx = session.messages.iter().any(|m| {
-            m.role == "context_file"
-                && m.tool_call_id == crate::chat::system_context::PROJECT_CONTEXT_MARKER
-        });
-        (has_system, has_project_ctx)
+        session.messages.clone()
     };
-
-    let needs_preamble =
-        !session_has_system || (!session_has_project_context && thread.include_project_info);
-
-    if needs_preamble {
-        let tool_names: std::collections::HashSet<String> =
-            tools.iter().map(|t| t.name.clone()).collect();
-        let mut has_rag_results = crate::scratchpads::scratchpad_utils::HasRagResults::new();
-        let messages_with_preamble =
-            prepend_the_right_system_prompt_and_maybe_more_initial_messages(
-                gcx.clone(),
-                messages.clone(),
-                &meta,
-                &thread.task_meta,
-                &mut has_rag_results,
-                tool_names,
-                &thread.mode,
-                &thread.model,
-            )
-            .await;
-
-        let first_conv_idx_in_new = messages_with_preamble
-            .iter()
-            .position(|m| m.role == "user" || m.role == "assistant")
-            .unwrap_or(messages_with_preamble.len());
-
-        if first_conv_idx_in_new > 0 {
-            let mut session = session_arc.lock().await;
-
-            let mut system_insert_idx = 0;
-            let mut context_insert_idx = session
-                .messages
-                .iter()
-                .position(|m| m.role == "system")
-                .map(|i| i + 1)
-                .unwrap_or(0);
-
-            let mut inserted = 0;
-            for msg in messages_with_preamble.iter().take(first_conv_idx_in_new) {
-                if msg.role == "assistant" {
-                    continue;
-                }
-                if msg.role == "system"
-                    && session
-                        .messages
-                        .first()
-                        .map(|m| m.role == "system")
-                        .unwrap_or(false)
-                {
-                    continue;
-                }
-                if msg.role == "cd_instruction"
-                    && session.messages.iter().any(|m| m.role == "cd_instruction")
-                {
-                    continue;
-                }
-                if msg.role == "context_file"
-                    && session
-                        .messages
-                        .iter()
-                        .any(|m| m.role == "context_file" && m.tool_call_id == msg.tool_call_id)
-                {
-                    continue;
-                }
-                let mut msg_with_id = msg.clone();
-                if msg_with_id.message_id.is_empty() {
-                    msg_with_id.message_id = Uuid::new_v4().to_string();
-                }
-                let insert_idx = if msg.role == "system" {
-                    let idx = system_insert_idx;
-                    system_insert_idx += 1;
-                    context_insert_idx += 1;
-                    idx
-                } else {
-                    let idx = context_insert_idx;
-                    context_insert_idx += 1;
-                    idx
-                };
-                session.messages.insert(insert_idx, msg_with_id.clone());
-                session.emit(ChatEvent::MessageAdded {
-                    message: msg_with_id,
-                    index: insert_idx,
-                });
-                inserted += 1;
-            }
-            if inserted > 0 {
-                session.increment_version();
-                info!("Saved {} preamble messages to session", inserted);
-            }
-        }
-        messages = messages_with_preamble;
-    }
-
-    let last_is_user = messages.last().map(|m| m.role == "user").unwrap_or(false);
-    if is_agentic_mode_id(&thread.mode) && last_is_user {
-        let msg_count_before = messages.len();
-        enrich_messages_with_knowledge(gcx.clone(), &mut messages, Some(&chat_id)).await;
-        if messages.len() > msg_count_before {
-            let mut session = session_arc.lock().await;
-            let session_last_user_idx = session
-                .messages
-                .iter()
-                .rposition(|m| m.role == "user")
-                .unwrap_or(0);
-            let local_last_user_idx = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
-            if local_last_user_idx > 0 {
-                let enriched_msg = &messages[local_last_user_idx - 1];
-                if enriched_msg.role == "context_file" {
-                    let mut msg_with_id = enriched_msg.clone();
-                    if msg_with_id.message_id.is_empty() {
-                        msg_with_id.message_id = Uuid::new_v4().to_string();
-                    }
-                    session
-                        .messages
-                        .insert(session_last_user_idx, msg_with_id.clone());
-                    session.emit(ChatEvent::MessageAdded {
-                        message: msg_with_id,
-                        index: session_last_user_idx,
-                    });
-                    session.increment_version();
-                    info!(
-                        "Saved knowledge enrichment context_file to session at index {}",
-                        session_last_user_idx
-                    );
-                }
-            }
-        }
-    }
-
+    let model_type_defaults = caps.user_defaults.defaults_for_model(
+        &model_rec.base.id,
+        &caps.defaults.chat_default_model,
+        &caps.defaults.chat_light_model,
+        &caps.defaults.chat_thinking_model,
+    );
     let mut parameters = SamplingParameters {
-        temperature: thread.temperature,
+        temperature: thread.temperature
+            .or(model_type_defaults.temperature),
         frequency_penalty: thread.frequency_penalty,
-        max_new_tokens: thread.max_tokens.unwrap_or(0),
-        boost_reasoning: thread.boost_reasoning,
+        max_new_tokens: thread.max_tokens
+            .or(model_type_defaults.max_new_tokens)
+            .unwrap_or(0),
+        boost_reasoning: thread.boost_reasoning
+            .unwrap_or_else(|| model_type_defaults.boost_reasoning.unwrap_or(false)),
         reasoning_effort: thread.reasoning_effort.as_ref().and_then(|s| {
             match s.as_str() {
                 "low" => Some(crate::call_validation::ReasoningEffort::Low),
@@ -362,8 +397,18 @@ pub async fn run_llm_generation(
                 "high" => Some(crate::call_validation::ReasoningEffort::High),
                 _ => None,
             }
+        }).or_else(|| {
+            model_type_defaults.reasoning_effort.as_ref().and_then(|s| {
+                match s.as_str() {
+                    "low" => Some(crate::call_validation::ReasoningEffort::Low),
+                    "medium" => Some(crate::call_validation::ReasoningEffort::Medium),
+                    "high" => Some(crate::call_validation::ReasoningEffort::High),
+                    _ => None,
+                }
+            })
         }),
-        thinking_budget: thread.thinking_budget,
+        thinking_budget: thread.thinking_budget
+            .or(model_type_defaults.thinking_budget),
         ..Default::default()
     };
 
@@ -408,18 +453,7 @@ pub async fn run_llm_generation(
     {
         let mut session = session_arc.lock().await;
         session.last_prompt_messages = prepared.limited_messages.clone();
-        let last_user_idx = session.messages.iter().rposition(|m| m.role == "user");
-        if let Some(insert_idx) = last_user_idx {
-            let mut offset = 0;
-            for rag_msg_json in &prepared.rag_results {
-                if let Ok(msg) = serde_json::from_value::<ChatMessage>(rag_msg_json.clone()) {
-                    if msg.role == "context_file" || msg.role == "plain_text" {
-                        session.insert_message(insert_idx + offset, msg);
-                        offset += 1;
-                    }
-                }
-            }
-        }
+        save_rag_results_to_session(&mut session, &prepared.rag_results);
     }
 
     run_streaming_generation(
@@ -466,6 +500,8 @@ async fn run_streaming_generation(
             abort_flag: Some(abort_flag.clone()),
             supports_tools: model_rec.supports_tools,
             supports_reasoning: model_rec.supports_reasoning.is_some(),
+            reasoning_type: model_rec.supports_reasoning.clone(),
+            supports_temperature: model_rec.supports_temperature,
         };
 
         enum CollectorEvent {
@@ -559,13 +595,10 @@ async fn run_streaming_generation(
         break result;
     };
 
-    // Extract model_id and usage before computing pricing to avoid holding lock during await
     let (model_id, usage_for_pricing) = {
         let session = session_arc.lock().await;
         (session.thread.model.clone(), session.draft_usage.clone())
     };
-
-    // Compute pricing outside the lock to avoid deadlocks
     let metering_usd = if let Some(ref usage) = usage_for_pricing {
         if let Some(pricing) = get_model_pricing(&gcx, &model_id).await {
             crate::providers::pricing::compute_cost(usage, &pricing)
@@ -578,7 +611,6 @@ async fn run_streaming_generation(
 
     {
         let mut session = session_arc.lock().await;
-
         if let Some(ref mut draft) = session.draft_message {
             draft.content = ChatContent::SimpleText(result.content);
 

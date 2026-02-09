@@ -376,12 +376,125 @@ fn find_task_done_report(messages: &[ChatMessage]) -> Option<String> {
     for msg in messages.iter().rev() {
         if msg.role == "tool" && msg.tool_call_id == call_id {
             if let ChatContent::SimpleText(text) = &msg.content {
-                return Some(text.clone());
+                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(text) {
+                    let summary = obj.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                    let report = obj.get("report").and_then(|v| v.as_str()).unwrap_or("");
+                    let files_changed: Vec<&str> = obj.get("files_changed")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                        .unwrap_or_default();
+
+                    let mut result = String::new();
+                    if !summary.is_empty() {
+                        result.push_str(&format!("**{}**\n\n", summary));
+                    }
+                    if !report.is_empty() {
+                        result.push_str(report);
+                    }
+                    if !files_changed.is_empty() {
+                        result.push_str("\n\n**Files changed:**\n");
+                        for f in &files_changed {
+                            result.push_str(&format!("- `{}`\n", f));
+                        }
+                    }
+                    if !result.is_empty() {
+                        return Some(result);
+                    }
+                }
             }
         }
     }
 
     None
+}
+
+fn resolve_tool_name_for_output(metadata: &ConversationMetadata, tool_call_id: &str) -> String {
+    if tool_call_id.is_empty() {
+        return "tool".to_string();
+    }
+    for (_, msg) in &metadata.annotated_messages {
+        if msg.role == "assistant" {
+            if let Some(tool_calls) = &msg.tool_calls {
+                for tc in tool_calls {
+                    if tc.id == tool_call_id {
+                        return tc.function.name.clone();
+                    }
+                }
+            }
+        }
+    }
+    "tool".to_string()
+}
+
+fn format_conversation_entry(msg: &ChatMessage, metadata: &ConversationMetadata) -> String {
+    match msg.role.as_str() {
+        "user" => {
+            let text = extract_text_content(&msg.content);
+            if text.trim().is_empty() {
+                return String::new();
+            }
+            format!("### 👤 User\n\n{}", text.trim())
+        }
+        "assistant" => {
+            let text = extract_text_content(&msg.content);
+            let tool_calls_md = if let Some(tool_calls) = &msg.tool_calls {
+                if !tool_calls.is_empty() {
+                    let calls: Vec<String> = tool_calls.iter()
+                        .map(|tc| {
+                            let args_preview = truncate_utf8(&tc.function.arguments, 120);
+                            format!("- `{}({})`", tc.function.name, args_preview)
+                        })
+                        .collect();
+                    format!("\n\n**Tool calls:**\n{}", calls.join("\n"))
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            if text.trim().is_empty() && tool_calls_md.is_empty() {
+                return String::new();
+            }
+            let mut result = "### 🤖 Assistant\n\n".to_string();
+            if !text.trim().is_empty() {
+                result.push_str(text.trim());
+            }
+            result.push_str(&tool_calls_md);
+            result
+        }
+        "tool" => {
+            let text = extract_text_content(&msg.content);
+            if text.trim().is_empty() {
+                return String::new();
+            }
+            let tool_name = resolve_tool_name_for_output(metadata, &msg.tool_call_id);
+            let truncated = truncate_utf8(text.trim(), 10000);
+            format!("### 🔧 Tool: `{}`\n\n```\n{}\n```", tool_name, truncated)
+        }
+        "system" => {
+            let text = extract_text_content(&msg.content);
+            if text.trim().is_empty() {
+                return String::new();
+            }
+            format!("### ⚙️ System\n\n{}", text.trim())
+        }
+        _ => String::new(),
+    }
+}
+
+fn extract_text_content(content: &ChatContent) -> String {
+    match content {
+        ChatContent::SimpleText(text) => text.clone(),
+        ChatContent::Multimodal(elements) => {
+            elements.iter()
+                .filter_map(|el| {
+                    if el.is_text() { Some(el.m_content.clone()) } else { None }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        ChatContent::ContextFiles(_) => String::new(),
+    }
 }
 
 pub async fn assemble_new_chat(
@@ -401,6 +514,8 @@ pub async fn assemble_new_chat(
         .map(|s| s.as_str())
         .collect();
 
+    // 1. All files batched in a single context_file message
+    let mut file_contents: Vec<ContextFile> = Vec::new();
     for path in &decisions.files_to_open {
         if !allowed_files.contains(path.as_str()) {
             tracing::warn!("Skipping file {} - not in conversation allowlist", path);
@@ -408,14 +523,28 @@ pub async fn assemble_new_chat(
         }
         match read_file_content_safe(gcx.clone(), path, &workspace_dirs).await {
             Ok(content) => {
-                new_messages.push(make_context_file_message(path, &content));
+                file_contents.push(ContextFile {
+                    file_name: path.clone(),
+                    file_content: content.clone(),
+                    line1: 1,
+                    line2: content.lines().count(),
+                    ..Default::default()
+                });
             }
             Err(e) => {
                 tracing::warn!("Failed to read file {}: {}", path, e);
             }
         }
     }
+    if !file_contents.is_empty() {
+        new_messages.push(ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(file_contents),
+            ..Default::default()
+        });
+    }
 
+    // 2. All memories batched in a single context_file message
     let mut memory_contents: Vec<ContextFile> = Vec::new();
     for memory_path in &decisions.memories_to_include {
         if !allowed_memories.contains(memory_path.as_str()) {
@@ -445,59 +574,34 @@ pub async fn assemble_new_chat(
         });
     }
 
-    let mut tool_output_contents: Vec<ContextFile> = Vec::new();
-    for (idx, msg_id_ref) in decisions.tool_outputs_to_include.iter().enumerate() {
-        let id = msg_id_ref.trim_start_matches("MSG_ID:");
-        if let Ok(msg_idx) = id.parse::<usize>() {
-            if let Some((_, msg)) = metadata.annotated_messages.get(msg_idx) {
-                if msg.role == "tool" {
-                    let tool_name = if msg.tool_call_id.is_empty() {
-                        "tool"
-                    } else {
-                        msg.tool_call_id.split('_').next().unwrap_or("tool")
-                    };
-                    let content_text = match &msg.content {
-                        ChatContent::SimpleText(text) => text.clone(),
-                        _ => continue,
-                    };
-                    tool_output_contents.push(ContextFile {
-                        file_name: format!("tool_output_{}_{}.txt", tool_name, idx),
-                        file_content: content_text,
-                        line1: 1,
-                        line2: 1,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-    }
-    if !tool_output_contents.is_empty() {
-        new_messages.push(ChatMessage {
-            role: "context_file".to_string(),
-            content: ChatContent::ContextFiles(tool_output_contents),
-            ..Default::default()
-        });
-    }
-
-    // Parse and sort message indices to preserve original conversation order
-    let mut preserved_indices: Vec<usize> = decisions.messages_to_preserve
+    // 3. "Previous Conversation" message: preserved messages + tool outputs interleaved in order, summary at end
+    let mut preserved_indices: HashSet<usize> = decisions.messages_to_preserve
         .iter()
         .filter_map(|msg_id_ref| {
             let id = msg_id_ref.trim_start_matches("MSG_ID:");
             id.parse::<usize>().ok()
         })
         .collect();
-    preserved_indices.sort();
-    preserved_indices.dedup();
+    let tool_output_indices: HashSet<usize> = decisions.tool_outputs_to_include
+        .iter()
+        .filter_map(|msg_id_ref| {
+            let id = msg_id_ref.trim_start_matches("MSG_ID:");
+            id.parse::<usize>().ok()
+        })
+        .collect();
+    preserved_indices.extend(&tool_output_indices);
 
-    let mut preserved_content = String::new();
+    let mut all_indices: Vec<usize> = preserved_indices.into_iter().collect();
+    all_indices.sort();
+    all_indices.dedup();
+
+    let mut conversation_parts: Vec<String> = Vec::new();
     let mut preserved_images: Vec<crate::scratchpads::multimodality::MultimodalElement> = Vec::new();
-    for idx in preserved_indices {
-        if let Some((_, msg)) = metadata.annotated_messages.get(idx) {
-            let formatted = format_message_as_markdown(msg);
+    for idx in &all_indices {
+        if let Some((_, msg)) = metadata.annotated_messages.get(*idx) {
+            let formatted = format_conversation_entry(msg, &metadata);
             if !formatted.is_empty() {
-                preserved_content.push_str(&formatted);
-                preserved_content.push_str("\n\n");
+                conversation_parts.push(formatted);
             }
             if let ChatContent::Multimodal(elements) = &msg.content {
                 for el in elements {
@@ -509,111 +613,82 @@ pub async fn assemble_new_chat(
         }
     }
 
+    let has_conversation = !conversation_parts.is_empty() || !decisions.summary.is_empty();
+    if has_conversation {
+        let mut conversation_text = String::new();
+        if !conversation_parts.is_empty() {
+            conversation_text.push_str("## Previous Conversation\n\n");
+            conversation_text.push_str(&conversation_parts.join("\n\n---\n\n"));
+        }
+        if !decisions.summary.is_empty() {
+            if !conversation_text.is_empty() {
+                conversation_text.push_str("\n\n---\n\n");
+            }
+            conversation_text.push_str(&format!("## Summary\n\n{}", decisions.summary));
+        }
+
+        if preserved_images.is_empty() {
+            new_messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::SimpleText(conversation_text),
+                ..Default::default()
+            });
+        } else {
+            match crate::scratchpads::multimodality::MultimodalElement::new("text".to_string(), conversation_text.clone()) {
+                Ok(text_element) => {
+                    let mut elements = vec![text_element];
+                    elements.extend(preserved_images);
+                    new_messages.push(ChatMessage {
+                        role: "user".to_string(),
+                        content: ChatContent::Multimodal(elements),
+                        ..Default::default()
+                    });
+                }
+                Err(_) => {
+                    new_messages.push(ChatMessage {
+                        role: "user".to_string(),
+                        content: ChatContent::SimpleText(conversation_text),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
+    // 4. Task done report as a separate message (if present)
     let task_done_report = find_task_done_report(original_messages);
-
-    let mut handoff_parts: Vec<String> = Vec::new();
-
     if let Some(report) = &task_done_report {
-        handoff_parts.push(format!("## Task Completion Report\n\n{}", report));
+        new_messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText(format!("## Task Completion Report\n\n{}", report)),
+            ..Default::default()
+        });
     }
 
-    if !decisions.summary.is_empty() {
-        handoff_parts.push(format!("## Summary\n\n{}", decisions.summary));
-    }
-
-    if !preserved_content.is_empty() {
-        handoff_parts.push(format!("## Previous Conversation\n\n{}", preserved_content.trim()));
-    }
-
-    if !decisions.pending_tasks.is_empty() {
+    // 5. Handoff message (with pending tasks only if no task_done report)
+    let mut handoff_text = String::new();
+    if task_done_report.is_none() && !decisions.pending_tasks.is_empty() {
         let tasks = decisions.pending_tasks.iter()
             .map(|t| format!("- {}", t))
             .collect::<Vec<_>>()
             .join("\n");
-        handoff_parts.push(format!("## Pending Tasks\n\n{}", tasks));
+        handoff_text.push_str(&format!("## Pending Tasks\n\n{}\n\n---\n\n", tasks));
     }
-
     if !decisions.handoff_message.is_empty() {
-        handoff_parts.push(format!("---\n\n{}", decisions.handoff_message));
+        handoff_text.push_str(&decisions.handoff_message);
     }
-
-    let handoff_text = handoff_parts.join("\n\n");
-
-    if preserved_images.is_empty() {
+    if !handoff_text.is_empty() {
         new_messages.push(ChatMessage {
             role: "user".to_string(),
-            content: ChatContent::SimpleText(handoff_text.clone()),
+            content: ChatContent::SimpleText(handoff_text),
             ..Default::default()
         });
-    } else {
-        match crate::scratchpads::multimodality::MultimodalElement::new("text".to_string(), handoff_text.clone()) {
-            Ok(text_element) => {
-                let mut elements = vec![text_element];
-                elements.extend(preserved_images);
-                new_messages.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: ChatContent::Multimodal(elements),
-                    ..Default::default()
-                });
-            }
-            Err(_) => {
-                new_messages.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: ChatContent::SimpleText(handoff_text),
-                    ..Default::default()
-                });
-            }
-        }
     }
 
     Ok(new_messages)
 }
 
-fn format_message_as_markdown(msg: &ChatMessage) -> String {
-    let role_label = match msg.role.as_str() {
-        "user" => "**User**",
-        "assistant" => "**Assistant**",
-        "tool" => "**Tool Result**",
-        "system" => "**System**",
-        _ => return String::new(), // Skip context_file, diff, etc.
-    };
 
-    let content_text = match &msg.content {
-        ChatContent::SimpleText(text) => text.clone(),
-        ChatContent::Multimodal(elements) => {
-            elements.iter()
-                .filter_map(|el| {
-                    if el.is_text() {
-                        Some(el.m_content.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        ChatContent::ContextFiles(_) => return String::new(),
-    };
-
-    if content_text.trim().is_empty() {
-        return String::new();
-    }
-
-    let tool_info = if let Some(tool_calls) = &msg.tool_calls {
-        if !tool_calls.is_empty() {
-            let calls: Vec<String> = tool_calls.iter()
-                .map(|tc| format!("`{}`", tc.function.name))
-                .collect();
-            format!(" (called: {})", calls.join(", "))
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-
-    format!("{}{}:\n> {}", role_label, tool_info, content_text.lines().collect::<Vec<_>>().join("\n> "))
-}
 
 async fn read_file_content_safe(
     _gcx: Arc<ARwLock<GlobalContext>>,
@@ -666,19 +741,7 @@ async fn read_file_content_safe(
         .map_err(|e| format!("Failed to read file {}: {}", canonical_path.display(), e))
 }
 
-fn make_context_file_message(path: &str, content: &str) -> ChatMessage {
-    ChatMessage {
-        role: "context_file".to_string(),
-        content: ChatContent::ContextFiles(vec![ContextFile {
-            file_name: path.to_string(),
-            file_content: content.to_string(),
-            line1: 1,
-            line2: content.lines().count(),
-            ..Default::default()
-        }]),
-        ..Default::default()
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -988,20 +1051,22 @@ index 1234567..abcdefg 100644
     }
 
     #[test]
-    fn test_format_message_as_markdown_user() {
+    fn test_format_conversation_entry_user() {
+        let metadata = ConversationMetadata::default();
         let msg = ChatMessage {
             role: "user".to_string(),
             content: ChatContent::SimpleText("Please help me with this code".to_string()),
             ..Default::default()
         };
-        let result = format_message_as_markdown(&msg);
-        assert!(result.contains("**User**:"));
-        assert!(result.contains("> Please help me with this code"));
+        let result = format_conversation_entry(&msg, &metadata);
+        assert!(result.contains("### 👤 User"));
+        assert!(result.contains("Please help me with this code"));
     }
 
     #[test]
-    fn test_format_message_as_markdown_assistant_with_tools() {
+    fn test_format_conversation_entry_assistant_with_tools() {
         use crate::call_validation::{ChatToolCall, ChatToolFunction};
+        let metadata = ConversationMetadata::default();
         let msg = ChatMessage {
             role: "assistant".to_string(),
             content: ChatContent::SimpleText("I'll search for the file.".to_string()),
@@ -1016,32 +1081,56 @@ index 1234567..abcdefg 100644
             }]),
             ..Default::default()
         };
-        let result = format_message_as_markdown(&msg);
-        assert!(result.contains("**Assistant**"));
-        assert!(result.contains("`search`"));
-        assert!(result.contains("> I'll search for the file."));
+        let result = format_conversation_entry(&msg, &metadata);
+        assert!(result.contains("### 🤖 Assistant"));
+        assert!(result.contains("`search({})`"));
+        assert!(result.contains("I'll search for the file."));
     }
 
     #[test]
-    fn test_format_message_as_markdown_skips_context_file() {
+    fn test_format_conversation_entry_skips_context_file() {
+        let metadata = ConversationMetadata::default();
         let msg = ChatMessage {
             role: "context_file".to_string(),
             content: ChatContent::SimpleText("file content".to_string()),
             ..Default::default()
         };
-        let result = format_message_as_markdown(&msg);
+        let result = format_conversation_entry(&msg, &metadata);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_format_message_as_markdown_multiline() {
-        let msg = ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText("Line 1\nLine 2\nLine 3".to_string()),
+    fn test_format_conversation_entry_tool_resolves_name() {
+        use crate::call_validation::{ChatToolCall, ChatToolFunction};
+        let metadata = ConversationMetadata {
+            annotated_messages: vec![
+                ("MSG_ID:0".to_string(), ChatMessage {
+                    role: "assistant".to_string(),
+                    content: ChatContent::SimpleText("Let me search.".to_string()),
+                    tool_calls: Some(vec![ChatToolCall {
+                        id: "call_abc".to_string(),
+                        index: None,
+                        function: ChatToolFunction {
+                            name: "grep".to_string(),
+                            arguments: r#"{"query":"test"}"#.to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                    }]),
+                    ..Default::default()
+                }),
+                ("MSG_ID:1".to_string(), ChatMessage {
+                    role: "tool".to_string(),
+                    tool_call_id: "call_abc".to_string(),
+                    content: ChatContent::SimpleText("Found 3 results".to_string()),
+                    ..Default::default()
+                }),
+            ],
             ..Default::default()
         };
-        let result = format_message_as_markdown(&msg);
-        assert!(result.contains("> Line 1\n> Line 2\n> Line 3"));
+        let tool_msg = &metadata.annotated_messages[1].1;
+        let result = format_conversation_entry(tool_msg, &metadata);
+        assert!(result.contains("### 🔧 Tool: `grep`"));
+        assert!(result.contains("Found 3 results"));
     }
 
     #[test]
@@ -1081,7 +1170,7 @@ MSG_ID:2
                     index: None,
                     function: ChatToolFunction {
                         name: "task_done".to_string(),
-                        arguments: r#"{"report": "Task completed", "summary": "Done"}"#.to_string(),
+                        arguments: r#"{"report": "Detailed report here", "summary": "All done"}"#.to_string(),
                     },
                     tool_type: "function".to_string(),
                 }]),
@@ -1090,14 +1179,19 @@ MSG_ID:2
             ChatMessage {
                 role: "tool".to_string(),
                 tool_call_id: "call_123".to_string(),
-                content: ChatContent::SimpleText("## Task Report\n\nEverything is done.".to_string()),
+                content: ChatContent::SimpleText(
+                    r#"{"type":"task_done","summary":"All done","report":"Detailed report here","files_changed":["src/main.rs"]}"#.to_string()
+                ),
                 ..Default::default()
             },
         ];
 
         let report = find_task_done_report(&messages);
         assert!(report.is_some());
-        assert!(report.unwrap().contains("Task Report"));
+        let report_text = report.unwrap();
+        assert!(report_text.contains("**All done**"));
+        assert!(report_text.contains("Detailed report here"));
+        assert!(report_text.contains("`src/main.rs`"));
     }
 
     #[test]

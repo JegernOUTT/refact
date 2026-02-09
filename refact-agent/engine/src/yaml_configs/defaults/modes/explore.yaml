@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -65,6 +65,7 @@ prompt: |
 tools:
   - tree
   - cat
+  - add_workspace_folder
   - search_pattern
   - search_symbol_definition
   - search_semantic

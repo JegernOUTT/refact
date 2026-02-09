@@ -327,6 +327,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
+        toolCall={toolCall}
       >
         <Box className={styles.content}>
           <Flex direction="column" gap="3">
@@ -369,6 +370,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         status="success"
         isOpen={isOpen}
         onToggle={handleToggle}
+        toolCall={toolCall}
       >
         <Box className={styles.content}>
           <Flex direction="column" gap="2">
@@ -402,6 +404,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
       status="success"
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {data && (
         <Box className={styles.content}>

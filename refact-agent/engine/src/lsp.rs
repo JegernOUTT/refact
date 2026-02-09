@@ -219,27 +219,44 @@ impl LspBackend {
 impl LanguageServer for LspBackend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         info!("LSP client_info {:?}", params.client_info);
-        let mut folders: Vec<PathBuf> = vec![];
-        if let Some(nonzero_folders) = params.workspace_folders {
-            folders = nonzero_folders
+
+        let mut folders: Vec<PathBuf> = Vec::new();
+
+        if let Some(workspace_folders) = &params.workspace_folders {
+            folders = workspace_folders
                 .iter()
                 .map(|x| {
-                    let path = crate::files_correction::canonical_path(
-                        &x.uri
+                    crate::files_correction::canonical_path(
+                        x.uri
                             .to_file_path()
                             .unwrap_or_default()
                             .display()
                             .to_string(),
-                    );
-                    path
+                    )
                 })
                 .collect();
+        }
+
+        if folders.is_empty() {
+            if let Some(root_uri) = &params.root_uri {
+                if let Ok(root_path) = root_uri.to_file_path() {
+                    folders.push(crate::files_correction::canonical_path(
+                        root_path.display().to_string(),
+                    ));
+                }
+            } else {
+                #[allow(deprecated)]
+                if let Some(root_path) = &params.root_path {
+                    folders.push(crate::files_correction::canonical_path(root_path.clone()));
+                }
+            }
         }
         {
             let gcx_locked = self.gcx.write().await;
             *gcx_locked.documents_state.workspace_folders.lock().unwrap() = folders.clone();
             info!("LSP workspace_folders {:?}", folders);
         }
+
         let gcx_clone = self.gcx.clone();
         tokio::spawn(async move {
             files_in_workspace::on_workspaces_init(gcx_clone).await;

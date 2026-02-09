@@ -14,6 +14,8 @@ pub struct XAIProvider {
     pub api_key: String,
     pub enabled: bool,
     #[serde(default)]
+    pub use_responses_api: bool,
+    #[serde(default)]
     pub enabled_models: Vec<String>,
     #[serde(default)]
     pub custom_models: HashMap<String, CustomModelConfig>,
@@ -59,6 +61,11 @@ fields:
     smartlinks:
       - sl_label: "Get API Key"
         sl_goto: "https://console.x.ai/"
+  use_responses_api:
+    f_type: boolean
+    f_desc: "Use the Responses API instead of Chat Completions"
+    f_label: "Use Responses API"
+    f_default: false
 description: |
   xAI Grok models.
 available:
@@ -76,6 +83,9 @@ available:
         if let Some(enabled) = yaml.get("enabled").and_then(|v| v.as_bool()) {
             self.enabled = enabled;
         }
+        if let Some(use_responses) = yaml.get("use_responses_api").and_then(|v| v.as_bool()) {
+            self.use_responses_api = use_responses;
+        }
         parse_enabled_models(&yaml, &mut self.enabled_models);
         parse_custom_models(&yaml, &mut self.custom_models);
         Ok(())
@@ -85,6 +95,7 @@ available:
         json!({
             "api_key": if self.api_key.is_empty() { "" } else { "***" },
             "enabled": self.enabled,
+            "use_responses_api": self.use_responses_api,
             "enabled_models": self.enabled_models,
             "custom_models": self.custom_models
         })
@@ -93,13 +104,19 @@ available:
     fn build_runtime(&self) -> Result<ProviderRuntime, String> {
         let api_key = resolve_env_var(&self.api_key, "", "xai api_key");
 
+        let (wire_format, chat_endpoint) = if self.use_responses_api {
+            (WireFormat::OpenaiResponses, "https://api.x.ai/v1/responses".to_string())
+        } else {
+            (WireFormat::OpenaiChatCompletions, "https://api.x.ai/v1/chat/completions".to_string())
+        };
+
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
             enabled: self.enabled && !api_key.is_empty(),
             readonly: false,
-            wire_format: self.default_wire_format(),
-            chat_endpoint: "https://api.x.ai/v1/chat/completions".to_string(),
+            wire_format,
+            chat_endpoint,
             completion_endpoint: String::new(),
             embedding_endpoint: String::new(),
             api_key,

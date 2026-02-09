@@ -119,6 +119,7 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
+      toolCall={toolCall}
     >
       {content && (
         <Box className={styles.resultContent}>

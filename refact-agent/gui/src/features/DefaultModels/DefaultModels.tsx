@@ -29,7 +29,7 @@ import type { Config } from "../Config/configSlice";
 
 import styles from "./DefaultModels.module.css";
 
-export type DefaultModelsProps = {
+type DefaultModelsProps = {
   backFromDefaultModels: () => void;
   host: Config["host"];
   tabbed: Config["tabbed"];

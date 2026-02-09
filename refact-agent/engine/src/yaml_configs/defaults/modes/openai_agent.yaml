@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: openai_agent
 title: OpenAI Agent
 description: Optimized for GPT-4o/GPT-5 models using OpenAI Codex-style agentic workflow

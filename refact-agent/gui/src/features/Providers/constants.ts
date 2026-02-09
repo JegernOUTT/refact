@@ -2,13 +2,15 @@ export const BEAUTIFUL_PROVIDER_NAMES: Record<string, string> = {
   refact: "Refact Cloud",
   refact_self_hosted: "Refact Self-Hosted",
   openai: "OpenAI",
+  openai_responses: "OpenAI (Responses API)",
   openrouter: "OpenRouter",
-  groq: "Groq", // not sure about this one
+  groq: "Groq",
   anthropic: "Anthropic",
   deepseek: "DeepSeek",
   google_gemini: "Google Gemini",
   ollama: "Ollama",
   lmstudio: "LM Studio",
   xai: "xAI",
+  xai_responses: "xAI (Responses API)",
   custom: "Custom Provider",
 };

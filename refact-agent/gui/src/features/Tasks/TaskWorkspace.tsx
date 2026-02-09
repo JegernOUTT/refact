@@ -285,7 +285,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
         </Text>
         <ModelSelector
           value={defaultAgentModel}
-          onValueChange={onModelChange}
+          onValueChange={onModelChange ?? (() => {})}
           showLabel={false}
         />
       </Flex>
