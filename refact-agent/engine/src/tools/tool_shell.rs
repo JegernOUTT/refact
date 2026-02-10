@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::process::Stdio;
 use serde::Deserialize;
 use serde::Serialize;
@@ -137,6 +138,7 @@ pub struct ShellStreamResult {
     pub stderr: String,
     pub exit_code: i32,
     pub duration_secs: f64,
+    pub interrupted: bool,
 }
 
 #[async_trait]
@@ -151,9 +153,9 @@ impl Tool for ToolShell {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, subchat_tx) = {
+        let (gcx, subchat_tx, abort_flag) = {
             let ccx_lock = ccx.lock().await;
-            (ccx_lock.global_context.clone(), ccx_lock.subchat_tx.clone())
+            (ccx_lock.global_context.clone(), ccx_lock.subchat_tx.clone(), ccx_lock.abort_flag.clone())
         };
         let (command, workdir_maybe, custom_filter, timeout_override) =
             parse_args_with_filter(gcx.clone(), args, &self.cfg.output_filter).await?;
@@ -178,6 +180,7 @@ impl Tool for ToolShell {
             gcx.clone(),
             &subchat_tx,
             tool_call_id,
+            abort_flag,
         )
         .await?;
 
@@ -186,16 +189,24 @@ impl Tool for ToolShell {
 
         let mut out =
             crate::integrations::integr_cmdline::format_output(&filtered_stdout, &filtered_stderr);
-        out.push_str(&format!(
-            "The command was running {:.3}s, finished with exit code {}\n",
-            result.duration_secs, result.exit_code
-        ));
+        if result.interrupted {
+            out.push_str(&format!(
+                "⚠️ The command was interrupted by user after {:.3}s (process killed). Output above may be incomplete.\n",
+                result.duration_secs
+            ));
+        } else {
+            out.push_str(&format!(
+                "The command was running {:.3}s, finished with exit code {}\n",
+                result.duration_secs, result.exit_code
+            ));
+        }
 
         let msg = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(out),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            tool_failed: if result.interrupted { Some(true) } else { None },
             output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         })];
@@ -306,13 +317,18 @@ fn spawn_output_streaming_task(
         let mut last_update = tokio::time::Instant::now();
         let update_interval = tokio::time::Duration::from_secs(2);
         let mut stdout_line_count: usize = 0;
+        let mut stdout_done = false;
+        let mut stderr_done = false;
 
         loop {
+            if stdout_done && stderr_done {
+                break;
+            }
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     break;
                 }
-                result = stdout_reader.next_line() => {
+                result = stdout_reader.next_line(), if !stdout_done => {
                     match result {
                         Ok(Some(line)) => {
                             let stripped = strip_ansi_escapes::strip(line.as_bytes());
@@ -331,14 +347,14 @@ fn spawn_output_streaming_task(
                                 last_update = tokio::time::Instant::now();
                             }
                         }
-                        Ok(None) => break,
+                        Ok(None) => { stdout_done = true; }
                         Err(e) => {
                             tracing::warn!("Error reading stdout: {}", e);
-                            break;
+                            stdout_done = true;
                         }
                     }
                 }
-                result = stderr_reader.next_line() => {
+                result = stderr_reader.next_line(), if !stderr_done => {
                     match result {
                         Ok(Some(line)) => {
                             let stripped = strip_ansi_escapes::strip(line.as_bytes());
@@ -355,15 +371,36 @@ fn spawn_output_streaming_task(
                                 );
                             }
                         }
-                        Ok(None) => {}
+                        Ok(None) => { stderr_done = true; }
                         Err(e) => {
                             tracing::warn!("Error reading stderr: {}", e);
+                            stderr_done = true;
                         }
                     }
                 }
             }
         }
     })
+}
+
+/// Kill a child process and reap it to prevent zombies.
+/// On Unix, kills the entire process group.
+async fn kill_and_reap(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // Kill the entire process group
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill().await;
+    // Reap the child to prevent zombie processes
+    let _ = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        child.wait()
+    ).await;
 }
 
 pub async fn execute_shell_command_with_streaming(
@@ -374,6 +411,7 @@ pub async fn execute_shell_command_with_streaming(
     gcx: Arc<ARwLock<GlobalContext>>,
     subchat_tx: &Arc<AMutex<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>>,
     tool_call_id: &str,
+    abort_flag: Arc<AtomicBool>,
 ) -> Result<ShellStreamResult, String> {
     let shell = if cfg!(target_os = "windows") {
         "powershell.exe"
@@ -402,6 +440,15 @@ pub async fn execute_shell_command_with_streaming(
     cmd.arg(shell_arg).arg(command);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+
+    // On Unix, spawn in its own process group so we can kill the entire tree
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
 
     tracing::info!(
         "SHELL: running command directory {:?}\n{:?}",
@@ -437,56 +484,107 @@ pub async fn execute_shell_command_with_streaming(
     );
 
     let timeout_duration = tokio::time::Duration::from_secs(timeout);
-    let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
+    let abort_flag_clone = abort_flag.clone();
 
-    let exit_status = match wait_result {
-        Ok(Ok(status)) => {
+    // Wait for child, with timeout and abort polling
+    let wait_result = tokio::select! {
+        result = tokio::time::timeout(timeout_duration, child.wait()) => {
+            match result {
+                Ok(Ok(status)) => Ok(Some(status)),
+                Ok(Err(e)) => Err(format!("Failed to wait for command: {}", e)),
+                Err(_) => Ok(None), // timeout
+            }
+        }
+        _ = async {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                if abort_flag_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        } => {
+            Ok(None) // abort
+        }
+    };
+
+    let was_aborted = abort_flag.load(Ordering::Relaxed);
+    let _was_timeout = matches!(&wait_result, Ok(None)) && !was_aborted;
+
+    match wait_result {
+        Ok(Some(status)) => {
+            // Normal completion
             let _ = streaming_handle.await;
-            status
+            let duration = t0.elapsed();
+            tracing::info!("SHELL: /finished in {:.3}s", duration.as_secs_f64());
+
+            let (stdout_str, stderr_str) = {
+                let mut collector = output_collector.lock().await;
+                (collector.stdout.take_result(), collector.stderr.take_result())
+            };
+            let exit_code = status.code().unwrap_or_default();
+
+            send_streaming_update(
+                subchat_tx,
+                tool_call_id,
+                &format!("✅ Finished (exit code: {}, {:.1}s)", exit_code, duration.as_secs_f64()),
+            );
+
+            Ok(ShellStreamResult {
+                stdout: stdout_str,
+                stderr: stderr_str,
+                exit_code,
+                duration_secs: duration.as_secs_f64(),
+                interrupted: false,
+            })
         }
-        Ok(Err(e)) => {
+        Ok(None) if was_aborted => {
+            // User abort — kill, drain remaining output, return partial results
+            kill_and_reap(&mut child).await;
+            // Give streaming task time to drain remaining buffered pipe data
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             cancel_token.cancel();
-            return Err(format!("Failed to wait for command: {}", e));
+            let _ = streaming_handle.await;
+
+            let duration = t0.elapsed();
+            tracing::info!("SHELL: /interrupted by user after {:.3}s", duration.as_secs_f64());
+
+            let (stdout_str, stderr_str) = {
+                let mut collector = output_collector.lock().await;
+                (collector.stdout.take_result(), collector.stderr.take_result())
+            };
+
+            send_streaming_update(
+                subchat_tx,
+                tool_call_id,
+                &format!("⚠️ Interrupted by user ({:.1}s)", duration.as_secs_f64()),
+            );
+
+            Ok(ShellStreamResult {
+                stdout: stdout_str,
+                stderr: stderr_str,
+                exit_code: -1,
+                duration_secs: duration.as_secs_f64(),
+                interrupted: true,
+            })
         }
-        Err(_) => {
+        Ok(None) => {
+            // Timeout
+            kill_and_reap(&mut child).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             cancel_token.cancel();
-            let _ = child.kill().await;
+            let _ = streaming_handle.await;
+
             return Err(format!(
                 "Command '{}' timed out after {} seconds",
                 command, timeout
             ));
         }
-    };
-
-    let duration = t0.elapsed();
-    tracing::info!("SHELL: /finished in {:.3}s", duration.as_secs_f64());
-
-    let (stdout_str, stderr_str) = {
-        let mut collector = output_collector.lock().await;
-        (
-            collector.stdout.take_result(),
-            collector.stderr.take_result(),
-        )
-    };
-
-    let exit_code = exit_status.code().unwrap_or_default();
-
-    send_streaming_update(
-        subchat_tx,
-        tool_call_id,
-        &format!(
-            "✅ Finished (exit code: {}, {:.1}s)",
-            exit_code,
-            duration.as_secs_f64()
-        ),
-    );
-
-    Ok(ShellStreamResult {
-        stdout: stdout_str,
-        stderr: stderr_str,
-        exit_code,
-        duration_secs: duration.as_secs_f64(),
-    })
+        Err(e) => {
+            cancel_token.cancel();
+            kill_and_reap(&mut child).await;
+            return Err(e);
+        }
+    }
 }
 
 async fn parse_args(

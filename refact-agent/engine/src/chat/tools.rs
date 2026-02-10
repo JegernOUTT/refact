@@ -571,6 +571,9 @@ pub async fn process_tool_calls_once(
     )
     .await;
 
+    // Determine tool-requested final state before checking abort, since ask_questions
+    // and task_done set abort_flag=true as part of their normal operation to prevent
+    // further LLM generation — but they still need their state transition applied.
     let mut final_state = SessionState::Idle;
     for tool_call in &tools_to_execute {
         match tool_call.function.name.as_str() {
@@ -579,20 +582,39 @@ pub async fn process_tool_calls_once(
             _ => {}
         }
     }
+    let tool_initiated_stop = matches!(
+        final_state,
+        SessionState::Completed | SessionState::WaitingUserInput
+    );
+
+    // Check if we were aborted during tool execution (user stop or tool-initiated).
+    let was_aborted = {
+        let session = session_arc.lock().await;
+        session.abort_flag.load(Ordering::Relaxed)
+    };
 
     {
         let mut session = session_arc.lock().await;
         for result_msg in tool_results {
             session.add_message(result_msg);
         }
-        session.set_runtime_state(final_state, None);
+        if tool_initiated_stop {
+            // ask_questions/task_done: always apply their intended state
+            session.set_runtime_state(final_state, None);
+        } else if was_aborted {
+            // User abort during regular tools: transition to Idle so UI stops animating
+            session.set_runtime_state(SessionState::Idle, None);
+        } else {
+            session.set_runtime_state(final_state, None);
+        }
     }
 
     maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
 
-    match final_state {
-        SessionState::Completed | SessionState::WaitingUserInput => ToolStepOutcome::Stop,
-        _ => ToolStepOutcome::Continue,
+    if was_aborted || tool_initiated_stop {
+        ToolStepOutcome::Stop
+    } else {
+        ToolStepOutcome::Continue
     }
 }
 

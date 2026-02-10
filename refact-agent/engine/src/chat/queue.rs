@@ -847,15 +847,28 @@ async fn handle_tool_decisions(
         )
         .await;
 
+        // Check if we were aborted during tool execution
+        let was_aborted = {
+            let session = session_arc.lock().await;
+            session.abort_flag.load(std::sync::atomic::Ordering::Relaxed)
+        };
+
         {
             let mut session = session_arc.lock().await;
             for result_msg in tool_results {
                 session.add_message(result_msg);
             }
+            // Always transition to Idle — either normally or after user abort.
+            // abort_stream() may have already set Idle, but set_runtime_state
+            // is idempotent and ensures the UI gets the RuntimeUpdated event.
             session.set_runtime_state(SessionState::Idle, None);
         }
 
         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+
+        if was_aborted {
+            return;
+        }
     }
 
     if any_rejected {
