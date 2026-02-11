@@ -643,6 +643,9 @@ async fn run_streaming_generation(
             if !result.citations.is_empty() {
                 draft.citations = result.citations;
             }
+            if !result.server_content_blocks.is_empty() {
+                draft.server_content_blocks = result.server_content_blocks;
+            }
             if !result.extra.is_empty() {
                 draft.extra = result.extra;
             }
@@ -685,6 +688,7 @@ fn is_result_empty(result: &ChoiceFinal) -> bool {
         && result.reasoning.trim().is_empty()
         && result.thinking_blocks.is_empty()
         && result.citations.is_empty()
+        && result.server_content_blocks.is_empty()
 }
 
 #[cfg(test)]

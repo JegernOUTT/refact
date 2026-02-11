@@ -69,6 +69,7 @@ export type DeltaOp =
   | { op: "set_tool_calls"; tool_calls: unknown[] }
   | { op: "set_thinking_blocks"; blocks: unknown[] }
   | { op: "add_citation"; citation: unknown }
+  | { op: "add_server_content_block"; block: unknown }
   | { op: "set_usage"; usage: unknown }
   | { op: "merge_extra"; extra: Record<string, unknown> };
 
@@ -443,6 +444,11 @@ export function applyDeltaOps(
 
       case "add_citation":
         updated.citations = [...(updated.citations ?? []), op.citation];
+        break;
+
+      case "add_server_content_block":
+        // Server content blocks (web_search) are stored for multi-turn passthrough
+        // but not displayed in the UI directly
         break;
 
       case "set_usage":

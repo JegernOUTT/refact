@@ -40,6 +40,7 @@ pub struct HttpParts {
 
 pub struct AdapterSettings {
     pub api_key: String,
+    pub auth_token: String,
     pub endpoint: String,
     pub extra_headers: HashMap<String, String>,
     pub model_name: String,
@@ -50,6 +51,7 @@ pub struct AdapterSettings {
     pub supports_max_completion_tokens: bool,
     pub support_metadata: bool,
     pub eof_is_done: bool,
+    pub supports_web_search: bool,
 }
 
 pub trait LlmWireAdapter: Send + Sync {

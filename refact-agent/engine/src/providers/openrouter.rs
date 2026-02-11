@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -18,6 +19,7 @@ pub struct OpenRouterProvider {
     pub custom_models: HashMap<String, CustomModelConfig>,
 }
 
+#[async_trait]
 impl ProviderTrait for OpenRouterProvider {
     fn name(&self) -> &'static str {
         "openrouter"
@@ -102,6 +104,7 @@ available:
             completion_endpoint: String::new(),
             embedding_endpoint: String::new(),
             api_key,
+            auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
             support_metadata: false,

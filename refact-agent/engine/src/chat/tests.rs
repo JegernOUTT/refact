@@ -63,6 +63,7 @@ mod tests {
                 json!({"type": "thinking", "thinking": "deep thought"}),
             ]),
             citations: vec![json!({"url": "https://example.com", "title": "Example"})],
+            server_content_blocks: vec![],
             extra: {
                 let mut m = serde_json::Map::new();
                 m.insert("custom_field".to_string(), json!("custom_value"));

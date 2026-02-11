@@ -129,6 +129,9 @@ pub enum LlmStreamDelta {
     AddCitation {
         citation: Value,
     },
+    AddServerContentBlock {
+        block: Value,
+    },
     SetUsage {
         usage: ChatUsage,
     },

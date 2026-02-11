@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -24,6 +25,7 @@ pub struct CustomProvider {
     pub custom_models: HashMap<String, CustomModelConfig>,
 }
 
+#[async_trait]
 impl ProviderTrait for CustomProvider {
     fn name(&self) -> &'static str {
         "custom"
@@ -176,6 +178,7 @@ available:
             completion_endpoint: self.completion_endpoint.clone(),
             embedding_endpoint: self.embedding_endpoint.clone(),
             api_key,
+            auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: self.extra_headers.clone(),
             support_metadata: false,

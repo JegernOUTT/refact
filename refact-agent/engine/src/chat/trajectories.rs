@@ -514,6 +514,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         checkpoints: vec![],
         thinking_blocks: None,
         citations: vec![],
+        server_content_blocks: vec![],
         extra: serde_json::Map::new(),
         output_filter: None,
     };

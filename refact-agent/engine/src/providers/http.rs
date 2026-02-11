@@ -440,10 +440,11 @@ pub async fn handle_v1_provider_available_models(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
-    let (provider, address_url) = {
+    let (provider, address_url, http_client) = {
         let gcx_locked = gcx.read().await;
         let registry = gcx_locked.providers.read().await;
         let address_url = gcx_locked.cmdline.address_url.clone();
+        let http_client = gcx_locked.http_client.clone();
 
         let provider: Box<dyn crate::providers::traits::ProviderTrait> =
             if let Some(p) = registry.get(&params.name) {
@@ -457,57 +458,21 @@ pub async fn handle_v1_provider_available_models(
                 ));
             };
 
-        (provider, address_url)
+        (provider, address_url, http_client)
     };
 
     let source = provider.model_source();
-    let (models, error) = match source {
-        ModelSource::ModelCaps => {
-            // Fetch model caps and filter by provider's regex
-            match get_model_caps(gcx.clone(), &address_url, false).await {
-                Ok(model_caps) => {
-                    (provider.get_available_models_from_caps(&model_caps), None)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to fetch model_caps for provider '{}': {}", params.name, e);
-                    // Still return custom models even if caps fetch fails
-                    let enabled_set: std::collections::HashSet<_> =
-                        provider.enabled_models().iter().map(|s| s.as_str()).collect();
-                    let custom_only: Vec<AvailableModel> = provider.custom_models()
-                        .iter()
-                        .map(|(id, config)| {
-                            let enabled = enabled_set.contains(id.as_str());
-                            AvailableModel::from_custom(id, config, enabled)
-                        })
-                        .collect();
-                    (custom_only, Some(format!("Failed to fetch model capabilities: {}. Only custom models shown.", e)))
-                }
-            }
-        }
-        ModelSource::Api => {
-            (
-                provider.get_custom_models_only(),
-                Some("API-based model discovery not yet implemented for this provider.".to_string())
-            )
-        }
-        ModelSource::Local => {
-            (
-                provider.get_custom_models_only(),
-                Some("Local model discovery not yet implemented. Add custom models manually.".to_string())
-            )
-        }
-        ModelSource::Manual => {
-            // Only custom models - check enabled_models for enabled state
-            let enabled_set: std::collections::HashSet<_> =
-                provider.enabled_models().iter().map(|s| s.as_str()).collect();
-            let models = provider.custom_models()
-                .iter()
-                .map(|(id, config)| {
-                    let enabled = enabled_set.contains(id.as_str());
-                    AvailableModel::from_custom(id, config, enabled)
-                })
-                .collect();
+    let (models, error) = match get_model_caps(gcx.clone(), &address_url, false).await {
+        Ok(model_caps) => {
+            let models = provider.fetch_available_models(&http_client, &model_caps).await;
             (models, None)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to fetch model_caps for provider '{}': {}", params.name, e);
+            (
+                provider.get_custom_models_only(),
+                Some(format!("Failed to fetch model capabilities: {}. Only custom models shown.", e)),
+            )
         }
     };
 

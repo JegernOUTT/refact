@@ -9,6 +9,10 @@ use crate::llm::params::CacheControl;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_THINKING_BUDGET: usize = 8192;
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
+const CLAUDE_CODE_OAUTH_BETA: &str = "oauth-2025-04-20";
+const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.2 (external, cli)";
+const CLAUDE_CODE_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+const CLAUDE_CODE_MCP_TOOL_PREFIX: &str = "mcp_";
 
 const PROTECTED_FIELDS: &[&str] = &["model", "messages", "stream", "system", "tools", "tool_choice"];
 
@@ -22,11 +26,36 @@ impl LlmWireAdapter for AnthropicAdapter {
     ) -> Result<HttpParts, String> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            "x-api-key",
-            HeaderValue::from_str(&settings.api_key)
-                .map_err(|e| format!("invalid api_key: {e}"))?,
-        );
+
+        // Support both API key auth (x-api-key) and OAuth Bearer token auth
+        // (Authorization: Bearer). This mirrors the official Anthropic SDK which
+        // accepts both api_key and auth_token parameters.
+        
+        let mut is_claude_code_oauth = false;
+        if !settings.auth_token.is_empty() {
+            is_claude_code_oauth = true;
+            headers.insert(
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {}", settings.auth_token))
+                    .map_err(|e| format!("invalid auth_token: {e}"))?,
+            );
+        } else if !settings.api_key.is_empty() {
+            headers.insert(
+                "x-api-key",
+                HeaderValue::from_str(&settings.api_key)
+                    .map_err(|e| format!("invalid api_key: {e}"))?,
+            );
+        }
+
+        // Claude Code OAuth requires specific headers and user-agent to pass
+        // Anthropic's server-side validation for subscription-based access.
+        if is_claude_code_oauth {
+            headers.insert(
+                "user-agent",
+                HeaderValue::from_static(CLAUDE_CODE_USER_AGENT),
+            );
+        }
+
         headers.insert(
             "anthropic-version",
             HeaderValue::from_static(ANTHROPIC_VERSION),
@@ -46,7 +75,16 @@ impl LlmWireAdapter for AnthropicAdapter {
         });
 
         if let Some(sys) = system {
-            body["system"] = sys;
+            if is_claude_code_oauth {
+                // Claude Code OAuth requires the system prompt to start with a specific prefix
+                // for Anthropic's server-side validation.
+                let prefixed = prepend_claude_code_system(sys);
+                body["system"] = prefixed;
+            } else {
+                body["system"] = sys;
+            }
+        } else if is_claude_code_oauth {
+            body["system"] = json!(CLAUDE_CODE_SYSTEM_PREFIX);
         }
 
         if let Some(temp) = req.params.temperature {
@@ -60,12 +98,30 @@ impl LlmWireAdapter for AnthropicAdapter {
         if settings.supports_tools {
             if let Some(tools) = &req.tools {
                 if !tools.is_empty() {
-                    let converted_tools = convert_tools_to_anthropic(tools);
+                    let mut converted_tools = convert_tools_to_anthropic(tools);
+                    if is_claude_code_oauth {
+                        prefix_tool_names(&mut converted_tools, CLAUDE_CODE_MCP_TOOL_PREFIX);
+                    }
+                    // Add Anthropic's server-side web_search tool if enabled
+                    if settings.supports_web_search {
+                        if let Some(arr) = converted_tools.as_array_mut() {
+                            arr.push(json!({
+                                "type": "web_search_20250305",
+                                "name": "web_search"
+                            }));
+                        }
+                    }
                     body["tools"] = converted_tools;
                     if let Some(choice) = &req.tool_choice {
                         body["tool_choice"] = tool_choice_to_anthropic(choice);
                     }
                 }
+            } else if settings.supports_web_search {
+                // No user tools but web_search is enabled
+                body["tools"] = json!([{
+                    "type": "web_search_20250305",
+                    "name": "web_search"
+                }]);
             }
         }
 
@@ -108,11 +164,25 @@ impl LlmWireAdapter for AnthropicAdapter {
             body.as_object_mut().map(|obj| obj.remove("temperature"));
         }
 
-        if body.get("thinking").and_then(|t| t.get("type")).and_then(|t| t.as_str()) == Some("enabled") {
-            headers.insert(
-                "anthropic-beta",
-                HeaderValue::from_static(INTERLEAVED_THINKING_BETA),
-            );
+        {
+            let mut betas = Vec::new();
+            if body.get("thinking").and_then(|t| t.get("type")).and_then(|t| t.as_str()) == Some("enabled") {
+                betas.push(INTERLEAVED_THINKING_BETA);
+            }
+            if is_claude_code_oauth {
+                betas.push(CLAUDE_CODE_OAUTH_BETA);
+                if !betas.contains(&INTERLEAVED_THINKING_BETA) {
+                    betas.push(INTERLEAVED_THINKING_BETA);
+                }
+            }
+            if !betas.is_empty() {
+                let beta_value = betas.join(",");
+                headers.insert(
+                    "anthropic-beta",
+                    HeaderValue::from_str(&beta_value)
+                        .map_err(|e| format!("invalid anthropic-beta: {e}"))?,
+                );
+            }
         }
 
         if let Some(extra) = &req.extra_body {
@@ -139,11 +209,40 @@ impl LlmWireAdapter for AnthropicAdapter {
             reasoning = ?req.reasoning,
             cache_control = ?req.cache_control,
             messages_count = %req.messages.len(),
+            has_auth_token = %!settings.auth_token.is_empty(),
+            has_api_key = %!settings.api_key.is_empty(),
             "anthropic adapter request"
         );
 
+        let url = if is_claude_code_oauth {
+            // Claude Code OAuth requires ?beta=true query parameter
+            let sep = if settings.endpoint.contains('?') { "&" } else { "?" };
+            format!("{}{}beta=true", settings.endpoint, sep)
+        } else {
+            settings.endpoint.clone()
+        };
+
+        // For Claude Code OAuth, prefix tool_use names in messages with mcp_
+        if is_claude_code_oauth {
+            if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                for msg in msgs {
+                    if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        for block in content {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                if let Some(name) = block.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()) {
+                                    if !name.starts_with(CLAUDE_CODE_MCP_TOOL_PREFIX) {
+                                        block["name"] = json!(format!("{}{}", CLAUDE_CODE_MCP_TOOL_PREFIX, name));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(HttpParts {
-            url: settings.endpoint.clone(),
+            url,
             headers,
             body,
         })
@@ -285,6 +384,14 @@ impl LlmWireAdapter for AnthropicAdapter {
                             // because the content arrives via deltas, not as a complete block.
                             // The thinking content accumulates in ChoiceFinal.reasoning.
                         }
+                        Some("server_tool_use") | Some("web_search_tool_result") => {
+                            // Server-executed tool blocks (e.g., web_search) must be
+                            // preserved verbatim and passed back in multi-turn conversations.
+                            // The full block arrives in content_block_start (no incremental deltas).
+                            deltas.push(LlmStreamDelta::AddServerContentBlock {
+                                block: cb.clone(),
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -357,29 +464,42 @@ fn convert_to_anthropic(
                     }
                 }
                 if !msg.citations.is_empty() {
+                    // Clean internal fields from citations before re-sending.
+                    // _content_block_index is our internal tracking field.
+                    let cleaned_citations: Vec<Value> = msg.citations.iter().map(|c| {
+                        let mut cleaned = c.clone();
+                        if let Some(obj) = cleaned.as_object_mut() {
+                            obj.remove("_content_block_index");
+                        }
+                        cleaned
+                    }).collect();
                     // Re-send citations from prior responses as content blocks with
                     // their citation data. Anthropic expects text blocks with citations
                     // arrays when re-sending cited content in multi-turn conversations.
                     let text_blocks = msg_content_to_anthropic(&msg.content);
                     if text_blocks.len() == 1 {
-                        // Single text block: attach all citations directly
                         let mut block = text_blocks.into_iter().next().unwrap();
                         if let Some(obj) = block.as_object_mut() {
-                            obj.insert("citations".to_string(), json!(msg.citations));
+                            obj.insert("citations".to_string(), json!(cleaned_citations));
                         }
                         content.push(block);
                     } else {
-                        // Multiple blocks: append citations to the last text block
                         let mut blocks = text_blocks;
                         if let Some(last) = blocks.last_mut() {
                             if let Some(obj) = last.as_object_mut() {
-                                obj.insert("citations".to_string(), json!(msg.citations));
+                                obj.insert("citations".to_string(), json!(cleaned_citations));
                             }
                         }
                         content.extend(blocks);
                     }
                 } else {
                     content.extend(msg_content_to_anthropic(&msg.content));
+                }
+                // Insert server content blocks (server_tool_use, web_search_tool_result)
+                // before client tool_use blocks. These must be passed back verbatim
+                // for Anthropic to validate encrypted_index in citations.
+                if !msg.server_content_blocks.is_empty() {
+                    content.extend(msg.server_content_blocks.iter().cloned());
                 }
                 if msg.role == "assistant" {
                     if let Some(tcs) = &msg.tool_calls {
@@ -426,36 +546,29 @@ fn convert_to_anthropic(
 
     flush_tool_results(&mut result, &mut pending_tool_results);
 
-    let system = system_text.map(|text| match cache {
-        CacheControl::Ephemeral => json!([{
-            "type": "text",
-            "text": text,
-            "cache_control": {"type": "ephemeral", "ttl": "1h"}
-        }]),
-        CacheControl::Off => json!(text),
-    });
+    // Claude prompt caching breakpoints are handled on messages (not system).
+    let system = system_text.map(|text| json!(text));
 
     // Apply cache breakpoints for prefix-based caching.
-    // Anthropic caches are prefix-based: the hash at each breakpoint covers ALL previous blocks.
-    // Up to 4 breakpoints allowed; combined with the system breakpoint = 3 message breakpoints.
-    //
-    // CRITICAL: breakpoints must be STABLE across consecutive calls. If a message has
-    // cache_control in call N but not in call N+1, the prefix hash changes and cache misses.
-    //
-    // In agentic flows the pattern is [user, assistant, user(tool_results), assistant, ...]
-    // with only one real user message at [0]. A "moving" middle breakpoint (e.g. last assistant
-    // before last user) shifts forward every call, removing cache_control from the previous
-    // position and invalidating the entire prefix after [0].
-    //
-    // Strategy: only two message breakpoints (+ system = 3 total):
-    //   1. [0] — first message. Stable across all calls.
-    //   2. [-1] — last message. Changes each call but caches the full prefix.
+    // Strategy: 4 message breakpoints, recomputed every request:
+    //   - last 2 messages
+    //   - middle message
+    //   - 1/4 point message
+    // (No system cache_control.)
     if cache == CacheControl::Ephemeral && !result.is_empty() {
         let len = result.len();
-        let mut breakpoint_indices = vec![0, len - 1];
-        breakpoint_indices.dedup();
 
-        for &idx in &breakpoint_indices {
+        let quarter = len / 4;
+        let middle = len / 2;
+        let last = len - 1;
+        let last2 = len.saturating_sub(2);
+
+        let mut breakpoint_indices = vec![quarter, middle, last2, last];
+        breakpoint_indices.sort_unstable();
+        breakpoint_indices.dedup();
+        breakpoint_indices.truncate(4);
+
+        for idx in breakpoint_indices {
             add_cache_control_to_last_block(&mut result[idx]);
         }
     }
@@ -529,6 +642,60 @@ fn convert_tools_to_anthropic(tools: &[Value]) -> Value {
     json!(converted)
 }
 
+/// Prefix tool names in an Anthropic tools array with the given prefix.
+/// Required for Claude Code OAuth: Anthropic's server expects tools to be
+/// prefixed with "mcp_" when using subscription-based OAuth tokens.
+fn prefix_tool_names(tools: &mut Value, prefix: &str) {
+    if let Some(arr) = tools.as_array_mut() {
+        for tool in arr {
+            if let Some(name) = tool.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()) {
+                if !name.starts_with(prefix) {
+                    tool["name"] = json!(format!("{}{}", prefix, name));
+                }
+            }
+        }
+    }
+}
+
+/// Prepend the Claude Code system prompt prefix to an existing system value.
+fn prepend_claude_code_system(system: Value) -> Value {
+    match system {
+        Value::String(text) => {
+            if text.trim().is_empty() {
+                json!(CLAUDE_CODE_SYSTEM_PREFIX)
+            } else {
+                json!([
+                    {"type": "text", "text": CLAUDE_CODE_SYSTEM_PREFIX},
+                    {"type": "text", "text": text}
+                ])
+            }
+        }
+        Value::Array(blocks) => {
+            let mut new_blocks = vec![json!({"type": "text", "text": CLAUDE_CODE_SYSTEM_PREFIX})];
+            new_blocks.extend(blocks);
+
+            if let Some(second_text) = new_blocks
+                .get(1)
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .filter(|&t| t == "text")
+                        .and_then(|_| v.get("text").and_then(|t| t.as_str()))
+                })
+            {
+                if !second_text.starts_with(CLAUDE_CODE_SYSTEM_PREFIX) {
+                    new_blocks[1] = json!({
+                        "type": "text",
+                        "text": format!("{}\n\n{}", CLAUDE_CODE_SYSTEM_PREFIX, second_text),
+                    });
+                }
+            }
+            json!(new_blocks)
+        }
+        _ => json!(CLAUDE_CODE_SYSTEM_PREFIX),
+    }
+}
+
 fn tool_choice_to_anthropic(choice: &CanonicalToolChoice) -> Value {
     match choice {
         CanonicalToolChoice::Auto => json!({"type": "auto"}),
@@ -577,6 +744,7 @@ mod tests {
     fn settings() -> AdapterSettings {
         AdapterSettings {
             api_key: "sk-ant-test".to_string(),
+            auth_token: String::new(),
             endpoint: "https://api.anthropic.com/v1/messages".to_string(),
             extra_headers: Default::default(),
             model_name: "claude-3-sonnet".to_string(),
@@ -587,6 +755,8 @@ mod tests {
             supports_max_completion_tokens: false,
             support_metadata: false,
             eof_is_done: false,
+            is_claude_code_oauth: false,
+            supports_web_search: false,
         }
     }
 
@@ -597,6 +767,31 @@ mod tests {
         let http = adapter.build_http(&req, &settings()).unwrap();
         assert!(http.headers.get("x-api-key").is_some());
         assert!(http.headers.get("anthropic-version").is_some());
+    }
+
+    #[test]
+    fn test_prepend_claude_code_system_keeps_prefix_as_standalone_block() {
+        // For Claude Code OAuth, the server may reject requests if the prefix is
+        // concatenated with other text in the same system block.
+        let system = json!("Be helpful");
+        let prefixed = prepend_claude_code_system(system);
+        assert!(prefixed.is_array());
+        let arr = prefixed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], CLAUDE_CODE_SYSTEM_PREFIX);
+        assert_eq!(arr[1]["type"], "text");
+        assert_eq!(arr[1]["text"], "Be helpful");
+
+        let system2 = json!([
+            {"type": "text", "text": "Be helpful"},
+            {"type": "text", "text": "Also be brief"}
+        ]);
+        let prefixed2 = prepend_claude_code_system(system2);
+        let arr2 = prefixed2.as_array().unwrap();
+        assert_eq!(arr2[0]["text"], CLAUDE_CODE_SYSTEM_PREFIX);
+        assert_eq!(arr2[1]["text"], "You are Claude Code, Anthropic's official CLI for Claude.\n\nBe helpful");
+        assert_eq!(arr2[2]["text"], "Also be brief");
     }
 
     #[test]
@@ -663,11 +858,9 @@ mod tests {
             ChatMessage::new("user".to_string(), "Hi".to_string()),
         ];
         let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
-        let expected =
-            json!([{"type": "text", "text": "Be helpful", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]);
-        assert_eq!(system, Some(expected));
+        assert_eq!(system, Some(json!("Be helpful")));
         assert_eq!(msgs.len(), 1);
-        // Single message should get cache breakpoint at [0]
+        // Single message should get a cache breakpoint
         assert!(msgs[0]["content"][0].get("cache_control").is_some());
     }
 
@@ -1051,25 +1244,17 @@ mod tests {
 
         let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
 
-        // System should have cache_control with 1h TTL
-        let sys = system.unwrap();
-        assert_eq!(sys[0]["cache_control"]["ttl"], "1h");
+        // System should be plain text (no cache_control)
+        assert_eq!(system, Some(json!("Be helpful")));
 
         // Messages: [0]=user, [1]=assistant+tool_use, [2]=user(tool_result+text)
         // Tool result is merged into the following user message (no consecutive user blocks)
         assert_eq!(msgs.len(), 3);
 
-        // [0]=user always gets breakpoint for stable prefix caching
-        assert!(msgs[0]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some(),
-            "First user message should have cache breakpoint for stable prefix");
-
-        // [1]=assistant has NO breakpoint (middle breakpoints are unstable in agentic flows)
-        assert!(msgs[1]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_none(),
-            "Assistant should NOT have cache breakpoint (only [0] and [-1])");
-
-        // [2]=user(tool_result+text) is [-1] → breakpoint
-        assert!(msgs[2]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some(),
-            "Last message should have cache breakpoint");
+        // With 3 messages, quarter=0, middle=1, last2=1, last=2 => all messages get breakpoints.
+        for i in 0..msgs.len() {
+            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some());
+        }
 
         // Verify the merged user message contains both tool_result and text
         let last_content = msgs[2]["content"].as_array().unwrap();
@@ -1166,16 +1351,10 @@ mod tests {
         // [0]=user, [1]=assistant(text+tool_use), [2]=tool_result(user)
         assert_eq!(msgs.len(), 3);
 
-        // [0]=user gets breakpoint (always first message)
-        assert!(msgs[0]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some(),
-            "First user message should have cache breakpoint");
-
-        // [1]=assistant has NO breakpoint (only [0] and [-1] get breakpoints)
-        let assistant_content = msgs[1]["content"].as_array().unwrap();
-        let last_block = assistant_content.last().unwrap();
-        assert_eq!(last_block["type"], "tool_use");
-        assert!(last_block.get("cache_control").is_none(),
-            "Assistant should NOT have cache breakpoint (middle breakpoints are unstable)");
+        // With 3 messages, quarter=0, middle=1, last2=1, last=2 => all messages get breakpoints.
+        for i in 0..msgs.len() {
+            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some());
+        }
     }
 
     #[test]
@@ -1392,14 +1571,145 @@ mod tests {
 
         let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
 
-        // Assistant content: [thinking, tool_use] (empty text sanitized)
+        // With 3 messages, quarter=0, middle=1, last2=1, last=2 => all messages get breakpoints.
+        for i in 0..msgs.len() {
+            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some());
+        }
+    }
+
+    #[test]
+    fn test_content_block_index_cleaned_from_citations() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Search for something".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Found it.".to_string()),
+                citations: vec![
+                    json!({
+                        "type": "web_search_result_location",
+                        "url": "https://example.com",
+                        "title": "Example",
+                        "encrypted_index": "abc123",
+                        "cited_text": "Found it.",
+                        "_content_block_index": 2
+                    }),
+                ],
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "Tell me more".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
         let assistant_content = msgs[1]["content"].as_array().unwrap();
-        // No breakpoint on assistant (only [0] and [-1] get breakpoints)
-        let last_block = assistant_content.last().unwrap();
-        assert_eq!(last_block["type"], "tool_use");
-        assert!(last_block.get("cache_control").is_none(),
-            "Assistant should NOT have cache breakpoint (only [0] and [-1])");
-        assert!(assistant_content[0].get("cache_control").is_none(),
-            "Thinking block should not have cache_control");
+        let citations = assistant_content[0]["citations"].as_array().unwrap();
+        assert_eq!(citations.len(), 1);
+        assert!(citations[0].get("_content_block_index").is_none(),
+            "Internal _content_block_index should be stripped from re-sent citations");
+        assert_eq!(citations[0]["encrypted_index"], "abc123",
+            "encrypted_index should be preserved");
+    }
+
+    #[test]
+    fn test_server_content_blocks_included_in_multi_turn() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "What's the weather?".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("It's sunny.".to_string()),
+                server_content_blocks: vec![
+                    json!({
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_abc",
+                        "name": "web_search",
+                        "input": {"query": "weather today"}
+                    }),
+                    json!({
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_abc",
+                        "content": [{"type": "web_search_result", "url": "https://weather.com", "encrypted_content": "enc123"}]
+                    }),
+                ],
+                citations: vec![
+                    json!({
+                        "type": "web_search_result_location",
+                        "url": "https://weather.com",
+                        "title": "Weather",
+                        "encrypted_index": "idx123",
+                        "cited_text": "It's sunny."
+                    }),
+                ],
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "And tomorrow?".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        // Should contain: text block (with citations), server_tool_use, web_search_tool_result
+        assert!(assistant_content.len() >= 3,
+            "Assistant should have text + server content blocks, got {} blocks", assistant_content.len());
+
+        let has_server_tool_use = assistant_content.iter().any(|b|
+            b.get("type").and_then(|t| t.as_str()) == Some("server_tool_use"));
+        let has_web_search_result = assistant_content.iter().any(|b|
+            b.get("type").and_then(|t| t.as_str()) == Some("web_search_tool_result"));
+        assert!(has_server_tool_use, "server_tool_use block should be included");
+        assert!(has_web_search_result, "web_search_tool_result block should be included");
+    }
+
+    #[test]
+    fn test_parse_stream_server_tool_use() {
+        let adapter = AnthropicAdapter;
+        let chunk = r#"{"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_abc","name":"web_search","input":{"query":"test"}}}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+        let has_server_block = deltas.iter().any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. }));
+        assert!(has_server_block, "Should emit AddServerContentBlock for server_tool_use");
+
+        if let Some(LlmStreamDelta::AddServerContentBlock { block }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })) {
+            assert_eq!(block.get("type").and_then(|v| v.as_str()), Some("server_tool_use"));
+            assert_eq!(block.get("name").and_then(|v| v.as_str()), Some("web_search"));
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_web_search_tool_result() {
+        let adapter = AnthropicAdapter;
+        let chunk = r#"{"type":"content_block_start","index":2,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_abc","content":[{"type":"web_search_result","url":"https://example.com","title":"Example","encrypted_content":"enc123"}]}}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+        let has_server_block = deltas.iter().any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. }));
+        assert!(has_server_block, "Should emit AddServerContentBlock for web_search_tool_result");
+    }
+
+    #[test]
+    fn test_web_search_tool_added_when_supported() {
+        let adapter = AnthropicAdapter;
+        let req = LlmRequest::new("claude".to_string(), vec![])
+            .with_tools(vec![json!({"type": "function", "function": {"name": "test", "parameters": {}}})], None);
+        let mut s = settings();
+        s.supports_web_search = true;
+        let http = adapter.build_http(&req, &s).unwrap();
+
+        let tools = http.body["tools"].as_array().unwrap();
+        let has_web_search = tools.iter().any(|t|
+            t.get("type").and_then(|v| v.as_str()) == Some("web_search_20250305"));
+        assert!(has_web_search, "web_search tool should be included when supports_web_search is true");
+    }
+
+    #[test]
+    fn test_web_search_tool_not_added_when_unsupported() {
+        let adapter = AnthropicAdapter;
+        let req = LlmRequest::new("claude".to_string(), vec![])
+            .with_tools(vec![json!({"type": "function", "function": {"name": "test", "parameters": {}}})], None);
+        let s = settings(); // supports_web_search: false
+        let http = adapter.build_http(&req, &s).unwrap();
+
+        let tools = http.body["tools"].as_array().unwrap();
+        let has_web_search = tools.iter().any(|t|
+            t.get("type").and_then(|v| v.as_str()) == Some("web_search_20250305"));
+        assert!(!has_web_search, "web_search tool should NOT be included when supports_web_search is false");
     }
 }

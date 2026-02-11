@@ -425,10 +425,12 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage]) 
 
 /// Injects `cache_control` breakpoints into OpenAI-format messages for LiteLLM prompt caching.
 ///
-/// Strategy (matching anthropic.rs):
-///   1. System message — static instructions, always stable
-///   2. First non-system message [0] — stable prefix anchor
-///   3. Last non-system message [-1] — current turn, caches full prefix
+/// Strategy:
+///   - 4 message breakpoints, recomputed each request:
+///     - last 2 non-system messages
+///     - middle non-system message
+///     - 1/4 point non-system message
+///   - no system cache_control
 ///
 /// For string content, converts to array-of-blocks format so `cache_control` can be attached.
 /// LiteLLM passes these through to Anthropic's native API.
@@ -449,23 +451,26 @@ fn inject_cache_control(messages: &mut [Value]) {
         }
     }
 
-    // Cache system message
-    if let Some(sys_msg) = messages.iter_mut().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system")) {
-        add_cache_to_message(sys_msg, &cc);
-    }
-
-    // Cache first and last non-system messages
+    // Cache selected non-system messages
     let non_system_indices: Vec<usize> = messages.iter().enumerate()
         .filter(|(_, m)| m.get("role").and_then(|r| r.as_str()) != Some("system"))
         .map(|(i, _)| i)
         .collect();
 
-    if let Some(&first_idx) = non_system_indices.first() {
-        add_cache_to_message(&mut messages[first_idx], &cc);
-    }
-    if non_system_indices.len() >= 2 {
-        if let Some(&last_idx) = non_system_indices.last() {
-            add_cache_to_message(&mut messages[last_idx], &cc);
+    let len = non_system_indices.len();
+    let quarter_pos = len / 4;
+    let middle_pos = len / 2;
+    let last_pos = len - 1;
+    let last2_pos = len.saturating_sub(2);
+
+    let mut selected_positions = vec![quarter_pos, middle_pos, last2_pos, last_pos];
+    selected_positions.sort_unstable();
+    selected_positions.dedup();
+    selected_positions.truncate(4);
+
+    for pos in selected_positions {
+        if let Some(&msg_idx) = non_system_indices.get(pos) {
+            add_cache_to_message(&mut messages[msg_idx], &cc);
         }
     }
 }
@@ -566,6 +571,7 @@ mod tests {
     fn default_settings() -> AdapterSettings {
         AdapterSettings {
             api_key: "test-key".to_string(),
+            auth_token: String::new(),
             endpoint: "https://app.refact.ai/v1/chat/completions".to_string(),
             extra_headers: Default::default(),
             model_name: "gpt-4".to_string(),
@@ -576,6 +582,8 @@ mod tests {
             supports_max_completion_tokens: false,
             support_metadata: true,
             eof_is_done: false,
+            is_claude_code_oauth: false,
+            supports_web_search: false,
         }
     }
 
@@ -1294,32 +1302,17 @@ mod tests {
         let messages = http.body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 4);
 
-        // System message: content converted to array with cache_control
+        // System message: no cache_control injected
         let sys = &messages[0];
-        let sys_content = sys["content"].as_array().unwrap();
-        assert_eq!(sys_content.len(), 1);
-        assert_eq!(sys_content[0]["type"], "text");
-        assert_eq!(sys_content[0]["text"], "You are helpful");
-        assert!(sys_content[0].get("cache_control").is_some(),
-            "System message should have cache_control");
+        assert!(sys["content"].is_string());
 
-        // First non-system [0] (user "Hello"): should have cache_control
-        let first_user = &messages[1];
-        let first_content = first_user["content"].as_array().unwrap();
-        assert!(first_content[0].get("cache_control").is_some(),
-            "First non-system message should have cache_control");
-
-        // Middle message (assistant): NO cache_control
-        let assistant = &messages[2];
-        // assistant content is still a string (no cache_control injected)
-        assert!(assistant["content"].is_string(),
-            "Middle message should not be converted to array");
-
-        // Last non-system [-1] (user "How are you?"): should have cache_control
-        let last_user = &messages[3];
-        let last_content = last_user["content"].as_array().unwrap();
-        assert!(last_content[0].get("cache_control").is_some(),
-            "Last non-system message should have cache_control");
+        // Non-system slice is [1,2,3] => len=3
+        // quarter=0, middle=1, last2=1, last=2 => selected positions {0,1,2}
+        // => all 3 non-system messages should be converted to blocks and have cache_control.
+        for idx in 1..=3 {
+            let content = messages[idx]["content"].as_array().unwrap();
+            assert!(content.last().unwrap().get("cache_control").is_some());
+        }
     }
 
     #[test]

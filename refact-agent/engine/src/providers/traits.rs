@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
+use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -182,6 +183,12 @@ pub struct ProviderRuntime {
     pub embedding_endpoint: String,
     #[serde(skip_serializing)]
     pub api_key: String,
+    /// OAuth/Bearer token for providers that use Authorization: Bearer auth
+    /// (e.g., Claude Code CLI OAuth tokens). When set, adapters should use
+    /// `Authorization: Bearer <token>` instead of provider-specific key headers.
+    #[serde(skip_serializing)]
+    #[serde(default)]
+    pub auth_token: String,
     #[serde(skip_serializing)]
     pub tokenizer_api_key: String,
     /// Extra headers for HTTP requests. Currently populated by CustomProvider
@@ -200,6 +207,7 @@ impl ProviderRuntime {
     pub fn redacted(&self) -> Self {
         Self {
             api_key: if self.api_key.is_empty() { String::new() } else { "***".to_string() },
+            auth_token: if self.auth_token.is_empty() { String::new() } else { "***".to_string() },
             tokenizer_api_key: if self.tokenizer_api_key.is_empty() { String::new() } else { "***".to_string() },
             extra_headers: HashMap::new(),
             ..self.clone()
@@ -207,6 +215,7 @@ impl ProviderRuntime {
     }
 }
 
+#[async_trait]
 pub trait ProviderTrait: Send + Sync {
     fn name(&self) -> &'static str;
 
@@ -290,6 +299,19 @@ pub trait ProviderTrait: Send + Sync {
         // Default: no-op, providers that need running_models filtering override this
     }
 
+    /// Discover and return available models for this provider.
+    /// Providers that need network access (API fetching) override this async method.
+    /// Default implementation matches against model_caps using the provider's filter regex
+    /// and enabled/disabled model lists.
+    async fn fetch_available_models(
+        &self,
+        http_client: &reqwest::Client,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let _ = http_client; // unused in default impl
+        self.get_available_models_from_caps(model_caps)
+    }
+
     fn get_available_models_from_caps(
         &self,
         model_caps: &HashMap<String, ModelCapabilities>,
@@ -341,7 +363,6 @@ pub trait ProviderTrait: Send + Sync {
         models
     }
 }
-
 // ============================================================================
 // Helper functions for reducing boilerplate in provider implementations
 // ============================================================================

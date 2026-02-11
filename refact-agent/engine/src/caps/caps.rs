@@ -44,6 +44,8 @@ pub struct BaseModelRecord {
     #[serde(default, skip_serializing)]
     pub api_key: String,
     #[serde(default, skip_serializing)]
+    pub auth_token: String,
+    #[serde(default, skip_serializing)]
     pub tokenizer_api_key: String,
 
     #[serde(default, skip_serializing)]
@@ -67,6 +69,10 @@ pub struct BaseModelRecord {
     /// Treat stream EOF as completion (for endpoints that don't send explicit Done signal)
     #[serde(default)]
     pub eof_is_done: bool,
+
+    /// Enable Anthropic's server-side web_search tool
+    #[serde(default)]
+    pub supports_web_search: bool,
 
     // Fields used for Config/UI management
     #[serde(skip_deserializing)]
@@ -429,6 +435,7 @@ fn build_chat_model_record(
     runtime_wire_format: WireFormat,
     runtime_endpoint: &str,
     runtime_api_key: &str,
+    runtime_auth_token: &str,
     runtime_tokenizer_api_key: &str,
     runtime_support_metadata: bool,
     runtime_extra_headers: &HashMap<String, String>,
@@ -504,6 +511,7 @@ fn build_chat_model_record(
             endpoint_style,
             wire_format: runtime_wire_format,
             api_key: runtime_api_key.to_string(),
+            auth_token: runtime_auth_token.to_string(),
             tokenizer_api_key: runtime_tokenizer_api_key.to_string(),
             support_metadata: runtime_support_metadata,
             extra_headers: runtime_extra_headers.clone(),
@@ -516,6 +524,10 @@ fn build_chat_model_record(
                 .map(|r| r.caps.supports_max_completion_tokens)
                 .unwrap_or(false),
             eof_is_done: false,
+            supports_web_search: resolved_caps
+                .as_ref()
+                .map(|r| r.caps.supports_web_search)
+                .unwrap_or(false),
             removable: model.is_custom,
             user_configured: model.is_custom,
         },
@@ -560,16 +572,19 @@ pub async fn populate_chat_models_from_providers(
     caps: &mut CodeAssistantCaps,
     gcx: Arc<ARwLock<GlobalContext>>,
 ) {
-    use crate::providers::traits::ModelSource;
-
     let model_caps = &*caps.model_caps;
 
-    let gcx_locked = gcx.read().await;
-    let registry = gcx_locked.providers.read().await;
+    let (http_client, providers_snapshot) = {
+        let gcx_locked = gcx.read().await;
+        let registry = gcx_locked.providers.read().await;
+        let snapshot: Vec<Box<dyn crate::providers::traits::ProviderTrait>> =
+            registry.iter().map(|(_, p)| p.clone_box()).collect();
+        (gcx_locked.http_client.clone(), snapshot)
+    };
 
     let mut pricing_map = caps.metadata.pricing.as_object_mut();
 
-    for (_name, provider) in registry.iter() {
+    for provider in &providers_snapshot {
         let runtime = match provider.build_runtime() {
             Ok(r) => r,
             Err(e) => {
@@ -586,10 +601,7 @@ pub async fn populate_chat_models_from_providers(
             continue;
         }
 
-        let available_models = match provider.model_source() {
-            ModelSource::ModelCaps => provider.get_available_models_from_caps(model_caps),
-            _ => provider.get_custom_models_only(),
-        };
+        let available_models = provider.fetch_available_models(&http_client, model_caps).await;
 
         for model in available_models {
             if !model.enabled {
@@ -603,6 +615,7 @@ pub async fn populate_chat_models_from_providers(
                 runtime.wire_format,
                 &runtime.chat_endpoint,
                 &runtime.api_key,
+                &runtime.auth_token,
                 &runtime.tokenizer_api_key,
                 runtime.support_metadata,
                 &runtime.extra_headers,
@@ -1105,6 +1118,7 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
     record.supports_boost_reasoning = caps.supports_reasoning_effort;
     record.supports_agent = caps.supports_tools;
     record.supports_temperature = caps.supports_temperature;
+    record.base.supports_web_search = caps.supports_web_search;
 }
 
 pub fn resolve_completion_model<'a>(

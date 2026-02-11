@@ -862,38 +862,34 @@ pub async fn execute_tools_with_session(
     result
 }
 
-/// Per-tool mutex registry - each tool has its own lock to enable true parallelism
-type ToolRegistry = std::collections::HashMap<String, Arc<AMutex<Box<dyn crate::tools::tools_description::Tool + Send>>>>;
+type SerialToolRegistry =
+    std::collections::HashMap<String, Arc<AMutex<Box<dyn crate::tools::tools_description::Tool + Send>>>>;
+
+async fn instantiate_tool_for_call(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    mode_id: &str,
+    model_id: Option<&str>,
+    tool_name: &str,
+) -> Option<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    let tools = crate::tools::tools_list::get_tools_for_mode(gcx, mode_id, model_id).await;
+    for tool in tools {
+        if tool.tool_description().name == tool_name {
+            return Some(tool);
+        }
+    }
+    None
+}
 
 async fn execute_single_tool(
+    gcx: Arc<ARwLock<GlobalContext>>,
     ccx: Arc<AMutex<AtCommandsContext>>,
     idx: usize,
     tool_call: ChatToolCall,
-    tool_registry: Arc<ToolRegistry>,
+    serial_registry: Arc<SerialToolRegistry>,
+    allow_parallel: bool,
+    mode_id: &str,
+    model_id: Option<&str>,
 ) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
-    // Get the tool's Arc without holding the registry lock during execution
-    let tool_arc = match tool_registry.get(&tool_call.function.name) {
-        Some(t) => t.clone(),
-        None => {
-            return (
-                idx,
-                true, // had_corrections: tool not found is a correction
-                vec![ChatMessage {
-                    message_id: Uuid::new_v4().to_string(),
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(format!(
-                        "Error: tool '{}' not found",
-                        tool_call.function.name
-                    )),
-                    tool_call_id: tool_call.id.clone(),
-                    tool_failed: Some(true),
-                    ..Default::default()
-                }],
-                vec![],
-            );
-        }
-    };
-
     let args: std::collections::HashMap<String, serde_json::Value> =
         match serde_json::from_str(&tool_call.function.arguments) {
             Ok(a) => a,
@@ -919,45 +915,137 @@ async fn execute_single_tool(
 
     info!("Executing tool: {}({:?})", tool_call.function.name, args);
 
-    // Lock only this specific tool, not the entire registry
-    let mut tool = tool_arc.lock().await;
-    match tool.tool_execute(ccx, &tool_call.id, &args).await {
-        Ok((had_corrections, results)) => {
-            let mut msgs = Vec::new();
-            let mut files = Vec::new();
-            for result in results {
-                match result {
-                    crate::call_validation::ContextEnum::ChatMessage(mut msg) => {
-                        if msg.message_id.is_empty() {
-                            msg.message_id = Uuid::new_v4().to_string();
+    if allow_parallel {
+        let mut tool = match instantiate_tool_for_call(
+            gcx.clone(),
+            mode_id,
+            model_id,
+            &tool_call.function.name,
+        )
+        .await
+        {
+            Some(t) => t,
+            None => {
+                return (
+                    idx,
+                    true,
+                    vec![ChatMessage {
+                        message_id: Uuid::new_v4().to_string(),
+                        role: "tool".to_string(),
+                        content: ChatContent::SimpleText(format!(
+                            "Error: tool '{}' not found",
+                            tool_call.function.name
+                        )),
+                        tool_call_id: tool_call.id.clone(),
+                        tool_failed: Some(true),
+                        ..Default::default()
+                    }],
+                    vec![],
+                );
+            }
+        };
+
+        match tool.tool_execute(ccx, &tool_call.id, &args).await {
+            Ok((had_corrections, results)) => {
+                let mut msgs = Vec::new();
+                let mut files = Vec::new();
+                for result in results {
+                    match result {
+                        crate::call_validation::ContextEnum::ChatMessage(mut msg) => {
+                            if msg.message_id.is_empty() {
+                                msg.message_id = Uuid::new_v4().to_string();
+                            }
+                            if msg.tool_failed.is_none() {
+                                msg.tool_failed = Some(false);
+                            }
+                            msgs.push(msg);
                         }
-                        if msg.tool_failed.is_none() {
-                            msg.tool_failed = Some(false);
+                        crate::call_validation::ContextEnum::ContextFile(cf) => {
+                            files.push(cf);
                         }
-                        msgs.push(msg);
-                    }
-                    crate::call_validation::ContextEnum::ContextFile(cf) => {
-                        files.push(cf);
                     }
                 }
+                (idx, had_corrections, msgs, files)
             }
-            (idx, had_corrections, msgs, files)
+            Err(e) => {
+                info!("Tool execution failed: {}: {}", tool_call.function.name, e);
+                (
+                    idx,
+                    true,
+                    vec![ChatMessage {
+                        message_id: Uuid::new_v4().to_string(),
+                        role: "tool".to_string(),
+                        content: ChatContent::SimpleText(format!("Error: {}", e)),
+                        tool_call_id: tool_call.id.clone(),
+                        tool_failed: Some(true),
+                        ..Default::default()
+                    }],
+                    vec![],
+                )
+            }
         }
-        Err(e) => {
-            info!("Tool execution failed: {}: {}", tool_call.function.name, e);
-            (
-                idx,
-                true, // had_corrections: execution error is a correction
-                vec![ChatMessage {
-                    message_id: Uuid::new_v4().to_string(),
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(format!("Error: {}", e)),
-                    tool_call_id: tool_call.id.clone(),
-                    tool_failed: Some(true),
-                    ..Default::default()
-                }],
-                vec![],
-            )
+    } else {
+        let tool_arc = match serial_registry.get(&tool_call.function.name) {
+            Some(t) => t.clone(),
+            None => {
+                return (
+                    idx,
+                    true,
+                    vec![ChatMessage {
+                        message_id: Uuid::new_v4().to_string(),
+                        role: "tool".to_string(),
+                        content: ChatContent::SimpleText(format!(
+                            "Error: tool '{}' not found",
+                            tool_call.function.name
+                        )),
+                        tool_call_id: tool_call.id.clone(),
+                        tool_failed: Some(true),
+                        ..Default::default()
+                    }],
+                    vec![],
+                );
+            }
+        };
+
+        let mut tool = tool_arc.lock().await;
+        match tool.tool_execute(ccx, &tool_call.id, &args).await {
+            Ok((had_corrections, results)) => {
+                let mut msgs = Vec::new();
+                let mut files = Vec::new();
+                for result in results {
+                    match result {
+                        crate::call_validation::ContextEnum::ChatMessage(mut msg) => {
+                            if msg.message_id.is_empty() {
+                                msg.message_id = Uuid::new_v4().to_string();
+                            }
+                            if msg.tool_failed.is_none() {
+                                msg.tool_failed = Some(false);
+                            }
+                            msgs.push(msg);
+                        }
+                        crate::call_validation::ContextEnum::ContextFile(cf) => {
+                            files.push(cf);
+                        }
+                    }
+                }
+                (idx, had_corrections, msgs, files)
+            }
+            Err(e) => {
+                info!("Tool execution failed: {}: {}", tool_call.function.name, e);
+                (
+                    idx,
+                    true,
+                    vec![ChatMessage {
+                        message_id: Uuid::new_v4().to_string(),
+                        role: "tool".to_string(),
+                        content: ChatContent::SimpleText(format!("Error: {}", e)),
+                        tool_call_id: tool_call.id.clone(),
+                        tool_failed: Some(true),
+                        ..Default::default()
+                    }],
+                    vec![],
+                )
+            }
         }
     }
 }
@@ -977,7 +1065,7 @@ async fn execute_tools_inner(
     let available_tools = crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id).await;
 
     let mut tool_allow_parallel: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    let mut tool_registry: ToolRegistry = std::collections::HashMap::new();
+    let mut serial_registry: SerialToolRegistry = std::collections::HashMap::new();
 
     for tool in available_tools {
         let desc = tool.tool_description();
@@ -995,11 +1083,16 @@ async fn execute_tools_inner(
             false // ignore override-to-true for safety
         };
         tool_allow_parallel.insert(desc.name.clone(), effective);
-        // Wrap each tool in its own mutex for true parallelism
-        tool_registry.insert(desc.name, Arc::new(AMutex::new(tool)));
+
+        // Parallel tools are instantiated per call (no shared mutex).
+        // Sequential tools are cached and protected by a single mutex.
+        if effective {
+            continue;
+        }
+        serial_registry.insert(desc.name, Arc::new(AMutex::new(tool)));
     }
 
-    let tool_registry = Arc::new(tool_registry);
+    let serial_registry = Arc::new(serial_registry);
 
     let mut all_results: Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> = Vec::new();
     let mut current_parallel_batch: Vec<(usize, ChatToolCall)> = Vec::new();
@@ -1015,20 +1108,27 @@ async fn execute_tools_inner(
         } else {
             if !current_parallel_batch.is_empty() {
                 let batch_results = execute_parallel_batch(
+                    gcx.clone(),
                     ccx.clone(),
                     &current_parallel_batch,
-                    tool_registry.clone(),
+                    serial_registry.clone(),
                     max_parallel,
+                    mode_id,
+                    model_id,
                 ).await;
                 all_results.extend(batch_results);
                 current_parallel_batch.clear();
             }
 
             let result = execute_single_tool(
+                gcx.clone(),
                 ccx.clone(),
                 idx,
                 tool_call.clone(),
-                tool_registry.clone(),
+                serial_registry.clone(),
+                false,
+                mode_id,
+                model_id,
             ).await;
             all_results.push(result);
         }
@@ -1036,10 +1136,13 @@ async fn execute_tools_inner(
 
     if !current_parallel_batch.is_empty() {
         let batch_results = execute_parallel_batch(
+            gcx.clone(),
             ccx.clone(),
             &current_parallel_batch,
-            tool_registry.clone(),
+            serial_registry.clone(),
             max_parallel,
+            mode_id,
+            model_id,
         ).await;
         all_results.extend(batch_results);
     }
@@ -1074,25 +1177,41 @@ async fn execute_tools_inner(
 }
 
 async fn execute_parallel_batch(
+    gcx: Arc<ARwLock<GlobalContext>>,
     ccx: Arc<AMutex<AtCommandsContext>>,
     batch: &[(usize, ChatToolCall)],
-    tool_registry: Arc<ToolRegistry>,
+    serial_registry: Arc<SerialToolRegistry>,
     max_parallel: usize,
+    mode_id: &str,
+    model_id: Option<&str>,
 ) -> Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> {
     let semaphore = Arc::new(Semaphore::new(max_parallel));
 
     let futures: Vec<_> = batch
         .iter()
         .map(|(idx, tool_call)| {
+            let gcx = gcx.clone();
             let ccx = ccx.clone();
             let semaphore = semaphore.clone();
-            let tool_registry = tool_registry.clone();
+            let serial_registry = serial_registry.clone();
             let tool_call = tool_call.clone();
             let idx = *idx;
+            let mode_id = mode_id.to_string();
+            let model_id = model_id.map(|s| s.to_string());
 
             async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                execute_single_tool(ccx, idx, tool_call, tool_registry).await
+                execute_single_tool(
+                    gcx,
+                    ccx,
+                    idx,
+                    tool_call,
+                    serial_registry,
+                    true,
+                    &mode_id,
+                    model_id.as_deref(),
+                )
+                .await
             }
         })
         .collect();

@@ -238,6 +238,10 @@ pub struct ChatMessage {
     /// Citations from web search results
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub citations: Vec<serde_json::Value>,
+    /// Server-executed content blocks (e.g., server_tool_use, web_search_tool_result)
+    /// that must be passed back verbatim in multi-turn conversations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server_content_blocks: Vec<serde_json::Value>,
     /// Extra provider-specific fields that should be preserved round-trip
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty", flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,

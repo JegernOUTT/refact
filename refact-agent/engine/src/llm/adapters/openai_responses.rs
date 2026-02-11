@@ -552,6 +552,7 @@ mod tests {
     fn default_settings() -> AdapterSettings {
         AdapterSettings {
             api_key: "test-key".to_string(),
+            auth_token: String::new(),
             endpoint: "https://api.openai.com/v1/responses".to_string(),
             extra_headers: Default::default(),
             model_name: "gpt-4.1".to_string(),
@@ -562,6 +563,8 @@ mod tests {
             supports_max_completion_tokens: false,
             support_metadata: false,
             eof_is_done: false,
+            is_claude_code_oauth: false,
+            supports_web_search: false,
         }
     }
 

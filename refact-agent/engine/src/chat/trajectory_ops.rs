@@ -21,6 +21,7 @@ pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
         checkpoints: vec![],
         thinking_blocks: None,
         citations: vec![],
+        server_content_blocks: vec![],
         extra: serde_json::Map::new(),
         output_filter: None,
     }

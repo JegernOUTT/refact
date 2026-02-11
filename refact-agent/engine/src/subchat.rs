@@ -894,7 +894,7 @@ async fn subchat_stream(
         supports_tools: model_rec.supports_tools,
         supports_reasoning: model_rec.supports_reasoning.is_some(),
         reasoning_type: model_rec.supports_reasoning.clone(),
-        supports_temperature: model_rec.supports_temperature,
+        supports_temperature: model_rec.supports_temperature
     };
 
     let mut collector = NoopCollector;

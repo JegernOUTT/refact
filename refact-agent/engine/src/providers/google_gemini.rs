@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -19,6 +20,7 @@ pub struct GoogleGeminiProvider {
     pub custom_models: HashMap<String, CustomModelConfig>,
 }
 
+#[async_trait]
 impl ProviderTrait for GoogleGeminiProvider {
     fn name(&self) -> &'static str {
         "google_gemini"
@@ -103,6 +105,7 @@ available:
             completion_endpoint: String::new(),
             embedding_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/embeddings".to_string(),
             api_key,
+            auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
             support_metadata: false,

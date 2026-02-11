@@ -86,6 +86,7 @@ pub struct ChoiceFinal {
     pub thinking_blocks: Vec<serde_json::Value>,
     pub tool_calls_raw: Vec<serde_json::Value>,
     pub citations: Vec<serde_json::Value>,
+    pub server_content_blocks: Vec<serde_json::Value>,
     pub extra: serde_json::Map<String, serde_json::Value>,
     pub finish_reason: Option<String>,
     pub usage: Option<ChatUsage>,
@@ -129,6 +130,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
 
     let adapter_settings = AdapterSettings {
         api_key: params.model_rec.api_key.clone(),
+        auth_token: params.model_rec.auth_token.clone(),
         endpoint: params.model_rec.endpoint.clone(),
         extra_headers: params.model_rec.extra_headers.clone(),
         model_name: params.model_rec.name.clone(),
@@ -139,6 +141,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         supports_max_completion_tokens: params.model_rec.supports_max_completion_tokens,
         support_metadata: params.model_rec.support_metadata,
         eof_is_done: params.model_rec.eof_is_done,
+        supports_web_search: params.model_rec.supports_web_search,
     };
 
     let http_parts = adapter.build_http(&params.llm_request, &adapter_settings)
@@ -236,6 +239,14 @@ pub async fn run_llm_stream<C: StreamCollector>(
                             ops.push(DeltaOp::AppendReasoning { text });
                         }
                         LlmStreamDelta::SetToolCalls { tool_calls } => {
+                            let tool_calls = if !params.model_rec.auth_token.is_empty() {
+                                tool_calls.into_iter().map(|mut tc| {
+                                    strip_mcp_prefix_from_tool_call(&mut tc);
+                                    tc
+                                }).collect()
+                            } else {
+                                tool_calls
+                            };
                             for tc in &tool_calls {
                                 acc.tool_calls.merge(tc);
                             }
@@ -248,6 +259,10 @@ pub async fn run_llm_stream<C: StreamCollector>(
                         LlmStreamDelta::AddCitation { citation } => {
                             acc.citations.push(citation.clone());
                             ops.push(DeltaOp::AddCitation { citation });
+                        }
+                        LlmStreamDelta::AddServerContentBlock { block } => {
+                            acc.server_content_blocks.push(block.clone());
+                            ops.push(DeltaOp::AddServerContentBlock { block });
                         }
                         LlmStreamDelta::SetUsage { usage } => {
                             acc.usage = Some(merge_usage(acc.usage.take(), usage.clone()));
@@ -313,6 +328,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 thinking_blocks,
                 tool_calls_raw: acc.tool_calls.finalize(),
                 citations: acc.citations,
+                server_content_blocks: acc.server_content_blocks,
                 extra: acc.extra,
                 finish_reason: acc.finish_reason,
                 usage: acc.usage,
@@ -330,9 +346,20 @@ struct ChoiceAccumulator {
     thinking_blocks: Vec<serde_json::Value>,
     tool_calls: ToolCallAccumulator,  // Use efficient accumulator instead of Vec
     citations: Vec<serde_json::Value>,
+    server_content_blocks: Vec<serde_json::Value>,
     extra: serde_json::Map<String, serde_json::Value>,
     finish_reason: Option<String>,
     usage: Option<ChatUsage>,
+}
+
+fn strip_mcp_prefix_from_tool_call(tc: &mut serde_json::Value) {
+    if let Some(func) = tc.get_mut("function") {
+        if let Some(name) = func.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()) {
+            if let Some(stripped) = name.strip_prefix("mcp_") {
+                func["name"] = serde_json::json!(stripped);
+            }
+        }
+    }
 }
 
 pub fn normalize_tool_call(tc: &serde_json::Value) -> Option<crate::call_validation::ChatToolCall> {

@@ -377,6 +377,9 @@ impl ChatSession {
                         DeltaOp::AddCitation { citation } => {
                             draft.citations.push(citation.clone());
                         }
+                        DeltaOp::AddServerContentBlock { block } => {
+                            draft.server_content_blocks.push(block.clone());
+                        }
                         DeltaOp::SetUsage { usage } => {
                             if let Ok(u) = serde_json::from_value(usage.clone()) {
                                 draft.usage = Some(u);

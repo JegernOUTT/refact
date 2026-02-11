@@ -280,6 +280,9 @@ pub enum DeltaOp {
     AddCitation {
         citation: serde_json::Value,
     },
+    AddServerContentBlock {
+        block: serde_json::Value,
+    },
     SetUsage {
         usage: serde_json::Value,
     },
@@ -669,6 +672,9 @@ mod tests {
             },
             DeltaOp::AddCitation {
                 citation: json!({"url":"http://x"}),
+            },
+            DeltaOp::AddServerContentBlock {
+                block: json!({"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}),
             },
             DeltaOp::SetUsage {
                 usage: json!({"total_tokens":100}),

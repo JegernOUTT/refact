@@ -125,6 +125,8 @@ pub struct ModelCapabilities {
     pub default_temperature: Option<f32>,
     #[serde(default)]
     pub default_max_tokens: Option<usize>,
+    #[serde(default)]
+    pub supports_web_search: bool,
 }
 
 fn default_true() -> bool {

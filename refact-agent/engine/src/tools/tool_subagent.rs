@@ -28,6 +28,7 @@ fn tools_contain_file_editing(tools: &[String]) -> bool {
         .any(|t| FILE_EDITING_TOOLS.contains(&t.as_str()))
 }
 
+#[derive(Clone)]
 pub struct ToolSubagent {
     pub config_path: String,
 }

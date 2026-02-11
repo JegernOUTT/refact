@@ -15,6 +15,7 @@ use crate::providers::{
     xai_responses::XAIResponsesProvider,
     google_gemini::GoogleGeminiProvider,
     custom::CustomProvider,
+    claude_code::ClaudeCodeProvider,
 };
 
 pub const PROVIDER_NAMES: &[&str] = &[
@@ -31,6 +32,7 @@ pub const PROVIDER_NAMES: &[&str] = &[
     "xai_responses",
     "google_gemini",
     "custom",
+    "claude_code",
 ];
 
 pub fn create_provider(name: &str) -> Option<Box<dyn ProviderTrait>> {
@@ -48,6 +50,7 @@ pub fn create_provider(name: &str) -> Option<Box<dyn ProviderTrait>> {
         "xai_responses" => Some(Box::new(XAIResponsesProvider::default())),
         "google_gemini" => Some(Box::new(GoogleGeminiProvider::default())),
         "custom" => Some(Box::new(CustomProvider::default())),
+        "claude_code" => Some(Box::new(ClaudeCodeProvider::default())),
         _ => None,
     }
 }

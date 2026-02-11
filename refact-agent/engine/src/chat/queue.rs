@@ -727,6 +727,7 @@ fn sanitize_message_for_restore(msg: &ChatMessage) -> ChatMessage {
         reasoning_content: msg.reasoning_content.clone(),
         thinking_blocks: msg.thinking_blocks.clone(),
         citations: msg.citations.clone(),  // Preserve citations (e.g., from web_search)
+        server_content_blocks: msg.server_content_blocks.clone(),  // Preserve for multi-turn web_search
         finish_reason: None,  // Strip finish reason
         extra: serde_json::Map::new(),  // Strip extra provider-specific data
         output_filter: None,
