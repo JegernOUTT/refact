@@ -156,15 +156,13 @@ pub async fn resolve_subchat_params(
     };
 
     let reasoning_effort = match subchat.reasoning_effort.as_deref() {
-        Some(re) if re.eq_ignore_ascii_case("low") => Some(ReasoningEffort::Low),
-        Some(re) if re.eq_ignore_ascii_case("medium") => Some(ReasoningEffort::Medium),
-        Some(re) if re.eq_ignore_ascii_case("high") => Some(ReasoningEffort::High),
-        Some(re) if re.eq_ignore_ascii_case("xhigh") => Some(ReasoningEffort::XHigh),
-        Some(re) if re.eq_ignore_ascii_case("max") => Some(ReasoningEffort::Max),
-        Some(re) => return Err(format!(
-            "invalid reasoning_effort '{}' for '{}', expected: low, medium, high, xhigh, max",
-            re, tool_name
-        )),
+        Some(re) => match ReasoningEffort::from_str_opt(re) {
+            Some(effort) => Some(effort),
+            None => return Err(format!(
+                "invalid reasoning_effort '{}' for '{}', expected: none, minimal, low, medium, high, xhigh, max",
+                re, tool_name
+            )),
+        },
         None => None,
     };
 
@@ -892,8 +890,8 @@ async fn subchat_stream(
         model_rec: model_rec.base.clone(),
         abort_flag: Some(abort_flag),
         supports_tools: model_rec.supports_tools,
-        supports_reasoning: model_rec.supports_reasoning.is_some(),
-        reasoning_type: model_rec.supports_reasoning.clone(),
+        supports_reasoning: model_rec.has_reasoning_support(),
+        reasoning_type: model_rec.reasoning_type_string(),
         supports_temperature: model_rec.supports_temperature
     };
 

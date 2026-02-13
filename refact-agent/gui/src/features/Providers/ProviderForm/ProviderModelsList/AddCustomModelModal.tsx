@@ -30,8 +30,7 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
   const [nCtx, setNCtx] = useState("4096");
   const [supportsTools, setSupportsTools] = useState(false);
   const [supportsMultimodality, setSupportsMultimodality] = useState(false);
-  const [supportsReasoning, setSupportsReasoning] = useState(false);
-  const [reasoningType, setReasoningType] = useState("");
+  const [supportsThinkingBudget, setSupportsThinkingBudget] = useState(false);
   const [tokenizer, setTokenizer] = useState("");
 
   const resetForm = useCallback(() => {
@@ -39,8 +38,7 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
     setNCtx("4096");
     setSupportsTools(false);
     setSupportsMultimodality(false);
-    setSupportsReasoning(false);
-    setReasoningType("");
+    setSupportsThinkingBudget(false);
     setTokenizer("");
   }, []);
 
@@ -50,7 +48,7 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
       n_ctx: parseInt(nCtx, 10) || 4096,
       supports_tools: supportsTools,
       supports_multimodality: supportsMultimodality,
-      supports_reasoning: supportsReasoning ? reasoningType || "openai" : null,
+      supports_thinking_budget: supportsThinkingBudget,
       tokenizer: tokenizer.trim() || null,
     };
 
@@ -69,8 +67,7 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
     nCtx,
     supportsTools,
     supportsMultimodality,
-    supportsReasoning,
-    reasoningType,
+    supportsThinkingBudget,
     tokenizer,
     resetForm,
     onClose,
@@ -144,30 +141,16 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
 
             <Flex align="center" gap="2">
               <Checkbox
-                id="supports_reasoning"
-                checked={supportsReasoning}
+                id="supports_thinking_budget"
+                checked={supportsThinkingBudget}
                 onCheckedChange={(checked) =>
-                  setSupportsReasoning(checked === true)
+                  setSupportsThinkingBudget(checked === true)
                 }
               />
-              <Text as="label" htmlFor="supports_reasoning" size="2">
-                Supports Reasoning
+              <Text as="label" htmlFor="supports_thinking_budget" size="2">
+                Supports Thinking Budget
               </Text>
             </Flex>
-
-            {supportsReasoning && (
-              <Flex direction="column" gap="1" ml="4">
-                <Text as="label" size="1" color="gray">
-                  Reasoning type (e.g., openai, anthropic, deepseek)
-                </Text>
-                <TextField.Root
-                  size="1"
-                  placeholder="openai"
-                  value={reasoningType}
-                  onChange={(e) => setReasoningType(e.target.value)}
-                />
-              </Flex>
-            )}
           </Flex>
 
           <Flex direction="column" gap="1">

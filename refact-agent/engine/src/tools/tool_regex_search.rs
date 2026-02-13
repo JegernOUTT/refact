@@ -318,8 +318,8 @@ impl Tool for ToolRegexSearch {
 
         // Append related memories (short form) based on the matched file paths.
         let related_section = {
-            let gcx_read = gcx.read().await;
-            let idx_guard = gcx_read.knowledge_index.lock().await;
+            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_guard = idx_arc.lock().await;
             let matched_files: Vec<String> = all_search_results
                 .iter()
                 .map(|cf| cf.file_name.clone())

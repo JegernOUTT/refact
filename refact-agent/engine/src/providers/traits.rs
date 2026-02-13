@@ -70,7 +70,11 @@ pub struct CustomModelConfig {
     #[serde(default)]
     pub supports_multimodality: bool,
     #[serde(default)]
-    pub supports_reasoning: Option<String>,
+    pub reasoning_effort_options: Option<Vec<String>>,
+    #[serde(default)]
+    pub supports_thinking_budget: bool,
+    #[serde(default)]
+    pub supports_adaptive_thinking_budget: bool,
     #[serde(default)]
     pub tokenizer: Option<String>,
     #[serde(default)]
@@ -87,7 +91,9 @@ impl Default for CustomModelConfig {
             n_ctx: default_n_ctx(),
             supports_tools: false,
             supports_multimodality: false,
-            supports_reasoning: None,
+            reasoning_effort_options: None,
+            supports_thinking_budget: false,
+            supports_adaptive_thinking_budget: false,
             tokenizer: None,
             pricing: None,
         }
@@ -101,7 +107,12 @@ pub struct AvailableModel {
     pub n_ctx: usize,
     pub supports_tools: bool,
     pub supports_multimodality: bool,
-    pub supports_reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_options: Option<Vec<String>>,
+    #[serde(default)]
+    pub supports_thinking_budget: bool,
+    #[serde(default)]
+    pub supports_adaptive_thinking_budget: bool,
     pub tokenizer: Option<String>,
     pub enabled: bool,
     pub is_custom: bool,
@@ -111,27 +122,15 @@ pub struct AvailableModel {
 
 impl AvailableModel {
     pub fn from_caps(id: &str, caps: &ModelCapabilities, enabled: bool, pricing: Option<ModelPricing>) -> Self {
-        let reasoning = match caps.reasoning {
-            crate::caps::model_caps::ReasoningType::None => None,
-            crate::caps::model_caps::ReasoningType::Openai => Some("openai".to_string()),
-            crate::caps::model_caps::ReasoningType::AnthropicBudget => Some("anthropic_budget".to_string()),
-            crate::caps::model_caps::ReasoningType::AnthropicEffort => Some("anthropic_effort".to_string()),
-            crate::caps::model_caps::ReasoningType::Deepseek => Some("deepseek".to_string()),
-            crate::caps::model_caps::ReasoningType::Xai => Some("xai".to_string()),
-            crate::caps::model_caps::ReasoningType::Qwen => Some("qwen".to_string()),
-            crate::caps::model_caps::ReasoningType::Gemini => Some("gemini".to_string()),
-            crate::caps::model_caps::ReasoningType::Kimi => Some("kimi".to_string()),
-            crate::caps::model_caps::ReasoningType::Zhipu => Some("zhipu".to_string()),
-            crate::caps::model_caps::ReasoningType::Mistral => Some("mistral".to_string()),
-        };
-
         Self {
             id: id.to_string(),
             display_name: None,
             n_ctx: caps.n_ctx,
             supports_tools: caps.supports_tools,
             supports_multimodality: caps.supports_vision,
-            supports_reasoning: reasoning,
+            reasoning_effort_options: caps.reasoning_effort_options.clone(),
+            supports_thinking_budget: caps.supports_thinking_budget,
+            supports_adaptive_thinking_budget: caps.supports_adaptive_thinking_budget,
             tokenizer: if caps.tokenizer.is_empty() { None } else { Some(caps.tokenizer.clone()) },
             enabled,
             is_custom: false,
@@ -146,7 +145,9 @@ impl AvailableModel {
             n_ctx: config.n_ctx,
             supports_tools: config.supports_tools,
             supports_multimodality: config.supports_multimodality,
-            supports_reasoning: config.supports_reasoning.clone(),
+            reasoning_effort_options: config.reasoning_effort_options.clone(),
+            supports_thinking_budget: config.supports_thinking_budget,
+            supports_adaptive_thinking_budget: config.supports_adaptive_thinking_budget,
             tokenizer: config.tokenizer.clone(),
             enabled,
             is_custom: true,

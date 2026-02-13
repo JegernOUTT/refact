@@ -315,11 +315,15 @@ impl Tool for ToolSubagent {
             format_related_memories_section(&cards, None)
         };
 
-        let result_message = format!(
-            "{}{}\n\nNote: related memories are heuristic and may be unrelated. If any look relevant, load full content with `cat(paths=\"<path>\")` using the memory file path shown above.",
-            result_message,
-            related_section
-        );
+        let result_message = if related_section.trim().is_empty() {
+            result_message
+        } else {
+            format!(
+                "{}{}",
+                result_message,
+                related_section
+            )
+        };
 
         Ok((
             false,

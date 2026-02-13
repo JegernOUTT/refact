@@ -16,6 +16,7 @@ import {
 } from "../../../../../hooks/useModelsQuery";
 
 import { FormField } from "./FormField";
+import { FormSelect } from "./FormSelect";
 import { CapabilityBadge } from "./CapabilityBadge";
 
 import type {
@@ -25,27 +26,10 @@ import type {
   Model,
   ModelType,
   SimplifiedModel,
-  SupportsReasoningStyle,
 } from "../../../../../services/refact";
 
-import { extractHumanReadableReasoningType } from "../utils";
 import { useEffectOnce } from "../../../../../hooks";
-import { FormSelect } from "./FormSelect";
 import { Spinner } from "../../../../../components/Spinner";
-
-const SUPPORTED_REASONING_STYLES: SupportsReasoningStyle[] = [
-  "openai",
-  "deepseek",
-  "anthropic_budget",
-  "anthropic_effort",
-  "xai",
-  "qwen",
-  "gemini",
-  "kimi",
-  "zhipu",
-  "mistral",
-  null,
-];
 
 export type ModelCardPopupProps = {
   minifiedModel?: SimplifiedModel;
@@ -425,19 +409,6 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
     });
   };
 
-  const handleReasoningStyleChange = (value: string) => {
-    if (!editedModelData) return;
-
-    setEditedModelData({
-      ...editedModelData,
-      type: "chat",
-      supports_boost_reasoning:
-        value === "null" ? false : editedModelData.supports_boost_reasoning,
-      supports_reasoning:
-        value === "null" ? null : (value as SupportsReasoningStyle),
-    });
-  };
-
   if (!editedModelData) return null;
 
   return (
@@ -480,13 +451,6 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
       />
 
       <Flex direction="column" gap="2">
-        <FormSelect
-          label="Reasoning Style"
-          value={editedModelData.supports_reasoning ?? "null"}
-          onValueChange={handleReasoningStyleChange}
-          options={SUPPORTED_REASONING_STYLES}
-          optionTransformer={extractHumanReadableReasoningType}
-        />
         <Text as="div" size="2" weight="bold">
           Capabilities
         </Text>
@@ -511,13 +475,11 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
             enabled={editedModelData.supports_agent}
             onClick={() => toggleCapability("supports_agent")}
           />
-          {editedModelData.supports_reasoning && (
-            <CapabilityBadge
-              name="Boost Reasoning"
-              enabled={!!editedModelData.supports_boost_reasoning}
-              onClick={() => toggleCapability("supports_boost_reasoning")}
-            />
-          )}
+          <CapabilityBadge
+            name="Thinking Budget"
+            enabled={!!editedModelData.supports_thinking_budget}
+            onClick={() => toggleCapability("supports_thinking_budget")}
+          />
         </Flex>
       </Flex>
     </>

@@ -206,8 +206,8 @@ impl Tool for ToolCat {
         // This is fast: uses in-memory KnowledgeIndex only.
         let related_section = {
             let gcx = ccx.lock().await.global_context.clone();
-            let gcx_read = gcx.read().await;
-            let idx_guard = gcx_read.knowledge_index.lock().await;
+            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_guard = idx_arc.lock().await;
             let mut cards = idx_guard.related_for_files(&filenames_present, 8);
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&filenames_present, 8);

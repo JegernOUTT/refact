@@ -31,8 +31,8 @@ function getDiffStats(diffs: DiffChunk[]): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
   for (const diff of diffs) {
-    added += diff.lines_add.split("\n").filter((l) => l.length > 0).length;
-    removed += diff.lines_remove.split("\n").filter((l) => l.length > 0).length;
+    added += (diff.lines_add ?? "").split("\n").filter((l) => l.length > 0).length;
+    removed += (diff.lines_remove ?? "").split("\n").filter((l) => l.length > 0).length;
   }
   return { added, removed };
 }
@@ -68,8 +68,8 @@ const DiffLine: React.FC<{
 };
 
 const DiffBlock: React.FC<{ diff: DiffChunk }> = ({ diff }) => {
-  const removeLines = diff.lines_remove.split("\n").filter((l) => l.length > 0);
-  const addLines = diff.lines_add.split("\n").filter((l) => l.length > 0);
+  const removeLines = (diff.lines_remove ?? "").split("\n").filter((l) => l.length > 0);
+  const addLines = (diff.lines_add ?? "").split("\n").filter((l) => l.length > 0);
 
   return (
     <Box className={styles.diffBlock}>

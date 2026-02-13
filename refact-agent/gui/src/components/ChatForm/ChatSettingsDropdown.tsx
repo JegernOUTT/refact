@@ -38,6 +38,7 @@ import {
   setTemperature,
   setMaxTokens,
 } from "../../features/Chat/Thread";
+import type { ReasoningEffort } from "../../features/Chat/Thread/types";
 import { push } from "../../features/Pages/pagesSlice";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
 import { useThinking } from "../../hooks/useThinking";
@@ -181,7 +182,9 @@ export const ChatSettingsDropdown: React.FC = () => {
           default_temperature?: number;
           default_max_tokens?: number;
           max_output_tokens?: number;
-          supports_reasoning?: string;
+          reasoning_effort_options?: string[] | null;
+          supports_thinking_budget?: boolean;
+          supports_adaptive_thinking_budget?: boolean;
         }
       | undefined;
     if (!modelData) return null;
@@ -192,7 +195,9 @@ export const ChatSettingsDropdown: React.FC = () => {
       defaultTemperature: modelData.default_temperature,
       defaultMaxTokens: modelData.default_max_tokens,
       maxOutputTokens: modelData.max_output_tokens,
-      supportsReasoning: modelData.supports_reasoning,
+      reasoningEffortOptions: modelData.reasoning_effort_options,
+      supportsThinkingBudget: modelData.supports_thinking_budget,
+      supportsAdaptiveThinkingBudget: modelData.supports_adaptive_thinking_budget,
       pricing: pricing ? formatPricingDetailed(pricing) : null,
     };
   }, [caps.currentModel, capsQuery.data]);
@@ -550,148 +555,83 @@ export const ChatSettingsDropdown: React.FC = () => {
               </Callout.Root>
             )}
 
-            {isBoostReasoningEnabled &&
-              selectedModelDetail?.supportsReasoning && (
-                <>
-                  {/* OpenAI/Mistral: low/medium/high/xhigh */}
-                  {(selectedModelDetail.supportsReasoning === "openai" ||
-                    selectedModelDetail.supportsReasoning === "mistral") && (
-                    <Flex align="center" justify="between" gap="2" mt="2">
-                      <Text size="1" color="gray">
-                        Effort
-                      </Text>
-                      <Flex gap="1">
-                        {(["low", "medium", "high", "xhigh"] as const).map(
-                          (level) => (
-                            <button
-                              key={level}
-                              type="button"
-                              className={`${styles.effortButton} ${
-                                (threadReasoningEffort ?? "medium") === level
-                                  ? styles.effortButtonActive
-                                  : ""
-                              }`}
-                              onClick={() =>
-                                dispatch(
-                                  setReasoningEffort({ chatId, value: level }),
-                                )
-                              }
-                              disabled={isInteractionDisabled}
-                            >
-                              <Text size="1">{level}</Text>
-                            </button>
-                          ),
-                        )}
-                      </Flex>
-                    </Flex>
-                  )}
-                  {/* xAI/Gemini 3: low/high only */}
-                  {(selectedModelDetail.supportsReasoning === "xai" ||
-                    selectedModelDetail.supportsReasoning === "gemini") && (
-                    <Flex align="center" justify="between" gap="2" mt="2">
-                      <Text size="1" color="gray">
-                        Level
-                      </Text>
-                      <Flex gap="1">
-                        {(["low", "high"] as const).map((level) => (
+            {isBoostReasoningEnabled && selectedModelDetail && (
+              <>
+                {/* Reasoning effort options (transparent) */}
+                {selectedModelDetail.reasoningEffortOptions &&
+                  selectedModelDetail.reasoningEffortOptions.length > 0 && (
+                  <Flex align="center" justify="between" gap="2" mt="2">
+                    <Text size="1" color="gray">
+                      Effort
+                    </Text>
+                    <Flex gap="1">
+                      {selectedModelDetail.reasoningEffortOptions.map(
+                        (level) => (
                           <button
                             key={level}
                             type="button"
                             className={`${styles.effortButton} ${
-                              (threadReasoningEffort ?? "high") === level
+                              (threadReasoningEffort ?? "medium") === level
                                 ? styles.effortButtonActive
                                 : ""
                             }`}
                             onClick={() =>
                               dispatch(
-                                setReasoningEffort({ chatId, value: level }),
+                                setReasoningEffort({
+                                  chatId,
+                                  value: level as ReasoningEffort,
+                                }),
                               )
                             }
                             disabled={isInteractionDisabled}
                           >
                             <Text size="1">{level}</Text>
                           </button>
-                        ))}
-                      </Flex>
+                        ),
+                      )}
                     </Flex>
-                  )}
-                  {/* Anthropic budget/Qwen/Zhipu: thinking budget slider */}
-                  {(selectedModelDetail.supportsReasoning ===
-                    "anthropic_budget" ||
-                    selectedModelDetail.supportsReasoning === "qwen" ||
-                    selectedModelDetail.supportsReasoning === "zhipu") && (
-                    <Flex direction="column" gap="1" mt="2">
-                      <Flex align="center" justify="between">
-                        <Text size="1" color="gray">
-                          Thinking tokens
-                        </Text>
-                        <Text size="1" weight="medium">
-                          {displayThinkingBudget ?? 16384}
-                        </Text>
-                      </Flex>
-                      <Flex align="center" gap="2">
-                        <Text size="1" color="gray">
-                          1K
-                        </Text>
-                        <Slider
-                          size="1"
-                          min={1024}
-                          max={32768}
-                          step={1024}
-                          value={[displayThinkingBudget ?? 16384]}
-                          onValueChange={(values) =>
-                            setLocalThinkingBudget(values[0])
-                          }
-                          onValueCommit={(values) => {
-                            dispatch(
-                              setThinkingBudget({ chatId, value: values[0] }),
-                            );
-                            setLocalThinkingBudget(null);
-                          }}
-                          disabled={isInteractionDisabled}
-                        />
-                        <Text size="1" color="gray">
-                          32K
-                        </Text>
-                      </Flex>
-                    </Flex>
-                  )}
-
-                  {/* Anthropic effort: low/medium/high/max */}
-                  {selectedModelDetail.supportsReasoning ===
-                    "anthropic_effort" && (
-                    <Flex align="center" justify="between" gap="2" mt="2">
+                  </Flex>
+                )}
+                {/* Thinking budget slider */}
+                {selectedModelDetail.supportsThinkingBudget && (
+                  <Flex direction="column" gap="1" mt="2">
+                    <Flex align="center" justify="between">
                       <Text size="1" color="gray">
-                        Effort
+                        Thinking tokens
                       </Text>
-                      <Flex gap="1">
-                        {(["low", "medium", "high", "max"] as const).map(
-                          (level) => (
-                            <button
-                              key={level}
-                              type="button"
-                              className={`${styles.effortButton} ${
-                                (threadReasoningEffort ?? "medium") === level
-                                  ? styles.effortButtonActive
-                                  : ""
-                              }`}
-                              onClick={() =>
-                                dispatch(
-                                  setReasoningEffort({ chatId, value: level }),
-                                )
-                              }
-                              disabled={isInteractionDisabled}
-                            >
-                              <Text size="1">{level}</Text>
-                            </button>
-                          ),
-                        )}
-                      </Flex>
+                      <Text size="1" weight="medium">
+                        {displayThinkingBudget ?? 16384}
+                      </Text>
                     </Flex>
-                  )}
-                  {/* DeepSeek/Kimi: no additional config needed */}
-                </>
-              )}
+                    <Flex align="center" gap="2">
+                      <Text size="1" color="gray">
+                        1K
+                      </Text>
+                      <Slider
+                        size="1"
+                        min={1024}
+                        max={32768}
+                        step={1024}
+                        value={[displayThinkingBudget ?? 16384]}
+                        onValueChange={(values) =>
+                          setLocalThinkingBudget(values[0])
+                        }
+                        onValueCommit={(values) => {
+                          dispatch(
+                            setThinkingBudget({ chatId, value: values[0] }),
+                          );
+                          setLocalThinkingBudget(null);
+                        }}
+                        disabled={isInteractionDisabled}
+                      />
+                      <Text size="1" color="gray">
+                        32K
+                      </Text>
+                    </Flex>
+                  </Flex>
+                )}
+              </>
+            )}
           </div>
         )}
 

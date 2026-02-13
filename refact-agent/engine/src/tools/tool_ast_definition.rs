@@ -12,6 +12,7 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, Too
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::knowledge_index::format_related_memories_section;
+use regex::Regex;
 
 pub struct ToolAstDefinition {
     pub config_path: String,
@@ -120,8 +121,8 @@ impl Tool for ToolAstDefinition {
 
             // Append related memories based on involved file paths.
             let related_section = {
-                let gcx_read = gcx.read().await;
-                let idx_guard = gcx_read.knowledge_index.lock().await;
+                let idx_arc = { gcx.read().await.knowledge_index.clone() };
+                let idx_guard = idx_arc.lock().await;
                 let mut files: Vec<String> = all_context_files
                     .iter()
                     .filter_map(|c| match c {
@@ -134,6 +135,39 @@ impl Tool for ToolAstDefinition {
                 let mut cards = idx_guard.related_for_files(&files, 8);
                 if cards.is_empty() {
                     cards = idx_guard.related_for_related_files(&files, 8);
+                }
+
+                // Also try entity-based lookup using the queried symbols (best-effort).
+                if cards.is_empty() {
+                    let mut ents: Vec<String> = Vec::new();
+                    // Parse from the original args string (comma-separated)
+                    for raw in symbols_str.split(',') {
+                        let s = raw.trim();
+                        if s.is_empty() {
+                            continue;
+                        }
+                        let s = s.replace('.', "::");
+                        // Prefer last segment as entity (often what's backticked in memories)
+                        if let Some(last) = s.split("::").last() {
+                            if !last.is_empty() {
+                                ents.push(last.to_string());
+                            }
+                        }
+                        ents.push(s);
+                    }
+                    ents.sort();
+                    ents.dedup();
+
+                    // Filter to reasonable identifier-ish tokens to avoid noise.
+                    let id_re = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_:]{1,100}$").unwrap();
+                    ents.retain(|e| id_re.is_match(e));
+
+                    if !ents.is_empty() {
+                        cards = idx_guard.related_for_entities(&ents, 8);
+                        if cards.is_empty() {
+                            cards = idx_guard.related_for_related_entities(&ents, 8);
+                        }
+                    }
                 }
                 format_related_memories_section(&cards, None)
             };

@@ -167,7 +167,6 @@ pub async fn exchange_code(
     })
 }
 
-#[allow(dead_code)]
 pub async fn refresh_access_token(
     http_client: &reqwest::Client,
     refresh_token: &str,

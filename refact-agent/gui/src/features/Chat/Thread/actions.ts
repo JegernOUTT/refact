@@ -386,7 +386,7 @@ export const setContextTokensCap = createAction<PayloadWithChatAndNumber>(
 
 export const setReasoningEffort = createAction<{
   chatId: string;
-  value: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  value: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
 }>("chatThread/setReasoningEffort");
 
 export const setThinkingBudget = createAction<{

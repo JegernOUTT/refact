@@ -44,6 +44,48 @@ fn normalize_key(s: &str) -> String {
     s.trim().to_lowercase()
 }
 
+fn kind_priority(kind: Option<&str>) -> i32 {
+    // Higher = better.
+    // Keep conservative: we mainly want durable preference/lesson/memory cards to outrank raw reports.
+    match kind.unwrap_or("") {
+        "preference" => 120,
+        "memory" => 110,
+        "lesson" => 105,
+        "pattern" => 100,
+        "insight" => 95,
+        "decision" => 90,
+        "process" => 80,
+        "task-report" => 70,
+        "research" => 60,
+        "trajectory" => 20,
+        _ => 50,
+    }
+}
+
+fn recency_key(created_at: Option<&str>, created: Option<&str>) -> String {
+    // Lexicographic sort works for RFC3339 and YYYY-MM-DD.
+    created_at
+        .or(created)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn rank_cards(mut cards: Vec<KnowledgeCard>, max_items: usize) -> Vec<KnowledgeCard> {
+    cards.sort_by(|a, b| {
+        let ak = kind_priority(a.kind.as_deref());
+        let bk = kind_priority(b.kind.as_deref());
+        bk.cmp(&ak)
+            .then_with(|| {
+                let ar = recency_key(a.created_at.as_deref(), a.created.as_deref());
+                let br = recency_key(b.created_at.as_deref(), b.created.as_deref());
+                br.cmp(&ar)
+            })
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    cards.truncate(max_items);
+    cards
+}
+
 fn first_nonempty_line(text: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();
@@ -146,14 +188,11 @@ impl KnowledgeIndex {
                 for c in cards {
                     if seen.insert(c.id.clone()) {
                         out.push(c.clone());
-                        if out.len() >= max_items {
-                            return out;
-                        }
                     }
                 }
             }
         }
-        out
+        rank_cards(out, max_items)
     }
 
     pub fn related_for_related_files(&self, filenames: &[String], max_items: usize) -> Vec<KnowledgeCard> {
@@ -164,14 +203,11 @@ impl KnowledgeIndex {
                 for c in cards {
                     if seen.insert(c.id.clone()) {
                         out.push(c.clone());
-                        if out.len() >= max_items {
-                            return out;
-                        }
                     }
                 }
             }
         }
-        out
+        rank_cards(out, max_items)
     }
 
     pub fn related_for_entities(&self, entities: &[String], max_items: usize) -> Vec<KnowledgeCard> {
@@ -182,14 +218,11 @@ impl KnowledgeIndex {
                 for c in cards {
                     if seen.insert(c.id.clone()) {
                         out.push(c.clone());
-                        if out.len() >= max_items {
-                            return out;
-                        }
                     }
                 }
             }
         }
-        out
+        rank_cards(out, max_items)
     }
 
     pub fn related_for_related_entities(&self, entities: &[String], max_items: usize) -> Vec<KnowledgeCard> {
@@ -200,14 +233,11 @@ impl KnowledgeIndex {
                 for c in cards {
                     if seen.insert(c.id.clone()) {
                         out.push(c.clone());
-                        if out.len() >= max_items {
-                            return out;
-                        }
                     }
                 }
             }
         }
-        out
+        rank_cards(out, max_items)
     }
 
     pub fn related_for_tags(&self, tags: &[String], max_items: usize) -> Vec<KnowledgeCard> {
@@ -219,14 +249,11 @@ impl KnowledgeIndex {
                 for c in cards {
                     if seen.insert(c.id.clone()) {
                         out.push(c.clone());
-                        if out.len() >= max_items {
-                            return out;
-                        }
                     }
                 }
             }
         }
-        out
+        rank_cards(out, max_items)
     }
 }
 
@@ -309,12 +336,13 @@ pub async fn build_knowledge_index(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            let (fm, _content_start) = KnowledgeFrontmatter::parse(&text);
+            let (fm, content_start) = KnowledgeFrontmatter::parse(&text);
             if fm.is_archived() || fm.is_deprecated() {
                 continue;
             }
 
-            index.add_from_frontmatter(path.to_path_buf(), &fm, None);
+            let content_slice = text.get(content_start..).unwrap_or("");
+            index.add_from_frontmatter(path.to_path_buf(), &fm, Some(content_slice));
         }
     }
 

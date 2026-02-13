@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use tracing::{info, warn};
 use crate::global_context::GlobalContext;
 
 static REFRESH_LOCK: OnceLock<AMutex<()>> = OnceLock::new();
+static FIRST_CALL: AtomicBool = AtomicBool::new(true);
 
 fn get_refresh_lock() -> &'static AMutex<()> {
     REFRESH_LOCK.get_or_init(|| AMutex::new(()))
@@ -52,28 +54,6 @@ pub struct ResolvedCaps {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum ReasoningType {
-    None,
-    Openai,
-    AnthropicBudget,
-    AnthropicEffort,
-    Deepseek,
-    Xai,
-    Qwen,
-    Gemini,
-    Kimi,
-    Zhipu,
-    Mistral,
-}
-
-impl Default for ReasoningType {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
 pub enum CachingType {
     None,
     Auto,
@@ -112,9 +92,13 @@ pub struct ModelCapabilities {
     #[serde(default)]
     pub supports_max_completion_tokens: bool,
     #[serde(default)]
-    pub reasoning: ReasoningType,
+    pub reasoning_effort_options: Option<Vec<String>>,
     #[serde(default)]
-    pub supports_reasoning_effort: bool,
+    pub supports_thinking_budget: bool,
+    #[serde(default)]
+    pub supports_adaptive_thinking_budget: bool,
+    #[serde(default)]
+    pub supports_parallel_tools: bool,
     #[serde(default)]
     pub max_thinking_tokens: Option<usize>,
     #[serde(default)]
@@ -278,13 +262,18 @@ pub async fn get_model_caps(
 ) -> Result<HashMap<String, ModelCapabilities>, String> {
     let _refresh_guard = get_refresh_lock().lock().await;
 
-    if !force_refresh {
+    let first_call = FIRST_CALL.swap(false, Ordering::SeqCst);
+    let should_refresh = force_refresh || first_call;
+
+    if !should_refresh {
         if let Some(cached) = load_cached_model_caps().await {
             if !cached.is_expired() {
                 return Ok(cached.models);
             }
             info!("Cached model capabilities expired, fetching fresh data");
         }
+    } else if first_call {
+        info!("First model capabilities request, fetching fresh data");
     }
 
     match fetch_model_caps_from_server(gcx, address_url).await {
@@ -629,12 +618,24 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_type_serde() {
-        let json = serde_json::to_string(&ReasoningType::Openai).unwrap();
-        assert_eq!(json, "\"openai\"");
+    fn test_reasoning_effort_options_serde() {
+        let caps = ModelCapabilities {
+            n_ctx: 128000,
+            max_output_tokens: 16384,
+            reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
+            supports_thinking_budget: true,
+            supports_adaptive_thinking_budget: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        assert!(json.contains("\"reasoning_effort_options\":[\"low\",\"medium\",\"high\"]"));
+        assert!(json.contains("\"supports_thinking_budget\":true"));
+        assert!(json.contains("\"supports_adaptive_thinking_budget\":false"));
 
-        let parsed: ReasoningType = serde_json::from_str("\"anthropic_budget\"").unwrap();
-        assert_eq!(parsed, ReasoningType::AnthropicBudget);
+        let parsed: ModelCapabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.reasoning_effort_options, Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]));
+        assert!(parsed.supports_thinking_budget);
+        assert!(!parsed.supports_adaptive_thinking_budget);
     }
 
     #[test]
@@ -688,8 +689,8 @@ mod tests {
             supports_strict_tools: true,
             supports_vision: true,
             supports_max_completion_tokens: true,
-            reasoning: ReasoningType::Openai,
-            supports_reasoning_effort: true,
+            reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
+            supports_thinking_budget: true,
             supports_temperature: false,
             ..Default::default()
         };
@@ -697,7 +698,8 @@ mod tests {
         assert!(caps.supports_strict_tools);
         assert!(caps.supports_max_completion_tokens);
         assert!(!caps.supports_temperature);
-        assert_eq!(caps.reasoning, ReasoningType::Openai);
+        assert_eq!(caps.reasoning_effort_options, Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]));
+        assert!(caps.supports_thinking_budget);
     }
 
     #[test]

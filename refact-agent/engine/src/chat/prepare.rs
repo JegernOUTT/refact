@@ -281,99 +281,72 @@ fn adapt_sampling_for_reasoning_models(
         sampling_parameters.frequency_penalty = model_record.default_frequency_penalty;
     }
 
-    let Some(ref supports_reasoning) = model_record.supports_reasoning else {
+    let has_reasoning_support = model_record.reasoning_effort_options.is_some()
+        || model_record.supports_thinking_budget
+        || model_record.supports_adaptive_thinking_budget;
+
+    if !has_reasoning_support {
         sampling_parameters.reasoning_effort = None;
         sampling_parameters.thinking = None;
+        sampling_parameters.thinking_budget = None;
         sampling_parameters.enable_thinking = None;
         return;
-    };
+    }
 
-    match supports_reasoning.as_ref() {
-        "openai" => {
-            if sampling_parameters.reasoning_effort.is_none()
-                && model_record.supports_boost_reasoning
-                && sampling_parameters.boost_reasoning
-            {
-                sampling_parameters.reasoning_effort = Some(ReasoningEffort::Medium);
-            }
-            if !user_set_max_tokens && sampling_parameters.max_new_tokens <= 8192 {
-                sampling_parameters.max_new_tokens *= 2;
-            }
-            sampling_parameters.thinking = None;
-            sampling_parameters.enable_thinking = None;
+    if sampling_parameters.boost_reasoning {
+        if model_record.supports_thinking_budget && sampling_parameters.thinking_budget.is_none() {
+            let min_budget = tokens().min_budget_tokens;
+            let budget = if sampling_parameters.max_new_tokens > min_budget {
+                (sampling_parameters.max_new_tokens / 2).max(min_budget)
+            } else {
+                min_budget
+            };
+            sampling_parameters.thinking_budget = Some(budget);
         }
-        "anthropic_budget" => {
-            if sampling_parameters.thinking_budget.is_none()
-                && model_record.supports_boost_reasoning
-                && sampling_parameters.boost_reasoning
-            {
-                let min_budget = tokens().min_budget_tokens;
-                let budget = if sampling_parameters.max_new_tokens > min_budget {
-                    (sampling_parameters.max_new_tokens / 2).max(min_budget)
+
+        if let Some(ref options) = model_record.reasoning_effort_options {
+            if sampling_parameters.reasoning_effort.is_none() && !options.is_empty() {
+                let default_effort = if options.contains(&"medium".to_string()) {
+                    ReasoningEffort::Medium
                 } else {
-                    min_budget
+                    ReasoningEffort::from_str_opt(&options[options.len() - 1])
+                        .unwrap_or(ReasoningEffort::Medium)
                 };
-                sampling_parameters.thinking_budget = Some(budget);
+                sampling_parameters.reasoning_effort = Some(default_effort);
             }
-            sampling_parameters.reasoning_effort = None;
-            sampling_parameters.thinking = None;
-            sampling_parameters.enable_thinking = None;
         }
-        "anthropic_effort" => {
-            if sampling_parameters.reasoning_effort.is_none()
-                && model_record.supports_boost_reasoning
-                && sampling_parameters.boost_reasoning
-            {
-                sampling_parameters.reasoning_effort = Some(ReasoningEffort::Medium);
-            }
-            sampling_parameters.thinking = None;
-            sampling_parameters.enable_thinking = None;
-        }
-        "qwen" => {
-            sampling_parameters.enable_thinking =
-                Some(model_record.supports_boost_reasoning && sampling_parameters.boost_reasoning);
-            sampling_parameters.reasoning_effort = None;
-            sampling_parameters.thinking = None;
-        }
-        "deepseek" => {
-            if !user_set_max_tokens && sampling_parameters.max_new_tokens <= 8192 {
-                sampling_parameters.max_new_tokens *= 2;
-            }
-            sampling_parameters.reasoning_effort = None;
-            sampling_parameters.thinking = None;
-            sampling_parameters.enable_thinking = None;
-        }
-        _ => {
-            sampling_parameters.reasoning_effort = None;
-            sampling_parameters.thinking = None;
-            sampling_parameters.enable_thinking = None;
-        }
-    };
+    }
+
+    if model_record.reasoning_effort_options.is_none() {
+        sampling_parameters.reasoning_effort = None;
+    }
+    if !model_record.supports_thinking_budget && !model_record.supports_adaptive_thinking_budget {
+        sampling_parameters.thinking_budget = None;
+    }
+    sampling_parameters.thinking = None;
+    sampling_parameters.enable_thinking = None;
 }
 
 fn sampling_params_to_reasoning_intent(
     sampling_parameters: &SamplingParameters,
     model_record: &ChatModelRecord,
 ) -> ReasoningIntent {
-    // If model doesn't support reasoning, return Off
-    let Some(ref reasoning_type) = model_record.supports_reasoning else {
-        return ReasoningIntent::Off;
-    };
+    let has_reasoning_support = model_record.reasoning_effort_options.is_some()
+        || model_record.supports_thinking_budget
+        || model_record.supports_adaptive_thinking_budget;
 
-    // DeepSeek handles reasoning automatically in responses - never send reasoning_effort
-    // This prevents accidentally sending OpenAI-style params that DeepSeek may reject
-    if reasoning_type == "deepseek" {
+    if !has_reasoning_support {
         return ReasoningIntent::Off;
     }
 
-    // Check thinking_budget (from frontend UI) — explicit tokens always win
     if let Some(budget) = sampling_parameters.thinking_budget {
         return ReasoningIntent::BudgetTokens(budget);
     }
 
-    // Check reasoning_effort (OpenAI-style or Anthropic effort)
     if let Some(ref effort) = sampling_parameters.reasoning_effort {
         return match effort {
+            ReasoningEffort::NoReasoning => ReasoningIntent::NoReasoning,
+            ReasoningEffort::Minimal => ReasoningIntent::Minimal,
             ReasoningEffort::Low => ReasoningIntent::Low,
             ReasoningEffort::Medium => ReasoningIntent::Medium,
             ReasoningEffort::High => ReasoningIntent::High,
@@ -382,7 +355,6 @@ fn sampling_params_to_reasoning_intent(
         };
     }
 
-    // Check Anthropic-style thinking with budget_tokens (legacy API)
     if let Some(ref thinking) = sampling_parameters.thinking {
         if thinking.get("type").and_then(|t| t.as_str()) == Some("enabled") {
             if let Some(budget) = thinking.get("budget_tokens").and_then(|b| b.as_u64()) {
@@ -392,14 +364,11 @@ fn sampling_params_to_reasoning_intent(
         }
     }
 
-    // Check Qwen-style enable_thinking
     if sampling_parameters.enable_thinking == Some(true) {
         return ReasoningIntent::Medium;
     }
 
-    // Check boost_reasoning flag (only for providers that support it via API params)
-    // DeepSeek is already handled above
-    if sampling_parameters.boost_reasoning && model_record.supports_boost_reasoning {
+    if sampling_parameters.boost_reasoning {
         return ReasoningIntent::Medium;
     }
 
@@ -424,7 +393,10 @@ fn strip_thinking_blocks_if_disabled(
     sampling_parameters: &SamplingParameters,
     model_record: &ChatModelRecord,
 ) -> Vec<ChatMessage> {
-    if model_record.supports_reasoning.is_none() || !is_thinking_enabled(sampling_parameters) {
+    let has_reasoning = model_record.reasoning_effort_options.is_some()
+        || model_record.supports_thinking_budget
+        || model_record.supports_adaptive_thinking_budget;
+    if !has_reasoning || !is_thinking_enabled(sampling_parameters) {
         messages
             .into_iter()
             .map(|mut msg| {
@@ -443,12 +415,38 @@ mod tests {
     use super::*;
     use crate::call_validation::ChatContent;
 
-    fn make_model_record(supports_reasoning: Option<&str>) -> ChatModelRecord {
+    fn make_model_record_effort(effort_options: Option<Vec<&str>>) -> ChatModelRecord {
         ChatModelRecord {
             base: Default::default(),
             default_temperature: Some(0.7),
-            supports_reasoning: supports_reasoning.map(|s| s.to_string()),
-            supports_boost_reasoning: true,
+            reasoning_effort_options: effort_options.map(|opts| opts.into_iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+
+    fn make_model_record_thinking_budget() -> ChatModelRecord {
+        ChatModelRecord {
+            base: Default::default(),
+            default_temperature: Some(0.7),
+            supports_thinking_budget: true,
+            ..Default::default()
+        }
+    }
+
+    fn make_model_record_adaptive() -> ChatModelRecord {
+        ChatModelRecord {
+            base: Default::default(),
+            default_temperature: Some(0.7),
+            supports_adaptive_thinking_budget: true,
+            reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string(), "max".to_string()]),
+            ..Default::default()
+        }
+    }
+
+    fn make_model_record_no_reasoning() -> ChatModelRecord {
+        ChatModelRecord {
+            base: Default::default(),
+            default_temperature: Some(0.7),
             ..Default::default()
         }
     }
@@ -508,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_blocks_when_no_reasoning_support() {
-        let model = make_model_record(None);
+        let model = make_model_record_no_reasoning();
         let params = make_sampling_params();
         let msgs = vec![ChatMessage {
             thinking_blocks: Some(vec![serde_json::json!({"type": "thinking"})]),
@@ -521,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_blocks_when_thinking_disabled() {
-        let model = make_model_record(Some("anthropic_budget"));
+        let model = make_model_record_thinking_budget();
         let params = make_sampling_params();
         let msgs = vec![ChatMessage {
             thinking_blocks: Some(vec![serde_json::json!({"type": "thinking"})]),
@@ -534,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_blocks_preserves_when_enabled() {
-        let model = make_model_record(Some("anthropic_budget"));
+        let model = make_model_record_thinking_budget();
         let mut params = make_sampling_params();
         params.thinking = Some(serde_json::json!({"type": "enabled", "budget_tokens": 1024}));
         let msgs = vec![ChatMessage {
@@ -548,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_blocks_preserves_other_fields() {
-        let model = make_model_record(None);
+        let model = make_model_record_no_reasoning();
         let params = make_sampling_params();
         let msgs = vec![ChatMessage {
             role: "assistant".into(),
@@ -566,71 +564,43 @@ mod tests {
     }
 
     #[test]
-    fn test_adapt_sampling_openai_boost_reasoning() {
+    fn test_adapt_sampling_effort_boost_reasoning() {
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
         params.temperature = None;
-        let model = make_model_record(Some("openai"));
+        let model = make_model_record_effort(Some(vec!["low", "medium", "high"]));
         adapt_sampling_for_reasoning_models(&mut params, &model);
         assert_eq!(params.reasoning_effort, Some(ReasoningEffort::Medium));
-        assert_eq!(params.temperature, Some(0.7)); // Filled from model default_temperature
+        assert_eq!(params.temperature, Some(0.7));
     }
 
     #[test]
-    fn test_adapt_sampling_openai_preserves_user_temperature() {
+    fn test_adapt_sampling_effort_preserves_user_temperature() {
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
-        params.temperature = Some(0.3); // User explicitly set temperature
-        let model = make_model_record(Some("openai"));
+        params.temperature = Some(0.3);
+        let model = make_model_record_effort(Some(vec!["low", "medium", "high"]));
         adapt_sampling_for_reasoning_models(&mut params, &model);
         assert_eq!(params.reasoning_effort, Some(ReasoningEffort::Medium));
-        assert_eq!(params.temperature, Some(0.3)); // User value preserved
+        assert_eq!(params.temperature, Some(0.3));
     }
 
     #[test]
-    fn test_adapt_sampling_openai_reasoning_effort_takes_precedence() {
+    fn test_adapt_sampling_effort_takes_precedence() {
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
-        params.reasoning_effort = Some(ReasoningEffort::High); // User set reasoning_effort
-        let model = make_model_record(Some("openai"));
+        params.reasoning_effort = Some(ReasoningEffort::High);
+        let model = make_model_record_effort(Some(vec!["low", "medium", "high"]));
         adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.reasoning_effort, Some(ReasoningEffort::High)); // User value preserved, not overwritten to Medium
+        assert_eq!(params.reasoning_effort, Some(ReasoningEffort::High));
     }
 
     #[test]
-    fn test_adapt_sampling_openai_doubles_tokens_when_default() {
-        let mut params = make_sampling_params();
-        params.max_new_tokens = 0;
-        let mut model = make_model_record(Some("openai"));
-        model.default_max_tokens = Some(4096);
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.max_new_tokens, 8192);
-    }
-
-    #[test]
-    fn test_adapt_sampling_openai_no_double_when_user_set() {
-        let mut params = make_sampling_params();
-        params.max_new_tokens = 4096;
-        let model = make_model_record(Some("openai"));
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.max_new_tokens, 4096);
-    }
-
-    #[test]
-    fn test_adapt_sampling_openai_no_double_above_8192() {
-        let mut params = make_sampling_params();
-        params.max_new_tokens = 16384;
-        let model = make_model_record(Some("openai"));
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.max_new_tokens, 16384);
-    }
-
-    #[test]
-    fn test_adapt_sampling_anthropic_budget_boost_reasoning() {
+    fn test_adapt_sampling_thinking_budget_boost_reasoning() {
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
         params.max_new_tokens = 4096;
-        let model = make_model_record(Some("anthropic_budget"));
+        let model = make_model_record_thinking_budget();
         adapt_sampling_for_reasoning_models(&mut params, &model);
         assert!(params.thinking_budget.is_some());
         assert!(params.thinking_budget.unwrap() > 0);
@@ -640,10 +610,10 @@ mod tests {
     }
 
     #[test]
-    fn test_adapt_sampling_anthropic_budget_explicit_budget_preserved() {
+    fn test_adapt_sampling_thinking_budget_explicit_preserved() {
         let mut params = make_sampling_params();
         params.thinking_budget = Some(5000);
-        let model = make_model_record(Some("anthropic_budget"));
+        let model = make_model_record_thinking_budget();
         adapt_sampling_for_reasoning_models(&mut params, &model);
         assert_eq!(params.thinking_budget, Some(5000));
         assert!(params.reasoning_effort.is_none());
@@ -651,19 +621,19 @@ mod tests {
     }
 
     #[test]
-    fn test_adapt_sampling_anthropic_budget_no_boost_no_budget() {
+    fn test_adapt_sampling_thinking_budget_no_boost_no_budget() {
         let mut params = make_sampling_params();
-        let model = make_model_record(Some("anthropic_budget"));
+        let model = make_model_record_thinking_budget();
         adapt_sampling_for_reasoning_models(&mut params, &model);
         assert!(params.thinking_budget.is_none());
         assert!(params.reasoning_effort.is_none());
     }
 
     #[test]
-    fn test_adapt_sampling_anthropic_effort_boost_reasoning() {
+    fn test_adapt_sampling_adaptive_boost_reasoning() {
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
-        let model = make_model_record(Some("anthropic_effort"));
+        let model = make_model_record_adaptive();
         adapt_sampling_for_reasoning_models(&mut params, &model);
         assert_eq!(params.reasoning_effort, Some(ReasoningEffort::Medium));
         assert!(params.thinking.is_none());
@@ -671,43 +641,12 @@ mod tests {
     }
 
     #[test]
-    fn test_adapt_sampling_anthropic_effort_preserves_reasoning_effort() {
+    fn test_adapt_sampling_adaptive_preserves_reasoning_effort() {
         let mut params = make_sampling_params();
         params.reasoning_effort = Some(ReasoningEffort::High);
-        let model = make_model_record(Some("anthropic_effort"));
+        let model = make_model_record_adaptive();
         adapt_sampling_for_reasoning_models(&mut params, &model);
         assert_eq!(params.reasoning_effort, Some(ReasoningEffort::High));
-    }
-
-    #[test]
-    fn test_adapt_sampling_qwen_enable_thinking() {
-        let mut params = make_sampling_params();
-        params.boost_reasoning = true;
-        params.temperature = None;
-        let model = make_model_record(Some("qwen"));
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.enable_thinking, Some(true));
-        assert_eq!(params.temperature, Some(0.7)); // Filled from model default_temperature
-    }
-
-    #[test]
-    fn test_adapt_sampling_qwen_preserves_user_temperature() {
-        let mut params = make_sampling_params();
-        params.boost_reasoning = true;
-        params.temperature = Some(0.5); // User explicitly set temperature
-        let model = make_model_record(Some("qwen"));
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.enable_thinking, Some(true));
-        assert_eq!(params.temperature, Some(0.5)); // User value preserved
-    }
-
-    #[test]
-    fn test_adapt_sampling_qwen_no_boost() {
-        let mut params = make_sampling_params();
-        params.boost_reasoning = false;
-        let model = make_model_record(Some("qwen"));
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.enable_thinking, Some(false));
     }
 
     #[test]
@@ -716,7 +655,7 @@ mod tests {
         params.reasoning_effort = Some(ReasoningEffort::High);
         params.thinking = Some(serde_json::json!({"type": "enabled"}));
         params.enable_thinking = Some(true);
-        let model = make_model_record(None);
+        let model = make_model_record_no_reasoning();
         adapt_sampling_for_reasoning_models(&mut params, &model);
         assert!(params.reasoning_effort.is_none());
         assert!(params.thinking.is_none());
@@ -724,62 +663,22 @@ mod tests {
     }
 
     #[test]
-    fn test_adapt_sampling_unknown_provider() {
+    fn test_adapt_sampling_effort_default_to_last_option() {
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
-        params.temperature = None;
-        let model = make_model_record(Some("unknown_provider"));
+        let model = make_model_record_effort(Some(vec!["low", "high"]));
         adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.temperature, Some(0.7)); // Filled from model default_temperature
-        assert!(params.reasoning_effort.is_none());
+        assert_eq!(params.reasoning_effort, Some(ReasoningEffort::High));
     }
 
     #[test]
-    fn test_adapt_sampling_deepseek_doubles_tokens_when_default() {
-        let mut params = make_sampling_params();
-        params.max_new_tokens = 0;
-        params.temperature = None;
-        let mut model = make_model_record(Some("deepseek"));
-        model.default_max_tokens = Some(4096);
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.max_new_tokens, 8192);
-        assert!(params.reasoning_effort.is_none());
-        assert!(params.thinking.is_none());
-        assert!(params.enable_thinking.is_none());
-        assert_eq!(params.temperature, Some(0.7)); // Filled from model default_temperature
-    }
-
-    #[test]
-    fn test_adapt_sampling_deepseek_no_double_when_user_set() {
-        let mut params = make_sampling_params();
-        params.max_new_tokens = 4096;
-        let model = make_model_record(Some("deepseek"));
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.max_new_tokens, 4096);
-    }
-
-    #[test]
-    fn test_adapt_sampling_deepseek_no_double_above_8192() {
-        let mut params = make_sampling_params();
-        params.max_new_tokens = 0;
-        let mut model = make_model_record(Some("deepseek"));
-        model.default_max_tokens = Some(16384);
-        adapt_sampling_for_reasoning_models(&mut params, &model);
-        assert_eq!(params.max_new_tokens, 16384);
-    }
-
-    #[test]
-    fn test_deepseek_reasoning_intent_always_off() {
-        // DeepSeek handles reasoning automatically - never send reasoning_effort to API
-        let model = make_model_record(Some("deepseek"));
-
-        // Even with boost_reasoning enabled, should return Off
+    fn test_no_reasoning_intent_for_no_support() {
+        let model = make_model_record_no_reasoning();
         let mut params = make_sampling_params();
         params.boost_reasoning = true;
         let intent = sampling_params_to_reasoning_intent(&params, &model);
         assert_eq!(intent, ReasoningIntent::Off);
 
-        // Even with reasoning_effort set (shouldn't happen but defensive)
         params.reasoning_effort = Some(ReasoningEffort::High);
         let intent = sampling_params_to_reasoning_intent(&params, &model);
         assert_eq!(intent, ReasoningIntent::Off);

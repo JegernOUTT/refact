@@ -21,5 +21,6 @@ mod google_gemini;
 mod custom;
 pub mod claude_code;
 pub mod claude_code_oauth;
+pub mod oauth_refresh;
 
 pub use registry::*;

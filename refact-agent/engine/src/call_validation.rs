@@ -26,6 +26,9 @@ pub struct CodeCompletionInputs {
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum ReasoningEffort {
+    #[serde(alias = "none")]
+    NoReasoning,
+    Minimal,
     Low,
     #[default]
     Medium,
@@ -36,7 +39,23 @@ pub enum ReasoningEffort {
 
 impl ReasoningEffort {
     pub fn to_string(&self) -> String {
-        format!("{:?}", self).to_lowercase()
+        match self {
+            Self::NoReasoning => "none".to_string(),
+            other => format!("{:?}", other).to_lowercase(),
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "none" => Some(Self::NoReasoning),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
     }
 }
 

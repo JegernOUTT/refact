@@ -133,16 +133,26 @@ impl Tool for ToolUpdateTextDocRegex {
             }
             format_related_memories_section(&cards, None)
         };
-        Ok((
-            false,
-            vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "diff".to_string(),
-                content: ChatContent::SimpleText(format!("{}{}", json!(chunks).to_string(), related_section)),
+
+        let mut out = vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "diff".to_string(),
+            content: ChatContent::SimpleText(json!(chunks).to_string()),
+            tool_calls: None,
+            tool_call_id: tool_call_id.clone(),
+            ..Default::default()
+        })];
+
+        if !related_section.trim().is_empty() {
+            out.push(ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(related_section),
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
                 ..Default::default()
-            })],
-        ))
+            }));
+        }
+
+        Ok((false, out))
     }
 
     async fn match_against_confirm_deny(

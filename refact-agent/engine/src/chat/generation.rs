@@ -482,7 +482,7 @@ async fn run_streaming_generation(
     const TEMPERATURE_BUMP: f32 = 0.1;
     const MAX_RETRY_TEMPERATURE: f32 = 0.5;
     let user_specified_temp = llm_request.params.temperature;
-    let model_supports_temperature = model_rec.supports_reasoning.is_none();
+    let model_supports_temperature = model_rec.supports_temperature;
     let can_retry_with_temp_bump = user_specified_temp.is_none() && model_supports_temperature;
     let max_attempts = if can_retry_with_temp_bump {
         (MAX_RETRY_TEMPERATURE / TEMPERATURE_BUMP).floor() as usize + 2
@@ -503,8 +503,8 @@ async fn run_streaming_generation(
             model_rec: model_rec.base.clone(),
             abort_flag: Some(abort_flag.clone()),
             supports_tools: model_rec.supports_tools,
-            supports_reasoning: model_rec.supports_reasoning.is_some(),
-            reasoning_type: model_rec.supports_reasoning.clone(),
+            supports_reasoning: model_rec.has_reasoning_support(),
+            reasoning_type: model_rec.reasoning_type_string(),
             supports_temperature: model_rec.supports_temperature,
         };
 

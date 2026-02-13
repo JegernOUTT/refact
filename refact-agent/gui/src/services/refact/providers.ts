@@ -17,7 +17,9 @@ export type ProviderModel = {
   n_ctx: number;
   supports_tools: boolean;
   supports_multimodality: boolean;
-  supports_reasoning: string | null;
+  reasoning_effort_options?: string[] | null;
+  supports_thinking_budget?: boolean;
+  supports_adaptive_thinking_budget?: boolean;
   supports_agent: boolean;
   wire_format_override: WireFormat | null;
   endpoint_override: string | null;
@@ -84,7 +86,9 @@ export type AvailableModel = {
   n_ctx: number;
   supports_tools: boolean;
   supports_multimodality: boolean;
-  supports_reasoning: string | null;
+  reasoning_effort_options?: string[] | null;
+  supports_thinking_budget?: boolean;
+  supports_adaptive_thinking_budget?: boolean;
   tokenizer: string | null;
   enabled: boolean;
   is_custom: boolean;
@@ -105,7 +109,9 @@ export type CustomModelConfig = {
   n_ctx: number;
   supports_tools?: boolean;
   supports_multimodality?: boolean;
-  supports_reasoning?: string | null;
+  reasoning_effort_options?: string[] | null;
+  supports_thinking_budget?: boolean;
+  supports_adaptive_thinking_budget?: boolean;
   tokenizer?: string | null;
 };
 

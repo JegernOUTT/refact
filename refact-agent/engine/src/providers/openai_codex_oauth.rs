@@ -153,8 +153,9 @@ fn build_authorize_url(code_challenge: &str, state: &str, redirect_uri: &str) ->
         .append_pair("scope", SCOPE)
         .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state)
-        .append_pair("codex_cli_simplified_flow", "true");
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("state", state);
 
     url.to_string()
 }
@@ -195,18 +196,17 @@ pub async fn exchange_code(
             .ok_or_else(|| "Invalid or expired OAuth session".to_string())?
     };
 
-    let body = serde_json::json!({
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": session.redirect_uri,
-        "client_id": CLIENT_ID,
-        "code_verifier": session.verifier,
-    });
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", session.redirect_uri.as_str()),
+        ("client_id", CLIENT_ID),
+        ("code_verifier", session.verifier.as_str()),
+    ];
 
     let response = http_client
         .post(TOKEN_URL)
-        .header("Content-Type", "application/json")
-        .json(&body)
+        .form(&params)
         .send()
         .await
         .map_err(|e| format!("Token exchange request failed: {}", e))?;
@@ -235,22 +235,20 @@ pub async fn exchange_code(
     })
 }
 
-#[allow(dead_code)]
 pub async fn refresh_access_token(
     http_client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<OAuthTokens, String> {
-    let body = serde_json::json!({
-        "client_id": CLIENT_ID,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "scope": "openid profile email",
-    });
+    let params = [
+        ("client_id", CLIENT_ID),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("scope", "openid profile email"),
+    ];
 
     let response = http_client
         .post(TOKEN_URL)
-        .header("Content-Type", "application/json")
-        .json(&body)
+        .form(&params)
         .send()
         .await
         .map_err(|e| format!("Token refresh request failed: {}", e))?;

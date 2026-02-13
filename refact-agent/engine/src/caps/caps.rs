@@ -16,7 +16,7 @@ use crate::caps::providers::{
     CapsProvider,
 };
 use crate::providers::config::ProviderDefaults;
-use crate::caps::model_caps::{ModelCapabilities, ReasoningType, get_model_caps, resolve_model_caps};
+use crate::caps::model_caps::{ModelCapabilities, get_model_caps, resolve_model_caps};
 use crate::llm::WireFormat;
 use crate::providers::traits::AvailableModel;
 
@@ -111,9 +111,11 @@ pub struct ChatModelRecord {
     #[serde(default)]
     pub supports_agent: bool,
     #[serde(default)]
-    pub supports_reasoning: Option<String>,
+    pub reasoning_effort_options: Option<Vec<String>>,
     #[serde(default)]
-    pub supports_boost_reasoning: bool,
+    pub supports_thinking_budget: bool,
+    #[serde(default)]
+    pub supports_adaptive_thinking_budget: bool,
     #[serde(default)]
     pub max_thinking_tokens: Option<usize>,
     #[serde(default)]
@@ -132,6 +134,24 @@ pub struct ChatModelRecord {
 
 pub fn default_chat_scratchpad() -> String {
     String::new()
+}
+
+impl ChatModelRecord {
+    pub fn has_reasoning_support(&self) -> bool {
+        self.reasoning_effort_options.is_some()
+            || self.supports_thinking_budget
+            || self.supports_adaptive_thinking_budget
+    }
+
+    pub fn reasoning_type_string(&self) -> Option<String> {
+        if self.supports_adaptive_thinking_budget {
+            Some("anthropic_effort".to_string())
+        } else if self.supports_thinking_budget {
+            Some("anthropic_budget".to_string())
+        } else {
+            None
+        }
+    }
 }
 
 impl HasBaseModelRecord for ChatModelRecord {
@@ -455,39 +475,31 @@ fn build_chat_model_record(
         n_ctx,
         supports_tools,
         supports_multimodality,
-        supports_reasoning,
+        reasoning_effort_options,
+        supports_thinking_budget,
+        supports_adaptive_thinking_budget,
         tokenizer,
         supports_clicks,
     ) = if let Some(ref resolved) = resolved_caps {
         let caps = &resolved.caps;
-        let reasoning = match caps.reasoning {
-            ReasoningType::None => None,
-            ReasoningType::Openai => Some("openai".to_string()),
-            ReasoningType::AnthropicBudget => Some("anthropic_budget".to_string()),
-            ReasoningType::AnthropicEffort => Some("anthropic_effort".to_string()),
-            ReasoningType::Deepseek => Some("deepseek".to_string()),
-            ReasoningType::Xai => Some("xai".to_string()),
-            ReasoningType::Qwen => Some("qwen".to_string()),
-            ReasoningType::Gemini => Some("gemini".to_string()),
-            ReasoningType::Kimi => Some("kimi".to_string()),
-            ReasoningType::Zhipu => Some("zhipu".to_string()),
-            ReasoningType::Mistral => Some("mistral".to_string()),
-        };
         (
             caps.n_ctx,
             caps.supports_tools,
             caps.supports_vision,
-            reasoning,
+            caps.reasoning_effort_options.clone(),
+            caps.supports_thinking_budget,
+            caps.supports_adaptive_thinking_budget,
             caps.tokenizer.clone(),
             caps.supports_clicks,
         )
     } else {
-        // Use model's own values (typically from CustomModelConfig)
         (
             model.n_ctx,
             model.supports_tools,
             model.supports_multimodality,
-            model.supports_reasoning.clone(),
+            model.reasoning_effort_options.clone(),
+            model.supports_thinking_budget,
+            model.supports_adaptive_thinking_budget,
             model.tokenizer.clone().unwrap_or_default(),
             false,
         )
@@ -537,11 +549,9 @@ fn build_chat_model_record(
         supports_multimodality,
         supports_clicks,
         supports_agent,
-        supports_reasoning,
-        supports_boost_reasoning: resolved_caps
-            .as_ref()
-            .map(|r| r.caps.supports_reasoning_effort)
-            .unwrap_or(false),
+        reasoning_effort_options,
+        supports_thinking_budget,
+        supports_adaptive_thinking_budget,
         max_thinking_tokens: resolved_caps
             .as_ref()
             .and_then(|r| r.caps.max_thinking_tokens),
@@ -1101,21 +1111,9 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
         record.base.tokenizer = caps.tokenizer.clone();
     }
 
-    record.supports_reasoning = match caps.reasoning {
-        crate::caps::model_caps::ReasoningType::None => None,
-        crate::caps::model_caps::ReasoningType::Openai => Some("openai".to_string()),
-        crate::caps::model_caps::ReasoningType::AnthropicBudget => Some("anthropic_budget".to_string()),
-        crate::caps::model_caps::ReasoningType::AnthropicEffort => Some("anthropic_effort".to_string()),
-        crate::caps::model_caps::ReasoningType::Deepseek => Some("deepseek".to_string()),
-        crate::caps::model_caps::ReasoningType::Xai => Some("xai".to_string()),
-        crate::caps::model_caps::ReasoningType::Qwen => Some("qwen".to_string()),
-        crate::caps::model_caps::ReasoningType::Gemini => Some("gemini".to_string()),
-        crate::caps::model_caps::ReasoningType::Kimi => Some("kimi".to_string()),
-        crate::caps::model_caps::ReasoningType::Zhipu => Some("zhipu".to_string()),
-        crate::caps::model_caps::ReasoningType::Mistral => Some("mistral".to_string()),
-    };
-
-    record.supports_boost_reasoning = caps.supports_reasoning_effort;
+    record.reasoning_effort_options = caps.reasoning_effort_options.clone();
+    record.supports_thinking_budget = caps.supports_thinking_budget;
+    record.supports_adaptive_thinking_budget = caps.supports_adaptive_thinking_budget;
     record.supports_agent = caps.supports_tools;
     record.supports_temperature = caps.supports_temperature;
     record.base.supports_web_search = caps.supports_web_search;

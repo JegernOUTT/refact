@@ -42,7 +42,7 @@ export type IntegrationMeta = {
   shouldIntermediatePageShowUp?: boolean;
 };
 
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ChatThread = {
   id: string;

@@ -47,6 +47,8 @@ impl Default for CommonParams {
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningIntent {
     Off,
+    NoReasoning,
+    Minimal,
     Low,
     Medium,
     High,
@@ -65,11 +67,12 @@ impl ReasoningIntent {
     pub fn to_openai_effort(&self) -> Option<&'static str> {
         match self {
             Self::Off => None,
+            Self::NoReasoning => Some("none"),
+            Self::Minimal => Some("minimal"),
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
             Self::XHigh => Some("xhigh"),
-            // OpenAI doesn't currently expose "max" effort; treat as highest.
             Self::Max => Some("xhigh"),
             Self::BudgetTokens(_) => Some("high"),
         }
@@ -77,7 +80,8 @@ impl ReasoningIntent {
 
     pub fn to_anthropic_budget(&self, default_budget: usize) -> Option<usize> {
         match self {
-            Self::Off => None,
+            Self::Off | Self::NoReasoning => None,
+            Self::Minimal => Some(default_budget / 8),
             Self::Low => Some(default_budget / 4),
             Self::Medium => Some(default_budget / 2),
             Self::High => Some(default_budget),
@@ -90,10 +94,11 @@ impl ReasoningIntent {
     pub fn to_anthropic_effort(&self) -> Option<&'static str> {
         match self {
             Self::Off => None,
+            Self::NoReasoning => Some("none"),
+            Self::Minimal => Some("low"),
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
-            // Anthropic doesn't have a separate "xhigh" level; closest is "high".
             Self::XHigh => Some("max"),
             Self::Max => Some("max"),
             Self::BudgetTokens(_) => Some("high"),
