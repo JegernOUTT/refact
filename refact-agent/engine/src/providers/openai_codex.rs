@@ -32,22 +32,38 @@ pub struct OpenAICodexProvider {
 }
 
 impl OpenAICodexProvider {
+    /// Returns the credential to use for api.openai.com endpoints.
+    ///
+    /// IMPORTANT: Codex/ChatGPT OAuth produces an OAuth access token, but the OpenAI Platform
+    /// API requires an API key with `api.responses.write` scope. Codex CLI obtains that API key
+    /// via OAuth token-exchange and stores it as OPENAI_API_KEY.
     fn resolve_auth(&self) -> (AuthSource, String) {
-        if self.oauth_tokens.has_valid_access_token() {
-            return (AuthSource::InAppOAuth, self.oauth_tokens.access_token.clone());
+        // Prefer API key obtained via token-exchange in our OAuth flow.
+        if !self.oauth_tokens.openai_api_key.is_empty() {
+            return (AuthSource::InAppOAuth, self.oauth_tokens.openai_api_key.clone());
         }
 
+        // Fall back to Codex CLI credentials: prefer OPENAI_API_KEY if present.
         if let Ok(cli_tokens) = crate::providers::openai_codex_oauth::read_codex_cli_credentials() {
+            if !cli_tokens.openai_api_key.is_empty() {
+                return (AuthSource::CodexCli, cli_tokens.openai_api_key);
+            }
+            // Last resort: OAuth access token (usually NOT sufficient for platform endpoints).
             if !cli_tokens.access_token.is_empty() {
                 return (AuthSource::CodexCli, cli_tokens.access_token);
             }
+        }
+
+        // Last resort: in-app OAuth access token (usually NOT sufficient for platform endpoints).
+        if self.oauth_tokens.has_valid_access_token() {
+            return (AuthSource::InAppOAuth, self.oauth_tokens.access_token.clone());
         }
 
         (AuthSource::None, String::new())
     }
 
     fn diagnose_auth_status(&self) -> String {
-        if self.oauth_tokens.has_valid_access_token() {
+        if !self.oauth_tokens.openai_api_key.is_empty() {
             return "OK (OAuth login)".to_string();
         }
         if !self.oauth_tokens.is_empty() && self.oauth_tokens.has_refresh_token() {
@@ -121,7 +137,7 @@ available:
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
         let auth_status = self.diagnose_auth_status();
-        let oauth_connected = self.oauth_tokens.has_valid_access_token();
+        let oauth_connected = !self.oauth_tokens.openai_api_key.is_empty();
 
         json!({
             "auth_status": auth_status,

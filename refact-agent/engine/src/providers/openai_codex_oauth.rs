@@ -32,6 +32,10 @@ pub struct OAuthTokens {
     pub refresh_token: String,
     #[serde(default)]
     pub expires_at: i64,
+    /// Platform API key obtained via OAuth token-exchange (requested_token=openai-api-key).
+    /// This is what should be used against https://api.openai.com endpoints.
+    #[serde(default)]
+    pub openai_api_key: String,
 }
 
 impl OAuthTokens {
@@ -62,6 +66,8 @@ struct TokenResponse {
     refresh_token: String,
     #[serde(default)]
     expires_in: i64,
+    #[serde(default)]
+    id_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,8 +130,21 @@ pub fn read_codex_cli_credentials() -> Result<OAuthTokens, String> {
     let creds: CodexCliCredentials = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse {}: {}", auth_path.display(), e))?;
 
-    let tokens = creds.tokens
-        .ok_or_else(|| "No OAuth tokens in Codex CLI credentials. Run 'codex login' (not API key mode).".to_string())?;
+    // In Codex CLI, OPENAI_API_KEY is obtained via token exchange and is the correct
+    // credential for api.openai.com endpoints. Prefer it if present.
+    if let Some(api_key) = creds.openai_api_key.as_ref().filter(|k| !k.is_empty()) {
+        return Ok(OAuthTokens {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: 0,
+            openai_api_key: api_key.clone(),
+        });
+    }
+
+    let tokens = creds.tokens.ok_or_else(|| {
+        "No Codex CLI credentials found (expected OPENAI_API_KEY or OAuth tokens). Run 'codex login' first."
+            .to_string()
+    })?;
 
     if tokens.access_token.is_empty() {
         return Err("Empty access token in Codex CLI credentials".to_string());
@@ -135,6 +154,7 @@ pub fn read_codex_cli_credentials() -> Result<OAuthTokens, String> {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at: 0,
+        openai_api_key: String::new(),
     })
 }
 
@@ -264,10 +284,23 @@ pub async fn exchange_code(
         chrono::Utc::now().timestamp_millis() + 8 * 24 * 3600 * 1000
     };
 
+    let openai_api_key = if !token_resp.id_token.is_empty() {
+        match obtain_openai_api_key(http_client, &token_resp.id_token).await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!("OpenAI Codex OAuth: failed to obtain OPENAI_API_KEY via token-exchange: {e}");
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
+
     Ok(OAuthTokens {
         access_token: token_resp.access_token,
         refresh_token: token_resp.refresh_token,
         expires_at,
+        openai_api_key,
     })
 }
 
@@ -314,7 +347,57 @@ pub async fn refresh_access_token(
             token_resp.refresh_token
         },
         expires_at,
+        openai_api_key: String::new(),
     })
+}
+
+async fn obtain_openai_api_key(
+    http_client: &reqwest::Client,
+    id_token: &str,
+) -> Result<String, String> {
+    // Mirrors Codex CLI flow: OAuth token exchange for an OpenAI Platform API key.
+    // grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+    // requested_token=openai-api-key
+    // subject_token_type=urn:ietf:params:oauth:token-type:id_token
+    #[derive(Deserialize)]
+    struct ExchangeResp {
+        access_token: String,
+    }
+
+    let params = [
+        ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+        ("client_id", CLIENT_ID),
+        ("requested_token", "openai-api-key"),
+        ("subject_token", id_token),
+        (
+            "subject_token_type",
+            "urn:ietf:params:oauth:token-type:id_token",
+        ),
+    ];
+
+    let response = http_client
+        .post(TOKEN_URL)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("API key token-exchange request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("API key token-exchange failed ({status}): {text}"));
+    }
+
+    let body: ExchangeResp = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse API key token-exchange response: {e}"))?;
+
+    if body.access_token.is_empty() {
+        return Err("API key token-exchange returned empty access_token".to_string());
+    }
+
+    Ok(body.access_token)
 }
 
 /// Starts a temporary HTTP listener on the given port to handle the OAuth callback.

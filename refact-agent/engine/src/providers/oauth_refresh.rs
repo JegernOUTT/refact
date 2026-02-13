@@ -139,16 +139,26 @@ async fn save_refreshed_tokens(
         .map_err(|e| format!("Failed to create providers.d: {}", e))?;
 
     let mut yaml_map: serde_yaml::Mapping = if config_path.exists() {
-        let content = tokio::fs::read_to_string(&config_path).await
+        let content = tokio::fs::read_to_string(&config_path)
+            .await
             .map_err(|e| format!("Failed to read config: {}", e))?;
         let value: serde_yaml::Value = serde_yaml::from_str(&content)
             .map_err(|e| format!("Failed to parse YAML: {}", e))?;
-        value.as_mapping().cloned().unwrap_or_default()
+        value
+            .as_mapping()
+            .cloned()
+            .ok_or_else(|| "Config file root is not a YAML mapping. Cannot safely patch.".to_string())?
     } else {
         serde_yaml::Mapping::new()
     };
 
-    let mut tokens_map = serde_yaml::Mapping::new();
+    // Preserve any additional OAuth fields already stored (e.g. openai_api_key)
+    let mut tokens_map = yaml_map
+        .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+
     tokens_map.insert(
         serde_yaml::Value::String("access_token".to_string()),
         serde_yaml::Value::String(access_token.to_string()),

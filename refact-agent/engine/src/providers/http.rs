@@ -1337,6 +1337,19 @@ async fn save_provider_oauth_tokens(
         tokens_value.clone(),
     );
 
+    // Backward/compat + UX: expose API key (if present) at the top-level as well.
+    // Our OpenAI Codex provider expects an API key (OPENAI_API_KEY) for api.openai.com.
+    if let Some(api_key) = tokens_value
+        .get("openai_api_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        yaml_map.insert(
+            serde_yaml::Value::String("OPENAI_API_KEY".to_string()),
+            serde_yaml::Value::String(api_key.to_string()),
+        );
+    }
+
     let content = serde_yaml::to_string(&yaml_map)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize config: {}", e)))?;
 

@@ -18,7 +18,7 @@ use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
 use crate::llm::params::CacheControl;
 use crate::chat::stream_core::{
-    run_llm_stream, StreamRunParams, NoopCollector, ChoiceFinal, normalize_tool_call,
+    run_llm_stream, StreamRunParams, ChoiceFinal, StreamCollector, normalize_tool_call,
 };
 use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
 use crate::chat::types::ThreadParams;
@@ -118,6 +118,145 @@ pub struct SubchatConfig {
     pub parent_tool_call_id: Option<String>,
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     pub abort_flag: Option<Arc<AtomicBool>>,
+}
+
+fn should_stream_thinking_progress(tool_name: &str) -> bool {
+    matches!(tool_name, "deep_research" | "strategic_planning" | "code_review")
+}
+
+struct SubchatProgressCollector {
+    sender: Option<mpsc::UnboundedSender<Value>>,
+    tool_call_id: Option<String>,
+    thinking_tail: String,
+    reasoning_tail: String,
+    content_tail: String,
+    last_sent: String,
+    last_sent_at: std::time::Instant,
+}
+
+impl SubchatProgressCollector {
+    fn new(sender: Option<mpsc::UnboundedSender<Value>>, tool_call_id: Option<String>) -> Self {
+        Self {
+            sender,
+            tool_call_id,
+            thinking_tail: String::new(),
+            reasoning_tail: String::new(),
+            content_tail: String::new(),
+            last_sent: String::new(),
+            last_sent_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(60))
+                .unwrap_or_else(std::time::Instant::now),
+        }
+    }
+
+    fn append_tail(buf: &mut String, text: &str, max_chars: usize) {
+        if text.is_empty() {
+            return;
+        }
+        buf.push_str(text);
+        if buf.len() > max_chars {
+            let start = buf.len().saturating_sub(max_chars);
+            *buf = buf[start..].to_string();
+        }
+    }
+
+    fn extract_thinking_preview(blocks: &[serde_json::Value]) -> Option<String> {
+        for block in blocks.iter().rev() {
+            let obj = block.as_object()?;
+            for key in ["thinking", "text", "content"] {
+                if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+                    if !s.trim().is_empty() {
+                        return Some(s.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn normalize_preview(text: &str) -> String {
+        text.replace(['\r', '\n', '\t'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn maybe_send_update(&mut self) {
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        let Some(tool_call_id) = self.tool_call_id.as_ref() else {
+            return;
+        };
+
+        let raw = if !self.thinking_tail.trim().is_empty() {
+            &self.thinking_tail
+        } else if !self.reasoning_tail.trim().is_empty() {
+            &self.reasoning_tail
+        } else {
+            &self.content_tail
+        };
+
+        let mut progress = Self::normalize_preview(raw);
+        if progress.is_empty() {
+            return;
+        }
+
+        const MAX_CHARS: usize = 220;
+        if progress.len() > MAX_CHARS {
+            progress.truncate(MAX_CHARS);
+            progress.push('…');
+        }
+
+        if self.last_sent == progress {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_sent_at) < std::time::Duration::from_millis(750)
+            && !self.last_sent.is_empty()
+        {
+            return;
+        }
+
+        let msg = json!({
+            "tool_call_id": tool_call_id,
+            "subchat_id": progress,
+        });
+        let _ = sender.send(msg);
+
+        self.last_sent = progress;
+        self.last_sent_at = now;
+    }
+}
+
+impl StreamCollector for SubchatProgressCollector {
+    fn on_delta_ops(&mut self, _choice_idx: usize, ops: Vec<crate::chat::types::DeltaOp>) {
+        for op in ops {
+            match op {
+                crate::chat::types::DeltaOp::AppendReasoning { text } => {
+                    Self::append_tail(&mut self.reasoning_tail, &text, 4_000);
+                }
+                crate::chat::types::DeltaOp::AppendContent { text } => {
+                    if self.reasoning_tail.trim().is_empty() && self.thinking_tail.trim().is_empty() {
+                        Self::append_tail(&mut self.content_tail, &text, 4_000);
+                    }
+                }
+                crate::chat::types::DeltaOp::SetThinkingBlocks { blocks } => {
+                    if let Some(preview) = Self::extract_thinking_preview(&blocks) {
+                        self.thinking_tail = preview;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.maybe_send_update();
+    }
+
+    fn on_usage(&mut self, _usage: &ChatUsage) {}
+
+    fn on_finish(&mut self, _choice_idx: usize, _finish_reason: Option<String>) {}
 }
 
 pub struct SubchatResult {
@@ -481,6 +620,7 @@ pub async fn run_subchat_once(
         config.max_new_tokens,
         config.reasoning_effort.clone(),
         false,
+        None,
     )
     .await?;
 
@@ -528,6 +668,11 @@ async fn run_subchat_loop(
             config.max_new_tokens,
             config.reasoning_effort.clone(),
             config.prepend_system_prompt && step == 0,
+            if should_stream_thinking_progress(&config.tool_name) {
+                config.parent_tool_call_id.as_deref()
+            } else {
+                None
+            },
         )
         .await?;
 
@@ -609,6 +754,11 @@ async fn run_subchat_with_wrap_up(
             config.max_new_tokens,
             config.reasoning_effort.clone(),
             config.prepend_system_prompt && step_n == 0,
+            if should_stream_thinking_progress(&config.tool_name) {
+                config.parent_tool_call_id.as_deref()
+            } else {
+                None
+            },
         )
         .await?;
 
@@ -663,6 +813,11 @@ async fn run_subchat_with_wrap_up(
         config.max_new_tokens,
         config.reasoning_effort.clone(),
         false,
+        if should_stream_thinking_progress(&config.tool_name) {
+            config.parent_tool_call_id.as_deref()
+        } else {
+            None
+        },
     )
     .await?;
 
@@ -814,6 +969,7 @@ async fn subchat_stream(
     max_new_tokens: usize,
     reasoning_effort: Option<ReasoningEffort>,
     only_deterministic_messages: bool,
+    progress_tool_call_id: Option<&str>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     let (gcx, effective_n_ctx, abort_flag) = {
         let ccx_locked = ccx.lock().await;
@@ -895,7 +1051,17 @@ async fn subchat_stream(
         supports_temperature: model_rec.supports_temperature
     };
 
-    let mut collector = NoopCollector;
+    let progress_sender: Option<mpsc::UnboundedSender<Value>> = if progress_tool_call_id.is_some() {
+        let subchat_tx_arc = ccx.lock().await.subchat_tx.clone();
+        let x = Some(subchat_tx_arc.lock().await.clone()); x
+    } else {
+        None
+    };
+
+    let mut collector = SubchatProgressCollector::new(
+        progress_sender,
+        progress_tool_call_id.map(|s| s.to_string()),
+    );
     let results = run_llm_stream(gcx.clone(), params, &mut collector).await?;
 
     info!(
@@ -1009,6 +1175,7 @@ async fn subchat_single_internal(
     max_new_tokens: usize,
     reasoning_effort: Option<ReasoningEffort>,
     prepend_system_prompt: bool,
+    progress_tool_call_id: Option<&str>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     let gcx = {
         let ccx_locked = ccx.lock().await;
@@ -1048,6 +1215,7 @@ async fn subchat_single_internal(
         max_new_tokens,
         reasoning_effort,
         only_deterministic_messages,
+        progress_tool_call_id,
     )
     .await
 }
