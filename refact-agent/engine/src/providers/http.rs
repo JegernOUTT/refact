@@ -1195,6 +1195,87 @@ pub async fn handle_v1_provider_oauth_callback(
     )
 }
 
+pub async fn handle_openai_codex_auth_callback(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Query(query): Query<OAuthCallbackParams>,
+) -> Result<Response<Body>, ScratchError> {
+    if let Some(err) = &query.error {
+        let desc = query.error_description.as_deref().unwrap_or("Unknown error");
+        tracing::warn!("OpenAI OAuth error: {} — {}", err, desc);
+        return html_response(
+            "Authentication Failed",
+            "✗ Authentication Failed",
+            "#ef4444",
+            &format!("{}: {}", err, desc),
+        );
+    }
+
+    let code = match &query.code {
+        Some(c) if !c.is_empty() => c.clone(),
+        _ => {
+            return html_response(
+                "Authentication Failed",
+                "✗ Authentication Failed",
+                "#ef4444",
+                "No authorization code received. Please try again.",
+            );
+        }
+    };
+
+    let session_id = match &query.state {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => {
+            return html_response(
+                "Authentication Failed",
+                "✗ Authentication Failed",
+                "#ef4444",
+                "Missing state parameter. Please start the OAuth flow again.",
+            );
+        }
+    };
+
+    let http_client = gcx.read().await.http_client.clone();
+    let config_dir = gcx.read().await.config_dir.clone();
+
+    let tokens = match crate::providers::openai_codex_oauth::exchange_code(
+        &http_client,
+        &session_id,
+        &code,
+    ).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("OpenAI OAuth exchange failed: {}", e);
+            return html_response(
+                "Authentication Failed",
+                "✗ Authentication Failed",
+                "#ef4444",
+                &format!("Token exchange failed: {}", e),
+            );
+        }
+    };
+
+    if let Err(e) = save_provider_oauth_tokens(
+        &gcx, &config_dir, "openai_codex",
+        &serde_yaml::to_value(&tokens)
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize tokens: {}", e)))?,
+    ).await {
+        tracing::warn!("Failed to save OAuth tokens: {:?}", e);
+        return html_response(
+            "Authentication Failed",
+            "✗ Authentication Failed",
+            "#ef4444",
+            "Tokens received but failed to save. Please try again.",
+        );
+    }
+
+    html_response(
+        "Authentication Successful",
+        "✓ Authentication Successful",
+        "#4ade80",
+        "You can close this window and return to the application.",
+    )
+}
+
 async fn save_provider_oauth_tokens(
     gcx: &Arc<ARwLock<GlobalContext>>,
     config_dir: &std::path::Path,

@@ -155,7 +155,8 @@ fn build_authorize_url(code_challenge: &str, state: &str, redirect_uri: &str) ->
         .append_pair("code_challenge_method", "S256")
         .append_pair("id_token_add_organizations", "true")
         .append_pair("codex_cli_simplified_flow", "true")
-        .append_pair("state", state);
+        .append_pair("state", state)
+        .append_pair("originator", "codex_cli_rs");
 
     url.to_string()
 }
@@ -169,7 +170,7 @@ pub async fn start_oauth_session(callback_port: u16) -> (String, String) {
     let verifier = generate_code_verifier();
     let challenge = generate_code_challenge(&verifier);
     let session_id = uuid::Uuid::new_v4().to_string();
-    let redirect_uri = format!("http://localhost:{}/v1/providers/openai_codex/oauth/callback", callback_port);
+    let redirect_uri = format!("http://localhost:{}/auth/callback", callback_port);
     let authorize_url = build_authorize_url(&challenge, &session_id, &redirect_uri);
 
     let session = PkceSession {
