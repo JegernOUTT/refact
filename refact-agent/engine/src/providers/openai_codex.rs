@@ -179,63 +179,52 @@ available:
 
     async fn fetch_available_models(
         &self,
-        http_client: &reqwest::Client,
+        _http_client: &reqwest::Client,
         model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
         let (_, auth_token) = self.resolve_auth();
         if auth_token.is_empty() {
-            tracing::warn!("OpenAI Codex: cannot fetch models, no auth");
+            tracing::warn!("OpenAI Codex: no auth");
             return self.get_custom_models_only();
         }
 
-        let api_model_ids = fetch_openai_codex_model_ids(http_client, &auth_token).await;
-        if api_model_ids.is_empty() {
-            tracing::warn!("OpenAI Codex: API returned no matching models, falling back to caps-based discovery");
-            return self.get_available_models_from_caps(model_caps);
+        let mut codex_model_ids: Vec<String> = vec![
+            "gpt-5.3-codex".to_string(),
+            "gpt-5.2-codex".to_string(),
+            "gpt-5.1-codex-max".to_string(),
+            "gpt-5.2".to_string(),
+            "gpt-5.1-codex-mini".to_string(),
+        ];
+
+        let codex_pattern = regex::Regex::new(r"(?i)^gpt.*codex").expect("valid static regex");
+        for model_id in model_caps.keys() {
+            if codex_pattern.is_match(model_id) && !codex_model_ids.contains(model_id) {
+                codex_model_ids.push(model_id.clone());
+            }
         }
 
-        tracing::info!("OpenAI Codex: API returned {} matching models", api_model_ids.len());
+        tracing::info!("OpenAI Codex: {} models available (hardcoded + discovered)", codex_model_ids.len());
 
         let enabled_set: std::collections::HashSet<_> =
             self.enabled_models.iter().map(|s| s.as_str()).collect();
-        let regex_opt = self.model_filter_regex()
-            .and_then(|p| regex::Regex::new(p).ok());
 
         let mut models: Vec<AvailableModel> = Vec::new();
-        let date_regex = regex::Regex::new(r"^(.+?)-\d{8}$").expect("valid static regex");
 
-        for api_id in &api_model_ids {
-            let matches_filter = match &regex_opt {
-                Some(regex) => regex.is_match(api_id),
-                None => true,
-            };
-            if !matches_filter {
-                continue;
-            }
+        for model_id in &codex_model_ids {
+            let enabled = enabled_set.contains(model_id.as_str());
+            let pricing = self.model_pricing(model_id);
 
-            let api_id_without_date = date_regex
-                .captures(api_id)
-                .and_then(|caps| caps.get(1))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_else(|| api_id.clone());
-
-            let enabled = enabled_set.contains(api_id.as_str());
-            let pricing = self.model_pricing(api_id);
-
-            if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, &api_id_without_date) {
-                let mut model = AvailableModel::from_caps(api_id, &caps.caps, enabled, pricing);
-                if api_id != &caps.matched_key {
-                    model.display_name = Some(api_id.clone());
-                }
+            if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, model_id) {
+                let model = AvailableModel::from_caps(model_id, &caps.caps, enabled, pricing);
                 models.push(model);
             } else {
-                tracing::info!("OpenAI Codex: no model_caps match for '{}', using defaults", api_id);
+                tracing::debug!("OpenAI Codex: no model_caps match for '{}', using defaults", model_id);
                 models.push(AvailableModel {
-                    id: api_id.clone(),
+                    id: model_id.to_string(),
                     display_name: None,
                     n_ctx: 200_000,
                     supports_tools: true,
-                    supports_multimodality: false,
+                    supports_multimodality: true,
                     reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
                     supports_thinking_budget: false,
                     supports_adaptive_thinking_budget: false,
@@ -275,63 +264,5 @@ available:
             }
         }
         openai_pricing(model_id)
-    }
-}
-
-pub async fn fetch_openai_codex_model_ids(
-    http_client: &reqwest::Client,
-    api_key: &str,
-) -> Vec<String> {
-    if api_key.is_empty() {
-        return vec![];
-    }
-
-    let models_url = "https://api.openai.com/v1/models";
-    let codex_filter = regex::Regex::new(r"(?i)(codex)").ok();
-
-    let request = http_client
-        .get(models_url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("content-type", "application/json");
-
-    match request.send().await {
-        Ok(response) => {
-            if !response.status().is_success() {
-                tracing::warn!(
-                    "OpenAI Codex models API returned status {}",
-                    response.status()
-                );
-                return vec![];
-            }
-            match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    json.get("data")
-                        .and_then(|d| d.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|m| {
-                                    m.get("id")
-                                        .and_then(|id| id.as_str())
-                                        .map(String::from)
-                                })
-                                .filter(|id| {
-                                    codex_filter.as_ref()
-                                        .map(|re| re.is_match(id))
-                                        .unwrap_or(true)
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse OpenAI Codex models response: {}", e);
-                    vec![]
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to fetch OpenAI Codex models: {}", e);
-            vec![]
-        }
     }
 }
