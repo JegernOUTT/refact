@@ -18,8 +18,8 @@ export const OpenAIRefusalTool: React.FC<Props> = ({ toolCall }) => {
 
   const refusal = useMemo(() => {
     if (!args) return null;
-    if (typeof (args as any).refusal === "string") return (args as any).refusal as string;
-    if (typeof (args as any).text === "string") return (args as any).text as string;
+    if (typeof args.refusal === "string") return args.refusal;
+    if (typeof args.text === "string") return args.text;
     return null;
   }, [args]);
 

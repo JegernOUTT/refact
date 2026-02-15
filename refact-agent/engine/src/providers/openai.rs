@@ -2,16 +2,20 @@ use std::any::Any;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::caps::model_caps::ModelCapabilities;
 use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
 use crate::providers::traits::{
-    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
 };
 use crate::providers::pricing::openai_pricing;
+
+const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenAIProvider {
@@ -118,7 +122,7 @@ available:
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
-            enabled: !api_key.is_empty() && !self.enabled_models.is_empty(),
+            enabled: self.enabled && !api_key.is_empty() && !self.enabled_models.is_empty(),
             readonly: false,
             wire_format,
             chat_endpoint,
@@ -141,7 +145,7 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::ModelCaps
+        ModelSource::Api
     }
 
     fn enabled_models(&self) -> &[String] {
@@ -171,5 +175,112 @@ available:
             }
         }
         openai_pricing(model_id)
+    }
+
+    async fn fetch_available_models(
+        &self,
+        http_client: &reqwest::Client,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let api_key = resolve_env_var(&self.api_key, "", "openai api_key");
+        if api_key.is_empty() {
+            return self.get_custom_models_only();
+        }
+
+        let response = match http_client
+            .get(OPENAI_MODELS_URL)
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"))
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!("OpenAI: failed to fetch models: {}", e);
+                return self.get_available_models_from_caps(model_caps);
+            }
+        };
+
+        if !response.status().is_success() {
+            tracing::warn!("OpenAI: models endpoint returned status {}", response.status());
+            return self.get_available_models_from_caps(model_caps);
+        }
+
+        let json: serde_json::Value = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("OpenAI: failed to parse models response: {}", e);
+                return self.get_available_models_from_caps(model_caps);
+            }
+        };
+
+        let filter_regex = self.model_filter_regex()
+            .and_then(|pattern| Regex::new(pattern).ok());
+
+        let enabled_set: std::collections::HashSet<&str> =
+            self.enabled_models.iter().map(|s| s.as_str()).collect();
+
+        let mut models_map: HashMap<String, AvailableModel> = HashMap::new();
+
+        if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
+            for model in data {
+                let id = match model.get("id").and_then(|v| v.as_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+
+                let matches_filter = match &filter_regex {
+                    Some(regex) => regex.is_match(&id),
+                    None => true,
+                };
+                if !matches_filter {
+                    continue;
+                }
+
+                let enabled = enabled_set.contains(id.as_str());
+                let pricing = self.model_pricing(&id);
+
+                if let Some(caps) = model_caps.get(&id) {
+                    models_map.insert(id.clone(), AvailableModel::from_caps(&id, caps, enabled, pricing));
+                } else {
+                    models_map.insert(id.clone(), AvailableModel {
+                        id: id.clone(),
+                        display_name: None,
+                        n_ctx: 128_000,
+                        supports_tools: true,
+                        supports_multimodality: true,
+                        reasoning_effort_options: None,
+                        supports_thinking_budget: false,
+                        supports_adaptive_thinking_budget: false,
+                        tokenizer: None,
+                        enabled,
+                        is_custom: false,
+                        pricing,
+                        available_providers: Vec::new(),
+                        selected_provider: None,
+                        max_output_tokens: None,
+                        provider_variants: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        // Also include models from model_caps that match filter but weren't in API response
+        // (some models might be in caps registry but not returned by the models endpoint)
+        for (name, caps) in model_caps {
+            let matches = match &filter_regex {
+                Some(regex) => regex.is_match(name),
+                None => true,
+            };
+            if matches && !models_map.contains_key(name) {
+                let enabled = enabled_set.contains(name.as_str());
+                let pricing = self.model_pricing(name);
+                models_map.insert(name.clone(), AvailableModel::from_caps(name, caps, enabled, pricing));
+            }
+        }
+
+        let mut models: Vec<AvailableModel> = models_map.into_values().collect();
+        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
     }
 }

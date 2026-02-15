@@ -10,7 +10,7 @@ use crate::llm::adapter::WireFormat;
 use crate::providers::claude_code_oauth::OAuthTokens;
 use crate::providers::traits::{
     AvailableModel, CustomModelConfig, ModelSource, ProviderRuntime, ProviderTrait,
-    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -295,7 +295,7 @@ available:
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
-            enabled: has_auth && !self.enabled_models.is_empty(),
+            enabled: self.enabled && has_auth && !self.enabled_models.is_empty(),
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: "https://api.anthropic.com/v1/messages".to_string(),
@@ -398,11 +398,7 @@ available:
             }
         }
 
-        // Add custom models
-        for (id, config) in &self.custom_models {
-            let enabled = enabled_set.contains(id.as_str());
-            models.push(AvailableModel::from_custom(id, config, enabled));
-        }
+        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
 
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models

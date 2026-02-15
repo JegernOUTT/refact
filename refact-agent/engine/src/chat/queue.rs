@@ -148,6 +148,13 @@ pub fn apply_setparams_patch(
     if let Some(model) = patch.get("model").and_then(|v| v.as_str()) {
         if thread.model != model {
             thread.model = model.to_string();
+            // Clear provider-specific state that's invalid across models.
+            // OpenAI Responses API previous_response_id is tied to a specific
+            // model+endpoint; switching models makes it invalid.
+            if thread.previous_response_id.is_some() {
+                tracing::info!("Clearing previous_response_id on model switch");
+                thread.previous_response_id = None;
+            }
             changed = true;
         }
     }
@@ -739,6 +746,38 @@ async fn handle_tool_decisions(
     session_arc: Arc<AMutex<ChatSession>>,
     decisions: &[ToolDecisionItem],
 ) {
+    let is_cache_guard_pause = {
+        let session = session_arc.lock().await;
+        session
+            .runtime
+            .pause_reasons
+            .iter()
+            .any(crate::chat::cache_guard::is_cache_guard_pause_reason)
+    };
+
+    if is_cache_guard_pause {
+        let accepted_any = decisions.iter().any(|d| d.accepted);
+
+        {
+            let mut session = session_arc.lock().await;
+            if accepted_any {
+                session.cache_guard_force_next = true;
+            }
+            session.runtime.pause_reasons.clear();
+            session.runtime.accepted_tool_ids.clear();
+            session.runtime.auto_approved_tool_ids.clear();
+            session.runtime.paused_message_index = None;
+            session.set_runtime_state(SessionState::Idle, None);
+        }
+
+        if accepted_any {
+            start_generation(gcx.clone(), session_arc.clone()).await;
+        } else {
+            maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+        }
+        return;
+    }
+
     let (auto_approved_ids, has_remaining_pauses, tool_calls_to_execute, messages, thread, any_rejected) = {
         let mut session = session_arc.lock().await;
         let auto_approved = session.runtime.auto_approved_tool_ids.clone();
@@ -1441,5 +1480,34 @@ mod tests {
         let non_priority_drained = drain_non_priority_user_messages(&mut queue);
         assert!(priority_drained.is_empty());
         assert!(non_priority_drained.is_empty());
+    }
+
+    #[test]
+    fn test_model_switch_clears_previous_response_id() {
+        let mut thread = ThreadParams::default();
+        thread.model = "openai/gpt-4".into();
+        thread.previous_response_id = Some("resp_abc123".to_string());
+
+        let patch = json!({"model": "anthropic/claude-3"});
+        let (changed, _) = apply_setparams_patch(&mut thread, &patch);
+
+        assert!(changed);
+        assert_eq!(thread.model, "anthropic/claude-3");
+        assert_eq!(thread.previous_response_id, None,
+            "previous_response_id must be cleared on model switch");
+    }
+
+    #[test]
+    fn test_same_model_preserves_previous_response_id() {
+        let mut thread = ThreadParams::default();
+        thread.model = "openai/gpt-4".into();
+        thread.previous_response_id = Some("resp_abc123".to_string());
+
+        let patch = json!({"model": "openai/gpt-4"});
+        let (changed, _) = apply_setparams_patch(&mut thread, &patch);
+
+        assert!(!changed);
+        assert_eq!(thread.previous_response_id, Some("resp_abc123".to_string()),
+            "previous_response_id should be preserved when model doesn't change");
     }
 }

@@ -115,7 +115,7 @@ available:
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
-            enabled: !api_key.is_empty() && !self.enabled_models.is_empty(),
+            enabled: self.enabled && !api_key.is_empty() && !self.enabled_models.is_empty(),
             readonly: false,
             wire_format,
             chat_endpoint,

@@ -13,6 +13,7 @@ pub mod openai_codex_oauth;
 mod openrouter;
 mod ollama;
 mod lmstudio;
+mod vllm;
 mod groq;
 mod deepseek;
 mod xai;

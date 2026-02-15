@@ -18,6 +18,7 @@ pub struct ToolCallEntry {
     pub arguments: String,  // Mutable String for efficient append
     pub index: usize,
     pub initialized: bool,  // Track if this entry received meaningful data
+    pub extra_content: Option<serde_json::Value>,  // Gemini thought_signature etc.
 }
 
 impl ToolCallAccumulator {
@@ -87,6 +88,13 @@ impl ToolCallAccumulator {
             }
         }
 
+        if let Some(extra) = new_tc.get("extra_content") {
+            if !extra.is_null() {
+                entry.extra_content = Some(extra.clone());
+                has_meaningful_data = true;
+            }
+        }
+
         // Only mark as initialized if we received meaningful data
         if has_meaningful_data {
             entry.initialized = true;
@@ -153,6 +161,13 @@ impl ToolCallAccumulator {
             }
         }
 
+        if let Some(extra) = new_tc.get("extra_content") {
+            if !extra.is_null() {
+                entry.extra_content = Some(extra.clone());
+                has_meaningful_data = true;
+            }
+        }
+
         if has_meaningful_data {
             entry.initialized = true;
         }
@@ -170,7 +185,7 @@ impl ToolCallAccumulator {
                 let id = entry.id.clone().unwrap_or_else(|| {
                     format!("pending_call_{}", entry.index)
                 });
-                json!({
+                let mut tc = json!({
                     "id": id,
                     "type": entry.tool_type.as_deref().unwrap_or("function"),
                     "index": entry.index,
@@ -178,7 +193,11 @@ impl ToolCallAccumulator {
                         "name": entry.name,
                         "arguments": entry.arguments
                     }
-                })
+                });
+                if let Some(extra) = &entry.extra_content {
+                    tc["extra_content"] = extra.clone();
+                }
+                tc
             })
             .collect()
     }

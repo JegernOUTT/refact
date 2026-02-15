@@ -46,6 +46,7 @@ mod tests {
                     arguments: r#"{"arg": "value"}"#.to_string(),
                 },
                 tool_type: "function".to_string(),
+                extra_content: None,
             }]),
             tool_call_id: "".to_string(),
             tool_failed: None,
@@ -351,6 +352,7 @@ mod tests {
                         arguments: args,
                     },
                     tool_type: call_type,
+                    extra_content: None,
                 };
                 existing.push(new_call);
             } else if !args.is_empty() {
@@ -391,6 +393,7 @@ mod tests {
                 arguments: "{\"a\":".to_string(),
             },
             tool_type: "function".to_string(),
+            extra_content: None,
         }];
 
         let new_calls = vec![json!({
@@ -488,6 +491,7 @@ mod tests {
                 arguments: "{}".to_string(),
             },
             tool_type: "function".to_string(),
+            extra_content: None,
         }];
 
         let new_calls = vec![json!({
@@ -919,6 +923,7 @@ mod tests {
                 arguments,
             },
             tool_type,
+            extra_content: None,
         })
     }
 
@@ -1349,6 +1354,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 tool_type: "function".to_string(),
+                extra_content: None,
             }]),
             ..Default::default()
         }];
@@ -1377,6 +1383,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 tool_type: "function".to_string(),
+                extra_content: None,
             },
             ChatToolCall {
                 id: "srvtoolu_2".to_string(),
@@ -1386,6 +1393,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 tool_type: "function".to_string(),
+                extra_content: None,
             },
         ];
 

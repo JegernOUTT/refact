@@ -61,43 +61,49 @@ impl ModelPricing {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CustomModelConfig {
-    #[serde(default = "default_n_ctx")]
-    pub n_ctx: usize,
-    #[serde(default)]
-    pub supports_tools: bool,
-    #[serde(default)]
-    pub supports_multimodality: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_ctx: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_multimodality: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort_options: Option<Vec<String>>,
-    #[serde(default)]
-    pub supports_thinking_budget: bool,
-    #[serde(default)]
-    pub supports_adaptive_thinking_budget: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_thinking_budget: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_adaptive_thinking_budget: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<ModelPricing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
 }
 
-fn default_n_ctx() -> usize {
-    4096
-}
-
-impl Default for CustomModelConfig {
-    fn default() -> Self {
-        Self {
-            n_ctx: default_n_ctx(),
-            supports_tools: false,
-            supports_multimodality: false,
-            reasoning_effort_options: None,
-            supports_thinking_budget: false,
-            supports_adaptive_thinking_budget: false,
-            tokenizer: None,
-            pricing: None,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderVariant {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ModelPricing>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_last_30m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub throughput_last_30m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_last_30m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_parameters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +124,14 @@ pub struct AvailableModel {
     pub is_custom: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing: Option<ModelPricing>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_variants: Vec<ProviderVariant>,
 }
 
 impl AvailableModel {
@@ -135,6 +149,10 @@ impl AvailableModel {
             enabled,
             is_custom: false,
             pricing,
+            available_providers: Vec::new(),
+            selected_provider: None,
+            max_output_tokens: None,
+            provider_variants: Vec::new(),
         }
     }
 
@@ -142,16 +160,20 @@ impl AvailableModel {
         Self {
             id: id.to_string(),
             display_name: None,
-            n_ctx: config.n_ctx,
-            supports_tools: config.supports_tools,
-            supports_multimodality: config.supports_multimodality,
+            n_ctx: config.n_ctx.unwrap_or(4096),
+            supports_tools: config.supports_tools.unwrap_or(false),
+            supports_multimodality: config.supports_multimodality.unwrap_or(false),
             reasoning_effort_options: config.reasoning_effort_options.clone(),
-            supports_thinking_budget: config.supports_thinking_budget,
-            supports_adaptive_thinking_budget: config.supports_adaptive_thinking_budget,
+            supports_thinking_budget: config.supports_thinking_budget.unwrap_or(false),
+            supports_adaptive_thinking_budget: config.supports_adaptive_thinking_budget.unwrap_or(false),
             tokenizer: config.tokenizer.clone(),
             enabled,
             is_custom: true,
             pricing: config.pricing.clone(),
+            available_providers: Vec::new(),
+            selected_provider: None,
+            max_output_tokens: config.max_output_tokens,
+            provider_variants: Vec::new(),
         }
     }
 }
@@ -297,6 +319,15 @@ pub trait ProviderTrait: Send + Sync {
         // Default: no-op, providers override this
     }
 
+    fn set_selected_provider(&mut self, _model_id: &str, _provider: Option<String>) {
+        // Default: no-op, providers override this
+    }
+
+    fn selected_providers(&self) -> &HashMap<String, String> {
+        static EMPTY: OnceLock<HashMap<String, String>> = OnceLock::new();
+        EMPTY.get_or_init(HashMap::new)
+    }
+
     fn add_custom_model(&mut self, _model_id: String, _config: CustomModelConfig) {
         // Default: no-op, providers override this
     }
@@ -351,12 +382,8 @@ pub trait ProviderTrait: Send + Sync {
             }
         }
 
-        for (id, config) in custom_models {
-            let enabled = enabled_set.contains(id.as_str());
-            models_map.insert(id.clone(), AvailableModel::from_custom(id, config, enabled));
-        }
-
         let mut models: Vec<AvailableModel> = models_map.into_values().collect();
+        merge_custom_models(&mut models, custom_models, &enabled_set);
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
     }
@@ -380,6 +407,56 @@ pub trait ProviderTrait: Send + Sync {
 // ============================================================================
 // Helper functions for reducing boilerplate in provider implementations
 // ============================================================================
+
+pub fn merge_custom_models(
+    models: &mut Vec<AvailableModel>,
+    custom_models: &HashMap<String, CustomModelConfig>,
+    enabled_set: &std::collections::HashSet<&str>,
+) {
+    for (id, config) in custom_models {
+        let enabled = enabled_set.contains(id.as_str());
+        if let Some(existing) = models.iter_mut().find(|m| m.id == *id) {
+            let has_capability_overrides = config.n_ctx.is_some()
+                || config.supports_tools.is_some()
+                || config.supports_multimodality.is_some()
+                || config.reasoning_effort_options.is_some()
+                || config.supports_thinking_budget.is_some()
+                || config.supports_adaptive_thinking_budget.is_some()
+                || config.tokenizer.is_some()
+                || config.max_output_tokens.is_some();
+            if let Some(n_ctx) = config.n_ctx { existing.n_ctx = n_ctx; }
+            if let Some(v) = config.supports_tools { existing.supports_tools = v; }
+            if let Some(v) = config.supports_multimodality { existing.supports_multimodality = v; }
+            if config.reasoning_effort_options.is_some() { existing.reasoning_effort_options = config.reasoning_effort_options.clone(); }
+            if let Some(v) = config.supports_thinking_budget { existing.supports_thinking_budget = v; }
+            if let Some(v) = config.supports_adaptive_thinking_budget { existing.supports_adaptive_thinking_budget = v; }
+            if config.tokenizer.is_some() { existing.tokenizer = config.tokenizer.clone(); }
+            if config.pricing.is_some() { existing.pricing = config.pricing.clone(); }
+            if config.max_output_tokens.is_some() { existing.max_output_tokens = config.max_output_tokens; }
+            if has_capability_overrides { existing.is_custom = true; }
+        } else {
+            models.push(AvailableModel::from_custom(id, config, enabled));
+        }
+    }
+}
+
+pub fn normalize_endpoint(endpoint: &str) -> String {
+    let s = endpoint.trim().trim_end_matches('/');
+    let s = s.strip_suffix("/v1").unwrap_or(s);
+    s.to_string()
+}
+
+pub fn derive_endpoint_from_chat_url(chat_endpoint: &str) -> Option<String> {
+    let s = chat_endpoint.trim().trim_end_matches('/');
+    for suffix in &["/v1/chat/completions", "/chat/completions", "/v1/completions", "/completions"] {
+        if let Some(base) = s.strip_suffix(suffix) {
+            if !base.is_empty() {
+                return Some(base.to_string());
+            }
+        }
+    }
+    None
+}
 
 /// Parse enabled_models from YAML, replacing the existing list
 pub fn parse_enabled_models(yaml: &serde_yaml::Value, enabled_models: &mut Vec<String>) {

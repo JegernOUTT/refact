@@ -1078,6 +1078,7 @@ index 1234567..abcdefg 100644
                     arguments: "{}".to_string(),
                 },
                 tool_type: "function".to_string(),
+                extra_content: None,
             }]),
             ..Default::default()
         };
@@ -1115,6 +1116,7 @@ index 1234567..abcdefg 100644
                             arguments: r#"{"query":"test"}"#.to_string(),
                         },
                         tool_type: "function".to_string(),
+                        extra_content: None,
                     }]),
                     ..Default::default()
                 }),
@@ -1173,6 +1175,7 @@ MSG_ID:2
                         arguments: r#"{"report": "Detailed report here", "summary": "All done"}"#.to_string(),
                     },
                     tool_type: "function".to_string(),
+                    extra_content: None,
                 }]),
                 ..Default::default()
             },

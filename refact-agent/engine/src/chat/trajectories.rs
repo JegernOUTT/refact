@@ -2510,6 +2510,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     },
                     tool_type: "function".to_string(),
+                    extra_content: None,
                 },
                 ChatToolCall {
                     id: "call_2".to_string(),
@@ -2519,6 +2520,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     },
                     tool_type: "function".to_string(),
+                    extra_content: None,
                 },
             ]),
             ..Default::default()
@@ -2542,6 +2544,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 tool_type: "function".to_string(),
+                extra_content: None,
             }]),
             ..Default::default()
         }];
@@ -2642,6 +2645,8 @@ mod tests {
             closed: false,
             external_reload_pending: false,
             last_prompt_messages: Vec::new(),
+            cache_guard_snapshot: None,
+            cache_guard_force_next: false,
             task_agent_error: None,
             trajectory_events_tx: None,
         };

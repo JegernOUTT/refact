@@ -21,8 +21,11 @@ export const OpenAIComputerCallOutputTool: React.FC<Props> = ({ toolCall }) => {
 
     // Typical shape: { output: { image_url: "..." } }
     const output =
-      typeof args.output === "object" && args.output ? (args.output as any) : null;
-    const url = output && typeof output.image_url === "string" ? output.image_url : null;
+      typeof args.output === "object" && args.output !== null
+        ? (args.output as Record<string, unknown>)
+        : null;
+    const url =
+      output && typeof output.image_url === "string" ? output.image_url : null;
 
     if (url) return [url];
     return [];

@@ -7,11 +7,16 @@ import {
   Heading,
   Separator,
   Text,
+  TextField,
 } from "@radix-ui/themes";
 import { PlusIcon, InfoCircledIcon } from "@radix-ui/react-icons";
 
 import type { ProviderListItem } from "../../../../services/refact";
-import { useGetAvailableModelsQuery } from "../../../../services/refact";
+import {
+  useGetAvailableModelsQuery,
+  useGetOpenRouterAccountInfoQuery,
+} from "../../../../services/refact";
+import { toPascalCase } from "../../../../utils/toPascalCase";
 
 import { Spinner } from "../../../../components/Spinner";
 import { AvailableModelCard } from "./AvailableModelCard";
@@ -24,6 +29,7 @@ export type ProviderModelsListProps = {
 export const ProviderModelsList: FC<ProviderModelsListProps> = ({
   provider,
 }) => {
+  const [searchQuery, setSearchQuery] = useState("");
   const {
     data: modelsData,
     isSuccess,
@@ -33,16 +39,34 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
   } = useGetAvailableModelsQuery({ providerName: provider.name });
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const { data: openRouterAccount } = useGetOpenRouterAccountInfoQuery(undefined, {
+    skip: provider.name !== "openrouter",
+  });
 
-  // Separate enabled and disabled models
-  const { enabledModels, disabledModels } = useMemo(() => {
-    if (!modelsData?.models) return { enabledModels: [], disabledModels: [] };
+  const filteredModels = useMemo(() => {
+    if (!modelsData?.models) return [];
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return modelsData.models;
+    return modelsData.models.filter((model) => {
+      const name = (model.display_name ?? model.id).toLowerCase();
+      const id = model.id.toLowerCase();
+      return name.includes(query) || id.includes(query);
+    });
+  }, [modelsData?.models, searchQuery]);
 
-    const enabled = modelsData.models.filter((m) => m.enabled);
-    const disabled = modelsData.models.filter((m) => !m.enabled);
+  const groupedByFamily = useMemo(() => {
+    if (provider.name !== "openrouter") return null;
+    const groups = new Map<string, typeof filteredModels>();
 
-    return { enabledModels: enabled, disabledModels: disabled };
-  }, [modelsData?.models]);
+    filteredModels.forEach((model) => {
+      const family = model.id.includes("/") ? model.id.split("/")[0] : "other";
+      const entry = groups.get(family) ?? [];
+      entry.push(model);
+      groups.set(family, entry);
+    });
+
+    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [filteredModels, provider.name]);
 
   if (isLoading) return <Spinner spinning />;
 
@@ -81,20 +105,27 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
   }
 
   const totalModels = modelsData.models.length;
-  const enabledCount = enabledModels.length;
+  const enabledCount = modelsData.models.filter((model) => model.enabled).length;
 
   return (
     <Flex direction="column" gap="3" mt="4">
       <Separator size="4" />
 
-      <Flex align="center" justify="between">
-        <Flex align="center" gap="2">
+      <Flex align="center" justify="between" gap="3" wrap="wrap">
+        <Flex align="center" gap="2" wrap="wrap">
           <Heading as="h3" size="3">
             Available Models
           </Heading>
           <Badge size="1" color="gray">
             {enabledCount}/{totalModels} enabled
           </Badge>
+          <TextField.Root
+            size="1"
+            placeholder="Search models"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            style={{ minWidth: 180 }}
+          />
         </Flex>
 
         {!provider.readonly && (
@@ -117,10 +148,28 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
         </Callout.Root>
       )}
 
-      {totalModels === 0 ? (
+      {provider.name === "openrouter" && openRouterAccount?.data && (
+        <Callout.Root color="blue" size="1">
+          <Callout.Icon>
+            <InfoCircledIcon />
+          </Callout.Icon>
+          <Callout.Text size="1">
+            OpenRouter balance: {openRouterAccount.data.remaining?.toFixed(2) ?? "0.00"}
+            {" / "}
+            {openRouterAccount.data.limit?.toFixed(2) ?? "0.00"} USD
+            {openRouterAccount.data.key_label
+              ? ` · Key: ${openRouterAccount.data.key_label}`
+              : ""}
+          </Callout.Text>
+        </Callout.Root>
+      )}
+
+      {filteredModels.length === 0 ? (
         <Flex direction="column" align="center" gap="2" py="4">
           <Text as="span" size="2" color="gray">
-            No models available for this provider.
+            {totalModels === 0
+              ? "No models available for this provider."
+              : "No models match your search."}
           </Text>
           {!provider.readonly && (
             <Text as="span" size="1" color="gray">
@@ -130,13 +179,23 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
         </Flex>
       ) : (
         <Flex direction="column" gap="2">
-          {/* Enabled models first */}
-          {enabledModels.length > 0 && (
-            <>
-              <Text as="span" size="1" color="gray" weight="medium">
-                Enabled ({enabledModels.length})
-              </Text>
-              {enabledModels.map((model) => (
+          {groupedByFamily
+            ? groupedByFamily.map(([family, group]) => (
+                <Flex key={family} direction="column" gap="2">
+                  <Text as="span" size="1" color="gray" weight="medium" mt="2">
+                    {toPascalCase(family)} · {group.length}
+                  </Text>
+                  {group.map((model) => (
+                    <AvailableModelCard
+                      key={model.id}
+                      model={model}
+                      providerName={provider.name}
+                      isReadonlyProvider={provider.readonly}
+                    />
+                  ))}
+                </Flex>
+              ))
+            : filteredModels.map((model) => (
                 <AvailableModelCard
                   key={model.id}
                   model={model}
@@ -144,25 +203,6 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
                   isReadonlyProvider={provider.readonly}
                 />
               ))}
-            </>
-          )}
-
-          {/* Disabled models */}
-          {disabledModels.length > 0 && (
-            <>
-              <Text as="span" size="1" color="gray" weight="medium" mt="2">
-                Available ({disabledModels.length})
-              </Text>
-              {disabledModels.map((model) => (
-                <AvailableModelCard
-                  key={model.id}
-                  model={model}
-                  providerName={provider.name}
-                  isReadonlyProvider={provider.readonly}
-                />
-              ))}
-            </>
-          )}
         </Flex>
       )}
 

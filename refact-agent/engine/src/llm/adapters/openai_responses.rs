@@ -259,6 +259,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
                     deltas.push(LlmStreamDelta::AppendContent {
                         text: delta.to_string(),
+                        block_index: None,
                     });
                 }
             }
@@ -278,6 +279,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
                     deltas.push(LlmStreamDelta::AppendReasoning {
                         text: delta.to_string(),
+                        block_index: None,
                     });
                 }
             }
@@ -287,6 +289,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
                     deltas.push(LlmStreamDelta::AppendContent {
                         text: delta.to_string(),
+                        block_index: None,
                     });
                 }
             }
@@ -335,8 +338,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             | "response.reasoning_summary_text.done"
             | "response.refusal.done"
             | "response.content_part.added"
-            | "response.content_part.done" => {
-                tracing::trace!("{} (redundant, skipping server content block)", event_type);
+            | "response.content_part.done"
+            | "keepalive" => {
+                tracing::trace!("{} (redundant/lifecycle, skipping)", event_type);
             }
 
             // ── Text annotations (citations in output text) ──
@@ -1086,7 +1090,7 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::AppendContent { text } => assert_eq!(text, "Hello"),
+            LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
             _ => panic!("expected AppendContent"),
         }
     }
@@ -1153,6 +1157,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_123".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: ChatToolFunction {
                         name: "get_weather".to_string(),
                         arguments: r#"{"location":"NYC"}"#.to_string(),
@@ -1420,6 +1425,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_weather".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: ChatToolFunction {
                         name: "get_weather".to_string(),
                         arguments: r#"{"city":"Paris"}"#.to_string(),
@@ -1530,7 +1536,7 @@ mod tests {
 
         assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })),
             "reasoning_summary_text.delta should produce AppendReasoning");
-        if let Some(LlmStreamDelta::AppendReasoning { text }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })) {
+        if let Some(LlmStreamDelta::AppendReasoning { text, .. }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })) {
             assert_eq!(text, "Thinking about");
         }
     }

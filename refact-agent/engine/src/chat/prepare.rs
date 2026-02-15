@@ -286,6 +286,17 @@ pub async fn prepare_chat_passthrough(
         llm_request = llm_request.with_meta(meta.clone());
     }
 
+    if model_record.base.id.starts_with("openrouter/") && !model_record.available_providers.is_empty() {
+        if let Some(selected_provider) = model_record.selected_provider.as_ref() {
+            let mut extra_body = llm_request.extra_body.unwrap_or_default();
+            extra_body.insert(
+                "provider".to_string(),
+                serde_json::json!({"order": [selected_provider]}),
+            );
+            llm_request.extra_body = Some(extra_body);
+        }
+    }
+
     Ok(PreparedChat {
         llm_request,
         limited_messages: linearized_msgs,

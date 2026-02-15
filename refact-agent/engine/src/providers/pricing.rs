@@ -241,9 +241,42 @@ pub fn anthropic_pricing(model_id: &str) -> Option<ModelPricing> {
 pub fn google_gemini_pricing(model_id: &str) -> Option<ModelPricing> {
     let id = model_id.to_lowercase();
     match id.as_str() {
+        // Gemini 3 family (preview)
+        s if s.contains("gemini-3") && s.contains("pro") => Some(ModelPricing {
+            prompt: 2.00,
+            generated: 12.00,
+            cache_read: None,
+            cache_creation: None,
+        }),
+        s if s.contains("gemini-3") && s.contains("flash") => Some(ModelPricing {
+            prompt: 0.50,
+            generated: 3.00,
+            cache_read: None,
+            cache_creation: None,
+        }),
+        // Gemini 2.5 family
         s if s.contains("gemini-2.5-pro") || s.contains("gemini-2-5-pro") => Some(ModelPricing {
             prompt: 1.25,
             generated: 10.00,
+            cache_read: None,
+            cache_creation: None,
+        }),
+        s if s.contains("gemini-2.5-flash-lite") || s.contains("gemini-2-5-flash-lite") => Some(ModelPricing {
+            prompt: 0.10,
+            generated: 0.40,
+            cache_read: None,
+            cache_creation: None,
+        }),
+        s if s.contains("gemini-2.5-flash") || s.contains("gemini-2-5-flash") => Some(ModelPricing {
+            prompt: 0.30,
+            generated: 2.50,
+            cache_read: None,
+            cache_creation: None,
+        }),
+        // Gemini 2.0 family
+        s if s.contains("gemini-2.0-flash-lite") || s.contains("gemini-2-0-flash-lite") => Some(ModelPricing {
+            prompt: 0.10,
+            generated: 0.40,
             cache_read: None,
             cache_creation: None,
         }),
@@ -253,6 +286,7 @@ pub fn google_gemini_pricing(model_id: &str) -> Option<ModelPricing> {
             cache_read: None,
             cache_creation: None,
         }),
+        // Gemini 1.5 family
         s if s.contains("gemini-1.5-flash") || s.contains("gemini-flash") => Some(ModelPricing {
             prompt: 0.075,
             generated: 0.30,

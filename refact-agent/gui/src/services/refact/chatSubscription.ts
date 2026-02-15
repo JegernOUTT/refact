@@ -452,7 +452,7 @@ export function applyDeltaOps(
 
       case "add_server_content_block":
         updated.server_content_blocks = [
-          ...((updated as any).server_content_blocks ?? []),
+          ...(updated.server_content_blocks ?? []),
           op.block,
         ];
         break;

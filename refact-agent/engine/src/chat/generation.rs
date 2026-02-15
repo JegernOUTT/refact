@@ -479,6 +479,10 @@ async fn run_streaming_generation(
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
     info!("session generation: model={}, messages={}", llm_request.model_id, llm_request.messages.len());
+    let chat_id = {
+        let session = session_arc.lock().await;
+        session.chat_id.clone()
+    };
 
     const TEMPERATURE_BUMP: f32 = 0.1;
     const MAX_RETRY_TEMPERATURE: f32 = 0.5;
@@ -502,6 +506,7 @@ async fn run_streaming_generation(
         let params = StreamRunParams {
             llm_request: llm_request.clone(),
             model_rec: model_rec.base.clone(),
+            chat_id: Some(chat_id.clone()),
             abort_flag: Some(abort_flag.clone()),
             supports_tools: model_rec.supports_tools,
             supports_reasoning: model_rec.has_reasoning_support(),
@@ -554,7 +559,7 @@ async fn run_streaming_generation(
         let _ = emitter_task.await;
         let results = results?;
 
-        let result = results.into_iter().next().unwrap_or_default();
+        let mut result = results.into_iter().next().unwrap_or_default();
 
         if is_result_empty(&result) {
             if attempt < max_attempts && can_retry_with_temp_bump {
@@ -576,6 +581,7 @@ async fn run_streaming_generation(
                         draft.reasoning_content = None;
                         draft.thinking_blocks = None;
                         draft.citations = Vec::new();
+                        draft.server_content_blocks = Vec::new();
                         draft.extra = serde_json::Map::new();
                     }
                     session.draft_usage = None;
@@ -593,9 +599,21 @@ async fn run_streaming_generation(
         if !result.tool_calls_raw.is_empty() {
             let parsed: Vec<_> = result.tool_calls_raw.iter().filter_map(|tc| normalize_tool_call(tc)).collect();
             if parsed.is_empty() {
-                return Err("Model returned tool_calls but none were parsable".to_string());
-            }
-            if parsed.len() < result.tool_calls_raw.len() {
+                let has_content = !result.content.trim().is_empty()
+                    || !result.reasoning.trim().is_empty()
+                    || !result.server_content_blocks.is_empty()
+                    || !result.citations.is_empty();
+                tracing::warn!(
+                    "All {} tool calls unparsable: {:?}",
+                    result.tool_calls_raw.len(),
+                    result.tool_calls_raw,
+                );
+                if !has_content {
+                    return Err("Model returned tool_calls but none were parsable".to_string());
+                }
+                // Has useful content — discard unparsable tool calls and continue
+                result.tool_calls_raw.clear();
+            } else if parsed.len() < result.tool_calls_raw.len() {
                 let dropped: Vec<_> = result.tool_calls_raw.iter()
                     .filter(|tc| normalize_tool_call(tc).is_none())
                     .collect();
@@ -755,6 +773,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 tool_type: "function".to_string(),
+                extra_content: None,
             }]),
             ..Default::default()
         }
@@ -846,6 +865,7 @@ mod tests {
                             arguments: "{}".to_string(),
                         },
                         tool_type: "function".to_string(),
+                        extra_content: None,
                     },
                     ChatToolCall {
                         id: "srvtoolu_456".to_string(),
@@ -855,6 +875,7 @@ mod tests {
                             arguments: "{}".to_string(),
                         },
                         tool_type: "function".to_string(),
+                        extra_content: None,
                     },
                 ]),
                 ..Default::default()
@@ -881,6 +902,7 @@ mod tests {
                             arguments: "{}".to_string(),
                         },
                         tool_type: "function".to_string(),
+                        extra_content: None,
                     },
                     ChatToolCall {
                         id: "srvtoolu_456".to_string(),
@@ -890,6 +912,7 @@ mod tests {
                             arguments: "{}".to_string(),
                         },
                         tool_type: "function".to_string(),
+                        extra_content: None,
                     },
                 ]),
                 ..Default::default()

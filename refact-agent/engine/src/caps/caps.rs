@@ -130,6 +130,10 @@ pub struct ChatModelRecord {
     pub supports_strict_tools: bool,
     #[serde(default = "default_true")]
     pub supports_temperature: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_provider: Option<String>,
 }
 
 pub fn default_chat_scratchpad() -> String {
@@ -468,9 +472,14 @@ fn build_chat_model_record(
     };
 
     let resolved_caps = resolve_model_caps(model_caps, &model_id)
-        .or_else(|| resolve_model_caps(model_caps, &model.id));
+        .or_else(|| {
+            if model_id.starts_with("openrouter/") {
+                None
+            } else {
+                resolve_model_caps(model_caps, &model.id)
+            }
+        });
 
-    // Get capabilities from model_caps or use the model's own values (for custom models)
     let (
         n_ctx,
         supports_tools,
@@ -480,18 +489,53 @@ fn build_chat_model_record(
         supports_adaptive_thinking_budget,
         tokenizer,
         supports_clicks,
+        max_output_tokens,
     ) = if let Some(ref resolved) = resolved_caps {
         let caps = &resolved.caps;
-        (
-            caps.n_ctx,
-            caps.supports_tools,
-            caps.supports_vision,
-            caps.reasoning_effort_options.clone(),
-            caps.supports_thinking_budget,
-            caps.supports_adaptive_thinking_budget,
-            caps.tokenizer.clone(),
-            caps.supports_clicks,
-        )
+        if model.is_custom {
+            let clamped_n_ctx = if caps.n_ctx > 0 { model.n_ctx.min(caps.n_ctx) } else { model.n_ctx };
+            let clamped_max_output = model.max_output_tokens.map(|v| {
+                if caps.max_output_tokens > 0 { v.min(caps.max_output_tokens) } else { v }
+            });
+            let tok = model.tokenizer.clone().unwrap_or_else(|| caps.tokenizer.clone());
+            (
+                clamped_n_ctx,
+                model.supports_tools,
+                model.supports_multimodality,
+                model.reasoning_effort_options.clone(),
+                model.supports_thinking_budget,
+                model.supports_adaptive_thinking_budget,
+                tok,
+                caps.supports_clicks,
+                clamped_max_output,
+            )
+        } else {
+            let effective_n_ctx = if model.n_ctx > 0 && caps.n_ctx > 0 {
+                model.n_ctx.min(caps.n_ctx)
+            } else if caps.n_ctx > 0 {
+                caps.n_ctx
+            } else {
+                model.n_ctx
+            };
+            let effective_max_output = if caps.max_output_tokens > 0 {
+                model.max_output_tokens
+                    .map(|v| v.min(caps.max_output_tokens))
+                    .or(Some(caps.max_output_tokens))
+            } else {
+                model.max_output_tokens
+            };
+            (
+                effective_n_ctx,
+                caps.supports_tools,
+                caps.supports_vision,
+                caps.reasoning_effort_options.clone(),
+                caps.supports_thinking_budget,
+                caps.supports_adaptive_thinking_budget,
+                caps.tokenizer.clone(),
+                caps.supports_clicks,
+                effective_max_output,
+            )
+        }
     } else {
         (
             model.n_ctx,
@@ -502,6 +546,7 @@ fn build_chat_model_record(
             model.supports_adaptive_thinking_budget,
             model.tokenizer.clone().unwrap_or_default(),
             false,
+            model.max_output_tokens,
         )
     };
 
@@ -562,10 +607,7 @@ fn build_chat_model_record(
         default_max_tokens: resolved_caps
             .as_ref()
             .and_then(|r| r.caps.default_max_tokens),
-        max_output_tokens: resolved_caps
-            .as_ref()
-            .map(|r| r.caps.max_output_tokens)
-            .filter(|&t| t > 0),
+        max_output_tokens,
         supports_strict_tools: resolved_caps
             .as_ref()
             .map(|r| r.caps.supports_strict_tools)
@@ -573,7 +615,9 @@ fn build_chat_model_record(
         supports_temperature: resolved_caps
             .as_ref()
             .map(|r| r.caps.supports_temperature)
-            .unwrap_or(false),
+            .unwrap_or(true),
+        available_providers: model.available_providers.clone(),
+        selected_provider: model.selected_provider.clone(),
         
     }
 }
@@ -889,6 +933,27 @@ pub async fn load_caps(
         }
     }
 
+    // Clear chat models from legacy CapsProviders that have a new ProviderTrait implementation.
+    // The new system (populate_chat_models_from_providers) is the sole source of truth for
+    // chat models — it respects enabled_models selection. Legacy running_models from YAML
+    // templates would otherwise bypass model selection, showing all template models.
+    // Only chat_models are cleared; completion_models and embedding_model are preserved
+    // since the new system doesn't handle those yet.
+    {
+        let gcx_locked = gcx.read().await;
+        let registry = gcx_locked.providers.read().await;
+        for p in &mut providers {
+            if registry.get(&p.name).is_some() && !p.chat_models.is_empty() {
+                info!(
+                    "Clearing {} legacy chat models for provider '{}' — handled by new provider system",
+                    p.chat_models.len(),
+                    p.name
+                );
+                p.chat_models.clear();
+            }
+        }
+    }
+
     add_models_to_caps(&mut caps, providers);
     populate_chat_models_from_providers(&mut caps, gcx.clone()).await;
     apply_model_caps_to_all_chat_models(&mut caps);
@@ -1092,7 +1157,35 @@ fn apply_model_caps_to_all_chat_models(caps: &mut CodeAssistantCaps) {
 }
 
 fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelCapabilities) {
-    record.base.n_ctx = caps.n_ctx;
+    if record.base.user_configured {
+        if caps.n_ctx > 0 {
+            record.base.n_ctx = record.base.n_ctx.min(caps.n_ctx);
+        }
+        if caps.max_output_tokens > 0 {
+            record.max_output_tokens = record.max_output_tokens
+                .map(|v| v.min(caps.max_output_tokens))
+                .or(Some(caps.max_output_tokens));
+        }
+        if record.base.tokenizer.is_empty() && !caps.tokenizer.is_empty() {
+            record.base.tokenizer = caps.tokenizer.clone();
+        }
+        if record.default_temperature.is_none() {
+            record.default_temperature = caps.default_temperature;
+        }
+        if record.default_max_tokens.is_none() {
+            record.default_max_tokens = caps.default_max_tokens;
+        }
+        record.base.supports_max_completion_tokens = caps.supports_max_completion_tokens;
+        return;
+    }
+
+    if caps.n_ctx > 0 {
+        record.base.n_ctx = if record.base.n_ctx > 0 {
+            record.base.n_ctx.min(caps.n_ctx)
+        } else {
+            caps.n_ctx
+        };
+    }
     record.base.supports_max_completion_tokens = caps.supports_max_completion_tokens;
 
     record.supports_tools = caps.supports_tools;
@@ -1101,11 +1194,11 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
     record.supports_clicks = caps.supports_clicks;
     record.default_temperature = caps.default_temperature;
     record.default_max_tokens = caps.default_max_tokens;
-    record.max_output_tokens = if caps.max_output_tokens > 0 {
-        Some(caps.max_output_tokens)
-    } else {
-        None
-    };
+    if caps.max_output_tokens > 0 {
+        record.max_output_tokens = record.max_output_tokens
+            .map(|v| v.min(caps.max_output_tokens))
+            .or(Some(caps.max_output_tokens));
+    }
 
     if !caps.tokenizer.is_empty() {
         record.base.tokenizer = caps.tokenizer.clone();

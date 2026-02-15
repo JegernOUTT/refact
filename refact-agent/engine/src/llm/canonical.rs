@@ -125,9 +125,15 @@ impl Default for CanonicalToolChoice {
 pub enum LlmStreamDelta {
     AppendContent {
         text: String,
+        /// Content block index for per-block content tracking (Anthropic interleaved output).
+        /// When set, the content text is associated with a specific content block.
+        block_index: Option<u64>,
     },
     AppendReasoning {
         text: String,
+        /// Content block index for per-block reasoning tracking (Anthropic interleaved thinking).
+        /// When set, the reasoning text is associated with a specific thinking block.
+        block_index: Option<u64>,
     },
     SetToolCalls {
         tool_calls: Vec<Value>,
@@ -179,8 +185,8 @@ mod tests {
         use serde_json::json;
 
         let deltas = vec![
-            LlmStreamDelta::AppendContent { text: "hello".to_string() },
-            LlmStreamDelta::AppendReasoning { text: "thinking".to_string() },
+            LlmStreamDelta::AppendContent { text: "hello".to_string(), block_index: None },
+            LlmStreamDelta::AppendReasoning { text: "thinking".to_string(), block_index: None },
             LlmStreamDelta::SetToolCalls { tool_calls: vec![json!({"id": "1"})] },
             LlmStreamDelta::SetThinkingBlocks { blocks: vec![json!({"type": "thinking", "text": "..."})] },
             LlmStreamDelta::AddCitation { citation: json!({"url": "https://example.com", "title": "Example"}) },

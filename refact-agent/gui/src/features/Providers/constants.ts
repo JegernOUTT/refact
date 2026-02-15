@@ -12,6 +12,7 @@ export const BEAUTIFUL_PROVIDER_NAMES: Record<string, string> = {
   google_gemini: "Google Gemini",
   ollama: "Ollama",
   lmstudio: "LM Studio",
+  vllm: "vLLM",
   xai: "xAI",
   xai_responses: "xAI (Responses API)",
   custom: "Custom Provider",

@@ -13,6 +13,7 @@ import type {
 
 import styles from "./ProviderForm.module.css";
 import { ProviderModelsList } from "./ProviderModelsList/ProviderModelsList";
+import { useGetOpenRouterHealthQuery } from "../../../services/refact";
 
 const SETTINGS_HIDDEN_PROVIDERS = ["refact", "refact_self_hosted"];
 
@@ -50,6 +51,9 @@ const StatusBadge: React.FC<{ status: ProviderStatus }> = ({ status }) => {
 export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
 }) => {
+  const { data: openRouterHealth } = useGetOpenRouterHealthQuery(undefined, {
+    skip: currentProvider.name !== "openrouter",
+  });
   const {
     areShowingExtraFields,
     formValues,
@@ -78,6 +82,11 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
     <Flex direction="column" width="100%" height="100%" mt="2" gap="3">
       <Flex align="center" gap="2">
         <StatusBadge status={status} />
+        {currentProvider.name === "openrouter" && openRouterHealth && (
+          <Badge color={openRouterHealth.ok ? "green" : "red"} size="1">
+            {openRouterHealth.ok ? "Key OK" : "Key Error"}
+          </Badge>
+        )}
         {parsedSchema.description && (
           <Text size="1" color="gray" style={{ flex: 1 }}>
             {parsedSchema.description.trim().split("\n")[0]}

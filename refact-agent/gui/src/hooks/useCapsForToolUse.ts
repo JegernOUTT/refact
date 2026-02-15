@@ -86,16 +86,8 @@ export function useCapsForToolUse() {
 
   const usableModels = useMemo(() => {
     const models = caps.data?.chat_models ?? {};
-    const items = Object.entries(models).reduce<string[]>(
-      (acc, [key, value]) => {
-        if (modeRequiresAgent && !value.supports_agent) return acc;
-        if (modeRequiresTools && !value.supports_tools) return acc;
-        return [...acc, key];
-      },
-      [],
-    );
-    return items;
-  }, [caps.data?.chat_models, modeRequiresAgent, modeRequiresTools]);
+    return Object.keys(models);
+  }, [caps.data?.chat_models]);
 
   const usableModelsForPlan = useMemo(() => {
     return usableModels.map((model) => {

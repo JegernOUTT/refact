@@ -92,6 +92,32 @@ export type AvailableModel = {
   tokenizer: string | null;
   enabled: boolean;
   is_custom: boolean;
+  pricing?: {
+    prompt: number;
+    generated: number;
+    cache_read?: number;
+    cache_creation?: number;
+  } | null;
+  available_providers?: string[];
+  selected_provider?: string | null;
+  max_output_tokens?: number | null;
+  provider_variants?: {
+    id: string;
+    name?: string | null;
+    tag?: string | null;
+    context_length?: number | null;
+    max_output_tokens?: number | null;
+    pricing?: {
+      prompt: number;
+      generated: number;
+      cache_read?: number;
+      cache_creation?: number;
+    } | null;
+    latency_last_30m?: number | null;
+    throughput_last_30m?: number | null;
+    uptime_last_30m?: number | null;
+    supported_parameters?: string[] | null;
+  }[];
 };
 
 export type AvailableModelsResponse = {
@@ -100,9 +126,41 @@ export type AvailableModelsResponse = {
   error?: string | null;
 };
 
+export type OpenRouterAccountInfoResponse = {
+  data: {
+    key_name?: string | null;
+    key_label?: string | null;
+    limit?: number | null;
+    usage?: number | null;
+    remaining?: number | null;
+    is_free_tier?: boolean | null;
+    rate_limit?: unknown;
+  };
+};
+
+export type OpenRouterHealthResponse = {
+  ok: boolean;
+  message?: string | null;
+  data?: {
+    key_name?: string | null;
+    key_label?: string | null;
+    rate_limit?: unknown;
+  } | null;
+};
+
+export type OpenRouterModelEndpointsResponse = {
+  provider_variants: NonNullable<AvailableModel["provider_variants"]>;
+  available_providers: string[];
+};
+
 export type ModelToggleRequest = {
   model_id: string;
   enabled: boolean;
+};
+
+export type ModelProviderRequest = {
+  model_id: string;
+  selected_provider?: string | null;
 };
 
 export type CustomModelConfig = {
@@ -360,6 +418,86 @@ export const providersApi = createApi({
       },
     }),
 
+    getOpenRouterModelEndpoints: builder.query<
+      OpenRouterModelEndpointsResponse,
+      { providerName: string; modelId: string }
+    >({
+      queryFn: async (args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/models/${encodeURIComponent(args.modelId)}/endpoints`;
+
+        const result = await baseQuery({
+          ...extraOptions,
+          method: "GET",
+          url,
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        if (!isOpenRouterModelEndpointsResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: `Invalid response from /v1/providers/${args.providerName}/models/${args.modelId}/endpoints`,
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data };
+      },
+    }),
+
+    getOpenRouterAccountInfo: builder.query<OpenRouterAccountInfoResponse, undefined>({
+      queryFn: async (_args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}/v1/openrouter/account-info`;
+
+        const result = await baseQuery({
+          ...extraOptions,
+          method: "GET",
+          url,
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        return { data: result.data as OpenRouterAccountInfoResponse };
+      },
+    }),
+
+    getOpenRouterHealth: builder.query<OpenRouterHealthResponse, undefined>({
+      queryFn: async (_args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}/v1/openrouter/health`;
+
+        const result = await baseQuery({
+          ...extraOptions,
+          method: "GET",
+          url,
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        return { data: result.data as OpenRouterHealthResponse };
+      },
+    }),
+
     // Toggle model enabled/disabled
     toggleModel: builder.mutation<
       { success: boolean; model_id: string; enabled: boolean },
@@ -406,6 +544,49 @@ export const providersApi = createApi({
             success: true,
             model_id: args.modelId,
             enabled: args.enabled,
+          },
+        };
+      },
+    }),
+
+    setModelProvider: builder.mutation<
+      {
+        success: boolean;
+        model_id: string;
+        selected_provider?: string | null;
+      },
+      { providerName: string; modelId: string; selectedProvider?: string | null }
+    >({
+      invalidatesTags: (_result, _error, { providerName }) => [
+        { type: "AVAILABLE_MODELS", id: providerName },
+        { type: "PROVIDER", id: providerName },
+      ],
+      queryFn: async (args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/models/provider`;
+
+        const result = await baseQuery({
+          ...extraOptions,
+          method: "POST",
+          url,
+          body: {
+            model_id: args.modelId,
+            selected_provider: args.selectedProvider ?? null,
+          },
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        return {
+          data: {
+            success: true,
+            model_id: args.modelId,
+            selected_provider: args.selectedProvider ?? null,
           },
         };
       },
@@ -805,6 +986,16 @@ function isAvailableModelsResponse(
   return true;
 }
 
+function isOpenRouterModelEndpointsResponse(
+  data: unknown,
+): data is OpenRouterModelEndpointsResponse {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "provider_variants")) return false;
+  if (!hasProperty(data, "available_providers")) return false;
+  if (!Array.isArray(data.available_providers)) return false;
+  return true;
+}
+
 function isModelTypeDefaults(data: unknown): data is ModelTypeDefaults {
   if (typeof data !== "object" || data === null) return false;
   return true;
@@ -833,7 +1024,11 @@ export const {
   useGetProviderSchemaQuery,
   useGetProviderModelsQuery,
   useGetAvailableModelsQuery,
+  useGetOpenRouterModelEndpointsQuery,
+  useGetOpenRouterAccountInfoQuery,
+  useGetOpenRouterHealthQuery,
   useToggleModelMutation,
+  useSetModelProviderMutation,
   useAddCustomModelMutation,
   useRemoveCustomModelMutation,
   useUpdateProviderMutation,

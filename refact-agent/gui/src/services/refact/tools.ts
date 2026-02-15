@@ -205,7 +205,8 @@ export type Tool = {
 };
 
 export type ToolConfirmationPauseReason = {
-  type: "confirmation" | "denial";
+  type: "confirmation" | "denial" | "unknown";
+  raw_type?: string;
   tool_name: string;
   command: string;
   rule: string;

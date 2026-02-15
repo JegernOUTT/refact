@@ -490,6 +490,8 @@ pub struct ChatSession {
     pub closed: bool,
     pub external_reload_pending: bool,
     pub last_prompt_messages: Vec<ChatMessage>,
+    pub cache_guard_snapshot: Option<serde_json::Value>,
+    pub cache_guard_force_next: bool,
     pub task_agent_error: Option<String>,
 }
 

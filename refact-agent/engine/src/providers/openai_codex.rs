@@ -10,7 +10,7 @@ use crate::llm::adapter::WireFormat;
 use crate::providers::openai_codex_oauth::OAuthTokens;
 use crate::providers::traits::{
     AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
 };
 use crate::providers::pricing::openai_pricing;
 
@@ -329,14 +329,15 @@ available:
                     enabled,
                     is_custom: false,
                     pricing,
+                    available_providers: Vec::new(),
+                    selected_provider: None,
+                    max_output_tokens: None,
+                    provider_variants: Vec::new(),
                 });
             }
         }
 
-        for (id, config) in &self.custom_models {
-            let enabled = enabled_set.contains(id.as_str());
-            models.push(AvailableModel::from_custom(id, config, enabled));
-        }
+        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
 
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models

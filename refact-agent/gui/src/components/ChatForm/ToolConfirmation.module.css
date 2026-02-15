@@ -35,3 +35,16 @@
   display: block;
   font-weight: 700;
 }
+
+.CacheGuardDiff {
+  width: 100%;
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--gray-6);
+  border-radius: 6px;
+  background-color: var(--gray-2);
+  font-family: var(--default-font-family);
+  font-size: 12px;
+  white-space: pre;
+}

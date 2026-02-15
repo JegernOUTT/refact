@@ -40,7 +40,7 @@ impl LlmWireAdapter for RefactAdapter {
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
 
-        let mut messages = convert_messages_to_refact(&req.messages);
+        let mut messages = convert_messages_to_refact(&req.messages, settings.reasoning_type.as_deref());
 
         if matches!(req.cache_control, CacheControl::Ephemeral) {
             inject_cache_control(&mut messages);
@@ -218,6 +218,7 @@ impl LlmWireAdapter for RefactAdapter {
                         if !content.is_empty() {
                             deltas.push(LlmStreamDelta::AppendContent {
                                 text: content.to_string(),
+                                block_index: None,
                             });
                         }
                     }
@@ -226,6 +227,7 @@ impl LlmWireAdapter for RefactAdapter {
                         if !reasoning.is_empty() {
                             deltas.push(LlmStreamDelta::AppendReasoning {
                                 text: reasoning.to_string(),
+                                block_index: None,
                             });
                         }
                     }
@@ -334,7 +336,9 @@ impl LlmWireAdapter for RefactAdapter {
     }
 }
 
-fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage]) -> Vec<Value> {
+fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage], reasoning_type: Option<&str>) -> Vec<Value> {
+    let is_anthropic_target = reasoning_type.map_or(false, |rt| rt.starts_with("anthropic"));
+    let supports_reasoning_content = reasoning_type.is_some();
     messages
         .iter()
         .filter_map(|msg| {
@@ -385,6 +389,7 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage]) 
                     .map(|tc| {
                         json!({
                             "id": tc.id,
+                            "index": tc.index,
                             "type": "function",
                             "function": {
                                 "name": tc.function.name,
@@ -402,50 +407,60 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage]) 
                 obj["tool_call_id"] = json!(msg.tool_call_id);
             }
 
-            if let Some(reasoning) = &msg.reasoning_content {
-                if !reasoning.is_empty() {
-                    obj["reasoning_content"] = json!(reasoning);
-                }
-            }
-
-            if let Some(blocks) = &msg.thinking_blocks {
-                if !blocks.is_empty() {
-                    let sanitized: Vec<Value> = blocks.iter().filter_map(|block| {
-                        match block.get("type").and_then(|t| t.as_str()) {
-                            Some("thinking") => {
-                                let mut tb = json!({"type": "thinking"});
-                                if let Some(thinking) = block.get("thinking") {
-                                    tb["thinking"] = thinking.clone();
-                                }
-                                if let Some(sig) = block.get("signature") {
-                                    tb["signature"] = sig.clone();
-                                }
-                                Some(tb)
-                            }
-                            Some("redacted_thinking") => {
-                                let mut rb = json!({"type": "redacted_thinking"});
-                                if let Some(data) = block.get("data") {
-                                    rb["data"] = data.clone();
-                                }
-                                Some(rb)
-                            }
-                            _ => None,
-                        }
-                    }).collect();
-                    if !sanitized.is_empty() {
-                        obj["thinking_blocks"] = json!(sanitized);
+            if supports_reasoning_content {
+                if let Some(reasoning) = &msg.reasoning_content {
+                    if !reasoning.is_empty() {
+                        obj["reasoning_content"] = json!(reasoning);
                     }
                 }
             }
 
+            if is_anthropic_target {
+                if let Some(blocks) = &msg.thinking_blocks {
+                    if !blocks.is_empty() {
+                        let sanitized: Vec<Value> = blocks.iter().filter_map(|block| {
+                            match block.get("type").and_then(|t| t.as_str()) {
+                                Some("thinking") => {
+                                    let thinking_text = block.get("thinking")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if thinking_text.trim().is_empty() {
+                                        tracing::warn!("skipping thinking block with empty thinking text");
+                                        return None;
+                                    }
+                                    let mut tb = json!({
+                                        "type": "thinking",
+                                        "thinking": thinking_text,
+                                    });
+                                    if let Some(sig) = block.get("signature") {
+                                        tb["signature"] = sig.clone();
+                                    }
+                                    Some(tb)
+                                }
+                                Some("redacted_thinking") => {
+                                    let mut rb = json!({"type": "redacted_thinking"});
+                                    if let Some(data) = block.get("data") {
+                                        rb["data"] = data.clone();
+                                    }
+                                    Some(rb)
+                                }
+                                _ => None,
+                            }
+                        }).collect();
+                        if !sanitized.is_empty() {
+                            obj["thinking_blocks"] = json!(sanitized);
+                        }
+                    }
+                }
+            }
+
+            // Always strip encrypted citations in Refact wire — server_content_blocks
+            // are never forwarded through LiteLLM, so encrypted citations would be
+            // orphaned and cause validation errors on Anthropic round-trip.
             if !msg.citations.is_empty() {
-                let valid_citations: Vec<&Value> = if msg.server_content_blocks.is_empty() {
-                    msg.citations.iter()
-                        .filter(|c| c.get("encrypted_index").is_none())
-                        .collect()
-                } else {
-                    msg.citations.iter().collect()
-                };
+                let valid_citations: Vec<&Value> = msg.citations.iter()
+                    .filter(|c| c.get("encrypted_index").is_none())
+                    .collect();
                 if !valid_citations.is_empty() {
                     obj["citations"] = json!(valid_citations);
                 }
@@ -795,7 +810,7 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        let has_content = deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendContent { text } if text == "Hi"));
+        let has_content = deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendContent { text, .. } if text == "Hi"));
         let has_extra = deltas.iter().any(|d| matches!(d, LlmStreamDelta::MergeExtra { extra } if extra.contains_key("metering_balance")));
 
         assert!(has_content);
@@ -890,6 +905,7 @@ mod tests {
                 tool_calls: Some(vec![crate::call_validation::ChatToolCall {
                     id: "call_edit".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: crate::call_validation::ChatToolFunction {
                         name: "file_edit".to_string(),
                         arguments: "{}".to_string(),
@@ -906,7 +922,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, None);
 
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[2]["role"], "tool");
@@ -1182,6 +1198,7 @@ mod tests {
                 tool_calls: Some(vec![crate::call_validation::ChatToolCall {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: crate::call_validation::ChatToolFunction {
                         name: "search".to_string(),
                         arguments: "{}".to_string(),
@@ -1198,13 +1215,13 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, Some("anthropic_budget"));
 
         assert_eq!(converted.len(), 3);
-        // Assistant message should have thinking_blocks
+        // Assistant message should have thinking_blocks when targeting Anthropic
         let assistant = &converted[1];
         assert!(assistant.get("thinking_blocks").is_some(),
-            "Assistant message should include thinking_blocks for LiteLLM");
+            "Assistant message should include thinking_blocks for LiteLLM Anthropic target");
         let blocks = assistant["thinking_blocks"].as_array().unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "thinking");
@@ -1223,7 +1240,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, None);
 
         assert_eq!(converted.len(), 2);
         assert!(converted[1].get("thinking_blocks").is_none(),
@@ -1241,7 +1258,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, None);
 
         assert!(converted[0].get("thinking_blocks").is_none(),
             "Empty thinking_blocks should not be included");
@@ -1258,6 +1275,7 @@ mod tests {
                 tool_calls: Some(vec![crate::call_validation::ChatToolCall {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: crate::call_validation::ChatToolFunction {
                         name: "search".to_string(),
                         arguments: "{}".to_string(),
@@ -1274,7 +1292,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, Some("openai"));
 
         assert_eq!(converted.len(), 3);
         let assistant = &converted[1];
@@ -1294,7 +1312,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, None);
 
         assert!(converted[0].get("reasoning_content").is_none());
     }
@@ -1310,7 +1328,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, None);
 
         assert!(converted[0].get("reasoning_content").is_none());
     }
@@ -1460,7 +1478,7 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        let has_content = deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendContent { text } if text == "the grass is green"));
+        let has_content = deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendContent { text, .. } if text == "the grass is green"));
         assert!(has_content, "Should have content delta");
 
         let citation_count = deltas.iter().filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. })).count();
@@ -1516,7 +1534,7 @@ mod tests {
         let citation_count = deltas.iter().filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. })).count();
         assert_eq!(citation_count, 0, "Null citations should be ignored");
 
-        let has_content = deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendContent { text } if text == "hello"));
+        let has_content = deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendContent { text, .. } if text == "hello"));
         assert!(has_content, "Content should still be parsed");
     }
 
@@ -1543,7 +1561,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "And the sky?".to_string()),
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, None);
 
         assert_eq!(converted.len(), 3);
         // Assistant message should have citations
@@ -1567,7 +1585,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_refact(&messages);
+        let converted = convert_messages_to_refact(&messages, None);
 
         assert!(converted[0].get("citations").is_none(),
             "Empty citations should not be included");
@@ -1589,5 +1607,139 @@ mod tests {
             assert_eq!(citation.get("start_page_number").and_then(|v| v.as_u64()), Some(5));
             assert_eq!(citation.get("end_page_number").and_then(|v| v.as_u64()), Some(6));
         }
+    }
+
+    #[test]
+    fn test_empty_thinking_blocks_filtered_in_convert() {
+        use crate::call_validation::{ChatContent, ChatMessage};
+
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Response".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({"type": "thinking", "thinking": "", "signature": "sig_empty"}),
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_refact(&messages, Some("anthropic_budget"));
+
+        let assistant = &converted[1];
+        assert!(
+            assistant.get("thinking_blocks").is_none()
+                || assistant["thinking_blocks"].as_array().unwrap().is_empty(),
+            "Empty thinking blocks should be filtered out in refact format: {:?}",
+            assistant.get("thinking_blocks")
+        );
+    }
+
+    #[test]
+    fn test_valid_thinking_block_kept_empty_filtered_in_refact() {
+        use crate::call_validation::{ChatContent, ChatMessage};
+
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Response".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({"type": "thinking", "thinking": "Valid text", "signature": "sig1"}),
+                    json!({"type": "thinking", "thinking": "", "signature": "sig_empty"}),
+                    json!({"type": "redacted_thinking", "data": "enc", "signature": "sig_r"}),
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_refact(&messages, Some("anthropic_budget"));
+
+        let blocks = converted[0]["thinking_blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "Valid thinking + redacted kept, empty filtered: {:?}", blocks);
+        assert_eq!(blocks[0]["thinking"], "Valid text");
+        assert_eq!(blocks[1]["type"], "redacted_thinking");
+    }
+
+    #[test]
+    fn test_thinking_blocks_stripped_for_non_anthropic_target() {
+        use crate::call_validation::{ChatContent, ChatMessage};
+
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Response".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({"type": "thinking", "thinking": "Valid text", "signature": "sig1"}),
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_refact(&messages, Some("openai"));
+        assert!(converted[0].get("thinking_blocks").is_none(),
+            "thinking_blocks should be stripped for non-Anthropic targets");
+
+        let converted_none = convert_messages_to_refact(&messages, None);
+        assert!(converted_none[0].get("thinking_blocks").is_none(),
+            "thinking_blocks should be stripped when no reasoning_type");
+    }
+
+    #[test]
+    fn test_reasoning_content_stripped_when_no_reasoning_support() {
+        use crate::call_validation::{ChatContent, ChatMessage};
+
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Response".to_string()),
+                reasoning_content: Some("Reasoning text".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_refact(&messages, None);
+        assert!(converted[0].get("reasoning_content").is_none(),
+            "reasoning_content should be stripped when no reasoning support");
+
+        let converted_openai = convert_messages_to_refact(&messages, Some("openai"));
+        assert_eq!(converted_openai[0]["reasoning_content"], "Reasoning text",
+            "reasoning_content should be included for openai reasoning");
+    }
+
+    #[test]
+    fn test_encrypted_citations_always_stripped_in_refact() {
+        use crate::call_validation::{ChatContent, ChatMessage};
+
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Search results".to_string()),
+                citations: vec![
+                    json!({
+                        "type": "web_search_result_location",
+                        "url": "https://example.com",
+                        "title": "Example",
+                        "encrypted_index": "abc123",
+                        "cited_text": "Found it."
+                    }),
+                    json!({
+                        "type": "char_location",
+                        "cited_text": "Local doc.",
+                        "document_index": 0,
+                        "start_char_index": 0,
+                        "end_char_index": 10
+                    }),
+                ],
+                server_content_blocks: vec![json!({"type": "server_tool_use"})],
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_refact(&messages, Some("anthropic_budget"));
+        let citations = converted[0]["citations"].as_array().unwrap();
+        assert_eq!(citations.len(), 1,
+            "Encrypted citations should always be stripped in Refact wire");
+        assert_eq!(citations[0]["type"], "char_location");
     }
 }

@@ -49,11 +49,14 @@ use crate::providers::http::{
     handle_v1_providers_list, handle_v1_provider_get, handle_v1_provider_schema,
     handle_v1_provider_update, handle_v1_provider_delete, handle_v1_provider_models,
     handle_v1_provider_available_models, handle_v1_provider_model_toggle,
+    handle_v1_provider_model_provider_update, handle_v1_openrouter_model_endpoints,
     handle_v1_provider_add_custom_model, handle_v1_provider_remove_custom_model,
     handle_v1_provider_remove_custom_model_post,
     handle_v1_defaults_get, handle_v1_defaults_update, handle_v1_models,
     handle_v1_provider_oauth_start, handle_v1_provider_oauth_exchange,
     handle_v1_provider_oauth_logout, handle_v1_provider_oauth_callback,
+    handle_v1_openrouter_account_info, handle_v1_openrouter_health,
+    handle_v1_google_gemini_health,
 };
 
 use crate::http::routers::v1::vecdb::{handle_v1_vecdb_search, handle_v1_vecdb_status};
@@ -238,16 +241,24 @@ pub fn make_v1_router() -> Router {
         .route("/providers/:name/schema", get(handle_v1_provider_schema))
         .route("/providers/:name/models", get(handle_v1_provider_models))
         .route("/providers/:name/available-models", get(handle_v1_provider_available_models))
+        .route(
+            "/providers/:name/models/:model_id/endpoints",
+            get(handle_v1_openrouter_model_endpoints),
+        )
         .route("/providers/:name/models/toggle", post(handle_v1_provider_model_toggle))
+        .route("/providers/:name/models/provider", post(handle_v1_provider_model_provider_update))
         .route("/providers/:name/custom-models", post(handle_v1_provider_add_custom_model))
         .route("/providers/:name/custom-models", delete(handle_v1_provider_remove_custom_model))
         .route("/providers/:name/custom-models/remove", post(handle_v1_provider_remove_custom_model_post))
+        .route("/openrouter/account-info", get(handle_v1_openrouter_account_info))
         .route("/providers/:name/oauth/start", post(handle_v1_provider_oauth_start))
         .route("/providers/:name/oauth/exchange", post(handle_v1_provider_oauth_exchange))
         .route("/providers/:name/oauth/logout", post(handle_v1_provider_oauth_logout))
         .route("/providers/:name/oauth/callback", get(handle_v1_provider_oauth_callback))
         .route("/defaults", get(handle_v1_defaults_get))
         .route("/defaults", post(handle_v1_defaults_update))
+        .route("/openrouter/health", get(handle_v1_openrouter_health))
+        .route("/google-gemini/health", get(handle_v1_google_gemini_health))
         // cloud related
         .route("/set-active-group-id", post(handle_v1_set_active_group_id))
         .route(

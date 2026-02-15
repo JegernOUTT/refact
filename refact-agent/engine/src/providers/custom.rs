@@ -171,7 +171,7 @@ available:
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
-            enabled: !self.chat_endpoint.is_empty() && !self.enabled_models.is_empty(),
+            enabled: self.enabled && !self.chat_endpoint.is_empty() && !self.enabled_models.is_empty(),
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: self.chat_endpoint.clone(),

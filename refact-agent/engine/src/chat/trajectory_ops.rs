@@ -556,6 +556,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 tool_type: "function".to_string(),
+                extra_content: None,
             }]),
             ..Default::default()
         }
@@ -1524,6 +1525,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     },
                     tool_type: "function".to_string(),
+                    extra_content: None,
                 }]),
                 ..Default::default()
             },
@@ -1557,6 +1559,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     },
                     tool_type: "function".to_string(),
+                    extra_content: None,
                 }]),
                 ..Default::default()
             },
@@ -1592,6 +1595,7 @@ mod tests {
                             arguments: "{}".to_string(),
                         },
                         tool_type: "function".to_string(),
+                        extra_content: None,
                     },
                     ChatToolCall {
                         id: "bad.id.2".to_string(),
@@ -1601,6 +1605,7 @@ mod tests {
                             arguments: "{}".to_string(),
                         },
                         tool_type: "function".to_string(),
+                        extra_content: None,
                     },
                 ]),
                 ..Default::default()

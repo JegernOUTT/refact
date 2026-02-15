@@ -1,4 +1,5 @@
 pub mod config;
+pub mod cache_guard;
 mod content;
 mod generation;
 mod handlers;

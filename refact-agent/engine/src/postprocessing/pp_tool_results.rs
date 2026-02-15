@@ -650,6 +650,7 @@ mod tests {
                             arguments: "{}".to_string(),
                         },
                         tool_type: "function".to_string(),
+                        extra_content: None,
                     })
                     .collect(),
             ),

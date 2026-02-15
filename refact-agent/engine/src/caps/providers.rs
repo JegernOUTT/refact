@@ -92,6 +92,12 @@ impl CapsProvider {
             self.embedding_model.base.user_configured = true;
         }
 
+        // New provider system writes `enabled_models` when user toggles models via UI.
+        // If present, replace template running_models with user's explicit selection.
+        if value.get("enabled_models").is_some() {
+            self.running_models.clear();
+            extend_collection::<Vec<String>>(&mut self.running_models, "enabled_models", &value)?;
+        }
         extend_collection::<Vec<String>>(&mut self.running_models, "running_models", &value)?;
         extend_model_collection::<ChatModelRecord>(
             &mut self.chat_models,
@@ -266,6 +272,10 @@ const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
     (
         "refact",
         include_str!("../yaml_configs/default_providers/refact.yaml"),
+    ),
+    (
+        "vllm",
+        include_str!("../yaml_configs/default_providers/vllm.yaml"),
     ),
     (
         "xai",

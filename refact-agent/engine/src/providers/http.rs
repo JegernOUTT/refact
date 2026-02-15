@@ -4,6 +4,7 @@ use axum::http::{Response, StatusCode};
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 
@@ -32,6 +33,8 @@ use crate::providers::registry::{
     create_provider, delete_provider_config, save_provider_config, PROVIDER_NAMES,
 };
 use crate::providers::traits::{AvailableModel, CustomModelConfig, ModelSource, ProviderModel, ProviderRuntime};
+use super::openrouter::OpenRouterProvider;
+use super::google_gemini::GoogleGeminiProvider;
 
 #[derive(Serialize)]
 struct ProviderListItem {
@@ -106,6 +109,18 @@ pub async fn handle_v1_providers_list(
 #[derive(Deserialize)]
 pub struct ProviderPathParams {
     name: String,
+}
+
+#[derive(Deserialize)]
+pub struct ProviderModelPathParams {
+    name: String,
+    model_id: String,
+}
+
+#[derive(Serialize)]
+pub struct OpenRouterModelEndpointsResponse {
+    pub provider_variants: Vec<crate::providers::traits::ProviderVariant>,
+    pub available_providers: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -465,6 +480,22 @@ pub struct AvailableModelsResponse {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct OpenRouterHealthResponse {
+    ok: bool,
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<crate::providers::openrouter::OpenRouterHealthInfo>,
+}
+
+#[derive(Serialize)]
+pub struct GoogleGeminiHealthResponse {
+    ok: bool,
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<crate::providers::google_gemini::GoogleGeminiHealthInfo>,
+}
+
 /// GET /v1/providers/{name}/available-models
 /// Fetches all available models for a provider from model_caps or API
 pub async fn handle_v1_provider_available_models(
@@ -493,19 +524,15 @@ pub async fn handle_v1_provider_available_models(
     };
 
     let source = provider.model_source();
-    let (models, error) = match get_model_caps(gcx.clone(), &address_url, false).await {
-        Ok(model_caps) => {
-            let models = provider.fetch_available_models(&http_client, &model_caps).await;
-            (models, None)
-        }
+    let (model_caps, caps_error) = match get_model_caps(gcx.clone(), &address_url, false).await {
+        Ok(caps) => (caps, None),
         Err(e) => {
             tracing::warn!("Failed to fetch model_caps for provider '{}': {}", params.name, e);
-            (
-                provider.get_custom_models_only(),
-                Some(format!("Failed to fetch model capabilities: {}. Only custom models shown.", e)),
-            )
+            (HashMap::new(), Some(format!("Failed to fetch model capabilities: {}. Model limits may be inaccurate.", e)))
         }
     };
+    let models = provider.fetch_available_models(&http_client, &model_caps).await;
+    let error = caps_error;
 
     let source_str = match source {
         ModelSource::ModelCaps => "model_caps",
@@ -527,6 +554,13 @@ pub async fn handle_v1_provider_available_models(
 pub struct ModelToggleRequest {
     pub model_id: String,
     pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ModelProviderRequest {
+    pub model_id: String,
+    #[serde(default)]
+    pub selected_provider: Option<String>,
 }
 
 /// POST /v1/providers/{name}/models/toggle
@@ -561,6 +595,224 @@ pub async fn handle_v1_provider_model_toggle(
     update_model_enabled_state(gcx, &params.name, &request.model_id, request.enabled).await
 }
 
+/// POST /v1/providers/{name}/models/provider
+/// Set preferred upstream provider for a model (OpenRouter)
+/// Body: { "model_id": "openai/gpt-4.1", "selected_provider": "openai" }
+pub async fn handle_v1_provider_model_provider_update(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Path(params): Path<ProviderPathParams>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let request: ModelProviderRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Invalid JSON: {}", e),
+        )
+    })?;
+
+    if request.model_id.is_empty() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Model ID cannot be empty".to_string(),
+        ));
+    }
+
+    if let Some(ref provider) = request.selected_provider {
+        if provider.len() > 128 {
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                "Selected provider is too long (max 128 characters)".to_string(),
+            ));
+        }
+    }
+
+    update_model_selected_provider_state(
+        gcx,
+        &params.name,
+        &request.model_id,
+        request.selected_provider,
+    )
+    .await
+}
+
+/// GET /v1/providers/openrouter/models/:model_id/endpoints
+pub async fn handle_v1_openrouter_model_endpoints(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Path(params): Path<ProviderModelPathParams>,
+) -> Result<Response<Body>, ScratchError> {
+    if params.name != "openrouter" {
+        return Err(ScratchError::new(
+            StatusCode::NOT_FOUND,
+            "Provider does not support endpoints lookup".to_string(),
+        ));
+    }
+
+    let (provider, http_client) = {
+        let gcx_locked = gcx.read().await;
+        let registry = gcx_locked.providers.read().await;
+        let provider = registry
+            .get(&params.name)
+            .map(|p| p.clone_box())
+            .or_else(|| create_provider(&params.name))
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::NOT_FOUND,
+                    format!("Provider '{}' not found", params.name),
+                )
+            })?;
+        (provider, gcx_locked.http_client.clone())
+    };
+
+    let Some(openrouter) = provider.as_any().downcast_ref::<OpenRouterProvider>() else {
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to resolve OpenRouter provider type".to_string(),
+        ));
+    };
+
+    let (provider_variants, available_providers) = openrouter
+        .fetch_model_endpoints(&http_client, &params.model_id)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::BAD_GATEWAY, e))?;
+
+    json_response(
+        StatusCode::OK,
+        &OpenRouterModelEndpointsResponse {
+            provider_variants,
+            available_providers,
+        },
+    )
+}
+
+/// GET /v1/openrouter/account-info
+pub async fn handle_v1_openrouter_account_info(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<Response<Body>, ScratchError> {
+    let (provider, http_client) = {
+        let gcx_locked = gcx.read().await;
+        let registry = gcx_locked.providers.read().await;
+        let provider = registry
+            .get("openrouter")
+            .map(|p| p.clone_box())
+            .or_else(|| create_provider("openrouter"))
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::NOT_FOUND,
+                    "OpenRouter provider is not available".to_string(),
+                )
+            })?;
+        (provider, gcx_locked.http_client.clone())
+    };
+
+    let Some(openrouter) = provider.as_any().downcast_ref::<OpenRouterProvider>() else {
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to resolve OpenRouter provider type".to_string(),
+        ));
+    };
+
+    let account_info = openrouter
+        .fetch_account_info(&http_client)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::BAD_GATEWAY, e))?;
+
+    json_response(StatusCode::OK, &json!({"data": account_info}))
+}
+
+/// GET /v1/openrouter/health
+pub async fn handle_v1_openrouter_health(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<Response<Body>, ScratchError> {
+    let (provider, http_client) = {
+        let gcx_locked = gcx.read().await;
+        let registry = gcx_locked.providers.read().await;
+        let provider = registry
+            .get("openrouter")
+            .map(|p| p.clone_box())
+            .or_else(|| create_provider("openrouter"))
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::NOT_FOUND,
+                    "OpenRouter provider is not available".to_string(),
+                )
+            })?;
+        (provider, gcx_locked.http_client.clone())
+    };
+
+    let Some(openrouter) = provider.as_any().downcast_ref::<OpenRouterProvider>() else {
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to resolve OpenRouter provider type".to_string(),
+        ));
+    };
+
+    match openrouter.check_api_key_health(&http_client).await {
+        Ok(info) => json_response(
+            StatusCode::OK,
+            &OpenRouterHealthResponse {
+                ok: true,
+                message: None,
+                data: Some(info),
+            },
+        ),
+        Err(e) => json_response(
+            StatusCode::OK,
+            &OpenRouterHealthResponse {
+                ok: false,
+                message: Some(e),
+                data: None,
+            },
+        ),
+    }
+}
+
+/// GET /v1/google-gemini/health
+pub async fn handle_v1_google_gemini_health(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<Response<Body>, ScratchError> {
+    let (provider, http_client) = {
+        let gcx_locked = gcx.read().await;
+        let registry = gcx_locked.providers.read().await;
+        let provider = registry
+            .get("google_gemini")
+            .map(|p| p.clone_box())
+            .or_else(|| create_provider("google_gemini"))
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::NOT_FOUND,
+                    "Google Gemini provider is not available".to_string(),
+                )
+            })?;
+        (provider, gcx_locked.http_client.clone())
+    };
+
+    let Some(gemini) = provider.as_any().downcast_ref::<GoogleGeminiProvider>() else {
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to resolve Google Gemini provider type".to_string(),
+        ));
+    };
+
+    match gemini.check_api_key_health(&http_client).await {
+        Ok(info) => json_response(
+            StatusCode::OK,
+            &GoogleGeminiHealthResponse {
+                ok: true,
+                message: None,
+                data: Some(info),
+            },
+        ),
+        Err(e) => json_response(
+            StatusCode::OK,
+            &GoogleGeminiHealthResponse {
+                ok: false,
+                message: Some(e),
+                data: None,
+            },
+        ),
+    }
+}
+
 async fn update_model_enabled_state(
     gcx: Arc<ARwLock<GlobalContext>>,
     provider_name: &str,
@@ -568,7 +820,7 @@ async fn update_model_enabled_state(
     enabled: bool,
 ) -> Result<Response<Body>, ScratchError> {
     // Capture previous state for rollback
-    let (config_dir, previous_enabled_models) = {
+    let (config_dir, previous_enabled_models, previous_disabled_models) = {
         let gcx_locked = gcx.read().await;
         let mut registry = gcx_locked.providers.write().await;
 
@@ -586,10 +838,11 @@ async fn update_model_enabled_state(
         }
 
         // Capture previous state for rollback
-        let previous = provider.enabled_models().to_vec();
+        let previous_enabled = provider.enabled_models().to_vec();
+        let previous_disabled = provider.disabled_models().to_vec();
 
         provider.set_model_enabled(model_id, enabled);
-        (gcx_locked.config_dir.clone(), previous)
+        (gcx_locked.config_dir.clone(), previous_enabled, previous_disabled)
     };
 
     // Try to save updated config
@@ -598,24 +851,79 @@ async fn update_model_enabled_state(
         let gcx_locked = gcx.read().await;
         let mut registry = gcx_locked.providers.write().await;
         if let Some(provider) = registry.get_mut(provider_name) {
-            // Restore previous enabled_models
+            for model in provider.enabled_models().to_vec() {
+                provider.set_model_enabled(&model, false);
+            }
+            for model in provider.disabled_models().to_vec() {
+                provider.set_model_enabled(&model, true);
+            }
             for model in &previous_enabled_models {
                 provider.set_model_enabled(model, true);
             }
-            // Disable any that weren't in previous
-            let previous_set: std::collections::HashSet<_> = previous_enabled_models.iter().collect();
-            for model in provider.enabled_models().to_vec() {
-                if !previous_set.contains(&model) {
-                    provider.set_model_enabled(&model, false);
-                }
+            for model in &previous_disabled_models {
+                provider.set_model_enabled(model, false);
             }
+        }
+        return Err(e);
+    }
+
+    // Reload provider from disk to ensure the enabled flag is applied in-memory.
+    // (enabled is stored in YAML and used by build_runtime for caps population)
+    reload_provider_from_disk(gcx.clone(), provider_name, &config_dir).await?;
+
+    invalidate_caps(gcx).await;
+
+    json_response(StatusCode::OK, &json!({"success": true, "model_id": model_id, "enabled": enabled}))
+}
+
+async fn update_model_selected_provider_state(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    provider_name: &str,
+    model_id: &str,
+    selected_provider: Option<String>,
+) -> Result<Response<Body>, ScratchError> {
+    let (config_dir, previous_selected_provider) = {
+        let gcx_locked = gcx.read().await;
+        let mut registry = gcx_locked.providers.write().await;
+
+        let provider = registry.get_mut(provider_name).ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("Provider '{}' not found or not configured", provider_name),
+            )
+        })?;
+
+        if provider.is_readonly() {
+            return Err(ScratchError::new(
+                StatusCode::FORBIDDEN,
+                format!("Provider '{}' is readonly", provider_name),
+            ));
+        }
+
+        let prev = provider.selected_providers().get(model_id).cloned();
+        provider.set_selected_provider(model_id, selected_provider.clone());
+        (gcx_locked.config_dir.clone(), prev)
+    };
+
+    if let Err(e) = patch_provider_model_config(gcx.clone(), &config_dir, provider_name).await {
+        let gcx_locked = gcx.read().await;
+        let mut registry = gcx_locked.providers.write().await;
+        if let Some(provider) = registry.get_mut(provider_name) {
+            provider.set_selected_provider(model_id, previous_selected_provider);
         }
         return Err(e);
     }
 
     invalidate_caps(gcx).await;
 
-    json_response(StatusCode::OK, &json!({"success": true, "model_id": model_id, "enabled": enabled}))
+    json_response(
+        StatusCode::OK,
+        &json!({
+            "success": true,
+            "model_id": model_id,
+            "selected_provider": selected_provider
+        }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -875,7 +1183,7 @@ async fn patch_provider_model_config(
     config_dir: &std::path::Path,
     provider_name: &str,
 ) -> Result<(), ScratchError> {
-    let (enabled_models, disabled_models, custom_models) = {
+    let (enabled_models, disabled_models, custom_models, selected_providers) = {
         let gcx_locked = gcx.read().await;
         let registry = gcx_locked.providers.read().await;
         let provider = registry.get(provider_name)
@@ -887,6 +1195,7 @@ async fn patch_provider_model_config(
             provider.enabled_models().to_vec(),
             provider.disabled_models().to_vec(),
             provider.custom_models().clone(),
+            provider.selected_providers().clone(),
         )
     };
 
@@ -919,6 +1228,12 @@ async fn patch_provider_model_config(
         serde_yaml::to_value(&enabled_models)
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize enabled_models: {}", e)))?,
     );
+    if !enabled_models.is_empty() {
+        yaml_map.insert(
+            serde_yaml::Value::String("enabled".to_string()),
+            serde_yaml::Value::Bool(true),
+        );
+    }
     // Always persist disabled_models for denylist providers
     if !disabled_models.is_empty() {
         yaml_map.insert(
@@ -934,6 +1249,15 @@ async fn patch_provider_model_config(
         serde_yaml::to_value(&custom_models)
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize custom_models: {}", e)))?,
     );
+    if selected_providers.is_empty() {
+        yaml_map.remove(serde_yaml::Value::String("selected_providers".to_string()));
+    } else {
+        yaml_map.insert(
+            serde_yaml::Value::String("selected_providers".to_string()),
+            serde_yaml::to_value(&selected_providers)
+                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize selected_providers: {}", e)))?,
+        );
+    }
 
     // Ensure directory exists
     tokio::fs::create_dir_all(&providers_dir).await
@@ -951,6 +1275,37 @@ async fn patch_provider_model_config(
 
     tokio::fs::rename(&temp_path, &config_path).await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to rename config: {}", e)))?;
+
+    Ok(())
+}
+
+async fn reload_provider_from_disk(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    provider_name: &str,
+    config_dir: &std::path::Path,
+) -> Result<(), ScratchError> {
+    let provider_path = config_dir.join("providers.d").join(format!("{}.yaml", provider_name));
+    if !provider_path.exists() {
+        return Ok(());
+    }
+
+    let content = tokio::fs::read_to_string(&provider_path)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reload config: {}", e)))?;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid YAML after save: {}", e)))?;
+
+    let mut provider = create_provider(provider_name)
+        .ok_or_else(|| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create provider".to_string()))?;
+
+    provider
+        .provider_settings_apply(yaml)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply settings: {}", e)))?;
+
+    let gcx_locked = gcx.read().await;
+    let mut registry = gcx_locked.providers.write().await;
+    registry.add(provider);
 
     Ok(())
 }

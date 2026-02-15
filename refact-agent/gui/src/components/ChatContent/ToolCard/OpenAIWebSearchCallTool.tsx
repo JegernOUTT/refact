@@ -35,7 +35,7 @@ export const OpenAIWebSearchCallTool: React.FC<Props> = ({ toolCall }) => {
 
   const args = state.parsedArgs as Record<string, unknown> | null;
   const query =
-    args && typeof args.query === "string" ? (args.query as string) : undefined;
+    args && typeof args.query === "string" ? args.query : undefined;
 
   const results = useMemo(() => {
     if (!args) return [] as WebSearchResult[];

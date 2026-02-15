@@ -57,11 +57,36 @@ const getConfirmationMessage = (
 type ResolvedPauseReason = {
   tool_call_id: string;
   type: string;
+  rawType?: string;
   toolName: string;
   command: string;
   rule: string;
   integr_config_path: string | null;
 };
+
+function isCacheGuardReason(reason: ToolConfirmationPauseReason): boolean {
+  return (
+    reason.tool_name === "cache_guard" ||
+    reason.tool_call_id.startsWith("cacheguard_")
+  );
+}
+
+function extractCacheGuardDiff(command: string): string {
+  const fenceStart = command.indexOf("```diff");
+  if (fenceStart >= 0) {
+    const start = fenceStart + "```diff".length;
+    const fenceEnd = command.indexOf("```", start);
+    if (fenceEnd > start) {
+      return command.slice(start, fenceEnd).trim();
+    }
+  }
+  return command;
+}
+
+function extractEstimatedUsd(command: string): string | null {
+  const match = command.match(/`\$([0-9]+(?:\.[0-9]+)?)`\s*USD/);
+  return match?.[1] ?? null;
+}
 
 export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   pauseReasons,
@@ -97,6 +122,7 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
       return {
         tool_call_id: r.tool_call_id,
         type: r.type,
+        rawType: r.raw_type,
         toolName: toolName ?? "unknown",
         command: r.command,
         rule: r.rule,
@@ -124,6 +150,8 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   const allConfirmation = resolvedReasons.every(
     (r) => r.type === "confirmation",
   );
+  const isCacheGuardConfirmation =
+    pauseReasons.length > 0 && pauseReasons.every(isCacheGuardReason);
   const confirmationToolNames = resolvedReasons
     .filter((r) => r.type === "confirmation")
     .map((r) => r.toolName);
@@ -184,6 +212,16 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
     confirmationToolNames,
     denialToolNames,
   );
+
+  if (isCacheGuardConfirmation) {
+    return (
+      <CacheGuardConfirmation
+        pauseReasons={pauseReasons}
+        confirmToolUsage={confirmToolUsage}
+        rejectToolUsage={handleReject}
+      />
+    );
+  }
 
   if (isPatchConfirmation && allConfirmation) {
     return (
@@ -274,6 +312,64 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
               Stop
             </Button>
           )}
+        </Flex>
+      </Flex>
+    </Card>
+  );
+};
+
+type CacheGuardConfirmationProps = {
+  pauseReasons: ToolConfirmationPauseReason[];
+  rejectToolUsage: () => void;
+  confirmToolUsage: () => void;
+};
+
+const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
+  pauseReasons,
+  rejectToolUsage,
+  confirmToolUsage,
+}) => {
+  const details = pauseReasons[0].command;
+  const diff = extractCacheGuardDiff(details);
+  const estimatedUsd = extractEstimatedUsd(details);
+
+  return (
+    <Card className={styles.ToolConfirmationCard}>
+      <Flex direction="column" gap="3">
+        <Flex align="baseline" gap="1" className={styles.ToolConfirmationHeading}>
+          <Text as="span">⚠️</Text>
+          <Text>Prompt cache may be broken</Text>
+        </Flex>
+
+        {estimatedUsd && (
+          <Text className={styles.ToolConfirmationText}>
+            Estimated extra cost: <strong>${estimatedUsd} USD</strong>
+          </Text>
+        )}
+
+        <Text className={styles.ToolConfirmationText}>
+          Force will allow this request once and refresh cache snapshot.
+        </Text>
+
+        <pre className={styles.CacheGuardDiff}>{diff}</pre>
+
+        <Flex align="end" justify="start" gap="2" direction="row">
+          <Button
+            color="grass"
+            variant="surface"
+            size="1"
+            onClick={confirmToolUsage}
+          >
+            Force and Continue
+          </Button>
+          <Button
+            color="red"
+            variant="surface"
+            size="1"
+            onClick={rejectToolUsage}
+          >
+            Stop
+          </Button>
         </Flex>
       </Flex>
     </Card>

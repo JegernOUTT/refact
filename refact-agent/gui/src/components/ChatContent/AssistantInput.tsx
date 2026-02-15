@@ -15,6 +15,7 @@ import { fallbackCopying } from "../../utils/fallbackCopying";
 import { telemetryApi } from "../../services/refact/telemetry";
 import { ReasoningContent } from "./ReasoningContent";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
+import { ServerContentBlocks } from "./ServerContentBlocks";
 
 type ChatInputProps = {
   message: string | null;
@@ -141,16 +142,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
 
       {!!serverContentBlocks?.length && (
         <Box mb={!message && !combinedReasoning ? "3" : undefined}>
-          <Card>
-            <Flex direction="column" gap="2">
-              <Text size="2" weight="bold">
-                Server content blocks ({serverContentBlocks.length})
-              </Text>
-              <Markdown>
-                {"```json\n" + JSON.stringify(serverContentBlocks, null, 2) + "\n```"}
-              </Markdown>
-            </Flex>
-          </Card>
+          <ServerContentBlocks blocks={serverContentBlocks} />
         </Box>
       )}
       {message && (

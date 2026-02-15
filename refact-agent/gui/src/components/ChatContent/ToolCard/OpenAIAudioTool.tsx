@@ -18,8 +18,8 @@ export const OpenAIAudioTool: React.FC<Props> = ({ toolCall }) => {
 
   const transcript = useMemo(() => {
     if (!args) return null;
-    if (typeof (args as any).transcript === "string") return (args as any).transcript as string;
-    if (typeof (args as any).text === "string") return (args as any).text as string;
+    if (typeof args.transcript === "string") return args.transcript;
+    if (typeof args.text === "string") return args.text;
     return null;
   }, [args]);
 

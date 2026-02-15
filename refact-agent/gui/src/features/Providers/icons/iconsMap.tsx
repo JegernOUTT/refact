@@ -8,6 +8,7 @@ import { OllamaIcon } from "./Ollama";
 import { OpenAIIcon } from "./OpenAI";
 import { OpenRouterIcon } from "./OpenRouter";
 import { RefactIcon } from "./Refact";
+import { VllmIcon } from "./Vllm";
 import { XaiIcon } from "./Xai";
 
 export const iconsMap: Record<string, JSX.Element> = {
@@ -24,6 +25,7 @@ export const iconsMap: Record<string, JSX.Element> = {
   groq: <GroqIcon />,
   ollama: <OllamaIcon />,
   lmstudio: <LMStudioIcon />,
+  vllm: <VllmIcon />,
   xai: <XaiIcon />,
   xai_responses: <XaiIcon />,
   custom: <CustomIcon />,

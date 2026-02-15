@@ -6,6 +6,7 @@ use crate::llm::adapter::{AdapterSettings, HttpParts, LlmWireAdapter, StreamPars
 use crate::llm::canonical::{
     CanonicalToolChoice, LlmRequest, LlmStreamDelta, ResponseFormat,
 };
+use crate::llm::params::CacheControl;
 
 const PROTECTED_FIELDS: &[&str] = &["model", "messages", "stream", "tools", "tool_choice", "stream_options"];
 
@@ -34,7 +35,12 @@ impl LlmWireAdapter for OpenAiChatAdapter {
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
 
-        let messages = convert_messages_to_openai(&req.messages);
+        let mut messages = convert_messages_to_openai(&req.messages);
+
+        // Inject cache_control for OpenRouter -> Anthropic routing
+        if matches!(req.cache_control, CacheControl::Ephemeral) {
+            inject_cache_control(&mut messages);
+        }
 
         let mut body = json!({
             "model": settings.model_name,
@@ -93,6 +99,7 @@ impl LlmWireAdapter for OpenAiChatAdapter {
             if let Some(effort) = req.reasoning.to_openai_effort() {
                 body["reasoning_effort"] = json!(effort);
             }
+            body.as_object_mut().map(|obj| obj.remove("temperature"));
         }
 
         if let Some(ref format) = req.response_format {
@@ -124,6 +131,7 @@ impl LlmWireAdapter for OpenAiChatAdapter {
             tool_choice = ?req.tool_choice,
             reasoning = ?req.reasoning,
             response_format = ?req.response_format.is_some(),
+            cache_control = ?req.cache_control,
             has_meta = %req.meta.is_some(),
             messages_count = %req.messages.len(),
             "openai chat adapter request"
@@ -169,6 +177,7 @@ impl LlmWireAdapter for OpenAiChatAdapter {
                         if !content.is_empty() {
                             deltas.push(LlmStreamDelta::AppendContent {
                                 text: content.to_string(),
+                                block_index: None,
                             });
                         }
                     }
@@ -178,6 +187,7 @@ impl LlmWireAdapter for OpenAiChatAdapter {
                         if !reasoning.is_empty() {
                             deltas.push(LlmStreamDelta::AppendReasoning {
                                 text: reasoning.to_string(),
+                                block_index: None,
                             });
                         }
                     }
@@ -282,14 +292,19 @@ fn convert_messages_to_openai(messages: &[crate::call_validation::ChatMessage]) 
                     .iter()
                     .filter(|tc| !tc.id.starts_with("srvtoolu_"))  // Filter server-executed tools
                     .map(|tc| {
-                        json!({
+                        let mut call = json!({
                             "id": tc.id,
+                            "index": tc.index,
                             "type": "function",
                             "function": {
                                 "name": tc.function.name,
                                 "arguments": tc.function.arguments
                             }
-                        })
+                        });
+                        if let Some(extra) = &tc.extra_content {
+                            call["extra_content"] = extra.clone();
+                        }
+                        call
                     })
                     .collect();
                 if !tc.is_empty() {
@@ -347,29 +362,131 @@ fn response_format_to_openai(format: &ResponseFormat) -> Value {
     }
 }
 
+/// Inject cache_control breakpoints for OpenRouter -> Anthropic routing.
+/// Converts simple text messages to multipart format with cache_control on last block.
+/// Strategy: cache system message + 4 strategically positioned messages (quarter, middle, last2, last).
+fn inject_cache_control(messages: &mut [Value]) {
+    let cc = json!({"type": "ephemeral", "ttl": "1h"});
+
+    fn add_cache_to_message(msg: &mut Value, cc: &Value) {
+        let Some(content) = msg.get_mut("content") else { return };
+        if let Some(text) = content.as_str().map(|s| s.to_string()) {
+            // Convert string content to array-of-blocks format (Anthropic multipart)
+            *content = json!([{"type": "text", "text": text, "cache_control": cc}]);
+        } else if let Some(arr) = content.as_array_mut() {
+            // Already multipart - add cache_control to last block
+            if let Some(last_block) = arr.last_mut() {
+                if let Some(obj) = last_block.as_object_mut() {
+                    obj.insert("cache_control".to_string(), cc.clone());
+                }
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        return;
+    }
+
+    // Cache system message if present
+    if let Some(first) = messages.first_mut() {
+        if first.get("role").and_then(|r| r.as_str()) == Some("system") {
+            add_cache_to_message(first, &cc);
+        }
+    }
+
+    // Cache selected non-system messages
+    let non_system_indices: Vec<usize> = messages.iter().enumerate()
+        .filter(|(_, m)| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+        .map(|(i, _)| i)
+        .collect();
+
+    if non_system_indices.is_empty() {
+        return;
+    }
+
+    let len = non_system_indices.len();
+    let quarter_pos = len / 4;
+    let middle_pos = len / 2;
+    let last_pos = len - 1;
+    let last2_pos = len.saturating_sub(2);
+
+    let mut selected_positions = vec![quarter_pos, middle_pos, last2_pos, last_pos];
+    selected_positions.sort_unstable();
+    selected_positions.dedup();
+    selected_positions.truncate(4);
+
+    for pos in selected_positions {
+        if let Some(&msg_idx) = non_system_indices.get(pos) {
+            add_cache_to_message(&mut messages[msg_idx], &cc);
+        }
+    }
+}
+
 fn parse_openai_usage(usage: &Value) -> Option<ChatUsage> {
-    let prompt_tokens = usage
-        .get("prompt_tokens")
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0) as usize;
     let completion_tokens = usage
         .get("completion_tokens")
         .and_then(|t| t.as_u64())
         .unwrap_or(0) as usize;
+
+    // When routing through OpenRouter to Anthropic models, cache fields come in Anthropic format:
+    // - cache_creation_input_tokens (top-level)
+    // - cache_read_input_tokens (top-level)
+    // For native OpenAI: cached_tokens in prompt_tokens_details (subset of prompt_tokens)
+    
+    let anthropic_cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|t| t.as_u64())
+        .filter(|&v| v > 0)
+        .map(|v| v as usize);
+    
+    let anthropic_cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|t| t.as_u64())
+        .filter(|&v| v > 0)
+        .map(|v| v as usize);
+
+    let details = usage.get("prompt_tokens_details");
+    let openai_cached = details
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|t| t.as_u64())
+        .filter(|&v| v > 0)
+        .map(|v| v as usize);
+
+    // Merge: prefer Anthropic fields (when routing via OpenRouter), fall back to OpenAI fields
+    let cache_creation = anthropic_cache_creation;
+    let cache_read = anthropic_cache_read.or(openai_cached);
+
+    let raw_prompt = usage
+        .get("prompt_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as usize;
+
+    // For Anthropic models (via OpenRouter), prompt_tokens includes cached tokens.
+    // Subtract cache_read to get non-cached portion.
+    // For native OpenAI, cached_tokens is already a subset, so this is a no-op.
+    let prompt_tokens = if let Some(cached) = cache_read {
+        raw_prompt.saturating_sub(cached)
+    } else {
+        raw_prompt
+    };
+
     let total_tokens = usage
         .get("total_tokens")
         .and_then(|t| t.as_u64())
         .map(|v| v as usize)
-        .unwrap_or_else(|| prompt_tokens + completion_tokens);
-    // Note: OpenAI's cached_tokens is a SUBSET of prompt_tokens (already included),
-    // not separate like Anthropic. We don't set cache_read_tokens here to avoid
-    // double-counting in context calculations that sum prompt_tokens + cache_read.
+        .unwrap_or_else(|| {
+            prompt_tokens 
+                + completion_tokens 
+                + cache_creation.unwrap_or(0)
+                + cache_read.unwrap_or(0)
+        });
+
     Some(ChatUsage {
         prompt_tokens,
         completion_tokens,
         total_tokens,
-        cache_creation_tokens: None,
-        cache_read_tokens: None,
+        cache_creation_tokens: cache_creation,
+        cache_read_tokens: cache_read,
         metering_usd: None,
     })
 }
@@ -457,7 +574,7 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::AppendContent { text } => assert_eq!(text, "Hello"),
+            LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
             _ => panic!("expected AppendContent"),
         }
     }
@@ -608,6 +725,7 @@ mod tests {
                         id: "srvtoolu_123".to_string(),  // Server-executed
                         index: Some(0),
                         tool_type: "function".to_string(),
+                        extra_content: None,
                         function: ChatToolFunction {
                             name: "web_search".to_string(),
                             arguments: r#"{"query":"test"}"#.to_string(),
@@ -617,6 +735,7 @@ mod tests {
                         id: "call_456".to_string(),  // Regular tool call
                         index: Some(1),
                         tool_type: "function".to_string(),
+                        extra_content: None,
                         function: ChatToolFunction {
                             name: "cat".to_string(),
                             arguments: r#"{"path":"file.txt"}"#.to_string(),
@@ -704,5 +823,195 @@ mod tests {
         let converted = convert_messages_to_openai(&messages);
 
         assert!(converted[0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_parse_openai_usage_with_anthropic_cache() {
+        // OpenRouter -> Anthropic: top-level cache fields
+        let usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 800
+        });
+
+        let result = parse_openai_usage(&usage).unwrap();
+        
+        // prompt_tokens should be adjusted: 1000 - 800 = 200
+        assert_eq!(result.prompt_tokens, 200);
+        assert_eq!(result.completion_tokens, 100);
+        assert_eq!(result.cache_creation_tokens, Some(200));
+        assert_eq!(result.cache_read_tokens, Some(800));
+        assert_eq!(result.total_tokens, 1100);
+    }
+
+    #[test]
+    fn test_parse_openai_usage_with_openai_cache() {
+        // Native OpenAI: cached_tokens in prompt_tokens_details
+        let usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "prompt_tokens_details": {
+                "cached_tokens": 800
+            }
+        });
+
+        let result = parse_openai_usage(&usage).unwrap();
+        
+        assert_eq!(result.prompt_tokens, 200);
+        assert_eq!(result.completion_tokens, 100);
+        assert_eq!(result.cache_creation_tokens, None);
+        assert_eq!(result.cache_read_tokens, Some(800));
+    }
+
+    #[test]
+    fn test_parse_openai_usage_no_cache() {
+        let usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100
+        });
+
+        let result = parse_openai_usage(&usage).unwrap();
+        
+        assert_eq!(result.prompt_tokens, 1000);
+        assert_eq!(result.completion_tokens, 100);
+        assert_eq!(result.cache_creation_tokens, None);
+        assert_eq!(result.cache_read_tokens, None);
+        assert_eq!(result.total_tokens, 1100);
+    }
+
+    #[test]
+    fn test_parse_openai_usage_zero_cache_tokens_filtered() {
+        // Zero cache tokens should be filtered out (None instead of Some(0))
+        let usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+        });
+
+        let result = parse_openai_usage(&usage).unwrap();
+        
+        assert_eq!(result.cache_creation_tokens, None);
+        assert_eq!(result.cache_read_tokens, None);
+    }
+
+    #[test]
+    fn test_inject_cache_control_simple_messages() {
+        let mut messages = vec![
+            json!({"role": "system", "content": "You are a helpful assistant"}),
+            json!({"role": "user", "content": "Hello"}),
+            json!({"role": "assistant", "content": "Hi there"}),
+            json!({"role": "user", "content": "How are you?"}),
+            json!({"role": "assistant", "content": "I'm doing well"}),
+        ];
+
+        inject_cache_control(&mut messages);
+
+        // System message should have cache_control
+        let system_content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(system_content.len(), 1);
+        assert_eq!(system_content[0]["type"], "text");
+        assert_eq!(system_content[0]["text"], "You are a helpful assistant");
+        assert_eq!(system_content[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system_content[0]["cache_control"]["ttl"], "1h");
+
+        // Non-system messages: 4 total (indices 1,2,3,4). Selected positions: [1, 2, 3]
+        // Which correspond to message indices: [2, 3, 4] (assistant1, user2, assistant2)
+        // user1 (message[1]) is at position 0 in non-system array, which is NOT selected
+        assert_eq!(messages[1]["content"].as_str(), Some("Hello"), 
+            "user1 should remain as simple string (not cached)");
+
+        let assistant1_content = messages[2]["content"].as_array().unwrap();
+        assert!(assistant1_content[0].get("cache_control").is_some(), 
+            "assistant1 should be cached (position 1/quarter)");
+
+        let user2_content = messages[3]["content"].as_array().unwrap();
+        assert!(user2_content[0].get("cache_control").is_some(), 
+            "user2 should be cached (position 2/middle)");
+
+        let assistant2_content = messages[4]["content"].as_array().unwrap();
+        assert!(assistant2_content[0].get("cache_control").is_some(), 
+            "assistant2 should be cached (position 3/last)");
+    }
+
+    #[test]
+    fn test_inject_cache_control_multipart_messages() {
+        let mut messages = vec![
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+                ]
+            }),
+            json!({"role": "assistant", "content": "I see a cat"}),
+        ];
+
+        inject_cache_control(&mut messages);
+
+        // First message (user) already multipart - cache_control on last block
+        let user_content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(user_content.len(), 2);
+        assert!(user_content[0].get("cache_control").is_none(), "First block shouldn't have cache_control");
+        assert_eq!(user_content[1]["cache_control"]["type"], "ephemeral", "Last block should have cache_control");
+
+        // Second message (assistant) simple text - converted to multipart
+        let assistant_content = messages[1]["content"].as_array().unwrap();
+        assert_eq!(assistant_content.len(), 1);
+        assert_eq!(assistant_content[0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn test_inject_cache_control_no_system_message() {
+        let mut messages = vec![
+            json!({"role": "user", "content": "Hello"}),
+            json!({"role": "assistant", "content": "Hi"}),
+        ];
+
+        inject_cache_control(&mut messages);
+
+        // Both messages should be cached (positions 0 and 1)
+        assert!(messages[0]["content"].as_array().unwrap()[0].get("cache_control").is_some());
+        assert!(messages[1]["content"].as_array().unwrap()[0].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn test_inject_cache_control_empty_messages() {
+        let mut messages: Vec<Value> = vec![];
+        inject_cache_control(&mut messages);
+        assert_eq!(messages.len(), 0, "Should handle empty messages gracefully");
+    }
+
+    #[test]
+    fn test_inject_cache_control_only_system() {
+        let mut messages = vec![
+            json!({"role": "system", "content": "Be helpful"}),
+        ];
+
+        inject_cache_control(&mut messages);
+
+        // System message should be cached
+        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_inject_cache_control_deduplication() {
+        // With 2 non-system messages: quarter=0, middle=1, last2=0, last=1
+        // After dedup: [0, 1]
+        let mut messages = vec![
+            json!({"role": "user", "content": "First"}),
+            json!({"role": "assistant", "content": "Second"}),
+        ];
+
+        inject_cache_control(&mut messages);
+
+        // Both should be cached
+        assert!(messages[0]["content"].as_array().unwrap()[0].get("cache_control").is_some());
+        assert!(messages[1]["content"].as_array().unwrap()[0].get("cache_control").is_some());
     }
 }

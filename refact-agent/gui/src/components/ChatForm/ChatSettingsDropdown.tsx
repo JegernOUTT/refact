@@ -291,10 +291,15 @@ export const ChatSettingsDropdown: React.FC = () => {
         checked,
       );
 
-      // Ensure “Reasoning” toggle truly controls reasoning.
-      // Backend treats `reasoning_effort` / `thinking_budget` as enabling reasoning
-      // even if `boost_reasoning` is turned off.
-      if (!checked) {
+      if (checked) {
+        // Reasoning requires temperature to be unset (None).
+        // Dispatch explicitly so the setTemperature middleware + persistence
+        // listeners fire, keeping Redux, backend, and localStorage in sync.
+        dispatch(setTemperature({ chatId, value: null }));
+      } else {
+        // Ensure "Reasoning" toggle truly controls reasoning.
+        // Backend treats `reasoning_effort` / `thinking_budget` as enabling reasoning
+        // even if `boost_reasoning` is turned off.
         dispatch(setReasoningEffort({ chatId, value: null }));
         dispatch(setThinkingBudget({ chatId, value: null }));
       }

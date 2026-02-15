@@ -202,6 +202,10 @@ available:
                     enabled: !disabled,
                     is_custom: false,
                     pricing: None,
+                    available_providers: Vec::new(),
+                    selected_provider: None,
+                    max_output_tokens: None,
+                    provider_variants: Vec::new(),
                 });
             }
         }

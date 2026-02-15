@@ -18,8 +18,8 @@ export const OpenAIMcpCallTool: React.FC<Props> = ({ toolCall }) => {
 
   const summary = useMemo(() => {
     if (!args) return "MCP Call";
-    const server = typeof (args as any).server === "string" ? (args as any).server : undefined;
-    const tool = typeof (args as any).tool === "string" ? (args as any).tool : undefined;
+    const server = typeof args.server === "string" ? args.server : undefined;
+    const tool = typeof args.tool === "string" ? args.tool : undefined;
     const label = [server, tool].filter(Boolean).join(" ");
     return label ? (
       <>

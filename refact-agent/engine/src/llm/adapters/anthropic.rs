@@ -279,15 +279,19 @@ impl LlmWireAdapter for AnthropicAdapter {
                     match delta_type {
                         "text_delta" => {
                             if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                let block_index = json.get("index").and_then(|i| i.as_u64());
                                 deltas.push(LlmStreamDelta::AppendContent {
                                     text: text.to_string(),
+                                    block_index,
                                 });
                             }
                         }
                         "thinking_delta" => {
                             if let Some(text) = delta.get("thinking").and_then(|t| t.as_str()) {
+                                let block_index = json.get("index").and_then(|i| i.as_u64());
                                 deltas.push(LlmStreamDelta::AppendReasoning {
                                     text: text.to_string(),
+                                    block_index,
                                 });
                             }
                         }
@@ -391,8 +395,16 @@ impl LlmWireAdapter for AnthropicAdapter {
                             // Server-executed tool blocks (e.g., web_search) must be
                             // preserved verbatim and passed back in multi-turn conversations.
                             // The full block arrives in content_block_start (no incremental deltas).
+                            // Include streaming index for correct interleaved ordering
+                            // with thinking blocks in multi-turn conversations.
+                            let mut block = cb.clone();
+                            if let Some(index) = json.get("index") {
+                                if let Some(obj) = block.as_object_mut() {
+                                    obj.insert("_order_index".to_string(), index.clone());
+                                }
+                            }
                             deltas.push(LlmStreamDelta::AddServerContentBlock {
-                                block: cb.clone(),
+                                block,
                             });
                         }
                         _ => {}
@@ -441,31 +453,95 @@ fn convert_to_anthropic(
                     flush_tool_results(&mut result, &mut pending_tool_results);
                 }
                 if msg.role == "assistant" {
+                    // Collect positional blocks (thinking + server content) with their
+                    // original streaming indices to preserve interleaved order.
+                    // Anthropic requires thinking blocks to remain unmodified and in
+                    // their original positions relative to server content blocks.
+                    let mut ordered_blocks: Vec<(u64, Value)> = Vec::new();
+
                     if let Some(blocks) = &msg.thinking_blocks {
                         for block in blocks {
                             if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
+                                let order_idx = block.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
                                 match block_type {
                                     "thinking" => {
-                                        let mut tb = json!({"type": "thinking"});
-                                        if let Some(thinking) = block.get("thinking") {
-                                            tb["thinking"] = thinking.clone();
+                                        let thinking_text = block.get("thinking")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        // Anthropic requires non-empty thinking text;
+                                        // skip blocks with empty/whitespace-only thinking.
+                                        if thinking_text.trim().is_empty() {
+                                            tracing::warn!("skipping thinking block with empty thinking text");
+                                            continue;
                                         }
+                                        let mut tb = json!({
+                                            "type": "thinking",
+                                            "thinking": thinking_text,
+                                        });
                                         if let Some(sig) = block.get("signature") {
                                             tb["signature"] = sig.clone();
                                         }
-                                        content.push(tb);
+                                        ordered_blocks.push((order_idx, tb));
                                     }
                                     "redacted_thinking" => {
                                         let mut rb = json!({"type": "redacted_thinking"});
                                         if let Some(data) = block.get("data") {
                                             rb["data"] = data.clone();
                                         }
-                                        content.push(rb);
+                                        ordered_blocks.push((order_idx, rb));
                                     }
                                     _ => {}
                                 }
                             }
                         }
+                    }
+
+                    // Merge server content blocks into the interleaved sequence.
+                    // Each block carries an _order_index from streaming; strip it before sending.
+                    if !msg.server_content_blocks.is_empty() {
+                        // Detect if blocks contain both server_tool_use and matching web_search_tool_result.
+                        // If they're already paired (historical message from storage), preserve all blocks
+                        // for cache consistency. Only apply orphan filtering to fresh/incomplete responses.
+                        let result_ids: std::collections::HashSet<&str> = msg.server_content_blocks.iter()
+                            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("web_search_tool_result"))
+                            .filter_map(|b| b.get("tool_use_id").and_then(|v| v.as_str()))
+                            .collect();
+                        
+                        let server_tool_use_ids: std::collections::HashSet<&str> = msg.server_content_blocks.iter()
+                            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("server_tool_use"))
+                            .filter_map(|b| b.get("id").and_then(|v| v.as_str()))
+                            .collect();
+                        
+                        // If all server_tool_use blocks have matching results, treat as complete historical
+                        // message and preserve all blocks for cache stability
+                        let is_complete_historical = !server_tool_use_ids.is_empty() 
+                            && server_tool_use_ids.iter().all(|id| result_ids.contains(id));
+                        
+                        for block in &msg.server_content_blocks {
+                            // For incomplete/fresh responses, filter orphaned server_tool_use blocks
+                            if !is_complete_historical 
+                                && block.get("type").and_then(|t| t.as_str()) == Some("server_tool_use") 
+                            {
+                                let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                if !result_ids.contains(id) {
+                                    tracing::warn!("stripping orphaned server_tool_use '{}' (no matching web_search_tool_result)", id);
+                                    continue;
+                                }
+                            }
+                            let order_idx = block.get("_order_index").and_then(|v| v.as_u64());
+                            let mut clean = block.clone();
+                            if let Some(obj) = clean.as_object_mut() {
+                                obj.remove("_order_index");
+                            }
+                            // Legacy blocks without _order_index go after all indexed blocks
+                            ordered_blocks.push((order_idx.unwrap_or(u64::MAX), clean));
+                        }
+                    }
+
+                    // Sort by original streaming index to preserve interleaved order
+                    ordered_blocks.sort_by_key(|(idx, _)| *idx);
+                    for (_, block) in ordered_blocks {
+                        content.push(block);
                     }
                 }
                 if !msg.citations.is_empty() {
@@ -510,33 +586,8 @@ fn convert_to_anthropic(
                 } else {
                     content.extend(msg_content_to_anthropic(&msg.content));
                 }
-                // Insert server content blocks (server_tool_use, web_search_tool_result)
-                // before client tool_use blocks. These must be passed back verbatim
-                // for Anthropic to validate encrypted_index in citations.
-                // Strip orphaned server_tool_use blocks that lack a matching web_search_tool_result.
-                if !msg.server_content_blocks.is_empty() {
-                    let result_ids: std::collections::HashSet<&str> = msg.server_content_blocks.iter()
-                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("web_search_tool_result"))
-                        .filter_map(|b| b.get("tool_use_id").and_then(|v| v.as_str()))
-                        .collect();
-                    let filtered: Vec<Value> = msg.server_content_blocks.iter()
-                        .filter(|b| {
-                            match b.get("type").and_then(|t| t.as_str()) {
-                                Some("server_tool_use") => {
-                                    let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                    let has_result = result_ids.contains(id);
-                                    if !has_result {
-                                        tracing::warn!("stripping orphaned server_tool_use '{}' (no matching web_search_tool_result)", id);
-                                    }
-                                    has_result
-                                }
-                                _ => true,
-                            }
-                        })
-                        .cloned()
-                        .collect();
-                    content.extend(filtered);
-                }
+                // Server content blocks are now interleaved with thinking blocks above
+                // (sorted by original streaming index) for correct multi-turn ordering.
                 if msg.role == "assistant" {
                     if let Some(tcs) = &msg.tool_calls {
                         let tool_blocks: Vec<Value> = tcs.iter()
@@ -908,7 +959,7 @@ mod tests {
         let chunk =
             r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}"#;
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-        assert!(matches!(&deltas[0], LlmStreamDelta::AppendContent { text } if text == "Hello"));
+        assert!(matches!(&deltas[0], LlmStreamDelta::AppendContent { text, .. } if text == "Hello"));
     }
 
     #[test]
@@ -976,7 +1027,7 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::AppendReasoning { text } => {
+            LlmStreamDelta::AppendReasoning { text, .. } => {
                 assert_eq!(text, "Let me think...");
             }
             _ => panic!("expected AppendReasoning"),
@@ -1027,6 +1078,7 @@ mod tests {
                     ChatToolCall {
                         id: "call_1".to_string(),
                         tool_type: "function".to_string(),
+                        extra_content: None,
                         function: ChatToolFunction {
                             name: "tool_a".to_string(),
                             arguments: "{}".to_string(),
@@ -1036,6 +1088,7 @@ mod tests {
                     ChatToolCall {
                         id: "call_2".to_string(),
                         tool_type: "function".to_string(),
+                        extra_content: None,
                         function: ChatToolFunction {
                             name: "tool_b".to_string(),
                             arguments: "{}".to_string(),
@@ -1088,6 +1141,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: ChatToolFunction {
                         name: "search".to_string(),
                         arguments: "{}".to_string(),
@@ -1132,6 +1186,7 @@ mod tests {
                 tool_calls: Some(vec![crate::call_validation::ChatToolCall {
                     id: "call_edit".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: crate::call_validation::ChatToolFunction {
                         name: "file_edit".to_string(),
                         arguments: "{}".to_string(),
@@ -1263,6 +1318,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: ChatToolFunction {
                         name: "tool_a".to_string(),
                         arguments: "{}".to_string(),
@@ -1368,6 +1424,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: ChatToolFunction {
                         name: "get_weather".to_string(),
                         arguments: r#"{"city":"London"}"#.to_string(),
@@ -1441,6 +1498,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: ChatToolFunction {
                         name: "search".to_string(),
                         arguments: "{}".to_string(),
@@ -1591,6 +1649,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
+                    extra_content: None,
                     function: ChatToolFunction {
                         name: "tool_a".to_string(),
                         arguments: "{}".to_string(),
@@ -1653,7 +1712,11 @@ mod tests {
         let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
-        let citations = assistant_content[0]["citations"].as_array().unwrap();
+        // Find the text block (may not be at index 0 due to interleaved server content blocks)
+        let text_block = assistant_content.iter()
+            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .expect("should have a text block");
+        let citations = text_block["citations"].as_array().unwrap();
         assert_eq!(citations.len(), 1);
         assert!(citations[0].get("_content_block_index").is_none(),
             "Internal _content_block_index should be stripped from re-sent citations");
@@ -1722,6 +1785,9 @@ mod tests {
         if let Some(LlmStreamDelta::AddServerContentBlock { block }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })) {
             assert_eq!(block.get("type").and_then(|v| v.as_str()), Some("server_tool_use"));
             assert_eq!(block.get("name").and_then(|v| v.as_str()), Some("web_search"));
+            // Verify streaming index is preserved for interleaved ordering
+            assert_eq!(block.get("_order_index").and_then(|v| v.as_u64()), Some(1),
+                "Server content block should carry original streaming index");
         }
     }
 
@@ -1762,5 +1828,305 @@ mod tests {
         let has_web_search = tools.iter().any(|t|
             t.get("type").and_then(|v| v.as_str()) == Some("web_search_20250305"));
         assert!(!has_web_search, "web_search tool should NOT be included when supports_web_search is false");
+    }
+
+    #[test]
+    fn test_empty_thinking_blocks_filtered_in_convert() {
+        // Thinking blocks with empty/missing thinking text must be filtered out,
+        // because Anthropic rejects them with "each thinking block must contain thinking".
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Response".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({
+                        "type": "thinking",
+                        "thinking": "",
+                        "signature": "sig_empty"
+                    }),
+                ]),
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "Follow up".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        let thinking_blocks: Vec<_> = assistant_content.iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("thinking"))
+            .collect();
+        assert!(thinking_blocks.is_empty(),
+            "Empty thinking blocks should be filtered out, got {:?}", thinking_blocks);
+    }
+
+    #[test]
+    fn test_whitespace_thinking_blocks_filtered_in_convert() {
+        // Whitespace-only thinking text should also be filtered out.
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Response".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({
+                        "type": "thinking",
+                        "thinking": "   \n\t  ",
+                        "signature": "sig_ws"
+                    }),
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        let assistant_content = msgs[0]["content"].as_array().unwrap();
+        let thinking_blocks: Vec<_> = assistant_content.iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("thinking"))
+            .collect();
+        assert!(thinking_blocks.is_empty(),
+            "Whitespace-only thinking blocks should be filtered out");
+    }
+
+    #[test]
+    fn test_missing_thinking_field_filtered_in_convert() {
+        // Blocks with no "thinking" field at all (only type + signature).
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Response".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({
+                        "type": "thinking",
+                        "signature": "sig_no_text"
+                    }),
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        let assistant_content = msgs[0]["content"].as_array().unwrap();
+        let thinking_blocks: Vec<_> = assistant_content.iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("thinking"))
+            .collect();
+        assert!(thinking_blocks.is_empty(),
+            "Thinking blocks without thinking text should be filtered out");
+    }
+
+    #[test]
+    fn test_valid_thinking_block_kept_empty_filtered_mixed() {
+        // Mix of valid and invalid thinking blocks: only valid ones should survive.
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Response".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({
+                        "type": "thinking",
+                        "thinking": "Valid reasoning",
+                        "signature": "sig_valid"
+                    }),
+                    json!({
+                        "type": "thinking",
+                        "thinking": "",
+                        "signature": "sig_empty"
+                    }),
+                    json!({
+                        "type": "redacted_thinking",
+                        "data": "encrypted"
+                    }),
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        // msgs[0] = user, msgs[1] = assistant
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        let thinking_blocks: Vec<_> = assistant_content.iter()
+            .filter(|b| {
+                let t = b.get("type").and_then(|t| t.as_str());
+                t == Some("thinking") || t == Some("redacted_thinking")
+            })
+            .collect();
+        assert_eq!(thinking_blocks.len(), 2,
+            "Should keep valid thinking + redacted, filter empty: {:?}", thinking_blocks);
+        assert_eq!(thinking_blocks[0]["thinking"], "Valid reasoning");
+        assert_eq!(thinking_blocks[1]["type"], "redacted_thinking");
+    }
+
+    #[test]
+    fn test_interleaved_thinking_and_server_blocks_ordering() {
+        // Simulates interleaved thinking with web search:
+        // thinking(0) → server_tool_use(1) → web_search_result(2) → thinking(3) → text(4)
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Search for X".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("Found results.".to_string()),
+                thinking_blocks: Some(vec![
+                    json!({
+                        "type": "thinking",
+                        "thinking": "Let me search for X",
+                        "signature": "sig_0",
+                        "index": 0
+                    }),
+                    json!({
+                        "type": "thinking",
+                        "thinking": "Now I have the results",
+                        "signature": "sig_3",
+                        "index": 3
+                    }),
+                ]),
+                server_content_blocks: vec![
+                    json!({
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_abc",
+                        "name": "web_search",
+                        "input": {"query": "X"},
+                        "_order_index": 1
+                    }),
+                    json!({
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_abc",
+                        "content": [{"type": "web_search_result", "url": "https://example.com", "encrypted_content": "enc"}],
+                        "_order_index": 2
+                    }),
+                ],
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "Tell me more".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        // Verify interleaved order: thinking(0), server_tool_use(1), web_search_result(2), thinking(3), text(4)
+        assert_eq!(assistant_content[0]["type"], "thinking",
+            "Block 0 should be thinking");
+        assert_eq!(assistant_content[0]["thinking"], "Let me search for X");
+        assert_eq!(assistant_content[1]["type"], "server_tool_use",
+            "Block 1 should be server_tool_use");
+        assert_eq!(assistant_content[2]["type"], "web_search_tool_result",
+            "Block 2 should be web_search_tool_result");
+        assert_eq!(assistant_content[3]["type"], "thinking",
+            "Block 3 should be thinking");
+        assert_eq!(assistant_content[3]["thinking"], "Now I have the results");
+        assert_eq!(assistant_content[4]["type"], "text",
+            "Block 4 should be text");
+        assert_eq!(assistant_content[4]["text"], "Found results.");
+
+        // Verify _order_index is stripped from server content blocks
+        assert!(assistant_content[1].get("_order_index").is_none(),
+            "Internal _order_index should be stripped from server content blocks");
+    }
+
+    #[test]
+    fn test_server_content_blocks_preserved_for_cache_consistency() {
+        // Regression test: When replaying historical messages with complete
+        // server_tool_use + web_search_tool_result pairs, ALL blocks must be
+        // preserved exactly to maintain cache prefix consistency.
+        // Previously, orphan detection would strip blocks on subsequent turns.
+        
+        // Simulate a historical assistant message from storage with complete
+        // web_search server content blocks
+        let mut assistant_msg = ChatMessage::new(
+            "assistant".to_string(),
+            "Here are the results.".to_string()
+        );
+        
+        assistant_msg.server_content_blocks = vec![
+            json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_01ABC",
+                "name": "web_search",
+                "input": {},
+                "_order_index": 1
+            }),
+            json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_01ABC",
+                "content": [{
+                    "type": "web_search_result",
+                    "title": "Result",
+                    "url": "https://example.com",
+                    "encrypted_content": "data"
+                }],
+                "_order_index": 2
+            }),
+        ];
+        
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Search for X".to_string()),
+            assistant_msg,
+            ChatMessage::new("user".to_string(), "Tell me more".to_string()),
+        ];
+        
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        
+        // Verify both blocks are preserved in the re-processed message
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        
+        let server_tool_use_count = assistant_content.iter()
+            .filter(|b| b["type"] == "server_tool_use")
+            .count();
+        let web_search_result_count = assistant_content.iter()
+            .filter(|b| b["type"] == "web_search_tool_result")
+            .count();
+        
+        assert_eq!(server_tool_use_count, 1, 
+            "server_tool_use block must be preserved for cache consistency");
+        assert_eq!(web_search_result_count, 1, 
+            "web_search_tool_result block must be preserved for cache consistency");
+        
+        // Verify _order_index was stripped (not part of Anthropic wire format)
+        for block in assistant_content {
+            assert!(block.get("_order_index").is_none(),
+                "_order_index should be stripped from all blocks");
+        }
+    }
+    
+    #[test]
+    fn test_orphaned_server_tool_use_filtered_for_fresh_responses() {
+        // Test that orphan filtering still works for incomplete/fresh responses
+        // (where server_tool_use exists but matching result is missing)
+        
+        let mut assistant_msg = ChatMessage::new(
+            "assistant".to_string(),
+            "Searching...".to_string()
+        );
+        
+        // Simulate incomplete response: server_tool_use without matching result
+        assistant_msg.server_content_blocks = vec![
+            json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_01ORPHAN",
+                "name": "web_search",
+                "input": {}
+            }),
+        ];
+        
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "Search for Y".to_string()),
+            assistant_msg,
+        ];
+        
+        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        
+        // Verify orphaned server_tool_use is filtered out
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        
+        let has_orphaned_block = assistant_content.iter()
+            .any(|b| b["type"] == "server_tool_use" && b["id"] == "srvtoolu_01ORPHAN");
+        
+        assert!(!has_orphaned_block, 
+            "Orphaned server_tool_use without matching result should be filtered for incomplete responses");
     }
 }

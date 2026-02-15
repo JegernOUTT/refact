@@ -49,6 +49,8 @@ impl ChatSession {
             closed: false,
             external_reload_pending: false,
             last_prompt_messages: Vec::new(),
+            cache_guard_snapshot: None,
+            cache_guard_force_next: false,
             task_agent_error: None,
         }
     }
@@ -82,6 +84,8 @@ impl ChatSession {
             created_at,
             closed: false,
             last_prompt_messages: Vec::new(),
+            cache_guard_snapshot: None,
+            cache_guard_force_next: false,
             task_agent_error: None,
         }
     }
@@ -416,7 +420,8 @@ impl ChatSession {
                     .thinking_blocks
                     .as_ref()
                     .map_or(false, |tb| !tb.is_empty())
-                || !draft.citations.is_empty();
+                || !draft.citations.is_empty()
+                || !draft.server_content_blocks.is_empty();
 
             self.emit(ChatEvent::StreamFinished {
                 message_id: draft.message_id.clone(),
@@ -457,6 +462,7 @@ impl ChatSession {
                     .as_ref()
                     .map_or(false, |tb| !tb.is_empty())
                 || !draft.citations.is_empty()
+                || !draft.server_content_blocks.is_empty()
                 || draft.usage.is_some()
                 || !draft.extra.is_empty();
 
@@ -498,6 +504,15 @@ impl ChatSession {
         self.set_runtime_state(SessionState::Idle, None);
         self.touch();
         self.queue_notify.notify_one();
+    }
+
+    pub fn discard_draft_for_pause(&mut self) {
+        if let Some(draft) = self.draft_message.take() {
+            self.emit(ChatEvent::MessageRemoved {
+                message_id: draft.message_id,
+            });
+        }
+        self.draft_usage = None;
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
@@ -1375,5 +1390,45 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         session.touch();
         assert!(session.last_activity > before);
+    }
+
+    #[test]
+    fn test_finish_stream_keeps_server_content_blocks_only_message() {
+        let mut session = make_session();
+        session.start_stream();
+        session.emit_stream_delta(vec![
+            DeltaOp::AddServerContentBlock {
+                block: json!({
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_test",
+                    "name": "web_search",
+                    "input": {"query": "test"}
+                }),
+            },
+            DeltaOp::AddServerContentBlock {
+                block: json!({
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_test",
+                    "content": [{"type": "web_search_result", "title": "Result", "url": "https://example.com"}]
+                }),
+            },
+        ]);
+        session.finish_stream(Some("stop".to_string()));
+
+        assert_eq!(session.messages.len(), 1,
+            "Server-blocks-only assistant message should be preserved");
+        assert_eq!(session.messages[0].server_content_blocks.len(), 2);
+        assert_eq!(session.messages[0].role, "assistant");
+    }
+
+    #[test]
+    fn test_finish_stream_discards_truly_empty_message() {
+        let mut session = make_session();
+        session.start_stream();
+        // No deltas at all
+        session.finish_stream(Some("stop".to_string()));
+
+        assert_eq!(session.messages.len(), 0,
+            "Truly empty assistant message should be discarded");
     }
 }

@@ -14,7 +14,7 @@ use crate::providers::traits::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LMStudioProvider {
+pub struct VLLMProvider {
     pub endpoint: String,
     pub api_key: String,
     pub enabled: bool,
@@ -24,10 +24,10 @@ pub struct LMStudioProvider {
     pub custom_models: HashMap<String, CustomModelConfig>,
 }
 
-impl Default for LMStudioProvider {
+impl Default for VLLMProvider {
     fn default() -> Self {
         Self {
-            endpoint: "http://localhost:1234".to_string(),
+            endpoint: "http://localhost:8000".to_string(),
             api_key: String::new(),
             enabled: false,
             enabled_models: Vec::new(),
@@ -36,14 +36,19 @@ impl Default for LMStudioProvider {
     }
 }
 
-impl LMStudioProvider {
+impl VLLMProvider {
     fn parse_openai_model(model: &serde_json::Value, enabled: bool) -> Option<AvailableModel> {
         let id = model.get("id")?.as_str()?.to_string();
+
+        let max_model_len = model
+            .get("max_model_len")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
 
         Some(AvailableModel {
             id,
             display_name: None,
-            n_ctx: 4096,
+            n_ctx: max_model_len.unwrap_or(4096),
             supports_tools: true,
             supports_multimodality: false,
             reasoning_effort_options: None,
@@ -62,13 +67,13 @@ impl LMStudioProvider {
 }
 
 #[async_trait]
-impl ProviderTrait for LMStudioProvider {
+impl ProviderTrait for VLLMProvider {
     fn name(&self) -> &'static str {
-        "lmstudio"
+        "vllm"
     }
 
     fn display_name(&self) -> &'static str {
-        "LM Studio"
+        "vLLM"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -96,18 +101,18 @@ impl ProviderTrait for LMStudioProvider {
 fields:
   endpoint:
     f_type: string_long
-    f_desc: "LM Studio server endpoint"
-    f_placeholder: "http://localhost:1234"
+    f_desc: "vLLM server endpoint"
+    f_placeholder: "http://localhost:8000"
     f_label: "Endpoint"
-    f_default: "http://localhost:1234"
+    f_default: "http://localhost:8000"
   api_key:
     f_type: string_long
-    f_desc: "API key (optional, for reverse proxy auth)"
+    f_desc: "API key (optional, depends on vLLM server config)"
     f_placeholder: ""
     f_label: "API Key"
     f_default: ""
 description: |
-  Local LM Studio server for running models.
+  vLLM inference server for high-throughput model serving.
 available:
   on_your_laptop_possible: true
   when_isolated_possible: true
@@ -218,20 +223,20 @@ available:
         let response = match request.send().await {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::warn!("LM Studio: server not reachable at {}: {}", models_url, e);
+                tracing::warn!("vLLM: server not reachable at {}: {}", models_url, e);
                 return self.get_custom_models_only();
             }
         };
 
         if !response.status().is_success() {
-            tracing::warn!("LM Studio: /v1/models returned status {}", response.status());
+            tracing::warn!("vLLM: /v1/models returned status {}", response.status());
             return self.get_custom_models_only();
         }
 
         let json: serde_json::Value = match response.json().await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("LM Studio: failed to parse /v1/models response: {}", e);
+                tracing::warn!("vLLM: failed to parse /v1/models response: {}", e);
                 return self.get_custom_models_only();
             }
         };
