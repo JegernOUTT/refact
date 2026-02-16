@@ -236,7 +236,12 @@ impl LlmWireAdapter for RefactAdapter {
                     // Each chunk may contain partial blocks; blocks with a signature are final.
                     if let Some(blocks) = delta.get("thinking_blocks").and_then(|b| b.as_array()) {
                         let signed: Vec<Value> = blocks.iter()
-                            .filter(|b| b.get("signature").and_then(|s| s.as_str()).is_some())
+                            // Some proxies send an empty string while a signature is still
+                            // being computed/unknown. Treat empty signatures as "not signed"
+                            // and skip them, otherwise multi-turn will resend invalid blocks.
+                            .filter(|b| b.get("signature")
+                                .and_then(|s| s.as_str())
+                                .is_some_and(|s| !s.trim().is_empty()))
                             .cloned()
                             .collect();
                         if !signed.is_empty() {
@@ -426,10 +431,20 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage], 
                         let keep: Vec<Value> = blocks
                             .iter()
                             .filter(|block| {
-                                matches!(
+                                let is_anthropic_block = matches!(
                                     block.get("type").and_then(|t| t.as_str()),
                                     Some("thinking") | Some("redacted_thinking")
-                                )
+                                );
+                                if !is_anthropic_block {
+                                    return false;
+                                }
+
+                                // Anthropic validates integrity of thinking blocks.
+                                // Blocks without a non-empty signature are invalid for replay.
+                                block
+                                    .get("signature")
+                                    .and_then(|s| s.as_str())
+                                    .is_some_and(|s| !s.trim().is_empty())
                             })
                             .cloned()
                             .collect();
@@ -1150,6 +1165,18 @@ mod tests {
             assert_eq!(blocks.len(), 1);
             assert_eq!(blocks[0]["signature"], "sig_abc123");
         }
+    }
+
+    #[test]
+    fn test_parse_stream_thinking_blocks_empty_signature_skipped() {
+        let adapter = RefactAdapter;
+        // Some proxies stream thinking_blocks with signature="" (empty) during streaming.
+        // These must be skipped; otherwise we will resend invalid signatures on the next turn.
+        let chunk = r#"{"choices":[{"delta":{"thinking_blocks":[{"type":"thinking","thinking":"partial","signature":""}]}}]}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+        let has_thinking = deltas.iter().any(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }));
+        assert!(!has_thinking, "Empty-string signature blocks must be skipped");
     }
 
     #[test]
