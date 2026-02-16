@@ -389,6 +389,12 @@ impl<'de> Deserialize<'de> for ChatMessage {
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default();
 
+        let server_content_blocks: Vec<Value> = obj
+            .get("server_content_blocks")
+            .and_then(|v| v.as_array())
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
+
         let usage: Option<crate::call_validation::ChatUsage> = obj
             .get("usage")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
@@ -411,6 +417,7 @@ impl<'de> Deserialize<'de> for ChatMessage {
             "checkpoints",
             "thinking_blocks",
             "citations",
+            "server_content_blocks",
         ];
         let extra: serde_json::Map<String, Value> = obj
             .iter()
@@ -431,7 +438,7 @@ impl<'de> Deserialize<'de> for ChatMessage {
             checkpoints,
             thinking_blocks,
             citations,            
-            server_content_blocks: vec![],
+            server_content_blocks,
             extra,
             output_filter: None,
         })

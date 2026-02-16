@@ -453,11 +453,37 @@ fn convert_to_anthropic(
                     flush_tool_results(&mut result, &mut pending_tool_results);
                 }
                 if msg.role == "assistant" {
-                    // Collect positional blocks (thinking + server content) with their
-                    // original streaming indices to preserve interleaved order.
-                    // Anthropic requires thinking blocks to remain unmodified and in
-                    // their original positions relative to server content blocks.
-                    let mut ordered_blocks: Vec<(u64, Value)> = Vec::new();
+                    let has_stream_text = msg
+                        .extra
+                        .get("_anthropic_text_blocks")
+                        .and_then(|v| v.as_array())
+                        .is_some();
+
+                    // Collect positional blocks (text + thinking + server blocks + tool_use)
+                    // with their original streaming indices to preserve interleaved order.
+                    let mut ordered_blocks: Vec<(u64, u64, Value)> = Vec::new();
+                    let mut seq: u64 = 0;
+
+                    if let Some(text_blocks) = msg.extra.get("_anthropic_text_blocks").and_then(|v| v.as_array()) {
+                        for block in text_blocks {
+                            let (Some(order_idx), Some(text)) = (
+                                block.get("index").and_then(|v| v.as_u64()),
+                                block.get("text").and_then(|v| v.as_str()),
+                            ) else {
+                                continue;
+                            };
+                            if text.is_empty() {
+                                continue;
+                            }
+                            ordered_blocks.push((order_idx, seq, json!({"type": "text", "text": text})));
+                            seq += 1;
+                        }
+                    } else {
+                        for block in msg_content_to_anthropic(&msg.content) {
+                            ordered_blocks.push((u64::MAX, seq, block));
+                            seq += 1;
+                        }
+                    }
 
                     if let Some(blocks) = &msg.thinking_blocks {
                         for block in blocks {
@@ -468,8 +494,6 @@ fn convert_to_anthropic(
                                         let thinking_text = block.get("thinking")
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("");
-                                        // Anthropic requires non-empty thinking text;
-                                        // skip blocks with empty/whitespace-only thinking.
                                         if thinking_text.trim().is_empty() {
                                             tracing::warn!("skipping thinking block with empty thinking text");
                                             continue;
@@ -481,14 +505,16 @@ fn convert_to_anthropic(
                                         if let Some(sig) = block.get("signature") {
                                             tb["signature"] = sig.clone();
                                         }
-                                        ordered_blocks.push((order_idx, tb));
+                                        ordered_blocks.push((order_idx, seq, tb));
+                                        seq += 1;
                                     }
                                     "redacted_thinking" => {
                                         let mut rb = json!({"type": "redacted_thinking"});
                                         if let Some(data) = block.get("data") {
                                             rb["data"] = data.clone();
                                         }
-                                        ordered_blocks.push((order_idx, rb));
+                                        ordered_blocks.push((order_idx, seq, rb));
+                                        seq += 1;
                                     }
                                     _ => {}
                                 }
@@ -496,31 +522,23 @@ fn convert_to_anthropic(
                         }
                     }
 
-                    // Merge server content blocks into the interleaved sequence.
-                    // Each block carries an _order_index from streaming; strip it before sending.
                     if !msg.server_content_blocks.is_empty() {
-                        // Detect if blocks contain both server_tool_use and matching web_search_tool_result.
-                        // If they're already paired (historical message from storage), preserve all blocks
-                        // for cache consistency. Only apply orphan filtering to fresh/incomplete responses.
                         let result_ids: std::collections::HashSet<&str> = msg.server_content_blocks.iter()
                             .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("web_search_tool_result"))
                             .filter_map(|b| b.get("tool_use_id").and_then(|v| v.as_str()))
                             .collect();
-                        
+
                         let server_tool_use_ids: std::collections::HashSet<&str> = msg.server_content_blocks.iter()
                             .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("server_tool_use"))
                             .filter_map(|b| b.get("id").and_then(|v| v.as_str()))
                             .collect();
-                        
-                        // If all server_tool_use blocks have matching results, treat as complete historical
-                        // message and preserve all blocks for cache stability
-                        let is_complete_historical = !server_tool_use_ids.is_empty() 
+
+                        let is_complete_historical = !server_tool_use_ids.is_empty()
                             && server_tool_use_ids.iter().all(|id| result_ids.contains(id));
-                        
+
                         for block in &msg.server_content_blocks {
-                            // For incomplete/fresh responses, filter orphaned server_tool_use blocks
-                            if !is_complete_historical 
-                                && block.get("type").and_then(|t| t.as_str()) == Some("server_tool_use") 
+                            if !is_complete_historical
+                                && block.get("type").and_then(|t| t.as_str()) == Some("server_tool_use")
                             {
                                 let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 if !result_ids.contains(id) {
@@ -528,90 +546,96 @@ fn convert_to_anthropic(
                                     continue;
                                 }
                             }
-                            let order_idx = block.get("_order_index").and_then(|v| v.as_u64());
+
+                            let order_idx = block.get("_order_index").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
                             let mut clean = block.clone();
                             if let Some(obj) = clean.as_object_mut() {
                                 obj.remove("_order_index");
                             }
-                            // Legacy blocks without _order_index go after all indexed blocks
-                            ordered_blocks.push((order_idx.unwrap_or(u64::MAX), clean));
+                            ordered_blocks.push((order_idx, seq, clean));
+                            seq += 1;
                         }
                     }
 
-                    // Sort by original streaming index to preserve interleaved order
-                    ordered_blocks.sort_by_key(|(idx, _)| *idx);
-                    for (_, block) in ordered_blocks {
-                        content.push(block);
+                    if let Some(tcs) = &msg.tool_calls {
+                        for tc in tcs.iter().filter(|tc| !tc.id.starts_with("srvtoolu_")) {
+                            let input = match serde_json::from_str::<Value>(&tc.function.arguments) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Invalid JSON in tool call arguments for '{}': {} - using empty object",
+                                        tc.function.name, e
+                                    );
+                                    json!({})
+                                }
+                            };
+
+                            let order_idx = if has_stream_text {
+                                tc.index.map(|i| i as u64).unwrap_or(u64::MAX)
+                            } else {
+                                u64::MAX
+                            };
+
+                            ordered_blocks.push((order_idx, seq, json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.function.name,
+                                "input": input,
+                            })));
+                            seq += 1;
+                        }
                     }
-                }
-                if !msg.citations.is_empty() {
-                    // Clean internal fields and strip orphaned web search citations.
-                    // Web search citations (with encrypted_index) require matching
-                    // server_content_blocks; document citations (char_location etc.) are always valid.
-                    let cleaned_citations: Vec<Value> = msg.citations.iter().filter_map(|c| {
-                        let has_encrypted = c.get("encrypted_index").is_some();
-                        if has_encrypted && msg.server_content_blocks.is_empty() {
-                            tracing::warn!("stripping orphaned web search citation (no server_content_blocks)");
-                            return None;
-                        }
-                        let mut cleaned = c.clone();
-                        if let Some(obj) = cleaned.as_object_mut() {
-                            obj.remove("_content_block_index");
-                        }
-                        Some(cleaned)
-                    }).collect();
-                    if !cleaned_citations.is_empty() {
-                        // Re-send citations from prior responses as content blocks with
-                        // their citation data. Anthropic expects text blocks with citations
-                        // arrays when re-sending cited content in multi-turn conversations.
-                        let text_blocks = msg_content_to_anthropic(&msg.content);
-                        if text_blocks.len() == 1 {
-                            let mut block = text_blocks.into_iter().next().unwrap();
-                            if let Some(obj) = block.as_object_mut() {
-                                obj.insert("citations".to_string(), json!(cleaned_citations));
+
+                    if !msg.citations.is_empty() {
+                        let mut citations_by_idx: std::collections::HashMap<Option<u64>, Vec<Value>> = std::collections::HashMap::new();
+                        for c in &msg.citations {
+                            let has_encrypted = c.get("encrypted_index").is_some();
+                            if has_encrypted && msg.server_content_blocks.is_empty() {
+                                tracing::warn!("stripping orphaned web search citation (no server_content_blocks)");
+                                continue;
                             }
-                            content.push(block);
-                        } else {
-                            let mut blocks = text_blocks;
-                            if let Some(last) = blocks.last_mut() {
-                                if let Some(obj) = last.as_object_mut() {
-                                    obj.insert("citations".to_string(), json!(cleaned_citations));
+                            let idx = c.get("_content_block_index").and_then(|v| v.as_u64());
+                            let mut cleaned = c.clone();
+                            if let Some(obj) = cleaned.as_object_mut() {
+                                obj.remove("_content_block_index");
+                            }
+                            citations_by_idx.entry(idx).or_default().push(cleaned);
+                        }
+
+                        // Attach indexed citations to matching text blocks.
+                        for (idx, _seq, block) in ordered_blocks.iter_mut() {
+                            if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+                                continue;
+                            }
+                            if let Some(cits) = citations_by_idx.remove(&Some(*idx)) {
+                                if let Some(obj) = block.as_object_mut() {
+                                    obj.insert("citations".to_string(), json!(cits));
                                 }
                             }
-                            content.extend(blocks);
                         }
-                    } else {
-                        content.extend(msg_content_to_anthropic(&msg.content));
+
+                        // Attach remaining citations (unindexed or unmatched) to the last text block.
+                        let mut remaining: Vec<Value> = citations_by_idx.remove(&None).unwrap_or_default();
+                        for (_idx, mut cits) in citations_by_idx {
+                            remaining.append(&mut cits);
+                        }
+                        if !remaining.is_empty() {
+                            if let Some((_idx, _seq, block)) = ordered_blocks.iter_mut().rev()
+                                .find(|(_, _, b)| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                            {
+                                if let Some(obj) = block.as_object_mut() {
+                                    obj.insert("citations".to_string(), json!(remaining));
+                                }
+                            }
+                        }
+                    }
+
+                    ordered_blocks.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                    for (_, _, block) in ordered_blocks {
+                        content.push(block);
                     }
                 } else {
                     content.extend(msg_content_to_anthropic(&msg.content));
-                }
-                // Server content blocks are now interleaved with thinking blocks above
-                // (sorted by original streaming index) for correct multi-turn ordering.
-                if msg.role == "assistant" {
-                    if let Some(tcs) = &msg.tool_calls {
-                        let tool_blocks: Vec<Value> = tcs.iter()
-                            .filter(|tc| !tc.id.starts_with("srvtoolu_"))  // Filter server-executed tools
-                            .map(|tc| {
-                                let input = match serde_json::from_str::<Value>(&tc.function.arguments) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Invalid JSON in tool call arguments for '{}': {} - using empty object",
-                                            tc.function.name, e
-                                        );
-                                        json!({})
-                                    }
-                                };
-                                json!({
-                                    "type": "tool_use",
-                                    "id": tc.id,
-                                    "name": tc.function.name,
-                                    "input": input
-                                })
-                            }).collect();
-                        content.extend(tool_blocks);
-                    }
                 }
                 let content = sanitize_anthropic_content(content);
                 result.push(json!({"role": msg.role, "content": content}));

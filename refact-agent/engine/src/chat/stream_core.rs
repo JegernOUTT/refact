@@ -828,8 +828,9 @@ mod tests {
 
     #[test]
     fn test_signature_delta_concatenation() {
-        // Anthropic sends signature_delta events in chunks, especially for Claude 4
-        // with significantly longer signatures. Each chunk must be concatenated.
+        // Anthropic sends a single signature_delta per thinking block.
+        // Some proxies may emit multiple updates; signature must be treated as
+        // an opaque integrity token, so the latest update must replace the prior.
         let mut blocks = vec![json!({
             "index": 0,
             "type": "thinking",
@@ -849,8 +850,8 @@ mod tests {
             "type": "thinking",
             "signature": "def"
         })]);
-        assert_eq!(blocks[0]["signature"].as_str().unwrap(), "abcdef",
-            "Signature deltas must be concatenated, not replaced");
+        assert_eq!(blocks[0]["signature"].as_str().unwrap(), "def",
+            "Signature updates must replace, not concatenate");
 
         // Third chunk
         merge_thinking_blocks(&mut blocks, vec![json!({
@@ -858,8 +859,8 @@ mod tests {
             "type": "thinking",
             "signature": "ghi"
         })]);
-        assert_eq!(blocks[0]["signature"].as_str().unwrap(), "abcdefghi",
-            "All signature chunks must be present in order");
+        assert_eq!(blocks[0]["signature"].as_str().unwrap(), "ghi",
+            "Latest signature update must win");
     }
 
     #[test]

@@ -41,6 +41,8 @@ export * from "./useChatSubscription";
 export * from "./useAllChatsSubscription";
 export * from "./useDraftMessage";
 
+export * from "./useProvidersQuery";
+
 export * from "./useBrowserOnlineStatus";
 export * from "./useLoadMoreHistory";
 export * from "./useThinking";

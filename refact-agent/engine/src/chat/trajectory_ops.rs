@@ -46,6 +46,14 @@ fn generate_valid_tool_id() -> String {
 }
 
 pub fn sanitize_messages_for_model_switch(msgs: &mut [ChatMessage]) {
+    // Thinking blocks and server-side content blocks are backend-specific.
+    // If a chat switches models/providers, re-sending them can cause provider
+    // validation errors (e.g., Anthropic thinking signatures are integrity-checked).
+    for msg in msgs.iter_mut() {
+        msg.thinking_blocks = None;
+        msg.server_content_blocks = Vec::new();
+    }
+
     let mut id_mapping: HashMap<String, String> = HashMap::new();
 
     for msg in msgs.iter() {

@@ -430,17 +430,31 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage], 
                                     }
                                     let mut tb = json!({
                                         "type": "thinking",
+                                        "index": block.get("index"),
                                         "thinking": thinking_text,
                                     });
+                                    // Remove null index to keep payload small.
+                                    if tb.get("index").is_some_and(|v| v.is_null()) {
+                                        tb.as_object_mut().map(|obj| obj.remove("index"));
+                                    }
                                     if let Some(sig) = block.get("signature") {
                                         tb["signature"] = sig.clone();
                                     }
                                     Some(tb)
                                 }
                                 Some("redacted_thinking") => {
-                                    let mut rb = json!({"type": "redacted_thinking"});
+                                    let mut rb = json!({
+                                        "type": "redacted_thinking",
+                                        "index": block.get("index"),
+                                    });
+                                    if rb.get("index").is_some_and(|v| v.is_null()) {
+                                        rb.as_object_mut().map(|obj| obj.remove("index"));
+                                    }
                                     if let Some(data) = block.get("data") {
                                         rb["data"] = data.clone();
+                                    }
+                                    if let Some(sig) = block.get("signature") {
+                                        rb["signature"] = sig.clone();
                                     }
                                     Some(rb)
                                 }
@@ -450,6 +464,14 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage], 
                         if !sanitized.is_empty() {
                             obj["thinking_blocks"] = json!(sanitized);
                         }
+                    }
+                }
+
+                // Preserve interleaved text block ordering for Anthropic multi-turn.
+                // LiteLLM proxies may forward these fields to Anthropic.
+                if let Some(text_blocks) = msg.extra.get("_anthropic_text_blocks") {
+                    if text_blocks.is_array() {
+                        obj["_anthropic_text_blocks"] = text_blocks.clone();
                     }
                 }
             }
@@ -1192,6 +1214,7 @@ mod tests {
                 content: crate::call_validation::ChatContent::SimpleText("Answer".to_string()),
                 thinking_blocks: Some(vec![json!({
                     "type": "thinking",
+                    "index": 5,
                     "thinking": "Let me reason...",
                     "signature": "sig_abc123"
                 })]),
@@ -1203,7 +1226,7 @@ mod tests {
                         name: "search".to_string(),
                         arguments: "{}".to_string(),
                     },
-                    index: None,
+                    index: Some(7),
                 }]),
                 ..Default::default()
             },
@@ -1226,6 +1249,10 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "thinking");
         assert_eq!(blocks[0]["signature"], "sig_abc123");
+        assert_eq!(blocks[0]["index"], 5);
+
+        let tool_calls = assistant["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls[0]["index"], 7);
     }
 
     #[test]
