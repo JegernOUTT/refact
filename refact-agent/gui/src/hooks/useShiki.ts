@@ -9,6 +9,27 @@ import {
 let highlighterInstance: Highlighter | null = null;
 let highlighterPromise: Promise<Highlighter> | null = null;
 
+// Serialization queue: ensures only one codeToHtml() WASM call runs at a time.
+// Prevents burst of concurrent WASM tokenizer invocations when switching chats
+// or mounting many code blocks simultaneously (can cause SIGSEGV/SIGILL).
+let highlightQueue = Promise.resolve();
+
+function yieldToMain(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function enqueueHighlight<T>(fn: () => T): Promise<T> {
+  const task = highlightQueue.then(
+    () => yieldToMain().then(fn),
+    () => yieldToMain().then(fn),
+  );
+  highlightQueue = task.then(
+    () => {},
+    () => {},
+  );
+  return task;
+}
+
 const INITIAL_LANGUAGES: BundledLanguage[] = [
   "javascript",
   "typescript",
@@ -151,17 +172,19 @@ export function useShiki() {
         }
       }
 
-      const html = (
-        h as unknown as {
-          codeToHtml(
-            code: string,
-            options: { lang: string; theme: BundledTheme },
-          ): string;
-        }
-      ).codeToHtml(code, {
-        lang: finalLang,
-        theme,
-      });
+      const html = await enqueueHighlight(() =>
+        (
+          h as unknown as {
+            codeToHtml(
+              code: string,
+              options: { lang: string; theme: BundledTheme },
+            ): string;
+          }
+        ).codeToHtml(code, {
+          lang: finalLang,
+          theme,
+        }),
+      );
 
       return { html, language: finalLang };
     },

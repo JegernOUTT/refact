@@ -62,20 +62,23 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
     }
 
     let cancelled = false;
-    highlight(textWithOutIndent, language, isDark)
-      .then((result) => {
-        if (!cancelled) {
-          setHighlightedHtml(result.html);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setHighlightedHtml(null);
-        }
-      });
+    const timer = setTimeout(() => {
+      highlight(textWithOutIndent, language, isDark)
+        .then((result) => {
+          if (!cancelled) {
+            setHighlightedHtml(result.html);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setHighlightedHtml(null);
+          }
+        });
+    }, 300);
 
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [shouldHighlight, textWithOutIndent, language, isDark, highlight]);
 

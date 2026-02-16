@@ -724,7 +724,8 @@ pub async fn save_trajectory_snapshot(
         file_path
     );
 
-    if let Some(vecdb) = gcx.read().await.vec_db.lock().await.as_ref() {
+    let vec_db = gcx.read().await.vec_db.clone();
+    if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
             .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], false)
             .await;

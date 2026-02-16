@@ -45,4 +45,3 @@ export const OpenAIRefusalTool: React.FC<Props> = ({ toolCall }) => {
     </ToolCard>
   );
 };
-

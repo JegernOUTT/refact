@@ -60,7 +60,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
 
   const providerVariants = useMemo(() => {
     if (!model.provider_variants?.length) return [];
-    return [...model.provider_variants].sort((a, b) => a.id.localeCompare(b.id));
+    return [...model.provider_variants].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    );
   }, [model.provider_variants]);
 
   const availableProviders = useMemo(() => {
@@ -93,7 +95,6 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
     resolvedProviderVariants.length > 0 ||
     resolvedAvailableProviders.length > 0 ||
     Boolean(model.selected_provider);
-
 
   const handleToggle = useCallback(
     async (checked: boolean) => {
@@ -152,7 +153,14 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
         setOptimisticSelectedProvider(previous);
       }
     },
-    [model.id, optimisticEnabled, optimisticSelectedProvider, providerName, setModelProvider, toggleModel],
+    [
+      model.id,
+      optimisticEnabled,
+      optimisticSelectedProvider,
+      providerName,
+      setModelProvider,
+      toggleModel,
+    ],
   );
 
   // Format context size for display
@@ -165,7 +173,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
   const formatPrice = (price?: number | null) =>
     typeof price === "number" ? `$${price.toFixed(2)}` : "–";
 
-  const renderProviderRow = (variant: (typeof resolvedProviderVariants)[number]) => {
+  const renderProviderRow = (
+    variant: (typeof resolvedProviderVariants)[number],
+  ) => {
     const isSelected = optimisticSelectedProvider === variant.id;
     return (
       <div
@@ -177,24 +187,41 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
         <Text size="1" className={styles.providerCellPrimary}>
           {variant.tag ?? variant.name ?? variant.id}
         </Text>
-        <Text size="1">{variant.context_length ? formatContextSize(variant.context_length) : "–"}</Text>
-        <Text size="1">{variant.max_output_tokens ? formatContextSize(variant.max_output_tokens) : "–"}</Text>
+        <Text size="1">
+          {variant.context_length
+            ? formatContextSize(variant.context_length)
+            : "–"}
+        </Text>
+        <Text size="1">
+          {variant.max_output_tokens
+            ? formatContextSize(variant.max_output_tokens)
+            : "–"}
+        </Text>
         <Text size="1">{formatPrice(variant.pricing?.prompt)}</Text>
         <Text size="1">{formatPrice(variant.pricing?.generated)}</Text>
         <Text size="1">
-          {formatPrice(variant.pricing?.cache_read)} / {formatPrice(variant.pricing?.cache_creation)}
+          {formatPrice(variant.pricing?.cache_read)} /{" "}
+          {formatPrice(variant.pricing?.cache_creation)}
         </Text>
         <Text size="1">
-          {typeof variant.latency_last_30m === "number" ? `${variant.latency_last_30m.toFixed(2)}s` : "–"}
+          {typeof variant.latency_last_30m === "number"
+            ? `${variant.latency_last_30m.toFixed(2)}s`
+            : "–"}
         </Text>
         <Text size="1">
-          {typeof variant.throughput_last_30m === "number" ? `${variant.throughput_last_30m.toFixed(0)} tps` : "–"}
+          {typeof variant.throughput_last_30m === "number"
+            ? `${variant.throughput_last_30m.toFixed(0)} tps`
+            : "–"}
         </Text>
         <Text size="1">
-          {typeof variant.uptime_last_30m === "number" ? `${(variant.uptime_last_30m * 100).toFixed(0)}%` : "–"}
+          {typeof variant.uptime_last_30m === "number"
+            ? `${(variant.uptime_last_30m * 100).toFixed(0)}%`
+            : "–"}
         </Text>
         <Text size="1" className={styles.providerCellCaps}>
-          {variant.supported_parameters?.length ? variant.supported_parameters.join(", ") : "–"}
+          {variant.supported_parameters?.length
+            ? variant.supported_parameters.join(", ")
+            : "–"}
         </Text>
         <Button
           size="1"
@@ -288,14 +315,18 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
             {model.pricing && (
               <Tooltip content="Pricing per 1M tokens (input/output)">
                 <Text as="span" size="1" color="gray">
-                  💲 ${model.pricing.prompt.toFixed(2)}/${model.pricing.generated.toFixed(2)}
+                  💲 ${model.pricing.prompt.toFixed(2)}/$
+                  {model.pricing.generated.toFixed(2)}
                 </Text>
               </Tooltip>
             )}
           </Flex>
 
           {hasProviderRouting && (
-            <RadixCollapsible.Root open={detailsOpen} onOpenChange={setDetailsOpen}>
+            <RadixCollapsible.Root
+              open={detailsOpen}
+              onOpenChange={setDetailsOpen}
+            >
               <RadixCollapsible.Content className={styles.providerPanel}>
                 <Text as="span" size="1" color="gray">
                   Selecting a provider will enable the model automatically.
@@ -317,7 +348,8 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                     </div>
                     <div
                       className={classNames(styles.providerRow, {
-                        [styles.providerRowSelected]: optimisticSelectedProvider === "",
+                        [styles.providerRowSelected]:
+                          optimisticSelectedProvider === "",
                       })}
                     >
                       <Text size="1" className={styles.providerCellPrimary}>
@@ -334,14 +366,22 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                       <Text size="1">–</Text>
                       <Button
                         size="1"
-                        variant={optimisticSelectedProvider === "" ? "solid" : "soft"}
-                        disabled={optimisticSelectedProvider === "" || isReadonlyProvider || isLoading}
+                        variant={
+                          optimisticSelectedProvider === "" ? "solid" : "soft"
+                        }
+                        disabled={
+                          optimisticSelectedProvider === "" ||
+                          isReadonlyProvider ||
+                          isLoading
+                        }
                         onClick={(event) => {
                           event.stopPropagation();
                           void handleProviderSelect("");
                         }}
                       >
-                        {optimisticSelectedProvider === "" ? "Selected" : "Select"}
+                        {optimisticSelectedProvider === ""
+                          ? "Selected"
+                          : "Select"}
                       </Button>
                     </div>
                     {resolvedProviderVariants.map(renderProviderRow)}
@@ -355,14 +395,22 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                         </Text>
                         <Button
                           size="1"
-                          variant={optimisticSelectedProvider === "" ? "solid" : "soft"}
-                          disabled={optimisticSelectedProvider === "" || isReadonlyProvider || isLoading}
+                          variant={
+                            optimisticSelectedProvider === "" ? "solid" : "soft"
+                          }
+                          disabled={
+                            optimisticSelectedProvider === "" ||
+                            isReadonlyProvider ||
+                            isLoading
+                          }
                           onClick={(event) => {
                             event.stopPropagation();
                             void handleProviderSelect("");
                           }}
                         >
-                          {optimisticSelectedProvider === "" ? "Selected" : "Select"}
+                          {optimisticSelectedProvider === ""
+                            ? "Selected"
+                            : "Select"}
                         </Button>
                       </Flex>
                       {resolvedAvailableProviders.length === 0 && (
@@ -371,7 +419,8 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                         </Text>
                       )}
                       {resolvedAvailableProviders.map((provider) => {
-                        const isSelected = optimisticSelectedProvider === provider;
+                        const isSelected =
+                          optimisticSelectedProvider === provider;
                         return (
                           <Flex
                             key={provider}
@@ -379,13 +428,18 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                             justify="between"
                             gap="2"
                           >
-                            <Text size="1" className={styles.providerCellPrimary}>
+                            <Text
+                              size="1"
+                              className={styles.providerCellPrimary}
+                            >
                               {provider}
                             </Text>
                             <Button
                               size="1"
                               variant={isSelected ? "solid" : "soft"}
-                              disabled={isSelected || isReadonlyProvider || isLoading}
+                              disabled={
+                                isSelected || isReadonlyProvider || isLoading
+                              }
                               onClick={(event) => {
                                 event.stopPropagation();
                                 void handleProviderSelect(provider);

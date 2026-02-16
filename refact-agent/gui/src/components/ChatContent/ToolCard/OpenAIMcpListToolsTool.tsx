@@ -30,4 +30,3 @@ export const OpenAIMcpListToolsTool: React.FC<Props> = ({ toolCall }) => {
     </ToolCard>
   );
 };
-

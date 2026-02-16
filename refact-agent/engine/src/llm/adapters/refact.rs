@@ -418,51 +418,24 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage], 
             if is_anthropic_target {
                 if let Some(blocks) = &msg.thinking_blocks {
                     if !blocks.is_empty() {
-                        let sanitized: Vec<Value> = blocks.iter().filter_map(|block| {
-                            match block.get("type").and_then(|t| t.as_str()) {
-                                Some("thinking") => {
-                                    let thinking_text = block.get("thinking")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    if thinking_text.trim().is_empty() {
-                                        tracing::warn!("skipping thinking block with empty thinking text");
-                                        return None;
-                                    }
-                                    let mut tb = json!({
-                                        "type": "thinking",
-                                        "index": block.get("index"),
-                                        "thinking": thinking_text,
-                                    });
-                                    // Remove null index to keep payload small.
-                                    if tb.get("index").is_some_and(|v| v.is_null()) {
-                                        tb.as_object_mut().map(|obj| obj.remove("index"));
-                                    }
-                                    if let Some(sig) = block.get("signature") {
-                                        tb["signature"] = sig.clone();
-                                    }
-                                    Some(tb)
-                                }
-                                Some("redacted_thinking") => {
-                                    let mut rb = json!({
-                                        "type": "redacted_thinking",
-                                        "index": block.get("index"),
-                                    });
-                                    if rb.get("index").is_some_and(|v| v.is_null()) {
-                                        rb.as_object_mut().map(|obj| obj.remove("index"));
-                                    }
-                                    if let Some(data) = block.get("data") {
-                                        rb["data"] = data.clone();
-                                    }
-                                    if let Some(sig) = block.get("signature") {
-                                        rb["signature"] = sig.clone();
-                                    }
-                                    Some(rb)
-                                }
-                                _ => None,
-                            }
-                        }).collect();
-                        if !sanitized.is_empty() {
-                            obj["thinking_blocks"] = json!(sanitized);
+                        // IMPORTANT: Anthropic thinking blocks are integrity-checked.
+                        // Do NOT rebuild or mutate blocks here (whitespace, missing fields,
+                        // dropped keys, etc.), or signatures may fail validation on multi-turn.
+                        // Only filter out non-Anthropic block types (e.g. OpenAI Responses
+                        // reasoning items) while preserving the raw JSON for valid blocks.
+                        let keep: Vec<Value> = blocks
+                            .iter()
+                            .filter(|block| {
+                                matches!(
+                                    block.get("type").and_then(|t| t.as_str()),
+                                    Some("thinking") | Some("redacted_thinking")
+                                )
+                            })
+                            .cloned()
+                            .collect();
+
+                        if !keep.is_empty() {
+                            obj["thinking_blocks"] = Value::Array(keep);
                         }
                     }
                 }
@@ -1655,12 +1628,15 @@ mod tests {
         let converted = convert_messages_to_refact(&messages, Some("anthropic_budget"));
 
         let assistant = &converted[1];
-        assert!(
-            assistant.get("thinking_blocks").is_none()
-                || assistant["thinking_blocks"].as_array().unwrap().is_empty(),
-            "Empty thinking blocks should be filtered out in refact format: {:?}",
-            assistant.get("thinking_blocks")
-        );
+        // LiteLLM may send signed thinking blocks with empty thinking text ("thinking": "")
+        // when the thinking content was streamed separately via reasoning_content.
+        // For multi-turn compatibility, we must preserve these blocks verbatim.
+        assert!(assistant.get("thinking_blocks").is_some());
+        let blocks = assistant["thinking_blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["signature"], "sig_empty");
+        assert_eq!(blocks[0]["thinking"], "");
     }
 
     #[test]
@@ -1683,9 +1659,10 @@ mod tests {
         let converted = convert_messages_to_refact(&messages, Some("anthropic_budget"));
 
         let blocks = converted[0]["thinking_blocks"].as_array().unwrap();
-        assert_eq!(blocks.len(), 2, "Valid thinking + redacted kept, empty filtered: {:?}", blocks);
+        assert_eq!(blocks.len(), 3, "All Anthropic blocks must be preserved verbatim: {:?}", blocks);
         assert_eq!(blocks[0]["thinking"], "Valid text");
-        assert_eq!(blocks[1]["type"], "redacted_thinking");
+        assert_eq!(blocks[1]["thinking"], "");
+        assert_eq!(blocks[2]["type"], "redacted_thinking");
     }
 
     #[test]

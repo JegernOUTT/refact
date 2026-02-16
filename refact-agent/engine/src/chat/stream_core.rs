@@ -100,13 +100,6 @@ pub trait StreamCollector: Send {
     fn on_finish(&mut self, choice_idx: usize, finish_reason: Option<String>);
 }
 
-pub struct NoopCollector;
-
-impl StreamCollector for NoopCollector {
-    fn on_delta_ops(&mut self, _: usize, _: Vec<DeltaOp>) {}
-    fn on_usage(&mut self, _: &ChatUsage) {}
-    fn on_finish(&mut self, _: usize, _: Option<String>) {}
-}
 
 pub async fn run_llm_stream<C: StreamCollector>(
     gcx: Arc<ARwLock<GlobalContext>>,

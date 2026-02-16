@@ -231,7 +231,15 @@ export function useAllChatsSubscription() {
         subscribe(id);
       }
     }
-  }, [activeChatId, openThreadIds, port, apiKey, subscribe, unsubscribe, unsubscribeAll]);
+  }, [
+    activeChatId,
+    openThreadIds,
+    port,
+    apiKey,
+    subscribe,
+    unsubscribe,
+    unsubscribeAll,
+  ]);
 
   useEffect(() => {
     if (!sseRefreshRequested) return;

@@ -260,7 +260,8 @@ pub async fn memories_add(
         idx.add_from_frontmatter(file_path.clone(), frontmatter, Some(content));
     }
 
-    if let Some(vecdb) = gcx.read().await.vec_db.lock().await.as_ref() {
+    let vec_db = gcx.read().await.vec_db.clone();
+    if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
             .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true)
             .await;
@@ -384,6 +385,10 @@ pub async fn memories_search(
         None => None,
     };
 
+    // Resolve trajectory dirs before acquiring vec_db lock to avoid holding the
+    // mutex across gcx.read() calls (which could deadlock with concurrent gcx.write()).
+    let trajectory_dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx.clone()).await;
+
     let vecdb_arc = {
         let gcx_read = gcx.read().await;
         gcx_read.vec_db.clone()
@@ -423,7 +428,6 @@ pub async fn memories_search(
         }
     }
 
-    let trajectory_dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx.clone()).await;
     for td in &trajectory_dirs {
         let prefix = if td.to_string_lossy().ends_with(std::path::MAIN_SEPARATOR) {
             td.to_string_lossy().to_string()
@@ -809,7 +813,8 @@ pub async fn deprecate_document(
 
     info!("Deprecated document: {}", doc_path.display());
 
-    if let Some(vecdb) = gcx.read().await.vec_db.lock().await.as_ref() {
+    let vec_db = gcx.read().await.vec_db.clone();
+    if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
             .vectorizer_enqueue_files(&vec![doc_path.to_string_lossy().to_string()], true)
             .await;
@@ -847,7 +852,8 @@ pub async fn archive_document(
     );
 
     // Keep VecDB consistent with the rename (remove old path, enqueue new path).
-    if let Some(vecdb) = gcx.read().await.vec_db.lock().await.as_ref() {
+    let vec_db = gcx.read().await.vec_db.clone();
+    if let Some(vecdb) = vec_db.lock().await.as_ref() {
         let _ = vecdb.remove_file(&PathBuf::from(old_path_str)).await;
         vecdb
             .vectorizer_enqueue_files(&vec![archive_path.to_string_lossy().to_string()], true)

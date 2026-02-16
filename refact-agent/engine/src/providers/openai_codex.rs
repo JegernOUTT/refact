@@ -27,7 +27,6 @@ enum CodexAuth {
     ChatGptBackendOAuth {
         access_token: String,
         chatgpt_account_id: String,
-        api_key_exchange_error: String,
     },
     None,
 }
@@ -67,7 +66,6 @@ impl OpenAICodexProvider {
                 CodexAuth::ChatGptBackendOAuth {
                     access_token: self.oauth_tokens.access_token.clone(),
                     chatgpt_account_id: self.oauth_tokens.chatgpt_account_id.clone(),
-                    api_key_exchange_error: self.oauth_tokens.api_key_exchange_error.clone(),
                 },
             );
         }
@@ -91,7 +89,6 @@ impl OpenAICodexProvider {
                 CodexAuth::ChatGptBackendOAuth {
                     access_token: self.oauth_tokens.access_token.clone(),
                     chatgpt_account_id: String::new(),
-                    api_key_exchange_error: self.oauth_tokens.api_key_exchange_error.clone(),
                 },
             );
         }

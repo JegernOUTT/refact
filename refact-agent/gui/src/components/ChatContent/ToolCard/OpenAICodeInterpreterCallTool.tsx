@@ -20,7 +20,9 @@ type CodeInterpreterOutput = {
   image?: { url?: string };
 };
 
-export const OpenAICodeInterpreterCallTool: React.FC<Props> = ({ toolCall }) => {
+export const OpenAICodeInterpreterCallTool: React.FC<Props> = ({
+  toolCall,
+}) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
   const args = state.parsedArgs as Record<string, unknown> | null;
 
@@ -28,7 +30,9 @@ export const OpenAICodeInterpreterCallTool: React.FC<Props> = ({ toolCall }) => 
     if (!args) return [] as CodeInterpreterOutput[];
     if (!Array.isArray(args.outputs)) return [] as CodeInterpreterOutput[];
     return (args.outputs as unknown[])
-      .map((o) => (typeof o === "object" && o ? (o as CodeInterpreterOutput) : {}))
+      .map((o) =>
+        typeof o === "object" && o ? (o as CodeInterpreterOutput) : {},
+      )
       .slice(0, 200);
   }, [args]);
 
@@ -46,7 +50,8 @@ export const OpenAICodeInterpreterCallTool: React.FC<Props> = ({ toolCall }) => 
 
   const summary = (
     <>
-      Code Interpreter <span className={styles.inlineCode}>{outputs.length} outputs</span>
+      Code Interpreter{" "}
+      <span className={styles.inlineCode}>{outputs.length} outputs</span>
     </>
   );
 
@@ -82,4 +87,3 @@ export const OpenAICodeInterpreterCallTool: React.FC<Props> = ({ toolCall }) => 
     </ToolCard>
   );
 };
-

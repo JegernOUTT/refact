@@ -12,7 +12,9 @@ type Props = {
   toolCall: ToolCall;
 };
 
-export const OpenAIImageGenerationCallTool: React.FC<Props> = ({ toolCall }) => {
+export const OpenAIImageGenerationCallTool: React.FC<Props> = ({
+  toolCall,
+}) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
   const args = state.parsedArgs as Record<string, unknown> | null;
 
@@ -28,7 +30,9 @@ export const OpenAIImageGenerationCallTool: React.FC<Props> = ({ toolCall }) => 
     const nested =
       output && typeof output.image_url === "string" ? output.image_url : null;
 
-    return [direct, nested].filter((u): u is string => typeof u === "string" && u.length > 0);
+    return [direct, nested].filter(
+      (u): u is string => typeof u === "string" && u.length > 0,
+    );
   }, [args]);
 
   return (
@@ -55,4 +59,3 @@ export const OpenAIImageGenerationCallTool: React.FC<Props> = ({ toolCall }) => 
     </ToolCard>
   );
 };
-

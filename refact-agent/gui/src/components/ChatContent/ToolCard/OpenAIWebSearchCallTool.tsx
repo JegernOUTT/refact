@@ -6,9 +6,7 @@ import { ToolCard } from "./ToolCard";
 import type { ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
 import styles from "./OpenAIResponsesTool.module.css";
-import {
-  useOpenAiResponsesToolCardState,
-} from "./openaiResponsesToolCardState";
+import { useOpenAiResponsesToolCardState } from "./openaiResponsesToolCardState";
 
 type Props = {
   toolCall: ToolCall;
@@ -34,8 +32,7 @@ export const OpenAIWebSearchCallTool: React.FC<Props> = ({ toolCall }) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
 
   const args = state.parsedArgs as Record<string, unknown> | null;
-  const query =
-    args && typeof args.query === "string" ? args.query : undefined;
+  const query = args && typeof args.query === "string" ? args.query : undefined;
 
   const results = useMemo(() => {
     if (!args) return [] as WebSearchResult[];
@@ -115,4 +112,3 @@ export const OpenAIWebSearchCallTool: React.FC<Props> = ({ toolCall }) => {
     </ToolCard>
   );
 };
-

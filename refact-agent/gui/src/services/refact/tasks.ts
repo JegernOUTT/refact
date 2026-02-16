@@ -222,7 +222,9 @@ export const tasksApi = createApi({
         });
         if (result.error) return { error: result.error };
         const payload = result.data as { content?: unknown };
-        return { data: typeof payload?.content === "string" ? payload.content : "" };
+        return {
+          data: typeof payload.content === "string" ? payload.content : "",
+        };
       },
     }),
 

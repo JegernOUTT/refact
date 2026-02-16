@@ -336,7 +336,11 @@ const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
   return (
     <Card className={styles.ToolConfirmationCard}>
       <Flex direction="column" gap="3">
-        <Flex align="baseline" gap="1" className={styles.ToolConfirmationHeading}>
+        <Flex
+          align="baseline"
+          gap="1"
+          className={styles.ToolConfirmationHeading}
+        >
           <Text as="span">⚠️</Text>
           <Text>Prompt cache may be broken</Text>
         </Flex>

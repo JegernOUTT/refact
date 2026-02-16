@@ -292,7 +292,8 @@ pub async fn handle_v1_knowledge_update_memory(
         )
     })??;
 
-    if let Some(vecdb) = gcx.read().await.vec_db.lock().await.as_ref() {
+    let vec_db = gcx.read().await.vec_db.clone();
+    if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
             .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true)
             .await;
@@ -353,7 +354,8 @@ pub async fn handle_v1_knowledge_delete_memory(
         tracing::info!("Deleted memory: {}", file_path.display());
     }
 
-    if let Some(vecdb) = gcx.read().await.vec_db.lock().await.as_ref() {
+    let vec_db = gcx.read().await.vec_db.clone();
+    if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
             .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true)
             .await;

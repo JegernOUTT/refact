@@ -28,7 +28,12 @@ import type { ProviderListItem } from "../../services/refact";
 import { useGetConfiguredProvidersView } from "../Providers/ProvidersView/useConfiguredProvidersView";
 import { newChatAction } from "../Chat";
 import { push } from "../Pages/pagesSlice";
-import { selectApiKey, selectAddressURL, setApiKey, setAddressURL } from "../Config/configSlice";
+import {
+  selectApiKey,
+  selectAddressURL,
+  setApiKey,
+  setAddressURL,
+} from "../Config/configSlice";
 
 export const LoginPage: React.FC = () => {
   const { loginWithProvider, polling, cancelLogin } = useLogin();
@@ -120,74 +125,78 @@ export const LoginPage: React.FC = () => {
           <Accordion.Item value="cloud">
             <Accordion.Trigger>Refact Cloud</Accordion.Trigger>
             <Accordion.Content>
-            <Box>
-              <Text size="2">
-                <ul>
-                  <li>
-                    Chat with your codebase powered by top models (e.g. Claude
-                    3.7 Sonnet, OpenAI GPT-4o and o3-mini).
-                  </li>
-                  <li>Unlimited Code Completions (powered by Qwen2.5).</li>
-                  <li>Codebase-aware vector database (RAG).</li>
-                  <li>
-                    Agentic features: browser use, database connect, debugger,
-                    shell commands, etc.
-                  </li>
-                </ul>
-              </Text>
-            </Box>
-            <Separator size="4" my="4" />
-            <Flex direction="column" gap="3" align="center">
-              <Button
-                onClick={() => {
-                  onCancel();
-                  loginWithProvider("google");
-                }}
-                disabled={isLoading}
-              >
-                <GoogleIcon width="15" height="15" /> Continue with Google
-              </Button>
-              <Button
-                onClick={() => {
-                  onCancel();
-                  loginWithProvider("github");
-                }}
-                disabled={isLoading}
-              >
-                <GitHubLogoIcon width="15" height="15" /> Continue with GitHub
-              </Button>
-
-              <Text>or</Text>
-
-              <Flex asChild direction="column" gap="3">
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (isLoading) return;
-                    const formData = new FormData(event.currentTarget);
-                    const email = formData.get("email");
-                    if (typeof email === "string") {
-                      emailLogin(email);
-                    }
+              <Box>
+                <Text size="2">
+                  <ul>
+                    <li>
+                      Chat with your codebase powered by top models (e.g. Claude
+                      3.7 Sonnet, OpenAI GPT-4o and o3-mini).
+                    </li>
+                    <li>Unlimited Code Completions (powered by Qwen2.5).</li>
+                    <li>Codebase-aware vector database (RAG).</li>
+                    <li>
+                      Agentic features: browser use, database connect, debugger,
+                      shell commands, etc.
+                    </li>
+                  </ul>
+                </Text>
+              </Box>
+              <Separator size="4" my="4" />
+              <Flex direction="column" gap="3" align="center">
+                <Button
+                  onClick={() => {
+                    onCancel();
+                    loginWithProvider("google");
                   }}
+                  disabled={isLoading}
                 >
-                  <TextField.Root
-                    placeholder="Email Address"
-                    type="email"
-                    name="email"
-                    required
-                    disabled={isLoading}
-                  />
-                  <Button type="submit" loading={emailIsLoading} disabled={isLoading}>
-                    Send magic link
-                  </Button>{" "}
-                  {isLoading && <Button onClick={onCancel}>Cancel</Button>}
-                  <Text size="1" align="center">
-                    We will send you a one-time login link by email.
-                  </Text>
-                </form>
+                  <GoogleIcon width="15" height="15" /> Continue with Google
+                </Button>
+                <Button
+                  onClick={() => {
+                    onCancel();
+                    loginWithProvider("github");
+                  }}
+                  disabled={isLoading}
+                >
+                  <GitHubLogoIcon width="15" height="15" /> Continue with GitHub
+                </Button>
+
+                <Text>or</Text>
+
+                <Flex asChild direction="column" gap="3">
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (isLoading) return;
+                      const formData = new FormData(event.currentTarget);
+                      const email = formData.get("email");
+                      if (typeof email === "string") {
+                        emailLogin(email);
+                      }
+                    }}
+                  >
+                    <TextField.Root
+                      placeholder="Email Address"
+                      type="email"
+                      name="email"
+                      required
+                      disabled={isLoading}
+                    />
+                    <Button
+                      type="submit"
+                      loading={emailIsLoading}
+                      disabled={isLoading}
+                    >
+                      Send magic link
+                    </Button>{" "}
+                    {isLoading && <Button onClick={onCancel}>Cancel</Button>}
+                    <Text size="1" align="center">
+                      We will send you a one-time login link by email.
+                    </Text>
+                  </form>
+                </Flex>
               </Flex>
-            </Flex>
             </Accordion.Content>
           </Accordion.Item>
         </Accordion.Root>

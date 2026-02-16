@@ -17,7 +17,8 @@ export const OpenAIComputerCallTool: React.FC<Props> = ({ toolCall }) => {
   const args = state.parsedArgs as Record<string, unknown> | null;
 
   const summary = useMemo(() => {
-    const action = args && typeof args.action === "string" ? args.action : undefined;
+    const action =
+      args && typeof args.action === "string" ? args.action : undefined;
     return action ? (
       <>
         Computer Call: <span className={styles.inlineCode}>{action}</span>
@@ -43,4 +44,3 @@ export const OpenAIComputerCallTool: React.FC<Props> = ({ toolCall }) => {
     </ToolCard>
   );
 };
-

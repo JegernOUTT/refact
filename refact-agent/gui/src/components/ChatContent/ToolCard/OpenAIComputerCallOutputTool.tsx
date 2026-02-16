@@ -55,4 +55,3 @@ export const OpenAIComputerCallOutputTool: React.FC<Props> = ({ toolCall }) => {
     </ToolCard>
   );
 };
-

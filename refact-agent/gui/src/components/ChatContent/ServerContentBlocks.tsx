@@ -25,7 +25,10 @@ type WebSearchToolResult = {
   content?: WebSearchResult[];
 };
 
-type ServerBlock = ServerToolUse | WebSearchToolResult | Record<string, unknown>;
+type ServerBlock =
+  | ServerToolUse
+  | WebSearchToolResult
+  | Record<string, unknown>;
 
 function isServerToolUse(block: ServerBlock): block is ServerToolUse {
   return "type" in block && block.type === "server_tool_use";
@@ -137,11 +140,7 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
                       </Text>
                     )}
                     {safeUrl && (
-                      <Text
-                        size="1"
-                        color="gray"
-                        className={styles.inlineCode}
-                      >
+                      <Text size="1" color="gray" className={styles.inlineCode}>
                         {safeUrl}
                       </Text>
                     )}

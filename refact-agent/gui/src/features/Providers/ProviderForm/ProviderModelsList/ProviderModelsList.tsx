@@ -39,9 +39,12 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
   } = useGetAvailableModelsQuery({ providerName: provider.name });
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const { data: openRouterAccount } = useGetOpenRouterAccountInfoQuery(undefined, {
-    skip: provider.name !== "openrouter",
-  });
+  const { data: openRouterAccount } = useGetOpenRouterAccountInfoQuery(
+    undefined,
+    {
+      skip: provider.name !== "openrouter",
+    },
+  );
 
   const filteredModels = useMemo(() => {
     if (!modelsData?.models) return [];
@@ -105,7 +108,9 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
   }
 
   const totalModels = modelsData.models.length;
-  const enabledCount = modelsData.models.filter((model) => model.enabled).length;
+  const enabledCount = modelsData.models.filter(
+    (model) => model.enabled,
+  ).length;
 
   return (
     <Flex direction="column" gap="3" mt="4">
@@ -154,7 +159,8 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
             <InfoCircledIcon />
           </Callout.Icon>
           <Callout.Text size="1">
-            OpenRouter balance: {openRouterAccount.data.remaining?.toFixed(2) ?? "0.00"}
+            OpenRouter balance:{" "}
+            {openRouterAccount.data.remaining?.toFixed(2) ?? "0.00"}
             {" / "}
             {openRouterAccount.data.limit?.toFixed(2) ?? "0.00"} USD
             {openRouterAccount.data.key_label

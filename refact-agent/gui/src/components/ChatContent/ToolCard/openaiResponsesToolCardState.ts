@@ -18,7 +18,9 @@ function parseJsonOrNull(text: string): unknown {
 }
 
 export function toolNameLabel(name: string): string {
-  const stripped = name.startsWith("openai_") ? name.slice("openai_".length) : name;
+  const stripped = name.startsWith("openai_")
+    ? name.slice("openai_".length)
+    : name;
   return stripped.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
@@ -80,7 +82,9 @@ export function useOpenAiResponsesToolCardState(
   }, [parsedArgs, toolCall.function.arguments]);
 
   const contentText =
-    maybeResult && typeof maybeResult.content === "string" ? maybeResult.content : null;
+    maybeResult && typeof maybeResult.content === "string"
+      ? maybeResult.content
+      : null;
 
   return {
     toolName,
@@ -94,4 +98,3 @@ export function useOpenAiResponsesToolCardState(
     contentText,
   };
 }
-

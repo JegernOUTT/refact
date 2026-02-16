@@ -25,7 +25,11 @@ export const OpenAIAudioTool: React.FC<Props> = ({ toolCall }) => {
 
   const summary = transcript ? (
     <>
-      Audio: <span className={styles.inlineCode}>{transcript.slice(0, 40)}{transcript.length > 40 ? "…" : ""}</span>
+      Audio:{" "}
+      <span className={styles.inlineCode}>
+        {transcript.slice(0, 40)}
+        {transcript.length > 40 ? "…" : ""}
+      </span>
     </>
   ) : (
     "Audio"
@@ -53,4 +57,3 @@ export const OpenAIAudioTool: React.FC<Props> = ({ toolCall }) => {
     </ToolCard>
   );
 };
-

@@ -23,8 +23,7 @@ export const OpenAIFileSearchCallTool: React.FC<Props> = ({ toolCall }) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
 
   const args = state.parsedArgs as Record<string, unknown> | null;
-  const query =
-    args && typeof args.query === "string" ? args.query : undefined;
+  const query = args && typeof args.query === "string" ? args.query : undefined;
 
   const results = useMemo(() => {
     if (!args) return [] as FileSearchResult[];
@@ -67,7 +66,9 @@ export const OpenAIFileSearchCallTool: React.FC<Props> = ({ toolCall }) => {
                   </Text>
                   {text && (
                     <Box mt="1" className={styles.codeBox}>
-                      <ShikiCodeBlock showLineNumbers={false}>{text}</ShikiCodeBlock>
+                      <ShikiCodeBlock showLineNumbers={false}>
+                        {text}
+                      </ShikiCodeBlock>
                     </Box>
                   )}
                 </Box>
@@ -84,4 +85,3 @@ export const OpenAIFileSearchCallTool: React.FC<Props> = ({ toolCall }) => {
     </ToolCard>
   );
 };
-

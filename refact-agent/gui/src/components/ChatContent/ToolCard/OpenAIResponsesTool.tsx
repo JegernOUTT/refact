@@ -116,7 +116,9 @@ function extractToolSummary(toolName: string, args: unknown): React.ReactNode {
   return label;
 }
 
-export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({ toolCall }) => {
+export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({
+  toolCall,
+}) => {
   const [isOpen, setIsOpen] = useState(false);
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
@@ -143,7 +145,9 @@ export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({ toolCa
   }, []);
 
   const content =
-    maybeResult && typeof maybeResult.content === "string" ? maybeResult.content : null;
+    maybeResult && typeof maybeResult.content === "string"
+      ? maybeResult.content
+      : null;
 
   const toolName = toolCall.function.name ?? "openai";
 
@@ -179,9 +183,7 @@ export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({ toolCa
         {content ? <Markdown>{content}</Markdown> : null}
 
         {parsedArgs != null && typeof parsedArgs === "object" && (
-          <Box mb="2">
-            {renderOpenAiResponsesPayload(toolName, parsedArgs)}
-          </Box>
+          <Box mb="2">{renderOpenAiResponsesPayload(toolName, parsedArgs)}</Box>
         )}
 
         <Text size="1" color="gray">
@@ -201,7 +203,9 @@ function renderOpenAiResponsesPayload(
 
   // Web search: show results list (if present)
   if (toolName === "openai_web_search_call") {
-    const results = Array.isArray(obj.results) ? (obj.results as unknown[]) : [];
+    const results = Array.isArray(obj.results)
+      ? (obj.results as unknown[])
+      : [];
     if (results.length > 0) {
       return (
         <Box>
@@ -211,12 +215,15 @@ function renderOpenAiResponsesPayload(
           <Box className={styles.resultList}>
             {results.slice(0, 20).map((r, idx) => {
               const rr = r as Record<string, unknown>;
-              const title = typeof rr.title === "string" ? rr.title : "(no title)";
+              const title =
+                typeof rr.title === "string" ? rr.title : "(no title)";
               const url = typeof rr.url === "string" ? rr.url : "";
               const snippet =
-                typeof rr.snippet === "string" ? rr.snippet :
-                typeof rr.description === "string" ? rr.description :
-                "";
+                typeof rr.snippet === "string"
+                  ? rr.snippet
+                  : typeof rr.description === "string"
+                    ? rr.description
+                    : "";
               return (
                 <Box key={idx} className={styles.resultItem}>
                   <Flex direction="column" gap="1">
@@ -245,7 +252,9 @@ function renderOpenAiResponsesPayload(
 
   // File search: show matches (if present)
   if (toolName === "openai_file_search_call") {
-    const results = Array.isArray(obj.results) ? (obj.results as unknown[]) : [];
+    const results = Array.isArray(obj.results)
+      ? (obj.results as unknown[])
+      : [];
     if (results.length > 0) {
       return (
         <Box>
@@ -274,7 +283,9 @@ function renderOpenAiResponsesPayload(
                   </Text>
                   {text && (
                     <Box mt="1" className={styles.codeBox}>
-                      <ShikiCodeBlock showLineNumbers={false}>{text}</ShikiCodeBlock>
+                      <ShikiCodeBlock showLineNumbers={false}>
+                        {text}
+                      </ShikiCodeBlock>
                     </Box>
                   )}
                 </Box>
@@ -288,7 +299,9 @@ function renderOpenAiResponsesPayload(
 
   // Code interpreter outputs: preserve JSON, but try to show text outputs.
   if (toolName === "openai_code_interpreter_call") {
-    const outputs = Array.isArray(obj.outputs) ? (obj.outputs as unknown[]) : [];
+    const outputs = Array.isArray(obj.outputs)
+      ? (obj.outputs as unknown[])
+      : [];
     if (outputs.length > 0) {
       const textOutputs: string[] = [];
       for (const out of outputs) {
@@ -312,4 +325,3 @@ function renderOpenAiResponsesPayload(
 
   return null;
 }
-

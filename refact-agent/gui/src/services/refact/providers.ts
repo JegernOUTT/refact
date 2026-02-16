@@ -425,7 +425,9 @@ export const providersApi = createApi({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/models/${encodeURIComponent(args.modelId)}/endpoints`;
+        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${
+          args.providerName
+        }/models/${encodeURIComponent(args.modelId)}/endpoints`;
 
         const result = await baseQuery({
           ...extraOptions,
@@ -454,7 +456,10 @@ export const providersApi = createApi({
       },
     }),
 
-    getOpenRouterAccountInfo: builder.query<OpenRouterAccountInfoResponse, undefined>({
+    getOpenRouterAccountInfo: builder.query<
+      OpenRouterAccountInfoResponse,
+      undefined
+    >({
       queryFn: async (_args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
@@ -555,7 +560,11 @@ export const providersApi = createApi({
         model_id: string;
         selected_provider?: string | null;
       },
-      { providerName: string; modelId: string; selectedProvider?: string | null }
+      {
+        providerName: string;
+        modelId: string;
+        selectedProvider?: string | null;
+      }
     >({
       invalidatesTags: (_result, _error, { providerName }) => [
         { type: "AVAILABLE_MODELS", id: providerName },
