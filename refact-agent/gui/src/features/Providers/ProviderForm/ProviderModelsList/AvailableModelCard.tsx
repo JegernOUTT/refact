@@ -215,7 +215,7 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
         </Text>
         <Text size="1">
           {typeof variant.uptime_last_30m === "number"
-            ? `${(variant.uptime_last_30m * 100).toFixed(0)}%`
+            ? `${variant.uptime_last_30m.toFixed(0)}%`
             : "–"}
         </Text>
         <Text size="1" className={styles.providerCellCaps}>

@@ -823,21 +823,21 @@ mod tests {
     fn test_parse_openai_usage_with_anthropic_cache() {
         // OpenRouter -> Anthropic: top-level cache fields
         let usage = json!({
-            "prompt_tokens": 1000,
+            "prompt_tokens": 1200,
             "completion_tokens": 100,
-            "total_tokens": 1100,
+            "total_tokens": 1300,
             "cache_creation_input_tokens": 200,
             "cache_read_input_tokens": 800
         });
 
         let result = parse_openai_usage(&usage).unwrap();
         
-        // prompt_tokens should be adjusted: 1000 - 800 = 200
+        // prompt_tokens should be adjusted: 1200 - 800 (cache_read) - 200 (cache_creation) = 200
         assert_eq!(result.prompt_tokens, 200);
         assert_eq!(result.completion_tokens, 100);
         assert_eq!(result.cache_creation_tokens, Some(200));
         assert_eq!(result.cache_read_tokens, Some(800));
-        assert_eq!(result.total_tokens, 1100);
+        assert_eq!(result.total_tokens, 1300);
     }
 
     #[test]

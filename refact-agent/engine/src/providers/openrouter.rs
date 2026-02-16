@@ -212,8 +212,11 @@ impl OpenRouterProvider {
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
 
-        let selected_provider = selected_provider
-            .filter(|provider| available_providers.contains(provider));
+        let selected_provider = if available_providers.is_empty() {
+            selected_provider
+        } else {
+            selected_provider.filter(|provider| available_providers.contains(provider))
+        };
 
         Some(AvailableModel {
             id,

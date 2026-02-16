@@ -146,7 +146,10 @@ async function collectEvents(
               const event = JSON.parse(payload);
               events.push(event);
 
-              if ((stopWhen?.(event, events) ?? false) || events.length >= maxEvents) {
+              if (
+                (stopWhen?.(event, events) ?? false) ||
+                events.length >= maxEvents
+              ) {
                 finish();
                 return;
               }
