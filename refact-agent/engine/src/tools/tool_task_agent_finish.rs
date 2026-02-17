@@ -269,6 +269,24 @@ impl Tool for ToolTaskAgentFinish {
 
         storage::update_task_stats(gcx.clone(), &task_id).await?;
 
+        if !success {
+            if let Some(ref wt) = worktree_path {
+                if let Some(branch) = board.get_card(&card_id).and_then(|c| c.agent_branch.clone()) {
+                    let _diff = crate::chat::task_agent_monitor::cleanup_failed_agent_worktree(
+                        gcx.clone(), wt, &branch, None
+                    ).await;
+                    let card_id_clear = card_id.clone();
+                    let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                        if let Some(c) = board.get_card_mut(&card_id_clear) {
+                            c.agent_worktree = None;
+                            c.agent_branch = None;
+                        }
+                        Ok(())
+                    }).await;
+                }
+            }
+        }
+
         let result_message = if success {
             if all_finished {
                 format!(

@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::process::Command;
+use std::path::Path;
 use tokio::sync::RwLock as ARwLock;
 use tokio::time::sleep;
 use chrono::Utc;
@@ -140,7 +142,27 @@ async fn mark_agent_as_failed(
 
     tracing::info!("Marked agent for card {} as failed: {}", card_id, reason);
 
-    // Notify planner if all agents are done
+    if let Some(card) = board.get_card(card_id) {
+        if let (Some(ref wt), Some(ref branch)) = (&card.agent_worktree, &card.agent_branch) {
+            let diff_report = cleanup_failed_agent_worktree(
+                gcx.clone(), wt, branch, card.agent_worktree_name.as_deref()
+            ).await;
+            let card_id_for_cleanup = card_id.to_string();
+            let _ = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+                if let Some(c) = board.get_card_mut(&card_id_for_cleanup) {
+                    if !diff_report.is_empty() {
+                        if let Some(ref mut report) = c.final_report {
+                            report.push_str(&diff_report);
+                        }
+                    }
+                    c.agent_worktree = None;
+                    c.agent_branch = None;
+                }
+                Ok(())
+            }).await;
+        }
+    }
+
     if all_finished {
         notify_planner_all_agents_done(gcx, task_id, &board).await?;
     }
@@ -255,6 +277,95 @@ async fn notify_planner_all_agents_done(
     }
 
     Ok(())
+}
+
+pub(crate) async fn cleanup_failed_agent_worktree(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    agent_worktree: &str,
+    agent_branch: &str,
+    _agent_worktree_name: Option<&str>,
+) -> String {
+    let worktree_path = Path::new(agent_worktree);
+    let mut diff_report = String::new();
+
+    if worktree_path.exists() {
+        let uncommitted_diff = Command::new("git")
+            .args(["diff", "HEAD"])
+            .current_dir(worktree_path)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        let committed_diff = Command::new("git")
+            .args(["log", "--patch", "--reverse", "HEAD@{upstream}..HEAD"])
+            .current_dir(worktree_path)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        let committed_diff = if committed_diff.is_empty() {
+            Command::new("git")
+                .args(["diff", &format!("{}~1..HEAD", agent_branch)])
+                .current_dir(worktree_path)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default()
+        } else {
+            committed_diff
+        };
+
+        if !committed_diff.is_empty() || !uncommitted_diff.is_empty() {
+            diff_report.push_str("\n\n## Changes made before failure\n\n");
+            if !committed_diff.is_empty() {
+                diff_report.push_str("### Committed changes\n```diff\n");
+                let truncated: String = committed_diff.chars().take(2000).collect();
+                diff_report.push_str(&truncated);
+                if committed_diff.len() > 2000 {
+                    diff_report.push_str("\n... (truncated)");
+                }
+                diff_report.push_str("\n```\n");
+            }
+            if !uncommitted_diff.is_empty() {
+                diff_report.push_str("### Uncommitted changes\n```diff\n");
+                let truncated: String = uncommitted_diff.chars().take(2000).collect();
+                diff_report.push_str(&truncated);
+                if uncommitted_diff.len() > 2000 {
+                    diff_report.push_str("\n... (truncated)");
+                }
+                diff_report.push_str("\n```\n");
+            }
+        }
+    }
+
+    crate::files_in_workspace::remove_folder(gcx.clone(), &std::path::PathBuf::from(agent_worktree)).await;
+
+    let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
+    if let Some(workspace_root) = project_dirs.first() {
+        let _ = Command::new("git")
+            .args(["worktree", "remove", agent_worktree, "--force"])
+            .current_dir(workspace_root)
+            .output();
+
+        let _ = Command::new("git")
+            .args(["branch", "-D", agent_branch])
+            .current_dir(workspace_root)
+            .output();
+    }
+
+    let parent = Path::new(agent_worktree).parent();
+    if let Some(p) = parent {
+        if p.exists() && p.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false) {
+            let _ = std::fs::remove_dir(p);
+        }
+    }
+
+    diff_report
 }
 
 /// Background task that monitors for stuck agents
