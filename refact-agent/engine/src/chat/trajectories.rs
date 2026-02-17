@@ -475,6 +475,10 @@ pub async fn load_trajectory_for_chat(
             .get("previous_response_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+
+        browser_meta: t
+            .get("browser_meta")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
     };
 
     let auto_approve_editing_tools_present = t.get("auto_approve_editing_tools").and_then(|v| v.as_bool()).is_some();

@@ -9,6 +9,30 @@ use uuid::Uuid;
 use crate::call_validation::{ChatMessage, ChatUsage};
 use super::config::{limits, timeouts, presentation};
 
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BrowserMeta {
+    pub browser_runtime_id: Option<String>,
+    pub profile_dir: Option<String>,
+    #[serde(default)]
+    pub tab_urls: Vec<String>,
+    pub active_tab_id: Option<String>,
+    pub window_bounds: Option<WindowBounds>,
+    #[serde(default)]
+    pub attach_screenshot_on_send: bool,
+    #[serde(default = "default_true")]
+    pub mask_passwords: bool,
+}
+
 pub fn max_queue_size() -> usize {
     limits().max_queue_size
 }
@@ -113,6 +137,9 @@ pub struct ThreadParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_response_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_meta: Option<BrowserMeta>,
 }
 
 impl Default for ThreadParams {
@@ -141,6 +168,7 @@ impl Default for ThreadParams {
             link_type: None,
             root_chat_id: None,
             previous_response_id: None,
+            browser_meta: None,
         }
     }
 }
@@ -770,5 +798,86 @@ mod tests {
         assert_eq!(json2["type"], "runtime_updated");
         assert_eq!(json2["state"], "error");
         assert_eq!(json2["error"], "test error");
+    }
+
+    #[test]
+    fn test_browser_meta_serde_roundtrip_full() {
+        let meta = BrowserMeta {
+            browser_runtime_id: Some("rt-123".to_string()),
+            profile_dir: Some("/tmp/chrome-profile".to_string()),
+            tab_urls: vec!["https://example.com".to_string(), "https://test.com".to_string()],
+            active_tab_id: Some("tab-1".to_string()),
+            window_bounds: Some(WindowBounds { x: 100, y: 200, width: 1920, height: 1080 }),
+            attach_screenshot_on_send: true,
+            mask_passwords: false,
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["browser_runtime_id"], "rt-123");
+        assert_eq!(json["profile_dir"], "/tmp/chrome-profile");
+        assert_eq!(json["tab_urls"].as_array().unwrap().len(), 2);
+        assert_eq!(json["active_tab_id"], "tab-1");
+        assert_eq!(json["window_bounds"]["x"], 100);
+        assert_eq!(json["window_bounds"]["width"], 1920);
+        assert_eq!(json["attach_screenshot_on_send"], true);
+        assert_eq!(json["mask_passwords"], false);
+
+        let roundtrip: BrowserMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.browser_runtime_id.as_deref(), Some("rt-123"));
+        assert_eq!(roundtrip.tab_urls.len(), 2);
+        assert!(roundtrip.attach_screenshot_on_send);
+        assert!(!roundtrip.mask_passwords);
+    }
+
+    #[test]
+    fn test_browser_meta_serde_roundtrip_minimal() {
+        let json_str = r#"{}"#;
+        let meta: BrowserMeta = serde_json::from_str(json_str).unwrap();
+        assert!(meta.browser_runtime_id.is_none());
+        assert!(meta.profile_dir.is_none());
+        assert!(meta.tab_urls.is_empty());
+        assert!(meta.active_tab_id.is_none());
+        assert!(meta.window_bounds.is_none());
+        assert!(!meta.attach_screenshot_on_send);
+        assert!(meta.mask_passwords);
+    }
+
+    #[test]
+    fn test_thread_params_without_browser_meta_omits_field() {
+        let params = ThreadParams::default();
+        assert!(params.browser_meta.is_none());
+        let json = serde_json::to_value(&params).unwrap();
+        assert!(json.get("browser_meta").is_none());
+    }
+
+    #[test]
+    fn test_thread_params_with_browser_meta_roundtrip() {
+        let mut params = ThreadParams::default();
+        params.browser_meta = Some(BrowserMeta {
+            browser_runtime_id: Some("rt-456".to_string()),
+            profile_dir: None,
+            tab_urls: vec!["https://example.com".to_string()],
+            active_tab_id: None,
+            window_bounds: None,
+            attach_screenshot_on_send: false,
+            mask_passwords: true,
+        });
+        let json = serde_json::to_value(&params).unwrap();
+        assert!(json.get("browser_meta").is_some());
+        assert_eq!(json["browser_meta"]["browser_runtime_id"], "rt-456");
+
+        let roundtrip: ThreadParams = serde_json::from_value(json).unwrap();
+        assert!(roundtrip.browser_meta.is_some());
+        let bm = roundtrip.browser_meta.unwrap();
+        assert_eq!(bm.browser_runtime_id.as_deref(), Some("rt-456"));
+        assert_eq!(bm.tab_urls.len(), 1);
+    }
+
+    #[test]
+    fn test_thread_params_backward_compat_no_browser_meta() {
+        let json_str = r#"{"id":"test","title":"Test","model":"gpt-4","mode":"agent","tool_use":"agent","include_project_info":true,"checkpoints_enabled":true}"#;
+        let params: ThreadParams = serde_json::from_str(json_str).unwrap();
+        assert!(params.browser_meta.is_none());
+        assert_eq!(params.id, "test");
+        assert_eq!(params.mode, "agent");
     }
 }
