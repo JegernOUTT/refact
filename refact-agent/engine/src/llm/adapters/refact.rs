@@ -498,7 +498,7 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage], 
 /// For string content, converts to array-of-blocks format so `cache_control` can be attached.
 /// LiteLLM passes these through to Anthropic's native API.
 fn inject_cache_control(messages: &mut [Value]) {
-    let cc = json!({"type": "ephemeral"});
+    let cc = json!({"type": "ephemeral"`, "ttl": "1h"});
 
     fn add_cache_to_message(msg: &mut Value, cc: &Value) {
         let Some(content) = msg.get_mut("content") else { return };
