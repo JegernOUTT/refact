@@ -9,6 +9,29 @@ use uuid::Uuid;
 use crate::call_validation::{ChatMessage, ChatUsage};
 use super::config::{limits, timeouts, presentation};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiffBox {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserTabInfo {
+    pub tab_id: String,
+    pub url: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineEntry {
+    pub timestamp: f64,
+    pub actor: String,
+    pub action: String,
+    pub detail: Option<String>,
+}
+
 fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,6 +314,34 @@ pub enum ChatEvent {
         client_request_id: String,
         accepted: bool,
         result: Option<serde_json::Value>,
+    },
+    BrowserFrame {
+        tab_id: String,
+        mime: String,
+        data: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diff_boxes: Vec<DiffBox>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changed_text: Option<String>,
+    },
+    BrowserStatus {
+        runtime_id: String,
+        connected: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tabs: Vec<BrowserTabInfo>,
+    },
+    BrowserClosed {
+        runtime_id: String,
+        reason: String,
+    },
+    BrowserTimeline {
+        events: Vec<TimelineEntry>,
     },
 }
 
@@ -879,5 +930,210 @@ mod tests {
         assert!(params.browser_meta.is_none());
         assert_eq!(params.id, "test");
         assert_eq!(params.mode, "agent");
+    }
+
+    #[test]
+    fn test_chat_event_browser_frame_serde() {
+        let event = ChatEvent::BrowserFrame {
+            tab_id: "tab-1".to_string(),
+            mime: "image/jpeg".to_string(),
+            data: "base64data".to_string(),
+            diff_boxes: vec![DiffBox { x: 10, y: 20, w: 100, h: 50 }],
+            changed_text: Some("button clicked".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "browser_frame");
+        assert_eq!(json["tab_id"], "tab-1");
+        assert_eq!(json["mime"], "image/jpeg");
+        assert_eq!(json["data"], "base64data");
+        assert_eq!(json["diff_boxes"][0]["x"], 10);
+        assert_eq!(json["diff_boxes"][0]["w"], 100);
+        assert_eq!(json["changed_text"], "button clicked");
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::BrowserFrame { tab_id, mime, diff_boxes, changed_text, .. } => {
+                assert_eq!(tab_id, "tab-1");
+                assert_eq!(mime, "image/jpeg");
+                assert_eq!(diff_boxes.len(), 1);
+                assert_eq!(changed_text, Some("button clicked".to_string()));
+            }
+            _ => panic!("Expected BrowserFrame"),
+        }
+    }
+
+    #[test]
+    fn test_chat_event_browser_frame_minimal() {
+        let event = ChatEvent::BrowserFrame {
+            tab_id: "tab-2".to_string(),
+            mime: "image/png".to_string(),
+            data: "abc123".to_string(),
+            diff_boxes: vec![],
+            changed_text: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "browser_frame");
+        assert!(json.get("diff_boxes").is_none());
+        assert!(json.get("changed_text").is_none());
+    }
+
+    #[test]
+    fn test_chat_event_browser_status_serde() {
+        let event = ChatEvent::BrowserStatus {
+            runtime_id: "rt-1".to_string(),
+            connected: true,
+            active_tab: Some("tab-1".to_string()),
+            url: Some("https://example.com".to_string()),
+            title: Some("Example".to_string()),
+            tabs: vec![BrowserTabInfo {
+                tab_id: "tab-1".to_string(),
+                url: "https://example.com".to_string(),
+                title: "Example".to_string(),
+            }],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "browser_status");
+        assert_eq!(json["runtime_id"], "rt-1");
+        assert_eq!(json["connected"], true);
+        assert_eq!(json["active_tab"], "tab-1");
+        assert_eq!(json["tabs"][0]["tab_id"], "tab-1");
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::BrowserStatus { runtime_id, connected, tabs, .. } => {
+                assert_eq!(runtime_id, "rt-1");
+                assert!(connected);
+                assert_eq!(tabs.len(), 1);
+            }
+            _ => panic!("Expected BrowserStatus"),
+        }
+    }
+
+    #[test]
+    fn test_chat_event_browser_status_minimal() {
+        let event = ChatEvent::BrowserStatus {
+            runtime_id: "rt-2".to_string(),
+            connected: false,
+            active_tab: None,
+            url: None,
+            title: None,
+            tabs: vec![],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "browser_status");
+        assert_eq!(json["connected"], false);
+        assert!(json.get("active_tab").is_none());
+        assert!(json.get("url").is_none());
+        assert!(json.get("tabs").is_none());
+    }
+
+    #[test]
+    fn test_chat_event_browser_closed_serde() {
+        let event = ChatEvent::BrowserClosed {
+            runtime_id: "rt-1".to_string(),
+            reason: "user_closed".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "browser_closed");
+        assert_eq!(json["runtime_id"], "rt-1");
+        assert_eq!(json["reason"], "user_closed");
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::BrowserClosed { runtime_id, reason } => {
+                assert_eq!(runtime_id, "rt-1");
+                assert_eq!(reason, "user_closed");
+            }
+            _ => panic!("Expected BrowserClosed"),
+        }
+    }
+
+    #[test]
+    fn test_chat_event_browser_timeline_serde() {
+        let event = ChatEvent::BrowserTimeline {
+            events: vec![
+                TimelineEntry {
+                    timestamp: 1000.0,
+                    actor: "user".to_string(),
+                    action: "click".to_string(),
+                    detail: Some("#submit-btn".to_string()),
+                },
+                TimelineEntry {
+                    timestamp: 1001.0,
+                    actor: "agent".to_string(),
+                    action: "navigate".to_string(),
+                    detail: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "browser_timeline");
+        assert_eq!(json["events"].as_array().unwrap().len(), 2);
+        assert_eq!(json["events"][0]["actor"], "user");
+        assert_eq!(json["events"][1]["action"], "navigate");
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::BrowserTimeline { events } => {
+                assert_eq!(events.len(), 2);
+                assert_eq!(events[0].action, "click");
+            }
+            _ => panic!("Expected BrowserTimeline"),
+        }
+    }
+
+    #[test]
+    fn test_diff_box_serde() {
+        let db = DiffBox { x: 10, y: 20, w: 100, h: 50 };
+        let json = serde_json::to_value(&db).unwrap();
+        assert_eq!(json["x"], 10);
+        assert_eq!(json["y"], 20);
+        assert_eq!(json["w"], 100);
+        assert_eq!(json["h"], 50);
+        let parsed: DiffBox = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, db);
+    }
+
+    #[test]
+    fn test_browser_tab_info_serde() {
+        let tab = BrowserTabInfo {
+            tab_id: "t1".to_string(),
+            url: "https://test.com".to_string(),
+            title: "Test".to_string(),
+        };
+        let json = serde_json::to_value(&tab).unwrap();
+        let parsed: BrowserTabInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.tab_id, "t1");
+        assert_eq!(parsed.url, "https://test.com");
+    }
+
+    #[test]
+    fn test_timeline_entry_serde() {
+        let entry = TimelineEntry {
+            timestamp: 999.0,
+            actor: "user".to_string(),
+            action: "input".to_string(),
+            detail: Some("typed text".to_string()),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["timestamp"], 999.0);
+        assert_eq!(json["detail"], "typed text");
+        let parsed: TimelineEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.action, "input");
+    }
+
+    #[test]
+    fn test_browser_events_in_event_envelope() {
+        let envelope = EventEnvelope {
+            chat_id: "chat-1".to_string(),
+            seq: 5,
+            event: ChatEvent::BrowserFrame {
+                tab_id: "t1".to_string(),
+                mime: "image/jpeg".to_string(),
+                data: "base64".to_string(),
+                diff_boxes: vec![],
+                changed_text: None,
+            },
+        };
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["chat_id"], "chat-1");
+        assert_eq!(json["seq"], "5");
+        assert_eq!(json["type"], "browser_frame");
     }
 }

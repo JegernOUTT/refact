@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,7 +13,7 @@ use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::chat::types::WindowBounds;
+use crate::chat::types::{WindowBounds, DiffBox};
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_chrome::ChromeTab;
 use crate::integrations::browser_types::{
@@ -19,6 +21,10 @@ use crate::integrations::browser_types::{
     MAX_BUFFER_SIZE, SCROLL_DEBOUNCE_MS,
     apply_password_masking, enforce_buffer_limit, flush_buffer_since,
 };
+
+const FRAME_RATE_LIMIT_MS: u128 = 500;
+const FRAME_HASH_THRESHOLD: u64 = 50;
+const DIFF_BLOCK_SIZE: u32 = 64;
 
 const RECORDER_SCRIPT_TEMPLATE: &str = include_str!("browser_recorder.js");
 
@@ -46,6 +52,7 @@ pub struct BrowserRuntime {
     pub last_send_mutation_cursor: usize,
     pub last_frame_hash: Option<u64>,
     pub last_frame_data: Option<Vec<u8>>,
+    pub last_frame_time: Option<Instant>,
     pub idle_timeout: Duration,
     pub is_connected: bool,
     pub last_activity: Instant,
@@ -99,6 +106,7 @@ impl BrowserRuntime {
             last_send_mutation_cursor: 0,
             last_frame_hash: None,
             last_frame_data: None,
+            last_frame_time: None,
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),
@@ -228,6 +236,91 @@ impl BrowserRuntime {
     pub fn flush_mutation_summary(&mut self) -> Vec<MutationSummaryEntry> {
         flush_buffer_since(&self.mutation_summary, &mut self.last_send_mutation_cursor)
     }
+
+    pub fn is_frame_rate_limited(&self) -> bool {
+        if let Some(last_time) = self.last_frame_time {
+            last_time.elapsed().as_millis() < FRAME_RATE_LIMIT_MS
+        } else {
+            false
+        }
+    }
+
+    pub fn should_emit_frame(&self, new_hash: u64) -> bool {
+        if self.is_frame_rate_limited() {
+            return false;
+        }
+        match self.last_frame_hash {
+            Some(old_hash) => hash_distance(old_hash, new_hash) > FRAME_HASH_THRESHOLD,
+            None => true,
+        }
+    }
+
+    pub fn update_frame_state(&mut self, hash: u64, data: Vec<u8>) {
+        self.last_frame_hash = Some(hash);
+        self.last_frame_data = Some(data);
+        self.last_frame_time = Some(Instant::now());
+    }
+}
+
+pub fn compute_frame_hash(data: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(data);
+    hasher.finish()
+}
+
+pub fn hash_distance(a: u64, b: u64) -> u64 {
+    (a ^ b).count_ones() as u64
+}
+
+pub fn compute_diff_boxes(
+    old_data: &[u8],
+    new_data: &[u8],
+    width: u32,
+    height: u32,
+    channels: u32,
+) -> Vec<DiffBox> {
+    let row_bytes = (width * channels) as usize;
+    let expected_size = (height as usize) * row_bytes;
+    if old_data.len() < expected_size || new_data.len() < expected_size {
+        return Vec::new();
+    }
+
+    let blocks_x = (width + DIFF_BLOCK_SIZE - 1) / DIFF_BLOCK_SIZE;
+    let blocks_y = (height + DIFF_BLOCK_SIZE - 1) / DIFF_BLOCK_SIZE;
+    let mut diff_boxes = Vec::new();
+
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let x0 = bx * DIFF_BLOCK_SIZE;
+            let y0 = by * DIFF_BLOCK_SIZE;
+            let x1 = (x0 + DIFF_BLOCK_SIZE).min(width);
+            let y1 = (y0 + DIFF_BLOCK_SIZE).min(height);
+
+            let mut differs = false;
+            'outer: for y in y0..y1 {
+                let row_start = (y as usize) * row_bytes;
+                let col_start = (x0 * channels) as usize;
+                let col_end = (x1 * channels) as usize;
+                let old_slice = &old_data[row_start + col_start..row_start + col_end];
+                let new_slice = &new_data[row_start + col_start..row_start + col_end];
+                if old_slice != new_slice {
+                    differs = true;
+                    break 'outer;
+                }
+            }
+
+            if differs {
+                diff_boxes.push(DiffBox {
+                    x: x0,
+                    y: y0,
+                    w: x1 - x0,
+                    h: y1 - y0,
+                });
+            }
+        }
+    }
+
+    diff_boxes
 }
 
 pub fn inject_recorder_into_tab(
@@ -562,6 +655,129 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[test]
+    fn test_compute_frame_hash_deterministic() {
+        let data = vec![0u8; 1024];
+        let h1 = compute_frame_hash(&data);
+        let h2 = compute_frame_hash(&data);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_compute_frame_hash_different_for_different_data() {
+        let data1 = vec![0u8; 1024];
+        let data2 = vec![1u8; 1024];
+        let h1 = compute_frame_hash(&data1);
+        let h2 = compute_frame_hash(&data2);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_distance_identical() {
+        assert_eq!(hash_distance(0xABCD, 0xABCD), 0);
+    }
+
+    #[test]
+    fn test_hash_distance_different() {
+        let d = hash_distance(0, u64::MAX);
+        assert_eq!(d, 64);
+    }
+
+    #[test]
+    fn test_should_emit_frame_first_frame() {
+        let rt = make_test_runtime();
+        assert!(rt.should_emit_frame(12345));
+    }
+
+    #[test]
+    fn test_should_emit_frame_same_hash() {
+        let mut rt = make_test_runtime();
+        rt.last_frame_hash = Some(12345);
+        assert!(!rt.should_emit_frame(12345));
+    }
+
+    #[test]
+    fn test_should_emit_frame_rate_limited() {
+        let mut rt = make_test_runtime();
+        rt.last_frame_time = Some(Instant::now());
+        assert!(!rt.should_emit_frame(99999));
+    }
+
+    #[test]
+    fn test_should_emit_frame_after_rate_limit_expires() {
+        let mut rt = make_test_runtime();
+        rt.last_frame_time = Some(Instant::now() - Duration::from_millis(600));
+        assert!(rt.should_emit_frame(99999));
+    }
+
+    #[test]
+    fn test_update_frame_state() {
+        let mut rt = make_test_runtime();
+        assert!(rt.last_frame_hash.is_none());
+        assert!(rt.last_frame_data.is_none());
+        assert!(rt.last_frame_time.is_none());
+        rt.update_frame_state(42, vec![1, 2, 3]);
+        assert_eq!(rt.last_frame_hash, Some(42));
+        assert_eq!(rt.last_frame_data, Some(vec![1, 2, 3]));
+        assert!(rt.last_frame_time.is_some());
+    }
+
+    #[test]
+    fn test_compute_diff_boxes_identical_data() {
+        let data = vec![128u8; 128 * 128 * 3];
+        let boxes = compute_diff_boxes(&data, &data, 128, 128, 3);
+        assert!(boxes.is_empty());
+    }
+
+    #[test]
+    fn test_compute_diff_boxes_completely_different() {
+        let old_data = vec![0u8; 128 * 128 * 3];
+        let new_data = vec![255u8; 128 * 128 * 3];
+        let boxes = compute_diff_boxes(&old_data, &new_data, 128, 128, 3);
+        assert!(!boxes.is_empty());
+        let blocks = (128 + DIFF_BLOCK_SIZE - 1) / DIFF_BLOCK_SIZE;
+        assert_eq!(boxes.len(), (blocks * blocks) as usize);
+    }
+
+    #[test]
+    fn test_compute_diff_boxes_single_pixel_change() {
+        let old_data = vec![0u8; 128 * 128 * 3];
+        let mut new_data = old_data.clone();
+        new_data[0] = 255;
+        let boxes = compute_diff_boxes(&old_data, &new_data, 128, 128, 3);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].x, 0);
+        assert_eq!(boxes[0].y, 0);
+    }
+
+    #[test]
+    fn test_compute_diff_boxes_short_data() {
+        let old_data = vec![0u8; 10];
+        let new_data = vec![1u8; 10];
+        let boxes = compute_diff_boxes(&old_data, &new_data, 128, 128, 3);
+        assert!(boxes.is_empty());
+    }
+
+    #[test]
+    fn test_is_frame_rate_limited_no_previous() {
+        let rt = make_test_runtime();
+        assert!(!rt.is_frame_rate_limited());
+    }
+
+    #[test]
+    fn test_is_frame_rate_limited_recently_sent() {
+        let mut rt = make_test_runtime();
+        rt.last_frame_time = Some(Instant::now());
+        assert!(rt.is_frame_rate_limited());
+    }
+
+    #[test]
+    fn test_is_frame_rate_limited_expired() {
+        let mut rt = make_test_runtime();
+        rt.last_frame_time = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!rt.is_frame_rate_limited());
+    }
+
     fn make_test_runtime() -> BrowserRuntime {
         BrowserRuntime {
             runtime_id: "test-runtime".to_string(),
@@ -580,6 +796,7 @@ mod tests {
             last_send_mutation_cursor: 0,
             last_frame_hash: None,
             last_frame_data: None,
+            last_frame_time: None,
             idle_timeout: Duration::from_secs(600),
             is_connected: true,
             last_activity: Instant::now(),
