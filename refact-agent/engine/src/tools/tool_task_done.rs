@@ -21,7 +21,7 @@ fn spawn_memory_enrichment_task(
 ) {
     tokio::spawn(async move {
         let enrichment_params = EnrichmentParams {
-            base_tags: vec!["task-report".to_string()],
+            base_tags: vec!["task-report".to_string(), "completed".to_string()],
             base_filenames: files_changed,
             base_kind: "task-report".to_string(),
             base_title: Some(summary.clone()),

@@ -26,6 +26,7 @@ use crate::global_context::GlobalContext;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 use crate::knowledge_graph::kg_subchat::{enrich_knowledge_metadata, check_deprecation};
 use crate::knowledge_graph::build_knowledge_graph;
+use crate::http::routers::v1::knowledge_ops::auto_link_memory;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -189,6 +190,63 @@ fn compute_content_hash_hex(content: &str) -> String {
     let mut h = Sha256::new();
     h.update(content.as_bytes());
     hex::encode(h.finalize())
+}
+
+fn extract_fallback_tags(content: &str, detected_files: &[String], detected_entities: &[String]) -> Vec<String> {
+    let content_lower = content.to_lowercase();
+    let mut tags = Vec::new();
+    
+    let languages = [
+        "rust", "python", "typescript", "javascript", "java", "kotlin", 
+        "cpp", "c++", "go", "swift", "ruby", "php", "csharp", "c#"
+    ];
+    for lang in &languages {
+        if content_lower.contains(lang) {
+            tags.push(lang.to_string());
+        }
+    }
+    
+    let domains = [
+        "frontend", "backend", "database", "testing", "performance", 
+        "security", "api", "ui", "ux", "devops", "deployment", 
+        "refactoring", "debugging", "optimization", "architecture",
+        "react", "vue", "angular", "node", "express", "django",
+        "postgres", "mysql", "redis", "docker", "kubernetes"
+    ];
+    for domain in &domains {
+        if content_lower.contains(domain) {
+            tags.push(domain.to_string());
+        }
+    }
+    
+    let actions = [
+        "fix", "bug", "error", "implement", "add", "remove", 
+        "refactor", "optimize", "improve", "update", "migrate"
+    ];
+    for action in &actions {
+        if content_lower.contains(action) {
+            tags.push(action.to_string());
+        }
+    }
+    
+    for file in detected_files.iter().take(5) {
+        if let Some(ext) = std::path::Path::new(file).extension() {
+            if let Some(ext_str) = ext.to_str() {
+                tags.push(ext_str.to_lowercase());
+            }
+        }
+    }
+    
+    for entity in detected_entities.iter().take(3) {
+        if entity.len() >= 4 && entity.len() <= 30 {
+            tags.push(entity.to_lowercase());
+        }
+    }
+    
+    tags.sort();
+    tags.dedup();
+    tags.truncate(10);
+    tags
 }
 
 pub async fn get_global_knowledge_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
@@ -958,7 +1016,12 @@ pub async fn memories_add_enriched(
                             .map(|l| l.trim_start_matches('#').trim().to_string())
                     }),
                     if tags.is_empty() {
-                        vec![params.base_kind.clone()]
+                        let mut fallback = vec![params.base_kind.clone()];
+                        fallback.extend(extract_fallback_tags(content, &detected_paths, &entities));
+                        fallback.sort();
+                        fallback.dedup();
+                        fallback.truncate(15);
+                        fallback
                     } else {
                         tags
                     },
@@ -969,12 +1032,20 @@ pub async fn memories_add_enriched(
                 )
             }
             Err(e) => {
-                warn!("Enrichment failed, using defaults: {}", e);
-                let tags = if params.base_tags.is_empty() {
-                    vec![params.base_kind.clone()]
-                } else {
-                    params.base_tags
-                };
+                warn!("Enrichment failed, using defaults with fallback tags: {}", e);
+                let mut tags = params.base_tags.clone();
+                
+                let fallback_tags = extract_fallback_tags(content, &detected_paths, &entities);
+                tags.extend(fallback_tags);
+                
+                if tags.is_empty() {
+                    tags.push(params.base_kind.clone());
+                }
+                
+                tags.sort();
+                tags.dedup();
+                tags.truncate(15);
+                
                 (
                     params.base_title.or_else(|| {
                         content
@@ -1057,6 +1128,18 @@ pub async fn memories_add_enriched(
 
     let file_path = memories_add(gcx.clone(), &frontmatter, content).await?;
     let new_doc_id = frontmatter.id.clone().unwrap();
+
+    let mut updated_frontmatter = frontmatter.clone();
+    if let Err(e) = auto_link_memory(gcx.clone(), &mut updated_frontmatter, content, &file_path).await {
+        warn!("Auto-linking failed for new memory: {}", e);
+    } else if updated_frontmatter.links != frontmatter.links {
+        let md_content = format!("{}\n\n{}", updated_frontmatter.to_yaml(), content);
+        if let Err(e) = fs::write(&file_path, &md_content).await {
+            warn!("Failed to update memory with auto-links: {}", e);
+        } else {
+            info!("Auto-linked {} docs to {}", updated_frontmatter.links.len(), file_path.display());
+        }
+    }
 
     let deprecation_candidates =
         kg.get_deprecation_candidates(&final_tags, &final_filenames, &entities, Some(&new_doc_id));

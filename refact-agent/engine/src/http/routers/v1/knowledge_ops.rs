@@ -18,9 +18,9 @@ use crate::knowledge_graph::{KnowledgeFrontmatter, build_knowledge_graph};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 
-const AUTO_LINK_MAX_LINKS: usize = 5;
-const AUTO_LINK_MIN_SCORE: f64 = 3.0;
-const AUTO_LINK_MAX_TOTAL: usize = 10;
+pub const AUTO_LINK_MAX_LINKS: usize = 5;
+pub const AUTO_LINK_MIN_SCORE: f64 = 3.0;
+pub const AUTO_LINK_MAX_TOTAL: usize = 10;
 const VALID_STATUSES: &[&str] = &["active", "deprecated", "archived"];
 
 fn extract_entities(content: &str) -> Vec<String> {
@@ -88,6 +88,56 @@ pub struct MemoryOperationResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+pub async fn auto_link_memory(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    frontmatter: &mut KnowledgeFrontmatter,
+    content: &str,
+    doc_path: &Path,
+) -> Result<(), String> {
+    let entities = extract_entities(content);
+    let kg = build_knowledge_graph(gcx.clone()).await;
+    let similar_docs = kg.find_similar_docs(
+        &frontmatter.tags,
+        &frontmatter.filenames,
+        &entities,
+    );
+
+    let doc_id = frontmatter
+        .id
+        .clone()
+        .unwrap_or_else(|| doc_path.to_string_lossy().to_string());
+    
+    let suggested_links: Vec<String> = similar_docs
+        .into_iter()
+        .filter(|(id, score)| {
+            if *score < AUTO_LINK_MIN_SCORE || *id == doc_id {
+                return false;
+            }
+            if let Some(doc) = kg.docs.get(id) {
+                if !doc.frontmatter.is_active() {
+                    return false;
+                }
+            }
+            true
+        })
+        .take(AUTO_LINK_MAX_LINKS)
+        .map(|(id, _)| id)
+        .collect();
+
+    for link in suggested_links {
+        if frontmatter.links.len() >= AUTO_LINK_MAX_TOTAL {
+            break;
+        }
+        if !frontmatter.links.contains(&link) {
+            frontmatter.links.push(link);
+        }
+    }
+
+    frontmatter.links.retain(|link| link != &doc_id);
+    
+    Ok(())
 }
 
 fn get_knowledge_root(gcx: &Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, ScratchError> {
@@ -198,47 +248,10 @@ pub async fn handle_v1_knowledge_update_memory(
 
     let auto_link_enabled = post.auto_link.unwrap_or(true);
     if auto_link_enabled {
-        let entities = extract_entities(&content_to_write);
-        let kg = build_knowledge_graph(gcx.clone()).await;
-        let similar_docs = kg.find_similar_docs(
-            &frontmatter.tags,
-            &frontmatter.filenames,
-            &entities,
-        );
-
-        let doc_id = frontmatter.id.clone().unwrap_or_else(|| file_path.to_string_lossy().to_string());
-        let suggested_links: Vec<String> = similar_docs
-            .into_iter()
-            .filter(|(id, score)| {
-                if *score < AUTO_LINK_MIN_SCORE || *id == doc_id {
-                    return false;
-                }
-                if let Some(doc) = kg.docs.get(id) {
-                    if doc.frontmatter.kind_or_default() == "trajectory" {
-                        return false;
-                    }
-                    if !doc.frontmatter.is_active() {
-                        return false;
-                    }
-                }
-                true
-            })
-            .take(AUTO_LINK_MAX_LINKS)
-            .map(|(id, _)| id)
-            .collect();
-
-        for link in suggested_links {
-            if frontmatter.links.len() >= AUTO_LINK_MAX_TOTAL {
-                break;
-            }
-            if !frontmatter.links.contains(&link) {
-                frontmatter.links.push(link);
-            }
+        if let Err(e) = auto_link_memory(gcx.clone(), &mut frontmatter, &content_to_write, &file_path).await {
+            tracing::warn!("Auto-linking failed: {}", e);
         }
     }
-
-    let doc_id = frontmatter.id.clone().unwrap_or_else(|| file_path.to_string_lossy().to_string());
-    frontmatter.links.retain(|link| link != &doc_id);
 
     let new_content = format!("{}\n\n{}", frontmatter.to_yaml(), content_to_write.trim());
 

@@ -114,7 +114,7 @@ pub mod graceful_shutdown;
 mod gui_help_handlers;
 pub mod knowledge_enrichment;
 mod knowledge_graph;
-mod knowledge_ops;
+pub mod knowledge_ops;
 pub mod links;
 pub mod lsp_like_handlers;
 pub mod sidebar;
