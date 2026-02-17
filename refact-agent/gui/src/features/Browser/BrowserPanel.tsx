@@ -5,7 +5,10 @@ import {
   selectBrowserRuntime,
   selectTimelineOpen,
   toggleTimelineOpen,
+  setBrowserRuntime,
+  setBrowserNotification,
 } from "./browserSlice";
+import { browserApi } from "../../services/refact/browser";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { ActionTimeline } from "./ActionTimeline";
 import styles from "./Browser.module.css";
@@ -22,10 +25,39 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
   const timelineOpen = useAppSelector((state) =>
     selectTimelineOpen(state, chatId),
   );
+  const [browserStart] = browserApi.useBrowserStartMutation();
 
   const isConnected = runtime?.connected ?? false;
   const url = runtime?.url ?? "";
   const frame = runtime?.latest_frame;
+  const notification = runtime?.notification;
+
+  const handleRestart = useCallback(() => {
+    void (async () => {
+      const result = await browserStart({ chat_id: chatId }).unwrap();
+      dispatch(
+        setBrowserRuntime({
+          chatId,
+          runtime: {
+            runtime_id: result.runtime_id,
+            connected: true,
+            active_tab: null,
+            url: null,
+            title: null,
+            tabs: [],
+            latest_frame: null,
+            picker_active: false,
+            attach_screenshot_on_send: false,
+            notification: null,
+          },
+        }),
+      );
+    })();
+  }, [browserStart, chatId, dispatch]);
+
+  const handleDismissNotification = useCallback(() => {
+    dispatch(setBrowserNotification({ chatId, notification: null }));
+  }, [dispatch, chatId]);
 
   const handleToggleTimeline = useCallback(() => {
     dispatch(toggleTimelineOpen({ chatId }));
@@ -34,6 +66,35 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
   return (
     <div className={styles.browserPanel}>
       <BrowserToolbar chatId={chatId} />
+      {notification && (
+        <div
+          className={classNames(styles.notification, {
+            [styles.notificationDetached]: notification.type === "detached",
+            [styles.notificationClosed]: notification.type === "closed",
+            [styles.notificationTimeout]: notification.type === "timeout",
+            [styles.notificationAttached]: notification.type === "attached",
+          })}
+        >
+          <span>{notification.message}</span>
+          {(notification.type === "closed" ||
+            notification.type === "timeout") && (
+            <button
+              type="button"
+              className={styles.restartButton}
+              onClick={handleRestart}
+            >
+              Restart
+            </button>
+          )}
+          <button
+            type="button"
+            className={styles.dismissButton}
+            onClick={handleDismissNotification}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <div className={styles.statusBar}>
         <span
           className={classNames(styles.statusDot, {

@@ -801,18 +801,89 @@ pub async fn handle_browser_handoff(
         ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.from_chat_id))
     })?;
 
-    let mut rt = runtime_arc.lock().await;
-    rt.reattach(&post.to_chat_id);
+    let (profile_dir, tab_urls, window_bounds, mask_passwords, attach_screenshot) = {
+        let mut rt = runtime_arc.lock().await;
+        let profile_dir = rt.profile_dir.to_string_lossy().to_string();
+        let tab_urls: Vec<String> = rt.browser.get_tabs().lock()
+            .map(|tabs| tabs.iter().map(|t| t.get_url()).collect())
+            .unwrap_or_default();
+        let window_bounds = rt.window_bounds.clone();
+        let mask_passwords = rt.mask_passwords;
+        let attach_screenshot = false;
+
+        rt.detach();
+        rt.reattach(&post.to_chat_id);
+        rt.touch();
+
+        (profile_dir, tab_urls, window_bounds, mask_passwords, attach_screenshot)
+    };
 
     Ok(json_response(StatusCode::OK, serde_json::json!({
         "runtime_id": rid,
-        "status": "transferred"
+        "status": "transferred",
+        "from_chat_id": post.from_chat_id,
+        "to_chat_id": post.to_chat_id,
+        "profile_dir": profile_dir,
+        "tab_urls": tab_urls,
+        "window_bounds": window_bounds,
+        "mask_passwords": mask_passwords,
+        "attach_screenshot_on_send": attach_screenshot
     })))
+}
+
+pub async fn handle_browser_status(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
+        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+    })?;
+
+    match find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await {
+        Some((rid, runtime_arc)) => {
+            let rt = runtime_arc.lock().await;
+            let tab_urls: Vec<String> = rt.browser.get_tabs().lock()
+                .map(|tabs| tabs.iter().map(|t| t.get_url()).collect())
+                .unwrap_or_default();
+            let title = rt.browser.get_tabs().lock()
+                .ok()
+                .and_then(|tabs| tabs.first().and_then(|t| t.get_title().ok()))
+                .unwrap_or_default();
+            let url = rt.browser.get_tabs().lock()
+                .ok()
+                .map(|tabs| tabs.first().map(|t| t.get_url()).unwrap_or_default())
+                .unwrap_or_default();
+
+            Ok(json_response(StatusCode::OK, serde_json::json!({
+                "runtime_id": rid,
+                "connected": rt.is_connected,
+                "url": url,
+                "title": title,
+                "tab_urls": tab_urls,
+                "idle_seconds": rt.last_activity.elapsed().as_secs(),
+                "idle_timeout": rt.idle_timeout.as_secs()
+            })))
+        }
+        None => {
+            Ok(json_response(StatusCode::OK, serde_json::json!({
+                "runtime_id": null,
+                "connected": false
+            })))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_handoff_body_deserialize() {
+        let json = r#"{"from_chat_id":"chat-1","to_chat_id":"chat-2"}"#;
+        let body: HandoffBody = serde_json::from_str(json).unwrap();
+        assert_eq!(body.from_chat_id, "chat-1");
+        assert_eq!(body.to_chat_id, "chat-2");
+    }
 
     #[test]
     fn test_sanitize_curl_get() {

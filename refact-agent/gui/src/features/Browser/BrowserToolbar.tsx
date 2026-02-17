@@ -8,6 +8,7 @@ import {
   setPickerActive,
   setBrowserRuntime,
   removeBrowserRuntime,
+  markBrowserDetached,
 } from "./browserSlice";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { selectLspPort, selectApiKey } from "../Config/configSlice";
@@ -31,6 +32,7 @@ interface LoadingFlags {
   record: boolean;
   summarize: boolean;
   extract: boolean;
+  handoff: boolean;
 }
 
 const defaultLoading: LoadingFlags = {
@@ -46,6 +48,7 @@ const defaultLoading: LoadingFlags = {
   record: false,
   summarize: false,
   extract: false,
+  handoff: false,
 };
 
 export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
@@ -67,6 +70,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
   const [browserElementPick] = browserApi.useBrowserElementPickMutation();
   const [browserRecordAnimation] =
     browserApi.useBrowserRecordAnimationMutation();
+  const [browserHandoff] = browserApi.useBrowserHandoffMutation();
 
   const withLoading = useCallback(
     async (key: keyof LoadingFlags, fn: () => Promise<void>) => {
@@ -100,6 +104,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
             timeline_open: false,
             timeline_filter_source: "all",
             timeline_filter_type: null,
+            notification: null,
           },
         }),
       );
@@ -241,6 +246,39 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
     });
   }, [browserScreenshot, chatId, port, apiKey, withLoading]);
 
+  const handleHandoff = useCallback(
+    (toChatId: string) => {
+      void withLoading("handoff", async () => {
+        await browserHandoff({
+          from_chat_id: chatId,
+          to_chat_id: toChatId,
+        }).unwrap();
+        dispatch(markBrowserDetached({ chatId }));
+        dispatch(
+          setBrowserRuntime({
+            chatId: toChatId,
+            runtime: {
+              runtime_id: runtime?.runtime_id ?? "",
+              connected: true,
+              active_tab: null,
+              url: runtime?.url ?? null,
+              title: runtime?.title ?? null,
+              tabs: [],
+              latest_frame: runtime?.latest_frame ?? null,
+              picker_active: false,
+              attach_screenshot_on_send: false,
+              notification: {
+                type: "attached",
+                message: "Browser session attached",
+              },
+            },
+          }),
+        );
+      });
+    },
+    [browserHandoff, chatId, dispatch, runtime, withLoading],
+  );
+
   const handleToggleScreenshotOnSend = useCallback(() => {
     dispatch(toggleAttachScreenshotOnSend({ chatId }));
   }, [dispatch, chatId]);
@@ -268,6 +306,18 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
           {loading.stop ? "Stopping…" : "⏹️ Stop"}
         </button>
       )}
+
+      <button
+        type="button"
+        className={styles.toolbarButton}
+        onClick={() => {
+          const target = window.prompt("Target chat ID for handoff:");
+          if (target) handleHandoff(target);
+        }}
+        disabled={!isConnected || loading.handoff}
+      >
+        {loading.handoff ? "…" : "🔄"} Handoff
+      </button>
 
       <div className={styles.toolbarSeparator} />
 

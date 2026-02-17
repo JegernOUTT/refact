@@ -8,6 +8,9 @@ import {
   removeBrowserRuntime,
   setPickerActive,
   toggleAttachScreenshotOnSend,
+  setBrowserNotification,
+  markBrowserDetached,
+  markBrowserClosed,
   type BrowserState,
   type BrowserRuntime,
   type BrowserFrame,
@@ -30,6 +33,7 @@ function makeRuntime(overrides?: Partial<BrowserRuntime>): BrowserRuntime {
     timeline_open: false,
     timeline_filter_source: "all",
     timeline_filter_type: null,
+    notification: null,
     ...overrides,
   };
 }
@@ -168,5 +172,83 @@ describe("browserSlice", () => {
     const rt2 = state2.runtimes["chat-1"];
     expect(rt2).toBeDefined();
     expect(rt2!.attach_screenshot_on_send).toBe(false);
+  });
+
+  test("setBrowserNotification sets notification", () => {
+    const initial = stateWith("chat-1", makeRuntime());
+    const state = reducer(
+      initial,
+      setBrowserNotification({
+        chatId: "chat-1",
+        notification: { type: "attached", message: "Browser session attached" },
+      }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.notification).toEqual({
+      type: "attached",
+      message: "Browser session attached",
+    });
+  });
+
+  test("setBrowserNotification clears notification with null", () => {
+    const initial = stateWith(
+      "chat-1",
+      makeRuntime({
+        notification: { type: "closed", message: "Closed" },
+      }),
+    );
+    const state = reducer(
+      initial,
+      setBrowserNotification({ chatId: "chat-1", notification: null }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.notification).toBeNull();
+  });
+
+  test("markBrowserDetached sets disconnected and notification", () => {
+    const initial = stateWith(
+      "chat-1",
+      makeRuntime({ connected: true }),
+    );
+    const state = reducer(
+      initial,
+      markBrowserDetached({ chatId: "chat-1" }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.connected).toBe(false);
+    expect(rt!.notification).toEqual({
+      type: "detached",
+      message: "Browser session detached",
+    });
+  });
+
+  test("markBrowserClosed sets disconnected with reason", () => {
+    const initial = stateWith(
+      "chat-1",
+      makeRuntime({ connected: true }),
+    );
+    const state = reducer(
+      initial,
+      markBrowserClosed({ chatId: "chat-1", reason: "timeout" }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.connected).toBe(false);
+    expect(rt!.notification).toEqual({
+      type: "closed",
+      message: "Browser closed: timeout",
+    });
+  });
+
+  test("markBrowserDetached does nothing for missing chatId", () => {
+    const initial: BrowserState = { runtimes: {} };
+    const state = reducer(
+      initial,
+      markBrowserDetached({ chatId: "missing" }),
+    );
+    expect(state.runtimes).toEqual({});
   });
 });

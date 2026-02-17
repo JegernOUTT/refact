@@ -145,3 +145,62 @@
   min-height: 0;
   overflow: hidden;
 }
+
+.notification {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  font-size: 12px;
+  border-bottom: 1px solid var(--gray-a4);
+}
+
+.notificationDetached {
+  background: var(--amber-a3);
+  color: var(--amber-11);
+}
+
+.notificationAttached {
+  background: var(--green-a3);
+  color: var(--green-11);
+}
+
+.notificationClosed {
+  background: var(--red-a3);
+  color: var(--red-11);
+}
+
+.notificationTimeout {
+  background: var(--amber-a3);
+  color: var(--amber-11);
+}
+
+.restartButton {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.restartButton:hover {
+  background: var(--gray-a3);
+}
+
+.dismissButton {
+  margin-left: auto;
+  padding: 0 var(--space-1);
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.dismissButton:hover {
+  opacity: 1;
+}

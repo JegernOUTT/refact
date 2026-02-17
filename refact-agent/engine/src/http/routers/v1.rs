@@ -154,6 +154,7 @@ use crate::http::routers::v1::v1_browser::{
     handle_browser_inject_css, handle_browser_remove_css,
     handle_browser_dom_snapshot, handle_browser_accessibility,
     handle_browser_record_animation, handle_browser_handoff,
+    handle_browser_status,
 };
 
 pub fn make_v1_router() -> Router {
@@ -388,7 +389,8 @@ pub fn make_v1_router() -> Router {
         .route("/browser/dom-snapshot", post(handle_browser_dom_snapshot))
         .route("/browser/accessibility", post(handle_browser_accessibility))
         .route("/browser/record-animation", post(handle_browser_record_animation))
-        .route("/browser/handoff", post(handle_browser_handoff));
+        .route("/browser/handoff", post(handle_browser_handoff))
+        .route("/browser/status", post(handle_browser_status));
 
     builder.layer(axum::middleware::from_fn(telemetry_middleware))
 }

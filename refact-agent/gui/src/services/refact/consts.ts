@@ -70,3 +70,5 @@ export const BROWSER_CONTEXT = "/v1/browser/context";
 export const BROWSER_CURL = "/v1/browser/curl";
 export const BROWSER_ELEMENT_PICK = "/v1/browser/element-pick";
 export const BROWSER_RECORD_ANIMATION = "/v1/browser/record-animation";
+export const BROWSER_HANDOFF = "/v1/browser/handoff";
+export const BROWSER_STATUS = "/v1/browser/status";

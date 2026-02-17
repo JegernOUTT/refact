@@ -8,6 +8,8 @@ import {
   BROWSER_CURL,
   BROWSER_ELEMENT_PICK,
   BROWSER_RECORD_ANIMATION,
+  BROWSER_HANDOFF,
+  BROWSER_STATUS,
 } from "./consts";
 
 export type BrowserStartRequest = {
@@ -70,6 +72,32 @@ export type BrowserRecordAnimationRequest = {
 
 export type BrowserRecordAnimationResponse = {
   frames: { mime: string; data: string }[];
+};
+
+export type BrowserHandoffRequest = {
+  from_chat_id: string;
+  to_chat_id: string;
+};
+
+export type BrowserHandoffResponse = {
+  runtime_id: string;
+  status: string;
+  from_chat_id: string;
+  to_chat_id: string;
+};
+
+export type BrowserStatusRequest = {
+  chat_id: string;
+};
+
+export type BrowserStatusResponse = {
+  runtime_id: string | null;
+  connected: boolean;
+  url?: string;
+  title?: string;
+  tab_urls?: string[];
+  idle_seconds?: number;
+  idle_timeout?: number;
 };
 
 export const browserApi = createApi({
@@ -203,6 +231,42 @@ export const browserApi = createApi({
         });
         if (response.error) return { error: response.error };
         return { data: response.data as BrowserRecordAnimationResponse };
+      },
+    }),
+    browserHandoff: builder.mutation<
+      BrowserHandoffResponse,
+      BrowserHandoffRequest
+    >({
+      async queryFn(args, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${BROWSER_HANDOFF}`;
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: args,
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as BrowserHandoffResponse };
+      },
+    }),
+    browserStatus: builder.mutation<
+      BrowserStatusResponse,
+      BrowserStatusRequest
+    >({
+      async queryFn(args, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${BROWSER_STATUS}`;
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: args,
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as BrowserStatusResponse };
       },
     }),
   }),

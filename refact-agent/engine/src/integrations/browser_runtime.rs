@@ -457,6 +457,70 @@ pub async fn remove_browser_runtime(
     gcx.write().await.browser_runtimes.remove(runtime_id)
 }
 
+pub async fn find_runtime_by_chat_id(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    chat_id: &str,
+) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
+    let gcx_locked = gcx.read().await;
+    for (rid, arc) in &gcx_locked.browser_runtimes {
+        let rt = arc.lock().await;
+        if rt.attached_chat_id.as_deref() == Some(chat_id) {
+            return Some((rid.clone(), arc.clone()));
+        }
+    }
+    None
+}
+
+pub async fn browser_monitor_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let runtime_ids: Vec<String> = {
+            let gcx_locked = gcx.read().await;
+            gcx_locked.browser_runtimes.keys().cloned().collect()
+        };
+
+        let mut to_remove = Vec::new();
+        for rid in &runtime_ids {
+            let runtime_arc = {
+                let gcx_locked = gcx.read().await;
+                match gcx_locked.browser_runtimes.get(rid) {
+                    Some(arc) => arc.clone(),
+                    None => continue,
+                }
+            };
+
+            let mut rt = runtime_arc.lock().await;
+
+            let was_connected = rt.is_connected;
+            let still_connected = rt.check_connection();
+
+            if was_connected && !still_connected {
+                info!(
+                    "BrowserRuntime {} (chat {:?}) lost connection",
+                    rt.runtime_id, rt.attached_chat_id
+                );
+            }
+
+            if rt.attached_chat_id.is_some() && rt.is_idle_expired() {
+                warn!(
+                    "BrowserRuntime {} idle timeout ({:?}) for chat {:?}",
+                    rt.runtime_id, rt.idle_timeout, rt.attached_chat_id
+                );
+                to_remove.push(rid.clone());
+            }
+
+            if !still_connected && rt.attached_chat_id.is_none() {
+                to_remove.push(rid.clone());
+            }
+        }
+
+        for rid in to_remove {
+            remove_browser_runtime(gcx.clone(), &rid).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,6 +840,74 @@ mod tests {
         let mut rt = make_test_runtime();
         rt.last_frame_time = Some(Instant::now() - Duration::from_secs(1));
         assert!(!rt.is_frame_rate_limited());
+    }
+
+    #[test]
+    fn test_handoff_detach_clears_chat_id() {
+        let mut rt = make_test_runtime();
+        rt.reattach("chat-old");
+        assert_eq!(rt.attached_chat_id.as_deref(), Some("chat-old"));
+
+        rt.detach();
+        assert!(rt.attached_chat_id.is_none());
+    }
+
+    #[test]
+    fn test_handoff_reattach_sets_new_chat_id() {
+        let mut rt = make_test_runtime();
+        rt.reattach("chat-old");
+        rt.detach();
+        rt.reattach("chat-new");
+        assert_eq!(rt.attached_chat_id.as_deref(), Some("chat-new"));
+    }
+
+    #[test]
+    fn test_handoff_reattach_resets_activity() {
+        let mut rt = make_test_runtime();
+        rt.last_activity = Instant::now() - Duration::from_secs(500);
+        assert!(rt.last_activity.elapsed().as_secs() >= 499);
+
+        rt.reattach("chat-new");
+        assert!(rt.last_activity.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn test_idle_timeout_not_expired_after_touch() {
+        let mut rt = make_test_runtime();
+        rt.idle_timeout = Duration::from_secs(10);
+        rt.last_activity = Instant::now() - Duration::from_secs(15);
+        assert!(rt.is_idle_expired());
+
+        rt.touch();
+        assert!(!rt.is_idle_expired());
+    }
+
+    #[test]
+    fn test_idle_timeout_expired() {
+        let mut rt = make_test_runtime();
+        rt.idle_timeout = Duration::from_secs(5);
+        rt.last_activity = Instant::now() - Duration::from_secs(10);
+        assert!(rt.is_idle_expired());
+    }
+
+    #[test]
+    fn test_idle_timeout_not_expired_when_recent() {
+        let rt = make_test_runtime();
+        assert!(!rt.is_idle_expired());
+    }
+
+    #[test]
+    fn test_detach_then_reattach_preserves_buffers() {
+        let mut rt = make_test_runtime();
+        rt.handle_recorder_event(r##"{"type":"click","selector":"#btn","text":"OK","x":0,"y":0,"timestamp":1.0}"##);
+        rt.handle_console_event(1.0, "log".to_string(), "test".to_string());
+        assert_eq!(rt.action_buffer.len(), 1);
+        assert_eq!(rt.console_buffer.len(), 1);
+
+        rt.detach();
+        rt.reattach("chat-new");
+        assert_eq!(rt.action_buffer.len(), 1);
+        assert_eq!(rt.console_buffer.len(), 1);
     }
 
     fn make_test_runtime() -> BrowserRuntime {

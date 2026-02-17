@@ -30,6 +30,12 @@ export type TimelineEntry = {
 
 export type TimelineFilterSource = "all" | "user" | "agent";
 
+export type BrowserNotification = {
+  type: "detached" | "attached" | "closed" | "timeout";
+  message: string;
+};
+
+
 export type BrowserRuntime = {
   runtime_id: string;
   connected: boolean;
@@ -44,6 +50,7 @@ export type BrowserRuntime = {
   timeline_open: boolean;
   timeline_filter_source: TimelineFilterSource;
   timeline_filter_type: string | null;
+  notification: BrowserNotification | null;
 };
 
 export type BrowserState = {
@@ -157,6 +164,44 @@ export const browserSlice = createSlice({
         rt.timeline_filter_type = action.payload.type;
       }
     },
+    setBrowserNotification(
+      state,
+      action: PayloadAction<{
+        chatId: string;
+        notification: BrowserNotification | null;
+      }>,
+    ) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.notification = action.payload.notification;
+      }
+    },
+    markBrowserDetached(
+      state,
+      action: PayloadAction<{ chatId: string }>,
+    ) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.connected = false;
+        rt.notification = {
+          type: "detached",
+          message: "Browser session detached",
+        };
+      }
+    },
+    markBrowserClosed(
+      state,
+      action: PayloadAction<{ chatId: string; reason: string }>,
+    ) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.connected = false;
+        rt.notification = {
+          type: "closed",
+          message: `Browser closed: ${action.payload.reason}`,
+        };
+      }
+    },
   },
 });
 
@@ -172,6 +217,9 @@ export const {
   toggleTimelineOpen,
   setTimelineFilterSource,
   setTimelineFilterType,
+  setBrowserNotification,
+  markBrowserDetached,
+  markBrowserClosed,
 } = browserSlice.actions;
 
 export const selectBrowserRuntime = (

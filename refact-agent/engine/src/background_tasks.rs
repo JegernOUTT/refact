@@ -69,6 +69,7 @@ pub async fn start_background_tasks(
         )),
         tokio::spawn(crate::chat::start_agent_monitor(gcx.clone())),
         tokio::spawn(crate::providers::oauth_refresh::oauth_token_refresh_background_task(gcx.clone())),
+        tokio::spawn(crate::integrations::browser_runtime::browser_monitor_background_task(gcx.clone())),
         tokio::spawn(async move {
             // Build in-memory knowledge index in background (best-effort).
             let index = build_knowledge_index(gcx_for_knowledge_index.clone()).await;
