@@ -111,6 +111,28 @@
   font-size: 13px;
 }
 
+.timelineToggle {
+  padding: 1px var(--space-2);
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--gray-10);
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease;
+}
+
+.timelineToggle:hover {
+  background: var(--gray-a3);
+}
+
+.timelineToggleActive {
+  background: var(--accent-a4);
+  border-color: var(--accent-8);
+  color: var(--accent-11);
+}
+
 .browserLayout {
   display: flex;
   flex-direction: column;

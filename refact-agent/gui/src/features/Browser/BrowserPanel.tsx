@@ -1,7 +1,13 @@
+import { useCallback } from "react";
 import classNames from "classnames";
-import { useAppSelector } from "../../hooks";
-import { selectBrowserRuntime } from "./browserSlice";
+import { useAppDispatch, useAppSelector } from "../../hooks";
+import {
+  selectBrowserRuntime,
+  selectTimelineOpen,
+  toggleTimelineOpen,
+} from "./browserSlice";
 import { BrowserToolbar } from "./BrowserToolbar";
+import { ActionTimeline } from "./ActionTimeline";
 import styles from "./Browser.module.css";
 
 type BrowserPanelProps = {
@@ -9,13 +15,21 @@ type BrowserPanelProps = {
 };
 
 export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
+  const dispatch = useAppDispatch();
   const runtime = useAppSelector((state) =>
     selectBrowserRuntime(state, chatId),
+  );
+  const timelineOpen = useAppSelector((state) =>
+    selectTimelineOpen(state, chatId),
   );
 
   const isConnected = runtime?.connected ?? false;
   const url = runtime?.url ?? "";
   const frame = runtime?.latest_frame;
+
+  const handleToggleTimeline = useCallback(() => {
+    dispatch(toggleTimelineOpen({ chatId }));
+  }, [dispatch, chatId]);
 
   return (
     <div className={styles.browserPanel}>
@@ -30,6 +44,16 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
         <span className={styles.statusUrl}>
           {url || (isConnected ? "Connected" : "Not connected")}
         </span>
+        <button
+          type="button"
+          className={classNames(styles.timelineToggle, {
+            [styles.timelineToggleActive]: timelineOpen,
+          })}
+          onClick={handleToggleTimeline}
+          data-testid="timeline-toggle"
+        >
+          Timeline
+        </button>
       </div>
       {frame && (
         <div className={styles.frameContainer}>
@@ -47,6 +71,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
           </span>
         </div>
       )}
+      {timelineOpen && <ActionTimeline chatId={chatId} />}
     </div>
   );
 };

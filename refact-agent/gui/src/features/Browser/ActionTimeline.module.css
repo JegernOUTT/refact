@@ -1,0 +1,144 @@
+.timelineContainer {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--gray-a4);
+  max-height: 240px;
+  min-height: 0;
+}
+
+.timelineHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--gray-a2);
+  border-bottom: 1px solid var(--gray-a4);
+  font-size: 12px;
+  color: var(--gray-11);
+  flex-shrink: 0;
+}
+
+.timelineTitle {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.filterGroup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+
+.filterButton {
+  padding: 1px var(--space-1);
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--gray-10);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.filterButton:hover {
+  background: var(--gray-a3);
+}
+
+.filterButtonActive {
+  background: var(--accent-a4);
+  border-color: var(--accent-8);
+  color: var(--accent-11);
+}
+
+.timelineList {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.timelineEntry {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--gray-a3);
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+}
+
+.timelineEntry:hover {
+  background: var(--gray-a2);
+}
+
+.timelineEntryRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 22px;
+}
+
+.entryTimestamp {
+  font-size: 10px;
+  color: var(--gray-9);
+  flex-shrink: 0;
+  font-family: monospace;
+}
+
+.entryIcon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+}
+
+.entryIconUser {
+  background: var(--blue-a4);
+  color: var(--blue-11);
+}
+
+.entryIconAgent {
+  background: var(--green-a4);
+  color: var(--green-11);
+}
+
+.entryType {
+  font-size: 10px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-1);
+  background: var(--gray-a3);
+  color: var(--gray-11);
+  flex-shrink: 0;
+  text-transform: lowercase;
+}
+
+.entrySummary {
+  font-size: 12px;
+  color: var(--gray-12);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entryDetails {
+  padding: var(--space-1) 0 0 34px;
+  font-size: 11px;
+  color: var(--gray-10);
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.emptyTimeline {
+  padding: var(--space-3);
+  text-align: center;
+  color: var(--gray-9);
+  font-size: 12px;
+}

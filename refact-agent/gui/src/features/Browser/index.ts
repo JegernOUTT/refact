@@ -1,3 +1,4 @@
+export { ActionTimeline } from "./ActionTimeline";
 export { BrowserLayout } from "./BrowserLayout";
 export { BrowserPanel } from "./BrowserPanel";
 export { BrowserToolbar } from "./BrowserToolbar";
@@ -9,8 +10,17 @@ export {
   removeBrowserRuntime,
   setPickerActive,
   toggleAttachScreenshotOnSend,
+  addTimelineEntries,
+  clearTimeline,
+  toggleTimelineOpen,
+  setTimelineFilterSource,
+  setTimelineFilterType,
   selectBrowserRuntime,
   selectBrowserRuntimes,
+  selectTimeline,
+  selectTimelineOpen,
+  selectTimelineFilterSource,
+  selectTimelineFilterType,
 } from "./browserSlice";
 export type {
   BrowserState,
@@ -18,4 +28,6 @@ export type {
   BrowserFrame,
   BrowserTabInfo,
   DiffBox,
+  TimelineEntry,
+  TimelineFilterSource,
 } from "./browserSlice";

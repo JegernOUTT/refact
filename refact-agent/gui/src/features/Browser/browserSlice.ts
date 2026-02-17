@@ -20,6 +20,16 @@ export type BrowserFrame = {
   diff_boxes: DiffBox[];
 };
 
+export type TimelineEntry = {
+  timestamp: string;
+  source: "user" | "agent";
+  type: string;
+  summary: string;
+  details?: Record<string, unknown>;
+};
+
+export type TimelineFilterSource = "all" | "user" | "agent";
+
 export type BrowserRuntime = {
   runtime_id: string;
   connected: boolean;
@@ -30,6 +40,10 @@ export type BrowserRuntime = {
   latest_frame: BrowserFrame | null;
   picker_active: boolean;
   attach_screenshot_on_send: boolean;
+  timeline: TimelineEntry[];
+  timeline_open: boolean;
+  timeline_filter_source: TimelineFilterSource;
+  timeline_filter_type: string | null;
 };
 
 export type BrowserState = {
@@ -98,6 +112,51 @@ export const browserSlice = createSlice({
         rt.attach_screenshot_on_send = !rt.attach_screenshot_on_send;
       }
     },
+    addTimelineEntries(
+      state,
+      action: PayloadAction<{
+        chatId: string;
+        entries: TimelineEntry[];
+      }>,
+    ) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.timeline = [...rt.timeline, ...action.payload.entries];
+      }
+    },
+    clearTimeline(state, action: PayloadAction<{ chatId: string }>) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.timeline = [];
+      }
+    },
+    toggleTimelineOpen(state, action: PayloadAction<{ chatId: string }>) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.timeline_open = !rt.timeline_open;
+      }
+    },
+    setTimelineFilterSource(
+      state,
+      action: PayloadAction<{
+        chatId: string;
+        source: TimelineFilterSource;
+      }>,
+    ) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.timeline_filter_source = action.payload.source;
+      }
+    },
+    setTimelineFilterType(
+      state,
+      action: PayloadAction<{ chatId: string; type: string | null }>,
+    ) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.timeline_filter_type = action.payload.type;
+      }
+    },
   },
 });
 
@@ -108,6 +167,11 @@ export const {
   removeBrowserRuntime,
   setPickerActive,
   toggleAttachScreenshotOnSend,
+  addTimelineEntries,
+  clearTimeline,
+  toggleTimelineOpen,
+  setTimelineFilterSource,
+  setTimelineFilterType,
 } = browserSlice.actions;
 
 export const selectBrowserRuntime = (
@@ -117,3 +181,25 @@ export const selectBrowserRuntime = (
 
 export const selectBrowserRuntimes = (state: RootState) =>
   state.browser.runtimes;
+
+export const selectTimeline = (
+  state: RootState,
+  chatId: string,
+): TimelineEntry[] => state.browser.runtimes[chatId]?.timeline ?? [];
+
+export const selectTimelineOpen = (
+  state: RootState,
+  chatId: string,
+): boolean => state.browser.runtimes[chatId]?.timeline_open ?? false;
+
+export const selectTimelineFilterSource = (
+  state: RootState,
+  chatId: string,
+): TimelineFilterSource =>
+  state.browser.runtimes[chatId]?.timeline_filter_source ?? "all";
+
+export const selectTimelineFilterType = (
+  state: RootState,
+  chatId: string,
+): string | null =>
+  state.browser.runtimes[chatId]?.timeline_filter_type ?? null;
