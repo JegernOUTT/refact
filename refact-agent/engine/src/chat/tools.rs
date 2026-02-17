@@ -583,7 +583,7 @@ pub async fn process_tool_calls_once(
     let mut final_state = SessionState::Idle;
     for tool_call in &tools_to_execute {
         match tool_call.function.name.as_str() {
-            "ask_questions" => final_state = SessionState::WaitingUserInput,
+            "ask_questions" | "task_wait_for_agents" => final_state = SessionState::WaitingUserInput,
             "task_done" => final_state = SessionState::Completed,
             "task_agent_finish" => final_state = SessionState::Completed,
             _ => {}

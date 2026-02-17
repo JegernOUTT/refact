@@ -230,6 +230,7 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_task_agent::ToolTaskAssignAgent::new()),
         Box::new(crate::tools::tool_task_spawn_agent::ToolTaskSpawnAgent::new()),
         Box::new(crate::tools::tool_task_check_agents::ToolTaskCheckAgents::new()),
+        Box::new(crate::tools::tool_task_wait_for_agents::ToolTaskWaitForAgents::new()),
         Box::new(crate::tools::tool_task_agent_finish::ToolTaskAgentFinish::new()),
         Box::new(crate::tools::tool_task_mark_card::ToolTaskMarkCardDone::new()),
         Box::new(crate::tools::tool_task_mark_card::ToolTaskMarkCardFailed::new()),

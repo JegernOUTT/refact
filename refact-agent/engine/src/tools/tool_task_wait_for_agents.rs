@@ -7,151 +7,32 @@ use async_trait::async_trait;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::tasks::storage;
-use crate::chat::types::SessionState;
+use crate::tools::tool_task_check_agents::{get_task_id, get_agent_statuses, format_agent_status};
 
-pub(crate) async fn get_task_id(
-    ccx: &Arc<AMutex<AtCommandsContext>>,
-    args: &HashMap<String, Value>,
-) -> Result<String, String> {
-    if let Some(id) = args.get("task_id").and_then(|v| v.as_str()) {
-        return Ok(id.to_string());
-    }
-    let ccx_lock = ccx.lock().await;
-    if let Some(ref meta) = ccx_lock.task_meta {
-        return Ok(meta.task_id.clone());
-    }
-    storage::infer_task_id_from_chat_id(&ccx_lock.chat_id)
-        .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
-}
+pub struct ToolTaskWaitForAgents;
 
-pub struct ToolTaskCheckAgents;
-
-impl ToolTaskCheckAgents {
+impl ToolTaskWaitForAgents {
     pub fn new() -> Self {
         Self
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct AgentStatus {
-    pub(crate) card_id: String,
-    pub(crate) card_title: String,
-    pub(crate) agent_chat_id: String,
-    pub(crate) column: String,
-    pub(crate) session_state: Option<SessionState>,
-    pub(crate) last_status_update: Option<String>,
-    pub(crate) final_report: Option<String>,
-}
-
-pub(crate) async fn get_agent_statuses(
-    gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
-    task_id: &str,
-) -> Result<Vec<AgentStatus>, String> {
-    let board = storage::load_board(gcx.clone(), task_id).await?;
-
-    let sessions = {
-        let gcx_locked = gcx.read().await;
-        gcx_locked.chat_sessions.clone()
-    };
-
-    let mut statuses = Vec::new();
-
-    for card in &board.cards {
-        if let Some(agent_chat_id) = &card.agent_chat_id {
-            let session_arc = {
-                let sessions_read = sessions.read().await;
-                sessions_read.get(agent_chat_id).cloned()
-            };
-
-            let session_state = if let Some(sa) = session_arc {
-                Some(sa.lock().await.runtime.state)
-            } else {
-                None
-            };
-
-            let last_status_update = card
-                .status_updates
-                .last()
-                .map(|u| format!("{}: {}", u.timestamp, u.message));
-
-            statuses.push(AgentStatus {
-                card_id: card.id.clone(),
-                card_title: card.title.clone(),
-                agent_chat_id: agent_chat_id.clone(),
-                column: card.column.clone(),
-                session_state,
-                last_status_update,
-                final_report: card.final_report.clone(),
-            });
-        }
-    }
-
-    Ok(statuses)
-}
-
-pub(crate) fn format_agent_status(status: &AgentStatus) -> String {
-    let (state_emoji, state_text) = match status.column.as_str() {
-        "done" => ("✅", "Completed"),
-        "failed" => ("❌", "Failed"),
-        "doing" => match &status.session_state {
-            Some(SessionState::Generating) => ("🔄", "Generating response"),
-            Some(SessionState::ExecutingTools) => ("⚙️", "Executing tools"),
-            Some(SessionState::Paused) => ("⏸️", "Paused (awaiting confirmation)"),
-            Some(SessionState::WaitingIde) => ("⏳", "Waiting for IDE"),
-            Some(SessionState::WaitingUserInput) => ("❓", "Waiting for user input"),
-            Some(SessionState::Completed) => ("✅", "Completed"),
-            Some(SessionState::Error) => ("⚠️", "Error state (will be marked as failed)"),
-            Some(SessionState::Idle) => ("💤", "Idle (waiting)"),
-            None => (
-                "❓",
-                "Unknown/offline (will be marked as failed if stuck too long)",
-            ),
-        },
-        _ => ("❓", "Unknown"),
-    };
-
-    let mut result = format!(
-        "### {} {} ({})\n**Status:** {} | **Column:** {}\n",
-        state_emoji, status.card_title, status.card_id, state_text, status.column
-    );
-
-    result.push_str(&format!(
-        "📎 [View Agent Chat](refact://chat/{})\n",
-        status.agent_chat_id
-    ));
-
-    if let Some(report) = &status.final_report {
-        let preview: String = report.chars().take(300).collect();
-        let preview = if preview.len() < report.len() {
-            format!("{}...", preview)
-        } else {
-            preview
-        };
-        result.push_str(&format!("\n**Final Report:**\n{}\n", preview));
-    } else if let Some(update) = &status.last_status_update {
-        result.push_str(&format!("\n**Last Update:** {}\n", update));
-    }
-
-    result
-}
-
 #[async_trait]
-impl Tool for ToolTaskCheckAgents {
+impl Tool for ToolTaskWaitForAgents {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_check_agents".to_string(),
-            display_name: "Task Check Agents".to_string(),
+            name: "task_wait_for_agents".to_string(),
+            display_name: "Task Wait For Agents".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
                 config_path: String::new(),
             },
             experimental: false,
-            allow_parallel: true,
+            allow_parallel: false,
             description: "Check the status of all spawned agents for a task. Shows their board status (primary) and live session state (if available). Agents mark themselves done via task_agent_finish(). Agents that fail (streaming errors, timeouts, stuck) are automatically marked as failed.".to_string(),
             parameters: vec![
                 ToolParam {
@@ -179,7 +60,7 @@ impl Tool for ToolTaskCheckAgents {
             .unwrap_or(false);
 
         if !is_planner {
-            return Err("task_check_agents can only be called by the task planner. \
+            return Err("task_wait_for_agents can only be called by the task planner. \
                  Switch to the planner chat to check agent status."
                 .to_string());
         }
@@ -193,6 +74,11 @@ impl Tool for ToolTaskCheckAgents {
 
         if statuses.is_empty() {
             let result = "# Agent Status\n\nNo agents have been spawned yet for this task.\n\nUse `task_spawn_agent(card_id)` to spawn an agent for a card.".to_string();
+
+            {
+                let ccx_lock = ccx.lock().await;
+                ccx_lock.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
 
             return Ok((
                 false,
@@ -247,6 +133,11 @@ impl Tool for ToolTaskCheckAgents {
             );
         } else if !running.is_empty() {
             result.push_str("⏳ **Agents are still working.** Do not check again, wait for the completion message to arrive.\n");
+        }
+
+        {
+            let ccx_lock = ccx.lock().await;
+            ccx_lock.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         Ok((
