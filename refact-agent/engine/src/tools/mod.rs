@@ -23,6 +23,7 @@ pub mod tool_config_subagent;
 mod tool_trajectory_context;
 mod tool_tree;
 mod tool_web;
+mod tool_web_search;
 
 pub mod file_edit;
 mod tool_create_knowledge;

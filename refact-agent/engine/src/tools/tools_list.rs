@@ -6,6 +6,7 @@ use tokio::sync::RwLock as ARwLock;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::integrations::running_integrations::load_integrations;
 use crate::yaml_configs::customization_registry::get_project_registry;
+use crate::caps::resolve_chat_model;
 
 use super::tools_description::{Tool, ToolGroup, ToolGroupCategory};
 use super::tool_config_subagent::ToolConfigSubagent;
@@ -146,9 +147,14 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
         }),
     ];
 
-    let web_tools: Vec<Box<dyn Tool + Send>> = vec![Box::new(crate::tools::tool_web::ToolWeb {
-        config_path: config_path.clone(),
-    })];
+    let web_tools: Vec<Box<dyn Tool + Send>> = vec![
+        Box::new(crate::tools::tool_web::ToolWeb {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_web_search::ToolWebSearch {
+            config_path: config_path.clone(),
+        }),
+    ];
 
     let system_tools: Vec<Box<dyn Tool + Send>> = vec![
         Box::new(crate::tools::tool_shell::ToolShell {
@@ -411,11 +417,28 @@ pub async fn get_tools_for_mode(
 
     let allowed_tools: HashSet<&str> = mode_config.tools.iter().map(|s| s.as_str()).collect();
 
+    let model_supports_web_search = if let Some(mid) = model_id {
+        match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
+            Ok(caps) => resolve_chat_model(caps, mid)
+                .map(|rec| rec.base.supports_web_search)
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
+
     let all_tools: Vec<Box<dyn Tool + Send>> = get_available_tool_groups(gcx.clone())
         .await
         .into_iter()
         .flat_map(|g| g.tools)
         .filter(|tool| tool.config().unwrap_or_default().enabled)
+        .filter(|tool| {
+            if tool.tool_description().name == "web_search" && model_supports_web_search {
+                return false;
+            }
+            true
+        })
         .collect();
 
     let tool_order: HashMap<&str, usize> = mode_config.tools

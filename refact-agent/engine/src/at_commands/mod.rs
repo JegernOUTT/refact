@@ -5,4 +5,5 @@ pub mod at_knowledge;
 pub mod at_search;
 pub mod at_tree;
 pub mod at_web;
+pub mod at_web_search;
 pub mod execute_at;
