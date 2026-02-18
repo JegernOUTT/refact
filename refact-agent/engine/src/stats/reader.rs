@@ -80,6 +80,7 @@ pub struct StatsTotals {
     pub total_cache_read_tokens: usize,
     pub total_cache_creation_tokens: usize,
     pub total_cost_usd: f64,
+    pub total_cost_coins: Option<f64>,
     pub total_duration_ms: u64,
     pub avg_duration_ms: u64,
     pub total_conversations: usize,
@@ -100,6 +101,7 @@ pub struct StatsByModel {
     pub total_cache_read_tokens: usize,
     pub total_cache_creation_tokens: usize,
     pub total_cost_usd: f64,
+    pub total_cost_coins: Option<f64>,
     pub total_duration_ms: u64,
     pub avg_duration_ms: u64,
 }
@@ -114,6 +116,7 @@ pub struct StatsByProvider {
     pub total_completion_tokens: usize,
     pub total_tokens: usize,
     pub total_cost_usd: f64,
+    pub total_cost_coins: Option<f64>,
     pub total_duration_ms: u64,
 }
 
@@ -126,6 +129,7 @@ pub struct StatsByDay {
     pub total_completion_tokens: usize,
     pub total_tokens: usize,
     pub total_cost_usd: f64,
+    pub total_cost_coins: Option<f64>,
     pub total_duration_ms: u64,
 }
 
@@ -135,6 +139,7 @@ pub struct StatsByMode {
     pub total_calls: usize,
     pub total_tokens: usize,
     pub total_cost_usd: f64,
+    pub total_cost_coins: Option<f64>,
 }
 
 #[derive(serde::Serialize)]
@@ -143,6 +148,7 @@ pub struct TopConversation {
     pub total_calls: usize,
     pub total_tokens: usize,
     pub total_cost_usd: f64,
+    pub total_cost_coins: Option<f64>,
     pub model_id: String,
 }
 
@@ -172,6 +178,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
     let mut total_cache_read_tokens = 0usize;
     let mut total_cache_creation_tokens = 0usize;
     let mut total_cost_usd = 0.0f64;
+    let mut total_cost_coins: Option<f64> = None;
     let mut total_duration_ms = 0u64;
     let mut successful_calls = 0usize;
     let mut total_messages_sent = 0usize;
@@ -187,6 +194,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         total_cache_read_tokens: usize,
         total_cache_creation_tokens: usize,
         total_cost_usd: f64,
+        total_cost_coins: Option<f64>,
         total_duration_ms: u64,
     }
     let mut by_model_map: HashMap<String, ModelAcc> = HashMap::new();
@@ -198,6 +206,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         total_completion_tokens: usize,
         total_tokens: usize,
         total_cost_usd: f64,
+        total_cost_coins: Option<f64>,
         total_duration_ms: u64,
     }
     let mut by_provider_map: HashMap<String, ProviderAcc> = HashMap::new();
@@ -209,6 +218,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         total_completion_tokens: usize,
         total_tokens: usize,
         total_cost_usd: f64,
+        total_cost_coins: Option<f64>,
         total_duration_ms: u64,
     }
     let mut by_day_map: HashMap<String, DayAcc> = HashMap::new();
@@ -217,6 +227,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         total_calls: usize,
         total_tokens: usize,
         total_cost_usd: f64,
+        total_cost_coins: Option<f64>,
     }
     let mut by_mode_map: HashMap<String, ModeAcc> = HashMap::new();
 
@@ -224,6 +235,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         total_calls: usize,
         total_tokens: usize,
         total_cost_usd: f64,
+        total_cost_coins: Option<f64>,
         model_id: String,
     }
     let mut conv_map: HashMap<String, ConvAcc> = HashMap::new();
@@ -235,6 +247,9 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         total_cache_read_tokens += event.cache_read_tokens.unwrap_or(0);
         total_cache_creation_tokens += event.cache_creation_tokens.unwrap_or(0);
         total_cost_usd += event.cost_usd.unwrap_or(0.0);
+        if let Some(coins) = event.cost_coins {
+            *total_cost_coins.get_or_insert(0.0) += coins;
+        }
         total_duration_ms += event.duration_ms;
         total_messages_sent += event.messages_count;
         if event.success {
@@ -252,6 +267,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_cache_read_tokens: 0,
             total_cache_creation_tokens: 0,
             total_cost_usd: 0.0,
+            total_cost_coins: None,
             total_duration_ms: 0,
         });
         model_acc.total_calls += 1;
@@ -262,6 +278,9 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         model_acc.total_cache_read_tokens += event.cache_read_tokens.unwrap_or(0);
         model_acc.total_cache_creation_tokens += event.cache_creation_tokens.unwrap_or(0);
         model_acc.total_cost_usd += event.cost_usd.unwrap_or(0.0);
+        if let Some(coins) = event.cost_coins {
+            *model_acc.total_cost_coins.get_or_insert(0.0) += coins;
+        }
         model_acc.total_duration_ms += event.duration_ms;
 
         let provider_acc = by_provider_map.entry(event.provider.clone()).or_insert_with(|| ProviderAcc {
@@ -271,6 +290,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            total_cost_coins: None,
             total_duration_ms: 0,
         });
         provider_acc.total_calls += 1;
@@ -279,6 +299,9 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         provider_acc.total_completion_tokens += event.completion_tokens;
         provider_acc.total_tokens += event.total_tokens;
         provider_acc.total_cost_usd += event.cost_usd.unwrap_or(0.0);
+        if let Some(coins) = event.cost_coins {
+            *provider_acc.total_cost_coins.get_or_insert(0.0) += coins;
+        }
         provider_acc.total_duration_ms += event.duration_ms;
 
         let day = event.ts_start.get(..10).unwrap_or("").to_string();
@@ -289,34 +312,46 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            total_cost_coins: None,
             total_duration_ms: 0,
         });
         day_acc.total_calls += 1;
         if event.success { day_acc.successful_calls += 1; }
         day_acc.total_prompt_tokens += event.prompt_tokens;
         day_acc.total_completion_tokens += event.completion_tokens;
-        day_acc.total_tokens += event.prompt_tokens + event.completion_tokens;
+        day_acc.total_tokens += event.total_tokens;
         day_acc.total_cost_usd += event.cost_usd.unwrap_or(0.0);
+        if let Some(coins) = event.cost_coins {
+            *day_acc.total_cost_coins.get_or_insert(0.0) += coins;
+        }
         day_acc.total_duration_ms += event.duration_ms;
 
         let mode_acc = by_mode_map.entry(event.mode.clone()).or_insert_with(|| ModeAcc {
             total_calls: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            total_cost_coins: None,
         });
         mode_acc.total_calls += 1;
         mode_acc.total_tokens += event.total_tokens;
         mode_acc.total_cost_usd += event.cost_usd.unwrap_or(0.0);
+        if let Some(coins) = event.cost_coins {
+            *mode_acc.total_cost_coins.get_or_insert(0.0) += coins;
+        }
 
         let conv_acc = conv_map.entry(event.chat_id.clone()).or_insert_with(|| ConvAcc {
             total_calls: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            total_cost_coins: None,
             model_id: event.model_id.clone(),
         });
         conv_acc.total_calls += 1;
         conv_acc.total_tokens += event.total_tokens;
         conv_acc.total_cost_usd += event.cost_usd.unwrap_or(0.0);
+        if let Some(coins) = event.cost_coins {
+            *conv_acc.total_cost_coins.get_or_insert(0.0) += coins;
+        }
         conv_acc.model_id = event.model_id.clone();
     }
 
@@ -340,6 +375,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_cache_read_tokens: acc.total_cache_read_tokens,
             total_cache_creation_tokens: acc.total_cache_creation_tokens,
             total_cost_usd: acc.total_cost_usd,
+            total_cost_coins: acc.total_cost_coins,
             total_duration_ms: acc.total_duration_ms,
             avg_duration_ms: if acc.total_calls > 0 { acc.total_duration_ms / acc.total_calls as u64 } else { 0 },
         })
@@ -357,6 +393,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_completion_tokens: acc.total_completion_tokens,
             total_tokens: acc.total_tokens,
             total_cost_usd: acc.total_cost_usd,
+            total_cost_coins: acc.total_cost_coins,
             total_duration_ms: acc.total_duration_ms,
         })
         .collect();
@@ -372,6 +409,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_completion_tokens: acc.total_completion_tokens,
             total_tokens: acc.total_tokens,
             total_cost_usd: acc.total_cost_usd,
+            total_cost_coins: acc.total_cost_coins,
             total_duration_ms: acc.total_duration_ms,
         })
         .collect();
@@ -384,6 +422,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_calls: acc.total_calls,
             total_tokens: acc.total_tokens,
             total_cost_usd: acc.total_cost_usd,
+            total_cost_coins: acc.total_cost_coins,
         })
         .collect();
     by_mode.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
@@ -395,6 +434,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_calls: acc.total_calls,
             total_tokens: acc.total_tokens,
             total_cost_usd: acc.total_cost_usd,
+            total_cost_coins: acc.total_cost_coins,
             model_id: acc.model_id,
         })
         .collect();
@@ -413,6 +453,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
             total_cache_read_tokens,
             total_cache_creation_tokens,
             total_cost_usd,
+            total_cost_coins,
             total_duration_ms,
             avg_duration_ms,
             total_conversations,
@@ -463,6 +504,7 @@ mod tests {
             cache_creation_tokens: None,
             total_tokens: 150,
             cost_usd: Some(0.001),
+            cost_coins: None,
         }
     }
 
@@ -569,5 +611,57 @@ mod tests {
         let summary = aggregate_summary(&events, None, None);
         assert_eq!(summary.totals.total_calls, 0);
         assert!(summary.by_model.is_empty());
+    }
+
+    #[test]
+    fn test_summary_no_coins_when_none() {
+        let events = vec![make_event(1, true), make_event(2, false)];
+        let summary = aggregate_summary(&events, None, None);
+        assert_eq!(summary.totals.total_cost_coins, None);
+        assert_eq!(summary.by_model[0].total_cost_coins, None);
+        assert_eq!(summary.by_provider[0].total_cost_coins, None);
+        assert_eq!(summary.by_day[0].total_cost_coins, None);
+        assert_eq!(summary.by_mode[0].total_cost_coins, None);
+        assert_eq!(summary.top_conversations[0].total_cost_coins, None);
+    }
+
+    #[test]
+    fn test_summary_aggregates_coins() {
+        let mut e1 = make_event(1, true);
+        e1.cost_coins = Some(10.0);
+        let mut e2 = make_event(2, true);
+        e2.cost_coins = Some(5.0);
+        let e3 = make_event(3, false);
+        let events = vec![e1, e2, e3];
+        let summary = aggregate_summary(&events, None, None);
+        assert_eq!(summary.totals.total_cost_coins, Some(15.0));
+        assert_eq!(summary.by_model[0].total_cost_coins, Some(15.0));
+        assert_eq!(summary.by_provider[0].total_cost_coins, Some(15.0));
+        assert_eq!(summary.by_mode[0].total_cost_coins, Some(15.0));
+    }
+
+    #[test]
+    fn test_summary_mixed_usd_and_coins() {
+        let mut e1 = make_event(1, true);
+        e1.cost_usd = Some(0.002);
+        e1.cost_coins = Some(20.0);
+        let mut e2 = make_event(2, true);
+        e2.cost_usd = Some(0.001);
+        e2.cost_coins = None;
+        let events = vec![e1, e2];
+        let summary = aggregate_summary(&events, None, None);
+        assert!((summary.totals.total_cost_usd - 0.003).abs() < 1e-9);
+        assert_eq!(summary.totals.total_cost_coins, Some(20.0));
+    }
+
+    #[test]
+    fn test_by_day_total_tokens_uses_total_tokens_field() {
+        let mut e = make_event(1, true);
+        e.prompt_tokens = 100;
+        e.completion_tokens = 50;
+        e.total_tokens = 200;
+        let events = vec![e];
+        let summary = aggregate_summary(&events, None, None);
+        assert_eq!(summary.by_day[0].total_tokens, 200, "by_day.total_tokens should use event.total_tokens, not prompt+completion");
     }
 }
