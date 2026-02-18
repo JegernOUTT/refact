@@ -53,3 +53,14 @@
 .emptyText {
   color: var(--gray-10);
 }
+
+.sortButton {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  width: 100%;
+  text-align: left;
+}

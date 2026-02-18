@@ -28,6 +28,10 @@ export type TrajectoryMeta = {
     | "error";
   root_chat_id?: string;
   total_coins?: number;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
+  total_tokens?: number;
+  total_cost_usd?: number;
   total_lines_added: number;
   total_lines_removed: number;
   tasks_total: number;

@@ -4,23 +4,15 @@ import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
 import { formatTokenCount, formatCost } from "../utils/formatters";
+import { dateRangeToApiArgs } from "../utils/dateRange";
 import type { DateRange } from "../types";
 import styles from "./TasksTab.module.css";
 
 type Props = { dateRange: DateRange };
 
-function dateRangeArgs(dateRange: DateRange): { from?: string; to?: string } {
-  if (dateRange.preset === "all") return {};
-  const days = dateRange.preset === "7d" ? 7 : 30;
-  const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
-  return { from };
-}
-
 export const TasksTab: React.FC<Props> = ({ dateRange }) => {
   const { data, isLoading, isError } = useGetStatsSummaryQuery(
-    dateRangeArgs(dateRange),
+    dateRangeToApiArgs(dateRange),
   );
 
   if (isLoading) return <Spinner spinning />;

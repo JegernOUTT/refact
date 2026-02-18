@@ -1,4 +1,5 @@
 export interface ModelStats {
+  model_id: string;
   model: string;
   provider: string;
   total_calls: number;
@@ -9,7 +10,7 @@ export interface ModelStats {
   total_tokens: number;
   total_cache_read_tokens: number;
   total_cache_creation_tokens: number;
-  total_cost_usd: number | null;
+  total_cost_usd: number;
   total_duration_ms: number;
   avg_duration_ms: number;
 }
@@ -22,7 +23,7 @@ export interface ProviderStats {
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_tokens: number;
-  total_cost_usd: number | null;
+  total_cost_usd: number;
   total_duration_ms: number;
 }
 
@@ -30,8 +31,10 @@ export interface DayStats {
   date: string;
   total_calls: number;
   successful_calls: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
   total_tokens: number;
-  total_cost_usd: number | null;
+  total_cost_usd: number;
   total_duration_ms: number;
 }
 
@@ -39,18 +42,15 @@ export interface ModeStats {
   mode: string;
   total_calls: number;
   total_tokens: number;
-  total_cost_usd: number | null;
+  total_cost_usd: number;
 }
 
 export interface ConversationStats {
   chat_id: string;
-  title: string;
-  model: string;
-  mode: string;
   total_calls: number;
   total_tokens: number;
-  total_cost_usd: number | null;
-  created_at: string;
+  total_cost_usd: number;
+  model_id: string;
 }
 
 export interface StatsSummary {
@@ -88,17 +88,34 @@ export interface StatsEventsParams {
 
 export interface StatsEvent {
   id: string;
+  ts_start: string;
+  ts_end: string;
   chat_id: string;
+  root_chat_id: string | null;
+  mode: string;
+  task_id: string | null;
+  task_role: string | null;
+  agent_id: string | null;
+  card_id: string | null;
+  model_id: string;
   model: string;
   provider: string;
-  mode: string;
+  messages_count: number;
+  tools_count: number;
+  max_tokens: number;
+  temperature: number | null;
   success: boolean;
+  error_message: string | null;
+  finish_reason: string | null;
+  attempt_n: number;
+  retry_reason: string | null;
   prompt_tokens: number;
   completion_tokens: number;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
   total_tokens: number;
   cost_usd: number | null;
   duration_ms: number;
-  created_at: string;
 }
 
 export interface StatsEventsResponse {
