@@ -8,7 +8,11 @@ export type StatCardProps = {
   subtitle?: string;
 };
 
-export const StatCard: React.FC<StatCardProps> = ({ title, value, subtitle }) => (
+export const StatCard: React.FC<StatCardProps> = ({
+  title,
+  value,
+  subtitle,
+}) => (
   <Card className={styles.card}>
     <Flex direction="column">
       <Text size="2" className={styles.title}>

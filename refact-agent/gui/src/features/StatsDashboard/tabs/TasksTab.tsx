@@ -24,9 +24,7 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
 
   if (!data || !taskModes || taskModes.length === 0) {
     return (
-      <Text className={styles.emptyText}>
-        No task or agent usage data yet.
-      </Text>
+      <Text className={styles.emptyText}>No task or agent usage data yet.</Text>
     );
   }
 
@@ -47,7 +45,9 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
               <tr key={m.mode}>
                 <td className={styles.td}>{m.mode}</td>
                 <td className={styles.td}>{m.total_calls}</td>
-                <td className={styles.td}>{formatTokenCount(m.total_tokens)}</td>
+                <td className={styles.td}>
+                  {formatTokenCount(m.total_tokens)}
+                </td>
                 <td className={styles.td}>{formatCost(m.total_cost_usd)}</td>
               </tr>
             ))}

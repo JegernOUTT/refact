@@ -10,10 +10,18 @@ import styles from "./ThreadsTab.module.css";
 
 type Props = { dateRange: DateRange };
 
-type SortKey = "total_tokens" | "message_count" | "total_cost_usd" | "updated_at";
+type SortKey =
+  | "total_tokens"
+  | "message_count"
+  | "total_cost_usd"
+  | "updated_at";
 
 export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
-  const { data: trajData, isLoading, isError } = useListTrajectoriesPaginatedQuery({ limit: 200 });
+  const {
+    data: trajData,
+    isLoading,
+    isError,
+  } = useListTrajectoriesPaginatedQuery({ limit: 200 });
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({
     key: "total_tokens",
@@ -153,10 +161,18 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                   <td className={styles.td}>{c.model}</td>
                   <td className={styles.td}>{c.mode}</td>
                   <td className={styles.td}>{c.message_count}</td>
-                  <td className={styles.td}>{formatTokenCount(c.total_tokens ?? 0)}</td>
-                  <td className={styles.td}>{formatTokenCount(c.total_prompt_tokens ?? 0)}</td>
-                  <td className={styles.td}>{formatTokenCount(c.total_completion_tokens ?? 0)}</td>
-                  <td className={styles.td}>{formatCost(c.total_cost_usd ?? null)}</td>
+                  <td className={styles.td}>
+                    {formatTokenCount(c.total_tokens ?? 0)}
+                  </td>
+                  <td className={styles.td}>
+                    {formatTokenCount(c.total_prompt_tokens ?? 0)}
+                  </td>
+                  <td className={styles.td}>
+                    {formatTokenCount(c.total_completion_tokens ?? 0)}
+                  </td>
+                  <td className={styles.td}>
+                    {formatCost(c.total_cost_usd ?? null)}
+                  </td>
                 </tr>
               ))}
             </tbody>

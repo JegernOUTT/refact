@@ -47,17 +47,23 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
         <StatCard
           title="Total Usage"
           value={formatTokenCount(t.total_tokens)}
-          subtitle={`${formatTokenCount(t.total_prompt_tokens)} read + ${formatTokenCount(t.total_completion_tokens)} written`}
+          subtitle={`${formatTokenCount(
+            t.total_prompt_tokens,
+          )} read + ${formatTokenCount(t.total_completion_tokens)} written`}
         />
         <StatCard
           title="Conversations"
           value={t.total_conversations.toString()}
-          subtitle={`Each one used ~${formatTokenCount(avgPerConversation)} tokens on average`}
+          subtitle={`Each one used ~${formatTokenCount(
+            avgPerConversation,
+          )} tokens on average`}
         />
         <StatCard
           title="Messages Sent"
           value={t.total_messages_sent.toString()}
-          subtitle={`Each message cost ~${formatTokenCount(avgPerMessage)} tokens on average`}
+          subtitle={`Each message cost ~${formatTokenCount(
+            avgPerMessage,
+          )} tokens on average`}
         />
         <StatCard
           title="AI Wrote"

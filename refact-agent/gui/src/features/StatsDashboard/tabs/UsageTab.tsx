@@ -14,7 +14,11 @@ import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
 import { useAppearance } from "../../../hooks";
-import { formatTokenCount, formatCost, formatDuration } from "../utils/formatters";
+import {
+  formatTokenCount,
+  formatCost,
+  formatDuration,
+} from "../utils/formatters";
 import { dateRangeToApiArgs } from "../utils/dateRange";
 import type { DateRange, ModelStats, ProviderStats } from "../types";
 import styles from "./UsageTab.module.css";
@@ -31,9 +35,17 @@ echarts.use([
 
 type Props = { dateRange: DateRange };
 
-type SortKey = "total_calls" | "total_tokens" | "total_cost_usd" | "avg_duration_ms";
+type SortKey =
+  | "total_calls"
+  | "total_tokens"
+  | "total_cost_usd"
+  | "avg_duration_ms";
 
-function sortModels(models: ModelStats[], key: SortKey, asc: boolean): ModelStats[] {
+function sortModels(
+  models: ModelStats[],
+  key: SortKey,
+  asc: boolean,
+): ModelStats[] {
   return [...models].sort((a, b) => {
     const av = a[key];
     const bv = b[key];
@@ -41,7 +53,11 @@ function sortModels(models: ModelStats[], key: SortKey, asc: boolean): ModelStat
   });
 }
 
-function sortProviders(providers: ProviderStats[], key: Exclude<SortKey, "avg_duration_ms">, asc: boolean): ProviderStats[] {
+function sortProviders(
+  providers: ProviderStats[],
+  key: Exclude<SortKey, "avg_duration_ms">,
+  asc: boolean,
+): ProviderStats[] {
   return [...providers].sort((a, b) => {
     const av = a[key];
     const bv = b[key];
@@ -50,7 +66,9 @@ function sortProviders(providers: ProviderStats[], key: Exclude<SortKey, "avg_du
 }
 
 export const UsageTab: React.FC<Props> = ({ dateRange }) => {
-  const { data, isLoading, isError } = useGetStatsSummaryQuery(dateRangeToApiArgs(dateRange));
+  const { data, isLoading, isError } = useGetStatsSummaryQuery(
+    dateRangeToApiArgs(dateRange),
+  );
   const { isDarkMode } = useAppearance();
   const axisColor = isDarkMode ? "#ffffff" : "#646464";
 
@@ -58,7 +76,10 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
     key: "total_tokens",
     asc: false,
   });
-  const [providerSort, setProviderSort] = useState<{ key: Exclude<SortKey, "avg_duration_ms">; asc: boolean }>({
+  const [providerSort, setProviderSort] = useState<{
+    key: Exclude<SortKey, "avg_duration_ms">;
+    asc: boolean;
+  }>({
     key: "total_tokens",
     asc: false,
   });
@@ -76,13 +97,22 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
 
   const days = [...data.by_day].sort((a, b) => a.date.localeCompare(b.date));
   const dayLabels = days.map((d) =>
-    new Date(d.date).toLocaleString(undefined, { month: "short", day: "numeric" }),
+    new Date(d.date).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+    }),
   );
 
   const barOption = {
     tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
     legend: { data: ["Prompt Tokens", "Completion Tokens"] },
-    grid: { left: "3%", right: "4%", bottom: "3%", top: "15%", containLabel: true },
+    grid: {
+      left: "3%",
+      right: "4%",
+      bottom: "3%",
+      top: "15%",
+      containLabel: true,
+    },
     xAxis: [
       {
         type: "category",
@@ -176,7 +206,13 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
       </Flex>
 
       <Box>
-        <Text size="3" weight="medium" className={styles.sectionTitle} mb="2" as="p">
+        <Text
+          size="3"
+          weight="medium"
+          className={styles.sectionTitle}
+          mb="2"
+          as="p"
+        >
           By Provider
         </Text>
         <Box className={styles.tableWrapper}>
@@ -190,7 +226,12 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                     className={styles.sortButton}
                     onClick={() => toggleProviderSort("total_calls")}
                   >
-                    Calls {providerSort.key === "total_calls" ? (providerSort.asc ? "↑" : "↓") : ""}
+                    Calls{" "}
+                    {providerSort.key === "total_calls"
+                      ? providerSort.asc
+                        ? "↑"
+                        : "↓"
+                      : ""}
                   </button>
                 </th>
                 <th className={styles.th}>
@@ -199,7 +240,12 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                     className={styles.sortButton}
                     onClick={() => toggleProviderSort("total_tokens")}
                   >
-                    Tokens {providerSort.key === "total_tokens" ? (providerSort.asc ? "↑" : "↓") : ""}
+                    Tokens{" "}
+                    {providerSort.key === "total_tokens"
+                      ? providerSort.asc
+                        ? "↑"
+                        : "↓"
+                      : ""}
                   </button>
                 </th>
                 <th className={styles.th}>
@@ -208,7 +254,12 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                     className={styles.sortButton}
                     onClick={() => toggleProviderSort("total_cost_usd")}
                   >
-                    Cost {providerSort.key === "total_cost_usd" ? (providerSort.asc ? "↑" : "↓") : ""}
+                    Cost{" "}
+                    {providerSort.key === "total_cost_usd"
+                      ? providerSort.asc
+                        ? "↑"
+                        : "↓"
+                      : ""}
                   </button>
                 </th>
               </tr>
@@ -218,7 +269,9 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <tr key={p.provider}>
                   <td className={styles.td}>{p.provider}</td>
                   <td className={styles.td}>{p.total_calls}</td>
-                  <td className={styles.td}>{formatTokenCount(p.total_tokens)}</td>
+                  <td className={styles.td}>
+                    {formatTokenCount(p.total_tokens)}
+                  </td>
                   <td className={styles.td}>{formatCost(p.total_cost_usd)}</td>
                 </tr>
               ))}
@@ -228,7 +281,13 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
       </Box>
 
       <Box>
-        <Text size="3" weight="medium" className={styles.sectionTitle} mb="2" as="p">
+        <Text
+          size="3"
+          weight="medium"
+          className={styles.sectionTitle}
+          mb="2"
+          as="p"
+        >
           By Model
         </Text>
         <Box className={styles.tableWrapper}>
@@ -242,7 +301,12 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                     className={styles.sortButton}
                     onClick={() => toggleModelSort("total_calls")}
                   >
-                    Calls {modelSort.key === "total_calls" ? (modelSort.asc ? "↑" : "↓") : ""}
+                    Calls{" "}
+                    {modelSort.key === "total_calls"
+                      ? modelSort.asc
+                        ? "↑"
+                        : "↓"
+                      : ""}
                   </button>
                 </th>
                 <th className={styles.th}>Prompt</th>
@@ -253,7 +317,12 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                     className={styles.sortButton}
                     onClick={() => toggleModelSort("total_cost_usd")}
                   >
-                    Cost {modelSort.key === "total_cost_usd" ? (modelSort.asc ? "↑" : "↓") : ""}
+                    Cost{" "}
+                    {modelSort.key === "total_cost_usd"
+                      ? modelSort.asc
+                        ? "↑"
+                        : "↓"
+                      : ""}
                   </button>
                 </th>
                 <th className={styles.th}>
@@ -262,7 +331,12 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                     className={styles.sortButton}
                     onClick={() => toggleModelSort("avg_duration_ms")}
                   >
-                    Avg Duration {modelSort.key === "avg_duration_ms" ? (modelSort.asc ? "↑" : "↓") : ""}
+                    Avg Duration{" "}
+                    {modelSort.key === "avg_duration_ms"
+                      ? modelSort.asc
+                        ? "↑"
+                        : "↓"
+                      : ""}
                   </button>
                 </th>
               </tr>
@@ -272,10 +346,16 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <tr key={`${m.provider}/${m.model}`}>
                   <td className={styles.td}>{m.model}</td>
                   <td className={styles.td}>{m.total_calls}</td>
-                  <td className={styles.td}>{formatTokenCount(m.total_prompt_tokens)}</td>
-                  <td className={styles.td}>{formatTokenCount(m.total_completion_tokens)}</td>
+                  <td className={styles.td}>
+                    {formatTokenCount(m.total_prompt_tokens)}
+                  </td>
+                  <td className={styles.td}>
+                    {formatTokenCount(m.total_completion_tokens)}
+                  </td>
                   <td className={styles.td}>{formatCost(m.total_cost_usd)}</td>
-                  <td className={styles.td}>{formatDuration(m.avg_duration_ms)}</td>
+                  <td className={styles.td}>
+                    {formatDuration(m.avg_duration_ms)}
+                  </td>
                 </tr>
               ))}
             </tbody>
