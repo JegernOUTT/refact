@@ -132,7 +132,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           error_message: "",
         });
       } else if (to === "stats") {
-        dispatch(push({ name: "statistics page" }));
+        dispatch(push({ name: "stats dashboard" }));
         void sendTelemetryEvent({
           scope: `openStats`,
           success: true,

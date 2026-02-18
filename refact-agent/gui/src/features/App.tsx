@@ -42,6 +42,7 @@ import { TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
 import { Customization } from "./Customization";
 import { DefaultModels } from "./DefaultModels";
+import { StatsDashboard } from "./StatsDashboard";
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
 
 import styles from "./App.module.css";
@@ -298,6 +299,13 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         {!pageSwitching && renderedPage.name === "default models" && (
           <DefaultModels
             backFromDefaultModels={goBack}
+            tabbed={config.tabbed}
+            host={config.host}
+          />
+        )}
+        {!pageSwitching && renderedPage.name === "stats dashboard" && (
+          <StatsDashboard
+            backFromDashboard={goBack}
             tabbed={config.tabbed}
             host={config.host}
           />

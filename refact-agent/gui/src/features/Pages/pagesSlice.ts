@@ -64,6 +64,10 @@ export interface DefaultModelsPage {
   name: "default models";
 }
 
+export interface StatsDashboardPage {
+  name: "stats dashboard";
+}
+
 export interface IntegrationsSetupPage {
   name: "integrations page";
   projectPath?: string;
@@ -88,7 +92,8 @@ export type Page =
   | TaskAgentPage
   | KnowledgeGraphPage
   | CustomizationPage
-  | DefaultModelsPage;
+  | DefaultModelsPage
+  | StatsDashboardPage;
 
 export function isIntegrationSetupPage(
   page: Page,

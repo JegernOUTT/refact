@@ -306,7 +306,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
         </DropdownMenu.Item>
 
         <DropdownMenu.Item onSelect={() => handleNavigation("stats")}>
-          Your Stats
+          Usage Dashboard
         </DropdownMenu.Item>
 
         {addressURL?.trim().toLowerCase() === "refact" && user.data ? (

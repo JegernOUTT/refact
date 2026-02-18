@@ -12,6 +12,7 @@ import {
   persistStore,
 } from "redux-persist";
 import { statisticsApi } from "../services/refact/statistics";
+import { statsApi } from "../services/refact/stats";
 import {
   capsApi,
   promptsApi,
@@ -89,6 +90,7 @@ const rootReducer = combineSlices(
     selected_snippet: selectedSnippetReducer,
     chat: chatReducer,
     [statisticsApi.reducerPath]: statisticsApi.reducer,
+    [statsApi.reducerPath]: statsApi.reducer,
     [capsApi.reducerPath]: capsApi.reducer,
     [promptsApi.reducerPath]: promptsApi.reducer,
     [toolsApi.reducerPath]: toolsApi.reducer,
@@ -180,6 +182,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
         .prepend(
           pingApi.middleware,
           statisticsApi.middleware,
+          statsApi.middleware,
           capsApi.middleware,
           promptsApi.middleware,
           toolsApi.middleware,
