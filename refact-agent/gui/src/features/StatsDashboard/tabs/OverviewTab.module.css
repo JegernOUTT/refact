@@ -1,0 +1,8 @@
+.cardsRow {
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.emptyText {
+  color: var(--gray-10);
+}

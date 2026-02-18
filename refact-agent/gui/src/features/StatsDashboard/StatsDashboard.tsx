@@ -4,6 +4,11 @@ import { ArrowLeftIcon } from "@radix-ui/react-icons";
 import { PageWrapper } from "../../components/PageWrapper";
 import type { Config } from "../Config/configSlice";
 import type { DateRange, DateRangePreset } from "./types";
+import { OverviewTab } from "./tabs/OverviewTab";
+import { UsageTab } from "./tabs/UsageTab";
+import { ThreadsTab } from "./tabs/ThreadsTab";
+import { TasksTab } from "./tabs/TasksTab";
+import { ImpactTab } from "./tabs/ImpactTab";
 import styles from "./StatsDashboard.module.css";
 
 export type StatsDashboardProps = {
@@ -61,33 +66,23 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
           </Tabs.List>
 
           <Tabs.Content value="overview" className={styles.tabContent}>
-            <Text className={styles.placeholderText}>
-              Overview stats coming soon.
-            </Text>
+            <OverviewTab dateRange={dateRange} />
           </Tabs.Content>
 
           <Tabs.Content value="usage" className={styles.tabContent}>
-            <Text className={styles.placeholderText}>
-              LLM usage breakdown coming soon.
-            </Text>
+            <UsageTab dateRange={dateRange} />
           </Tabs.Content>
 
           <Tabs.Content value="threads" className={styles.tabContent}>
-            <Text className={styles.placeholderText}>
-              Thread and session stats coming soon.
-            </Text>
+            <ThreadsTab dateRange={dateRange} />
           </Tabs.Content>
 
           <Tabs.Content value="tasks" className={styles.tabContent}>
-            <Text className={styles.placeholderText}>
-              Tasks and agent stats coming soon.
-            </Text>
+            <TasksTab dateRange={dateRange} />
           </Tabs.Content>
 
           <Tabs.Content value="impact" className={styles.tabContent}>
-            <Text className={styles.placeholderText}>
-              Impact metrics coming soon.
-            </Text>
+            <ImpactTab />
           </Tabs.Content>
         </Tabs.Root>
       </Flex>
