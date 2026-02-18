@@ -1,5 +1,20 @@
 import { useCallback, useState } from "react";
 import classNames from "classnames";
+import { Tooltip } from "@radix-ui/themes";
+import {
+  PlayIcon,
+  StopIcon,
+  CameraIcon,
+  CursorArrowIcon,
+  GlobeIcon,
+  CodeIcon,
+  ClipboardCopyIcon,
+  ImageIcon,
+  ViewGridIcon,
+  ActivityLogIcon,
+  VideoIcon,
+  ReaderIcon,
+} from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { browserApi } from "../../services/refact/browser";
 import {
@@ -8,7 +23,9 @@ import {
   setPickerActive,
   setBrowserRuntime,
   removeBrowserRuntime,
-  markBrowserDetached,
+  closeBrowserUi,
+  makeBrowserRuntime,
+  updateBrowserFrame,
 } from "./browserSlice";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { selectLspPort, selectApiKey } from "../Config/configSlice";
@@ -32,7 +49,6 @@ interface LoadingFlags {
   record: boolean;
   summarize: boolean;
   extract: boolean;
-  handoff: boolean;
 }
 
 const defaultLoading: LoadingFlags = {
@@ -48,7 +64,6 @@ const defaultLoading: LoadingFlags = {
   record: false,
   summarize: false,
   extract: false,
-  handoff: false,
 };
 
 export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
@@ -72,7 +87,6 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
     browserApi.useBrowserElementPickResultMutation();
   const [browserRecordAnimation] =
     browserApi.useBrowserRecordAnimationMutation();
-  const [browserHandoff] = browserApi.useBrowserHandoffMutation();
 
   const withLoading = useCallback(
     async (key: keyof LoadingFlags, fn: () => Promise<void>) => {
@@ -89,35 +103,20 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
   const handleStart = useCallback(() => {
     void withLoading("start", async () => {
       const result = await browserStart({ chat_id: chatId }).unwrap();
-      dispatch(
-        setBrowserRuntime({
-          chatId,
-          runtime: {
-            runtime_id: result.runtime_id,
-            connected: true,
-            active_tab: null,
-            url: null,
-            title: null,
-            tabs: [],
-            latest_frame: null,
-            picker_active: false,
-            attach_screenshot_on_send: false,
-            timeline: [],
-            timeline_open: false,
-            timeline_filter_source: "all",
-            timeline_filter_type: null,
-            notification: null,
-            oversize_info: null,
-          },
-        }),
-      );
+      // Only reset runtime state if this is a genuinely new session or the runtime_id changed.
+      // If already_running with the same id, preserve existing timeline/flags set by SSE.
+      if (result.status !== "already_running" || runtime?.runtime_id !== result.runtime_id) {
+        dispatch(setBrowserRuntime({ chatId, runtime: makeBrowserRuntime(result.runtime_id) }));
+      }
     });
-  }, [browserStart, chatId, dispatch, withLoading]);
+  }, [browserStart, chatId, dispatch, runtime, withLoading]);
 
   const handleStop = useCallback(() => {
     void withLoading("stop", async () => {
       await browserStop({ chat_id: chatId }).unwrap();
       dispatch(removeBrowserRuntime({ chatId }));
+      // Close the panel — requirement: panels disappear when session ends
+      dispatch(closeBrowserUi({ chatId }));
     });
   }, [browserStop, chatId, dispatch, withLoading]);
 
@@ -149,6 +148,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
       void withLoading(label, async () => {
         const result = await browserContext({
           chat_id: chatId,
+          skip_cursor: true,
         }).unwrap();
         const content = JSON.stringify(result[field], null, 2);
         if (port) {
@@ -190,7 +190,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
           const pickResult = await browserElementPickResult({
             chat_id: chatId,
           }).unwrap();
-          if ("status" in pickResult && pickResult.status === "waiting") {
+          if ("status" in pickResult) {
             continue;
           }
           if ("selector" in pickResult) {
@@ -237,10 +237,26 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
 
   const handleSummarizePage = useCallback(() => {
     void withLoading("summarize", async () => {
-      await browserScreenshot({
+      const result = await browserScreenshot({
         chat_id: chatId,
         full_page: false,
       }).unwrap();
+      dispatch(
+        updateBrowserFrame({
+          chatId,
+          frame: { mime: result.mime, data: result.data, diff_boxes: [] },
+        }),
+      );
+      dispatch(
+        addThreadImage({
+          id: chatId,
+          image: {
+            name: "screenshot.png",
+            content: `data:${result.mime};base64,${result.data}`,
+            type: result.mime,
+          },
+        }),
+      );
       if (port) {
         await sendUserMessage(
           chatId,
@@ -250,14 +266,30 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
         );
       }
     });
-  }, [browserScreenshot, chatId, port, apiKey, withLoading]);
+  }, [browserScreenshot, chatId, port, apiKey, dispatch, withLoading]);
 
   const handleExtractJson = useCallback(() => {
     void withLoading("extract", async () => {
-      await browserScreenshot({
+      const result = await browserScreenshot({
         chat_id: chatId,
         full_page: false,
       }).unwrap();
+      dispatch(
+        updateBrowserFrame({
+          chatId,
+          frame: { mime: result.mime, data: result.data, diff_boxes: [] },
+        }),
+      );
+      dispatch(
+        addThreadImage({
+          id: chatId,
+          image: {
+            name: "screenshot.png",
+            content: `data:${result.mime};base64,${result.data}`,
+            type: result.mime,
+          },
+        }),
+      );
       if (port) {
         await sendUserMessage(
           chatId,
@@ -267,45 +299,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
         );
       }
     });
-  }, [browserScreenshot, chatId, port, apiKey, withLoading]);
-
-  const handleHandoff = useCallback(
-    (toChatId: string) => {
-      void withLoading("handoff", async () => {
-        await browserHandoff({
-          from_chat_id: chatId,
-          to_chat_id: toChatId,
-        }).unwrap();
-        dispatch(markBrowserDetached({ chatId }));
-        dispatch(
-          setBrowserRuntime({
-            chatId: toChatId,
-            runtime: {
-              runtime_id: runtime?.runtime_id ?? "",
-              connected: true,
-              active_tab: null,
-              url: runtime?.url ?? null,
-              title: runtime?.title ?? null,
-              tabs: [],
-              latest_frame: runtime?.latest_frame ?? null,
-              picker_active: false,
-              attach_screenshot_on_send: false,
-              timeline: [],
-              timeline_open: false,
-              timeline_filter_source: "all",
-              timeline_filter_type: null,
-              notification: {
-                type: "attached",
-                message: "Browser session attached",
-              },
-              oversize_info: null,
-            },
-          }),
-        );
-      });
-    },
-    [browserHandoff, chatId, dispatch, runtime, withLoading],
-  );
+  }, [browserScreenshot, chatId, port, apiKey, dispatch, withLoading]);
 
   const handleToggleScreenshotOnSend = useCallback(() => {
     dispatch(toggleAttachScreenshotOnSend({ chatId }));
@@ -316,139 +310,173 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
   return (
     <div className={styles.browserToolbar}>
       {!isConnected ? (
-        <button
-          type="button"
-          className={styles.toolbarButton}
-          onClick={handleStart}
-          disabled={loading.start}
-        >
-          {loading.start ? "Starting…" : "▶️ Start"}
-        </button>
+        <Tooltip content="Start browser">
+          <button
+            type="button"
+            className={styles.toolbarIconButton}
+            onClick={handleStart}
+            disabled={loading.start}
+            aria-label="Start browser"
+          >
+            <PlayIcon />
+          </button>
+        </Tooltip>
       ) : (
-        <button
-          type="button"
-          className={styles.toolbarButton}
-          onClick={handleStop}
-          disabled={loading.stop}
-        >
-          {loading.stop ? "Stopping…" : "⏹️ Stop"}
-        </button>
+        <Tooltip content="Stop browser">
+          <button
+            type="button"
+            className={classNames(styles.toolbarIconButton, styles.toolbarIconButtonDanger)}
+            onClick={handleStop}
+            disabled={loading.stop}
+            aria-label="Stop browser"
+          >
+            <StopIcon />
+          </button>
+        </Tooltip>
       )}
 
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={() => {
-          const target = window.prompt("Target chat ID for handoff:");
-          if (target) handleHandoff(target);
-        }}
-        disabled={!isConnected || loading.handoff}
-      >
-        {loading.handoff ? "…" : "🔄"} Handoff
-      </button>
+      <div className={styles.toolbarSeparator} />
+
+      <Tooltip content="Screenshot (viewport)">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={() => handleScreenshot(false)}
+          disabled={!isConnected || loading.screenshot}
+          aria-label="Screenshot"
+        >
+          <CameraIcon />
+        </button>
+      </Tooltip>
+
+      <Tooltip content="Screenshot (full page)">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={() => handleScreenshot(true)}
+          disabled={!isConnected || loading.fullpage}
+          aria-label="Full page screenshot"
+        >
+          <ImageIcon />
+        </button>
+      </Tooltip>
 
       <div className={styles.toolbarSeparator} />
 
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={() => handleScreenshot(false)}
-        disabled={!isConnected || loading.screenshot}
-      >
-        {loading.screenshot ? "…" : "📷"} Screenshot
-      </button>
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={() => handleScreenshot(true)}
-        disabled={!isConnected || loading.fullpage}
-      >
-        {loading.fullpage ? "…" : "📄"} Full Page
-      </button>
+      <Tooltip content="Paste recorded actions into chat">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={() => handleContext("actions", "actions")}
+          disabled={!isConnected || loading.actions}
+          aria-label="Actions"
+        >
+          <ActivityLogIcon />
+        </button>
+      </Tooltip>
+
+      <Tooltip content="Paste console log into chat">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={() => handleContext("console", "console")}
+          disabled={!isConnected || loading.console}
+          aria-label="Console"
+        >
+          <CodeIcon />
+        </button>
+      </Tooltip>
+
+      <Tooltip content="Paste network requests into chat">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={() => handleContext("network", "network")}
+          disabled={!isConnected || loading.network}
+          aria-label="Network"
+        >
+          <GlobeIcon />
+        </button>
+      </Tooltip>
+
+      <Tooltip content="Paste last request as cURL into chat">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={handleCurl}
+          disabled={!isConnected || loading.curl}
+          aria-label="cURL"
+        >
+          <ClipboardCopyIcon />
+        </button>
+      </Tooltip>
+
+      <Tooltip content="Pick element from page">
+        <button
+          type="button"
+          className={classNames(styles.toolbarIconButton, {
+            [styles.toolbarIconButtonActive]: runtime?.picker_active ?? false,
+          })}
+          onClick={handleElementPick}
+          disabled={!isConnected || loading.pick}
+          aria-label="Pick element"
+        >
+          <CursorArrowIcon />
+        </button>
+      </Tooltip>
+
+      <Tooltip content={runtime?.attach_screenshot_on_send ? "Auto-screenshot on send: ON" : "Auto-screenshot on send: OFF"}>
+        <button
+          type="button"
+          className={classNames(styles.toolbarIconButton, {
+            [styles.toolbarIconButtonActive]:
+              runtime?.attach_screenshot_on_send ?? false,
+          })}
+          onClick={handleToggleScreenshotOnSend}
+          disabled={!isConnected}
+          aria-label="Auto-screenshot on send"
+        >
+          <ViewGridIcon />
+        </button>
+      </Tooltip>
 
       <div className={styles.toolbarSeparator} />
 
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={() => handleContext("actions", "actions")}
-        disabled={!isConnected || loading.actions}
-      >
-        {loading.actions ? "…" : "📋"} Actions
-      </button>
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={() => handleContext("console", "console")}
-        disabled={!isConnected || loading.console}
-      >
-        {loading.console ? "…" : "⚠️"} Console
-      </button>
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={() => handleContext("network", "network")}
-        disabled={!isConnected || loading.network}
-      >
-        {loading.network ? "…" : "🌐"} Network
-      </button>
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={handleCurl}
-        disabled={!isConnected || loading.curl}
-      >
-        {loading.curl ? "…" : "🔗"} cURL
-      </button>
+      <Tooltip content="Record animation frames">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={handleRecordAnimation}
+          disabled={!isConnected || loading.record}
+          aria-label="Record animation"
+        >
+          <VideoIcon />
+        </button>
+      </Tooltip>
 
-      <div className={styles.toolbarSeparator} />
+      <Tooltip content="Summarize page">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={handleSummarizePage}
+          disabled={!isConnected || loading.summarize}
+          aria-label="Summarize page"
+        >
+          <ReaderIcon />
+        </button>
+      </Tooltip>
 
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={handleElementPick}
-        disabled={!isConnected || loading.pick}
-      >
-        {loading.pick ? "Picking…" : "🎯 Pick Element"}
-      </button>
-      <button
-        type="button"
-        className={classNames(styles.toolbarButton, {
-          [styles.toolbarButtonActive]:
-            runtime?.attach_screenshot_on_send ?? false,
-        })}
-        onClick={handleToggleScreenshotOnSend}
-        disabled={!isConnected}
-      >
-        📎 Auto-Screenshot
-      </button>
-
-      <div className={styles.toolbarSeparator} />
-
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={handleRecordAnimation}
-        disabled={!isConnected || loading.record}
-      >
-        {loading.record ? "Recording…" : "📽️ Record"}
-      </button>
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={handleSummarizePage}
-        disabled={!isConnected || loading.summarize}
-      >
-        {loading.summarize ? "…" : "📝"} Summarize
-      </button>
-      <button
-        type="button"
-        className={styles.toolbarButton}
-        onClick={handleExtractJson}
-        disabled={!isConnected || loading.extract}
-      >
-        {loading.extract ? "…" : "📊"} Extract JSON
-      </button>
+      <Tooltip content="Extract JSON from page">
+        <button
+          type="button"
+          className={styles.toolbarIconButton}
+          onClick={handleExtractJson}
+          disabled={!isConnected || loading.extract}
+          aria-label="Extract JSON"
+        >
+          <ViewGridIcon />
+        </button>
+      </Tooltip>
     </div>
   );
 };

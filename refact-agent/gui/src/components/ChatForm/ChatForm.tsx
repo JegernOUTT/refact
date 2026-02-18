@@ -53,6 +53,7 @@ import {
   BackToSideBarButton,
   AgentIntegrationsButton,
   UnifiedSendButton,
+  BrowserToggleButton,
 } from "../Buttons";
 import { StreamingTokenCounter, UsageCounter } from "../UsageCounter";
 import { TrajectoryButton } from "../Trajectory";
@@ -571,6 +572,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             />
 
             <Flex justify="end" flexGrow="1" wrap="wrap" gap="2" align="center">
+              <BrowserToggleButton chatId={chatId} />
               <AgentIntegrationsButton
                 title="Set up Agent Integrations"
                 onClick={handleAgentIntegrationsClick}

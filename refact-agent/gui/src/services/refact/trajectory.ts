@@ -52,6 +52,7 @@ export type HandoffPreviewResponse = {
 export type HandoffApplyResponse = {
   new_chat_id: string;
   stats: TransformStats;
+  browser_runtime_id?: string | null;
 };
 
 export type ModeTransitionApplyResponse = {

@@ -11,6 +11,7 @@ use crate::chat::trajectory_ops::{
     CompressOptions, HandoffOptions, TransformStats, compress_in_place, handoff_select,
     sanitize_messages_for_new_thread,
 };
+use crate::integrations::browser_runtime::find_runtime_by_chat_id;
 use crate::agentic::mode_transition::{
     analyze_mode_transition, assemble_new_chat,
 };
@@ -53,6 +54,8 @@ pub struct HandoffPreviewResponse {
 pub struct HandoffApplyResponse {
     pub new_chat_id: String,
     pub stats: TransformStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_runtime_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -304,7 +307,20 @@ pub async fn handle_handoff_apply(
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let response = HandoffApplyResponse { new_chat_id, stats };
+    let browser_runtime_id = if let Some((runtime_id, runtime_arc)) =
+        find_runtime_by_chat_id(gcx.clone(), &chat_id).await
+    {
+        let mut rt = runtime_arc.lock().await;
+        rt.detach();
+        rt.reattach(&new_chat_id);
+        rt.touch();
+        drop(rt);
+        Some(runtime_id)
+    } else {
+        None
+    };
+
+    let response = HandoffApplyResponse { new_chat_id, stats, browser_runtime_id };
 
     let body = serde_json::to_vec(&response)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

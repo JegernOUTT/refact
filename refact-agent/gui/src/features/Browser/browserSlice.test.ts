@@ -11,10 +11,14 @@ import {
   setBrowserNotification,
   markBrowserDetached,
   markBrowserClosed,
+  shiftPendingToolbarAction,
+  openBrowserUi,
+  closeBrowserUi,
   type BrowserState,
   type BrowserRuntime,
   type BrowserFrame,
 } from "./browserSlice";
+import { applyChatEvent } from "../Chat/Thread/actions";
 
 const reducer = browserSlice.reducer;
 
@@ -35,6 +39,7 @@ function makeRuntime(overrides?: Partial<BrowserRuntime>): BrowserRuntime {
     timeline_filter_type: null,
     notification: null,
     oversize_info: null,
+    pending_toolbar_actions: [],
     ...overrides,
   };
 }
@@ -42,8 +47,12 @@ function makeRuntime(overrides?: Partial<BrowserRuntime>): BrowserRuntime {
 function stateWith(
   chatId: string,
   runtime: BrowserRuntime,
+  uiOpen = true,
 ): BrowserState {
-  return { runtimes: { [chatId]: runtime } };
+  return {
+    runtimes: { [chatId]: runtime },
+    browserUiOpen: uiOpen ? { [chatId]: true } : {},
+  };
 }
 
 describe("browserSlice", () => {
@@ -92,7 +101,7 @@ describe("browserSlice", () => {
   });
 
   test("updateBrowserStatus does nothing for missing chatId", () => {
-    const initial: BrowserState = { runtimes: {} };
+    const initial: BrowserState = { runtimes: {}, browserUiOpen: {} };
     const state = reducer(
       initial,
       updateBrowserStatus({ chatId: "missing", connected: true }),
@@ -131,6 +140,7 @@ describe("browserSlice", () => {
         "chat-1": makeRuntime({ runtime_id: "rt-1" }),
         "chat-2": makeRuntime({ runtime_id: "rt-2" }),
       },
+      browserUiOpen: {},
     };
     const state = reducer(
       initial,
@@ -245,11 +255,178 @@ describe("browserSlice", () => {
   });
 
   test("markBrowserDetached does nothing for missing chatId", () => {
-    const initial: BrowserState = { runtimes: {} };
+    const initial: BrowserState = { runtimes: {}, browserUiOpen: {} };
     const state = reducer(
       initial,
       markBrowserDetached({ chatId: "missing" }),
     );
     expect(state.runtimes).toEqual({});
+  });
+
+  test("browser_toolbar_action SSE event pushes to pending queue", () => {
+    const initial = stateWith("chat-1", makeRuntime());
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_toolbar_action",
+        action: "screenshot",
+      }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.pending_toolbar_actions).toEqual(["screenshot"]);
+  });
+
+  test("browser_toolbar_action queues multiple actions", () => {
+    const initial = stateWith("chat-1", makeRuntime());
+    let state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_toolbar_action",
+        action: "screenshot",
+      }),
+    );
+    state = reducer(
+      state,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "2",
+        type: "browser_toolbar_action",
+        action: "summarize",
+      }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.pending_toolbar_actions).toEqual(["screenshot", "summarize"]);
+  });
+
+  test("browser_toolbar_action ignores invalid action strings", () => {
+    const initial = stateWith("chat-1", makeRuntime());
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_toolbar_action",
+        action: "invalid_action",
+      }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.pending_toolbar_actions).toEqual([]);
+  });
+
+  test("browser_toolbar_action does nothing for missing runtime", () => {
+    const initial: BrowserState = { runtimes: {}, browserUiOpen: {} };
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_toolbar_action",
+        action: "screenshot",
+      }),
+    );
+    expect(state.runtimes["chat-1"]).toBeUndefined();
+  });
+
+  test("shiftPendingToolbarAction removes first item from queue", () => {
+    const initial = stateWith(
+      "chat-1",
+      makeRuntime({ pending_toolbar_actions: ["screenshot", "summarize", "curl"] }),
+    );
+    const state = reducer(
+      initial,
+      shiftPendingToolbarAction({ chatId: "chat-1" }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.pending_toolbar_actions).toEqual(["summarize", "curl"]);
+  });
+
+  test("shiftPendingToolbarAction does nothing on empty queue", () => {
+    const initial = stateWith("chat-1", makeRuntime());
+    const state = reducer(
+      initial,
+      shiftPendingToolbarAction({ chatId: "chat-1" }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.pending_toolbar_actions).toEqual([]);
+  });
+
+  test("openBrowserUi sets browserUiOpen true without creating runtime", () => {
+    const state = reducer(undefined, openBrowserUi({ chatId: "chat-1" }));
+    expect(state.browserUiOpen["chat-1"]).toBe(true);
+    expect(state.runtimes["chat-1"]).toBeUndefined();
+  });
+
+  test("closeBrowserUi sets browserUiOpen false and clears runtime", () => {
+    const initial: BrowserState = {
+      runtimes: { "chat-1": makeRuntime() },
+      browserUiOpen: { "chat-1": true },
+    };
+    const state = reducer(initial, closeBrowserUi({ chatId: "chat-1" }));
+    expect(state.browserUiOpen["chat-1"]).toBe(false);
+    expect(state.runtimes["chat-1"]).toBeUndefined();
+  });
+
+  test("browser_closed event closes UI and clears runtime", () => {
+    const initial: BrowserState = {
+      runtimes: { "chat-1": makeRuntime({ runtime_id: "rt-1" }) },
+      browserUiOpen: { "chat-1": true },
+    };
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_closed",
+        runtime_id: "rt-1",
+        reason: "user_closed",
+      }),
+    );
+    expect(state.browserUiOpen["chat-1"]).toBe(false);
+    expect(state.runtimes["chat-1"]).toBeUndefined();
+  });
+
+  test("SSE events are ignored when browserUiOpen is false", () => {
+    const initial: BrowserState = {
+      runtimes: {},
+      browserUiOpen: {},
+    };
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_status",
+        connected: true,
+        runtime_id: "rt-1",
+      }),
+    );
+    expect(state.runtimes["chat-1"]).toBeUndefined();
+  });
+
+  test("browser_status does not recreate runtime after UI closed", () => {
+    const initial: BrowserState = {
+      runtimes: {},
+      browserUiOpen: { "chat-1": false },
+    };
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_status",
+        connected: true,
+        runtime_id: "rt-1",
+      }),
+    );
+    expect(state.runtimes["chat-1"]).toBeUndefined();
   });
 });

@@ -17,6 +17,11 @@ import {
   requestSseRefresh,
   closeThread,
 } from "../features/Chat/Thread/actions";
+import {
+  selectBrowserRuntime,
+  setBrowserRuntime,
+  removeBrowserRuntime,
+} from "../features/Browser/browserSlice";
 import { push } from "../features/Pages/pagesSlice";
 import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
 import { regenerate } from "../services/refact/chatCommands";
@@ -27,6 +32,9 @@ export function useTrajectoryOps() {
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectChatId);
   const thread = useAppSelector(selectThread);
+  const browserRuntime = useAppSelector((state) =>
+    chatId ? selectBrowserRuntime(state, chatId) : undefined,
+  );
   const port = useAppSelector(selectLspPort);
   const apiKey = useAppSelector(selectApiKey);
 
@@ -117,6 +125,19 @@ export function useTrajectoryOps() {
         }),
       );
 
+      // Transfer browser runtime state to the new chat if one was active
+      if (browserRuntime && result.browser_runtime_id) {
+        dispatch(setBrowserRuntime({
+          chatId: result.new_chat_id,
+          runtime: {
+            ...browserRuntime,
+            runtime_id: result.browser_runtime_id,
+            notification: { type: "attached", message: "Browser session transferred via handoff" },
+          },
+        }));
+        dispatch(removeBrowserRuntime({ chatId: oldChatId }));
+      }
+
       if (isTaskChat && taskMeta?.role === "planner") {
         const taskId = taskMeta.task_id;
         const now = new Date().toISOString();
@@ -174,7 +195,7 @@ export function useTrajectoryOps() {
       console.error("[handleApplyHandoff]", error);
       return false;
     }
-  }, [chatId, thread, handoffOptions, applyHandoff, dispatch, port, apiKey]);
+  }, [chatId, thread, browserRuntime, handoffOptions, applyHandoff, dispatch, port, apiKey]);
 
   const clearPreviews = useCallback(() => {
     setTransformPreview(null);

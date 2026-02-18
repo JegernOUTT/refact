@@ -1,10 +1,10 @@
 export { ActionTimeline } from "./ActionTimeline";
-export { BrowserLayout } from "./BrowserLayout";
 export { BrowserPanel } from "./BrowserPanel";
 export { BrowserToolbar } from "./BrowserToolbar";
 export { BrowserContextGuard } from "./BrowserContextGuard";
 export {
   browserSlice,
+  makeBrowserRuntime,
   setBrowserRuntime,
   updateBrowserStatus,
   updateBrowserFrame,
@@ -21,6 +21,9 @@ export {
   markBrowserClosed,
   setBrowserContextOversize,
   clearBrowserContextOversize,
+  shiftPendingToolbarAction,
+  openBrowserUi,
+  closeBrowserUi,
   selectBrowserRuntime,
   selectBrowserRuntimes,
   selectTimeline,
@@ -28,6 +31,7 @@ export {
   selectTimelineFilterSource,
   selectTimelineFilterType,
   selectBrowserContextOversize,
+  selectBrowserUiOpen,
 } from "./browserSlice";
 export type {
   BrowserState,
@@ -39,4 +43,6 @@ export type {
   DiffBox,
   TimelineEntry,
   TimelineFilterSource,
+  BrowserToolbarActionType,
 } from "./browserSlice";
+export { useBrowserToolbarActions } from "./useBrowserToolbarActions";

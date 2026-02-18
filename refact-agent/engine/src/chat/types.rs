@@ -358,6 +358,9 @@ pub enum ChatEvent {
         mutation_bytes: usize,
         pending_message_id: String,
     },
+    BrowserToolbarAction {
+        action: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1185,5 +1188,38 @@ mod tests {
         assert_eq!(json["chat_id"], "chat-1");
         assert_eq!(json["seq"], "5");
         assert_eq!(json["type"], "browser_frame");
+    }
+
+    #[test]
+    fn test_chat_event_browser_toolbar_action_serde() {
+        let event = ChatEvent::BrowserToolbarAction {
+            action: "screenshot".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "browser_toolbar_action");
+        assert_eq!(json["action"], "screenshot");
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::BrowserToolbarAction { action } => {
+                assert_eq!(action, "screenshot");
+            }
+            _ => panic!("Expected BrowserToolbarAction"),
+        }
+    }
+
+    #[test]
+    fn test_chat_event_browser_toolbar_action_in_envelope() {
+        let envelope = EventEnvelope {
+            chat_id: "chat-1".to_string(),
+            seq: 10,
+            event: ChatEvent::BrowserToolbarAction {
+                action: "summarize".to_string(),
+            },
+        };
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["chat_id"], "chat-1");
+        assert_eq!(json["seq"], "10");
+        assert_eq!(json["type"], "browser_toolbar_action");
+        assert_eq!(json["action"], "summarize");
     }
 }

@@ -2677,6 +2677,7 @@ mod tests {
             cache_guard_force_next: false,
             task_agent_error: None,
             trajectory_events_tx: None,
+            pending_browser_message: None,
         };
 
         let snapshot = TrajectorySnapshot::from_session(&session);

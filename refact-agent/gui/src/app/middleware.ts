@@ -1143,8 +1143,9 @@ startListening({
 
     if (isUnstartedChat) {
       patch.model = runtime.thread.model;
-      patch.temperature = runtime.thread.temperature;
-      patch.max_tokens = runtime.thread.max_tokens;
+      patch.temperature = runtime.thread.temperature ?? undefined;
+
+      patch.max_tokens = runtime.thread.max_tokens ?? undefined;
       patch.increase_max_tokens = runtime.thread.increase_max_tokens;
       patch.include_project_info = runtime.thread.include_project_info;
       patch.context_tokens_cap = runtime.thread.context_tokens_cap;
@@ -1156,15 +1157,20 @@ startListening({
     if (setBoostReasoning.match(_action)) {
       patch.boost_reasoning = runtime.thread.boost_reasoning;
       // preserve temperature reset as part of “reasoning defaults”
-      patch.temperature = runtime.thread.temperature;
+
+      patch.temperature = runtime.thread.temperature ?? undefined;
     }
     if (setReasoningEffort.match(_action)) {
-      patch.reasoning_effort = runtime.thread.reasoning_effort;
-      patch.temperature = runtime.thread.temperature;
+
+      patch.reasoning_effort = runtime.thread.reasoning_effort ?? undefined;
+
+      patch.temperature = runtime.thread.temperature ?? undefined;
     }
     if (setThinkingBudget.match(_action)) {
-      patch.thinking_budget = runtime.thread.thinking_budget;
-      patch.temperature = runtime.thread.temperature;
+
+      patch.thinking_budget = runtime.thread.thinking_budget ?? undefined;
+
+      patch.temperature = runtime.thread.temperature ?? undefined;
     }
 
     // Still persist model changes after start (matches current UX).

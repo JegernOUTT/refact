@@ -46,6 +46,10 @@ pub enum RecorderEvent {
         changed: u32,
         timestamp: f64,
     },
+    ToolbarAction {
+        action: String,
+        timestamp: f64,
+    },
 }
 
 impl RecorderEvent {
@@ -58,6 +62,7 @@ impl RecorderEvent {
             RecorderEvent::Submit { timestamp, .. } => *timestamp,
             RecorderEvent::Scroll { timestamp, .. } => *timestamp,
             RecorderEvent::MutationSummary { timestamp, .. } => *timestamp,
+            RecorderEvent::ToolbarAction { timestamp, .. } => *timestamp,
         }
     }
 
@@ -107,37 +112,6 @@ pub fn apply_password_masking(event: &RecorderEvent) -> RecorderEvent {
         }
         _ => event.clone(),
     }
-}
-
-pub fn debounce_scroll_events(events: &[RecorderEvent]) -> Vec<RecorderEvent> {
-    if events.is_empty() {
-        return Vec::new();
-    }
-
-    let mut result: Vec<RecorderEvent> = Vec::new();
-
-    for event in events {
-        if let RecorderEvent::Scroll { scroll_x, scroll_y, timestamp } = event {
-            if let Some(last) = result.last() {
-                if let RecorderEvent::Scroll { timestamp: last_ts, .. } = last {
-                    if (timestamp - last_ts) < SCROLL_DEBOUNCE_MS {
-                        let _ = result.pop();
-                        result.push(RecorderEvent::Scroll {
-                            scroll_x: *scroll_x,
-                            scroll_y: *scroll_y,
-                            timestamp: *timestamp,
-                        });
-                        continue;
-                    }
-                }
-            }
-            result.push(event.clone());
-        } else {
-            result.push(event.clone());
-        }
-    }
-
-    result
 }
 
 pub fn enforce_buffer_limit<T>(buffer: &mut Vec<T>, cursor: &mut usize) {
@@ -256,55 +230,6 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let parsed: RecorderEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, parsed);
-    }
-
-    #[test]
-    fn test_scroll_debounce_collapses_within_threshold() {
-        let events = vec![
-            RecorderEvent::Scroll { scroll_x: 0.0, scroll_y: 100.0, timestamp: 1000.0 },
-            RecorderEvent::Scroll { scroll_x: 0.0, scroll_y: 200.0, timestamp: 1100.0 },
-            RecorderEvent::Scroll { scroll_x: 0.0, scroll_y: 300.0, timestamp: 1200.0 },
-        ];
-        let debounced = debounce_scroll_events(&events);
-        assert_eq!(debounced.len(), 1);
-        match &debounced[0] {
-            RecorderEvent::Scroll { scroll_y, timestamp, .. } => {
-                assert_eq!(*scroll_y, 300.0);
-                assert_eq!(*timestamp, 1200.0);
-            }
-            _ => panic!("Expected scroll"),
-        }
-    }
-
-    #[test]
-    fn test_scroll_debounce_keeps_separated_scrolls() {
-        let events = vec![
-            RecorderEvent::Scroll { scroll_x: 0.0, scroll_y: 100.0, timestamp: 1000.0 },
-            RecorderEvent::Scroll { scroll_x: 0.0, scroll_y: 200.0, timestamp: 1500.0 },
-        ];
-        let debounced = debounce_scroll_events(&events);
-        assert_eq!(debounced.len(), 2);
-    }
-
-    #[test]
-    fn test_scroll_debounce_mixed_events() {
-        let events = vec![
-            RecorderEvent::Scroll { scroll_x: 0.0, scroll_y: 100.0, timestamp: 1000.0 },
-            RecorderEvent::Scroll { scroll_x: 0.0, scroll_y: 200.0, timestamp: 1050.0 },
-            RecorderEvent::Click { selector: "#btn".to_string(), text: "OK".to_string(), x: 10.0, y: 20.0, timestamp: 1100.0 },
-            RecorderEvent::Scroll { scroll_x: 0.0, scroll_y: 400.0, timestamp: 1200.0 },
-        ];
-        let debounced = debounce_scroll_events(&events);
-        assert_eq!(debounced.len(), 3);
-        assert!(debounced[0].is_scroll());
-        assert!(!debounced[1].is_scroll());
-        assert!(debounced[2].is_scroll());
-    }
-
-    #[test]
-    fn test_scroll_debounce_empty() {
-        let debounced = debounce_scroll_events(&[]);
-        assert!(debounced.is_empty());
     }
 
     #[test]

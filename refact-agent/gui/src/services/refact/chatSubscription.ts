@@ -199,6 +199,52 @@ export type EventEnvelope =
       network_bytes: number;
       mutation_bytes: number;
       pending_message_id: string;
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "browser_frame";
+      tab_id: string;
+      mime: string;
+      data: string;
+      diff_boxes?: { x: number; y: number; width: number; height: number }[];
+      changed_text?: string;
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "browser_status";
+      runtime_id: string;
+      connected: boolean;
+      active_tab?: string | null;
+      url?: string | null;
+      title?: string | null;
+      tabs?: { tab_id: string; url: string; title: string }[];
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "browser_closed";
+      runtime_id: string;
+      reason: string;
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "browser_timeline";
+      events: {
+        timestamp: string;
+        source: string;
+        type: string;
+        summary: string;
+        details?: Record<string, unknown>;
+      }[];
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "browser_toolbar_action";
+      action: string;
     };
 
 export type ChatEventEnvelope = EventEnvelope;

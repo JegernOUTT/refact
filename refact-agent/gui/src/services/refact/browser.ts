@@ -47,6 +47,7 @@ export type BrowserContextRequest = {
   chat_id: string;
   max_bytes?: number;
   last_n_actions?: number;
+  skip_cursor?: boolean;
 };
 
 export type BrowserContextResponse = {

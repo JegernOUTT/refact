@@ -37,6 +37,7 @@ function makeRuntime(overrides?: Partial<BrowserRuntime>): BrowserRuntime {
     timeline_filter_type: null,
     notification: null,
     oversize_info: null,
+    pending_toolbar_actions: [],
     ...overrides,
   };
 }
@@ -45,7 +46,7 @@ function stateWith(
   chatId: string,
   runtime: BrowserRuntime,
 ): BrowserState {
-  return { runtimes: { [chatId]: runtime } };
+  return { runtimes: { [chatId]: runtime }, browserUiOpen: {} };
 }
 
 const sampleEntries: TimelineEntry[] = [
@@ -243,7 +244,7 @@ describe("browserSlice timeline reducers", () => {
   });
 
   test("addTimelineEntries does nothing for missing chatId", () => {
-    const initial: BrowserState = { runtimes: {} };
+    const initial: BrowserState = { runtimes: {}, browserUiOpen: {} };
     const state = reducer(
       initial,
       addTimelineEntries({

@@ -6,13 +6,16 @@ import {
   selectBrowserContextOversize,
   selectTimelineOpen,
   toggleTimelineOpen,
-  setBrowserRuntime,
   setBrowserNotification,
+  setBrowserRuntime,
+  updateBrowserFrame,
+  makeBrowserRuntime,
 } from "./browserSlice";
 import { browserApi } from "../../services/refact/browser";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserContextGuard } from "./BrowserContextGuard";
 import { ActionTimeline } from "./ActionTimeline";
+import { useBrowserToolbarActions } from "./useBrowserToolbarActions";
 import styles from "./Browser.module.css";
 
 type BrowserPanelProps = {
@@ -31,6 +34,9 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
     selectBrowserContextOversize(state, chatId),
   );
   const [browserStart] = browserApi.useBrowserStartMutation();
+  const [browserScreenshot] = browserApi.useBrowserScreenshotMutation();
+
+  useBrowserToolbarActions(chatId);
 
   const isConnected = runtime?.connected ?? false;
   const url = runtime?.url ?? "";
@@ -39,31 +45,29 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
 
   const handleRestart = useCallback(() => {
     void (async () => {
-      const result = await browserStart({ chat_id: chatId }).unwrap();
-      dispatch(
-        setBrowserRuntime({
-          chatId,
-          runtime: {
-            runtime_id: result.runtime_id,
-            connected: true,
-            active_tab: null,
-            url: null,
-            title: null,
-            tabs: [],
-            latest_frame: null,
-            picker_active: false,
-            attach_screenshot_on_send: false,
-            timeline: [],
-            timeline_open: false,
-            timeline_filter_source: "all",
-            timeline_filter_type: null,
-            notification: null,
-            oversize_info: null,
-          },
-        }),
-      );
+      try {
+        dispatch(setBrowserNotification({ chatId, notification: null }));
+        const result = await browserStart({ chat_id: chatId }).unwrap();
+        dispatch(setBrowserRuntime({ chatId, runtime: makeBrowserRuntime(result.runtime_id) }));
+        const screenshotResult = await browserScreenshot({
+          chat_id: chatId,
+          full_page: false,
+        }).unwrap();
+        dispatch(
+          updateBrowserFrame({
+            chatId,
+            frame: {
+              mime: screenshotResult.mime,
+              data: screenshotResult.data,
+              diff_boxes: [],
+            },
+          }),
+        );
+      } catch {
+        // Silently ignore restart failures
+      }
     })();
-  }, [browserStart, chatId, dispatch]);
+  }, [browserStart, browserScreenshot, chatId, dispatch]);
 
   const handleDismissNotification = useCallback(() => {
     dispatch(setBrowserNotification({ chatId, notification: null }));

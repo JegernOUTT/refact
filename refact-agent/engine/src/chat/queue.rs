@@ -487,16 +487,19 @@ pub async fn process_command_queue(
                     attach_screenshot_on_send,
                 ).await;
 
-                let is_oversize = browser_ctx_result.as_ref().map_or(false, |(_, oversize)| oversize.is_some());
+                let is_oversize = browser_ctx_result.as_ref().map_or(false, |(_, oversize)| *oversize);
 
                 if is_oversize {
-                    if let Some((_, Some(ref _info))) = browser_ctx_result {
+                    if let Some((_, true)) = browser_ctx_result {
                         let snapshot = browser_context::get_browser_context_for_chat(
                             gcx.clone(),
                             &browser_chat_id,
                         ).await;
                         if let Some(ref snap) = snapshot {
-                            let breakdown = browser_context::compute_context_breakdown(snap);
+                            let action_bytes = serde_json::to_string(&snap.actions).unwrap_or_default().len();
+                            let console_bytes = serde_json::to_string(&snap.console).unwrap_or_default().len();
+                            let network_bytes = serde_json::to_string(&snap.network).unwrap_or_default().len();
+                            let mutation_bytes = serde_json::to_string(&snap.mutations).unwrap_or_default().len();
                             let pending_message_id = Uuid::new_v4().to_string();
                             let mut session = session_arc.lock().await;
                             session.pending_browser_message = Some(PendingBrowserMessage {
@@ -506,14 +509,14 @@ pub async fn process_command_queue(
                                 checkpoints: checkpoints.clone(),
                             });
                             session.emit(ChatEvent::BrowserContextOversize {
-                                total_bytes: breakdown.total_bytes,
-                                action_count: breakdown.action_count,
-                                action_bytes: breakdown.action_bytes,
-                                console_count: breakdown.console_count,
-                                console_bytes: breakdown.console_bytes,
-                                network_count: breakdown.network_count,
-                                network_bytes: breakdown.network_bytes,
-                                mutation_bytes: breakdown.mutation_bytes,
+                                total_bytes: action_bytes + console_bytes + network_bytes + mutation_bytes,
+                                action_count: snap.actions.len(),
+                                action_bytes,
+                                console_count: snap.console.len(),
+                                console_bytes,
+                                network_count: snap.network.len(),
+                                network_bytes,
+                                mutation_bytes,
                                 pending_message_id: pending_message_id.clone(),
                             });
                             session.set_runtime_state(SessionState::WaitingUserInput, None);

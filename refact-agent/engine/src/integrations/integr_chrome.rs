@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::ContextEnum;
 use crate::integrations::sessions::{IntegrationSession, get_session_hashmap_key};
+use crate::integrations::browser_runtime::find_runtime_by_chat_id;
 use crate::global_context::GlobalContext;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::scratchpads::multimodality::MultimodalElement;
@@ -222,7 +223,7 @@ impl Tool for ToolChrome {
 
         let session_hashmap_key = get_session_hashmap_key("chrome", &chat_id);
         let mut tool_log =
-            setup_chrome_session(gcx.clone(), &self.settings_chrome, &session_hashmap_key).await?;
+            setup_chrome_session(gcx.clone(), &self.settings_chrome, &session_hashmap_key, &chat_id).await?;
 
         let command_session = {
             let gcx_locked = gcx.read().await;
@@ -343,6 +344,7 @@ async fn setup_chrome_session(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &SettingsChrome,
     session_hashmap_key: &String,
+    chat_id: &str,
 ) -> Result<Vec<String>, String> {
     let mut setup_log = vec![];
 
@@ -369,6 +371,23 @@ async fn setup_chrome_session(
                 .integration_sessions
                 .remove(session_hashmap_key);
         }
+    }
+
+    if let Some((_, runtime_arc)) = find_runtime_by_chat_id(gcx.clone(), chat_id).await {
+        let browser = {
+            let rt = runtime_arc.lock().await;
+            rt.browser.clone()
+        };
+        setup_log.push("Connected to existing browser panel session.".to_string());
+        let command_session: Box<dyn IntegrationSession> = Box::new(ChromeSession {
+            browser,
+            tabs: HashMap::new(),
+        });
+        gcx.write().await.integration_sessions.insert(
+            session_hashmap_key.clone(),
+            Arc::new(AMutex::new(command_session)),
+        );
+        return Ok(setup_log);
     }
 
     let window_size = match (

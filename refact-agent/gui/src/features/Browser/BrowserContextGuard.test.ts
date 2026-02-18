@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { estimateSize, formatKB } from "./BrowserContextGuard";
+import { estimateSize, formatKB } from "./BrowserContextGuard.utils";
 import type { BrowserContextOversizeInfo } from "./browserSlice";
 import {
   browserSlice,
@@ -25,6 +25,7 @@ const makeRuntime = (overrides?: Partial<BrowserRuntime>): BrowserRuntime => ({
   timeline_filter_type: null,
   notification: null,
   oversize_info: null,
+  pending_toolbar_actions: [],
   ...overrides,
 });
 

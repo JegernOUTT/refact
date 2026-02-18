@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use base64::Engine;
 
+use crate::chat::types::{ChatEvent, TimelineEntry};
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::integrations::browser_runtime::{
-    BrowserRuntime, get_browser_profile_dir, register_browser_runtime, remove_browser_runtime,
-    find_runtime_by_chat_id,
+    BrowserRuntime, compute_frame_hash, get_browser_profile_dir, register_browser_runtime,
+    remove_browser_runtime, find_runtime_by_chat_id, setup_recording_for_runtime,
 };
+use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry};
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> {
     Response::builder()
@@ -38,11 +40,8 @@ pub struct ContextBody {
     pub chat_id: String,
     pub max_bytes: Option<usize>,
     pub last_n_actions: Option<usize>,
-}
-
-#[derive(Deserialize)]
-pub struct ElementPickResultBody {
-    pub chat_id: String,
+    #[serde(default)]
+    pub skip_cursor: bool,
 }
 
 #[derive(Deserialize)]
@@ -130,6 +129,19 @@ pub async fn handle_browser_start(
     rt.reattach(&post.chat_id);
     let runtime_id = register_browser_runtime(gcx.clone(), rt).await;
 
+    if let Some(runtime_arc) = gcx.read().await.browser_runtimes.get(&runtime_id).cloned() {
+        let rt = runtime_arc.lock().await;
+        if let Err(e) = setup_recording_for_runtime(&rt) {
+            tracing::warn!("Browser recording setup failed (non-fatal): {}", e);
+        }
+    }
+
+    tokio::spawn(browser_frame_emission_task(
+        gcx.clone(),
+        post.chat_id.clone(),
+        runtime_id.clone(),
+    ));
+
     Ok(json_response(StatusCode::OK, serde_json::json!({
         "runtime_id": runtime_id,
         "status": "started"
@@ -149,6 +161,11 @@ pub async fn handle_browser_stop(
     })?;
 
     remove_browser_runtime(gcx.clone(), &rid).await;
+
+    // Give the frame emission task time to notice the runtime is gone and release its Arc,
+    // so Chrome fully exits before the caller can start a new session with the same profile dir.
+    // Task polls every 500ms; allow up to ~800ms for in-progress screenshot + sleep + exit.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
     Ok(json_response(StatusCode::OK, serde_json::json!({
         "status": "stopped"
@@ -235,7 +252,7 @@ fn resize_screenshot(data: &[u8], max_dim: u32, mime: &str) -> Result<Vec<u8>, S
     if scale < 1.0 {
         let nw = (scale * img.width() as f32) as u32;
         let nh = (scale * img.height() as f32) as u32;
-        img = img.resize(nw, nh, image::imageops::FilterType::Lanczos3);
+        img = img.resize(nw, nh, image::imageops::FilterType::Triangle);
     }
 
     let mut out = Vec::new();
@@ -264,10 +281,20 @@ pub async fn handle_browser_context(
         None => (String::new(), String::new()),
     };
 
-    let actions_snapshot = &rt.action_buffer[rt.last_send_action_cursor..];
-    let console_snapshot = &rt.console_buffer[rt.last_send_console_cursor..];
-    let network_snapshot = &rt.network_buffer[rt.last_send_network_cursor..];
-    let mutations_snapshot = &rt.mutation_summary[rt.last_send_mutation_cursor..];
+    let (actions_snapshot, console_snapshot, network_snapshot, mutations_snapshot) = if post.skip_cursor {
+        (&rt.action_buffer[..], &rt.console_buffer[..], &rt.network_buffer[..], &rt.mutation_summary[..])
+    } else {
+        let a0 = rt.last_send_action_cursor.min(rt.action_buffer.len());
+        let c0 = rt.last_send_console_cursor.min(rt.console_buffer.len());
+        let n0 = rt.last_send_network_cursor.min(rt.network_buffer.len());
+        let m0 = rt.last_send_mutation_cursor.min(rt.mutation_summary.len());
+        (
+            &rt.action_buffer[a0..],
+            &rt.console_buffer[c0..],
+            &rt.network_buffer[n0..],
+            &rt.mutation_summary[m0..],
+        )
+    };
 
     let mut actions_json = serde_json::to_value(actions_snapshot).unwrap_or(serde_json::json!([]));
     let mut console_json = serde_json::to_value(console_snapshot).unwrap_or(serde_json::json!([]));
@@ -282,18 +309,26 @@ pub async fn handle_browser_context(
         }
     }
 
-    let total_bytes = serde_json::to_string(&actions_json).unwrap_or_default().len()
-        + serde_json::to_string(&console_json).unwrap_or_default().len()
-        + serde_json::to_string(&network_json).unwrap_or_default().len()
-        + serde_json::to_string(&mutations_json).unwrap_or_default().len();
+    // Apply a default cap when skip_cursor is used to avoid unbounded payloads
+    let effective_max_bytes = post.max_bytes.or_else(|| if post.skip_cursor { Some(512 * 1024) } else { None });
 
-    if let Some(max_bytes) = post.max_bytes {
-        if total_bytes > max_bytes {
+    if let Some(max_bytes) = effective_max_bytes {
+        let bytes_before_trim = serde_json::to_string(&actions_json).unwrap_or_default().len()
+            + serde_json::to_string(&console_json).unwrap_or_default().len()
+            + serde_json::to_string(&network_json).unwrap_or_default().len()
+            + serde_json::to_string(&mutations_json).unwrap_or_default().len();
+        if bytes_before_trim > max_bytes {
             let trim_arrays = |arr: &mut serde_json::Value| {
                 if let Some(a) = arr.as_array_mut() {
-                    while serde_json::to_string(a).unwrap_or_default().len() > max_bytes / 4 && a.len() > 1 {
-                        let keep = a.split_off(1);
-                        *a = keep;
+                    let budget = max_bytes / 4;
+                    let n = a.len();
+                    if n == 0 { return; }
+                    // Estimate bytes per item and keep as many tail items as fit
+                    let total_len = serde_json::to_string(a).unwrap_or_default().len();
+                    let bytes_per_item = total_len / n;
+                    let keep = if bytes_per_item > 0 { (budget / bytes_per_item).max(1) } else { n };
+                    if keep < n {
+                        a.drain(0..n - keep);
                     }
                 }
             };
@@ -302,6 +337,11 @@ pub async fn handle_browser_context(
             trim_arrays(&mut network_json);
         }
     }
+
+    let total_bytes = serde_json::to_string(&actions_json).unwrap_or_default().len()
+        + serde_json::to_string(&console_json).unwrap_or_default().len()
+        + serde_json::to_string(&network_json).unwrap_or_default().len()
+        + serde_json::to_string(&mutations_json).unwrap_or_default().len();
 
     Ok(json_response(StatusCode::OK, serde_json::json!({
         "url": url,
@@ -453,7 +493,7 @@ pub async fn handle_browser_curl(
         ScratchError::new(StatusCode::NOT_FOUND, "No network request at specified index".to_string())
     })?;
 
-    let curl = sanitize_curl(entry);
+    let curl = format_curl_minimal(entry);
 
     Ok(json_response(StatusCode::OK, serde_json::json!({
         "curl": curl,
@@ -463,7 +503,7 @@ pub async fn handle_browser_curl(
     })))
 }
 
-fn sanitize_curl(entry: &crate::integrations::browser_types::NetworkEntry) -> String {
+fn format_curl_minimal(entry: &crate::integrations::browser_types::NetworkEntry) -> String {
     let method_flag = if entry.method.is_empty() || entry.method == "GET" {
         String::new()
     } else {
@@ -830,6 +870,195 @@ pub async fn handle_browser_status(
     }
 }
 
+fn format_ts(ts_ms: f64) -> String {
+    let total_secs = (ts_ms / 1000.0) as u64;
+    let hours = (total_secs / 3600) % 24;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+}
+
+fn recorder_events_to_timeline(
+    actions: &[RecorderEvent],
+    console: &[ConsoleEntry],
+) -> Vec<TimelineEntry> {
+    let mut entries = Vec::new();
+
+    for event in actions {
+        let ts = format_ts(event.timestamp());
+        let (entry_type, summary) = match event {
+            RecorderEvent::Navigation { url, .. } => {
+                ("navigation".to_string(), format!("navigate → {}", url))
+            }
+            RecorderEvent::Click { selector, text, x, y, .. } => {
+                let label = if text.is_empty() {
+                    selector.clone()
+                } else {
+                    format!("{} \"{}\"", selector, text)
+                };
+                ("click".to_string(), format!("click → {} (x:{}, y:{})", label, *x as i32, *y as i32))
+            }
+            RecorderEvent::Input { selector, .. } => {
+                ("input".to_string(), format!("input → {}", selector))
+            }
+            RecorderEvent::Keypress { key, modifiers, .. } => {
+                let mods = if modifiers.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}+", modifiers.join("+"))
+                };
+                ("keypress".to_string(), format!("keypress → {}{}", mods, key))
+            }
+            RecorderEvent::Submit { selector, method, action, .. } => {
+                ("submit".to_string(), format!("submit → {} {} {}", selector, method, action))
+            }
+            RecorderEvent::Scroll { scroll_x, scroll_y, .. } => {
+                ("scroll".to_string(), format!("scroll → ({}, {})", *scroll_x as i32, *scroll_y as i32))
+            }
+            RecorderEvent::MutationSummary { added, removed, changed, .. } => {
+                ("mutation".to_string(), format!("dom-change → +{} -{} ~{}", added, removed, changed))
+            }
+            RecorderEvent::ToolbarAction { action, .. } => {
+                ("toolbar".to_string(), format!("toolbar → {}", action))
+            }
+        };
+        entries.push(TimelineEntry {
+            timestamp: ts,
+            source: "user".to_string(),
+            entry_type,
+            summary,
+            details: None,
+        });
+    }
+
+    for entry in console {
+        entries.push(TimelineEntry {
+            timestamp: format_ts(entry.timestamp),
+            source: "agent".to_string(),
+            entry_type: "console".to_string(),
+            summary: format!("[{}] {}", entry.level, entry.text),
+            details: None,
+        });
+    }
+
+    entries
+}
+
+async fn browser_frame_emission_task(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    chat_id: String,
+    runtime_id: String,
+) {
+    let sessions = gcx.read().await.chat_sessions.clone();
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Exit if the runtime has been removed
+        let runtime_arc = {
+            let gcx_locked = gcx.read().await;
+            gcx_locked.browser_runtimes.get(&runtime_id).cloned()
+        };
+        let runtime_arc = match runtime_arc {
+            Some(arc) => arc,
+            None => break,
+        };
+
+        // Drain raw recorder/console/network events into typed buffers, collect timeline + toolbar
+        let (toolbar_actions, timeline_entries) = {
+            let mut rt = runtime_arc.lock().await;
+            rt.drain_raw_events();
+            let toolbar_actions = rt.drain_toolbar_actions();
+            let (new_actions, new_console) = rt.flush_timeline_events();
+            let timeline_entries = recorder_events_to_timeline(&new_actions, &new_console);
+            (toolbar_actions, timeline_entries)
+        };
+
+        // Emit toolbar actions and timeline events
+        if !toolbar_actions.is_empty() || !timeline_entries.is_empty() {
+            let session_arc = {
+                let sessions_locked = sessions.read().await;
+                sessions_locked.get(&chat_id).cloned()
+            };
+            if let Some(session_arc) = session_arc {
+                let mut session = session_arc.lock().await;
+                for action in toolbar_actions {
+                    session.emit(ChatEvent::BrowserToolbarAction { action });
+                }
+                if !timeline_entries.is_empty() {
+                    session.emit(ChatEvent::BrowserTimeline { events: timeline_entries });
+                }
+            }
+        }
+
+        // Take a screenshot (release the runtime lock first)
+        let tab = {
+            let rt = runtime_arc.lock().await;
+            rt.get_active_tab()
+        };
+        let tab = match tab {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let screenshot_result = tab.call_method(
+            headless_chrome::protocol::cdp::Page::CaptureScreenshot {
+                format: Some(headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Jpeg),
+                clip: None,
+                quality: Some(60),
+                from_surface: Some(true),
+                capture_beyond_viewport: Some(false),
+                optimize_for_speed: Some(true),
+            },
+        );
+
+        let raw_data = match screenshot_result {
+            Ok(r) => match base64::prelude::BASE64_STANDARD.decode(&r.data) {
+                Ok(d) => d,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
+
+        let new_hash = compute_frame_hash(&raw_data);
+
+        // Only emit if the frame actually changed (with rate limiting and hash threshold)
+        {
+            let rt = runtime_arc.lock().await;
+            if !rt.should_emit_frame(new_hash) {
+                continue;
+            }
+        }
+
+        let resized = match resize_screenshot(&raw_data, 800, "image/jpeg") {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let b64 = base64::prelude::BASE64_STANDARD.encode(&resized);
+        let tab_id = tab.get_target_id().clone();
+
+        {
+            let mut rt = runtime_arc.lock().await;
+            rt.update_frame_state(new_hash, resized);
+        }
+
+        let session_arc = {
+            let sessions_locked = sessions.read().await;
+            sessions_locked.get(&chat_id).cloned()
+        };
+        if let Some(session_arc) = session_arc {
+            let mut session = session_arc.lock().await;
+            session.emit(ChatEvent::BrowserFrame {
+                tab_id,
+                mime: "image/jpeg".to_string(),
+                data: b64,
+                diff_boxes: vec![],
+                changed_text: None,
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_curl_get() {
+    fn test_format_curl_minimal_get() {
         let entry = crate::integrations::browser_types::NetworkEntry {
             timestamp: 1.0,
             method: "GET".to_string(),
@@ -851,12 +1080,12 @@ mod tests {
             resource_type: "Fetch".to_string(),
             status: Some(200),
         };
-        let curl = sanitize_curl(&entry);
+        let curl = format_curl_minimal(&entry);
         assert_eq!(curl, "curl 'https://example.com/api?key=123'");
     }
 
     #[test]
-    fn test_sanitize_curl_post() {
+    fn test_format_curl_minimal_post() {
         let entry = crate::integrations::browser_types::NetworkEntry {
             timestamp: 1.0,
             method: "POST".to_string(),
@@ -864,12 +1093,12 @@ mod tests {
             resource_type: "XHR".to_string(),
             status: Some(201),
         };
-        let curl = sanitize_curl(&entry);
+        let curl = format_curl_minimal(&entry);
         assert_eq!(curl, "curl -X POST 'https://example.com/api'");
     }
 
     #[test]
-    fn test_sanitize_curl_empty_method() {
+    fn test_format_curl_minimal_empty_method() {
         let entry = crate::integrations::browser_types::NetworkEntry {
             timestamp: 1.0,
             method: String::new(),
@@ -877,7 +1106,7 @@ mod tests {
             resource_type: "Document".to_string(),
             status: Some(200),
         };
-        let curl = sanitize_curl(&entry);
+        let curl = format_curl_minimal(&entry);
         assert_eq!(curl, "curl 'https://example.com'");
     }
 

@@ -20,40 +20,7 @@ pub struct BrowserContextSnapshot {
     pub page_changed: bool,
 }
 
-pub struct OversizeInfo {
-    pub total_bytes: usize,
-    pub action_count: usize,
-    pub console_count: usize,
-    pub network_count: usize,
-}
 
-pub struct BrowserContextBreakdown {
-    pub total_bytes: usize,
-    pub action_count: usize,
-    pub action_bytes: usize,
-    pub console_count: usize,
-    pub console_bytes: usize,
-    pub network_count: usize,
-    pub network_bytes: usize,
-    pub mutation_bytes: usize,
-}
-
-pub fn compute_context_breakdown(snapshot: &BrowserContextSnapshot) -> BrowserContextBreakdown {
-    let action_bytes = serde_json::to_string(&snapshot.actions).unwrap_or_default().len();
-    let console_bytes = serde_json::to_string(&snapshot.console).unwrap_or_default().len();
-    let network_bytes = serde_json::to_string(&snapshot.network).unwrap_or_default().len();
-    let mutation_bytes = serde_json::to_string(&snapshot.mutations).unwrap_or_default().len();
-    BrowserContextBreakdown {
-        total_bytes: action_bytes + console_bytes + network_bytes + mutation_bytes,
-        action_count: snapshot.actions.len(),
-        action_bytes,
-        console_count: snapshot.console.len(),
-        console_bytes,
-        network_count: snapshot.network.len(),
-        network_bytes,
-        mutation_bytes,
-    }
-}
 
 pub fn format_browser_context(snapshot: &BrowserContextSnapshot) -> String {
     let mut parts = Vec::new();
@@ -141,6 +108,9 @@ fn format_action(action: &RecorderEvent) -> String {
         RecorderEvent::MutationSummary { added, removed, changed, timestamp } => {
             format!("[{}] dom-change → +{} -{} ~{}", format_timestamp(*timestamp), added, removed, changed)
         }
+        RecorderEvent::ToolbarAction { action, timestamp } => {
+            format!("[{}] toolbar → {}", format_timestamp(*timestamp), action)
+        }
     }
 }
 
@@ -165,27 +135,6 @@ pub fn compute_context_size(
         + serde_json::to_string(mutations).unwrap_or_default().len()
 }
 
-pub fn cap_to_n(snapshot: &mut BrowserContextSnapshot, n: usize) {
-    if snapshot.actions.len() > n {
-        let start = snapshot.actions.len() - n;
-        snapshot.actions = snapshot.actions[start..].to_vec();
-    }
-    if snapshot.console.len() > n {
-        let start = snapshot.console.len() - n;
-        snapshot.console = snapshot.console[start..].to_vec();
-    }
-    if snapshot.network.len() > n {
-        let start = snapshot.network.len() - n;
-        snapshot.network = snapshot.network[start..].to_vec();
-    }
-    snapshot.total_bytes = compute_context_size(
-        &snapshot.actions,
-        &snapshot.console,
-        &snapshot.network,
-        &snapshot.mutations,
-    );
-}
-
 pub async fn get_browser_context_for_chat(
     gcx: Arc<ARwLock<GlobalContext>>,
     chat_id: &str,
@@ -197,8 +146,13 @@ pub async fn get_browser_context_for_chat(
         return None;
     }
 
-    let url = String::new();
-    let title = String::new();
+    let (url, title) = if let Some(tab) = rt.get_active_tab() {
+        let url = tab.get_url();
+        let title = tab.get_title().unwrap_or_default();
+        (url, title)
+    } else {
+        (String::new(), String::new())
+    };
 
     let actions = rt.action_buffer[rt.last_send_action_cursor..].to_vec();
     let console = rt.console_buffer[rt.last_send_console_cursor..].to_vec();
@@ -240,7 +194,7 @@ pub async fn maybe_insert_browser_context(
     chat_id: &str,
     has_browser_meta: bool,
     attach_screenshot_on_send: bool,
-) -> Option<(ChatMessage, Option<OversizeInfo>)> {
+) -> Option<(ChatMessage, bool)> {
     if !has_browser_meta {
         return None;
     }
@@ -248,18 +202,12 @@ pub async fn maybe_insert_browser_context(
     let snapshot = get_browser_context_for_chat(gcx.clone(), chat_id).await?;
 
     if snapshot.total_bytes > OVERSIZE_THRESHOLD {
-        let oversize = OversizeInfo {
-            total_bytes: snapshot.total_bytes,
-            action_count: snapshot.actions.len(),
-            console_count: snapshot.console.len(),
-            network_count: snapshot.network.len(),
-        };
-        return Some((make_context_message(&snapshot, false), Some(oversize)));
+        return Some((make_context_message(&snapshot, false), true));
     }
 
     commit_browser_cursors(gcx, chat_id).await;
 
-    Some((make_context_message(&snapshot, attach_screenshot_on_send && snapshot.page_changed), None))
+    Some((make_context_message(&snapshot, attach_screenshot_on_send && snapshot.page_changed), false))
 }
 
 pub fn apply_decision_to_snapshot(
@@ -554,64 +502,6 @@ mod tests {
         }];
         let size = compute_context_size(&actions, &[], &[], &[]);
         assert!(size > 8);
-    }
-
-    #[test]
-    fn test_cap_to_n_reduces_buffers() {
-        let mut snapshot = BrowserContextSnapshot {
-            url: "https://example.com".to_string(),
-            title: "Test".to_string(),
-            actions: (0..100).map(|i| RecorderEvent::Click {
-                selector: format!("#btn-{}", i),
-                text: format!("Button {}", i),
-                x: i as f64,
-                y: 0.0,
-                timestamp: i as f64 * 1000.0,
-            }).collect(),
-            console: (0..50).map(|i| ConsoleEntry {
-                timestamp: i as f64 * 1000.0,
-                level: "log".to_string(),
-                text: format!("Log {}", i),
-            }).collect(),
-            network: (0..30).map(|i| NetworkEntry {
-                timestamp: i as f64 * 1000.0,
-                method: "GET".to_string(),
-                url: format!("https://api.com/{}", i),
-                resource_type: "Fetch".to_string(),
-                status: Some(200),
-            }).collect(),
-            mutations: vec![],
-            total_bytes: 0,
-            page_changed: false,
-        };
-
-        cap_to_n(&mut snapshot, 10);
-        assert_eq!(snapshot.actions.len(), 10);
-        assert_eq!(snapshot.console.len(), 10);
-        assert_eq!(snapshot.network.len(), 10);
-    }
-
-    #[test]
-    fn test_cap_to_n_no_op_when_under_limit() {
-        let mut snapshot = BrowserContextSnapshot {
-            url: "https://example.com".to_string(),
-            title: "Test".to_string(),
-            actions: vec![RecorderEvent::Click {
-                selector: "#btn".to_string(),
-                text: "OK".to_string(),
-                x: 10.0,
-                y: 20.0,
-                timestamp: 1000.0,
-            }],
-            console: vec![],
-            network: vec![],
-            mutations: vec![],
-            total_bytes: 100,
-            page_changed: false,
-        };
-
-        cap_to_n(&mut snapshot, 10);
-        assert_eq!(snapshot.actions.len(), 1);
     }
 
     #[test]
