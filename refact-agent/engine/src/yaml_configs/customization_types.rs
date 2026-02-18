@@ -507,6 +507,9 @@ tool_confirm:
             base: None,
             match_models: None,
             override_config: None,
+            allow_integrations: false,
+            allow_mcp: false,
+            allow_subagents: false,
         };
 
         let override_cfg = ModeOverride {
@@ -546,6 +549,9 @@ tool_confirm:
             base: None,
             match_models: None,
             override_config: None,
+            allow_integrations: false,
+            allow_mcp: false,
+            allow_subagents: false,
         };
 
         let override_cfg = ModeOverride {
@@ -574,6 +580,9 @@ tool_confirm:
             base: None,
             match_models: None,
             override_config: None,
+            allow_integrations: false,
+            allow_mcp: false,
+            allow_subagents: false,
         };
 
         let override_cfg = ModeOverride {

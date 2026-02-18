@@ -30,6 +30,7 @@ function makeRuntime(overrides?: Partial<BrowserRuntime>): BrowserRuntime {
     tabs: [],
     latest_frame: null,
     picker_active: false,
+    annotate_active: false,
     attach_screenshot_on_send: false,
     timeline: [],
     timeline_open: false,

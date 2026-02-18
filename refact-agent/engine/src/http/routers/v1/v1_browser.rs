@@ -474,6 +474,231 @@ pub async fn handle_browser_element_pick_result(
     }
 }
 
+pub async fn handle_browser_annotate_start(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
+        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+    })?;
+
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
+        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
+    })?;
+
+    let rt = runtime_arc.lock().await;
+
+    let tab = rt.get_active_tab().ok_or_else(|| {
+        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+    })?;
+
+    let annotate_js = r#"
+    (function() {
+        if (window.__refact_annotate_active) return 'already_active';
+        window.__refact_annotate_active = true;
+        window.__refact_annotations = window.__refact_annotations || [];
+        window.__refact_annotated_elements = window.__refact_annotated_elements || [];
+        var nextIndex = window.__refact_annotations.length + 1;
+
+        function exitOverlay() {
+            if (hovered) {
+                hovered.style.outline = hovered.__refact_prev_outline || '';
+                hovered.style.outlineOffset = hovered.__refact_prev_outlineOffset || '';
+                hovered = null;
+            }
+            var ov = document.getElementById('__refact_annotate_overlay');
+            if (ov) ov.remove();
+            window.__refact_annotate_active = false;
+            if (window.__refact_annotate_key_handler) {
+                document.removeEventListener('keydown', window.__refact_annotate_key_handler);
+                window.__refact_annotate_key_handler = null;
+            }
+        }
+
+        var overlay = document.createElement('div');
+        overlay.id = '__refact_annotate_overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483645;cursor:crosshair;';
+        document.body.appendChild(overlay);
+
+        var hovered = null;
+        overlay.addEventListener('mousemove', function(e) {
+            if (hovered) {
+                hovered.style.outline = hovered.__refact_prev_outline || '';
+                hovered.style.outlineOffset = hovered.__refact_prev_outlineOffset || '';
+            }
+            overlay.style.display = 'none';
+            var el = document.elementFromPoint(e.clientX, e.clientY);
+            overlay.style.display = '';
+            if (el && el.id !== '__refact_toolbar_host') {
+                el.__refact_prev_outline = el.style.outline;
+                el.__refact_prev_outlineOffset = el.style.outlineOffset;
+                el.style.outline = '2px solid #7c6aef';
+                hovered = el;
+            } else {
+                hovered = null;
+            }
+        });
+
+        overlay.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            overlay.style.display = 'none';
+            var el = document.elementFromPoint(e.clientX, e.clientY);
+            overlay.style.display = '';
+            if (hovered) {
+                hovered.style.outline = hovered.__refact_prev_outline || '';
+                hovered.style.outlineOffset = hovered.__refact_prev_outlineOffset || '';
+                hovered = null;
+            }
+            if (!el || el.id === '__refact_toolbar_host') return;
+
+            var rect = el.getBoundingClientRect();
+            var sel = el.id ? '#' + el.id : el.tagName.toLowerCase();
+            if (!el.id && el.className && typeof el.className === 'string') {
+                sel = el.tagName.toLowerCase() + '.' + el.className.trim().split(/\s+/).join('.');
+            }
+            var idx = nextIndex++;
+            window.__refact_annotations.push({
+                index: idx,
+                selector: sel,
+                innerText: (el.innerText || '').substring(0, 300),
+                bbox: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }
+            });
+
+            var markerTop = Math.max(0, Math.round(rect.y - 28));
+            var marker = document.createElement('div');
+            marker.className = '__refact_annotation_marker';
+            marker.style.cssText = 'position:fixed;z-index:2147483646;width:24px;height:24px;border-radius:50%;'
+                + 'background:#7c6aef;color:white;font-size:12px;font-weight:bold;font-family:sans-serif;'
+                + 'display:flex;align-items:center;justify-content:center;pointer-events:none;'
+                + 'box-shadow:0 2px 8px rgba(0,0,0,0.3);border:2px solid white;'
+                + 'left:' + Math.round(rect.x + rect.width/2 - 12) + 'px;'
+                + 'top:' + markerTop + 'px;';
+            marker.textContent = String(idx);
+            document.body.appendChild(marker);
+
+            el.__refact_prev_outline_saved = el.style.outline;
+            el.__refact_prev_outlineOffset_saved = el.style.outlineOffset;
+            el.style.outline = '2px solid #7c6aef';
+            el.style.outlineOffset = '2px';
+            window.__refact_annotated_elements.push(el);
+        });
+
+        overlay.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            exitOverlay();
+        });
+
+        window.__refact_annotate_key_handler = function(e) {
+            if (e.key === 'Escape' && window.__refact_annotate_active) {
+                exitOverlay();
+            }
+        };
+        document.addEventListener('keydown', window.__refact_annotate_key_handler);
+
+        return 'started';
+    })()
+    "#;
+
+    let result = tab.evaluate(annotate_js, false).map_err(|e| {
+        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to inject annotation overlay: {}", e))
+    })?;
+
+    let status = match result.value.and_then(|v| v.as_str().map(|s| s.to_string())) {
+        Some(s) => s,
+        None => "started".to_string(),
+    };
+
+    Ok(json_response(StatusCode::OK, serde_json::json!({
+        "status": status
+    })))
+}
+
+pub async fn handle_browser_annotate_result(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
+        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+    })?;
+
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
+        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
+    })?;
+
+    let rt = runtime_arc.lock().await;
+
+    let tab = rt.get_active_tab().ok_or_else(|| {
+        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+    })?;
+
+    let result = tab.evaluate("JSON.stringify({ annotations: window.__refact_annotations || [], active: !!window.__refact_annotate_active })", false).map_err(|e| {
+        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read annotations: {}", e))
+    })?;
+
+    match result.value {
+        Some(val) => {
+            let parsed: serde_json::Value = match val.as_str() {
+                Some(s) => serde_json::from_str(s).unwrap_or(serde_json::json!({ "annotations": [], "active": false })),
+                None => val,
+            };
+            Ok(json_response(StatusCode::OK, parsed))
+        }
+        None => Ok(json_response(StatusCode::OK, serde_json::json!({ "annotations": [], "active": false }))),
+    }
+}
+
+pub async fn handle_browser_annotate_clear(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
+        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+    })?;
+
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
+        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
+    })?;
+
+    let rt = runtime_arc.lock().await;
+
+    let tab = rt.get_active_tab().ok_or_else(|| {
+        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+    })?;
+
+    let clear_js = r#"
+    (function() {
+        window.__refact_annotations = [];
+        window.__refact_annotate_active = false;
+        var overlay = document.getElementById('__refact_annotate_overlay');
+        if (overlay) overlay.remove();
+        if (window.__refact_annotate_key_handler) {
+            document.removeEventListener('keydown', window.__refact_annotate_key_handler);
+            window.__refact_annotate_key_handler = null;
+        }
+        var markers = document.querySelectorAll('.__refact_annotation_marker');
+        for (var i = 0; i < markers.length; i++) markers[i].remove();
+        var elems = window.__refact_annotated_elements || [];
+        for (var i = 0; i < elems.length; i++) {
+            var el = elems[i];
+            el.style.outline = el.__refact_prev_outline_saved || '';
+            el.style.outlineOffset = el.__refact_prev_outlineOffset_saved || '';
+        }
+        window.__refact_annotated_elements = [];
+        return 'cleared';
+    })()
+    "#;
+
+    tab.evaluate(clear_js, false).map_err(|e| {
+        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to clear annotations: {}", e))
+    })?;
+
+    Ok(json_response(StatusCode::OK, serde_json::json!({
+        "status": "cleared"
+    })))
+}
+
 pub async fn handle_browser_curl(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     body_bytes: hyper::body::Bytes,

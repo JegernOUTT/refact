@@ -155,6 +155,8 @@ use crate::http::routers::v1::v1_browser::{
     handle_browser_dom_snapshot, handle_browser_accessibility,
     handle_browser_record_animation, handle_browser_handoff,
     handle_browser_status,
+    handle_browser_annotate_start, handle_browser_annotate_result,
+    handle_browser_annotate_clear,
 };
 
 pub fn make_v1_router() -> Router {
@@ -383,6 +385,9 @@ pub fn make_v1_router() -> Router {
         .route("/browser/record-animation", post(handle_browser_record_animation))
         .route("/browser/handoff", post(handle_browser_handoff))
         .route("/browser/status", post(handle_browser_status))
+        .route("/browser/annotate/start", post(handle_browser_annotate_start))
+        .route("/browser/annotate/result", post(handle_browser_annotate_result))
+        .route("/browser/annotate/clear", post(handle_browser_annotate_clear))
         .route("/stats/llm/summary", get(handle_v1_stats_llm_summary))
         .route("/stats/llm/events", get(handle_v1_stats_llm_events));
 

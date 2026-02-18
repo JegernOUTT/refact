@@ -12,6 +12,9 @@ import {
   BROWSER_HANDOFF,
   BROWSER_STATUS,
   BROWSER_CONTEXT_ESTIMATE,
+  BROWSER_ANNOTATE_START,
+  BROWSER_ANNOTATE_RESULT,
+  BROWSER_ANNOTATE_CLEAR,
 } from "./consts";
 
 export type BrowserStartRequest = {
@@ -109,6 +112,38 @@ export type BrowserHandoffResponse = {
   status: string;
   from_chat_id: string;
   to_chat_id: string;
+};
+
+export type BrowserAnnotateStartRequest = {
+  chat_id: string;
+};
+
+export type BrowserAnnotateStartResponse = {
+  status: "started" | "already_active";
+};
+
+export type BrowserAnnotation = {
+  index: number;
+  selector: string;
+  innerText: string;
+  bbox: { x: number; y: number; width: number; height: number };
+};
+
+export type BrowserAnnotateResultRequest = {
+  chat_id: string;
+};
+
+export type BrowserAnnotateResultResponse = {
+  annotations: BrowserAnnotation[];
+  active: boolean;
+};
+
+export type BrowserAnnotateClearRequest = {
+  chat_id: string;
+};
+
+export type BrowserAnnotateClearResponse = {
+  status: "cleared";
 };
 
 export type BrowserContextEstimateRequest = {
@@ -326,6 +361,60 @@ export const browserApi = createApi({
         });
         if (response.error) return { error: response.error };
         return { data: response.data as BrowserStatusResponse };
+      },
+    }),
+    browserAnnotateStart: builder.mutation<
+      BrowserAnnotateStartResponse,
+      BrowserAnnotateStartRequest
+    >({
+      async queryFn(args, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${BROWSER_ANNOTATE_START}`;
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: args,
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as BrowserAnnotateStartResponse };
+      },
+    }),
+    browserAnnotateResult: builder.mutation<
+      BrowserAnnotateResultResponse,
+      BrowserAnnotateResultRequest
+    >({
+      async queryFn(args, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${BROWSER_ANNOTATE_RESULT}`;
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: args,
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as BrowserAnnotateResultResponse };
+      },
+    }),
+    browserAnnotateClear: builder.mutation<
+      BrowserAnnotateClearResponse,
+      BrowserAnnotateClearRequest
+    >({
+      async queryFn(args, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${BROWSER_ANNOTATE_CLEAR}`;
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: args,
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as BrowserAnnotateClearResponse };
       },
     }),
     browserContextEstimate: builder.mutation<

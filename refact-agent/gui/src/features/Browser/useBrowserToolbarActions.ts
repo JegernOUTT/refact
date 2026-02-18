@@ -1,14 +1,29 @@
 import { useEffect, useCallback, useRef } from "react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { browserApi } from "../../services/refact/browser";
+import type { BrowserAnnotation } from "../../services/refact/browser";
 import {
   selectBrowserRuntime,
   shiftPendingToolbarAction,
   updateBrowserFrame,
   setPickerActive,
+  setAnnotateActive,
+  setBrowserNotification,
 } from "./browserSlice";
 import { addThreadImage } from "../Chat/Thread/actions";
 import { formatBrowserDraftBlock, insertBrowserDraft } from "./draftInsert";
+
+function formatAnnotationsText(annotations: BrowserAnnotation[]): string {
+  if (annotations.length === 0) return "(no annotations)";
+  return annotations
+    .map(
+      (a) =>
+        `[${a.index}] ${a.selector} — "${a.innerText.substring(0, 120)}" (${
+          a.bbox.x
+        },${a.bbox.y} ${a.bbox.width}×${a.bbox.height})`,
+    )
+    .join("\n");
+}
 
 export function useBrowserToolbarActions(chatId: string) {
   const dispatch = useAppDispatch();
@@ -25,35 +40,77 @@ export function useBrowserToolbarActions(chatId: string) {
   const [browserElementPick] = browserApi.useBrowserElementPickMutation();
   const [browserElementPickResult] =
     browserApi.useBrowserElementPickResultMutation();
+  const [browserAnnotateStart] = browserApi.useBrowserAnnotateStartMutation();
+  const [browserAnnotateResult] = browserApi.useBrowserAnnotateResultMutation();
+  const [browserAnnotateClear] = browserApi.useBrowserAnnotateClearMutation();
+
+  const notifyError = useCallback(
+    (action: string, err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      dispatch(
+        setBrowserNotification({
+          chatId,
+          notification: {
+            type: "timeout",
+            message: `Action "${action}" failed: ${message}`,
+          },
+        }),
+      );
+    },
+    [chatId, dispatch],
+  );
 
   const executeAction = useCallback(
     async (action: string) => {
       switch (action) {
         case "annotate": {
-          insertBrowserDraft(
-            formatBrowserDraftBlock(
-              "Browser Annotate",
-              "Enter annotate mode: click elements and label them (TODO: overlay UI).",
-            ),
-          );
+          await browserAnnotateStart({ chat_id: chatId }).unwrap();
+          dispatch(setAnnotateActive({ chatId, active: true }));
           break;
         }
         case "annotate_send": {
-          insertBrowserDraft(
-            formatBrowserDraftBlock(
-              "Browser Annotate",
-              "Send annotated screenshot + labels (TODO).",
-            ),
-          );
+          try {
+            const annotResult = await browserAnnotateResult({
+              chat_id: chatId,
+            }).unwrap();
+            const screenshotResult = await browserScreenshot({
+              chat_id: chatId,
+              full_page: false,
+            }).unwrap();
+            const ext = screenshotResult.mime === "image/png" ? "png" : "jpg";
+            dispatch(
+              addThreadImage({
+                id: chatId,
+                image: {
+                  name: `annotated_screenshot.${ext}`,
+                  content: `data:${screenshotResult.mime};base64,${screenshotResult.data}`,
+                  type: screenshotResult.mime,
+                },
+              }),
+            );
+            const annotText = formatAnnotationsText(annotResult.annotations);
+            insertBrowserDraft(
+              formatBrowserDraftBlock(
+                "Browser Annotations",
+                `The screenshot has numbered annotations:\n${annotText}`,
+              ),
+            );
+            await browserAnnotateClear({ chat_id: chatId })
+              .unwrap()
+              .catch((_: unknown) => {
+                /* best-effort cleanup */
+              });
+          } finally {
+            dispatch(setAnnotateActive({ chatId, active: false }));
+          }
           break;
         }
         case "annotate_clear": {
-          insertBrowserDraft(
-            formatBrowserDraftBlock(
-              "Browser Annotate",
-              "Clear annotations (TODO).",
-            ),
-          );
+          try {
+            await browserAnnotateClear({ chat_id: chatId }).unwrap();
+          } finally {
+            dispatch(setAnnotateActive({ chatId, active: false }));
+          }
           break;
         }
 
@@ -188,6 +245,9 @@ export function useBrowserToolbarActions(chatId: string) {
       browserCurl,
       browserElementPick,
       browserElementPickResult,
+      browserAnnotateStart,
+      browserAnnotateResult,
+      browserAnnotateClear,
       chatId,
       dispatch,
     ],
@@ -200,11 +260,10 @@ export function useBrowserToolbarActions(chatId: string) {
 
     void executeAction(nextAction)
       .catch((err: unknown) => {
-        // eslint-disable-next-line no-console
-        console.warn("[BrowserToolbar] action failed:", nextAction, err);
+        notifyError(nextAction, err);
       })
       .finally(() => {
         processingRef.current = false;
       });
-  }, [nextAction, chatId, dispatch, executeAction]);
+  }, [nextAction, chatId, dispatch, executeAction, notifyError]);
 }

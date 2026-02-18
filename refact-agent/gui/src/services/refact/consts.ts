@@ -71,3 +71,6 @@ export const BROWSER_RECORD_ANIMATION = "/v1/browser/record-animation";
 export const BROWSER_HANDOFF = "/v1/browser/handoff";
 export const BROWSER_STATUS = "/v1/browser/status";
 export const BROWSER_CONTEXT_ESTIMATE = "/v1/browser/context-estimate";
+export const BROWSER_ANNOTATE_START = "/v1/browser/annotate/start";
+export const BROWSER_ANNOTATE_RESULT = "/v1/browser/annotate/result";
+export const BROWSER_ANNOTATE_CLEAR = "/v1/browser/annotate/clear";

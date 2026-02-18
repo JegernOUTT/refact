@@ -57,7 +57,10 @@ export type BrowserToolbarActionType =
   | "paste_network"
   | "curl"
   | "summarize"
-  | "extract_json";
+  | "extract_json"
+  | "annotate"
+  | "annotate_send"
+  | "annotate_clear";
 
 export type BrowserRuntime = {
   runtime_id: string;
@@ -68,6 +71,7 @@ export type BrowserRuntime = {
   tabs: BrowserTabInfo[];
   latest_frame: BrowserFrame | null;
   picker_active: boolean;
+  annotate_active: boolean;
   attach_screenshot_on_send: boolean;
   timeline: TimelineEntry[];
   timeline_open: boolean;
@@ -100,6 +104,9 @@ const VALID_TOOLBAR_ACTIONS = [
   "curl",
   "summarize",
   "extract_json",
+  "annotate",
+  "annotate_send",
+  "annotate_clear",
 ] as const;
 
 export function makeBrowserRuntime(runtime_id: string): BrowserRuntime {
@@ -112,6 +119,7 @@ export function makeBrowserRuntime(runtime_id: string): BrowserRuntime {
     tabs: [],
     latest_frame: null,
     picker_active: false,
+    annotate_active: false,
     attach_screenshot_on_send: true,
     timeline: [],
     timeline_open: true,
@@ -168,6 +176,15 @@ export const browserSlice = createSlice({
       const rt = state.runtimes[action.payload.chatId];
       if (rt) {
         rt.picker_active = action.payload.active;
+      }
+    },
+    setAnnotateActive(
+      state,
+      action: PayloadAction<{ chatId: string; active: boolean }>,
+    ) {
+      const rt = state.runtimes[action.payload.chatId];
+      if (rt) {
+        rt.annotate_active = action.payload.active;
       }
     },
     toggleAttachScreenshotOnSend(
@@ -410,6 +427,7 @@ export const {
   updateBrowserFrame,
   removeBrowserRuntime,
   setPickerActive,
+  setAnnotateActive,
   toggleAttachScreenshotOnSend,
   addTimelineEntries,
   clearTimeline,
