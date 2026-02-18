@@ -31,10 +31,6 @@ fn preformat_path(path: &String) -> String {
 
 #[async_trait]
 impl Tool for ToolTree {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "tree".to_string(),

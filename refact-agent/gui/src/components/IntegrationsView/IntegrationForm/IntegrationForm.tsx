@@ -5,7 +5,6 @@ import { useGetIntegrationDataByPathQuery } from "../../../hooks/useGetIntegrati
 import { Spinner } from "../../Spinner";
 import { Confirmation } from "../Confirmation";
 import { useFormFields } from "../hooks/useFormFields";
-import { IntegrationDocker } from "../IntegrationDocker";
 
 import {
   areToolConfirmation,
@@ -29,10 +28,6 @@ type IntegrationFormProps = {
   handleDeleteIntegration: (path: string) => void;
   onSchema: (schema: Integration["integr_schema"]) => void;
   onValues: (values: Integration["integr_values"]) => void;
-  handleSwitchIntegration: (
-    integrationName: string,
-    integrationConfigPath: string,
-  ) => void;
   handleUpdateFormField: (
     fieldKey: string,
     fieldValue: IntegrationFieldValue,
@@ -49,7 +44,6 @@ export const IntegrationForm: FC<IntegrationFormProps> = ({
   handleDeleteIntegration,
   onSchema,
   onValues,
-  handleSwitchIntegration,
   handleUpdateFormField,
   formValues,
 }) => {
@@ -202,18 +196,6 @@ export const IntegrationForm: FC<IntegrationFormProps> = ({
             integrationName={toPascalCase(integration.data.integr_name)}
           />
         )}
-
-      {integration.data.integr_schema.docker && (
-        <Flex mt="6" direction="column" align="start" gap="5">
-          <IntegrationDocker
-            dockerData={integration.data.integr_schema.docker}
-            integrationName={integration.data.integr_name}
-            integrationProject={integration.data.project_path}
-            integrationPath={integration.data.integr_config_path}
-            handleSwitchIntegration={handleSwitchIntegration}
-          />
-        </Flex>
-      )}
     </Flex>
   );
 };

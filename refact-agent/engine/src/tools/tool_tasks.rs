@@ -32,10 +32,6 @@ pub struct ToolTasksSet {
 
 #[async_trait]
 impl Tool for ToolTasksSet {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "tasks_set".to_string(),

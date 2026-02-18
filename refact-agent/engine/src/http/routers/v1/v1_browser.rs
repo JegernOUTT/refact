@@ -10,10 +10,10 @@ use crate::chat::types::{ChatEvent, TimelineEntry};
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::integrations::browser_runtime::{
-    BrowserRuntime, compute_frame_hash, get_browser_profile_dir, register_browser_runtime,
-    remove_browser_runtime, find_runtime_by_chat_id, setup_recording_for_runtime,
+    BrowserRuntime, compute_frame_hash, ensure_injection_into_tab, get_browser_profile_dir,
+    register_browser_runtime, remove_browser_runtime, find_runtime_by_chat_id, setup_recording_for_runtime,
 };
-use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry};
+use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry, NetworkEntry};
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> {
     Response::builder()
@@ -130,8 +130,8 @@ pub async fn handle_browser_start(
     let runtime_id = register_browser_runtime(gcx.clone(), rt).await;
 
     if let Some(runtime_arc) = gcx.read().await.browser_runtimes.get(&runtime_id).cloned() {
-        let rt = runtime_arc.lock().await;
-        if let Err(e) = setup_recording_for_runtime(&rt) {
+        let mut rt = runtime_arc.lock().await;
+        if let Err(e) = setup_recording_for_runtime(&mut rt) {
             tracing::warn!("Browser recording setup failed (non-fatal): {}", e);
         }
     }
@@ -881,6 +881,7 @@ fn format_ts(ts_ms: f64) -> String {
 fn recorder_events_to_timeline(
     actions: &[RecorderEvent],
     console: &[ConsoleEntry],
+    network: &[NetworkEntry],
 ) -> Vec<TimelineEntry> {
     let mut entries = Vec::new();
 
@@ -941,6 +942,24 @@ fn recorder_events_to_timeline(
         });
     }
 
+    for entry in network {
+        entries.push(TimelineEntry {
+            timestamp: format_ts(entry.timestamp),
+            source: "agent".to_string(),
+            entry_type: "network".to_string(),
+            summary: format!(
+                "{} {}{}",
+                if entry.method.is_empty() { "GET" } else { &entry.method },
+                entry.url,
+                entry
+                    .status
+                    .map(|status| format!(" → {}", status))
+                    .unwrap_or_default()
+            ),
+            details: None,
+        });
+    }
+
     entries
 }
 
@@ -965,14 +984,66 @@ async fn browser_frame_emission_task(
         };
 
         // Drain raw recorder/console/network events into typed buffers, collect timeline + toolbar
-        let (toolbar_actions, timeline_entries) = {
+        let (toolbar_actions, timeline_entries, actions_len, console_len, network_len, mutation_len) = {
             let mut rt = runtime_arc.lock().await;
             rt.drain_raw_events();
             let toolbar_actions = rt.drain_toolbar_actions();
-            let (new_actions, new_console) = rt.flush_timeline_events();
-            let timeline_entries = recorder_events_to_timeline(&new_actions, &new_console);
-            (toolbar_actions, timeline_entries)
+            let (new_actions, new_console, new_network) = rt.flush_timeline_events();
+            let timeline_entries = recorder_events_to_timeline(&new_actions, &new_console, &new_network);
+            (
+                toolbar_actions,
+                timeline_entries,
+                rt.action_buffer.len(),
+                rt.console_buffer.len(),
+                rt.network_buffer.len(),
+                rt.mutation_summary.len(),
+            )
         };
+
+        // Ensure scripts/bindings stay installed after user navigations.
+        let (tab_for_injection, mask_passwords, raw_events_buf) = {
+            let rt = runtime_arc.lock().await;
+            (
+                rt.get_active_tab(),
+                rt.mask_passwords(),
+                rt.buffers.raw_recorder_events.clone(),
+            )
+        };
+        if let Some(tab) = tab_for_injection {
+            ensure_injection_into_tab(&tab, mask_passwords, raw_events_buf);
+        }
+
+        // Close extra tabs to enforce single-tab experience.
+        // Chrome may open NTP asynchronously after Browser::new() returns,
+        // and the close loop in setup_recording_for_runtime can miss it.
+        // This periodic cleanup ensures any late-arriving tabs get closed.
+        {
+            let rt = runtime_arc.lock().await;
+            if let Some(ref recording_id) = rt.recording_tab_target_id {
+                let all_tabs: Vec<Arc<headless_chrome::Tab>> = rt.browser.get_tabs()
+                    .lock()
+                    .map(|tabs| tabs.iter().cloned().collect())
+                    .unwrap_or_default();
+                for tab in all_tabs {
+                    if tab.get_target_id() != recording_id {
+                        let _ = tab.close(false);
+                    }
+                }
+            }
+        }
+
+        // Best-effort: update in-page toolbar counters if overlay exists.
+        let tab_for_counts = {
+            let rt = runtime_arc.lock().await;
+            rt.get_active_tab()
+        };
+        if let Some(tab) = tab_for_counts {
+            let js = format!(
+                "window.__refact_toolbar_setCounts && window.__refact_toolbar_setCounts({{actions:{},console:{},network:{},mutations:{}}});",
+                actions_len, console_len, network_len, mutation_len
+            );
+            let _ = tab.evaluate(&js, false);
+        }
 
         // Emit toolbar actions and timeline events
         if !toolbar_actions.is_empty() || !timeline_entries.is_empty() {

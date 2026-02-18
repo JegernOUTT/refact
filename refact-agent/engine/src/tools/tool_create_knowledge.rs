@@ -17,10 +17,6 @@ pub struct ToolCreateKnowledge {
 
 #[async_trait]
 impl Tool for ToolCreateKnowledge {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "create_knowledge".to_string(),

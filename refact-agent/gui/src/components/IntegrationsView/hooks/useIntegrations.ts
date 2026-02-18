@@ -26,7 +26,6 @@ import { useDeleteIntegrationByPath } from "../../../hooks/useDeleteIntegrationB
 import { useSaveIntegrationData } from "../../../hooks/useSaveIntegrationData";
 import {
   areIntegrationsNotConfigured,
-  dockerApi,
   GroupedIntegrationWithIconRecord,
   Integration,
   IntegrationFieldValue,
@@ -422,8 +421,6 @@ export const useIntegrations = ({
     }
     currentIntegrationSchema && setCurrentIntegrationSchema(null);
     dispatch(integrationsApi.util.resetApiState());
-    dispatch(dockerApi.util.resetApiState());
-    // TODO: can cause a loop where integration pages goes back to form
     dispatch(pop());
     dispatch(popBackTo({ name: "integrations page" }));
   }, [

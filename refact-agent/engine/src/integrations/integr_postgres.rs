@@ -41,10 +41,6 @@ pub struct ToolPostgres {
 
 #[async_trait]
 impl IntegrationTrait for ToolPostgres {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         _gcx: Arc<ARwLock<GlobalContext>>,
@@ -146,10 +142,6 @@ impl ToolPostgres {
 
 #[async_trait]
 impl Tool for ToolPostgres {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "postgres".to_string(),
@@ -289,31 +281,6 @@ smartlinks:
           🔧 Your goal is to set up postgres client. Look at the project, especially files like "docker-compose.yaml" or ".env". Call tree() to see what files the project has.
           After that is completed, go through the usual plan in the system prompt.
           Keep POSTGRES_HOST POSTGRES_PORT POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB in variables.yaml so they can be reused by command line tools later.
-docker:
-  filter_label: ""
-  filter_image: "postgres"
-  new_container_default:
-    image: "postgres:latest"
-    environment:
-      POSTGRES_DB: "$POSTGRES_DB"
-      POSTGRES_USER: "$POSTGRES_USER"
-      POSTGRES_PASSWORD: "$POSTGRES_PASSWORD"
-    ports:
-      - "5432:5432"
-  smartlinks:
-    - sl_label: "Add Database Container"
-      sl_chat:
-        - role: "user"
-          content: >
-            🔧 Your job is to create a postgres container, using the image and environment from new_container_default section in the current config schema. Follow the system prompt.
-  smartlinks_for_each_container:
-    - sl_label: "Use for integration"
-      sl_chat:
-        - role: "user"
-          content: >
-            🔧 Your job is to modify postgres() tool config in %CURRENT_CONFIG% to match the variables from the container. Use docker() tool to inspect the container if needed.
-            Ask user before proceeding with the changes. After re-writing the config, test it to see if works. If it does, also update variables.yaml but
-            ask the user first.
 "#;
 
 // To think about: PGPASSWORD PGHOST PGUSER PGPORT PGDATABASE maybe tell the model to set that in variables.yaml as well

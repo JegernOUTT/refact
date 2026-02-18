@@ -12,7 +12,6 @@ export * from "./path";
 export * from "./ping";
 export * from "./links";
 export * from "./integrations";
-export * from "./docker";
 export * from "./telemetry";
 export * from "./knowledge";
 export * from "./knowledgeGraphApi";

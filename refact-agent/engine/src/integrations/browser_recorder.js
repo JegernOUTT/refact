@@ -134,11 +134,26 @@
             }, 500);
         });
 
-        observer.observe(document.documentElement || document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            characterData: true
-        });
+        function startObserver() {
+            try {
+                var root = document.documentElement || document.body;
+                if (!root) return false;
+                observer.observe(root, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    characterData: true
+                });
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        if (!startObserver()) {
+            document.addEventListener('DOMContentLoaded', function() {
+                startObserver();
+            }, { once: true });
+        }
     }
 })();

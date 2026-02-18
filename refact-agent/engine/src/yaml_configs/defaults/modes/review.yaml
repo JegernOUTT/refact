@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 7
 id: review
 title: Review
 description: Autonomous code review with correctness validation
@@ -79,6 +79,10 @@ prompt: |
   %PROJECT_SUMMARY%
 
   %GIT_INFO%
+  
+allow_integrations: true
+allow_mcp: true
+allow_subagents: true
 
 tools:
   - tree

@@ -12,9 +12,7 @@ use crate::call_validation::{
 };
 use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
 use crate::chat::types::ThreadParams;
-use crate::http::http_post_json;
 use crate::indexing_utils::wait_for_indexing_if_needed;
-use crate::integrations::docker::docker_container_manager::docker_container_get_host_lsp_port_to_connect;
 use crate::tools::tools_description::{
     set_tool_config, MatchConfirmDenyResult, ToolConfig, ToolDesc, ToolGroupCategory, ToolSource,
 };
@@ -189,22 +187,6 @@ pub async fn handle_v1_tools_check_if_confirmation_needed(
             format!("JSON problem: {}", e),
         )
     })?;
-
-    let is_inside_container = gcx.read().await.cmdline.inside_container;
-    if post.meta.chat_remote && !is_inside_container {
-        let port = docker_container_get_host_lsp_port_to_connect(gcx.clone(), &post.meta.chat_id)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        let url = format!("http://localhost:{port}/v1/tools-check-if-confirmation-needed");
-        let response: serde_json::Value = http_post_json(&url, &post)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::to_string(&response).unwrap()))
-            .unwrap());
-    }
 
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new(

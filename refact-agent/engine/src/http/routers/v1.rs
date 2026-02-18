@@ -24,9 +24,6 @@ use crate::http::routers::v1::chat_based_handlers::{
     handle_v1_commit_message_from_diff, handle_v1_trajectory_compress,
 };
 use crate::http::routers::v1::dashboard::get_dashboard_plots;
-use crate::http::routers::v1::docker::{
-    handle_v1_docker_container_action, handle_v1_docker_container_list,
-};
 use crate::http::routers::v1::git::{
     handle_v1_git_commit, handle_v1_checkpoints_preview, handle_v1_checkpoints_restore,
 };
@@ -107,7 +104,6 @@ mod code_edit;
 pub mod code_lens;
 pub mod customization;
 mod dashboard;
-mod docker;
 mod file_edit_tools;
 mod git;
 pub mod graceful_shutdown;
@@ -231,14 +227,6 @@ pub fn make_v1_router() -> Router {
         .route(
             "/integrations-mcp-logs",
             post(handle_v1_integrations_mcp_logs),
-        )
-        .route(
-            "/docker-container-list",
-            post(handle_v1_docker_container_list),
-        )
-        .route(
-            "/docker-container-action",
-            post(handle_v1_docker_container_action),
         )
         .route("/checkpoints-preview", post(handle_v1_checkpoints_preview))
         .route("/checkpoints-restore", post(handle_v1_checkpoints_restore))

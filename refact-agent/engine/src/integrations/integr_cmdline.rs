@@ -76,10 +76,6 @@ pub struct ToolCmdline {
 
 #[async_trait]
 impl IntegrationTrait for ToolCmdline {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         _gcx: Arc<ARwLock<GlobalContext>>,
@@ -305,10 +301,6 @@ fn _parse_command_args(
 
 #[async_trait]
 impl Tool for ToolCmdline {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

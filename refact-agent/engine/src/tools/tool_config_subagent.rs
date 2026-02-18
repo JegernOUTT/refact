@@ -66,10 +66,6 @@ impl ToolConfigSubagent {
 
 #[async_trait]
 impl Tool for ToolConfigSubagent {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         let description = if let Some(ref tool_schema) = self.config.tool {
             tool_schema.description.clone()

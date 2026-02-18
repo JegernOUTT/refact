@@ -22,7 +22,6 @@ pub mod integr_postgres;
 pub mod mcp;
 
 pub mod config_chat;
-pub mod docker;
 pub mod process_io_utils;
 pub mod project_summary_chat;
 pub mod running_integrations;
@@ -56,9 +55,6 @@ pub fn integration_from_name(n: &str) -> Result<Box<dyn IntegrationTrait + Send 
         "mysql" => Ok(Box::new(integr_mysql::ToolMysql {
             ..Default::default()
         }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "docker" => Ok(Box::new(docker::integr_docker::ToolDocker {
-            ..Default::default()
-        }) as Box<dyn IntegrationTrait + Send + Sync>),
         cmdline if cmdline.starts_with("cmdline_") => {
             // let tool_name = cmdline.strip_prefix("cmdline_").unwrap();
             Ok(Box::new(integr_cmdline::ToolCmdline {
@@ -81,15 +77,12 @@ pub fn integration_from_name(n: &str) -> Result<Box<dyn IntegrationTrait + Send 
                 ..Default::default()
             }) as Box<dyn IntegrationTrait + Send + Sync>)
         }
-        "isolation" => Ok(Box::new(docker::integr_isolation::IntegrationIsolation {
-            ..Default::default()
-        }) as Box<dyn IntegrationTrait + Send + Sync>),
         _ => Err(format!("Unknown integration name: {}", n)),
     }
 }
 
-pub fn integrations_list(allow_experimental: bool) -> Vec<&'static str> {
-    let mut integrations = vec![
+pub fn integrations_list(_allow_experimental: bool) -> Vec<&'static str> {
+    let integrations = vec![
         "github",
         "gitlab",
         "bitbucket",
@@ -101,11 +94,7 @@ pub fn integrations_list(allow_experimental: bool) -> Vec<&'static str> {
         "service_TEMPLATE",
         "mcp_stdio_TEMPLATE",
         "mcp_sse_TEMPLATE",
-        "docker",
     ];
-    if allow_experimental {
-        integrations.extend(vec!["isolation"]);
-    }
     integrations
 }
 

@@ -80,10 +80,6 @@ impl ToolTaskBoardGet {
 
 #[async_trait]
 impl Tool for ToolTaskBoardGet {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -159,10 +155,6 @@ impl ToolTaskBoardCreateCard {
 
 #[async_trait]
 impl Tool for ToolTaskBoardCreateCard {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -307,10 +299,6 @@ impl ToolTaskBoardUpdateCard {
 
 #[async_trait]
 impl Tool for ToolTaskBoardUpdateCard {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -434,10 +422,6 @@ impl ToolTaskBoardMoveCard {
 
 #[async_trait]
 impl Tool for ToolTaskBoardMoveCard {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -555,10 +539,6 @@ impl ToolTaskBoardDeleteCard {
 
 #[async_trait]
 impl Tool for ToolTaskBoardDeleteCard {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -650,10 +630,6 @@ impl ToolTaskReadyCards {
 
 #[async_trait]
 impl Tool for ToolTaskReadyCards {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

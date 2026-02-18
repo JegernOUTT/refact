@@ -239,10 +239,6 @@ async fn execute_strategic_planning(
 
 #[async_trait]
 impl Tool for ToolStrategicPlanning {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "strategic_planning".to_string(),

@@ -66,10 +66,6 @@ impl ToolTaskMemorySave {
 
 #[async_trait]
 impl Tool for ToolTaskMemorySave {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_memory_save".to_string(),
@@ -226,9 +222,6 @@ impl ToolTaskMemoriesGet {
 
 #[async_trait]
 impl Tool for ToolTaskMemoriesGet {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {

@@ -49,7 +49,6 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
     handleSubmit,
     handleDeleteIntegration,
     handleNotConfiguredIntegrationSubmit,
-    handleNavigateToIntegrationSetup,
     handleSetCurrentIntegrationSchema,
     handleSetCurrentIntegrationValues,
     handleFormReturn,
@@ -110,7 +109,6 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
           formValues={formValues}
           onSchema={handleSetCurrentIntegrationSchema}
           onValues={handleSetCurrentIntegrationValues}
-          handleSwitchIntegration={handleNavigateToIntegrationSetup}
           handleUpdateFormField={handleUpdateFormField}
         />
         {information && (

@@ -47,10 +47,6 @@ impl ToolTaskAgentUpdate {
 
 #[async_trait]
 impl Tool for ToolTaskAgentUpdate {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -136,10 +132,6 @@ impl ToolTaskAgentComplete {
 
 #[async_trait]
 impl Tool for ToolTaskAgentComplete {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -227,9 +219,6 @@ impl ToolTaskAgentFail {
 
 #[async_trait]
 impl Tool for ToolTaskAgentFail {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 
     async fn tool_execute(
         &mut self,
@@ -320,10 +309,6 @@ impl ToolTaskAssignAgent {
 
 #[async_trait]
 impl Tool for ToolTaskAssignAgent {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

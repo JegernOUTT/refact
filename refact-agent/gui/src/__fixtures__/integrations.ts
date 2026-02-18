@@ -56,30 +56,6 @@ export const INTEGRATIONS_RESPONSE: Integration = {
         ],
       },
     ],
-    docker: {
-      filter_image: "postgres",
-      filter_label: "",
-      new_container_default: {
-        image: "postgres:13",
-        environment: {
-          POSTGRES_DB: "marketing_db",
-          POSTGRES_USER: "john_doe",
-          POSTGRES_PASSWORD: "$POSTGRES_PASSWORD",
-        },
-      },
-      smartlinks: [
-        {
-          sl_label: "Add Database Container",
-          sl_chat: [
-            {
-              role: "user",
-              content:
-                '🔧 Your job is to create a new section under "docker" that will define a new postgres container, inside the current config file %CURRENT_CONFIG%. Follow the system prompt.\n',
-            },
-          ],
-        },
-      ],
-    },
   },
   integr_values: {
     psql_binary_path: "",

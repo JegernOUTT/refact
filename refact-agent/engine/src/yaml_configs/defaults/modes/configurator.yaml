@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: configurator
 title: Configurator
 description: Integration configuration wizard
@@ -53,6 +53,7 @@ tools:
   - search_pattern
   - create_textdoc
   - update_textdoc
+  - 
 tool_confirm:
   rules:
     - match: "tree"

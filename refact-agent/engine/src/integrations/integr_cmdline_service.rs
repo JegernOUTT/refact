@@ -35,10 +35,6 @@ pub struct ToolService {
 
 #[async_trait]
 impl IntegrationTrait for ToolService {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         _gcx: Arc<ARwLock<GlobalContext>>,
@@ -347,10 +343,6 @@ async fn execute_background_command(
 
 #[async_trait]
 impl Tool for ToolService {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

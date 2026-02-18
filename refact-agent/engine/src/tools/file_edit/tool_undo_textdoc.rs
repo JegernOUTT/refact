@@ -122,10 +122,6 @@ pub async fn tool_undo_text_doc_exec(
 
 #[async_trait]
 impl Tool for ToolUndoTextDoc {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

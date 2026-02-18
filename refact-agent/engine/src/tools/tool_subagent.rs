@@ -68,10 +68,6 @@ You have access to these tools: {tools_list}
 
 #[async_trait]
 impl Tool for ToolSubagent {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "subagent".to_string(),

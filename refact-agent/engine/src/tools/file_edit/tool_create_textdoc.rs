@@ -76,10 +76,6 @@ pub async fn tool_create_text_doc_exec(
 
 #[async_trait]
 impl Tool for ToolCreateTextDoc {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

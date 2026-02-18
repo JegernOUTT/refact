@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 7
 id: ask
 title: Ask
 description: Quick Q&A with web research capability
@@ -43,6 +43,10 @@ prompt: |
   Example: `ask_questions(questions='[{"id":"q1","type":"free_text","text":"Can you be more specific about what you need?"}]')`
 
   %SYSTEM_INFO%
+
+allow_integrations: false
+allow_mcp: true
+allow_subagents: false
 
 tools:
   - add_workspace_folder

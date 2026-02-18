@@ -16,10 +16,6 @@ pub struct ToolTrajectoryContext {
 
 #[async_trait]
 impl Tool for ToolTrajectoryContext {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "get_trajectory_context".to_string(),

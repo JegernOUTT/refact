@@ -41,10 +41,6 @@ pub struct ToolMysql {
 
 #[async_trait]
 impl IntegrationTrait for ToolMysql {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         _gcx: Arc<ARwLock<GlobalContext>>,
@@ -147,10 +143,6 @@ impl ToolMysql {
 
 #[async_trait]
 impl Tool for ToolMysql {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "mysql".to_string(),
@@ -291,27 +283,4 @@ smartlinks:
           🔧 Your goal is to set up mysql client. Look at the project, especially files like "docker-compose.yaml" or ".env". Call tree() to see what files the project has.
           After that is completed, go through the usual plan in the system prompt.
           Keep MYSQL_HOST MYSQL_PORT MYSQL_USER MYSQL_PASSWORD MYSQL_DATABASE in variables.yaml so they can be reused by command line tools later.
-docker:
-  filter_label: ""
-  filter_image: "mysql"
-  new_container_default:
-    image: "mysql:8.4"
-    environment:
-      MYSQL_DATABASE: "$MYSQL_DB"
-      MYSQL_USER: "$MYSQL_USER"
-      MYSQL_PASSWORD: "$MYSQL_PASSWORD"
-    ports:
-      - "3306:3306"
-  smartlinks:
-    - sl_label: "Add Database Container"
-      sl_chat:
-        - role: "user"
-          content: |
-            🔧 Your job is to create a mysql container, using the image and environment from new_container_default section in the current config file: %CURRENT_CONFIG%. Follow the system prompt.
-  smartlinks_for_each_container:
-    - sl_label: "Use for integration"
-      sl_chat:
-        - role: "user"
-          content: |
-            🔧 Your job is to modify mysql connection config in the current file to match the variables from the container, use docker tool to inspect the container if needed. Current config file: %CURRENT_CONFIG%.
 "#;

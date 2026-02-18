@@ -2,8 +2,6 @@ use std::fmt::Display;
 
 use serde::{Deserialize, Serializer, Deserializer};
 
-use crate::integrations::docker::docker_container_manager::Port;
-
 pub fn serialize_opt_num_to_str<T: Display, S: Serializer>(
     value: &Option<T>,
     serializer: S,
@@ -40,29 +38,3 @@ where
         .map_err(serde::de::Error::custom)
 }
 
-pub fn serialize_ports<S: Serializer>(ports: &Vec<Port>, serializer: S) -> Result<S::Ok, S::Error> {
-    let ports_str = ports
-        .iter()
-        .map(|port| format!("{}:{}", port.published, port.target))
-        .collect::<Vec<_>>()
-        .join(",");
-    serializer.serialize_str(&ports_str)
-}
-pub fn deserialize_ports<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<Port>, D::Error> {
-    let ports_str = String::deserialize(deserializer)?;
-    ports_str
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .map(|port_str| {
-            let (published, target) = port_str
-                .split_once(':')
-                .ok_or_else(|| serde::de::Error::custom("expected format 'published:target'"))?;
-            Ok(Port {
-                published: published.to_string(),
-                target: target.to_string(),
-            })
-        })
-        .collect()
-}

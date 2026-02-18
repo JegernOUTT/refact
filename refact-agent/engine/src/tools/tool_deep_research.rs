@@ -72,10 +72,6 @@ async fn execute_deep_research(
 
 #[async_trait]
 impl Tool for ToolDeepResearch {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "deep_research".to_string(),

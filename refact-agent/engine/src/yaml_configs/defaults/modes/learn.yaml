@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 7
 id: learn
 title: Learn
 description: Understand code with clear explanations
@@ -74,6 +74,10 @@ prompt: |
   %WORKSPACE_INFO%
 
   %PROJECT_SUMMARY%
+
+allow_integrations: false
+allow_mcp: true
+allow_subagents: false
 
 tools:
   - tree

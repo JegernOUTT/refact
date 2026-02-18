@@ -184,10 +184,6 @@ fn build_agent_prompt(
 
 #[async_trait]
 impl Tool for ToolTaskSpawnAgent {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_spawn_agent".to_string(),

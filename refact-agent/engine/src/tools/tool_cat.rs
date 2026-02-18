@@ -116,10 +116,6 @@ fn parse_cat_args(
 
 #[async_trait]
 impl Tool for ToolCat {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "cat".to_string(),

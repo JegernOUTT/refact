@@ -17,10 +17,6 @@ const DEFAULT_NUM_RESULTS: usize = 8;
 
 #[async_trait]
 impl Tool for ToolWebSearch {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "web_search".to_string(),

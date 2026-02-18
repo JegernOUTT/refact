@@ -15,10 +15,6 @@ pub struct ToolSearchTrajectories {
 
 #[async_trait]
 impl Tool for ToolSearchTrajectories {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "search_trajectories".to_string(),

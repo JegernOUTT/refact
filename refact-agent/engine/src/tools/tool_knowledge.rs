@@ -20,10 +20,6 @@ pub struct ToolGetKnowledge {
 
 #[async_trait]
 impl Tool for ToolGetKnowledge {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "knowledge".to_string(),

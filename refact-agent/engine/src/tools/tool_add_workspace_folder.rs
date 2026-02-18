@@ -16,10 +16,6 @@ pub struct ToolAddWorkspaceFolder {
 
 #[async_trait]
 impl Tool for ToolAddWorkspaceFolder {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "add_workspace_folder".to_string(),

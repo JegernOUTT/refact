@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 7
 id: past_work
 title: Past Work
 description: Search conversation history and project knowledge
@@ -59,6 +59,10 @@ prompt: |
   - If nothing found, say so clearly
 
   %SYSTEM_INFO%
+  
+allow_integrations: false
+allow_mcp: false
+allow_subagents: true
 
 tools:
   - add_workspace_folder

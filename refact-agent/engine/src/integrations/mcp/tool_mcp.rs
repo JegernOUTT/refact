@@ -25,10 +25,6 @@ pub struct ToolMCP {
 
 #[async_trait]
 impl Tool for ToolMCP {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

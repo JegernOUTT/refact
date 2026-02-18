@@ -61,10 +61,6 @@ impl ToolRm {
 
 #[async_trait]
 impl Tool for ToolRm {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn command_to_match_against_confirm_deny(
         &self,
         _ccx: Arc<AMutex<AtCommandsContext>>,

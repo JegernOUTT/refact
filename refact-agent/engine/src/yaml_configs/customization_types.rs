@@ -16,6 +16,12 @@ pub struct ModeConfig {
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
+    pub allow_integrations: bool,
+    #[serde(default)]
+    pub allow_mcp: bool,
+    #[serde(default)]
+    pub allow_subagents: bool,
+    #[serde(default)]
     pub model_defaults: ModeModelDefaults,
     #[serde(default)]
     pub tool_confirm: ToolConfirmConfig,
@@ -135,6 +141,12 @@ pub struct ModeOverride {
     #[serde(default)]
     pub tools_remove: Option<Vec<String>>,
     #[serde(default)]
+    pub allow_integrations: Option<bool>,
+    #[serde(default)]
+    pub allow_mcp: Option<bool>,
+    #[serde(default)]
+    pub allow_subagents: Option<bool>,
+    #[serde(default)]
     pub model_defaults: Option<ModeModelDefaults>,
     #[serde(default)]
     pub tool_confirm: Option<ToolConfirmConfig>,
@@ -161,6 +173,15 @@ impl ModeConfig {
             if let Some(remove) = &override_config.tools_remove {
                 result.tools.retain(|t| !remove.contains(t));
             }
+        }
+        if let Some(v) = override_config.allow_integrations {
+            result.allow_integrations = v;
+        }
+        if let Some(v) = override_config.allow_mcp {
+            result.allow_mcp = v;
+        }
+        if let Some(v) = override_config.allow_subagents {
+            result.allow_subagents = v;
         }
         if let Some(model_defaults) = &override_config.model_defaults {
             result.model_defaults.merge_from(model_defaults);

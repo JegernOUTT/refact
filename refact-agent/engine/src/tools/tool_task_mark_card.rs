@@ -43,10 +43,6 @@ impl ToolTaskMarkCardFailed {
 
 #[async_trait]
 impl Tool for ToolTaskMarkCardDone {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_mark_card_done".to_string(),
@@ -147,10 +143,6 @@ impl Tool for ToolTaskMarkCardDone {
 
 #[async_trait]
 impl Tool for ToolTaskMarkCardFailed {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_mark_card_failed".to_string(),

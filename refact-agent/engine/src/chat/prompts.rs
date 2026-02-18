@@ -7,9 +7,6 @@ use tokio::sync::RwLock as ARwLock;
 use crate::call_validation;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
-use crate::http::http_post_json;
-use crate::http::routers::v1::system_prompt::{PrependSystemPromptPost, PrependSystemPromptResponse};
-use crate::integrations::docker::docker_container_manager::docker_container_get_host_lsp_port_to_connect;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use super::system_context::{
     self, create_instruction_files_message, create_memories_message, gather_system_context,
@@ -391,25 +388,6 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         .iter()
         .any(|m| m.role == "context_file" && m.tool_call_id == PROJECT_CONTEXT_MARKER);
 
-    let is_inside_container = gcx.read().await.cmdline.inside_container;
-    if chat_meta.chat_remote && !is_inside_container {
-        messages = match prepend_system_prompt_and_maybe_more_initial_messages_from_remote(
-            gcx.clone(),
-            &messages,
-            chat_meta,
-            stream_back_to_user,
-        )
-        .await
-        {
-            Ok(messages_from_remote) => messages_from_remote,
-            Err(e) => {
-                tracing::error!("prepend_the_right_system_prompt_and_maybe_more_initial_messages_from_remote: {}", e);
-                messages
-            }
-        };
-        return messages;
-    }
-
     if !have_system {
         let canonical_mode = canonical_mode_id(&chat_meta.chat_mode).unwrap_or_else(|_| "agent".to_string());
         match canonical_mode.as_str() {
@@ -657,26 +635,4 @@ pub async fn inject_task_memories(
     Ok(())
 }
 
-pub async fn prepend_system_prompt_and_maybe_more_initial_messages_from_remote(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    messages: &[call_validation::ChatMessage],
-    chat_meta: &call_validation::ChatMeta,
-    stream_back_to_user: &mut HasRagResults,
-) -> Result<Vec<call_validation::ChatMessage>, String> {
-    let post = PrependSystemPromptPost {
-        messages: messages.to_vec(),
-        chat_meta: chat_meta.clone(),
-    };
 
-    let port =
-        docker_container_get_host_lsp_port_to_connect(gcx.clone(), &chat_meta.chat_id).await?;
-    let url =
-        format!("http://localhost:{port}/v1/prepend-system-prompt-and-maybe-more-initial-messages");
-    let response: PrependSystemPromptResponse = http_post_json(&url, &post).await?;
-
-    for msg in response.messages_to_stream_back {
-        stream_back_to_user.push_in_json(msg);
-    }
-
-    Ok(response.messages)
-}

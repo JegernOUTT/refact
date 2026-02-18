@@ -23,6 +23,9 @@ use crate::integrations::browser_types::{
 const FRAME_RATE_LIMIT_MS: u128 = 500;
 const FRAME_HASH_THRESHOLD: u64 = 50;
 
+const MAX_RAW_EVENT_QUEUE: usize = 2000;
+const MAX_RAW_EVENT_BYTES: usize = 64 * 1024;
+
 const RECORDER_SCRIPT_TEMPLATE: &str = include_str!("browser_recorder.js");
 const TOOLBAR_SCRIPT: &str = include_str!("browser_toolbar.js");
 
@@ -31,6 +34,16 @@ pub fn build_recorder_script(mask_passwords: bool) -> String {
         "__REFACT_MASK_PASSWORDS__",
         if mask_passwords { "true" } else { "false" },
     )
+}
+
+fn normalize_timestamp_ms(ts: f64) -> f64 {
+    // CDP timestamps are often seconds (e.g. ~1.7e9), while recorder timestamps
+    // come from Date.now() in milliseconds (~1.7e12).
+    if ts < 10_000_000_000.0 {
+        ts * 1000.0
+    } else {
+        ts
+    }
 }
 
 pub struct BrowserBuffers {
@@ -45,6 +58,7 @@ pub struct BrowserBuffers {
     pub last_send_mutation_cursor: usize,
     pub last_timeline_action_cursor: usize,
     pub last_timeline_console_cursor: usize,
+    pub last_timeline_network_cursor: usize,
     pub last_frame_hash: Option<u64>,
     pub last_send_frame_hash: Option<u64>,
     pub last_frame_data: Option<Vec<u8>>,
@@ -69,6 +83,7 @@ impl BrowserBuffers {
             last_send_mutation_cursor: 0,
             last_timeline_action_cursor: 0,
             last_timeline_console_cursor: 0,
+            last_timeline_network_cursor: 0,
             last_frame_hash: None,
             last_send_frame_hash: None,
             last_frame_data: None,
@@ -166,7 +181,7 @@ impl BrowserBuffers {
         std::mem::take(&mut self.toolbar_action_queue)
     }
 
-    pub fn flush_timeline_events(&mut self) -> (Vec<RecorderEvent>, Vec<ConsoleEntry>) {
+    pub fn flush_timeline_events(&mut self) -> (Vec<RecorderEvent>, Vec<ConsoleEntry>, Vec<NetworkEntry>) {
         let action_start = self.last_timeline_action_cursor.min(self.action_buffer.len());
         let new_actions = self.action_buffer[action_start..].to_vec();
         self.last_timeline_action_cursor = self.action_buffer.len();
@@ -175,7 +190,11 @@ impl BrowserBuffers {
         let new_console = self.console_buffer[console_start..].to_vec();
         self.last_timeline_console_cursor = self.console_buffer.len();
 
-        (new_actions, new_console)
+        let network_start = self.last_timeline_network_cursor.min(self.network_buffer.len());
+        let new_network = self.network_buffer[network_start..].to_vec();
+        self.last_timeline_network_cursor = self.network_buffer.len();
+
+        (new_actions, new_console, new_network)
     }
 
     pub fn commit_cursors(&mut self) {
@@ -219,6 +238,7 @@ pub struct BrowserRuntime {
     pub runtime_id: String,
     pub attached_chat_id: Option<String>,
     pub browser: Browser,
+    pub recording_tab_target_id: Option<String>,
     pub profile_dir: PathBuf,
     pub window_bounds: Option<WindowBounds>,
     pub buffers: BrowserBuffers,
@@ -282,6 +302,7 @@ impl BrowserRuntime {
             runtime_id,
             attached_chat_id: None,
             browser,
+            recording_tab_target_id: None,
             profile_dir,
             window_bounds,
             buffers: BrowserBuffers::new(mask_passwords),
@@ -334,6 +355,11 @@ impl BrowserRuntime {
         if tabs_guard.is_empty() {
             return None;
         }
+        if let Some(target_id) = &self.recording_tab_target_id {
+            if let Some(tab) = tabs_guard.iter().find(|tab| tab.get_target_id() == target_id) {
+                return Some(tab.clone());
+            }
+        }
         tabs_guard.first().cloned()
     }
 }
@@ -358,40 +384,48 @@ pub fn inject_recorder_into_tab(
     // 1. Set up the __refact_event binding FIRST so scripts can call it immediately.
     //    Runtime.addBinding makes window.__refact_event available on all contexts.
     let binding_buffer = action_buffer.clone();
-    tab.expose_function(
+    // Binding registration can fail if the binding already exists.
+    // We treat that case as non-fatal, because the existing binding is fine.
+    if let Err(e) = tab.expose_function(
         "__refact_event",
         Arc::new(move |payload: serde_json::Value| {
-            if let Some(json_str) = payload.as_str() {
-                if let Some(inner) = json_str.strip_prefix('{') {
-                    let rebuilt = format!("{{{}", inner);
-                    if let Ok(mut buf) = binding_buffer.lock() {
-                        buf.push(rebuilt);
+            if let Some(event_json) = extract_refact_event_json(&payload) {
+                if event_json.trim().is_empty() {
+                    return;
+                }
+                if event_json.len() > MAX_RAW_EVENT_BYTES {
+                    return;
+                }
+                if let Ok(mut buf) = binding_buffer.lock() {
+                    if buf.len() >= MAX_RAW_EVENT_QUEUE {
+                        return;
                     }
-                } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    if let Ok(s) = serde_json::to_string(&parsed) {
-                        if let Ok(mut buf) = binding_buffer.lock() {
-                            buf.push(s);
-                        }
-                    }
+                    buf.push(event_json);
                 }
             }
         }),
-    ).map_err(|e| format!("Failed to expose __refact_event binding: {}", e))?;
+    ) {
+        warn!("Failed to expose __refact_event binding (non-fatal): {}", e);
+    }
 
     // 2. Register scripts for future navigations (fires on every new document load).
-    tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
+    if let Err(e) = tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
         source: script.clone(),
         world_name: None,
         include_command_line_api: None,
         run_immediately: None,
-    }).map_err(|e| format!("Failed to add recorder script: {}", e))?;
+    }) {
+        warn!("Failed to add recorder script (non-fatal): {}", e);
+    }
 
-    tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
+    if let Err(e) = tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
         source: TOOLBAR_SCRIPT.to_string(),
         world_name: None,
         include_command_line_api: None,
         run_immediately: None,
-    }).map_err(|e| format!("Failed to add toolbar script: {}", e))?;
+    }) {
+        warn!("Failed to add toolbar script (non-fatal): {}", e);
+    }
 
     // 3. Evaluate scripts immediately on the current page. AddScriptToEvaluateOnNewDocument
     //    only fires on future navigations — the initial about:blank page already loaded.
@@ -406,6 +440,103 @@ pub fn inject_recorder_into_tab(
     Ok(())
 }
 
+pub fn ensure_injection_into_tab(
+    tab: &headless_chrome::Tab,
+    mask_passwords: bool,
+    action_buffer: Arc<Mutex<Vec<String>>>,
+) {
+    // If a navigation causes the CDP binding to disappear, re-register it.
+    // This is best-effort; injection is idempotent.
+    let needs = tab
+        .evaluate(
+            r#"(function(){
+                try {
+                    if (typeof window.__refact_event !== 'function') return true;
+                    if (!window.__refact_recorder_installed || !window.__refact_toolbar_installed) return true;
+                    // Detect a broken wrapper after reload (native binding missing / captured undefined).
+                    try { window.__refact_event(''); } catch(e) { return true; }
+                    return false;
+                } catch(e) { return true; }
+            })()"#,
+            false,
+        )
+        .ok()
+        .and_then(|r| r.value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    if needs {
+        let _ = inject_recorder_into_tab(tab, mask_passwords, action_buffer);
+    }
+}
+
+fn extract_refact_event_json(payload: &serde_json::Value) -> Option<String> {
+    fn extract_from_value(value: &serde_json::Value) -> Option<String> {
+        if let Some(arr) = value.as_array() {
+            if let Some(first) = arr.first() {
+                if let Some(event_str) = first.as_str() {
+                    return Some(event_str.to_string());
+                }
+                if first.is_object() {
+                    return serde_json::to_string(first).ok();
+                }
+            }
+        }
+
+        if let Some(args) = value.get("args").and_then(|v| v.as_array()) {
+            if let Some(first) = args.first() {
+                if let Some(event_str) = first.as_str() {
+                    return Some(event_str.to_string());
+                }
+                if first.is_object() {
+                    return serde_json::to_string(first).ok();
+                }
+            }
+        }
+
+        if let Some(args) = value.get("arguments").and_then(|v| v.as_array()) {
+            if let Some(first) = args.first() {
+                if let Some(event_str) = first.as_str() {
+                    return Some(event_str.to_string());
+                }
+                if first.is_object() {
+                    return serde_json::to_string(first).ok();
+                }
+            }
+        }
+
+        if let Some(event_type) = value.get("type").and_then(|v| v.as_str()) {
+            if !event_type.is_empty() {
+                return serde_json::to_string(value).ok();
+            }
+        }
+
+        None
+    }
+
+    if let Some(as_str) = payload.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(as_str) {
+            if let Some(unwrapped) = extract_from_value(&parsed) {
+                return Some(unwrapped);
+            }
+            if parsed.is_object() {
+                return serde_json::to_string(&parsed).ok();
+            }
+        }
+        return Some(as_str.to_string());
+    }
+
+    if let Some(unwrapped) = extract_from_value(payload) {
+        return Some(unwrapped);
+    }
+
+    if payload.is_object() {
+        return serde_json::to_string(payload).ok();
+    }
+
+    None
+}
+
 pub fn setup_console_capture(
     tab: &headless_chrome::Tab,
     console_buffer: Arc<Mutex<Vec<ConsoleEntry>>>,
@@ -415,7 +546,7 @@ pub fn setup_console_capture(
     tab.add_event_listener(Arc::new(move |event: &Event| {
         if let Event::LogEntryAdded(e) = event {
             let entry = ConsoleEntry {
-                timestamp: e.params.entry.timestamp,
+                timestamp: normalize_timestamp_ms(e.params.entry.timestamp),
                 level: format!("{:?}", e.params.entry.level),
                 text: e.params.entry.text.clone(),
             };
@@ -450,7 +581,7 @@ pub fn setup_network_capture(
             if allowed {
                 if let Ok(mut buf) = buf.lock() {
                     buf.push(NetworkEntry {
-                        timestamp: params.timestamp as f64,
+                        timestamp: normalize_timestamp_ms(params.timestamp as f64),
                         method: String::new(),
                         url,
                         resource_type,
@@ -468,32 +599,67 @@ pub fn setup_network_capture(
     Ok(())
 }
 
-pub fn setup_recording_for_runtime(runtime: &BrowserRuntime) -> Result<(), String> {
-    // Collect tabs that Chrome/headless_chrome already opened before we create ours.
-    // On non-headless launch Chrome auto-opens a "New Tab" page, and headless_chrome
-    // may have its own internal about:blank tab. We close both after creating our tab.
-    let old_tabs: Vec<Arc<headless_chrome::Tab>> = runtime.browser.get_tabs()
+pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), String> {
+    // Collect startup tabs and prefer the user-visible non-about:blank tab.
+    let startup_tabs: Vec<Arc<headless_chrome::Tab>> = runtime.browser.get_tabs()
         .lock()
         .map(|tabs| tabs.iter().cloned().collect())
         .unwrap_or_default();
 
-    // Always create a fresh tab so scripts and CDP bindings are on a known tab.
-    let tab = runtime.browser.new_tab()
-        .map_err(|e| format!("Failed to create recording tab: {}", e))?;
+    let primary_tab = startup_tabs
+        .iter()
+        .find(|tab| tab.get_url() != "about:blank")
+        .cloned()
+        .or_else(|| startup_tabs.first().cloned())
+        .or_else(|| runtime.browser.new_tab().ok())
+        .ok_or_else(|| "Failed to select recording tab".to_string())?;
+
+    // `chrome://newtab` and other internal pages can block injection/evaluate.
+    // Keep one tab, but navigate it to an injectable blank page.
+    let url = primary_tab.get_url();
+    if url.starts_with("chrome://") {
+        if let Err(e) = primary_tab.navigate_to("about:blank") {
+            tracing::debug!("Could not navigate chrome:// tab to about:blank (non-fatal): {}", e);
+        } else {
+            let _ = primary_tab.wait_until_navigated();
+        }
+    }
 
     inject_recorder_into_tab(
-        &tab,
+        &primary_tab,
         runtime.buffers.mask_passwords,
         runtime.buffers.raw_recorder_events.clone(),
     )?;
-    setup_console_capture(&tab, runtime.buffers.raw_console_entries.clone())?;
-    setup_network_capture(&tab, runtime.buffers.raw_network_entries.clone())?;
+    setup_console_capture(&primary_tab, runtime.buffers.raw_console_entries.clone())?;
+    setup_network_capture(&primary_tab, runtime.buffers.raw_network_entries.clone())?;
 
-    // Close any pre-existing tabs (Chrome's NTP, headless_chrome's default about:blank).
-    for old_tab in old_tabs {
-        if let Err(e) = old_tab.close(false) {
-            tracing::debug!("Could not close pre-existing tab (non-fatal): {}", e);
+    runtime.recording_tab_target_id = Some(primary_tab.get_target_id().clone());
+
+    // Keep only the selected tab to avoid NTP/about:blank duplicates.
+    for _attempt in 0..10 {
+        let tabs_now: Vec<Arc<headless_chrome::Tab>> = runtime
+            .browser
+            .get_tabs()
+            .lock()
+            .map(|tabs| tabs.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let mut any_extra = false;
+        for tab in tabs_now {
+            if tab.get_target_id() == primary_tab.get_target_id() {
+                continue;
+            }
+            any_extra = true;
+            if let Err(e) = tab.close(false) {
+                tracing::debug!("Could not close extra tab (non-fatal): {}", e);
+            }
         }
+
+        if !any_extra {
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())
@@ -961,5 +1127,46 @@ mod tests {
         let text2 = "日本語テスト";
         let truncated2: String = text2.chars().take(3).collect();
         assert_eq!(truncated2, "日本語");
+    }
+
+    #[test]
+    fn test_normalize_timestamp_seconds_to_ms() {
+        let ts_sec = 1_700_000_000.0;
+        assert_eq!(normalize_timestamp_ms(ts_sec), ts_sec * 1000.0);
+    }
+
+    #[test]
+    fn test_normalize_timestamp_ms_passthrough() {
+        let ts_ms = 1_700_000_000_000.0;
+        assert_eq!(normalize_timestamp_ms(ts_ms), ts_ms);
+    }
+
+    #[test]
+    fn test_extract_refact_event_json_from_wrapper_string_payload() {
+        let payload = serde_json::json!("{\"name\":\"__refact_event\",\"seq\":1,\"args\":[\"{\\\"type\\\":\\\"toolbar_action\\\",\\\"action\\\":\\\"screenshot\\\",\\\"timestamp\\\":1}\"]}");
+        let extracted = extract_refact_event_json(&payload).unwrap();
+        assert!(extracted.contains("\"type\":\"toolbar_action\""));
+        assert!(extracted.contains("\"action\":\"screenshot\""));
+    }
+
+    #[test]
+    fn test_extract_refact_event_json_from_wrapper_object_payload() {
+        let payload = serde_json::json!({
+            "name": "__refact_event",
+            "seq": 1,
+            "args": [
+                {
+                    "type": "click",
+                    "selector": "#btn",
+                    "text": "OK",
+                    "x": 1.0,
+                    "y": 2.0,
+                    "timestamp": 3.0
+                }
+            ]
+        });
+        let extracted = extract_refact_event_json(&payload).unwrap();
+        assert!(extracted.contains("\"type\":\"click\""));
+        assert!(extracted.contains("\"selector\":\"#btn\""));
     }
 }

@@ -19,8 +19,6 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, Too
 use crate::integrations::integr_abstract::{
     IntegrationTrait, IntegrationCommon, IntegrationConfirmation,
 };
-use crate::integrations::docker::docker_container_manager::get_container_name;
-
 use tokio::time::sleep;
 use chrono::DateTime;
 use std::path::PathBuf;
@@ -157,10 +155,6 @@ impl IntegrationSession for ChromeSession {
 
 #[async_trait]
 impl IntegrationTrait for ToolChrome {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         _gcx: Arc<ARwLock<GlobalContext>>,
@@ -200,10 +194,6 @@ impl IntegrationTrait for ToolChrome {
 
 #[async_trait]
 impl Tool for ToolChrome {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -254,8 +244,6 @@ impl Tool for ToolChrome {
                 &parsed_command,
                 command_session.clone(),
                 &self.settings_chrome,
-                gcx.clone(),
-                &chat_id,
             )
             .await
             {
@@ -760,8 +748,6 @@ async fn chrome_command_exec(
     cmd: &Command,
     chrome_session: Arc<AMutex<Box<dyn IntegrationSession>>>,
     settings_chrome: &SettingsChrome,
-    gcx: Arc<ARwLock<GlobalContext>>,
-    chat_id: &str,
 ) -> Result<(Vec<String>, Vec<MultimodalElement>), String> {
     let mut tool_log = vec![];
     let mut multimodal_els = vec![];
@@ -788,13 +774,7 @@ async fn chrome_command_exec(
                     .ok_or("Failed to downcast to ChromeSession")?;
                 session_get_tab_arc(chrome_session, &args.tab_id).await?
             };
-            let mut url = args.uri.clone();
-            if settings_chrome.chrome_path.starts_with("container://") {
-                let is_inside_container = gcx.read().await.cmdline.inside_container;
-                if is_inside_container {
-                    url = replace_host_with_container_if_needed(&url, chat_id);
-                }
-            }
+            let url = args.uri.clone();
             let log = {
                 let tab_lock = tab.lock().await;
                 match {
@@ -1456,20 +1436,6 @@ fn parse_single_command(command: &String) -> Result<Command, String> {
     }
 }
 
-fn replace_host_with_container_if_needed(url: &str, chat_id: &str) -> String {
-    if let Ok(mut parsed_url) = url::Url::parse(url) {
-        if let Some(host) = parsed_url.host_str() {
-            if host == "127.0.0.1" || host == "0.0.0.0" || host == "localhost" {
-                parsed_url
-                    .set_host(Some(&get_container_name(chat_id)))
-                    .unwrap();
-                return parsed_url.to_string();
-            }
-        }
-    }
-    url.to_string()
-}
-
 const CHROME_INTEGRATION_SCHEMA: &str = r#"
 fields:
   chrome_path:
@@ -1539,22 +1505,4 @@ smartlinks:
       - role: "user"
         content: |
           🔧 Help the user to install Chrome for Testing using npm, once that is done rewrite the current config file %CURRENT_CONFIG% to use chrome_path to use it.
-docker:
-  filter_label: ""
-  filter_image: "standalone-chrome"
-  new_container_default:
-    image: "selenium/standalone-chrome:latest"
-    environment: {}
-  smartlinks:
-    - sl_label: "Add Chrome Container"
-      sl_chat:
-        - role: "user"
-          content: |
-            🔧 Your job is to create a chrome container, using the image and environment from new_container_default section in the current config file: %CURRENT_CONFIG%. Follow the system prompt.
-  smartlinks_for_each_container:
-    - sl_label: "Use for integration"
-      sl_chat:
-        - role: "user"
-          content: |
-            🔧 Your job is to modify chrome config in the current file to connect through websockets to the container, use docker tool to inspect the container if needed. Current config file: %CURRENT_CONFIG%.
 "#;

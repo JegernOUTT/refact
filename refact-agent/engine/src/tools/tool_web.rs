@@ -55,10 +55,6 @@ fn parse_output_filter(args: &HashMap<String, Value>) -> OutputFilter {
 
 #[async_trait]
 impl Tool for ToolWeb {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "web".to_string(),

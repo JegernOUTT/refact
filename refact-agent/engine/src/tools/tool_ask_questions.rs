@@ -27,10 +27,6 @@ pub struct ToolAskQuestions {
 
 #[async_trait]
 impl Tool for ToolAskQuestions {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "ask_questions".to_string(),

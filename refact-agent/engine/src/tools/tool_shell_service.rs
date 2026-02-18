@@ -551,10 +551,6 @@ async fn execute_restart_action(
 
 #[async_trait]
 impl Tool for ToolShellService {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "shell_service".to_string(),

@@ -205,6 +205,9 @@ export const ModeForm: React.FC<ModeFormProps> = ({
   const specific = safeBoolean(config.specific);
   const prompt = safeString(config.prompt);
   const tools = safeArray(config.tools, isString);
+  const allowIntegrations = safeBoolean(config.allow_integrations);
+  const allowMcp = safeBoolean(config.allow_mcp);
+  const allowSubagents = safeBoolean(config.allow_subagents);
   const modelDefaults = safeObject(config.model_defaults);
   const modelDefaultsDefault = safeObject(modelDefaults.default);
   const modelDefaultsLight = safeObject(modelDefaults.light);
@@ -310,6 +313,44 @@ export const ModeForm: React.FC<ModeFormProps> = ({
 
       {activeTab === "tools" && (
         <div className={styles.formTabContent}>
+          <Flex direction="column" gap="2">
+            <Text size="1" weight="medium">
+              Automatically Include
+            </Text>
+            <Flex gap="3" wrap="wrap">
+              <Flex align="center" gap="1">
+                <Switch
+                  size="1"
+                  checked={allowIntegrations}
+                  onCheckedChange={(checked) =>
+                    patch(["allow_integrations"], checked || undefined)
+                  }
+                />
+                <Text size="1">Integrations</Text>
+              </Flex>
+              <Flex align="center" gap="1">
+                <Switch
+                  size="1"
+                  checked={allowMcp}
+                  onCheckedChange={(checked) =>
+                    patch(["allow_mcp"], checked || undefined)
+                  }
+                />
+                <Text size="1">MCP</Text>
+              </Flex>
+              <Flex align="center" gap="1">
+                <Switch
+                  size="1"
+                  checked={allowSubagents}
+                  onCheckedChange={(checked) =>
+                    patch(["allow_subagents"], checked || undefined)
+                  }
+                />
+                <Text size="1">Subagents</Text>
+              </Flex>
+            </Flex>
+          </Flex>
+
           <StringListEditor
             value={tools}
             onChange={(t) => patch(["tools"], t)}

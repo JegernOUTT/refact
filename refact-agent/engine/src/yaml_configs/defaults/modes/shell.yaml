@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -36,6 +36,10 @@ prompt: |
   %SYSTEM_INFO%
 
   %SHELL_INSTRUCTIONS%
+
+allow_integrations: false
+allow_mcp: false
+allow_subagents: false
 
 tools:
   - add_workspace_folder

@@ -83,10 +83,6 @@ impl IntegrationSession for PdbSession {
 
 #[async_trait]
 impl IntegrationTrait for ToolPdb {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         _gcx: Arc<ARwLock<GlobalContext>>,
@@ -125,10 +121,6 @@ impl IntegrationTrait for ToolPdb {
 
 #[async_trait]
 impl Tool for ToolPdb {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

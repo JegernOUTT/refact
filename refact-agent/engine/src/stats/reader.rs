@@ -4,6 +4,7 @@ use tracing::warn;
 
 use crate::stats::event::LlmCallEvent;
 
+#[allow(dead_code)]
 pub fn read_all_stats_events(stats_dir: &Path) -> Vec<LlmCallEvent> {
     read_stats_events_filtered(stats_dir, None, None)
 }

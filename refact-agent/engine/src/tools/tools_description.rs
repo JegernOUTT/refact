@@ -57,6 +57,7 @@ pub enum ToolGroupCategory {
     Builtin,
     Integration,
     MCP,
+    ConfigSubagent,
 }
 
 pub struct ToolGroup {
@@ -117,8 +118,6 @@ pub struct ToolParam {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn as_any(&self) -> &dyn std::any::Any;
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

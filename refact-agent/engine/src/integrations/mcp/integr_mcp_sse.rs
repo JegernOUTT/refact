@@ -161,10 +161,6 @@ impl MCPTransportInitializer for IntegrationMCPSse {
 
 #[async_trait]
 impl IntegrationTrait for IntegrationMCPSse {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         gcx: Arc<ARwLock<GlobalContext>>,

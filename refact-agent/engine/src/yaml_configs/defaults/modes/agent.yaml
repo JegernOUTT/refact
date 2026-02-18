@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 8
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -196,6 +196,10 @@ prompt: |
   %GIT_INFO%
 
   %PROJECT_TREE%
+
+allow_integrations: true
+allow_mcp: true
+allow_subagents: true
 
 tools:
   - tree

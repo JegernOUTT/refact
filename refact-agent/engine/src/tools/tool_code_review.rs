@@ -215,10 +215,6 @@ async fn execute_code_review(
 
 #[async_trait]
 impl Tool for ToolCodeReview {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "code_review".to_string(),

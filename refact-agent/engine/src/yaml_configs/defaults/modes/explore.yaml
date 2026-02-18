@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 7
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -61,6 +61,10 @@ prompt: |
   %PROJECT_CONFIGS%
 
   %GIT_INFO%
+
+allow_integrations: false
+allow_mcp: true
+allow_subagents: true
 
 tools:
   - tree

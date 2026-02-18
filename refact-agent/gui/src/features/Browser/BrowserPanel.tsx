@@ -48,12 +48,18 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
       try {
         dispatch(setBrowserNotification({ chatId, notification: null }));
         const result = await browserStart({ chat_id: chatId }).unwrap();
-        dispatch(
-          setBrowserRuntime({
-            chatId,
-            runtime: makeBrowserRuntime(result.runtime_id),
-          }),
-        );
+        // Preserve runtime state if backend reports already-running.
+        if (
+          result.status !== "already_running" ||
+          runtime?.runtime_id !== result.runtime_id
+        ) {
+          dispatch(
+            setBrowserRuntime({
+              chatId,
+              runtime: makeBrowserRuntime(result.runtime_id),
+            }),
+          );
+        }
         const screenshotResult = await browserScreenshot({
           chat_id: chatId,
           full_page: false,
@@ -72,7 +78,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
         // Silently ignore restart failures
       }
     })();
-  }, [browserStart, browserScreenshot, chatId, dispatch]);
+  }, [browserStart, browserScreenshot, chatId, dispatch, runtime?.runtime_id]);
 
   const handleDismissNotification = useCallback(() => {
     dispatch(setBrowserNotification({ chatId, notification: null }));

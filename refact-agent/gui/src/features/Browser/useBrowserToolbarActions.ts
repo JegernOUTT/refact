@@ -7,17 +7,14 @@ import {
   updateBrowserFrame,
   setPickerActive,
 } from "./browserSlice";
-import { selectLspPort, selectApiKey } from "../Config/configSlice";
 import { addThreadImage } from "../Chat/Thread/actions";
-import { sendUserMessage } from "../../services/refact/chatCommands";
+import { formatBrowserDraftBlock, insertBrowserDraft } from "./draftInsert";
 
 export function useBrowserToolbarActions(chatId: string) {
   const dispatch = useAppDispatch();
   const runtime = useAppSelector((state) =>
     selectBrowserRuntime(state, chatId),
   );
-  const port = useAppSelector(selectLspPort);
-  const apiKey = useAppSelector(selectApiKey);
   const pendingActions = runtime?.pending_toolbar_actions ?? [];
   const nextAction = pendingActions.length > 0 ? pendingActions[0] : null;
   const processingRef = useRef(false);
@@ -31,9 +28,35 @@ export function useBrowserToolbarActions(chatId: string) {
 
   const executeAction = useCallback(
     async (action: string) => {
-      if (!port) return;
-
       switch (action) {
+        case "annotate": {
+          insertBrowserDraft(
+            formatBrowserDraftBlock(
+              "Browser Annotate",
+              "Enter annotate mode: click elements and label them (TODO: overlay UI).",
+            ),
+          );
+          break;
+        }
+        case "annotate_send": {
+          insertBrowserDraft(
+            formatBrowserDraftBlock(
+              "Browser Annotate",
+              "Send annotated screenshot + labels (TODO).",
+            ),
+          );
+          break;
+        }
+        case "annotate_clear": {
+          insertBrowserDraft(
+            formatBrowserDraftBlock(
+              "Browser Annotate",
+              "Clear annotations (TODO).",
+            ),
+          );
+          break;
+        }
+
         case "screenshot":
         case "screenshot_full": {
           const fullPage = action === "screenshot_full";
@@ -41,11 +64,12 @@ export function useBrowserToolbarActions(chatId: string) {
             chat_id: chatId,
             full_page: fullPage,
           }).unwrap();
+          const ext = result.mime === "image/png" ? "png" : "jpg";
           dispatch(
             addThreadImage({
               id: chatId,
               image: {
-                name: fullPage ? "full_page.png" : "screenshot.png",
+                name: fullPage ? `full_page.${ext}` : `screenshot.${ext}`,
                 content: `data:${result.mime};base64,${result.data}`,
                 type: result.mime,
               },
@@ -72,7 +96,9 @@ export function useBrowserToolbarActions(chatId: string) {
                 const text = `Selector: ${pickResult.selector}\nText: ${
                   pickResult.innerText
                 }\nBbox: ${JSON.stringify(pickResult.bbox)}`;
-                await sendUserMessage(chatId, text, port, apiKey ?? undefined);
+                insertBrowserDraft(
+                  formatBrowserDraftBlock("Browser Picked Element", text),
+                );
               }
               break;
             }
@@ -100,13 +126,21 @@ export function useBrowserToolbarActions(chatId: string) {
             null,
             2,
           );
-          await sendUserMessage(chatId, content, port, apiKey ?? undefined);
+          const title =
+            action === "paste_actions"
+              ? "Browser Actions"
+              : action === "paste_console"
+                ? "Browser Console"
+                : "Browser Network";
+          insertBrowserDraft(formatBrowserDraftBlock(title, content));
           break;
         }
 
         case "curl": {
           const result = await browserCurl({ chat_id: chatId }).unwrap();
-          await sendUserMessage(chatId, result.curl, port, apiKey ?? undefined);
+          insertBrowserDraft(
+            formatBrowserDraftBlock("Browser cURL", result.curl),
+          );
           break;
         }
 
@@ -140,7 +174,7 @@ export function useBrowserToolbarActions(chatId: string) {
             action === "summarize"
               ? "Summarize this page"
               : "Extract data as JSON from tables/lists";
-          await sendUserMessage(chatId, message, port, apiKey ?? undefined);
+          insertBrowserDraft(formatBrowserDraftBlock("Browser Task", message));
           break;
         }
 
@@ -156,8 +190,6 @@ export function useBrowserToolbarActions(chatId: string) {
       browserElementPickResult,
       chatId,
       dispatch,
-      port,
-      apiKey,
     ],
   );
 

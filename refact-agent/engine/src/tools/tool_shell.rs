@@ -143,10 +143,6 @@ pub struct ShellStreamResult {
 
 #[async_trait]
 impl Tool for ToolShell {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,

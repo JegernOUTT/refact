@@ -22,7 +22,6 @@ use crate::completion_cache::CompletionCache;
 use crate::custom_error::ScratchError;
 use crate::files_in_workspace::DocumentsState;
 use crate::integrations::browser_runtime::BrowserRuntime;
-use crate::integrations::docker::docker_ssh_tunnel_utils::SshTunnel;
 use crate::integrations::sessions::IntegrationSession;
 use crate::privacy::PrivacySettings;
 use crate::telemetry::telemetry_structs;
@@ -288,7 +287,6 @@ pub struct GlobalContext {
     pub integration_sessions: HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>,
     pub browser_runtimes: HashMap<String, Arc<AMutex<BrowserRuntime>>>,
     pub codelens_cache: Arc<AMutex<crate::http::routers::v1::code_lens::CodeLensCache>>,
-    pub docker_ssh_tunnel: Arc<AMutex<Option<SshTunnel>>>,
     pub active_group_id: Option<String>,
     pub init_shadow_repos_background_task_holder: BackgroundTasksHolder,
     pub init_shadow_repos_lock: Arc<AMutex<bool>>,
@@ -586,7 +584,6 @@ pub async fn create_global_context(
         codelens_cache: Arc::new(AMutex::new(
             crate::http::routers::v1::code_lens::CodeLensCache::default(),
         )),
-        docker_ssh_tunnel: Arc::new(AMutex::new(None)),
         active_group_id: cmdline.active_group_id.clone(),
         init_shadow_repos_background_task_holder: BackgroundTasksHolder::new(vec![]),
         init_shadow_repos_lock: Arc::new(AMutex::new(false)),
@@ -694,7 +691,6 @@ pub mod tests {
             codelens_cache: Arc::new(AMutex::new(
                 crate::http::routers::v1::code_lens::CodeLensCache::default(),
             )),
-            docker_ssh_tunnel: Arc::new(AMutex::new(None)),
             active_group_id: None,
             init_shadow_repos_background_task_holder: BackgroundTasksHolder::new(vec![]),
             init_shadow_repos_lock: Arc::new(AMutex::new(false)),

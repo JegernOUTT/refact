@@ -19,10 +19,6 @@ impl ToolTaskWaitForAgents {
 
 #[async_trait]
 impl Tool for ToolTaskWaitForAgents {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_wait_for_agents".to_string(),

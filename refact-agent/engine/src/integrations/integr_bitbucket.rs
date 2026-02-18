@@ -213,10 +213,6 @@ pub struct ToolBitbucket {
 
 #[async_trait]
 impl IntegrationTrait for ToolBitbucket {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         _gcx: Arc<ARwLock<GlobalContext>>,
@@ -255,10 +251,6 @@ impl IntegrationTrait for ToolBitbucket {
 
 #[async_trait]
 impl Tool for ToolBitbucket {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "bitbucket".to_string(),

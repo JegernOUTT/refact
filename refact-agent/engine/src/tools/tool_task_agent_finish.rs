@@ -130,10 +130,6 @@ impl ToolTaskAgentFinish {
 
 #[async_trait]
 impl Tool for ToolTaskAgentFinish {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_agent_finish".to_string(),

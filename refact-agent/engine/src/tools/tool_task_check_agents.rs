@@ -138,10 +138,6 @@ pub(crate) fn format_agent_status(status: &AgentStatus) -> String {
 
 #[async_trait]
 impl Tool for ToolTaskCheckAgents {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_check_agents".to_string(),

@@ -35,10 +35,6 @@ pub struct ToolGithub {
 
 #[async_trait]
 impl IntegrationTrait for ToolGithub {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         _gcx: Arc<ARwLock<GlobalContext>>,
@@ -77,10 +73,6 @@ impl IntegrationTrait for ToolGithub {
 
 #[async_trait]
 impl Tool for ToolGithub {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "github".to_string(),

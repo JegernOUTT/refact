@@ -25,10 +25,6 @@ impl ToolTaskMergeAgent {
 
 #[async_trait]
 impl Tool for ToolTaskMergeAgent {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_merge_agent".to_string(),

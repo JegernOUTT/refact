@@ -39,7 +39,6 @@ import {
 import { saveLastThreadParams } from "../utils/threadStorage";
 import { statisticsApi } from "../services/refact/statistics";
 import { integrationsApi } from "../services/refact/integrations";
-import { dockerApi } from "../services/refact/docker";
 import { capsApi, isCapsErrorResponse } from "../services/refact/caps";
 import { promptsApi } from "../services/refact/prompts";
 import { toolsApi } from "../services/refact/tools";
@@ -275,72 +274,6 @@ startListening({
         : isDetailMessage(action.payload?.data)
           ? action.payload.data.detail
           : `fetching integrations.`;
-
-      listenerApi.dispatch(setError(message));
-      listenerApi.dispatch(setIsAuthError(isAuthError));
-    }
-
-    if (
-      dockerApi.endpoints.getAllDockerContainers.matchRejected(action) &&
-      !action.meta.condition
-    ) {
-      const errorStatus = action.payload?.status;
-      const isAuthError = errorStatus === 401;
-      const message = isAuthError
-        ? AUTH_ERROR_MESSAGE
-        : isDetailMessage(action.payload?.data)
-          ? action.payload.data.detail
-          : `fetching docker containers.`;
-
-      listenerApi.dispatch(setError(message));
-      listenerApi.dispatch(setIsAuthError(isAuthError));
-    }
-
-    if (
-      dockerApi.endpoints.getDockerContainersByImage.matchRejected(action) &&
-      !action.meta.condition
-    ) {
-      const errorStatus = action.payload?.status;
-      const isAuthError = errorStatus === 401;
-      const message = isAuthError
-        ? AUTH_ERROR_MESSAGE
-        : isDetailMessage(action.payload?.data)
-          ? action.payload.data.detail
-          : `fetching docker containers.`;
-
-      listenerApi.dispatch(setError(message));
-      listenerApi.dispatch(setIsAuthError(isAuthError));
-    }
-
-    if (
-      dockerApi.endpoints.getDockerContainersByLabel.matchRejected(action) &&
-      !action.meta.condition
-    ) {
-      const errorStatus = action.payload?.status;
-      const isAuthError = errorStatus === 401;
-      const message = isAuthError
-        ? AUTH_ERROR_MESSAGE
-        : isDetailMessage(action.payload?.data)
-          ? action.payload.data.detail
-          : `fetching docker containers.`;
-
-      listenerApi.dispatch(setError(message));
-      listenerApi.dispatch(setIsAuthError(isAuthError));
-    }
-
-    if (
-      dockerApi.endpoints.executeActionForDockerContainer.matchRejected(
-        action,
-      ) &&
-      !action.meta.condition
-    ) {
-      const errorStatus = action.payload?.status;
-      const isAuthError = errorStatus === 401;
-      const message = isAuthError
-        ? AUTH_ERROR_MESSAGE
-        : isDetailMessage(action.payload?.data)
-          ? action.payload.data.detail
-          : `fetching docker containers.`;
 
       listenerApi.dispatch(setError(message));
       listenerApi.dispatch(setIsAuthError(isAuthError));

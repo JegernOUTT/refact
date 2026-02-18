@@ -8,7 +8,6 @@ use crate::global_context::GlobalContext;
 
 #[async_trait]
 pub trait IntegrationTrait: Send + Sync {
-    fn as_any(&self) -> &dyn std::any::Any;
     fn integr_schema(&self) -> &str;
     async fn integr_settings_apply(
         &mut self,

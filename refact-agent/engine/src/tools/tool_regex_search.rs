@@ -237,10 +237,6 @@ fn parse_usize_arg(args: &HashMap<String, Value>, key: &str) -> Result<Option<us
 
 #[async_trait]
 impl Tool for ToolRegexSearch {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "search_pattern".to_string(),

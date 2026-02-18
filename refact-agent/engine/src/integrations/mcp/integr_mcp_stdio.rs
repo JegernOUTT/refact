@@ -149,10 +149,6 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
 
 #[async_trait]
 impl IntegrationTrait for IntegrationMCPStdio {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn integr_settings_apply(
         &mut self,
         gcx: Arc<ARwLock<GlobalContext>>,

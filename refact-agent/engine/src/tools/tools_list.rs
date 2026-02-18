@@ -368,7 +368,7 @@ async fn get_config_subagent_tools(gcx: Arc<ARwLock<GlobalContext>>) -> ToolGrou
     ToolGroup {
         name: "Config Subagents".to_string(),
         description: "Subagent tools from project config".to_string(),
-        category: ToolGroupCategory::Builtin,
+        category: ToolGroupCategory::ConfigSubagent,
         tools: subagent_tools,
     }
 }
@@ -428,12 +428,24 @@ pub async fn get_tools_for_mode(
         false
     };
 
-    let all_tools: Vec<Box<dyn Tool + Send>> = get_available_tool_groups(gcx.clone())
-        .await
+    let allow_integrations = mode_config.allow_integrations;
+    let allow_mcp = mode_config.allow_mcp;
+    let allow_subagents = mode_config.allow_subagents;
+
+    let all_tool_groups: Vec<(ToolGroupCategory, Box<dyn Tool + Send>)> =
+        get_available_tool_groups(gcx.clone())
+            .await
+            .into_iter()
+            .flat_map(|g| {
+                let cat = g.category;
+                g.tools.into_iter().map(move |t| (cat, t))
+            })
+            .collect();
+
+    let all_tools: Vec<(ToolGroupCategory, Box<dyn Tool + Send>)> = all_tool_groups
         .into_iter()
-        .flat_map(|g| g.tools)
-        .filter(|tool| tool.config().unwrap_or_default().enabled)
-        .filter(|tool| {
+        .filter(|(_, tool)| tool.config().unwrap_or_default().enabled)
+        .filter(|(_, tool)| {
             if tool.tool_description().name == "web_search" && model_supports_web_search {
                 return false;
             }
@@ -449,7 +461,15 @@ pub async fn get_tools_for_mode(
 
     let mut result: Vec<Box<dyn Tool + Send>> = all_tools
         .into_iter()
-        .filter(|tool| allowed_tools.contains(tool.tool_description().name.as_str()))
+        .filter(|(cat, tool)| {
+            match cat {
+                ToolGroupCategory::Integration if allow_integrations => true,
+                ToolGroupCategory::MCP if allow_mcp => true,
+                ToolGroupCategory::ConfigSubagent if allow_subagents => true,
+                _ => allowed_tools.contains(tool.tool_description().name.as_str()),
+            }
+        })
+        .map(|(_, tool)| tool)
         .collect();
 
     result.sort_by_key(|tool| {
