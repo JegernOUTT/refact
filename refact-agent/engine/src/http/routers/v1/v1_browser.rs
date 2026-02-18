@@ -407,7 +407,7 @@ pub async fn handle_browser_element_pick(
                 window.__refact_picked_element = {
                     selector: sel,
                     innerText: (el.innerText || '').substring(0, 500),
-                    bbox: {x: rect.x, y: rect.y, w: rect.width, h: rect.height}
+                    bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height}
                 };
             }
         }, {once: true});

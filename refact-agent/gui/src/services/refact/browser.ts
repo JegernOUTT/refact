@@ -7,6 +7,7 @@ import {
   BROWSER_CONTEXT,
   BROWSER_CURL,
   BROWSER_ELEMENT_PICK,
+  BROWSER_ELEMENT_PICK_RESULT,
   BROWSER_RECORD_ANIMATION,
   BROWSER_HANDOFF,
   BROWSER_STATUS,
@@ -19,7 +20,7 @@ export type BrowserStartRequest = {
 
 export type BrowserStartResponse = {
   runtime_id: string;
-  success: boolean;
+  status: "started" | "already_running";
 };
 
 export type BrowserStopRequest = {
@@ -27,7 +28,7 @@ export type BrowserStopRequest = {
 };
 
 export type BrowserStopResponse = {
-  success: boolean;
+  status: "stopped";
 };
 
 export type BrowserScreenshotRequest = {
@@ -38,15 +39,24 @@ export type BrowserScreenshotRequest = {
 export type BrowserScreenshotResponse = {
   mime: string;
   data: string;
+  url: string;
+  title: string;
 };
 
 export type BrowserContextRequest = {
   chat_id: string;
-  fields: string[];
+  max_bytes?: number;
+  last_n_actions?: number;
 };
 
 export type BrowserContextResponse = {
-  content: string;
+  url: string;
+  title: string;
+  actions: unknown[];
+  console: unknown[];
+  network: unknown[];
+  mutations: unknown[];
+  total_bytes: number;
 };
 
 export type BrowserCurlRequest = {
@@ -54,7 +64,10 @@ export type BrowserCurlRequest = {
 };
 
 export type BrowserCurlResponse = {
-  curl_command: string;
+  curl: string;
+  url: string;
+  method: string;
+  status: number;
 };
 
 export type BrowserElementPickRequest = {
@@ -62,17 +75,27 @@ export type BrowserElementPickRequest = {
 };
 
 export type BrowserElementPickResponse = {
-  selector: string;
-  text: string;
-  bbox: { x: number; y: number; width: number; height: number };
+  status: "picker_active";
 };
+
+export type BrowserElementPickResultRequest = {
+  chat_id: string;
+};
+
+export type BrowserElementPickResultResponse =
+  | { status: "waiting" }
+  | {
+      selector: string;
+      innerText: string;
+      bbox: { x: number; y: number; width: number; height: number };
+    };
 
 export type BrowserRecordAnimationRequest = {
   chat_id: string;
 };
 
 export type BrowserRecordAnimationResponse = {
-  frames: { mime: string; data: string }[];
+  frames: { mime: string; data: string; timestamp: number }[];
 };
 
 export type BrowserHandoffRequest = {
@@ -230,6 +253,24 @@ export const browserApi = createApi({
         });
         if (response.error) return { error: response.error };
         return { data: response.data as BrowserElementPickResponse };
+      },
+    }),
+    browserElementPickResult: builder.mutation<
+      BrowserElementPickResultResponse,
+      BrowserElementPickResultRequest
+    >({
+      async queryFn(args, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${BROWSER_ELEMENT_PICK_RESULT}`;
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: args,
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as BrowserElementPickResultResponse };
       },
     }),
     browserRecordAnimation: builder.mutation<

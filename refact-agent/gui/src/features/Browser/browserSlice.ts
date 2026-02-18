@@ -10,7 +10,7 @@ export type DiffBox = {
 };
 
 export type BrowserTabInfo = {
-  id: string;
+  tab_id: string;
   url: string;
   title: string;
 };

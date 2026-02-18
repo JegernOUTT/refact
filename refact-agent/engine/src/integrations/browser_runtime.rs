@@ -313,8 +313,8 @@ pub fn compute_diff_boxes(
                 diff_boxes.push(DiffBox {
                     x: x0,
                     y: y0,
-                    w: x1 - x0,
-                    h: y1 - y0,
+                    width: x1 - x0,
+                    height: y1 - y0,
                 });
             }
         }

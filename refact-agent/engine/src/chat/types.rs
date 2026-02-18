@@ -13,8 +13,8 @@ use super::config::{limits, timeouts, presentation};
 pub struct DiffBox {
     pub x: u32,
     pub y: u32,
-    pub w: u32,
-    pub h: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,10 +26,13 @@ pub struct BrowserTabInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineEntry {
-    pub timestamp: f64,
-    pub actor: String,
-    pub action: String,
-    pub detail: Option<String>,
+    pub timestamp: String,
+    pub source: String,
+    #[serde(rename = "type")]
+    pub entry_type: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 fn default_true() -> bool { true }
@@ -938,7 +941,7 @@ mod tests {
             tab_id: "tab-1".to_string(),
             mime: "image/jpeg".to_string(),
             data: "base64data".to_string(),
-            diff_boxes: vec![DiffBox { x: 10, y: 20, w: 100, h: 50 }],
+            diff_boxes: vec![DiffBox { x: 10, y: 20, width: 100, height: 50 }],
             changed_text: Some("button clicked".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -947,7 +950,7 @@ mod tests {
         assert_eq!(json["mime"], "image/jpeg");
         assert_eq!(json["data"], "base64data");
         assert_eq!(json["diff_boxes"][0]["x"], 10);
-        assert_eq!(json["diff_boxes"][0]["w"], 100);
+        assert_eq!(json["diff_boxes"][0]["width"], 100);
         assert_eq!(json["changed_text"], "button clicked");
         let parsed: ChatEvent = serde_json::from_value(json).unwrap();
         match parsed {
@@ -1050,29 +1053,31 @@ mod tests {
         let event = ChatEvent::BrowserTimeline {
             events: vec![
                 TimelineEntry {
-                    timestamp: 1000.0,
-                    actor: "user".to_string(),
-                    action: "click".to_string(),
-                    detail: Some("#submit-btn".to_string()),
+                    timestamp: "2025-01-01T10:00:00Z".to_string(),
+                    source: "user".to_string(),
+                    entry_type: "click".to_string(),
+                    summary: "Clicked #submit-btn".to_string(),
+                    details: Some(json!({"selector": "#submit-btn"})),
                 },
                 TimelineEntry {
-                    timestamp: 1001.0,
-                    actor: "agent".to_string(),
-                    action: "navigate".to_string(),
-                    detail: None,
+                    timestamp: "2025-01-01T10:00:01Z".to_string(),
+                    source: "agent".to_string(),
+                    entry_type: "navigate".to_string(),
+                    summary: "Navigated to page".to_string(),
+                    details: None,
                 },
             ],
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "browser_timeline");
         assert_eq!(json["events"].as_array().unwrap().len(), 2);
-        assert_eq!(json["events"][0]["actor"], "user");
-        assert_eq!(json["events"][1]["action"], "navigate");
+        assert_eq!(json["events"][0]["source"], "user");
+        assert_eq!(json["events"][1]["type"], "navigate");
         let parsed: ChatEvent = serde_json::from_value(json).unwrap();
         match parsed {
             ChatEvent::BrowserTimeline { events } => {
                 assert_eq!(events.len(), 2);
-                assert_eq!(events[0].action, "click");
+                assert_eq!(events[0].entry_type, "click");
             }
             _ => panic!("Expected BrowserTimeline"),
         }
@@ -1080,12 +1085,12 @@ mod tests {
 
     #[test]
     fn test_diff_box_serde() {
-        let db = DiffBox { x: 10, y: 20, w: 100, h: 50 };
+        let db = DiffBox { x: 10, y: 20, width: 100, height: 50 };
         let json = serde_json::to_value(&db).unwrap();
         assert_eq!(json["x"], 10);
         assert_eq!(json["y"], 20);
-        assert_eq!(json["w"], 100);
-        assert_eq!(json["h"], 50);
+        assert_eq!(json["width"], 100);
+        assert_eq!(json["height"], 50);
         let parsed: DiffBox = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, db);
     }
@@ -1106,16 +1111,18 @@ mod tests {
     #[test]
     fn test_timeline_entry_serde() {
         let entry = TimelineEntry {
-            timestamp: 999.0,
-            actor: "user".to_string(),
-            action: "input".to_string(),
-            detail: Some("typed text".to_string()),
+            timestamp: "2025-01-01T10:00:00Z".to_string(),
+            source: "user".to_string(),
+            entry_type: "input".to_string(),
+            summary: "Typed text".to_string(),
+            details: Some(json!({"text": "typed text"})),
         };
         let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json["timestamp"], 999.0);
-        assert_eq!(json["detail"], "typed text");
+        assert_eq!(json["timestamp"], "2025-01-01T10:00:00Z");
+        assert_eq!(json["type"], "input");
+        assert_eq!(json["summary"], "Typed text");
         let parsed: TimelineEntry = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.action, "input");
+        assert_eq!(parsed.entry_type, "input");
     }
 
     #[test]

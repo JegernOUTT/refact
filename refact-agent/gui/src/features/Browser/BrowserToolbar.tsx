@@ -68,6 +68,8 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
   const [browserContext] = browserApi.useBrowserContextMutation();
   const [browserCurl] = browserApi.useBrowserCurlMutation();
   const [browserElementPick] = browserApi.useBrowserElementPickMutation();
+  const [browserElementPickResult] =
+    browserApi.useBrowserElementPickResultMutation();
   const [browserRecordAnimation] =
     browserApi.useBrowserRecordAnimationMutation();
   const [browserHandoff] = browserApi.useBrowserHandoffMutation();
@@ -143,16 +145,16 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
   );
 
   const handleContext = useCallback(
-    (fields: string[], label: keyof LoadingFlags) => {
+    (field: "actions" | "console" | "network", label: keyof LoadingFlags) => {
       void withLoading(label, async () => {
         const result = await browserContext({
           chat_id: chatId,
-          fields,
         }).unwrap();
+        const content = JSON.stringify(result[field], null, 2);
         if (port) {
           await sendUserMessage(
             chatId,
-            result.content,
+            content,
             port,
             apiKey ?? undefined,
           );
@@ -168,7 +170,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
       if (port) {
         await sendUserMessage(
           chatId,
-          result.curl_command,
+          result.curl,
           port,
           apiKey ?? undefined,
         );
@@ -180,18 +182,38 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
     dispatch(setPickerActive({ chatId, active: true }));
     void withLoading("pick", async () => {
       try {
-        const result = await browserElementPick({
-          chat_id: chatId,
-        }).unwrap();
-        const text = `Selector: ${result.selector}\nText: ${result.text}\nBbox: ${JSON.stringify(result.bbox)}`;
-        if (port) {
-          await sendUserMessage(chatId, text, port, apiKey ?? undefined);
+        await browserElementPick({ chat_id: chatId }).unwrap();
+        const pollInterval = 500;
+        const maxAttempts = 60;
+        for (let i = 0; i < maxAttempts; i++) {
+          await new Promise((r) => setTimeout(r, pollInterval));
+          const pickResult = await browserElementPickResult({
+            chat_id: chatId,
+          }).unwrap();
+          if ("status" in pickResult && pickResult.status === "waiting") {
+            continue;
+          }
+          if ("selector" in pickResult) {
+            const text = `Selector: ${pickResult.selector}\nText: ${pickResult.innerText}\nBbox: ${JSON.stringify(pickResult.bbox)}`;
+            if (port) {
+              await sendUserMessage(chatId, text, port, apiKey ?? undefined);
+            }
+          }
+          break;
         }
       } finally {
         dispatch(setPickerActive({ chatId, active: false }));
       }
     });
-  }, [browserElementPick, chatId, dispatch, port, apiKey, withLoading]);
+  }, [
+    browserElementPick,
+    browserElementPickResult,
+    chatId,
+    dispatch,
+    port,
+    apiKey,
+    withLoading,
+  ]);
 
   const handleRecordAnimation = useCallback(() => {
     void withLoading("record", async () => {
@@ -349,7 +371,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
       <button
         type="button"
         className={styles.toolbarButton}
-        onClick={() => handleContext(["actions"], "actions")}
+        onClick={() => handleContext("actions", "actions")}
         disabled={!isConnected || loading.actions}
       >
         {loading.actions ? "…" : "📋"} Actions
@@ -357,7 +379,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
       <button
         type="button"
         className={styles.toolbarButton}
-        onClick={() => handleContext(["console"], "console")}
+        onClick={() => handleContext("console", "console")}
         disabled={!isConnected || loading.console}
       >
         {loading.console ? "…" : "⚠️"} Console
@@ -365,7 +387,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
       <button
         type="button"
         className={styles.toolbarButton}
-        onClick={() => handleContext(["network"], "network")}
+        onClick={() => handleContext("network", "network")}
         disabled={!isConnected || loading.network}
       >
         {loading.network ? "…" : "🌐"} Network
