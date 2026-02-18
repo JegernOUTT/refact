@@ -10,21 +10,8 @@ use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::integrations::browser_runtime::{
     BrowserRuntime, get_browser_profile_dir, register_browser_runtime, remove_browser_runtime,
+    find_runtime_by_chat_id,
 };
-
-async fn find_runtime_by_chat_id(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    chat_id: &str,
-) -> Option<(String, Arc<tokio::sync::Mutex<BrowserRuntime>>)> {
-    let gcx_locked = gcx.read().await;
-    for (rid, arc) in &gcx_locked.browser_runtimes {
-        let rt = arc.lock().await;
-        if rt.attached_chat_id.as_deref() == Some(chat_id) {
-            return Some((rid.clone(), arc.clone()));
-        }
-    }
-    None
-}
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> {
     Response::builder()
@@ -182,9 +169,7 @@ pub async fn handle_browser_screenshot(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
@@ -274,17 +259,9 @@ pub async fn handle_browser_context(
 
     let rt = runtime_arc.lock().await;
 
-    let url = {
-        let tabs = rt.browser.get_tabs().lock().map_err(|e| {
-            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-        })?;
-        tabs.first().map(|t| t.get_url()).unwrap_or_default()
-    };
-    let title = {
-        let tabs = rt.browser.get_tabs().lock().map_err(|e| {
-            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-        })?;
-        tabs.first().and_then(|t| t.get_title().ok()).unwrap_or_default()
+    let (url, title) = match rt.get_active_tab() {
+        Some(tab) => (tab.get_url(), tab.get_title().unwrap_or_default()),
+        None => (String::new(), String::new()),
     };
 
     let actions_snapshot = &rt.action_buffer[rt.last_send_action_cursor..];
@@ -314,8 +291,9 @@ pub async fn handle_browser_context(
         if total_bytes > max_bytes {
             let trim_arrays = |arr: &mut serde_json::Value| {
                 if let Some(a) = arr.as_array_mut() {
-                    while serde_json::to_string(a).unwrap_or_default().len() > max_bytes / 4 && !a.is_empty() {
-                        a.remove(0);
+                    while serde_json::to_string(a).unwrap_or_default().len() > max_bytes / 4 && a.len() > 1 {
+                        let keep = a.split_off(1);
+                        *a = keep;
                     }
                 }
             };
@@ -349,10 +327,7 @@ pub async fn handle_browser_context_commit(
     })?;
 
     let mut rt = runtime_arc.lock().await;
-    rt.flush_action_buffer();
-    rt.flush_console_buffer();
-    rt.flush_network_buffer();
-    rt.flush_mutation_summary();
+    rt.commit_cursors();
 
     Ok(json_response(StatusCode::OK, serde_json::json!({
         "status": "committed"
@@ -373,9 +348,7 @@ pub async fn handle_browser_element_pick(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
@@ -437,9 +410,7 @@ pub async fn handle_browser_element_pick_result(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
@@ -515,9 +486,7 @@ pub async fn handle_browser_eval(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
@@ -555,24 +524,23 @@ pub async fn handle_browser_inject_css(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
     let style_id = post.id.unwrap_or_else(|| format!("refact-css-{}", uuid::Uuid::new_v4()));
-    let escaped_css = post.css.replace('\\', "\\\\").replace('`', "\\`");
+    let css_json = serde_json::to_string(&post.css).unwrap_or_else(|_| "\"\"".to_string());
     let js = format!(
         r#"(function() {{
-            var existing = document.getElementById('{}');
+            var existing = document.getElementById('{id}');
             if (existing) existing.remove();
             var style = document.createElement('style');
-            style.id = '{}';
-            style.textContent = `{}`;
+            style.id = '{id}';
+            style.textContent = {css};
             document.head.appendChild(style);
         }})()"#,
-        style_id, style_id, escaped_css
+        id = style_id,
+        css = css_json,
     );
 
     tab.evaluate(&js, false).map_err(|e| {
@@ -598,9 +566,7 @@ pub async fn handle_browser_remove_css(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
@@ -632,9 +598,7 @@ pub async fn handle_browser_dom_snapshot(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
@@ -654,8 +618,9 @@ pub async fn handle_browser_dom_snapshot(
     };
 
     let max_chars = post.max_chars.unwrap_or(50000);
-    let truncated = html.len() > max_chars;
-    let html_out = if truncated { html[..max_chars].to_string() } else { html };
+    let char_count = html.chars().count();
+    let truncated = char_count > max_chars;
+    let html_out: String = if truncated { html.chars().take(max_chars).collect() } else { html };
 
     Ok(json_response(StatusCode::OK, serde_json::json!({
         "html": html_out,
@@ -677,9 +642,7 @@ pub async fn handle_browser_accessibility(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
@@ -735,14 +698,12 @@ pub async fn handle_browser_record_animation(
 
     let rt = runtime_arc.lock().await;
 
-    let tab = rt.browser.get_tabs().lock().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get tabs: {}", e))
-    })?.first().cloned().ok_or_else(|| {
+    let tab = rt.get_active_tab().ok_or_else(|| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
-    let duration_ms = post.duration_ms.unwrap_or(2000);
-    let fps = post.fps.unwrap_or(5);
+    let duration_ms = post.duration_ms.unwrap_or(2000).clamp(100, 10000);
+    let fps = post.fps.unwrap_or(5).clamp(1, 60);
     let frame_interval = std::time::Duration::from_millis(1000 / fps as u64);
     let num_frames = (duration_ms as f64 / frame_interval.as_millis() as f64).ceil() as u32;
 
@@ -808,7 +769,7 @@ pub async fn handle_browser_handoff(
             .map(|tabs| tabs.iter().map(|t| t.get_url()).collect())
             .unwrap_or_default();
         let window_bounds = rt.window_bounds.clone();
-        let mask_passwords = rt.mask_passwords;
+        let mask_passwords = rt.mask_passwords();
         let attach_screenshot = false;
 
         rt.detach();
@@ -845,14 +806,10 @@ pub async fn handle_browser_status(
             let tab_urls: Vec<String> = rt.browser.get_tabs().lock()
                 .map(|tabs| tabs.iter().map(|t| t.get_url()).collect())
                 .unwrap_or_default();
-            let title = rt.browser.get_tabs().lock()
-                .ok()
-                .and_then(|tabs| tabs.first().and_then(|t| t.get_title().ok()))
-                .unwrap_or_default();
-            let url = rt.browser.get_tabs().lock()
-                .ok()
-                .map(|tabs| tabs.first().map(|t| t.get_url()).unwrap_or_default())
-                .unwrap_or_default();
+            let (url, title) = match rt.get_active_tab() {
+                Some(tab) => (tab.get_url(), tab.get_title().unwrap_or_default()),
+                None => (String::new(), String::new()),
+            };
 
             Ok(json_response(StatusCode::OK, serde_json::json!({
                 "runtime_id": rid,

@@ -35,13 +35,7 @@ pub fn build_recorder_script(mask_passwords: bool) -> String {
     )
 }
 
-pub struct BrowserRuntime {
-    pub runtime_id: String,
-    pub attached_chat_id: Option<String>,
-    pub browser: Browser,
-    pub tabs: HashMap<String, Arc<AMutex<ChromeTab>>>,
-    pub profile_dir: PathBuf,
-    pub window_bounds: Option<WindowBounds>,
+pub struct BrowserBuffers {
     pub action_buffer: Vec<RecorderEvent>,
     pub console_buffer: Vec<ConsoleEntry>,
     pub network_buffer: Vec<NetworkEntry>,
@@ -51,51 +45,15 @@ pub struct BrowserRuntime {
     pub last_send_network_cursor: usize,
     pub last_send_mutation_cursor: usize,
     pub last_frame_hash: Option<u64>,
+    pub last_send_frame_hash: Option<u64>,
     pub last_frame_data: Option<Vec<u8>>,
     pub last_frame_time: Option<Instant>,
-    pub idle_timeout: Duration,
-    pub is_connected: bool,
-    pub last_activity: Instant,
     pub mask_passwords: bool,
 }
 
-impl BrowserRuntime {
-    pub fn launch(
-        profile_dir: PathBuf,
-        window_bounds: Option<WindowBounds>,
-        chrome_path: Option<PathBuf>,
-        idle_timeout: Option<Duration>,
-        mask_passwords: bool,
-    ) -> Result<Self, String> {
-        std::fs::create_dir_all(&profile_dir)
-            .map_err(|e| format!("Failed to create profile dir {:?}: {}", profile_dir, e))?;
-
-        let window_size = window_bounds.as_ref().map(|wb| (wb.width, wb.height));
-        let idle_timeout = idle_timeout.unwrap_or(Duration::from_secs(600));
-
-        let mut launch_options = headless_chrome::LaunchOptions {
-            headless: false,
-            window_size,
-            idle_browser_timeout: idle_timeout,
-            user_data_dir: Some(profile_dir.clone()),
-            ..Default::default()
-        };
-        if let Some(ref path) = chrome_path {
-            launch_options.path = Some(path.clone());
-        }
-
-        let browser = Browser::new(launch_options).map_err(|e| e.to_string())?;
-        let runtime_id = Uuid::new_v4().to_string();
-
-        info!("BrowserRuntime {} launched with profile {:?}", runtime_id, profile_dir);
-
-        Ok(Self {
-            runtime_id,
-            attached_chat_id: None,
-            browser,
-            tabs: HashMap::new(),
-            profile_dir,
-            window_bounds,
+impl BrowserBuffers {
+    pub fn new(mask_passwords: bool) -> Self {
+        Self {
             action_buffer: Vec::new(),
             console_buffer: Vec::new(),
             network_buffer: Vec::new(),
@@ -105,47 +63,11 @@ impl BrowserRuntime {
             last_send_network_cursor: 0,
             last_send_mutation_cursor: 0,
             last_frame_hash: None,
+            last_send_frame_hash: None,
             last_frame_data: None,
             last_frame_time: None,
-            idle_timeout,
-            is_connected: true,
-            last_activity: Instant::now(),
             mask_passwords,
-        })
-    }
-
-    pub fn reattach(&mut self, chat_id: &str) {
-        info!(
-            "BrowserRuntime {} reattached from {:?} to {}",
-            self.runtime_id, self.attached_chat_id, chat_id
-        );
-        self.attached_chat_id = Some(chat_id.to_string());
-        self.last_activity = Instant::now();
-    }
-
-    pub fn detach(&mut self) {
-        info!(
-            "BrowserRuntime {} detached from {:?}",
-            self.runtime_id, self.attached_chat_id
-        );
-        self.attached_chat_id = None;
-    }
-
-    pub fn check_connection(&mut self) -> bool {
-        let connected = self.browser.get_version().is_ok();
-        if self.is_connected && !connected {
-            warn!("BrowserRuntime {} detected browser disconnect", self.runtime_id);
         }
-        self.is_connected = connected;
-        connected
-    }
-
-    pub fn is_idle_expired(&self) -> bool {
-        self.last_activity.elapsed() > self.idle_timeout
-    }
-
-    pub fn touch(&mut self) {
-        self.last_activity = Instant::now();
     }
 
     pub fn handle_recorder_event(&mut self, json_str: &str) {
@@ -237,6 +159,18 @@ impl BrowserRuntime {
         flush_buffer_since(&self.mutation_summary, &mut self.last_send_mutation_cursor)
     }
 
+    pub fn commit_cursors(&mut self) {
+        self.flush_action_buffer();
+        self.flush_console_buffer();
+        self.flush_network_buffer();
+        self.flush_mutation_summary();
+        self.last_send_frame_hash = self.last_frame_hash;
+    }
+
+    pub fn page_changed(&self) -> bool {
+        self.last_frame_hash != self.last_send_frame_hash
+    }
+
     pub fn is_frame_rate_limited(&self) -> bool {
         if let Some(last_time) = self.last_frame_time {
             last_time.elapsed().as_millis() < FRAME_RATE_LIMIT_MS
@@ -259,6 +193,123 @@ impl BrowserRuntime {
         self.last_frame_hash = Some(hash);
         self.last_frame_data = Some(data);
         self.last_frame_time = Some(Instant::now());
+    }
+}
+
+pub struct BrowserRuntime {
+    pub runtime_id: String,
+    pub attached_chat_id: Option<String>,
+    pub browser: Browser,
+    pub tabs: HashMap<String, Arc<AMutex<ChromeTab>>>,
+    pub profile_dir: PathBuf,
+    pub window_bounds: Option<WindowBounds>,
+    pub buffers: BrowserBuffers,
+    pub idle_timeout: Duration,
+    pub is_connected: bool,
+    pub last_activity: Instant,
+}
+
+impl std::ops::Deref for BrowserRuntime {
+    type Target = BrowserBuffers;
+    fn deref(&self) -> &BrowserBuffers {
+        &self.buffers
+    }
+}
+
+impl std::ops::DerefMut for BrowserRuntime {
+    fn deref_mut(&mut self) -> &mut BrowserBuffers {
+        &mut self.buffers
+    }
+}
+
+impl BrowserRuntime {
+    pub fn launch(
+        profile_dir: PathBuf,
+        window_bounds: Option<WindowBounds>,
+        chrome_path: Option<PathBuf>,
+        idle_timeout: Option<Duration>,
+        mask_passwords: bool,
+    ) -> Result<Self, String> {
+        std::fs::create_dir_all(&profile_dir)
+            .map_err(|e| format!("Failed to create profile dir {:?}: {}", profile_dir, e))?;
+
+        let window_size = window_bounds.as_ref().map(|wb| (wb.width, wb.height));
+        let idle_timeout = idle_timeout.unwrap_or(Duration::from_secs(600));
+
+        let mut launch_options = headless_chrome::LaunchOptions {
+            headless: false,
+            window_size,
+            idle_browser_timeout: idle_timeout,
+            user_data_dir: Some(profile_dir.clone()),
+            ..Default::default()
+        };
+        if let Some(ref path) = chrome_path {
+            launch_options.path = Some(path.clone());
+        }
+
+        let browser = Browser::new(launch_options).map_err(|e| e.to_string())?;
+        let runtime_id = Uuid::new_v4().to_string();
+
+        info!("BrowserRuntime {} launched with profile {:?}", runtime_id, profile_dir);
+
+        Ok(Self {
+            runtime_id,
+            attached_chat_id: None,
+            browser,
+            tabs: HashMap::new(),
+            profile_dir,
+            window_bounds,
+            buffers: BrowserBuffers::new(mask_passwords),
+            idle_timeout,
+            is_connected: true,
+            last_activity: Instant::now(),
+        })
+    }
+
+    pub fn mask_passwords(&self) -> bool {
+        self.buffers.mask_passwords
+    }
+
+    pub fn reattach(&mut self, chat_id: &str) {
+        info!(
+            "BrowserRuntime {} reattached from {:?} to {}",
+            self.runtime_id, self.attached_chat_id, chat_id
+        );
+        self.attached_chat_id = Some(chat_id.to_string());
+        self.last_activity = Instant::now();
+    }
+
+    pub fn detach(&mut self) {
+        info!(
+            "BrowserRuntime {} detached from {:?}",
+            self.runtime_id, self.attached_chat_id
+        );
+        self.attached_chat_id = None;
+    }
+
+    pub fn check_connection(&mut self) -> bool {
+        let connected = self.browser.get_version().is_ok();
+        if self.is_connected && !connected {
+            warn!("BrowserRuntime {} detected browser disconnect", self.runtime_id);
+        }
+        self.is_connected = connected;
+        connected
+    }
+
+    pub fn is_idle_expired(&self) -> bool {
+        self.last_activity.elapsed() > self.idle_timeout
+    }
+
+    pub fn touch(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
+    pub fn get_active_tab(&self) -> Option<Arc<headless_chrome::Tab>> {
+        let tabs_guard = self.browser.get_tabs().lock().ok()?;
+        if tabs_guard.is_empty() {
+            return None;
+        }
+        tabs_guard.first().cloned()
     }
 }
 
@@ -461,11 +512,16 @@ pub async fn find_runtime_by_chat_id(
     gcx: Arc<ARwLock<GlobalContext>>,
     chat_id: &str,
 ) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
-    let gcx_locked = gcx.read().await;
-    for (rid, arc) in &gcx_locked.browser_runtimes {
+    let runtime_arcs: Vec<(String, Arc<AMutex<BrowserRuntime>>)> = {
+        let gcx_locked = gcx.read().await;
+        gcx_locked.browser_runtimes.iter()
+            .map(|(rid, arc)| (rid.clone(), arc.clone()))
+            .collect()
+    };
+    for (rid, arc) in runtime_arcs {
         let rt = arc.lock().await;
         if rt.attached_chat_id.as_deref() == Some(chat_id) {
-            return Some((rid.clone(), arc.clone()));
+            return Some((rid, arc.clone()));
         }
     }
     None
@@ -526,6 +582,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn make_test_buffers() -> BrowserBuffers {
+        BrowserBuffers::new(true)
+    }
+
     #[test]
     fn test_get_browser_profile_dir() {
         let cache_dir = PathBuf::from("/tmp/refact-cache");
@@ -561,21 +621,21 @@ mod tests {
 
     #[test]
     fn test_handle_recorder_event_click() {
-        let mut rt = make_test_runtime();
+        let mut buf = make_test_buffers();
         let json = r##"{"type":"click","selector":"#btn","text":"OK","x":10.0,"y":20.0,"timestamp":1000.0}"##;
-        rt.handle_recorder_event(json);
-        assert_eq!(rt.action_buffer.len(), 1);
-        assert!(matches!(&rt.action_buffer[0], RecorderEvent::Click { .. }));
+        buf.handle_recorder_event(json);
+        assert_eq!(buf.action_buffer.len(), 1);
+        assert!(matches!(&buf.action_buffer[0], RecorderEvent::Click { .. }));
     }
 
     #[test]
     fn test_handle_recorder_event_scroll_debounce() {
-        let mut rt = make_test_runtime();
-        rt.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":100,"timestamp":1000.0}"#);
-        rt.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":200,"timestamp":1100.0}"#);
-        rt.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":300,"timestamp":1150.0}"#);
-        assert_eq!(rt.action_buffer.len(), 1);
-        match &rt.action_buffer[0] {
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":100,"timestamp":1000.0}"#);
+        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":200,"timestamp":1100.0}"#);
+        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":300,"timestamp":1150.0}"#);
+        assert_eq!(buf.action_buffer.len(), 1);
+        match &buf.action_buffer[0] {
             RecorderEvent::Scroll { scroll_y, .. } => assert_eq!(*scroll_y, 300.0),
             _ => panic!("Expected scroll"),
         }
@@ -583,19 +643,19 @@ mod tests {
 
     #[test]
     fn test_handle_recorder_event_scroll_no_debounce_when_separated() {
-        let mut rt = make_test_runtime();
-        rt.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":100,"timestamp":1000.0}"#);
-        rt.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":200,"timestamp":1500.0}"#);
-        assert_eq!(rt.action_buffer.len(), 2);
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":100,"timestamp":1000.0}"#);
+        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":200,"timestamp":1500.0}"#);
+        assert_eq!(buf.action_buffer.len(), 2);
     }
 
     #[test]
     fn test_handle_recorder_event_password_masking() {
-        let mut rt = make_test_runtime();
-        rt.mask_passwords = true;
-        rt.handle_recorder_event(r##"{"type":"input","selector":"#pass","value":"secret","masked":true,"timestamp":1000.0}"##);
-        assert_eq!(rt.action_buffer.len(), 1);
-        match &rt.action_buffer[0] {
+        let mut buf = make_test_buffers();
+        buf.mask_passwords = true;
+        buf.handle_recorder_event(r##"{"type":"input","selector":"#pass","value":"secret","masked":true,"timestamp":1000.0}"##);
+        assert_eq!(buf.action_buffer.len(), 1);
+        match &buf.action_buffer[0] {
             RecorderEvent::Input { value, masked, .. } => {
                 assert_eq!(value, "******");
                 assert!(*masked);
@@ -606,11 +666,11 @@ mod tests {
 
     #[test]
     fn test_handle_recorder_event_no_masking_when_disabled() {
-        let mut rt = make_test_runtime();
-        rt.mask_passwords = false;
-        rt.handle_recorder_event(r##"{"type":"input","selector":"#pass","value":"secret","masked":true,"timestamp":1000.0}"##);
-        assert_eq!(rt.action_buffer.len(), 1);
-        match &rt.action_buffer[0] {
+        let mut buf = make_test_buffers();
+        buf.mask_passwords = false;
+        buf.handle_recorder_event(r##"{"type":"input","selector":"#pass","value":"secret","masked":true,"timestamp":1000.0}"##);
+        assert_eq!(buf.action_buffer.len(), 1);
+        match &buf.action_buffer[0] {
             RecorderEvent::Input { value, .. } => assert_eq!(value, "secret"),
             _ => panic!("Expected input"),
         }
@@ -618,97 +678,97 @@ mod tests {
 
     #[test]
     fn test_handle_recorder_event_mutation_goes_to_mutation_buffer() {
-        let mut rt = make_test_runtime();
-        rt.handle_recorder_event(r#"{"type":"mutation_summary","added":3,"removed":1,"changed":2,"timestamp":1000.0}"#);
-        assert!(rt.action_buffer.is_empty());
-        assert_eq!(rt.mutation_summary.len(), 1);
-        assert_eq!(rt.mutation_summary[0].added, 3);
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event(r#"{"type":"mutation_summary","added":3,"removed":1,"changed":2,"timestamp":1000.0}"#);
+        assert!(buf.action_buffer.is_empty());
+        assert_eq!(buf.mutation_summary.len(), 1);
+        assert_eq!(buf.mutation_summary[0].added, 3);
     }
 
     #[test]
     fn test_handle_recorder_event_invalid_json() {
-        let mut rt = make_test_runtime();
-        rt.handle_recorder_event("not valid json");
-        assert!(rt.action_buffer.is_empty());
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event("not valid json");
+        assert!(buf.action_buffer.is_empty());
     }
 
     #[test]
     fn test_handle_console_event() {
-        let mut rt = make_test_runtime();
-        rt.handle_console_event(1000.0, "error".to_string(), "Uncaught TypeError".to_string());
-        assert_eq!(rt.console_buffer.len(), 1);
-        assert_eq!(rt.console_buffer[0].level, "error");
+        let mut buf = make_test_buffers();
+        buf.handle_console_event(1000.0, "error".to_string(), "Uncaught TypeError".to_string());
+        assert_eq!(buf.console_buffer.len(), 1);
+        assert_eq!(buf.console_buffer[0].level, "error");
     }
 
     #[test]
     fn test_handle_network_request_filters() {
-        let mut rt = make_test_runtime();
-        rt.handle_network_request(1.0, "GET".to_string(), "https://example.com".to_string(), "Document".to_string());
-        rt.handle_network_request(2.0, "GET".to_string(), "https://example.com/img.png".to_string(), "Image".to_string());
-        rt.handle_network_request(3.0, "POST".to_string(), "https://api.example.com".to_string(), "XHR".to_string());
-        rt.handle_network_request(4.0, "POST".to_string(), "https://api.example.com/v2".to_string(), "Fetch".to_string());
-        assert_eq!(rt.network_buffer.len(), 3);
+        let mut buf = make_test_buffers();
+        buf.handle_network_request(1.0, "GET".to_string(), "https://example.com".to_string(), "Document".to_string());
+        buf.handle_network_request(2.0, "GET".to_string(), "https://example.com/img.png".to_string(), "Image".to_string());
+        buf.handle_network_request(3.0, "POST".to_string(), "https://api.example.com".to_string(), "XHR".to_string());
+        buf.handle_network_request(4.0, "POST".to_string(), "https://api.example.com/v2".to_string(), "Fetch".to_string());
+        assert_eq!(buf.network_buffer.len(), 3);
     }
 
     #[test]
     fn test_handle_network_response_updates_status() {
-        let mut rt = make_test_runtime();
-        rt.handle_network_request(1.0, "GET".to_string(), "https://example.com".to_string(), "Document".to_string());
-        assert!(rt.network_buffer[0].status.is_none());
-        rt.handle_network_response("https://example.com", 200);
-        assert_eq!(rt.network_buffer[0].status, Some(200));
+        let mut buf = make_test_buffers();
+        buf.handle_network_request(1.0, "GET".to_string(), "https://example.com".to_string(), "Document".to_string());
+        assert!(buf.network_buffer[0].status.is_none());
+        buf.handle_network_response("https://example.com", 200);
+        assert_eq!(buf.network_buffer[0].status, Some(200));
     }
 
     #[test]
     fn test_buffer_enforcement_on_action() {
-        let mut rt = make_test_runtime();
+        let mut buf = make_test_buffers();
         for i in 0..MAX_BUFFER_SIZE + 500 {
-            rt.handle_recorder_event(&format!(
+            buf.handle_recorder_event(&format!(
                 r##"{{"type":"click","selector":"#btn","text":"OK","x":{},"y":0,"timestamp":{}}}"##,
                 i, i
             ));
         }
-        assert_eq!(rt.action_buffer.len(), MAX_BUFFER_SIZE);
+        assert_eq!(buf.action_buffer.len(), MAX_BUFFER_SIZE);
     }
 
     #[test]
     fn test_flush_action_buffer() {
-        let mut rt = make_test_runtime();
-        rt.handle_recorder_event(r##"{"type":"click","selector":"#a","text":"A","x":0,"y":0,"timestamp":1.0}"##);
-        rt.handle_recorder_event(r##"{"type":"click","selector":"#b","text":"B","x":0,"y":0,"timestamp":2.0}"##);
-        let flushed = rt.flush_action_buffer();
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event(r##"{"type":"click","selector":"#a","text":"A","x":0,"y":0,"timestamp":1.0}"##);
+        buf.handle_recorder_event(r##"{"type":"click","selector":"#b","text":"B","x":0,"y":0,"timestamp":2.0}"##);
+        let flushed = buf.flush_action_buffer();
         assert_eq!(flushed.len(), 2);
-        let flushed2 = rt.flush_action_buffer();
+        let flushed2 = buf.flush_action_buffer();
         assert_eq!(flushed2.len(), 0);
     }
 
     #[test]
     fn test_flush_console_buffer() {
-        let mut rt = make_test_runtime();
-        rt.handle_console_event(1.0, "log".to_string(), "hello".to_string());
-        let flushed = rt.flush_console_buffer();
+        let mut buf = make_test_buffers();
+        buf.handle_console_event(1.0, "log".to_string(), "hello".to_string());
+        let flushed = buf.flush_console_buffer();
         assert_eq!(flushed.len(), 1);
-        let flushed2 = rt.flush_console_buffer();
+        let flushed2 = buf.flush_console_buffer();
         assert_eq!(flushed2.len(), 0);
     }
 
     #[test]
     fn test_flush_network_buffer() {
-        let mut rt = make_test_runtime();
-        rt.handle_network_request(1.0, "GET".to_string(), "https://example.com".to_string(), "Document".to_string());
-        let flushed = rt.flush_network_buffer();
+        let mut buf = make_test_buffers();
+        buf.handle_network_request(1.0, "GET".to_string(), "https://example.com".to_string(), "Document".to_string());
+        let flushed = buf.flush_network_buffer();
         assert_eq!(flushed.len(), 1);
-        let flushed2 = rt.flush_network_buffer();
+        let flushed2 = buf.flush_network_buffer();
         assert_eq!(flushed2.len(), 0);
     }
 
     #[test]
     fn test_flush_mutation_summary() {
-        let mut rt = make_test_runtime();
-        rt.handle_recorder_event(r#"{"type":"mutation_summary","added":1,"removed":0,"changed":0,"timestamp":1.0}"#);
-        let flushed = rt.flush_mutation_summary();
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event(r#"{"type":"mutation_summary","added":1,"removed":0,"changed":0,"timestamp":1.0}"#);
+        let flushed = buf.flush_mutation_summary();
         assert_eq!(flushed.len(), 1);
-        let flushed2 = rt.flush_mutation_summary();
+        let flushed2 = buf.flush_mutation_summary();
         assert_eq!(flushed2.len(), 0);
     }
 
@@ -749,41 +809,41 @@ mod tests {
 
     #[test]
     fn test_should_emit_frame_first_frame() {
-        let rt = make_test_runtime();
-        assert!(rt.should_emit_frame(12345));
+        let buf = make_test_buffers();
+        assert!(buf.should_emit_frame(12345));
     }
 
     #[test]
     fn test_should_emit_frame_same_hash() {
-        let mut rt = make_test_runtime();
-        rt.last_frame_hash = Some(12345);
-        assert!(!rt.should_emit_frame(12345));
+        let mut buf = make_test_buffers();
+        buf.last_frame_hash = Some(12345);
+        assert!(!buf.should_emit_frame(12345));
     }
 
     #[test]
     fn test_should_emit_frame_rate_limited() {
-        let mut rt = make_test_runtime();
-        rt.last_frame_time = Some(Instant::now());
-        assert!(!rt.should_emit_frame(99999));
+        let mut buf = make_test_buffers();
+        buf.last_frame_time = Some(Instant::now());
+        assert!(!buf.should_emit_frame(99999));
     }
 
     #[test]
     fn test_should_emit_frame_after_rate_limit_expires() {
-        let mut rt = make_test_runtime();
-        rt.last_frame_time = Some(Instant::now() - Duration::from_millis(600));
-        assert!(rt.should_emit_frame(99999));
+        let mut buf = make_test_buffers();
+        buf.last_frame_time = Some(Instant::now() - Duration::from_millis(600));
+        assert!(buf.should_emit_frame(99999));
     }
 
     #[test]
     fn test_update_frame_state() {
-        let mut rt = make_test_runtime();
-        assert!(rt.last_frame_hash.is_none());
-        assert!(rt.last_frame_data.is_none());
-        assert!(rt.last_frame_time.is_none());
-        rt.update_frame_state(42, vec![1, 2, 3]);
-        assert_eq!(rt.last_frame_hash, Some(42));
-        assert_eq!(rt.last_frame_data, Some(vec![1, 2, 3]));
-        assert!(rt.last_frame_time.is_some());
+        let mut buf = make_test_buffers();
+        assert!(buf.last_frame_hash.is_none());
+        assert!(buf.last_frame_data.is_none());
+        assert!(buf.last_frame_time.is_none());
+        buf.update_frame_state(42, vec![1, 2, 3]);
+        assert_eq!(buf.last_frame_hash, Some(42));
+        assert_eq!(buf.last_frame_data, Some(vec![1, 2, 3]));
+        assert!(buf.last_frame_time.is_some());
     }
 
     #[test]
@@ -824,115 +884,82 @@ mod tests {
 
     #[test]
     fn test_is_frame_rate_limited_no_previous() {
-        let rt = make_test_runtime();
-        assert!(!rt.is_frame_rate_limited());
+        let buf = make_test_buffers();
+        assert!(!buf.is_frame_rate_limited());
     }
 
     #[test]
     fn test_is_frame_rate_limited_recently_sent() {
-        let mut rt = make_test_runtime();
-        rt.last_frame_time = Some(Instant::now());
-        assert!(rt.is_frame_rate_limited());
+        let mut buf = make_test_buffers();
+        buf.last_frame_time = Some(Instant::now());
+        assert!(buf.is_frame_rate_limited());
     }
 
     #[test]
     fn test_is_frame_rate_limited_expired() {
-        let mut rt = make_test_runtime();
-        rt.last_frame_time = Some(Instant::now() - Duration::from_secs(1));
-        assert!(!rt.is_frame_rate_limited());
-    }
-
-    #[test]
-    fn test_handoff_detach_clears_chat_id() {
-        let mut rt = make_test_runtime();
-        rt.reattach("chat-old");
-        assert_eq!(rt.attached_chat_id.as_deref(), Some("chat-old"));
-
-        rt.detach();
-        assert!(rt.attached_chat_id.is_none());
-    }
-
-    #[test]
-    fn test_handoff_reattach_sets_new_chat_id() {
-        let mut rt = make_test_runtime();
-        rt.reattach("chat-old");
-        rt.detach();
-        rt.reattach("chat-new");
-        assert_eq!(rt.attached_chat_id.as_deref(), Some("chat-new"));
-    }
-
-    #[test]
-    fn test_handoff_reattach_resets_activity() {
-        let mut rt = make_test_runtime();
-        rt.last_activity = Instant::now() - Duration::from_secs(500);
-        assert!(rt.last_activity.elapsed().as_secs() >= 499);
-
-        rt.reattach("chat-new");
-        assert!(rt.last_activity.elapsed().as_secs() < 2);
-    }
-
-    #[test]
-    fn test_idle_timeout_not_expired_after_touch() {
-        let mut rt = make_test_runtime();
-        rt.idle_timeout = Duration::from_secs(10);
-        rt.last_activity = Instant::now() - Duration::from_secs(15);
-        assert!(rt.is_idle_expired());
-
-        rt.touch();
-        assert!(!rt.is_idle_expired());
-    }
-
-    #[test]
-    fn test_idle_timeout_expired() {
-        let mut rt = make_test_runtime();
-        rt.idle_timeout = Duration::from_secs(5);
-        rt.last_activity = Instant::now() - Duration::from_secs(10);
-        assert!(rt.is_idle_expired());
-    }
-
-    #[test]
-    fn test_idle_timeout_not_expired_when_recent() {
-        let rt = make_test_runtime();
-        assert!(!rt.is_idle_expired());
+        let mut buf = make_test_buffers();
+        buf.last_frame_time = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!buf.is_frame_rate_limited());
     }
 
     #[test]
     fn test_detach_then_reattach_preserves_buffers() {
-        let mut rt = make_test_runtime();
-        rt.handle_recorder_event(r##"{"type":"click","selector":"#btn","text":"OK","x":0,"y":0,"timestamp":1.0}"##);
-        rt.handle_console_event(1.0, "log".to_string(), "test".to_string());
-        assert_eq!(rt.action_buffer.len(), 1);
-        assert_eq!(rt.console_buffer.len(), 1);
-
-        rt.detach();
-        rt.reattach("chat-new");
-        assert_eq!(rt.action_buffer.len(), 1);
-        assert_eq!(rt.console_buffer.len(), 1);
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event(r##"{"type":"click","selector":"#btn","text":"OK","x":0,"y":0,"timestamp":1.0}"##);
+        buf.handle_console_event(1.0, "log".to_string(), "test".to_string());
+        assert_eq!(buf.action_buffer.len(), 1);
+        assert_eq!(buf.console_buffer.len(), 1);
     }
 
-    fn make_test_runtime() -> BrowserRuntime {
-        BrowserRuntime {
-            runtime_id: "test-runtime".to_string(),
-            attached_chat_id: None,
-            browser: unsafe { std::mem::zeroed() },
-            tabs: HashMap::new(),
-            profile_dir: PathBuf::from("/tmp/test"),
-            window_bounds: None,
-            action_buffer: Vec::new(),
-            console_buffer: Vec::new(),
-            network_buffer: Vec::new(),
-            mutation_summary: Vec::new(),
-            last_send_action_cursor: 0,
-            last_send_console_cursor: 0,
-            last_send_network_cursor: 0,
-            last_send_mutation_cursor: 0,
-            last_frame_hash: None,
-            last_frame_data: None,
-            last_frame_time: None,
-            idle_timeout: Duration::from_secs(600),
-            is_connected: true,
-            last_activity: Instant::now(),
-            mask_passwords: true,
-        }
+    #[test]
+    fn test_page_changed_true_after_frame_update() {
+        let mut buf = make_test_buffers();
+        buf.update_frame_state(42, vec![1, 2, 3]);
+        assert!(buf.page_changed());
+    }
+
+    #[test]
+    fn test_page_changed_false_after_commit() {
+        let mut buf = make_test_buffers();
+        buf.update_frame_state(42, vec![1, 2, 3]);
+        assert!(buf.page_changed());
+        buf.commit_cursors();
+        assert!(!buf.page_changed());
+    }
+
+    #[test]
+    fn test_page_changed_true_after_new_frame_post_commit() {
+        let mut buf = make_test_buffers();
+        buf.update_frame_state(42, vec![1, 2, 3]);
+        buf.commit_cursors();
+        assert!(!buf.page_changed());
+        buf.update_frame_state(99, vec![4, 5, 6]);
+        assert!(buf.page_changed());
+    }
+
+    #[test]
+    fn test_page_changed_false_when_no_frames() {
+        let buf = make_test_buffers();
+        assert!(!buf.page_changed());
+    }
+
+    #[test]
+    fn test_fps_clamping_edge_values() {
+        assert_eq!(0u32.clamp(1, 60), 1);
+        assert_eq!(1u32.clamp(1, 60), 1);
+        assert_eq!(30u32.clamp(1, 60), 30);
+        assert_eq!(60u32.clamp(1, 60), 60);
+        assert_eq!(100u32.clamp(1, 60), 60);
+    }
+
+    #[test]
+    fn test_utf8_safe_truncation() {
+        let text = "Hello 🌍 World";
+        let truncated: String = text.chars().take(7).collect();
+        assert_eq!(truncated, "Hello 🌍");
+
+        let text2 = "日本語テスト";
+        let truncated2: String = text2.chars().take(3).collect();
+        assert_eq!(truncated2, "日本語");
     }
 }

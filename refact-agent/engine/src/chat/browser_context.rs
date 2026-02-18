@@ -162,21 +162,7 @@ pub async fn get_browser_context_for_chat(
     gcx: Arc<ARwLock<GlobalContext>>,
     chat_id: &str,
 ) -> Option<BrowserContextSnapshot> {
-    let gcx_locked = gcx.read().await;
-    let runtime_arc = {
-        let mut found = None;
-        for (_rid, arc) in &gcx_locked.browser_runtimes {
-            let rt = arc.lock().await;
-            if rt.attached_chat_id.as_deref() == Some(chat_id) {
-                found = Some(arc.clone());
-                break;
-            }
-        }
-        found
-    };
-    drop(gcx_locked);
-
-    let runtime_arc = runtime_arc?;
+    let (_, runtime_arc) = crate::integrations::browser_runtime::find_runtime_by_chat_id(gcx, chat_id).await?;
     let rt = runtime_arc.lock().await;
 
     if !rt.is_connected {
@@ -193,12 +179,7 @@ pub async fn get_browser_context_for_chat(
 
     let total_bytes = compute_context_size(&actions, &console, &network, &mutations);
 
-    let page_changed = rt.last_frame_hash.map_or(false, |current| {
-        let hash_at_last_send = rt.last_frame_data.as_ref().map(|d| {
-            crate::integrations::browser_runtime::compute_frame_hash(d)
-        });
-        hash_at_last_send.map_or(true, |h| h != current)
-    });
+    let page_changed = rt.page_changed();
 
     if actions.is_empty() && console.is_empty() && network.is_empty() && mutations.is_empty() {
         return None;
@@ -220,26 +201,9 @@ pub async fn commit_browser_cursors(
     gcx: Arc<ARwLock<GlobalContext>>,
     chat_id: &str,
 ) {
-    let gcx_locked = gcx.read().await;
-    let runtime_arc = {
-        let mut found = None;
-        for (_rid, arc) in &gcx_locked.browser_runtimes {
-            let rt = arc.lock().await;
-            if rt.attached_chat_id.as_deref() == Some(chat_id) {
-                found = Some(arc.clone());
-                break;
-            }
-        }
-        found
-    };
-    drop(gcx_locked);
-
-    if let Some(runtime_arc) = runtime_arc {
+    if let Some((_, runtime_arc)) = crate::integrations::browser_runtime::find_runtime_by_chat_id(gcx, chat_id).await {
         let mut rt = runtime_arc.lock().await;
-        rt.flush_action_buffer();
-        rt.flush_console_buffer();
-        rt.flush_network_buffer();
-        rt.flush_mutation_summary();
+        rt.commit_cursors();
     }
 }
 
