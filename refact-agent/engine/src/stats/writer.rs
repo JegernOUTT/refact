@@ -8,17 +8,7 @@ use tracing::{info, warn};
 use crate::global_context::GlobalContext;
 use crate::stats::event::LlmCallEvent;
 
-const STATS_DIR: &str = "stats";
 const MAX_FILE_SIZE: u64 = 1024 * 1024;
-
-async fn get_stats_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
-    let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
-    if let Some(first) = project_dirs.first() {
-        first.join(".refact").join(STATS_DIR)
-    } else {
-        gcx.read().await.config_dir.join(STATS_DIR)
-    }
-}
 
 async fn find_current_sequence(stats_dir: &PathBuf) -> u32 {
     let mut max_seq: u32 = 0;
@@ -49,7 +39,7 @@ pub async fn stats_writer_task(
     gcx: Arc<ARwLock<GlobalContext>>,
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<LlmCallEvent>,
 ) {
-    let stats_dir = get_stats_dir(gcx.clone()).await;
+    let stats_dir = crate::stats::get_stats_dir(gcx.clone()).await;
     if let Err(e) = fs::create_dir_all(&stats_dir).await {
         warn!("stats: failed to create stats dir {:?}: {}", stats_dir, e);
         return;

@@ -135,6 +135,7 @@ mod chat_modes;
 mod customization_editor;
 pub mod project_information;
 mod v1_browser;
+mod stats;
 
 use crate::http::routers::v1::chat_modes::handle_v1_chat_modes;
 use crate::http::routers::v1::customization_editor::{
@@ -145,6 +146,9 @@ use crate::http::routers::v1::customization_editor::{
 use crate::http::routers::v1::project_information::{
     handle_v1_project_information_get, handle_v1_project_information_save,
     handle_v1_project_information_preview,
+};
+use crate::http::routers::v1::stats::{
+    handle_v1_stats_llm_summary, handle_v1_stats_llm_events,
 };
 use crate::http::routers::v1::v1_browser::{
     handle_browser_start, handle_browser_stop, handle_browser_screenshot,
@@ -390,7 +394,9 @@ pub fn make_v1_router() -> Router {
         .route("/browser/accessibility", post(handle_browser_accessibility))
         .route("/browser/record-animation", post(handle_browser_record_animation))
         .route("/browser/handoff", post(handle_browser_handoff))
-        .route("/browser/status", post(handle_browser_status));
+        .route("/browser/status", post(handle_browser_status))
+        .route("/stats/llm/summary", get(handle_v1_stats_llm_summary))
+        .route("/stats/llm/events", get(handle_v1_stats_llm_events));
 
     builder.layer(axum::middleware::from_fn(telemetry_middleware))
 }
