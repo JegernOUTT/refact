@@ -8,6 +8,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
     ChatContent, ChatMessage, ChatMeta, ChatUsage, SamplingParameters, is_agentic_mode_id,
 };
+use crate::stats::event::{LlmCallEvent, split_model_provider};
 use crate::chat::tool_call_recovery;
 use crate::global_context::GlobalContext;
 use crate::llm::LlmRequest;
@@ -501,9 +502,18 @@ async fn run_streaming_generation(
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
     info!("session generation: model={}, messages={}", llm_request.model_id, llm_request.messages.len());
-    let chat_id = {
+    let (chat_id, root_chat_id, mode, task_id, task_role, agent_id, card_id) = {
         let session = session_arc.lock().await;
-        session.chat_id.clone()
+        let tm = session.thread.task_meta.as_ref();
+        (
+            session.chat_id.clone(),
+            session.thread.root_chat_id.clone(),
+            session.thread.mode.clone(),
+            tm.map(|t| t.task_id.clone()),
+            tm.map(|t| t.role.clone()),
+            tm.and_then(|t| t.agent_id.clone()),
+            tm.and_then(|t| t.card_id.clone()),
+        )
     };
 
     const TEMPERATURE_BUMP: f32 = 0.1;
@@ -755,14 +765,108 @@ async fn run_streaming_generation(
             }
         });
 
+        let call_ts_start = chrono::Utc::now().to_rfc3339();
+        let call_start = std::time::Instant::now();
+
         let results = run_llm_stream(gcx.clone(), params, &mut collector).await;
         drop(collector);
         let _ = emitter_task.await;
+
+        let duration_ms = call_start.elapsed().as_millis() as u64;
+        let call_ts_end = chrono::Utc::now().to_rfc3339();
+
+        let (model_id_for_stats, messages_count, tools_count, temperature_for_stats, max_tokens_for_stats) = (
+            llm_request.model_id.clone(),
+            llm_request.messages.len(),
+            llm_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+            llm_request.params.temperature,
+            llm_request.params.max_tokens,
+        );
+
+        match &results {
+            Err(e) => {
+                let (provider, model) = split_model_provider(&model_id_for_stats);
+                let event = LlmCallEvent {
+                    ts_start: call_ts_start.clone(),
+                    ts_end: call_ts_end.clone(),
+                    duration_ms,
+                    chat_id: chat_id.clone(),
+                    root_chat_id: root_chat_id.clone(),
+                    mode: mode.clone(),
+                    task_id: task_id.clone(),
+                    task_role: task_role.clone(),
+                    agent_id: agent_id.clone(),
+                    card_id: card_id.clone(),
+                    model_id: model_id_for_stats.clone(),
+                    provider,
+                    model,
+                    messages_count,
+                    tools_count,
+                    max_tokens: max_tokens_for_stats,
+                    temperature: temperature_for_stats,
+                    success: false,
+                    error_message: Some(e.chars().take(200).collect()),
+                    finish_reason: None,
+                    attempt_n: attempt,
+                    retry_reason: None,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    total_tokens: 0,
+                    cost_usd: None,
+                };
+                if let Some(sender) = &gcx.read().await.llm_stats_sender {
+                    let _ = sender.send(event);
+                }
+            }
+            Ok(_) => {}
+        }
+
         let results = results?;
 
         let mut result = results.into_iter().next().unwrap_or_default();
 
         if is_result_empty(&result) {
+            let draft_usage = {
+                let session = session_arc.lock().await;
+                session.draft_usage.clone()
+            };
+            let (provider, model) = split_model_provider(&model_id_for_stats);
+            let event = LlmCallEvent {
+                ts_start: call_ts_start,
+                ts_end: call_ts_end,
+                duration_ms,
+                chat_id: chat_id.clone(),
+                root_chat_id: root_chat_id.clone(),
+                mode: mode.clone(),
+                task_id: task_id.clone(),
+                task_role: task_role.clone(),
+                agent_id: agent_id.clone(),
+                card_id: card_id.clone(),
+                model_id: model_id_for_stats,
+                provider,
+                model,
+                messages_count,
+                tools_count,
+                max_tokens: max_tokens_for_stats,
+                temperature: temperature_for_stats,
+                success: false,
+                error_message: Some("empty_response".to_string()),
+                finish_reason: result.finish_reason.clone(),
+                attempt_n: attempt,
+                retry_reason: Some("empty_response".to_string()),
+                prompt_tokens: draft_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                completion_tokens: draft_usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                cache_read_tokens: draft_usage.as_ref().and_then(|u| u.cache_read_tokens),
+                cache_creation_tokens: draft_usage.as_ref().and_then(|u| u.cache_creation_tokens),
+                total_tokens: draft_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
+                cost_usd: draft_usage.as_ref().and_then(|u| u.metering_usd.as_ref()).map(|m| m.total_usd),
+            };
+            if let Some(sender) = &gcx.read().await.llm_stats_sender {
+                let _ = sender.send(event);
+            }
+
             if attempt < max_attempts && can_retry_with_temp_bump {
                 let current_temp_display = if attempt == 1 {
                     "default".to_string()
@@ -855,6 +959,46 @@ async fn run_streaming_generation(
                     dropped,
                 );
             }
+        }
+
+        let draft_usage_for_success = {
+            let session = session_arc.lock().await;
+            session.draft_usage.clone()
+        };
+        let usage_for_event = result.usage.as_ref().or(draft_usage_for_success.as_ref());
+        let (provider, model) = split_model_provider(&model_id_for_stats);
+        let success_event = LlmCallEvent {
+            ts_start: call_ts_start,
+            ts_end: call_ts_end,
+            duration_ms,
+            chat_id: chat_id.clone(),
+            root_chat_id: root_chat_id.clone(),
+            mode: mode.clone(),
+            task_id: task_id.clone(),
+            task_role: task_role.clone(),
+            agent_id: agent_id.clone(),
+            card_id: card_id.clone(),
+            model_id: model_id_for_stats,
+            provider,
+            model,
+            messages_count,
+            tools_count,
+            max_tokens: max_tokens_for_stats,
+            temperature: temperature_for_stats,
+            success: true,
+            error_message: None,
+            finish_reason: result.finish_reason.clone(),
+            attempt_n: attempt,
+            retry_reason: None,
+            prompt_tokens: usage_for_event.map(|u| u.prompt_tokens).unwrap_or(0),
+            completion_tokens: usage_for_event.map(|u| u.completion_tokens).unwrap_or(0),
+            cache_read_tokens: usage_for_event.and_then(|u| u.cache_read_tokens),
+            cache_creation_tokens: usage_for_event.and_then(|u| u.cache_creation_tokens),
+            total_tokens: usage_for_event.map(|u| u.total_tokens).unwrap_or(0),
+            cost_usd: usage_for_event.and_then(|u| u.metering_usd.as_ref()).map(|m| m.total_usd),
+        };
+        if let Some(sender) = &gcx.read().await.llm_stats_sender {
+            let _ = sender.send(success_event);
         }
 
         break result;
