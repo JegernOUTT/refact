@@ -17,3 +17,31 @@
 .full_height :global(.rt-ScrollAreaViewport > *) {
   height: 100%;
 }
+
+.vertical :global(.rt-ScrollAreaScrollbar[data-orientation="vertical"]) {
+  width: 5px;
+}
+
+/* Hide the scrollbar track by default; show on hover (matches chat UX). */
+.vertical :global(.rt-ScrollAreaScrollbar[data-orientation="vertical"]) {
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+
+.vertical:hover :global(.rt-ScrollAreaScrollbar[data-orientation="vertical"]) {
+  opacity: 1;
+}
+
+.vertical :global(.rt-ScrollAreaThumb) {
+  background-color: var(--gray-a5);
+  border-radius: 2px;
+  transition: background-color 150ms ease-out;
+}
+
+.vertical :global(.rt-ScrollAreaScrollbar:hover .rt-ScrollAreaThumb) {
+  background-color: var(--gray-a6);
+}
+
+.vertical :global(.rt-ScrollAreaThumb:active) {
+  background-color: var(--gray-a7);
+}

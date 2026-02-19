@@ -2,13 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 use super::kg_structs::{KnowledgeDoc, KnowledgeGraph};
 
-struct RelatedDoc {
-    id: String,
-    score: f64,
+#[derive(Debug, Clone)]
+pub struct RelatedDoc {
+    pub id: String,
+    pub score: f64,
 }
 
 impl KnowledgeGraph {
-    fn find_related(&self, doc_id: &str, max_results: usize) -> Vec<RelatedDoc> {
+    pub fn find_related(&self, doc_id: &str, max_results: usize) -> Vec<RelatedDoc> {
         let Some(doc) = self.docs.get(doc_id) else {
             return vec![];
         };
@@ -39,17 +40,31 @@ impl KnowledgeGraph {
             }
         }
 
-        let mut results: Vec<RelatedDoc> = scores.into_iter()
-            .filter(|(id, _)| self.docs.get(id).map(|d| d.frontmatter.is_active()).unwrap_or(false))
+        let mut results: Vec<RelatedDoc> = scores
+            .into_iter()
+            .filter(|(id, _)| {
+                self.docs
+                    .get(id)
+                    .map(|d| d.frontmatter.is_active())
+                    .unwrap_or(false)
+            })
             .map(|(id, score)| RelatedDoc { id, score })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(max_results);
         results
     }
 
-    pub fn expand_search_results(&self, initial_doc_ids: &[String], max_expansion: usize) -> Vec<String> {
+    pub fn expand_search_results(
+        &self,
+        initial_doc_ids: &[String],
+        max_expansion: usize,
+    ) -> Vec<String> {
         let mut all_ids: HashSet<String> = initial_doc_ids.iter().cloned().collect();
         let mut expanded: Vec<String> = vec![];
 
@@ -72,7 +87,12 @@ impl KnowledgeGraph {
         expanded
     }
 
-    fn find_similar_docs(&self, tags: &[String], filenames: &[String], entities: &[String]) -> Vec<(String, f64)> {
+    pub fn find_similar_docs(
+        &self,
+        tags: &[String],
+        filenames: &[String],
+        entities: &[String],
+    ) -> Vec<(String, f64)> {
         let mut scores: HashMap<String, f64> = HashMap::new();
 
         for tag in tags {
@@ -93,21 +113,32 @@ impl KnowledgeGraph {
             }
         }
 
-        let mut results: Vec<_> = scores.into_iter()
-            .filter(|(id, _)| self.docs.get(id).map(|d| d.frontmatter.is_active()).unwrap_or(false))
+        let mut results: Vec<_> = scores
+            .into_iter()
+            .filter(|(id, _)| {
+                self.docs
+                    .get(id)
+                    .map(|d| d.frontmatter.is_active())
+                    .unwrap_or(false)
+            })
             .collect();
 
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results
     }
 
-    pub fn get_deprecation_candidates(&self, new_doc_tags: &[String], new_doc_filenames: &[String], new_doc_entities: &[String], exclude_id: Option<&str>) -> Vec<&KnowledgeDoc> {
+    pub fn get_deprecation_candidates(
+        &self,
+        new_doc_tags: &[String],
+        new_doc_filenames: &[String],
+        new_doc_entities: &[String],
+        exclude_id: Option<&str>,
+    ) -> Vec<&KnowledgeDoc> {
         let similar = self.find_similar_docs(new_doc_tags, new_doc_filenames, new_doc_entities);
 
-        similar.into_iter()
-            .filter(|(id, score)| {
-                *score >= 2.0 && exclude_id.map(|e| e != id).unwrap_or(true)
-            })
+        similar
+            .into_iter()
+            .filter(|(id, score)| *score >= 2.0 && exclude_id.map(|e| e != id).unwrap_or(true))
             .filter_map(|(id, _)| {
                 let doc = self.docs.get(&id)?;
                 if doc.frontmatter.is_deprecated() || doc.frontmatter.is_archived() {

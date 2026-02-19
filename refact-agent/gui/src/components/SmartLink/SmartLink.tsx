@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import type { FC } from "react";
 import type { SmartLink as SmartLinkType } from "../../services/refact";
-import { Button, DropdownMenu } from "@radix-ui/themes";
+import { Button } from "@radix-ui/themes";
 import { useSmartLinks } from "../../hooks";
 import styles from "./SmartLink.module.css";
 
@@ -11,7 +11,6 @@ export const SmartLink: FC<{
   integrationPath: string;
   integrationProject: string;
   isSmall?: boolean;
-  isDockerSmartlink?: boolean;
   shouldBeDisabled?: boolean;
 }> = ({
   smartlink,
@@ -19,7 +18,6 @@ export const SmartLink: FC<{
   integrationPath,
   integrationProject,
   isSmall = false,
-  isDockerSmartlink = false,
   shouldBeDisabled,
 }) => {
   const { handleGoTo, handleSmartLink } = useSmartLinks();
@@ -55,28 +53,21 @@ export const SmartLink: FC<{
     return acc;
   }, []);
 
-  const smartlinkElement = isDockerSmartlink ? (
-    <DropdownMenu.Item
-      onClick={handleClick}
-      title={title ? title.join("\n") : ""}
-    >
-      ✨ {smartlink.sl_label}
-    </DropdownMenu.Item>
-  ) : (
-    <Button
-      size={isSmall ? "1" : "2"}
-      onClick={handleClick}
-      title={title ? title.join("\n") : ""}
-      color="gray"
-      type="button"
-      variant="outline"
-      className={styles.magicButton}
-      disabled={shouldBeDisabled}
-    >
-      {smartlink.sl_chat ? "✨ " : ""}
-      {smartlink.sl_label}
-    </Button>
+  return (
+    <>
+      <Button
+        size={isSmall ? "1" : "2"}
+        onClick={handleClick}
+        title={title ? title.join("\n") : ""}
+        color="gray"
+        type="button"
+        variant="outline"
+        className={styles.magicButton}
+        disabled={shouldBeDisabled}
+      >
+        {smartlink.sl_chat ? "✨ " : ""}
+        {smartlink.sl_label}
+      </Button>
+    </>
   );
-
-  return <>{smartlinkElement}</>;
 };

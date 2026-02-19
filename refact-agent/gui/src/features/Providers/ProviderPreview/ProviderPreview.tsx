@@ -3,38 +3,46 @@ import { Flex, Heading } from "@radix-ui/themes";
 
 import { ProviderForm } from "../ProviderForm";
 
-import { useProviderPreview } from "./useProviderPreview";
 import { getProviderName } from "../getProviderName";
 
-import type { SimplifiedProvider } from "../../../services/refact";
+import type { ProviderListItem } from "../../../services/refact";
 import { DeletePopover } from "../../../components/DeletePopover";
+import { useDeleteProviderMutation } from "../../../hooks/useProvidersQuery";
+import { useAppDispatch } from "../../../hooks";
+import { setInformation } from "../../Errors/informationSlice";
+import { providersApi } from "../../../services/refact";
+
+const UNDELETABLE_PROVIDERS = ["refact", "refact_self_hosted"];
 
 export type ProviderPreviewProps = {
-  configuredProviders: SimplifiedProvider<
-    "name" | "enabled" | "readonly" | "supports_completion"
-  >[];
-  currentProvider: SimplifiedProvider<
-    "name" | "enabled" | "readonly" | "supports_completion"
-  >;
-  handleSetCurrentProvider: (
-    provider: SimplifiedProvider<
-      "name" | "enabled" | "readonly" | "supports_completion"
-    > | null,
-  ) => void;
+  configuredProviders: ProviderListItem[];
+  currentProvider: ProviderListItem;
+  handleSetCurrentProvider: (provider: ProviderListItem | null) => void;
 };
 
 export const ProviderPreview: React.FC<ProviderPreviewProps> = ({
-  configuredProviders,
   currentProvider,
   handleSetCurrentProvider,
 }) => {
-  const {
-    handleDiscardChanges,
-    handleSaveChanges,
-    handleDeleteProvider,
-    isDeletingProvider,
-    isSavingProvider,
-  } = useProviderPreview(handleSetCurrentProvider);
+  const dispatch = useAppDispatch();
+  const [deleteProvider, { isLoading: isDeletingProvider }] =
+    useDeleteProviderMutation();
+
+  const showDelete = !UNDELETABLE_PROVIDERS.includes(currentProvider.name);
+
+  const handleDeleteProvider = async (providerName: string) => {
+    const response = await deleteProvider(providerName);
+    if (response.error) return;
+    dispatch(
+      setInformation(
+        `${getProviderName(
+          providerName,
+        )}'s Provider configuration was deleted successfully`,
+      ),
+    );
+    dispatch(providersApi.util.resetApiState());
+    handleSetCurrentProvider(null);
+  };
 
   return (
     <Flex direction="column" align="start" height="100%">
@@ -42,27 +50,19 @@ export const ProviderPreview: React.FC<ProviderPreviewProps> = ({
         <Heading as="h2" size="3">
           {getProviderName(currentProvider)} Configuration
         </Heading>
-        <DeletePopover
-          itemName={getProviderName(currentProvider)}
-          isDisabled={currentProvider.readonly}
-          isDeleting={isDeletingProvider}
-          deleteBy={currentProvider.name}
-          handleDelete={(providerName: string) =>
-            void handleDeleteProvider(providerName)
-          }
-        />
-      </Flex>
-      <ProviderForm
-        currentProvider={currentProvider}
-        handleSaveChanges={(updatedProviderData) =>
-          void handleSaveChanges(updatedProviderData)
-        }
-        isSaving={isSavingProvider}
-        isProviderConfigured={configuredProviders.some(
-          (p) => p.name === currentProvider.name,
+        {showDelete && (
+          <DeletePopover
+            itemName={getProviderName(currentProvider)}
+            isDisabled={currentProvider.readonly}
+            isDeleting={isDeletingProvider}
+            deleteBy={currentProvider.name}
+            handleDelete={(providerName: string) =>
+              void handleDeleteProvider(providerName)
+            }
+          />
         )}
-        handleDiscardChanges={handleDiscardChanges}
-      />
+      </Flex>
+      <ProviderForm currentProvider={currentProvider} />
     </Flex>
   );
 };

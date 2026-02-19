@@ -1,0 +1,16 @@
+.path {
+  font-family: var(--code-font-family);
+  font-size: 0.95em;
+  color: var(--accent-11);
+  cursor: pointer;
+}
+
+.path:hover {
+  text-decoration: underline;
+}
+
+.resultContent {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  max-height: 300px;
+  overflow-y: auto;
+}

@@ -1,0 +1,42 @@
+schema_version: 2
+id: follow_up
+title: Follow Up
+description: Generate follow-up suggestions and detect topic changes
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 32000
+  max_new_tokens: 1024
+  temperature: 0.2
+  tokens_for_rag: 0
+
+messages:
+  system_prompt: |
+    Your task is to do two things for a conversation between a user and an assistant:
+
+    1. **Follow-Up Messages:**
+       - Create up to 3 follow-up messages that the user might send after the assistant's last message.
+       - Maximum 3 words each, preferably 1 or 2 words.
+       - Each message should have a different meaning.
+       - If the assistant's last message contains a question, generate different replies that address that question.
+       - If there is no clear follow-up, return an empty list.
+       - If assistant's work looks completed, return an empty list.
+       - If there is nothing but garbage in the text you see, return an empty list.
+       - If not sure, return an empty list.
+
+    2. **Topic Change Detection:**
+       - Decide if the user's latest message is about a different topic or a different project or a different problem from the previous conversation.
+       - A topic change means the new topic is not related to the previous discussion.
+
+    Return the result in this JSON format (without extra formatting):
+
+    {
+      "follow_ups": ["Follow-up 1", "Follow-up 2", "Follow-up 3", "Follow-up 4", "Follow-up 5"],
+      "topic_changed": true
+    }
+
+tools: []

@@ -1,0 +1,11 @@
+.dialogContent {
+  transform: translateZ(0);
+}
+
+.callout {
+  margin-top: var(--space-3);
+}
+
+.loadingContainer {
+  padding: var(--space-6);
+}

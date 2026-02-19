@@ -3,11 +3,17 @@ import { useState, useEffect } from "react";
 import { selectConfig } from "../features/Config/configSlice";
 import { pingApi } from "../services/refact";
 import { useAppSelector } from "./useAppSelector";
+import { useAppDispatch } from "./useAppDispatch";
+import { setBackendStatus } from "../features/Connection";
+
+const POLL_INTERVAL_HEALTHY = 5000;
+const POLL_INTERVAL_ERROR = 2000;
 
 export const useGetPing = () => {
+  const dispatch = useAppDispatch();
   const currentLspPort = useAppSelector(selectConfig).lspPort;
 
-  const [pollingInterval, setPollingInterval] = useState(1000);
+  const [pollingInterval, setPollingInterval] = useState(POLL_INTERVAL_ERROR);
   const [queryStarted, setQueryStarted] = useState(false);
 
   const result = pingApi.endpoints.ping.useQuery(currentLspPort, {
@@ -21,20 +27,33 @@ export const useGetPing = () => {
     }
   }, [result.requestId, queryStarted]);
 
-  // Effect to manage polling based on query status
   useEffect(() => {
     if (result.isUninitialized && queryStarted) {
-      setPollingInterval(1000);
+      setPollingInterval(POLL_INTERVAL_ERROR);
       setQueryStarted(false);
     } else if (result.isSuccess) {
-      setPollingInterval(0);
+      setPollingInterval(POLL_INTERVAL_HEALTHY);
+      dispatch(setBackendStatus({ status: "online" }));
     } else if (result.isError) {
-      setPollingInterval(1000);
+      setPollingInterval(POLL_INTERVAL_ERROR);
+      const err = result.error as Record<string, unknown> | undefined;
+      const errorMsg =
+        err && typeof err === "object" && "message" in err
+          ? String(err.message)
+          : "Connection failed";
+      dispatch(setBackendStatus({ status: "offline", error: errorMsg }));
     }
-  }, [result.isSuccess, result.isError, result.isUninitialized, queryStarted]);
+  }, [
+    result.isSuccess,
+    result.isError,
+    result.isUninitialized,
+    result.error,
+    queryStarted,
+    dispatch,
+  ]);
 
   useEffect(() => {
-    setPollingInterval(1000);
+    setPollingInterval(POLL_INTERVAL_ERROR);
     setQueryStarted(false);
   }, [currentLspPort]);
 

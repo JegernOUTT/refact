@@ -1,0 +1,57 @@
+schema_version: 1
+id: my_custom_subagent
+title: My Custom Subagent
+description: Example of a user-defined subagent tool
+expose_as_tool: true
+has_code: false
+
+tool:
+  description: A custom subagent that performs specialized analysis
+  agentic: true
+  parameters:
+    - name: query
+      type: string
+      description: The query or task to analyze
+    - name: context
+      type: string
+      description: Additional context for the analysis
+  required:
+    - query
+
+subchat:
+  context_mode: bare
+  stateful: false
+  max_steps: 15
+  model_type: default
+  n_ctx: 100000
+  max_new_tokens: 8000
+  temperature: 0.3
+
+messages:
+  system_prompt: |
+    You are a specialized analysis agent. Your job is to provide thorough,
+    well-structured analysis based on the query provided.
+
+    Guidelines:
+    - Be thorough but focused
+    - Use available tools to gather information
+    - Provide clear, actionable insights
+    - Structure your response with clear sections
+
+  user_template: |
+    # Analysis Request
+
+    **Query:** {{query}}
+
+    {{#if context}}
+    **Context:** {{context}}
+    {{/if}}
+
+    Please perform a comprehensive analysis and provide your findings.
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_semantic
+  - knowledge

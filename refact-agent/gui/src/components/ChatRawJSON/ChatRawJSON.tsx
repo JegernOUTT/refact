@@ -1,10 +1,9 @@
 import { Box, Button, Flex, Heading } from "@radix-ui/themes";
 import { ScrollArea } from "../ScrollArea";
-import { MarkdownCodeBlock } from "../Markdown/CodeBlock";
-import { ChatHistoryItem } from "../../events";
+import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 
 type ChatRawJSONProps = {
-  thread: ChatHistoryItem;
+  thread: { title?: string; [key: string]: unknown };
   copyHandler: () => void;
 };
 
@@ -45,12 +44,12 @@ export const ChatRawJSON = ({ thread, copyHandler }: ChatRawJSONProps) => {
         >
           <ScrollArea scrollbars="horizontal" style={{ width: "100%" }} asChild>
             <Box>
-              <MarkdownCodeBlock
-                useInlineStyles={true}
+              <ShikiCodeBlock
+                className="language-json"
                 preOptions={{ noMargin: true }}
               >
                 {JSON.stringify(thread, null, 2)}
-              </MarkdownCodeBlock>
+              </ShikiCodeBlock>
             </Box>
           </ScrollArea>
         </Flex>

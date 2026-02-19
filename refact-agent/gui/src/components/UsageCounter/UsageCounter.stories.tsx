@@ -28,6 +28,7 @@ const MockedStore: React.FC<{
   isInline = false,
   isMessageEmpty = false,
 }) => {
+  const threadId = "test";
   const store = setUpStore({
     config: {
       themeProps: {
@@ -37,36 +38,52 @@ const MockedStore: React.FC<{
       lspPort: 8001,
     },
     chat: {
-      streaming: false,
-      error: null,
-      waiting_for_response: false,
-      prevent_send: false,
-      send_immediately: false,
+      current_thread_id: threadId,
+      open_thread_ids: [threadId],
+      threads: {
+        [threadId]: {
+          thread: {
+            id: threadId,
+            messages: [
+              {
+                role: "user",
+                content: "Hello, how are you?",
+              },
+              {
+                role: "assistant",
+                content: "Test content",
+                usage,
+              },
+            ],
+            model: "claude-3-5-sonnet",
+            mode: "AGENT",
+            new_chat_suggested: {
+              wasSuggested: false,
+            },
+            currentMaximumContextTokens: threadMaximumContextTokens,
+            currentMessageContextTokens,
+          },
+          streaming: false,
+          waiting_for_response: false,
+          prevent_send: false,
+          error: null,
+          queued_items: [],
+          send_immediately: false,
+          attached_images: [],
+          attached_text_files: [],
+          confirmation: {
+            pause: false,
+            pause_reasons: [],
+            status: { wasInteracted: false, confirmationStatus: true },
+          },
+          snapshot_received: true,
+          task_widget_expanded: false,
+        },
+      },
       tool_use: "agent",
       system_prompt: {},
-      cache: {},
-      queued_messages: [],
-      thread: {
-        id: "test",
-        messages: [
-          {
-            role: "user",
-            content: "Hello, how are you?",
-          },
-          {
-            role: "assistant",
-            content: "Test content",
-            usage,
-          },
-        ],
-        model: "claude-3-5-sonnet",
-        mode: "AGENT",
-        new_chat_suggested: {
-          wasSuggested: false,
-        },
-        currentMaximumContextTokens: threadMaximumContextTokens,
-        currentMessageContextTokens,
-      },
+      sse_refresh_requested: null,
+      stream_version: 0,
     },
   });
 

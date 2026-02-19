@@ -2,11 +2,28 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { selectSelectedSnippet } from "../../features/Chat/selectedSnippet";
 import { FileInfo, selectActiveFile } from "../../features/Chat/activeFile";
 import { useConfig, useAppSelector } from "../../hooks";
-import type { Checkbox } from "./ChatControls";
 import { selectMessages } from "../../features/Chat/Thread/selectors";
 import { createSelector } from "@reduxjs/toolkit";
 import { filename } from "../../utils";
 import { ideAttachFileToChat } from "../../hooks";
+
+type CheckboxHelp = {
+  text: string;
+  link?: string;
+  linkText?: string;
+};
+
+export type Checkbox = {
+  name: string;
+  label: string;
+  checked: boolean;
+  value?: string;
+  disabled: boolean;
+  fileName?: string;
+  hide?: boolean;
+  info?: CheckboxHelp;
+  locked?: boolean;
+};
 
 const messageLengthSelector = createSelector(
   [selectMessages],
@@ -137,7 +154,7 @@ const useAttachSelectedSnippet = (
       label: label,
       value: markdown,
       disabled: !snippet.code,
-      hide: host === "web",
+      hide: host === "web" || codeLineCount === 0,
       info: {
         text: "Adds the currently selected lines as a snippet for analysis or modification. Equivalent to code in triple backticks ``` in the text.",
       },
@@ -152,9 +169,9 @@ const useAttachSelectedSnippet = (
           label: label,
           value: markdown,
           disabled: !snippet.code,
-          hide: host === "web",
+          hide: host === "web" || codeLineCount === 0,
           checked: !!snippet.code && !interacted,
-          locked: false,
+          locked: interacted ? prev.locked : false,
         };
       });
     }
@@ -165,6 +182,7 @@ const useAttachSelectedSnippet = (
     markdown,
     interacted,
     attachedSelectedSnippet.checked,
+    codeLineCount,
   ]);
 
   const onToggleAttachedSelectedSnippet = useCallback(() => {

@@ -1,9 +1,13 @@
 use crate::custom_error::MapErrToString;
 
 pub fn extract_json_object<T: for<'de> serde::Deserialize<'de>>(text: &str) -> Result<T, String> {
-    let start = text.find('{').ok_or_else(|| "No opening brace '{' found".to_string())?;
-    let end = text.rfind('}').ok_or_else(|| "No closing brace '}' found".to_string())?;
-    
+    let start = text
+        .find('{')
+        .ok_or_else(|| "No opening brace '{' found".to_string())?;
+    let end = text
+        .rfind('}')
+        .ok_or_else(|| "No closing brace '}' found".to_string())?;
+
     if end <= start {
         return Err("Closing brace appears before opening brace".to_string());
     }
@@ -37,21 +41,28 @@ mod tests {
     #[test]
     fn test_extract_json_nested() {
         let input = r#"LLM response: {"FOUND": {"file1.rs": "symbol1,symbol2"}, "SIMILAR": {"file2.rs": "symbol3"}}"#;
-        let result: Result<IndexMap<String, IndexMap<String, String>>, _> = extract_json_object(input);
+        let result: Result<IndexMap<String, IndexMap<String, String>>, _> =
+            extract_json_object(input);
         assert!(result.is_ok());
-        
+
         let map = result.unwrap();
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("FOUND").unwrap().get("file1.rs").unwrap(), "symbol1,symbol2");
-        assert_eq!(map.get("SIMILAR").unwrap().get("file2.rs").unwrap(), "symbol3");
+        assert_eq!(
+            map.get("FOUND").unwrap().get("file1.rs").unwrap(),
+            "symbol1,symbol2"
+        );
+        assert_eq!(
+            map.get("SIMILAR").unwrap().get("file2.rs").unwrap(),
+            "symbol3"
+        );
     }
-    
+
     #[derive(Deserialize, Debug, PartialEq)]
     struct FollowUpResponse {
         pub follow_ups: Vec<String>,
         pub topic_changed: bool,
     }
-    
+
     #[test]
     fn test_follow_up_response_format() {
         let input = r#"
@@ -63,13 +74,16 @@ mod tests {
         }
         ```
         "#;
-        
+
         let result: Result<FollowUpResponse, _> = extract_json_object(input);
-        
+
         assert!(result.is_ok());
         let response = result.unwrap();
-        
-        assert_eq!(response.follow_ups, vec!["How?", "More examples", "Thank you"]);
+
+        assert_eq!(
+            response.follow_ups,
+            vec!["How?", "More examples", "Thank you"]
+        );
         assert_eq!(response.topic_changed, false);
     }
 }

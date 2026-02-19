@@ -5,9 +5,9 @@ use hyper::Body;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 
-use crate::call_validation::{ChatMessage, ChatMeta, ChatMode};
-use crate::caps::resolve_chat_model;
+use crate::call_validation::{ChatMessage, ChatMeta, is_agentic_mode_id, validate_mode_for_request};
 use crate::custom_error::ScratchError;
+use crate::caps::resolve_chat_model;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::integrations::go_to_configuration_message;
 use crate::agentic::generate_follow_up_message::generate_follow_up_message;
@@ -56,7 +56,8 @@ fn last_message_assistant_without_tools_with_code_blocks(messages: &Vec<ChatMess
     if let Some(m) = messages.last() {
         m.role == "assistant"
             && m.tool_calls.as_ref().map(|x| x.is_empty()).unwrap_or(true)
-            && (m.content.content_text_only().contains("```") || m.content.content_text_only().contains("|"))
+            && (m.content.content_text_only().contains("```")
+                || m.content.content_text_only().contains("|"))
     } else {
         false
     }
@@ -74,15 +75,31 @@ pub async fn handle_v1_links(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-    let post = serde_json::from_slice::<LinksPost>(&body_bytes)
-        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e)))?;
+    let post = serde_json::from_slice::<LinksPost>(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
+    })?;
     let mut links: Vec<Link> = Vec::new();
     let mut uncommited_changes_warning = String::new();
 
-    tracing::info!("for links, post.meta.chat_mode == {:?}", post.meta.chat_mode);
-    let (_integrations_map, integration_yaml_errors) = crate::integrations::running_integrations::load_integrations(gcx.clone(), &["**/*".to_string()]).await;
-
-    if post.meta.chat_mode == ChatMode::CONFIGURE {
+    let canonical_mode = validate_mode_for_request(gcx.clone(), &post.meta.chat_mode).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Invalid chat mode: {}", e),
+        )
+    })?;
+    
+    tracing::info!("for links, canonical_mode == {:?}", canonical_mode);
+    
+    let (_integrations_map, integration_yaml_errors) =
+        crate::integrations::running_integrations::load_integrations(
+            gcx.clone(),
+            &["**/*".to_string()],
+        )
+        .await;
+    if canonical_mode == "configurator" {
         if last_message_assistant_without_tools_with_code_blocks(&post.messages) {
             links.push(Link {
                 link_action: LinkAction::FollowUp,
@@ -95,7 +112,7 @@ pub async fn handle_v1_links(
         }
     }
 
-    if post.meta.chat_mode == ChatMode::PROJECT_SUMMARY {
+    if canonical_mode == "project_summary" {
         if last_message_assistant_without_tools_with_code_blocks(&post.messages) {
             links.push(Link {
                 link_action: LinkAction::FollowUp,
@@ -108,28 +125,8 @@ pub async fn handle_v1_links(
         }
     }
 
-    // GIT Init
-    // if post.meta.chat_mode.is_agentic() && post.messages.is_empty() {
-    //     if let Some(path) = crate::files_correction::get_active_project_path(gcx.clone()).await {
-    //         let path_has_vcs = {
-    //             let cx_locked = gcx.write().await;
-    //             let x = cx_locked.documents_state.workspace_vcs_roots.lock().unwrap().iter().contains(&path); x
-    //         };
-    //         if !path_has_vcs {
-    //             links.push(Link {
-    //                 link_action: LinkAction::GitInit,
-    //                 link_text: format!("Initialize git in the `{}`", path.to_string_lossy().to_string()),
-    //                 link_goto: Some("LINKS_AGAIN".to_string()),
-    //                 link_summary_path: None,
-    //                 link_tooltip: format!("git init {}", path.to_string_lossy().to_string()),
-    //                 ..Default::default()
-    //             });
-    //         }
-    //     }
-    // }
-
     // GIT uncommitted
-    if post.meta.chat_mode.is_agentic() && post.messages.is_empty() {
+    if is_agentic_mode_id(&canonical_mode) && post.messages.is_empty() {
         let commits_info = get_commit_information_from_current_changes(gcx.clone()).await;
 
         let mut commit_texts = Vec::new();
@@ -138,27 +135,53 @@ pub async fn handle_v1_links(
 
             if !commit_info.staged_changes.is_empty() {
                 commit_text.push_str("Staged changes:\n");
-                commit_text.push_str(&commit_info.staged_changes.iter()
-                    .take(2)
-                    .map(|f| format!("{} {}", f.status.initial(), f.relative_path.to_string_lossy()))
-                    .collect::<Vec<_>>()
-                    .join("\n"));
+                commit_text.push_str(
+                    &commit_info
+                        .staged_changes
+                        .iter()
+                        .take(2)
+                        .map(|f| {
+                            format!(
+                                "{} {}",
+                                f.status.initial(),
+                                f.relative_path.to_string_lossy()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
                 commit_text.push('\n');
                 if commit_info.staged_changes.len() > 2 {
-                    commit_text.push_str(&format!("...{} files more\n", commit_info.staged_changes.len() - 2));
+                    commit_text.push_str(&format!(
+                        "...{} files more\n",
+                        commit_info.staged_changes.len() - 2
+                    ));
                 }
             }
 
             if !commit_info.unstaged_changes.is_empty() {
                 commit_text.push_str("Unstaged changes:\n");
-                commit_text.push_str(&commit_info.unstaged_changes.iter()
-                    .take(2)
-                    .map(|f| format!("{} {}", f.status.initial(), f.relative_path.to_string_lossy()))
-                    .collect::<Vec<_>>()
-                    .join("\n"));
+                commit_text.push_str(
+                    &commit_info
+                        .unstaged_changes
+                        .iter()
+                        .take(2)
+                        .map(|f| {
+                            format!(
+                                "{} {}",
+                                f.status.initial(),
+                                f.relative_path.to_string_lossy()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
                 commit_text.push('\n');
                 if commit_info.unstaged_changes.len() > 2 {
-                    commit_text.push_str(&format!("...{} files more\n", commit_info.unstaged_changes.len() - 2));
+                    commit_text.push_str(&format!(
+                        "...{} files more\n",
+                        commit_info.unstaged_changes.len() - 2
+                    ));
                 }
             }
 
@@ -175,17 +198,32 @@ pub async fn handle_v1_links(
 
         if false {
             for commit_with_msg in generate_commit_messages(gcx.clone(), commits_info).await {
-                let all_changes = commit_with_msg.staged_changes.iter()
+                let all_changes = commit_with_msg
+                    .staged_changes
+                    .iter()
                     .chain(commit_with_msg.unstaged_changes.iter());
-                let first_changes = all_changes.clone().take(5)
-                    .map(|f| format!("{} {}", f.status.initial(), f.relative_path.to_string_lossy()))
-                    .collect::<Vec<_>>().join("\n");
+                let first_changes = all_changes
+                    .clone()
+                    .take(5)
+                    .map(|f| {
+                        format!(
+                            "{} {}",
+                            f.status.initial(),
+                            f.relative_path.to_string_lossy()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let remaining_changes = all_changes.count().saturating_sub(5);
 
                 let mut tooltip_message = format!(
                     "git commit -m \"{}{}\"\n{}",
                     commit_with_msg.commit_message.lines().next().unwrap_or(""),
-                    if commit_with_msg.commit_message.lines().count() > 1 { "..." } else { "" },
+                    if commit_with_msg.commit_message.lines().count() > 1 {
+                        "..."
+                    } else {
+                        ""
+                    },
                     first_changes,
                 );
                 if remaining_changes != 0 {
@@ -193,8 +231,12 @@ pub async fn handle_v1_links(
                 }
                 links.push(Link {
                     link_action: LinkAction::Commit,
-                    link_text: format!("Commit {} files in `{}`", commit_with_msg.staged_changes.len() +
-                        commit_with_msg.unstaged_changes.len(), commit_with_msg.get_project_name()),
+                    link_text: format!(
+                        "Commit {} files in `{}`",
+                        commit_with_msg.staged_changes.len()
+                            + commit_with_msg.unstaged_changes.len(),
+                        commit_with_msg.get_project_name()
+                    ),
                     link_goto: Some("LINKS_AGAIN".to_string()),
                     link_summary_path: None,
                     link_tooltip: tooltip_message,
@@ -204,8 +246,7 @@ pub async fn handle_v1_links(
         }
     }
 
-    // Failures in integrations
-    if post.meta.chat_mode.is_agentic() {
+    if is_agentic_mode_id(&canonical_mode) {
         for failed_integr_name in failed_integration_names_after_last_user_message(&post.messages) {
             links.push(Link {
                 link_action: LinkAction::Goto,
@@ -221,7 +262,10 @@ pub async fn handle_v1_links(
         for e in integration_yaml_errors {
             links.push(Link {
                 link_action: LinkAction::Goto,
-                link_text: format!("Syntax error in {}", crate::nicer_logs::last_n_chars(&e.path, 20)),
+                link_text: format!(
+                    "Syntax error in {}",
+                    crate::nicer_logs::last_n_chars(&e.path, 20)
+                ),
                 link_goto: Some(format!("SETTINGS:{}", e.path)),
                 link_summary_path: None,
                 link_tooltip: format!("Error at line {}: {}", e.error_line, e.error_msg),
@@ -251,97 +295,18 @@ pub async fn handle_v1_links(
     }
 
     // Tool recommendations
-    /* temporary remove project summary and recomended integrations
-    if post.meta.chat_mode.is_agentic() {
-        if post.messages.is_empty() {
-            let (summary_exists, summary_path_option) = crate::scratchpads::chat_utils_prompts::dig_for_project_summarization_file(gcx.clone()).await;
-            if !summary_exists {
-                // doesn't exist
-                links.push(Link {
-                    link_action: LinkAction::SummarizeProject,
-                    link_text: "Initial project summarization".to_string(),
-                    link_goto: None,
-                    link_summary_path: summary_path_option,
-                    link_tooltip: format!("Project summary is a starting point for Refact Agent."),
-                    ..Default::default()
-                });
-            } else {
-                // exists
-                if let Some(summary_path) = summary_path_option {
-                    match fs::read_to_string(&summary_path) {
-                        Ok(content) => {
-                            match serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                                Ok(yaml) => {
-                                    if let Some(recommended_integrations) = yaml.get("recommended_integrations").and_then(|rt| rt.as_sequence()) {
-                                        let mut any_recommended = false;
-                                        for igname_value in recommended_integrations {
-                                            if let Some(igname) = igname_value.as_str() {
-                                                if igname == "isolation" || igname == "docker" {
-                                                    continue;
-                                                }
-                                                if !integrations_map.contains_key(igname) {
-                                                    tracing::info!("tool {} not present => link", igname);
-                                                    links.push(Link {
-                                                        link_action: LinkAction::Goto,
-                                                        link_text: format!("Configure {igname}"),
-                                                        link_goto: Some(format!("SETTINGS:{igname}")),
-                                                        link_summary_path: None,
-                                                        link_tooltip: format!(""),
-                                                        ..Default::default()
-                                                    });
-                                                    any_recommended = true;
-                                                } else {
-                                                    tracing::info!("tool {} present => happy", igname);
-                                                }
-                                            }
-                                        }
-                                        if any_recommended {
-                                            links.push(Link {
-                                                link_action: LinkAction::PostChat,
-                                                link_text: format!("Stop recommending integrations"),
-                                                link_goto: None,
-                                                link_summary_path: None,
-                                                link_tooltip: format!(""),
-                                                link_payload: serde_json::json!({
-                                                    "chat_meta": crate::call_validation::ChatMeta {
-                                                        chat_id: "".to_string(),
-                                                        chat_remote: false,
-                                                        chat_mode: crate::call_validation::ChatMode::CONFIGURE,
-                                                        current_config_file: summary_path.clone(),
-                                                    },
-                                                    "messages": [
-                                                        crate::call_validation::ChatMessage {
-                                                            role: "user".to_string(),
-                                                            content: crate::call_validation::ChatContent::SimpleText(format!("Make recommended_integrations an empty list, follow the system prompt.")),
-                                                            ..Default::default()
-                                                        },
-                                                    ]
-                                                }),
-                                            });
-                                        }
-                                    }
-                                },
-                                Err(e) => {
-                                    tracing::error!("Failed to parse project summary YAML file: {}", e);
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to read project summary file: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    */
+    /* temporary remove project summary and recomended integrations    */
 
     // Follow-up
     let mut new_chat_suggestion = false;
-    if post.meta.chat_mode != ChatMode::NO_TOOLS
+    if canonical_mode != "explore"
         && links.is_empty()
         && post.messages.len() > 2
-        && post.messages.last().map(|x| x.role == "assistant").unwrap_or(false)
+        && post
+            .messages
+            .last()
+            .map(|x| x.role == "assistant")
+            .unwrap_or(false)
     {
         let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0).await?;
         let model_id = match resolve_chat_model(caps.clone(), &caps.defaults.chat_light_model) {
@@ -349,9 +314,18 @@ pub async fn handle_v1_links(
             Err(_) => post.model_name.clone(),
         };
         let follow_up_response = generate_follow_up_message(
-            post.messages.clone(), gcx.clone(), &model_id, &post.meta.chat_id
-        ).await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Error generating follow-up message: {}", e)))?;
+            post.messages.clone(),
+            gcx.clone(),
+            &model_id,
+            &post.meta.chat_id,
+        )
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Error generating follow-up message: {}", e),
+            )
+        })?;
         new_chat_suggestion = follow_up_response.topic_changed;
         for follow_up_message in follow_up_response.follow_ups {
             tracing::info!("follow-up {:?}", follow_up_message);
@@ -366,28 +340,41 @@ pub async fn handle_v1_links(
         }
     }
 
-    tracing::info!("generated links2\n{}", serde_json::to_string_pretty(&links).unwrap());
+    tracing::info!(
+        "generated links2\n{}",
+        serde_json::to_string_pretty(&links).unwrap()
+    );
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string_pretty(&serde_json::json!({
-            "links": links,
-            "uncommited_changes_warning": uncommited_changes_warning,
-            "new_chat_suggestion": new_chat_suggestion
-        })).unwrap())).unwrap())
+        .body(Body::from(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "links": links,
+                "uncommited_changes_warning": uncommited_changes_warning,
+                "new_chat_suggestion": new_chat_suggestion
+            }))
+            .unwrap(),
+        ))
+        .unwrap())
 }
 
 fn failed_integration_names_after_last_user_message(messages: &Vec<ChatMessage>) -> Vec<String> {
     let last_user_msg_index = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
-    let tool_calls = messages[last_user_msg_index..].iter().filter(|m| m.role == "assistant")
-        .filter_map(|m| m.tool_calls.as_ref()).flatten().collect::<Vec<_>>();
+    let tool_calls = messages[last_user_msg_index..]
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+        .collect::<Vec<_>>();
 
     let mut result = Vec::new();
     for tool_call in tool_calls {
-        if let Some(answer_text) = messages.iter()
+        if let Some(answer_text) = messages
+            .iter()
             .find(|m| m.role == "tool" && m.tool_call_id == tool_call.id)
-            .map(|m| m.content.content_text_only()) {
+            .map(|m| m.content.content_text_only())
+        {
             if answer_text.contains(&go_to_configuration_message(&tool_call.function.name)) {
                 result.push(tool_call.function.name.clone());
             }

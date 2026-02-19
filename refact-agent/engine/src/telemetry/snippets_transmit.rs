@@ -3,10 +3,8 @@ use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context;
 
-
-const SNIP_NOT_ACCEPTED_TIMEOUT_AFTER : i64 = 30;
+const SNIP_NOT_ACCEPTED_TIMEOUT_AFTER: i64 = 30;
 const SNIP_ACCEPTED_NOT_FINISHED_TIMEOUT_AFTER: i64 = 600;
-
 
 pub async fn send_finished_snippets(gcx: Arc<ARwLock<global_context::GlobalContext>>) {
     let tele_storage;
@@ -44,7 +42,6 @@ pub async fn send_finished_snippets(gcx: Arc<ARwLock<global_context::GlobalConte
     // Snippet sending code was here, but it was removed because we at Refact didn't find a good way to
     // use it (in cloud or self-hosting), so we don't have an option to collect it anymore.
 }
-
 
 pub async fn tele_snip_background_task(
     global_context: Arc<ARwLock<global_context::GlobalContext>>,

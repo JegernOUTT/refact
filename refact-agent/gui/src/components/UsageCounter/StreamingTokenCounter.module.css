@@ -1,0 +1,23 @@
+.inlineContainer {
+  font-variant-numeric: tabular-nums;
+  color: var(--gray-11);
+}
+
+.tokenValue {
+  font-weight: 400;
+}
+
+.animateValue {
+  animation: tokenPulse 0.12s ease-out;
+}
+
+@keyframes tokenPulse {
+  0% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

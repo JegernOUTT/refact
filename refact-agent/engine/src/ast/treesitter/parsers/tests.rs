@@ -9,25 +9,32 @@ use similar::DiffableStr;
 use uuid::Uuid;
 
 use crate::ast::treesitter::file_ast_markup::FileASTMarkup;
-use crate::ast::treesitter::ast_instance_structs::{AstSymbolInstance, AstSymbolInstanceArc, SymbolInformation};
+use crate::ast::treesitter::ast_instance_structs::{
+    AstSymbolInstance, AstSymbolInstanceArc, SymbolInformation,
+};
 use crate::ast::treesitter::language_id::LanguageId;
 use crate::ast::treesitter::parsers::AstLanguageParser;
 use crate::ast::treesitter::skeletonizer::make_formatter;
 use crate::ast::treesitter::structs::SymbolType;
 use crate::files_in_workspace::Document;
 
-mod rust;
-mod python;
-mod java;
-mod kotlin;
 mod cpp;
-mod ts;
+mod java;
 mod js;
+mod kotlin;
+mod python;
+mod rust;
+mod ts;
 
 pub(crate) fn print(symbols: &Vec<AstSymbolInstanceArc>, code: &str) {
-    let guid_to_symbol_map = symbols.iter()
-        .map(|s| (s.read().guid().clone(), s.clone())).collect::<HashMap<_, _>>();
-    let sorted = symbols.iter().sorted_by_key(|x| x.read().full_range().start_byte).collect::<Vec<_>>();
+    let guid_to_symbol_map = symbols
+        .iter()
+        .map(|s| (s.read().guid().clone(), s.clone()))
+        .collect::<HashMap<_, _>>();
+    let sorted = symbols
+        .iter()
+        .sorted_by_key(|x| x.read().full_range().start_byte)
+        .collect::<Vec<_>>();
     let mut used_guids: HashSet<Uuid> = Default::default();
 
     for sym in sorted {
@@ -45,9 +52,20 @@ pub(crate) fn print(symbols: &Vec<AstSymbolInstanceArc>, code: &str) {
         }
         let full_range = sym.read().full_range().clone();
         let range = full_range.start_byte..full_range.end_byte;
-        println!("{0} {1} [{2}] {3}", guid.to_string().slice(0..6), name, code.slice(range).lines().collect::<Vec<_>>().first().unwrap(), type_name);
+        println!(
+            "{0} {1} [{2}] {3}",
+            guid.to_string().slice(0..6),
+            name,
+            code.slice(range)
+                .lines()
+                .collect::<Vec<_>>()
+                .first()
+                .unwrap(),
+            type_name
+        );
         used_guids.insert(guid.clone());
-        let mut candidates: VecDeque<(i32, Uuid)> = VecDeque::from_iter(sym.read().childs_guid().iter().map(|x| (4, x.clone())));
+        let mut candidates: VecDeque<(i32, Uuid)> =
+            VecDeque::from_iter(sym.read().childs_guid().iter().map(|x| (4, x.clone())));
         while let Some((offest, cand)) = candidates.pop_front() {
             used_guids.insert(cand.clone());
             if let Some(sym_l) = guid_to_symbol_map.get(&cand) {
@@ -61,9 +79,25 @@ pub(crate) fn print(symbols: &Vec<AstSymbolInstanceArc>, code: &str) {
                 }
                 let full_range = sym_l.read().full_range().clone();
                 let range = full_range.start_byte..full_range.end_byte;
-                println!("{0} {1} {2} [{3}] {4}", cand.to_string().slice(0..6), str::repeat(" ", offest as usize),
-                         name, code.slice(range).lines().collect::<Vec<_>>().first().unwrap(), type_name);
-                let mut new_candidates = VecDeque::from_iter(sym_l.read().childs_guid().iter().map(|x| (offest + 2, x.clone())));
+                println!(
+                    "{0} {1} {2} [{3}] {4}",
+                    cand.to_string().slice(0..6),
+                    str::repeat(" ", offest as usize),
+                    name,
+                    code.slice(range)
+                        .lines()
+                        .collect::<Vec<_>>()
+                        .first()
+                        .unwrap(),
+                    type_name
+                );
+                let mut new_candidates = VecDeque::from_iter(
+                    sym_l
+                        .read()
+                        .childs_guid()
+                        .iter()
+                        .map(|x| (offest + 2, x.clone())),
+                );
                 new_candidates.extend(candidates.clone());
                 candidates = new_candidates;
             }
@@ -71,14 +105,16 @@ pub(crate) fn print(symbols: &Vec<AstSymbolInstanceArc>, code: &str) {
     }
 }
 
-fn eq_symbols(symbol: &AstSymbolInstanceArc,
-              ref_symbol: &Box<dyn AstSymbolInstance>) -> bool {
+fn eq_symbols(symbol: &AstSymbolInstanceArc, ref_symbol: &Box<dyn AstSymbolInstance>) -> bool {
     let symbol = symbol.read();
     let _f = symbol.fields();
     let _ref_f = ref_symbol.fields();
 
     let sym_type = symbol.symbol_type() == ref_symbol.symbol_type();
-    let name = if ref_symbol.name().contains(ref_symbol.guid().to_string().as_str()) {
+    let name = if ref_symbol
+        .name()
+        .contains(ref_symbol.guid().to_string().as_str())
+    {
         symbol.name().contains(symbol.guid().to_string().as_str())
     } else {
         symbol.name() == ref_symbol.name()
@@ -95,14 +131,31 @@ fn eq_symbols(symbol: &AstSymbolInstanceArc,
     let definition_range = symbol.definition_range() == ref_symbol.definition_range();
     let is_error = symbol.is_error() == ref_symbol.is_error();
 
-    sym_type && name && lang && file_path && is_type && is_declaration &&
-        namespace && full_range && declaration_range && definition_range && is_error
+    sym_type
+        && name
+        && lang
+        && file_path
+        && is_type
+        && is_declaration
+        && namespace
+        && full_range
+        && declaration_range
+        && definition_range
+        && is_error
 }
 
-fn compare_symbols(symbols: &Vec<AstSymbolInstanceArc>,
-                   ref_symbols: &Vec<Box<dyn AstSymbolInstance>>) {
-    let guid_to_sym = symbols.iter().map(|s| (s.clone().read().guid().clone(), s.clone())).collect::<HashMap<_, _>>();
-    let ref_guid_to_sym = ref_symbols.iter().map(|s| (s.guid().clone(), s)).collect::<HashMap<_, _>>();
+fn compare_symbols(
+    symbols: &Vec<AstSymbolInstanceArc>,
+    ref_symbols: &Vec<Box<dyn AstSymbolInstance>>,
+) {
+    let guid_to_sym = symbols
+        .iter()
+        .map(|s| (s.clone().read().guid().clone(), s.clone()))
+        .collect::<HashMap<_, _>>();
+    let ref_guid_to_sym = ref_symbols
+        .iter()
+        .map(|s| (s.guid().clone(), s))
+        .collect::<HashMap<_, _>>();
     let mut checked_guids: HashSet<Uuid> = Default::default();
     for sym in symbols {
         let sym_l = sym.read();
@@ -111,12 +164,15 @@ fn compare_symbols(symbols: &Vec<AstSymbolInstanceArc>,
         if checked_guids.contains(&sym_l.guid()) {
             continue;
         }
-        let closest_sym = ref_symbols.iter().filter(|s| sym_l.full_range() == s.full_range())
+        let closest_sym = ref_symbols
+            .iter()
+            .filter(|s| sym_l.full_range() == s.full_range())
             .filter(|x| eq_symbols(&sym, x))
             .collect::<Vec<_>>();
         assert_eq!(closest_sym.len(), 1);
         let closest_sym = closest_sym.first().unwrap();
-        let mut candidates: Vec<(AstSymbolInstanceArc, &Box<dyn AstSymbolInstance>)> = vec![(sym.clone(), &closest_sym)];
+        let mut candidates: Vec<(AstSymbolInstanceArc, &Box<dyn AstSymbolInstance>)> =
+            vec![(sym.clone(), &closest_sym)];
         while let Some((sym, ref_sym)) = candidates.pop() {
             let sym_l = sym.read();
             if checked_guids.contains(&sym_l.guid()) {
@@ -134,33 +190,46 @@ fn compare_symbols(symbols: &Vec<AstSymbolInstanceArc>,
             );
             if sym_l.parent_guid().is_some() {
                 if let Some(parent) = guid_to_sym.get(&sym_l.parent_guid().unwrap()) {
-                    let ref_parent = ref_guid_to_sym.get(&ref_sym.parent_guid().unwrap()).unwrap();
+                    let ref_parent = ref_guid_to_sym
+                        .get(&ref_sym.parent_guid().unwrap())
+                        .unwrap();
                     candidates.push((parent.clone(), ref_parent));
                 }
             }
 
             assert_eq!(sym_l.childs_guid().len(), ref_sym.childs_guid().len());
 
-            let childs = sym_l.childs_guid().iter().filter_map(|x| guid_to_sym.get(x))
+            let childs = sym_l
+                .childs_guid()
+                .iter()
+                .filter_map(|x| guid_to_sym.get(x))
                 .collect::<Vec<_>>();
-            let ref_childs = ref_sym.childs_guid().iter().filter_map(|x| ref_guid_to_sym.get(x))
+            let ref_childs = ref_sym
+                .childs_guid()
+                .iter()
+                .filter_map(|x| ref_guid_to_sym.get(x))
                 .collect::<Vec<_>>();
 
             for child in childs {
                 let child_l = child.read();
-                let closest_sym = ref_childs.iter().filter(|s| child_l.full_range() == s.full_range())
+                let closest_sym = ref_childs
+                    .iter()
+                    .filter(|s| child_l.full_range() == s.full_range())
                     .collect::<Vec<_>>();
                 assert_eq!(closest_sym.len(), 1);
                 let closest_sym = closest_sym.first().unwrap();
                 candidates.push((child.clone(), closest_sym));
             }
 
-            assert!((sym_l.get_caller_guid().is_some() && ref_sym.get_caller_guid().is_some())
-                || (sym_l.get_caller_guid().is_none() && ref_sym.get_caller_guid().is_none())
+            assert!(
+                (sym_l.get_caller_guid().is_some() && ref_sym.get_caller_guid().is_some())
+                    || (sym_l.get_caller_guid().is_none() && ref_sym.get_caller_guid().is_none())
             );
             if sym_l.get_caller_guid().is_some() {
                 if let Some(caller) = guid_to_sym.get(&sym_l.get_caller_guid().unwrap()) {
-                    let ref_caller = ref_guid_to_sym.get(&ref_sym.get_caller_guid().unwrap()).unwrap();
+                    let ref_caller = ref_guid_to_sym
+                        .get(&ref_sym.get_caller_guid().unwrap())
+                        .unwrap();
                     candidates.push((caller.clone(), ref_caller));
                 }
             }
@@ -188,9 +257,12 @@ fn check_duplicates_with_ref(symbols: &Vec<Box<dyn AstSymbolInstance>>) {
     }
 }
 
-pub(crate) fn base_parser_test(parser: &mut Box<dyn AstLanguageParser>,
-                               path: &PathBuf,
-                               code: &str, symbols_str: &str) {
+pub(crate) fn base_parser_test(
+    parser: &mut Box<dyn AstLanguageParser>,
+    path: &PathBuf,
+    code: &str,
+    symbols_str: &str,
+) {
     // Normalize line endings to LF to ensure consistent byte offsets across platforms
     let normalized_code = code.replace("\r\n", "\n");
     let symbols = parser.parse(&normalized_code, &path);
@@ -211,27 +283,48 @@ struct Skeleton {
     pub line: String,
 }
 
-pub(crate) fn base_skeletonizer_test(lang: &LanguageId,
-                                     parser: &mut Box<dyn AstLanguageParser>,
-                                     file: &PathBuf,
-                                     code: &str, skeleton_ref_str: &str) {
+pub(crate) fn base_skeletonizer_test(
+    lang: &LanguageId,
+    parser: &mut Box<dyn AstLanguageParser>,
+    file: &PathBuf,
+    code: &str,
+    skeleton_ref_str: &str,
+) {
     // Normalize line endings to LF to ensure consistent byte offsets across platforms
     let normalized_code = code.replace("\r\n", "\n");
     let symbols = parser.parse(&normalized_code, &file);
-    let symbols_struct = symbols.iter().map(|s| s.read().symbol_info_struct()).collect();
+    let symbols_struct = symbols
+        .iter()
+        .map(|s| s.read().symbol_info_struct())
+        .collect();
     let doc = Document {
         doc_path: file.clone(),
         doc_text: Some(Rope::from_str(&normalized_code)),
     };
-    let guid_to_children: HashMap<Uuid, Vec<Uuid>> = symbols.iter().map(|s| (s.read().guid().clone(), s.read().childs_guid().clone())).collect();
-    let ast_markup: FileASTMarkup = crate::ast::lowlevel_file_markup(&doc, &symbols_struct).unwrap();
-    let guid_to_info: HashMap<Uuid, &SymbolInformation> = ast_markup.symbols_sorted_by_path_len.iter().map(|s| (s.guid.clone(), s)).collect();
+    let guid_to_children: HashMap<Uuid, Vec<Uuid>> = symbols
+        .iter()
+        .map(|s| (s.read().guid().clone(), s.read().childs_guid().clone()))
+        .collect();
+    let ast_markup: FileASTMarkup =
+        crate::ast::lowlevel_file_markup(&doc, &symbols_struct).unwrap();
+    let guid_to_info: HashMap<Uuid, &SymbolInformation> = ast_markup
+        .symbols_sorted_by_path_len
+        .iter()
+        .map(|s| (s.guid.clone(), s))
+        .collect();
     let formatter = make_formatter(lang);
-    let class_symbols: Vec<_> = ast_markup.symbols_sorted_by_path_len.iter().filter(|x| x.symbol_type == SymbolType::StructDeclaration).collect();
+    let class_symbols: Vec<_> = ast_markup
+        .symbols_sorted_by_path_len
+        .iter()
+        .filter(|x| x.symbol_type == SymbolType::StructDeclaration)
+        .collect();
     let mut skeletons: HashSet<Skeleton> = Default::default();
     for symbol in class_symbols {
-        let skeleton_line = formatter.make_skeleton(&symbol, &normalized_code, &guid_to_children, &guid_to_info);
-        skeletons.insert(Skeleton { line: skeleton_line });
+        let skeleton_line =
+            formatter.make_skeleton(&symbol, &normalized_code, &guid_to_children, &guid_to_info);
+        skeletons.insert(Skeleton {
+            line: skeleton_line,
+        });
     }
     // use std::fs;
     // let symbols_str_ = serde_json::to_string_pretty(&skeletons).unwrap();
@@ -241,7 +334,6 @@ pub(crate) fn base_skeletonizer_test(lang: &LanguageId,
     assert_eq!(skeletons, ref_skeletons);
 }
 
-
 #[derive(Default, Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 struct Decl {
     pub top_row: usize,
@@ -249,29 +341,53 @@ struct Decl {
     pub line: String,
 }
 
-pub(crate) fn base_declaration_formatter_test(lang: &LanguageId,
-                                              parser: &mut Box<dyn AstLanguageParser>,
-                                              file: &PathBuf,
-                                              code: &str, decls_ref_str: &str) {
+pub(crate) fn base_declaration_formatter_test(
+    lang: &LanguageId,
+    parser: &mut Box<dyn AstLanguageParser>,
+    file: &PathBuf,
+    code: &str,
+    decls_ref_str: &str,
+) {
     // Normalize line endings to LF to ensure consistent byte offsets across platforms
     let normalized_code = code.replace("\r\n", "\n");
     let symbols = parser.parse(&normalized_code, &file);
-    let symbols_struct = symbols.iter().map(|s| s.read().symbol_info_struct()).collect();
+    let symbols_struct = symbols
+        .iter()
+        .map(|s| s.read().symbol_info_struct())
+        .collect();
     let doc = Document {
         doc_path: file.clone(),
         doc_text: Some(Rope::from_str(&normalized_code)),
     };
-    let guid_to_children: HashMap<Uuid, Vec<Uuid>> = symbols.iter().map(|s| (s.read().guid().clone(), s.read().childs_guid().clone())).collect();
-    let ast_markup: FileASTMarkup = crate::ast::lowlevel_file_markup(&doc, &symbols_struct).unwrap();
-    let guid_to_info: HashMap<Uuid, &SymbolInformation> = ast_markup.symbols_sorted_by_path_len.iter().map(|s| (s.guid.clone(), s)).collect();
+    let guid_to_children: HashMap<Uuid, Vec<Uuid>> = symbols
+        .iter()
+        .map(|s| (s.read().guid().clone(), s.read().childs_guid().clone()))
+        .collect();
+    let ast_markup: FileASTMarkup =
+        crate::ast::lowlevel_file_markup(&doc, &symbols_struct).unwrap();
+    let guid_to_info: HashMap<Uuid, &SymbolInformation> = ast_markup
+        .symbols_sorted_by_path_len
+        .iter()
+        .map(|s| (s.guid.clone(), s))
+        .collect();
     let formatter = make_formatter(lang);
     let mut decls: HashSet<Decl> = Default::default();
     for symbol in &guid_to_info {
         let symbol = guid_to_info.get(&symbol.0).unwrap();
-        if !vec![SymbolType::StructDeclaration, SymbolType::FunctionDeclaration].contains(&symbol.symbol_type) {
+        if !vec![
+            SymbolType::StructDeclaration,
+            SymbolType::FunctionDeclaration,
+        ]
+        .contains(&symbol.symbol_type)
+        {
             continue;
         }
-        let (line, (top_row, bottom_row)) = formatter.get_declaration_with_comments(&symbol, &normalized_code, &guid_to_children, &guid_to_info);
+        let (line, (top_row, bottom_row)) = formatter.get_declaration_with_comments(
+            &symbol,
+            &normalized_code,
+            &guid_to_children,
+            &guid_to_info,
+        );
         if !line.is_empty() {
             decls.insert(Decl {
                 top_row,

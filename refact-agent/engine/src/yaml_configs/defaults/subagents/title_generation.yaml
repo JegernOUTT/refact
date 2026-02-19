@@ -1,0 +1,20 @@
+schema_version: 2
+id: title_generation
+title: Title Generation
+description: Generate concise chat titles
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: fork
+  stateful: false
+  model_type: light
+  n_ctx: 128000
+  max_new_tokens: 128
+  temperature: 0.2
+
+messages:
+  user_template: |
+    Summarize this chat in 2-5 words. Avoid generic terms. Write only the title, nothing else.
+
+tools: []

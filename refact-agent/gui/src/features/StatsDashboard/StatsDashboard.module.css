@@ -1,0 +1,26 @@
+.tabsRoot {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.tabContent {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-top: var(--space-3);
+}
+
+.presetButton {
+  cursor: pointer;
+}
+
+.presetButtonActive {
+  font-weight: bold;
+}
+
+.placeholderText {
+  color: var(--gray-10);
+}

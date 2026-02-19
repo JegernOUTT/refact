@@ -1,0 +1,16 @@
+schema_version: 1
+id: explain
+label: Explain
+auto_submit: true
+new_tab: true
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      ```
+      %CODE_SELECTION%
+      ```
+      Look up definitions of types used in this code. Look up references on things defined in this code.
+      Explain: about one paragraph on why this code exists, one paragraph about the code, maybe a paragraph about
+      any tricky parts in the code. Be concise, wait for a more specific follow-up question from the user.

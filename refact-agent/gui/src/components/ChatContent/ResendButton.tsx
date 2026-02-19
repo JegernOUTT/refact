@@ -1,24 +1,21 @@
 import React from "react";
-import { IconButton, Tooltip } from "@radix-ui/themes";
-import { useAppSelector } from "../../hooks";
+import { IconButton, HoverCard, Text } from "@radix-ui/themes";
+import { useAppSelector, useChatActions } from "../../hooks";
 import {
   selectIsStreaming,
   selectIsWaiting,
   selectMessages,
 } from "../../features/Chat";
-import { useSendChatRequest } from "../../hooks/useSendChatRequest";
 
 function useResendMessages() {
   const messages = useAppSelector(selectMessages);
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
-  const { retry } = useSendChatRequest();
+  const { regenerate } = useChatActions();
 
   const handleResend = React.useCallback(() => {
-    if (messages.length > 0) {
-      retry(messages);
-    }
-  }, [messages, retry]);
+    void regenerate();
+  }, [regenerate]);
 
   const shouldShow = React.useMemo(() => {
     if (messages.length === 0) return false;
@@ -36,19 +33,31 @@ export const ResendButton = () => {
   if (!shouldShow) return null;
 
   return (
-    <Tooltip content="Resend last messages">
-      <IconButton variant="ghost" onClick={handleResend} size="2">
-        <ResendIcon />
-      </IconButton>
-    </Tooltip>
+    <HoverCard.Root>
+      <HoverCard.Trigger>
+        <IconButton
+          type="button"
+          variant="ghost"
+          onClick={handleResend}
+          size="1"
+        >
+          <ResendIcon />
+        </IconButton>
+      </HoverCard.Trigger>
+      <HoverCard.Content size="1" side="top">
+        <Text as="p" size="2">
+          Resend last messages
+        </Text>
+      </HoverCard.Content>
+    </HoverCard.Root>
   );
 };
 
 const ResendIcon: React.FC = () => {
   return (
     <svg
-      height="20"
-      width="20"
+      height="15"
+      width="15"
       viewBox="0 0 24 24"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"

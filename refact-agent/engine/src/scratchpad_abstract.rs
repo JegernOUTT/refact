@@ -71,10 +71,7 @@ impl FinishReason {
 
 #[async_trait]
 pub trait ScratchpadAbstract: Send {
-    async fn apply_model_adaptation_patch(
-        &mut self,
-        patch: &Value,
-    ) -> Result<(), String>;
+    async fn apply_model_adaptation_patch(&mut self, patch: &Value) -> Result<(), String>;
 
     async fn prompt(
         &mut self,
@@ -93,12 +90,12 @@ pub trait ScratchpadAbstract: Send {
     fn response_streaming(
         &mut self,
         delta: String,
-        finish_reason: FinishReason
+        finish_reason: FinishReason,
     ) -> Result<(Value, FinishReason), String>;
 
     fn response_message_n_choices(
         &mut self,
-        _choices: Vec<String>,    // XXX replace with Value
+        _choices: Vec<String>, // XXX replace with Value
         _finish_reasons: Vec<FinishReason>,
     ) -> Result<Value, String> {
         Err("not implemented".to_string())
@@ -107,7 +104,7 @@ pub trait ScratchpadAbstract: Send {
     fn response_message_streaming(
         &mut self,
         delta: &Value,
-        finish_reason: FinishReason
+        finish_reason: FinishReason,
     ) -> Result<(Value, FinishReason), String>;
 
     fn response_spontaneous(&mut self) -> Result<Vec<Value>, String>;
@@ -127,20 +124,20 @@ pub struct HasTokenizerAndEot {
 
 impl HasTokenizerAndEot {
     pub fn new(tokenizer: Option<Arc<Tokenizer>>) -> Self {
-        HasTokenizerAndEot { tokenizer, eot: String::new(), eos: String::new(), context_format: String::new(), rag_ratio: 0.5}
+        HasTokenizerAndEot {
+            tokenizer,
+            eot: String::new(),
+            eos: String::new(),
+            context_format: String::new(),
+            rag_ratio: 0.5,
+        }
     }
 
-    pub fn count_tokens(
-        &self,
-        text: &str,
-    ) -> Result<i32, String> {
+    pub fn count_tokens(&self, text: &str) -> Result<i32, String> {
         count_text_tokens(self.tokenizer.clone(), text).map(|t| t as i32)
     }
 
-    pub fn assert_one_token(
-        &self,
-        text: &str
-    ) -> Result<(), String> {
+    pub fn assert_one_token(&self, text: &str) -> Result<(), String> {
         if self.tokenizer.is_none() {
             return Err("assert_one_token: no tokenizer".to_string());
         }
@@ -148,7 +145,9 @@ impl HasTokenizerAndEot {
         let token_count = count_text_tokens(self.tokenizer.clone(), text)?;
 
         if token_count != 1 {
-            Err(format!("assert_one_token: expected 1 token for \"{text}\", got {token_count}"))
+            Err(format!(
+                "assert_one_token: expected 1 token for \"{text}\", got {token_count}"
+            ))
         } else {
             Ok(())
         }

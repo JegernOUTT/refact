@@ -1,6 +1,6 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
-import { chatResponse } from "../Chat";
 import { smallCloudApi } from "../../services/smallcloud";
+import { applyChatEvent } from "../Chat/Thread/actions";
 
 export type InformationSliceState = {
   message: string | null;
@@ -18,7 +18,7 @@ export const informationSlice = createSlice({
   initialState,
   reducers: {
     setInformation: (state, action: PayloadAction<string>) => {
-      if (state.message) return state;
+      if (state.message) return;
       state.message = action.payload;
     },
     clearInformation: (state, _action: PayloadAction) => {
@@ -40,38 +40,38 @@ export const informationSlice = createSlice({
   },
 
   extraReducers: (builder) => {
-    builder.addMatcher(chatResponse.match, (state, action) => {
+    // Listen to SSE events for metering balance updates (addCase must come before addMatcher)
+    builder.addCase(applyChatEvent, (state, action) => {
+      const event = action.payload;
+      // Check for metering_balance in SSE events
       if (
-        state.dismissed &&
-        "metering_balance" in action.payload &&
-        typeof action.payload.metering_balance === "number" &&
-        action.payload.metering_balance > 2000
+        "metering_balance" in event &&
+        typeof event.metering_balance === "number"
       ) {
-        state.dismissed = false;
+        const balance = event.metering_balance;
+        if (state.dismissed && balance > 2000) {
+          state.dismissed = false;
+        }
+        if (state.dismissed) return;
+        if (state.message) return;
+        if (balance <= 2000) {
+          state.type = "balance";
+          state.message =
+            "Your account is running low on credits. Please top up your account to continue using the service.";
+        }
       }
-      if (state.dismissed) return state;
-      if (state.message) return state;
-      if (!("metering_balance" in action.payload)) return state;
-      if (typeof action.payload.metering_balance !== "number") return state;
-      if (action.payload.metering_balance <= 2000) {
-        state.type = "balance";
-        state.message =
-          "Your account is running low on credits. Please top up your account to continue using the service.";
-      }
-      return state;
     });
 
     builder.addMatcher(
       smallCloudApi.endpoints.getUser.matchFulfilled,
       (state, action) => {
-        if (state.dismissed) return state;
-        if (state.message) return state;
+        if (state.dismissed) return;
+        if (state.message) return;
         if (action.payload.metering_balance <= 2000) {
           state.type = "balance";
           state.message =
             "Your account is running low on credits. Please top up your account to continue using the service.";
         }
-        return state;
       },
     );
   },

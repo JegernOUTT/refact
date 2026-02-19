@@ -1,5 +1,6 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Box, Button, Flex } from "@radix-ui/themes";
+import { useCollapsibleStore } from "../ChatContent/useStoredOpen";
 import styles from "./reveal.module.css";
 import classNames from "classnames";
 
@@ -8,6 +9,7 @@ export type RevealProps = {
   defaultOpen: boolean;
   isRevealingCode?: boolean;
   onClose?: () => void;
+  storeKey?: string;
 };
 
 const RevealButton: React.FC<{
@@ -41,8 +43,20 @@ export const Reveal: React.FC<RevealProps> = ({
   defaultOpen,
   isRevealingCode = false,
   onClose,
+  storeKey,
 }) => {
-  const [open, setOpen] = React.useState(defaultOpen);
+  const store = useCollapsibleStore();
+  const [open, setOpen] = useState(() => {
+    if (storeKey && store) {
+      const stored = store.get(storeKey);
+      if (stored !== undefined) return stored;
+    }
+    return defaultOpen;
+  });
+
+  useEffect(() => {
+    if (storeKey && store) store.set(storeKey, open);
+  }, [storeKey, store, open]);
 
   const handleClick = useCallback(() => {
     if (defaultOpen) return;

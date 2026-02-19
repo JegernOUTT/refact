@@ -20,6 +20,7 @@ export const ThinkingButton: React.FC = () => {
     shouldBeTeasing,
     noteText,
     areCapsInitialized,
+    supportsBoostReasoning,
   } = useThinking();
 
   const { startPollingForUser } = useStartPollingForUser();
@@ -30,6 +31,10 @@ export const ThinkingButton: React.FC = () => {
         <Button size="1">💡 Think</Button>
       </Skeleton>
     );
+  }
+
+  if (!supportsBoostReasoning) {
+    return null;
   }
 
   return (

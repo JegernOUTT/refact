@@ -22,14 +22,15 @@ export const CheckpointButton = ({
 
   return (
     <IconButton
-      size="2"
-      variant="soft"
+      size="1"
+      variant="ghost"
       title={isPreviewing ? "Reverting..." : "Revert agent changes"}
       onClick={() => void handlePreview(checkpoints, messageIndex)}
       loading={isPreviewing}
       disabled={!isOnline || isStreaming || isWaiting}
+      style={{ width: 20, height: 20 }}
     >
-      <ResetIcon />
+      <ResetIcon width={12} height={12} />
     </IconButton>
   );
 };

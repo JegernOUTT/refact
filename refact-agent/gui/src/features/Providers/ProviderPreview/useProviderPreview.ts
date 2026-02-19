@@ -7,44 +7,44 @@ import {
 } from "../../../hooks/useProvidersQuery";
 
 import { setInformation } from "../../Errors/informationSlice";
-import { providersApi } from "../../../services/refact";
+import { providersApi, ProviderListItem } from "../../../services/refact";
 
 import { getProviderName } from "../getProviderName";
 
-import type { Provider, SimplifiedProvider } from "../../../services/refact";
+import type { ProviderFormValues } from "../ProviderForm/useProviderForm";
 
 export function useProviderPreview(
-  handleSetCurrentProvider: (
-    provider: SimplifiedProvider<
-      "name" | "enabled" | "readonly" | "supports_completion"
-    > | null,
-  ) => void,
+  handleSetCurrentProvider: (provider: ProviderListItem | null) => void,
 ) {
   const dispatch = useAppDispatch();
 
   const [isSavingProvider, setIsSavingProvider] = useState(false);
   const [isDeletingProvider, setIsDeletingProvider] = useState(false);
+  const [currentProviderName, setCurrentProviderName] = useState<string>("");
 
-  const updateProvider = useUpdateProviderMutation();
-  const deleteProvider = useDeleteProviderMutation();
+  const [updateProvider] = useUpdateProviderMutation();
+  const [deleteProvider] = useDeleteProviderMutation();
 
   const handleSaveChanges = useCallback(
-    async (updatedProviderData: Provider) => {
+    async (updatedProviderData: ProviderFormValues, providerName: string) => {
       setIsSavingProvider(true);
-      const response = await updateProvider(updatedProviderData);
+      setCurrentProviderName(providerName);
+
+      const { enabled, readonly: _readonly, ...settings } = updatedProviderData;
+      const response = await updateProvider({
+        providerName,
+        settings: { ...settings, enabled },
+      });
+
       if (response.error) {
         setIsSavingProvider(false);
         return;
       }
       const actions = [
-        setInformation(
-          `Provider ${getProviderName(
-            updatedProviderData,
-          )} updated successfully`,
-        ),
+        setInformation(`Provider ${providerName} updated successfully`),
         providersApi.util.invalidateTags([
           "PROVIDER",
-          { type: "CONFIGURED_PROVIDERS", id: "LIST" },
+          { type: "PROVIDERS", id: "LIST" },
         ]),
       ];
       actions.forEach((action) => dispatch(action));
@@ -90,5 +90,6 @@ export function useProviderPreview(
     handleSaveChanges,
     isSavingProvider,
     isDeletingProvider,
+    currentProviderName,
   };
 }

@@ -1,0 +1,13 @@
+schema_version: 1
+id: comment
+description: Comment each line
+selection_needed: [1, 50]
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      Comment each line of the code block below:
+      ```
+      %CODE_SELECTION%
+      ```

@@ -1,13 +1,5 @@
 import { createSlice, PayloadAction } from "@reduxjs/toolkit";
 
-export interface Welcome {
-  name: "welcome";
-}
-
-export interface TourEnd {
-  name: "tour end";
-}
-
 export interface HistoryList {
   name: "history";
 }
@@ -42,6 +34,40 @@ export interface ProvidersPage {
   name: "providers page";
 }
 
+export interface TasksListPage {
+  name: "tasks list";
+}
+
+export interface TaskWorkspacePage {
+  name: "task workspace";
+  taskId: string;
+}
+
+export interface TaskAgentPage {
+  name: "task agent";
+  taskId: string;
+  agentId: string;
+  chatId: string;
+}
+
+export interface KnowledgeGraphPage {
+  name: "knowledge graph";
+}
+
+export interface CustomizationPage {
+  name: "customization";
+  kind?: "modes" | "subagents" | "toolbox_commands" | "code_lens";
+  configId?: string;
+}
+
+export interface DefaultModelsPage {
+  name: "default models";
+}
+
+export interface StatsDashboardPage {
+  name: "stats dashboard";
+}
+
 export interface IntegrationsSetupPage {
   name: "integrations page";
   projectPath?: string;
@@ -53,8 +79,6 @@ export interface IntegrationsSetupPage {
 
 export type Page =
   | ChatPage
-  | Welcome
-  | TourEnd
   | HistoryList
   | FIMDebugPage
   | StatisticsPage
@@ -62,7 +86,14 @@ export type Page =
   | ChatThreadHistoryPage
   | IntegrationsSetupPage
   | ProvidersPage
-  | LoginPage;
+  | LoginPage
+  | TasksListPage
+  | TaskWorkspacePage
+  | TaskAgentPage
+  | KnowledgeGraphPage
+  | CustomizationPage
+  | DefaultModelsPage
+  | StatsDashboardPage;
 
 export function isIntegrationSetupPage(
   page: Page,
@@ -100,14 +131,14 @@ export const pagesSlice = createSlice({
       });
       if (pageIndex === -1) {
         state.push(action.payload);
-        return state;
+        return;
       }
-      return state.slice(0, pageIndex + 1);
+      state.length = pageIndex + 1;
     },
 
     change: (state, action: PayloadAction<Page>) => {
-      const last = state.slice(0, -1);
-      return last.concat(action.payload);
+      state.pop();
+      state.push(action.payload);
     },
   },
   selectors: {

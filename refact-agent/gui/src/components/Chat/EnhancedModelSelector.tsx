@@ -57,8 +57,9 @@ function extractCapabilitiesFromCaps(
     supportsMultimodality: capsModel.supports_multimodality,
     supportsClicks: capsModel.supports_clicks,
     supportsAgent: capsModel.supports_agent,
-    supportsReasoning: capsModel.supports_reasoning,
-    supportsBoostReasoning: capsModel.supports_boost_reasoning,
+    reasoningEffortOptions: capsModel.reasoning_effort_options,
+    supportsThinkingBudget: capsModel.supports_thinking_budget,
+    supportsAdaptiveThinkingBudget: capsModel.supports_adaptive_thinking_budget,
   };
 }
 

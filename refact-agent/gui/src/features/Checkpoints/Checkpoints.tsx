@@ -1,4 +1,5 @@
-import { Dialog, Flex, Text, Button } from "@radix-ui/themes";
+import { useState } from "react";
+import { Dialog, Flex, Text, Button, RadioGroup } from "@radix-ui/themes";
 import { useCheckpoints, useEventsBusForIDE } from "../../hooks";
 import { TruncateLeft } from "../../components/Text";
 import { Link } from "../../components/Link";
@@ -9,6 +10,8 @@ import { formatDateOrTimeBasedOnToday } from "../../utils/formatDateToHumanReada
 import { formatPathName } from "../../utils/formatPathName";
 import { CheckpointsStatusIndicator } from "./CheckpointsStatusIndicator";
 import { ErrorCallout } from "../../components/Callout";
+
+export type RestoreMode = "files_only" | "files_and_messages";
 
 export const Checkpoints = () => {
   const { openFile } = useEventsBusForIDE();
@@ -22,6 +25,9 @@ export const Checkpoints = () => {
     wereFilesChanged,
     errorLog,
   } = useCheckpoints();
+
+  const [restoreMode, setRestoreMode] =
+    useState<RestoreMode>("files_and_messages");
 
   const clientTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const formattedDate = formatDateOrTimeBasedOnToday(
@@ -39,9 +45,8 @@ export const Checkpoints = () => {
       onOpenChange={(state) => {
         if (!state) {
           handleUndo();
-        } else {
-          void handleFix();
         }
+        // Don't auto-call handleFix on open - user must click the button
       }}
     >
       <Dialog.Content className={styles.CheckpointsDialog}>
@@ -108,12 +113,33 @@ export const Checkpoints = () => {
             {errorLog.join("\n")}
           </ErrorCallout>
         )}
-        <Flex
-          gap="3"
-          mt={wereFilesChanged ? "4" : "2"}
-          justify="between"
-          wrap="wrap"
-        >
+
+        <Flex direction="column" gap="2" mt="4">
+          <Text size="2" weight="medium">
+            Restore options:
+          </Text>
+          <RadioGroup.Root
+            value={restoreMode}
+            onValueChange={(value) => setRestoreMode(value as RestoreMode)}
+          >
+            <Flex direction="column" gap="2">
+              <Text as="label" size="2">
+                <Flex gap="2" align="center">
+                  <RadioGroup.Item value="files_and_messages" />
+                  <span>Restore files and undo messages after this point</span>
+                </Flex>
+              </Text>
+              <Text as="label" size="2">
+                <Flex gap="2" align="center">
+                  <RadioGroup.Item value="files_only" />
+                  <span>Restore files only (keep messages)</span>
+                </Flex>
+              </Text>
+            </Flex>
+          </RadioGroup.Root>
+        </Flex>
+
+        <Flex gap="3" mt="4" justify="between" wrap="wrap">
           <Flex gap="3" wrap="wrap" justify="start">
             <Button
               type="button"
@@ -126,7 +152,7 @@ export const Checkpoints = () => {
             <Button
               loading={isRestoring}
               disabled={errorLog.length > 0}
-              onClick={() => void handleFix()}
+              onClick={() => void handleFix(restoreMode)}
               title={
                 isRestoring
                   ? "Rolling back..."

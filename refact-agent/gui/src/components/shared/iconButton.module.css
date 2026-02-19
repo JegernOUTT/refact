@@ -1,0 +1,66 @@
+/* Shared icon button styles - use via composes: iconButton from '../shared/iconButton.module.css' */
+
+.iconButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--gray-11);
+  cursor: pointer;
+  transition: filter 0.15s ease;
+  flex-shrink: 0;
+}
+
+.iconButton svg {
+  width: 15px;
+  height: 15px;
+}
+
+.iconButton:hover:not(:disabled) {
+  filter: brightness(1.5);
+}
+
+.iconButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Variant: active state */
+.active {
+  composes: iconButton;
+  color: var(--blue-11);
+}
+
+/* Variant: danger state */
+.danger {
+  composes: iconButton;
+  color: var(--red-11);
+}
+
+/* Variant: stop action */
+.stop {
+  composes: iconButton;
+  color: var(--red-11);
+}
+
+/* Variant: send action */
+.send {
+  composes: iconButton;
+  color: var(--accent-11);
+}
+
+/* Variant: queue action */
+.queue {
+  composes: iconButton;
+  color: var(--green-11);
+}
+
+/* Variant: priority action */
+.priority {
+  composes: iconButton;
+  color: var(--blue-11);
+}

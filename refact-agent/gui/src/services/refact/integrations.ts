@@ -330,82 +330,13 @@ function isMCPLogsResponse(data: unknown): data is MCPLogsResponse {
   return data.logs.every((l) => typeof l === "string");
 }
 
-type DockerFilter = {
-  filter_label: string;
-  filter_image: string;
-};
-
-type SchemaDockerContainer = {
-  image: string;
-  environment: DockerEnvironment;
-};
-
-export type SchemaDocker = DockerFilter & {
-  new_container_default: SchemaDockerContainer;
-  smartlinks: SmartLink[];
-  smartlinks_for_each_container?: SmartLink[];
-};
-
-type DockerEnvironment = Record<string, IntegrationPrimitive>;
-
 type IntegrationSchema = {
   description?: string;
   fields: Record<string, IntegrationField<NonNullable<IntegrationPrimitive>>>;
   available: Record<string, boolean>;
   confirmation: SchemaToolConfirmation;
   smartlinks?: SmartLink[];
-  docker?: SchemaDocker;
 };
-
-function isDockerFilter(json: unknown): json is DockerFilter {
-  if (!json) {
-    return false;
-  }
-  if (typeof json !== "object") {
-    return false;
-  }
-  if (!("filter_label" in json)) {
-    return false;
-  }
-  if (typeof json.filter_label !== "string") {
-    return false;
-  }
-  if (!("filter_image" in json)) {
-    return false;
-  }
-  if (typeof json.filter_image !== "string") {
-    return false;
-  }
-  return true;
-}
-
-function isSchemaDockerContainer(json: unknown): json is SchemaDockerContainer {
-  if (!json) {
-    return false;
-  }
-  if (typeof json !== "object") {
-    return false;
-  }
-  if (!("image" in json)) {
-    return false;
-  }
-  if (typeof json.image !== "string") {
-    return false;
-  }
-  if (!("environment" in json)) {
-    return false;
-  }
-  if (!json.environment) {
-    return false;
-  }
-  if (!(typeof json.environment === "object")) {
-    return false;
-  }
-  if (!Object.values(json.environment).every(isPrimitive)) {
-    return false;
-  }
-  return true;
-}
 
 function isIntegrationSchema(json: unknown): json is IntegrationSchema {
   if (!json) {
@@ -455,42 +386,6 @@ function isIntegrationSchema(json: unknown): json is IntegrationSchema {
     }
     if (!json.smartlinks.every(isSmartLink)) {
       return false;
-    }
-  }
-  if ("docker" in json) {
-    if (!json.docker) {
-      return false;
-    }
-    if (!(typeof json.docker === "object")) {
-      return false;
-    }
-    if (!isDockerFilter(json.docker)) {
-      return false;
-    }
-    if (!("new_container_default" in json.docker)) {
-      return false;
-    }
-    if (!isSchemaDockerContainer(json.docker.new_container_default)) {
-      return false;
-    }
-    if (!("smartlinks" in json.docker)) {
-      return false;
-    }
-    if (!Array.isArray(json.docker.smartlinks)) {
-      return false;
-    }
-    if (!json.docker.smartlinks.every(isSmartLink)) {
-      return false;
-    }
-
-    if ("smartlinks_for_each_container" in json.docker) {
-      if (!Array.isArray(json.docker.smartlinks_for_each_container)) {
-        return false;
-      }
-
-      if (!json.docker.smartlinks_for_each_container.every(isSmartLink)) {
-        return false;
-      }
     }
   }
   return true;

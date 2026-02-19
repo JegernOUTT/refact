@@ -1,0 +1,260 @@
+use std::any::Any;
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::caps::model_caps::ModelCapabilities;
+use crate::llm::adapter::WireFormat;
+use crate::providers::traits::{
+    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    merge_custom_models, normalize_endpoint, derive_endpoint_from_chat_url,
+    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LMStudioProvider {
+    pub endpoint: String,
+    pub api_key: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub enabled_models: Vec<String>,
+    #[serde(default)]
+    pub custom_models: HashMap<String, CustomModelConfig>,
+}
+
+impl Default for LMStudioProvider {
+    fn default() -> Self {
+        Self {
+            endpoint: "http://localhost:1234".to_string(),
+            api_key: String::new(),
+            enabled: false,
+            enabled_models: Vec::new(),
+            custom_models: HashMap::new(),
+        }
+    }
+}
+
+impl LMStudioProvider {
+    fn parse_openai_model(model: &serde_json::Value, enabled: bool) -> Option<AvailableModel> {
+        let id = model.get("id")?.as_str()?.to_string();
+
+        Some(AvailableModel {
+            id,
+            display_name: None,
+            n_ctx: 4096,
+            supports_tools: true,
+            supports_multimodality: false,
+            reasoning_effort_options: None,
+            supports_thinking_budget: false,
+            supports_adaptive_thinking_budget: false,
+            tokenizer: None,
+            enabled,
+            is_custom: false,
+            pricing: None,
+            available_providers: Vec::new(),
+            selected_provider: None,
+            max_output_tokens: None,
+            provider_variants: Vec::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl ProviderTrait for LMStudioProvider {
+    fn name(&self) -> &'static str {
+        "lmstudio"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "LM Studio"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn ProviderTrait> {
+        Box::new(self.clone())
+    }
+
+    fn default_wire_format(&self) -> WireFormat {
+        WireFormat::OpenaiChatCompletions
+    }
+
+    fn model_filter_regex(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn provider_schema(&self) -> &'static str {
+        r#"
+fields:
+  endpoint:
+    f_type: string_long
+    f_desc: "LM Studio server endpoint"
+    f_placeholder: "http://localhost:1234"
+    f_label: "Endpoint"
+    f_default: "http://localhost:1234"
+  api_key:
+    f_type: string_long
+    f_desc: "API key (optional, for reverse proxy auth)"
+    f_placeholder: ""
+    f_label: "API Key"
+    f_default: ""
+description: |
+  Local LM Studio server for running models.
+available:
+  on_your_laptop_possible: true
+  when_isolated_possible: true
+"#
+    }
+
+    fn provider_settings_apply(&mut self, yaml: serde_yaml::Value) -> Result<(), String> {
+        if let Some(endpoint) = yaml.get("endpoint").and_then(|v| v.as_str()) {
+            self.endpoint = normalize_endpoint(endpoint);
+        } else if let Some(chat_ep) = yaml.get("chat_endpoint").and_then(|v| v.as_str()) {
+            if let Some(derived) = derive_endpoint_from_chat_url(chat_ep) {
+                self.endpoint = derived;
+            }
+        }
+        if let Some(api_key) = yaml.get("api_key").and_then(|v| v.as_str()) {
+            if api_key != "***" && api_key != "any-will-work" {
+                self.api_key = api_key.to_string();
+            }
+        }
+        if let Some(enabled) = yaml.get("enabled").and_then(|v| v.as_bool()) {
+            self.enabled = enabled;
+        }
+        parse_enabled_models(&yaml, &mut self.enabled_models);
+        parse_custom_models(&yaml, &mut self.custom_models);
+        Ok(())
+    }
+
+    fn provider_settings_as_json(&self) -> serde_json::Value {
+        json!({
+            "endpoint": self.endpoint,
+            "api_key": if self.api_key.is_empty() { "" } else { "***" },
+            "enabled": self.enabled,
+            "enabled_models": self.enabled_models,
+            "custom_models": self.custom_models
+        })
+    }
+
+    fn build_runtime(&self) -> Result<ProviderRuntime, String> {
+        let base_url = normalize_endpoint(&self.endpoint);
+
+        Ok(ProviderRuntime {
+            name: self.name().to_string(),
+            display_name: self.display_name().to_string(),
+            enabled: self.enabled && !self.endpoint.is_empty() && !self.enabled_models.is_empty(),
+            readonly: false,
+            wire_format: self.default_wire_format(),
+            chat_endpoint: format!("{}/v1/chat/completions", base_url),
+            completion_endpoint: format!("{}/v1/completions", base_url),
+            embedding_endpoint: format!("{}/v1/embeddings", base_url),
+            api_key: self.api_key.clone(),
+            auth_token: String::new(),
+            tokenizer_api_key: String::new(),
+            extra_headers: HashMap::new(),
+            support_metadata: false,
+            chat_models: Vec::new(),
+            completion_models: Vec::new(),
+            embedding_model: None,
+        })
+    }
+
+    fn has_credentials(&self) -> bool {
+        !self.endpoint.is_empty()
+    }
+
+    fn model_source(&self) -> ModelSource {
+        ModelSource::Api
+    }
+
+    fn enabled_models(&self) -> &[String] {
+        &self.enabled_models
+    }
+
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
+        &self.custom_models
+    }
+
+    fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
+        set_model_enabled_impl(&mut self.enabled_models, model_id, enabled);
+    }
+
+    fn add_custom_model(&mut self, model_id: String, config: CustomModelConfig) {
+        self.custom_models.insert(model_id, config);
+    }
+
+    fn remove_custom_model(&mut self, model_id: &str) -> bool {
+        self.custom_models.remove(model_id).is_some()
+    }
+
+    fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
+        self.custom_models.get(model_id).and_then(|c| c.pricing.clone())
+    }
+
+    async fn fetch_available_models(
+        &self,
+        http_client: &reqwest::Client,
+        _model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let base_url = normalize_endpoint(&self.endpoint);
+        let models_url = format!("{}/v1/models", base_url);
+
+        let mut request = http_client
+            .get(&models_url)
+            .timeout(std::time::Duration::from_secs(5));
+        if !self.api_key.is_empty() {
+            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", self.api_key));
+        }
+
+        let response = match request.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!("LM Studio: server not reachable at {}: {}", models_url, e);
+                return self.get_custom_models_only();
+            }
+        };
+
+        if !response.status().is_success() {
+            tracing::warn!("LM Studio: /v1/models returned status {}", response.status());
+            return self.get_custom_models_only();
+        }
+
+        let json: serde_json::Value = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("LM Studio: failed to parse /v1/models response: {}", e);
+                return self.get_custom_models_only();
+            }
+        };
+
+        let enabled_set: std::collections::HashSet<&str> =
+            self.enabled_models.iter().map(|s| s.as_str()).collect();
+
+        let mut models: Vec<AvailableModel> = json
+            .get("data")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        let id = m.get("id").and_then(|v| v.as_str())?;
+                        let enabled = enabled_set.contains(id);
+                        Self::parse_openai_model(m, enabled)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
+}

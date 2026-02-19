@@ -1,0 +1,18 @@
+schema_version: 1
+id: problems
+label: Find Problems
+auto_submit: true
+new_tab: true
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      ```
+      %CODE_SELECTION%
+      ```
+      Find potential problems: locks, initialization, security, type safety, faulty logic.
+      If there are no serious problems, tell briefly there are no problems.
+  - role: cd_instruction
+    content: |
+      Don't solve all problems at once, fix just one. Don't call any tools this time.

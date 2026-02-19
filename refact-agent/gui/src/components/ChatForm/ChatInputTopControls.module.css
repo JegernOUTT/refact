@@ -1,0 +1,56 @@
+/* Use shared iconButton with variants */
+.iconButton {
+  composes: iconButton from "../shared/iconButton.module.css";
+}
+
+.active {
+  composes: active from "../shared/iconButton.module.css";
+}
+
+.danger {
+  composes: danger from "../shared/iconButton.module.css";
+}
+
+.divider {
+  color: var(--gray-8);
+  font-size: 12px;
+  user-select: none;
+  margin: 0 var(--space-1);
+}
+
+.selectedLinesGroup {
+  height: 24px;
+}
+
+.lockButton,
+.helpButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--gray-10);
+  cursor: pointer;
+  transition: filter 0.15s ease;
+  flex-shrink: 0;
+}
+
+.lockButton svg,
+.helpButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.lockButton:hover:not(:disabled),
+.helpButton:hover:not(:disabled) {
+  filter: brightness(1.5);
+}
+
+.lockButton:disabled,
+.helpButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

@@ -1,0 +1,91 @@
+.indicator {
+  padding: 0;
+}
+
+.iconConnected {
+  color: var(--green-9);
+  width: 14px;
+  height: 14px;
+}
+
+.iconDisconnected {
+  color: var(--red-9);
+  width: 14px;
+  height: 14px;
+}
+
+.iconReconnecting {
+  color: var(--orange-9);
+  width: 14px;
+  height: 14px;
+  animation: spin 1s linear infinite;
+}
+
+.reconnectingPulse {
+  animation: reconnectingPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes reconnectingPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 140, 0, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(255, 140, 0, 0);
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Unified toolbar button style */
+.statusButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.statusButton.statusConnected:hover {
+  background: rgba(48, 164, 108, 0.15);
+}
+
+.statusButton.statusDisconnected:hover {
+  background: rgba(229, 72, 77, 0.15);
+}
+
+.statusButton.statusReconnecting:hover {
+  background: rgba(255, 140, 0, 0.15);
+}
+
+.statusButton.statusRefreshing:hover {
+  background: var(--gray-a3);
+}
+
+.statusButton:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: -2px;
+}
+
+.statusButton:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.statusButton:disabled:hover {
+  background: transparent;
+}

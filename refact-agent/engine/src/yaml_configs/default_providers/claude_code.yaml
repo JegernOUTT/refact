@@ -1,0 +1,5 @@
+wire_format: anthropic_messages
+chat_endpoint: https://api.anthropic.com/v1/messages
+supports_completion: false
+# Models are fetched dynamically from the Anthropic API
+# and matched against model_caps for capabilities.

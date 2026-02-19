@@ -14,7 +14,7 @@ use tracing::info;
 
 use crate::at_commands::execute_at::run_at_commands_locally;
 use crate::indexing_utils::wait_for_indexing_if_needed;
-use crate::postprocessing::pp_utils::pp_resolve_ctx_file_paths;
+use crate::postprocessing::pp_context_files::postprocess_context_files;
 use crate::tokens;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::execute_at::{execute_at_commands_in_query, parse_words_from_line};
@@ -23,11 +23,10 @@ use crate::caps::resolve_chat_model;
 use crate::custom_error::ScratchError;
 use crate::global_context::try_load_caps_quickly_if_not_present;
 use crate::global_context::GlobalContext;
-use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
+use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, deserialize_messages_from_post};
 use crate::at_commands::at_commands::filter_only_context_file_from_context_tool;
-use crate::http::routers::v1::chat::deserialize_messages_from_post;
+use crate::chat::get_or_create_session_with_trajectory;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
-
 
 #[derive(Serialize, Deserialize, Clone)]
 struct CommandCompletionPost {
@@ -86,36 +85,60 @@ pub async fn handle_v1_command_completion(
     Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-    let post = serde_json::from_slice::<CommandCompletionPost>(&body_bytes)
-        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e)))?;
+    let post = serde_json::from_slice::<CommandCompletionPost>(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
+    })?;
     let top_n = post.top_n;
 
     let fake_n_ctx = 4096;
-    let ccx: Arc<AMutex<AtCommandsContext>> = Arc::new(AMutex::new(AtCommandsContext::new(
-        global_context.clone(),
-        fake_n_ctx,
-        top_n,
-        true,
-        vec![],
-        "".to_string(),
-        false,
-        "".to_string(),
-    ).await));
+    let ccx: Arc<AMutex<AtCommandsContext>> = Arc::new(AMutex::new(
+        AtCommandsContext::new(
+            global_context.clone(),
+            fake_n_ctx,
+            top_n,
+            true,
+            vec![],
+            "".to_string(),
+            None,
+            "".to_string(),
+            None,
+        )
+        .await,
+    ));
 
     let at_commands = ccx.lock().await.at_commands.clone();
-    let at_command_names = at_commands.keys().map(|x|x.clone()).collect::<Vec<_>>();
+    let at_command_names = at_commands.keys().map(|x| x.clone()).collect::<Vec<_>>();
 
     let mut completions: Vec<String> = vec![];
-    let mut pos1 = -1; let mut pos2 = -1;
+    let mut pos1 = -1;
+    let mut pos2 = -1;
     let mut is_cmd_executable = false;
 
-    if let Ok((query_line_val, cursor_rel, cursor_line_start)) = get_line_with_cursor(&post.query, post.cursor) {
-        let query_line_val = query_line_val.chars().take(cursor_rel as usize).collect::<String>();
-        let args = query_line_args(&query_line_val, cursor_rel, cursor_line_start, &at_command_names);
+    if let Ok((query_line_val, cursor_rel, cursor_line_start)) =
+        get_line_with_cursor(&post.query, post.cursor)
+    {
+        let query_line_val = query_line_val
+            .chars()
+            .take(cursor_rel as usize)
+            .collect::<String>();
+        let args = query_line_args(
+            &query_line_val,
+            cursor_rel,
+            cursor_line_start,
+            &at_command_names,
+        );
         info!("args: {:?}", args);
-        (completions, is_cmd_executable, pos1, pos2) = command_completion(ccx.clone(), args,  post.cursor).await;
+        (completions, is_cmd_executable, pos1, pos2) =
+            command_completion(ccx.clone(), args, post.cursor).await;
     }
-    let completions: Vec<_> = completions.into_iter().unique().map(|x|format!("{} ", x)).collect();
+    let completions: Vec<_> = completions
+        .into_iter()
+        .unique()
+        .map(|x| format!("{} ", x))
+        .collect();
 
     let response = CommandCompletionResponse {
         completions,
@@ -129,15 +152,21 @@ pub async fn handle_v1_command_completion(
         .unwrap())
 }
 
-async fn count_tokens(tokenizer_arc: Option<Arc<Tokenizer>>, messages: &Vec<ChatMessage>) -> Result<u64, ScratchError> {
+async fn count_tokens(
+    tokenizer_arc: Option<Arc<Tokenizer>>,
+    messages: &Vec<ChatMessage>,
+) -> Result<u64, ScratchError> {
     let mut accum: u64 = 0;
 
     for message in messages {
-        accum += message.content.count_tokens(tokenizer_arc.clone(), &None)
+        accum += message
+            .content
+            .count_tokens(tokenizer_arc.clone(), &None)
             .map_err(|e| ScratchError {
                 status_code: StatusCode::INTERNAL_SERVER_ERROR,
                 message: format!("v1_chat_token_counter: count_tokens failed: {}", e),
-                telemetry_skip: false})? as u64;
+                telemetry_skip: false,
+            })? as u64;
     }
     Ok(accum)
 }
@@ -146,8 +175,12 @@ pub async fn handle_v1_command_preview(
     Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-    let post = serde_json::from_slice::<CommandPreviewPost>(&body_bytes)
-        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e)))?;
+    let post = serde_json::from_slice::<CommandPreviewPost>(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
+    })?;
     let mut messages = deserialize_messages_from_post(&post.messages)?;
 
     let last_message = messages.pop();
@@ -157,75 +190,95 @@ pub async fn handle_v1_command_preview(
             ChatContent::Multimodal(elements) => {
                 let mut query = String::new();
                 for element in elements {
-                    if element.is_text() { // use last text, but expected to be only one
+                    if element.is_text() {
+                        // use last text, but expected to be only one
                         query = element.m_content.clone();
                     }
                 }
                 query
+            }
+            ChatContent::ContextFiles(_) => {
+                // Context files don't contain user query text
+                String::new()
             }
         }
     } else {
         String::new()
     };
 
-    let caps = crate::global_context::try_load_caps_quickly_if_not_present(global_context.clone(), 0).await?;
+    let caps =
+        crate::global_context::try_load_caps_quickly_if_not_present(global_context.clone(), 0)
+            .await?;
     let model_rec = resolve_chat_model(caps, &post.model)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let tokenizer_arc = match tokens::cached_tokenizer(global_context.clone(), &model_rec.base).await {
-        Ok(x) => x,
-        Err(e) => {
-            tracing::error!(e);
-            return Err(ScratchError::new(StatusCode::BAD_REQUEST, e));
-        }
-    };
+    let tokenizer_arc =
+        match tokens::cached_tokenizer(global_context.clone(), &model_rec.base).await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(e);
+                return Err(ScratchError::new(StatusCode::BAD_REQUEST, e));
+            }
+        };
 
-    let ccx = Arc::new(AMutex::new(AtCommandsContext::new(
-        global_context.clone(),
-        model_rec.base.n_ctx,
-        crate::http::routers::v1::chat::CHAT_TOP_N,
-        true,
-        vec![],
-        "".to_string(),
-        false,
-        model_rec.base.id.clone(),
-    ).await));
+    let ccx = Arc::new(AMutex::new(
+        AtCommandsContext::new(
+            global_context.clone(),
+            model_rec.base.n_ctx,
+            crate::constants::CHAT_TOP_N,
+            true,
+            messages,
+            "".to_string(),
+            None,
+            model_rec.base.id.clone(),
+            None,
+        )
+        .await,
+    ));
 
-    let (messages_for_postprocessing, vec_highlights) = execute_at_commands_in_query(
-        ccx.clone(),
-        &mut query
-    ).await;
+    let (messages_for_postprocessing, vec_highlights) =
+        execute_at_commands_in_query(ccx.clone(), &mut query).await;
 
     let mut preview: Vec<ChatMessage> = vec![];
     for exec_result in messages_for_postprocessing.iter() {
-        // at commands exec() can produce both role="user" and role="assistant" messages
         if let ContextEnum::ChatMessage(raw_msg) = exec_result {
             preview.push(raw_msg.clone());
         }
     }
 
-    let mut pp_settings = {
-        let ccx_locked = ccx.lock().await;
-        ccx_locked.postprocess_parameters.clone()
-    };
-    if pp_settings.max_files_n == 0 {
-        pp_settings.max_files_n = crate::http::routers::v1::chat::CHAT_TOP_N;
-    }
-
-    let mut context_files = filter_only_context_file_from_context_tool(&messages_for_postprocessing);
-    let ctx_file_paths = pp_resolve_ctx_file_paths(global_context.clone(), &mut context_files).await;
-    for (context_file, (_, short_path)) in context_files.iter_mut().zip(ctx_file_paths.into_iter()) {
-        context_file.file_name = short_path;
-    }
+    let mut context_files =
+        filter_only_context_file_from_context_tool(&messages_for_postprocessing);
 
     if !context_files.is_empty() {
-        let message = ChatMessage {
-            role: "context_file".to_string(),
-            content: ChatContent::SimpleText(serde_json::to_string(&context_files).unwrap()),
-            tool_calls: None,
-            tool_call_id: "".to_string(),
-            ..Default::default()
+        let (gcx, mut pp_settings) = {
+            let ccx_locked = ccx.lock().await;
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.postprocess_parameters.clone(),
+            )
         };
-        preview.push(message.clone());
+
+        pp_settings.max_files_n = pp_settings.max_files_n.max(1);
+        pp_settings.use_ast_based_pp = false;
+
+        let tokens_limit = (model_rec.base.n_ctx / 4).max(256);
+        let (post_processed_files, _notes) = postprocess_context_files(
+            gcx.clone(),
+            &mut context_files,
+            tokenizer_arc.clone(),
+            tokens_limit,
+            false,
+            &pp_settings,
+        )
+        .await;
+
+        if !post_processed_files.is_empty() {
+            let message = ChatMessage {
+                role: "context_file".to_string(),
+                content: ChatContent::ContextFiles(post_processed_files),
+                ..Default::default()
+            };
+            preview.push(message);
+        }
     }
 
     let mut highlights = vec![];
@@ -241,13 +294,18 @@ pub async fn handle_v1_command_preview(
 
     let messages_to_count = if let Some(mut last_message) = last_message {
         match &mut last_message.content {
-            ChatContent::SimpleText(_) => {last_message.content = ChatContent::SimpleText(query.clone());}
+            ChatContent::SimpleText(_) => {
+                last_message.content = ChatContent::SimpleText(query.clone());
+            }
             ChatContent::Multimodal(elements) => {
                 for elem in elements {
                     if elem.is_text() {
                         elem.m_content = query.clone();
                     }
                 }
+            }
+            ChatContent::ContextFiles(_) => {
+                // Context files are not user queries, leave unchanged
             }
         };
         itertools::concat(vec![preview.clone(), vec![last_message]])
@@ -258,10 +316,13 @@ pub async fn handle_v1_command_preview(
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .body(Body::from(serde_json::to_string_pretty(
-            &json!({"messages": preview, "model": model_rec.base.id, "highlight": highlights,
-                "current_context": tokens_number, "number_context": model_rec.base.n_ctx})
-        ).unwrap()))
+        .body(Body::from(
+            serde_json::to_string_pretty(
+                &json!({"messages": preview, "model": model_rec.base.id, "highlight": highlights,
+                "current_context": tokens_number, "number_context": model_rec.base.n_ctx}),
+            )
+            .unwrap(),
+        ))
         .unwrap())
 }
 
@@ -271,38 +332,75 @@ pub async fn handle_v1_at_command_execute(
 ) -> Result<Response<Body>, ScratchError> {
     wait_for_indexing_if_needed(global_context.clone()).await;
 
-    let post = serde_json::from_slice::<CommandExecutePost>(&body_bytes)
-        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e)))?;
+    let post = serde_json::from_slice::<CommandExecutePost>(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
+    })?;
 
     let caps = try_load_caps_quickly_if_not_present(global_context.clone(), 0).await?;
     let model_rec = resolve_chat_model(caps, &post.model_name)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let tokenizer = tokens::cached_tokenizer(global_context.clone(), &model_rec.base).await
+    let tokenizer = tokens::cached_tokenizer(global_context.clone(), &model_rec.base)
+        .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let effective_n_ctx = post.n_ctx.min(model_rec.base.n_ctx).max(1);
 
     let mut ccx = AtCommandsContext::new(
         global_context.clone(),
-        post.n_ctx,
-        crate::http::routers::v1::chat::CHAT_TOP_N,
-        true,
-        vec![],
-        "".to_string(),
+        effective_n_ctx,
+        crate::constants::CHAT_TOP_N,
         false,
+        post.messages.clone(),
+        post.chat_id.clone(),
+        None,
         model_rec.base.id.clone(),
-    ).await;
+        None,
+    )
+    .await;
     ccx.subchat_tool_parameters = post.subchat_tool_parameters.clone();
     ccx.postprocess_parameters = post.postprocess_parameters.clone();
     let ccx_arc = Arc::new(AMutex::new(ccx));
 
     let mut has_rag_results = HasRagResults::new();
     let (messages, any_context_produced) = run_at_commands_locally(
-        ccx_arc.clone(), tokenizer.clone(), post.maxgen, post.messages, &mut has_rag_results).await;
+        ccx_arc.clone(),
+        tokenizer.clone(),
+        post.maxgen,
+        post.messages.clone(),
+        &mut has_rag_results,
+    )
+    .await;
     let messages_to_stream_back = has_rag_results.in_json;
-    let undroppable_msg_number = messages.iter().rposition(|msg| msg.role == "user").unwrap_or(0);
+
+    if !post.chat_id.is_empty() && any_context_produced {
+        let sessions = global_context.read().await.chat_sessions.clone();
+        let session_arc = get_or_create_session_with_trajectory(
+            global_context.clone(),
+            &sessions,
+            &post.chat_id,
+        ).await;
+        let mut session = session_arc.lock().await;
+        let original_len = post.messages.len();
+        for msg in messages.iter().skip(original_len) {
+            session.add_message(msg.clone());
+        }
+    }
+
+    let undroppable_msg_number = messages
+        .iter()
+        .rposition(|msg| msg.role == "user")
+        .unwrap_or(0);
 
     let response = CommandExecuteResponse {
-        messages, messages_to_stream_back, undroppable_msg_number, any_context_produced };
+        messages,
+        messages_to_stream_back,
+        undroppable_msg_number,
+        any_context_produced,
+    };
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -320,37 +418,55 @@ fn get_line_with_cursor(query: &String, cursor: i64) -> Result<(String, i64, i64
         }
         cursor_rel -= line_length + 1; // +1 to account for the newline character
     }
-    return Err(ScratchError::new(StatusCode::EXPECTATION_FAILED, "incorrect cursor provided".to_string()));
+    return Err(ScratchError::new(
+        StatusCode::EXPECTATION_FAILED,
+        "incorrect cursor provided".to_string(),
+    ));
 }
 
 async fn command_completion(
     ccx: Arc<AMutex<AtCommandsContext>>,
     args: Vec<QueryLineArg>,
     cursor_abs: i64,
-) -> (Vec<String>, bool, i64, i64) {    // returns ([possible, completions], good_as_it_is)
+) -> (Vec<String>, bool, i64, i64) {
+    // returns ([possible, completions], good_as_it_is)
     let mut args = args;
     let at_commands = ccx.lock().await.at_commands.clone();
-    let at_command_names = at_commands.keys().map(|x|x.clone()).collect::<Vec<_>>();
+    let at_command_names = at_commands.keys().map(|x| x.clone()).collect::<Vec<_>>();
 
-    let q_cmd_with_index = args.iter().enumerate().find_map(|(index, x)| {
-        x.value.starts_with("@").then(|| (x, index))
-    });
+    let q_cmd_with_index = args
+        .iter()
+        .enumerate()
+        .find_map(|(index, x)| x.value.starts_with("@").then(|| (x, index)));
     let (q_cmd, q_cmd_idx) = match q_cmd_with_index {
         Some((x, idx)) => (x.clone(), idx),
         None => return (vec![], false, -1, -1),
     };
 
-    let cmd = match at_command_names.iter().find(|x|x == &&q_cmd.value).and_then(|x| at_commands.get(x)) {
+    let cmd = match at_command_names
+        .iter()
+        .find(|x| x == &&q_cmd.value)
+        .and_then(|x| at_commands.get(x))
+    {
         Some(x) => x,
         None => {
             return if !q_cmd.focused {
                 (vec![], false, -1, -1)
             } else {
-                (command_completion_options(ccx.clone(), &q_cmd.value).await, false, q_cmd.pos1, q_cmd.pos2)
+                (
+                    command_completion_options(ccx.clone(), &q_cmd.value).await,
+                    false,
+                    q_cmd.pos1,
+                    q_cmd.pos2,
+                )
             }
         }
     };
-    args = args.iter().skip(q_cmd_idx + 1).map(|x|x.clone()).collect::<Vec<_>>();
+    args = args
+        .iter()
+        .skip(q_cmd_idx + 1)
+        .map(|x| x.clone())
+        .collect::<Vec<_>>();
     let cmd_params_cnt = cmd.params().len();
     args.truncate(cmd_params_cnt);
 
@@ -360,13 +476,23 @@ async fn command_completion(
         let is_valid = param.is_value_valid(ccx.clone(), &arg.value).await;
         if !is_valid {
             return if arg.focused {
-                (param.param_completion(ccx.clone(), &arg.value).await, can_execute, arg.pos1, arg.pos2)
+                (
+                    param.param_completion(ccx.clone(), &arg.value).await,
+                    can_execute,
+                    arg.pos1,
+                    arg.pos2,
+                )
             } else {
                 (vec![], false, -1, -1)
-            }
+            };
         }
         if is_valid && arg.focused && param.param_completion_valid() {
-            return (param.param_completion(ccx.clone(), &arg.value).await, can_execute, arg.pos1, arg.pos2);
+            return (
+                param.param_completion(ccx.clone(), &arg.value).await,
+                can_execute,
+                arg.pos1,
+                arg.pos2,
+            );
         }
     }
 
@@ -378,8 +504,13 @@ async fn command_completion(
     if !q_cmd.focused {
         match cmd.params().get(args.len()) {
             Some(param) => {
-                return (param.param_completion(ccx.clone(), &"".to_string()).await, false, cursor_abs, cursor_abs);
-            },
+                return (
+                    param.param_completion(ccx.clone(), &"".to_string()).await,
+                    false,
+                    cursor_abs,
+                    cursor_abs,
+                );
+            }
             None => {}
         }
     }
@@ -392,13 +523,11 @@ async fn command_completion_options(
     q_cmd: &String,
 ) -> Vec<String> {
     let at_commands = ccx.lock().await.at_commands.clone();
-    let at_command_names = at_commands.keys().map(|x|x.clone()).collect::<Vec<_>>();
+    let at_command_names = at_commands.keys().map(|x| x.clone()).collect::<Vec<_>>();
     at_command_names
         .iter()
         .filter(|command| command.starts_with(q_cmd))
-        .map(|command| {
-            (command.to_string(), jaro_winkler(&command, q_cmd))
-        })
+        .map(|command| (command.to_string(), jaro_winkler(&command, q_cmd)))
         .sorted_by(|(_, dist1), (_, dist2)| dist1.partial_cmp(dist2).unwrap())
         .rev()
         .take(5)
@@ -406,15 +535,25 @@ async fn command_completion_options(
         .collect()
 }
 
-pub fn query_line_args(line: &String, cursor_rel: i64, cursor_line_start: i64, at_command_names: &Vec<String>) -> Vec<QueryLineArg> {
+pub fn query_line_args(
+    line: &String,
+    cursor_rel: i64,
+    cursor_line_start: i64,
+    at_command_names: &Vec<String>,
+) -> Vec<QueryLineArg> {
     let mut args: Vec<QueryLineArg> = vec![];
     for (text, pos1, pos2) in parse_words_from_line(line).iter().rev().cloned() {
-        if at_command_names.contains(&text) && args.iter().any(|x|(x.value.contains("@") && x.focused) || at_command_names.contains(&x.value)) {
+        if at_command_names.contains(&text)
+            && args.iter().any(|x| {
+                (x.value.contains("@") && x.focused) || at_command_names.contains(&x.value)
+            })
+        {
             break;
         }
         let mut x = QueryLineArg {
             value: text.clone(),
-            pos1: pos1 as i64, pos2: pos2 as i64,
+            pos1: pos1 as i64,
+            pos2: pos2 as i64,
             focused: false,
         };
         x.focused = cursor_rel >= x.pos1 && cursor_rel <= x.pos2;

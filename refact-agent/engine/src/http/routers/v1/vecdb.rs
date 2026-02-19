@@ -7,7 +7,6 @@ use crate::custom_error::ScratchError;
 use crate::global_context::SharedGlobalContext;
 use crate::vecdb::vdb_structs::VecdbSearch;
 
-
 #[derive(Serialize, Deserialize, Clone)]
 struct VecDBPost {
     query: String,
@@ -16,21 +15,23 @@ struct VecDBPost {
 
 const NO_VECDB: &str = "Vector db is not running, check if you have --vecdb parameter and a vectorization model is running on server side.";
 
-
 pub async fn handle_v1_vecdb_search(
     Extension(gcx): Extension<SharedGlobalContext>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-    let post = serde_json::from_slice::<VecDBPost>(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e))
-    })?;
+    let post = serde_json::from_slice::<VecDBPost>(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
 
     let vec_db = gcx.read().await.vec_db.clone();
     let search_res = match *vec_db.lock().await {
-        Some(ref db) => db.vecdb_search(post.query.to_string(), post.top_n, None).await,
+        Some(ref db) => {
+            db.vecdb_search(post.query.to_string(), post.top_n, None)
+                .await
+        }
         None => {
             return Err(ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR, NO_VECDB.to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                NO_VECDB.to_string(),
             ));
         }
     };
@@ -38,19 +39,19 @@ pub async fn handle_v1_vecdb_search(
     match search_res {
         Ok(search_res) => {
             let json_string = serde_json::to_string_pretty(&search_res).map_err(|e| {
-                ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization problem: {}", e))
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("JSON serialization problem: {}", e),
+                )
             })?;
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .body(Body::from(json_string))
                 .unwrap())
         }
-        Err(e) => {
-            Err(ScratchError::new(StatusCode::BAD_REQUEST, e))
-        }
+        Err(e) => Err(ScratchError::new(StatusCode::BAD_REQUEST, e)),
     }
 }
-
 
 pub async fn handle_v1_vecdb_status(
     Extension(gcx): Extension<SharedGlobalContext>,
@@ -69,4 +70,3 @@ pub async fn handle_v1_vecdb_status(
         .body(Body::from(status_str))
         .unwrap())
 }
-

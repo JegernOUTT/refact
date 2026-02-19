@@ -6,10 +6,11 @@ import {
   selectIsStreaming,
   selectIsWaiting,
   selectMessages,
-  selectThreadToolUse,
+  selectThreadMode,
 } from "../../features/Chat";
 import { getErrorMessage } from "../../features/Errors/errorsSlice";
 import { getInformationMessage } from "../../features/Errors/informationSlice";
+import { useGetChatModesQuery } from "../../services/refact/chatModes";
 
 export const UncommittedChangesWarning: React.FC = () => {
   const isStreaming = useAppSelector(selectIsStreaming);
@@ -17,15 +18,23 @@ export const UncommittedChangesWarning: React.FC = () => {
   const linksRequest = useGetLinksFromLsp();
   const error = useAppSelector(getErrorMessage);
   const information = useAppSelector(getInformationMessage);
-  const toolUse = useAppSelector(selectThreadToolUse);
+  const currentMode = useAppSelector(selectThreadMode);
   const messages = useAppSelector(selectMessages);
+  const modesQuery = useGetChatModesQuery(undefined);
+
+  const modeHasEditing = React.useMemo(() => {
+    if (!modesQuery.data?.modes) return false;
+    const modeInfo = modesQuery.data.modes.find((m) => m.id === currentMode);
+    if (!modeInfo) return currentMode === "agent";
+    return modeInfo.ui.tags.includes("editing");
+  }, [modesQuery.data?.modes, currentMode]);
 
   const hasCallout = React.useMemo(() => {
     return !!error || !!information;
   }, [error, information]);
 
   if (
-    toolUse !== "agent" ||
+    !modeHasEditing ||
     messages.length !== 0 ||
     hasCallout ||
     isStreaming ||

@@ -2,15 +2,10 @@ import { http, HttpResponse, type HttpHandler } from "msw";
 import { EMPTY_CAPS_RESPONSE, STUB_CAPS_RESPONSE } from "./caps";
 import { SYSTEM_PROMPTS } from "./prompts";
 import { STUB_LINKS_FOR_CHAT_RESPONSE } from "./chat_links_response";
-import {
-  TOOLS,
-  CHAT_LINKS_URL,
-  KNOWLEDGE_CREATE_URL,
-} from "../services/refact/consts";
+import { TOOLS, CHAT_LINKS_URL } from "../services/refact/consts";
 import { STUB_TOOL_RESPONSE } from "./tools_response";
 import { GoodPollingResponse } from "../services/smallcloud/types";
 import type { LinksForChatResponse } from "../services/refact/links";
-import { SaveTrajectoryResponse } from "../services/refact/knowledge";
 import { ToolConfirmationResponse } from "../services/refact";
 
 export const goodPing: HttpHandler = http.get(
@@ -136,17 +131,6 @@ export const goodTools: HttpHandler = http.get(
   },
 );
 
-export const makeKnowledgeFromChat: HttpHandler = http.post(
-  `http://127.0.0.1:8001${KNOWLEDGE_CREATE_URL}`,
-  () => {
-    const result: SaveTrajectoryResponse = {
-      memid: "foo",
-      trajectory: "something",
-    };
-    return HttpResponse.json(result);
-  },
-);
-
 export const loginPollingGood: HttpHandler = http.get(
   "https://www.smallcloud.ai/v1/streamlined-login-recall-ticket",
   () => {
@@ -233,5 +217,104 @@ export const ToolConfirmation = http.post(
     };
 
     return HttpResponse.json(response);
+  },
+);
+
+export const emptyTrajectories: HttpHandler = http.get(
+  "http://127.0.0.1:8001/v1/trajectories",
+  () => {
+    return HttpResponse.json([]);
+  },
+);
+
+export const trajectoryGet: HttpHandler = http.get(
+  "http://127.0.0.1:8001/v1/trajectories/:id",
+  () => {
+    return HttpResponse.json({ status: "not_found" }, { status: 404 });
+  },
+);
+
+export const trajectorySave: HttpHandler = http.put(
+  "http://127.0.0.1:8001/v1/trajectories/:id",
+  () => {
+    return HttpResponse.json({ status: "ok" });
+  },
+);
+
+export const trajectoryDelete: HttpHandler = http.delete(
+  "http://127.0.0.1:8001/v1/trajectories/:id",
+  () => {
+    return HttpResponse.json({ status: "ok" });
+  },
+);
+
+// Chat Session (Stateless Trajectory UI) handlers
+export const chatSessionSubscribe: HttpHandler = http.get(
+  "http://127.0.0.1:8001/v1/chats/subscribe",
+  () => {
+    // Return an SSE stream that immediately closes (no events)
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        // Send a comment to keep connection alive, then close
+        controller.enqueue(encoder.encode(": keep-alive\n\n"));
+        // Don't close - let the client handle disconnection
+      },
+    });
+    return new HttpResponse(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  },
+);
+
+export const chatSessionCommand: HttpHandler = http.post(
+  "http://127.0.0.1:8001/v1/chats/:id/commands",
+  () => {
+    return HttpResponse.json({ status: "queued" });
+  },
+);
+
+export const chatSessionAbort: HttpHandler = http.post(
+  "http://127.0.0.1:8001/v1/chats/:id/abort",
+  () => {
+    return HttpResponse.json({ status: "ok" });
+  },
+);
+
+// Sidebar subscription endpoint (SSE)
+export const sidebarSubscribe: HttpHandler = http.get(
+  "http://127.0.0.1:8001/v1/sidebar/subscribe",
+  () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        // Send initial snapshot with empty data
+        const snapshot = JSON.stringify({
+          category: "snapshot",
+          trajectories: [],
+          tasks: [],
+        });
+        controller.enqueue(encoder.encode(`data: ${snapshot}\n\n`));
+      },
+    });
+    return new HttpResponse(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  },
+);
+
+// Tasks list endpoint
+export const emptyTasks: HttpHandler = http.get(
+  "http://127.0.0.1:8001/v1/tasks",
+  () => {
+    return HttpResponse.json([]);
   },
 );

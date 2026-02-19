@@ -2,12 +2,19 @@
   overflow-wrap: anywhere;
 }
 
+.compactTrigger {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  padding-block: 0;
+}
+
 .content {
   /* JB doesn't support dvw yet */
   max-width: 50vw;
   max-width: 80dvw;
   max-height: 300px;
-  z-index: 9999;
+  z-index: var(--z-dropdown, 100);
 }
 
 /* Show only plain text in trigger, hide rich content */
@@ -23,7 +30,7 @@
 /* Fix Radix Themes Select - remove inner scrollbars */
 :global(.rt-SelectContent) {
   max-height: 400px;
-  z-index: 9999;
+  z-index: var(--z-dropdown, 100);
 }
 
 :global(.rt-SelectContent [data-radix-scroll-area-viewport]) {
@@ -38,12 +45,13 @@
   position: relative;
 }
 
-/* Fix checkmark indicator positioning */
+/* Fix checkmark indicator positioning - vertically centered */
 :global(.rt-SelectItem .rt-SelectItemIndicator),
 :global(.rt-SelectItem [data-state]) {
   position: absolute;
   left: 8px;
-  top: 8px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 :global(.rt-SelectViewport) {

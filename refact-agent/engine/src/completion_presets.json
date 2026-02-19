@@ -1,0 +1,122 @@
+{
+    "completion_models": {
+        "starcoder": {
+            "n_ctx": 4096,
+            "scratchpad_patch": {
+                "context_format": "starcoder",
+                "rag_ratio": 0.5
+            },
+            "scratchpad": "FIM-PSM",
+            "tokenizer": "hf://bigcode/starcoder2-3b",
+            "similar_models": [
+                "bigcode/starcoder",
+                "bigcode/starcoderbase",
+                "starcoder/15b/base",
+                "starcoder/15b/plus",
+                "starcoder/1b/base",
+                "starcoder/3b/base",
+                "starcoder/7b/base",
+                "wizardcoder/15b",
+                "starcoder/1b/vllm",
+                "starcoder/3b/vllm",
+                "starcoder/7b/vllm",
+                "starcoder2/3b/base",
+                "starcoder2/7b/base",
+                "starcoder2/15b/base",
+                "starcoder2/3b/vllm",
+                "starcoder2/7b/vllm",
+                "starcoder2/15b/vllm",
+                "starcoder2/3b/neuron",
+                "starcoder2/7b/neuron",
+                "starcoder2/15b/neuron",
+                "starcoder2/3b",
+                "starcoder2/7b",
+                "starcoder2/15b",
+                "bigcode/starcoder2-3b",
+                "bigcode/starcoder2-7b",
+                "bigcode/starcoder2-15b"
+            ]
+        },
+        "smallcloudai/Refact-1_6B-fim": {
+            "n_ctx": 4096,
+            "tokenizer": "hf://smallcloudai/Refact-1_6B-fim",
+            "scratchpad": "FIM-SPM",
+            "similar_models": [
+                "Refact/1.6B",
+                "Refact/1.6B/vllm"
+            ]
+        },
+        "codellama/CodeLlama-13b-hf": {
+            "n_ctx": 4096,
+            "scratchpad_patch": {
+                "fim_prefix": "<PRE>",
+                "fim_suffix": "<SUF>",
+                "fim_middle": "<MID>",
+                "eot": "<EOT>",
+                "eos": "</s>"
+            },
+            "scratchpad": "FIM-PSM",
+            "tokenizer": "hf://codellama/CodeLlama-13b-hf",
+            "similar_models": [
+                "codellama/7b"
+            ]
+        },
+        "deepseek-coder": {
+            "n_ctx": 4096,
+            "scratchpad_patch": {
+                "fim_prefix": "<｜fim▁begin｜>",
+                "fim_suffix": "<｜fim▁hole｜>",
+                "fim_middle": "<｜fim▁end｜>",
+                "eot": "<|EOT|>"
+            },
+            "scratchpad": "FIM-PSM",
+            "tokenizer": "hf://deepseek-ai/deepseek-coder-1.3b-base",
+            "similar_models": [
+                "deepseek-coder/1.3b/base",
+                "deepseek-coder/5.7b/mqa-base",
+                "deepseek-coder/1.3b/vllm",
+                "deepseek-coder/5.7b/vllm",
+                "deepseek-ai/deepseek-coder-1.3b-base"
+            ]
+        },
+        "stable/3b/code": {
+            "n_ctx": 4096,
+            "scratchpad": "FIM-PSM",
+            "tokenizer": "hf://stabilityai/stable-code-3b",
+            "similar_models": []
+        },
+        "qwen2.5-coder-base": {
+            "n_ctx": 8192,
+            "scratchpad_patch": {
+                "fim_prefix": "<|fim_prefix|>",
+                "fim_suffix": "<|fim_suffix|>",
+                "fim_middle": "<|fim_middle|>",
+                "eot": "<|endoftext|>",
+                "extra_stop_tokens": [
+                    "<|repo_name|>",
+                    "<|file_sep|>",
+                    "<|fim_pad|>",
+                    "<|cursor|>"
+                ],
+                "context_format": "qwen2.5",
+                "rag_ratio": 0.5
+            },
+            "tokenizer": "hf://Qwen/Qwen2.5-Coder-0.5B",
+            "scratchpad": "FIM-PSM",
+            "similar_models": [
+                "qwen2.5/coder/0.5b/base",
+                "qwen2.5/coder/1.5b/base",
+                "qwen2.5/coder/3b/base",
+                "qwen2.5/coder/7b/base",
+                "qwen2.5/coder/14b/base",
+                "qwen2.5/coder/32b/base",
+                "qwen2.5/coder/0.5b/base/vllm",
+                "qwen2.5/coder/1.5b/base/vllm",
+                "qwen2.5/coder/3b/base/vllm",
+                "qwen2.5/coder/7b/base/vllm",
+                "qwen2.5/coder/14b/base/vllm",
+                "qwen2.5/coder/32b/base/vllm"
+            ]
+        }
+    }
+}

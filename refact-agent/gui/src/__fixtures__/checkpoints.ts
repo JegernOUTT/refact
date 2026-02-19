@@ -6,6 +6,8 @@ export const STUB_PREVIEWED_CHECKPOINT_DATA: CheckpointsMeta["latestCheckpointRe
     current_checkpoints: [],
     checkpoints_for_undo: [],
     error_log: [],
+    chat_id: "test-chat-id",
+    chat_mode: "agent",
     reverted_changes: [
       {
         files_changed: [
@@ -46,5 +48,7 @@ export const STUB_RESTORED_CHECKPOINTS_STATE_WITH_NO_CHANGES: CheckpointsMeta =
       current_checkpoints: [],
       reverted_changes: [],
       error_log: [],
+      chat_id: "test-chat-id-2",
+      chat_mode: "agent",
     },
   };

@@ -1,11 +1,12 @@
 import { providersApi } from "../services/refact";
+import { useAppSelector } from "./useAppSelector";
+import { selectBackendStatus } from "../features/Connection";
 
 export function useGetConfiguredProvidersQuery() {
-  return providersApi.useGetConfiguredProvidersQuery(undefined);
-}
-
-export function useGetProviderTemplatesQuery() {
-  return providersApi.useGetProviderTemplatesQuery(undefined);
+  const backendStatus = useAppSelector(selectBackendStatus);
+  return providersApi.useGetConfiguredProvidersQuery(undefined, {
+    skip: backendStatus === "unknown",
+  });
 }
 
 export function useGetProviderQuery({
@@ -16,12 +17,34 @@ export function useGetProviderQuery({
   return providersApi.useGetProviderQuery({ providerName });
 }
 
+export function useGetProviderSchemaQuery({
+  providerName,
+}: {
+  providerName: string;
+}) {
+  return providersApi.useGetProviderSchemaQuery({ providerName });
+}
+
+export function useGetProviderModelsQuery({
+  providerName,
+}: {
+  providerName: string;
+}) {
+  return providersApi.useGetProviderModelsQuery({ providerName });
+}
+
 export function useUpdateProviderMutation() {
-  const [mutationTrigger] = providersApi.useUpdateProviderMutation();
-  return mutationTrigger;
+  return providersApi.useUpdateProviderMutation();
 }
 
 export function useDeleteProviderMutation() {
-  const [mutationTrigger] = providersApi.useDeleteProviderMutation();
-  return mutationTrigger;
+  return providersApi.useDeleteProviderMutation();
+}
+
+export function useGetDefaultsQuery() {
+  return providersApi.useGetDefaultsQuery(undefined);
+}
+
+export function useUpdateDefaultsMutation() {
+  return providersApi.useUpdateDefaultsMutation();
 }

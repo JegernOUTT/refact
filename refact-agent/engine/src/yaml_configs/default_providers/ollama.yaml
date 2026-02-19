@@ -1,5 +1,6 @@
+wire_format: openai_chat_completions
 completion_endpoint: "http://localhost:11434/v1/completions"
-chat_endpoint:       "http://localhost:11434/v1/chat/completions"
+chat_endpoint: "http://localhost:11434/v1/chat/completions"
 supports_completion: true
 
 api_key: any-will-work

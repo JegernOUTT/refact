@@ -1,5 +1,6 @@
 import { combineSlices, configureStore } from "@reduxjs/toolkit";
 import { storage } from "./storage";
+import { pruneStaleDraftMessages } from "../utils/threadStorage";
 import {
   FLUSH,
   PAUSE,
@@ -11,6 +12,7 @@ import {
   persistStore,
 } from "redux-persist";
 import { statisticsApi } from "../services/refact/statistics";
+import { statsApi } from "../services/refact/stats";
 import {
   capsApi,
   promptsApi,
@@ -19,16 +21,22 @@ import {
   pathApi,
   pingApi,
   integrationsApi,
-  dockerApi,
   telemetryApi,
   knowledgeApi,
+  knowledgeGraphApi,
   providersApi,
   modelsApi,
   teamsApi,
+  trajectoriesApi,
+  trajectoryApi,
+  tasksApi,
+  browserApi,
 } from "../services/refact";
+import { chatModesApi } from "../services/refact/chatModes";
+import { customizationApi } from "../services/refact/customization";
+import { projectInformationApi } from "../services/refact/projectInformation";
 import { smallCloudApi } from "../services/smallcloud";
 import { reducer as fimReducer } from "../features/FIM/reducer";
-import { tourReducer } from "../features/Tour";
 import { tipOfTheDaySlice } from "../features/TipOfTheDay";
 import { reducer as configReducer } from "../features/Config/configSlice";
 import { activeFileReducer } from "../features/Chat/activeFile";
@@ -44,8 +52,6 @@ import { pagesSlice } from "../features/Pages/pagesSlice";
 import mergeInitialState from "redux-persist/lib/stateReconciler/autoMergeLevel2";
 import { listenerMiddleware } from "./middleware";
 import { informationSlice } from "../features/Errors/informationSlice";
-import { confirmationSlice } from "../features/ToolConfirmation/confirmationSlice";
-import { attachedImagesSlice } from "../features/AttachedImages";
 import { teamsSlice } from "../features/Teams";
 import { userSurveySlice } from "../features/UserSurvey/userSurveySlice";
 import { linksApi } from "../services/refact/links";
@@ -55,6 +61,9 @@ import { checkpointsSlice } from "../features/Checkpoints/checkpointsSlice";
 import { checkpointsApi } from "../services/refact/checkpoints";
 import { patchesAndDiffsTrackerSlice } from "../features/PatchesAndDiffsTracker/patchesAndDiffsTrackerSlice";
 import { coinBallanceSlice } from "../features/CoinBalance";
+import { tasksSlice } from "../features/Tasks";
+import { connectionSlice } from "../features/Connection";
+import { browserSlice } from "../features/Browser";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -72,7 +81,6 @@ const persistedTipOfTheDayReducer = persistReducer<
 const rootReducer = combineSlices(
   {
     fim: fimReducer,
-    tour: tourReducer,
     // tipOfTheDay: persistedTipOfTheDayReducer,
     [tipOfTheDaySlice.reducerPath]: persistedTipOfTheDayReducer,
     config: configReducer,
@@ -81,6 +89,7 @@ const rootReducer = combineSlices(
     selected_snippet: selectedSnippetReducer,
     chat: chatReducer,
     [statisticsApi.reducerPath]: statisticsApi.reducer,
+    [statsApi.reducerPath]: statsApi.reducer,
     [capsApi.reducerPath]: capsApi.reducer,
     [promptsApi.reducerPath]: promptsApi.reducer,
     [toolsApi.reducerPath]: toolsApi.reducer,
@@ -92,30 +101,38 @@ const rootReducer = combineSlices(
     [checkpointsApi.reducerPath]: checkpointsApi.reducer,
     [telemetryApi.reducerPath]: telemetryApi.reducer,
     [knowledgeApi.reducerPath]: knowledgeApi.reducer,
+    [knowledgeGraphApi.reducerPath]: knowledgeGraphApi.reducer,
     [teamsApi.reducerPath]: teamsApi.reducer,
     [providersApi.reducerPath]: providersApi.reducer,
     [modelsApi.reducerPath]: modelsApi.reducer,
+    [trajectoriesApi.reducerPath]: trajectoriesApi.reducer,
+    [trajectoryApi.reducerPath]: trajectoryApi.reducer,
+    [tasksApi.reducerPath]: tasksApi.reducer,
+    [browserApi.reducerPath]: browserApi.reducer,
+    [chatModesApi.reducerPath]: chatModesApi.reducer,
+    [customizationApi.reducerPath]: customizationApi.reducer,
+    [projectInformationApi.reducerPath]: projectInformationApi.reducer,
   },
   historySlice,
   errorSlice,
   informationSlice,
   pagesSlice,
   integrationsApi,
-  dockerApi,
-  confirmationSlice,
-  attachedImagesSlice,
   userSurveySlice,
   teamsSlice,
   integrationsSlice,
   checkpointsSlice,
   patchesAndDiffsTrackerSlice,
   coinBallanceSlice,
+  tasksSlice,
+  connectionSlice,
+  browserSlice,
 );
 
 const rootPersistConfig = {
   key: "root",
   storage: storage(),
-  whitelist: [historySlice.reducerPath, "tour", userSurveySlice.reducerPath],
+  whitelist: [userSurveySlice.reducerPath],
   stateReconciler: mergeInitialState,
 };
 
@@ -159,36 +176,44 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
             },
           });
 
-      return (
-        middleware
-          .prepend(
-            pingApi.middleware,
-            statisticsApi.middleware,
-            capsApi.middleware,
-            promptsApi.middleware,
-            toolsApi.middleware,
-            commandsApi.middleware,
-            smallCloudApi.middleware,
-            pathApi.middleware,
-            linksApi.middleware,
-            integrationsApi.middleware,
-            dockerApi.middleware,
-            checkpointsApi.middleware,
-            telemetryApi.middleware,
-            knowledgeApi.middleware,
-            providersApi.middleware,
-            modelsApi.middleware,
-            teamsApi.middleware,
-          )
-          .prepend(historyMiddleware.middleware)
-          // .prepend(errorMiddleware.middleware)
-          .prepend(listenerMiddleware.middleware)
-      );
+      return middleware
+        .prepend(
+          pingApi.middleware,
+          statisticsApi.middleware,
+          statsApi.middleware,
+          capsApi.middleware,
+          promptsApi.middleware,
+          toolsApi.middleware,
+          commandsApi.middleware,
+          smallCloudApi.middleware,
+          pathApi.middleware,
+          linksApi.middleware,
+          integrationsApi.middleware,
+          checkpointsApi.middleware,
+          telemetryApi.middleware,
+          knowledgeApi.middleware,
+          knowledgeGraphApi.middleware,
+          providersApi.middleware,
+          modelsApi.middleware,
+          teamsApi.middleware,
+          trajectoriesApi.middleware,
+          trajectoryApi.middleware,
+          tasksApi.middleware,
+          browserApi.middleware,
+          chatModesApi.middleware,
+          customizationApi.middleware,
+          projectInformationApi.middleware,
+        )
+        .prepend(historyMiddleware.middleware)
+        .prepend(listenerMiddleware.middleware);
     },
   });
 
   return store;
 }
+
+pruneStaleDraftMessages();
+
 export const store = setUpStore();
 export type Store = typeof store;
 

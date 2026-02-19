@@ -56,7 +56,7 @@ impl ScratchError {
 #[derive(Serialize, Default)]
 pub struct YamlError {
     pub path: String,
-    pub error_line: usize,  // starts with 1, zero if invalid
+    pub error_line: usize, // starts with 1, zero if invalid
     pub error_msg: String,
 }
 

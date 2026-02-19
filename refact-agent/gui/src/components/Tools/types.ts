@@ -7,6 +7,9 @@ export const TEXTDOC_TOOL_NAMES = [
   "replace_textdoc",
   "update_textdoc_regex",
   "update_textdoc_by_lines",
+  "update_textdoc_anchored",
+  "apply_patch",
+  "undo_textdoc",
 ];
 
 type TextDocToolNames = (typeof TEXTDOC_TOOL_NAMES)[number];
@@ -30,7 +33,7 @@ export const isRawTextDocToolCall = (
 export type ParsedRawTextDocToolCall = Omit<RawTextDocTool, "function"> & {
   function: {
     name: TextDocToolNames;
-    arguments: Record<string, string | boolean>;
+    arguments: Record<string, string | boolean | number | undefined>;
   };
 };
 
@@ -176,12 +179,81 @@ export const isUpdateTextDocByLinesToolCall = (
   return true;
 };
 
+export interface UpdateTextDocAnchoredToolCall
+  extends ParsedRawTextDocToolCall {
+  function: {
+    name: "update_textdoc_anchored";
+    arguments: {
+      path: string;
+      anchor1: string;
+      anchor2?: string;
+      content: string;
+      mode: "replace_between" | "insert_after" | "insert_before";
+      multiple?: boolean;
+    };
+  };
+}
+
+export const isUpdateTextDocAnchoredToolCall = (
+  toolCall: ParsedRawTextDocToolCall,
+): toolCall is UpdateTextDocAnchoredToolCall => {
+  if (toolCall.function.name !== "update_textdoc_anchored") return false;
+  if (!("path" in toolCall.function.arguments)) return false;
+  if (typeof toolCall.function.arguments.path !== "string") return false;
+  if (!("anchor1" in toolCall.function.arguments)) return false;
+  if (typeof toolCall.function.arguments.anchor1 !== "string") return false;
+  if (!("content" in toolCall.function.arguments)) return false;
+  if (typeof toolCall.function.arguments.content !== "string") return false;
+  if (!("mode" in toolCall.function.arguments)) return false;
+  return true;
+};
+
+export interface ApplyPatchToolCall extends ParsedRawTextDocToolCall {
+  function: {
+    name: "apply_patch";
+    arguments: {
+      patch: string;
+    };
+  };
+}
+
+export const isApplyPatchToolCall = (
+  toolCall: ParsedRawTextDocToolCall,
+): toolCall is ApplyPatchToolCall => {
+  if (toolCall.function.name !== "apply_patch") return false;
+  if (!("patch" in toolCall.function.arguments)) return false;
+  if (typeof toolCall.function.arguments.patch !== "string") return false;
+  return true;
+};
+
+export interface UndoTextDocToolCall extends ParsedRawTextDocToolCall {
+  function: {
+    name: "undo_textdoc";
+    arguments: {
+      path: string;
+      steps?: number;
+    };
+  };
+}
+
+export const isUndoTextDocToolCall = (
+  toolCall: ParsedRawTextDocToolCall,
+): toolCall is UndoTextDocToolCall => {
+  if (toolCall.function.name !== "undo_textdoc") return false;
+  if (!("path" in toolCall.function.arguments)) return false;
+  if (typeof toolCall.function.arguments.path !== "string") return false;
+  return true;
+};
+
 export type TextDocToolCall =
   | CreateTextDocToolCall
   | UpdateTextDocToolCall
   | ReplaceTextDocToolCall
   | UpdateRegexTextDocToolCall
-  | UpdateTextDocByLinesToolCall;
+  | UpdateTextDocByLinesToolCall
+  | UpdateTextDocAnchoredToolCall
+  | ApplyPatchToolCall
+  | UndoTextDocToolCall;
 
 function isTextDocToolCall(
   toolCall: ParsedRawTextDocToolCall,
@@ -191,6 +263,9 @@ function isTextDocToolCall(
   if (isReplaceTextDocToolCall(toolCall)) return true;
   if (isUpdateRegexTextDocToolCall(toolCall)) return true;
   if (isUpdateTextDocByLinesToolCall(toolCall)) return true;
+  if (isUpdateTextDocAnchoredToolCall(toolCall)) return true;
+  if (isApplyPatchToolCall(toolCall)) return true;
+  if (isUndoTextDocToolCall(toolCall)) return true;
   return false;
 }
 

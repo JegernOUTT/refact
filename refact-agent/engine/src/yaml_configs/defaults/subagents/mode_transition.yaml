@@ -1,0 +1,90 @@
+schema_version: 4
+id: mode_transition
+title: Mode Transition Context Extraction
+description: Analyze conversation to extract context for transitioning to a new chat mode
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: default
+  n_ctx: 200000
+  max_new_tokens: 32000
+  temperature: 0.0
+  tokens_for_rag: 0
+
+messages:
+  user_template: |
+    You are analyzing a conversation to extract context for transitioning to a new chat mode.
+
+    TARGET MODE: {target_mode}
+    TARGET MODE DESCRIPTION: {target_mode_description}
+
+    ## Available References
+
+    ### Messages (use MSG_ID to reference)
+    {annotated_message_list}
+
+    ### Files Seen in Conversation
+    {file_list}
+
+    ### Memory/Knowledge Files
+    {memory_list}
+
+    ## Your Task
+
+    Analyze this conversation and output what should be preserved for the new chat. Use the EXACT IDs and paths provided above.
+
+    Output your decisions using these XML tags:
+
+    <summary>
+    A detailed summary of:
+    - What the user is trying to accomplish
+    - What has been done so far
+    - Current state and blockers
+    - Key technical decisions
+    </summary>
+
+    <files_to_open>
+    List file paths to include in the new chat. One per line.
+    For edited files, they will be included with full content.
+    For referenced files, just the path will be noted.
+    Example:
+    /src/main.rs
+    /src/config.rs
+    </files_to_open>
+
+    <messages_to_preserve>
+    List MSG_IDs of messages to keep verbatim. One per line.
+    Only include truly essential exchanges (user requirements, key decisions).
+    Example:
+    MSG_ID:5
+    MSG_ID:12
+    </messages_to_preserve>
+
+    <memories_to_include>
+    List full paths to memory/knowledge files to include. These memories come mainly from agentic tools like code review, planning, .... One per line.
+    Example:
+    /project/.refact/knowledge/2024-01-15_abc123_api-design.md
+    </memories_to_include>
+
+    <tool_outputs_to_include>
+    List MSG_IDs of tool outputs that contain important results (e.g., search results, code analysis, web research).
+    These will be included as reference context in the new chat. One per line.
+    Example:
+    MSG_ID:7
+    MSG_ID:15
+    </tool_outputs_to_include>
+
+    <pending_tasks>
+    List tasks that still need to be done. One per line.
+    </pending_tasks>
+
+    <handoff_message>
+    A brief message to start the new chat, telling the assistant what to continue working on.
+    </handoff_message>
+
+    Be thorough but selective. The goal is to preserve everything important while keeping the new chat focused.
+
+tools: []

@@ -1,0 +1,26 @@
+.themeToggle {
+  position: fixed;
+  z-index: var(--z-fixed, 400);
+  right: 15px;
+  top: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--gray-11);
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.themeToggle svg {
+  width: 15px;
+  height: 15px;
+}
+
+.themeToggle:hover {
+  filter: brightness(1.5);
+}

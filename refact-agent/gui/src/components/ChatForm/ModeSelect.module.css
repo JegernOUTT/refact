@@ -1,0 +1,100 @@
+.trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  color: var(--gray-12);
+  transition: background-color 0.15s ease;
+}
+
+.trigger:hover:not(.disabled) {
+  background-color: var(--gray-a3);
+}
+
+.trigger.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.triggerContent {
+  max-width: 180px;
+}
+
+.content {
+  min-width: 280px;
+  max-width: 360px;
+  padding: var(--space-2);
+}
+
+.modeList {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.separator {
+  margin: var(--space-1) 0;
+}
+
+.item {
+  display: flex;
+  align-items: flex-start;
+  padding: var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background-color 0.15s ease;
+}
+
+.item:hover:not(:disabled):not(.itemDisabled) {
+  background-color: var(--gray-a3);
+}
+
+.item:disabled,
+.item.itemDisabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.itemSelected {
+  background-color: var(--accent-a3);
+}
+
+.itemSelected:hover:not(:disabled):not(.itemDisabled) {
+  background-color: var(--accent-a4);
+}
+
+.addModeItem {
+  display: flex;
+  align-items: center;
+  padding: var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background-color 0.15s ease;
+}
+
+.addModeItem:hover {
+  background-color: var(--gray-a3);
+}
+
+.description {
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.badge {
+  font-size: 10px;
+}

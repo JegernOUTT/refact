@@ -1,0 +1,259 @@
+.trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  color: var(--gray-12);
+  transition: background-color 0.15s ease;
+}
+
+.trigger:hover:not(.disabled) {
+  background-color: var(--gray-a3);
+}
+
+.trigger.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.triggerContent {
+  max-width: 320px;
+}
+
+.modelName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--gray-9);
+  width: 12px;
+  height: 12px;
+}
+
+.content {
+  min-width: 300px;
+  max-width: 400px;
+  max-height: 600px;
+  overflow: visible;
+  padding: var(--space-2);
+}
+
+.contentAdvancedOpen {
+  max-height: 780px;
+}
+
+.modelSection {
+  overflow: hidden;
+}
+
+.section {
+  padding: var(--space-2) 0;
+}
+
+.section:first-child {
+  padding-top: 0;
+}
+
+.section:last-child {
+  padding-bottom: 0;
+}
+
+.sectionHeader {
+  display: block;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+}
+
+.groupHeader {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  opacity: 0.7;
+}
+
+.groupSeparator {
+  margin: var(--space-1) 0;
+}
+
+.modelList {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* When the outer popover grows, let the list grow too,
+   reducing the chance of nested scrollbars. */
+.contentAdvancedOpen .modelList {
+  max-height: 320px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background-color 0.15s ease;
+}
+
+.item:hover:not(:disabled):not(.itemDisabled) {
+  background-color: var(--gray-a3);
+}
+
+.item:disabled,
+.item.itemDisabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.itemSelected {
+  background-color: var(--accent-a3);
+}
+
+.itemSelected:hover:not(:disabled):not(.itemDisabled) {
+  background-color: var(--accent-a4);
+}
+
+.itemModelName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.badge {
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+.sliderContainer {
+  padding: 0 var(--space-1);
+}
+
+.slider {
+  flex: 1;
+}
+
+.advancedTrigger {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  color: var(--gray-11);
+  transition: background-color 0.15s ease;
+}
+
+.advancedTrigger:hover:not(:disabled) {
+  background-color: var(--gray-a3);
+}
+
+.advancedTrigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.advancedChevron {
+  width: 12px;
+  height: 12px;
+  transition: transform 0.15s ease;
+}
+
+.advancedChevronOpen {
+  transform: rotate(90deg);
+}
+
+.advancedContent {
+  padding: var(--space-2);
+  padding-top: 0;
+}
+
+.advancedRow {
+  padding: var(--space-2) 0;
+}
+
+.advancedRow:first-child {
+  padding-top: var(--space-1);
+}
+
+.resetButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-1);
+  cursor: pointer;
+  color: var(--gray-9);
+  font-size: 10px;
+  line-height: 1;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.resetButton:hover:not(:disabled) {
+  background-color: var(--gray-a4);
+  color: var(--gray-12);
+}
+
+.resetButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.effortButton {
+  padding: var(--space-1) var(--space-2);
+  background: var(--gray-a3);
+  border: 1px solid var(--gray-a6);
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  color: var(--gray-11);
+  transition: all 0.15s ease;
+}
+
+.effortButton:hover:not(:disabled) {
+  background: var(--gray-a4);
+  border-color: var(--gray-a8);
+}
+
+.effortButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.effortButtonActive {
+  background: var(--accent-a4);
+  border-color: var(--accent-a8);
+  color: var(--accent-11);
+}
+
+.effortButtonActive:hover:not(:disabled) {
+  background: var(--accent-a5);
+  border-color: var(--accent-a9);
+}

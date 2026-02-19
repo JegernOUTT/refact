@@ -3,3 +3,72 @@
   pointer-events: none;
   transition: 0.15s ease-in-out;
 }
+
+.providerToggle {
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-1) var(--space-2);
+}
+
+.providerChevron {
+  margin-left: var(--space-2);
+}
+
+.providerPanel {
+  margin-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.providerTableWrap {
+  composes: scrollbarThin from "../../../../components/shared/scrollbar.module.css";
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  padding: var(--space-2);
+  overflow-x: auto;
+}
+
+.providerHeaderRow,
+.providerRow {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr 0.8fr 0.7fr 0.7fr 0.9fr 0.8fr 0.9fr 0.7fr 1.3fr 0.7fr;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 900px;
+}
+
+.providerHeaderRow {
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--gray-a4);
+  color: var(--gray-11);
+  font-weight: var(--font-weight-medium);
+}
+
+.providerRow {
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--gray-a2);
+}
+
+.providerRow:last-child {
+  border-bottom: none;
+}
+
+.providerRowSelected {
+  background: var(--gray-a2);
+  border-radius: var(--radius-3);
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
+}
+
+.providerCellPrimary {
+  font-weight: var(--font-weight-medium);
+  color: var(--gray-12);
+}
+
+.providerCellCaps {
+  color: var(--gray-11);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

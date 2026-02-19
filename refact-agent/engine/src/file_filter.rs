@@ -3,43 +3,110 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-const LARGE_FILE_SIZE_THRESHOLD: u64 = 4096*1024; // 4Mb files
-const SMALL_FILE_SIZE_THRESHOLD: u64 = 5;        // 5 Bytes
+const LARGE_FILE_SIZE_THRESHOLD: u64 = 4096 * 1024; // 4Mb files
+const SMALL_FILE_SIZE_THRESHOLD: u64 = 5; // 5 Bytes
 
-pub const KNOWLEDGE_FOLDER_NAME: &str = ".refact_knowledge";
+pub const KNOWLEDGE_FOLDER_NAME: &str = ".refact/knowledge";
 
-const ALLOWED_HIDDEN_FOLDERS: &[&str] = &[KNOWLEDGE_FOLDER_NAME];
+const ALLOWED_HIDDEN_FOLDERS: &[&str] = &[".refact"];
 
 pub const SOURCE_FILE_EXTENSIONS: &[&str] = &[
-    "c", "cpp", "cc", "h", "hpp", "cs", "java", "py", "rb", "go", "rs", "swift",
-    "php", "js", "jsx", "ts", "tsx", "lua", "pl", "r", "sh", "bat", "cmd", "ps1",
-    "m", "kt", "kts", "groovy", "dart", "fs", "fsx", "fsi", "html", "htm", "css",
-    "scss", "sass", "less", "json", "xml", "yml", "yaml", "md", "sql", "cfg",
-    "conf", "ini", "toml", "dockerfile", "ipynb", "rmd", "xml", "kt", "xaml",
-    "unity", "gd", "uproject", "asm", "s", "tex", "makefile", "mk", "cmake",
-    "gradle", "liquid"
+    "c",
+    "cpp",
+    "cc",
+    "h",
+    "hpp",
+    "cs",
+    "java",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "swift",
+    "php",
+    "js",
+    "jsx",
+    "ts",
+    "tsx",
+    "lua",
+    "pl",
+    "r",
+    "sh",
+    "bat",
+    "cmd",
+    "ps1",
+    "m",
+    "kt",
+    "kts",
+    "groovy",
+    "dart",
+    "fs",
+    "fsx",
+    "fsi",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "json",
+    "xml",
+    "yml",
+    "yaml",
+    "md",
+    "sql",
+    "cfg",
+    "conf",
+    "ini",
+    "toml",
+    "dockerfile",
+    "ipynb",
+    "rmd",
+    "xml",
+    "kt",
+    "xaml",
+    "unity",
+    "gd",
+    "uproject",
+    "asm",
+    "s",
+    "tex",
+    "makefile",
+    "mk",
+    "cmake",
+    "gradle",
+    "liquid",
 ];
 
 fn is_in_allowed_hidden_folder(path: &PathBuf) -> bool {
     path.ancestors().any(|ancestor| {
-        ancestor.file_name()
+        ancestor
+            .file_name()
             .map(|name| ALLOWED_HIDDEN_FOLDERS.contains(&name.to_string_lossy().as_ref()))
             .unwrap_or(false)
     })
 }
 
-pub fn is_valid_file(path: &PathBuf, allow_hidden_folders: bool, ignore_size_thresholds: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn is_valid_file(
+    path: &PathBuf,
+    allow_hidden_folders: bool,
+    ignore_size_thresholds: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !path.is_file() {
         return Err("Path is not a file".into());
     }
 
     let in_allowed_hidden = is_in_allowed_hidden_folder(path);
 
-    if !allow_hidden_folders && !in_allowed_hidden && path.ancestors().any(|ancestor| {
-        ancestor.file_name()
-            .map(|name| name.to_string_lossy().starts_with('.'))
-            .unwrap_or(false)
-    }) {
+    if !allow_hidden_folders
+        && !in_allowed_hidden
+        && path.ancestors().any(|ancestor| {
+            ancestor
+                .file_name()
+                .map(|name| name.to_string_lossy().starts_with('.'))
+                .unwrap_or(false)
+        })
+    {
         return Err("Parent dir starts with a dot".into());
     }
 

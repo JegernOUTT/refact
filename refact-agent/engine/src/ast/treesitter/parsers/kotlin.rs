@@ -11,7 +11,11 @@ use similar::DiffableStr;
 use tree_sitter::{Node, Parser, Range};
 use uuid::Uuid;
 
-use crate::ast::treesitter::ast_instance_structs::{AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg, FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, TypeDef, VariableDefinition, VariableUsage};
+use crate::ast::treesitter::ast_instance_structs::{
+    AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg,
+    FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, TypeDef,
+    VariableDefinition, VariableUsage,
+};
 use crate::ast::treesitter::language_id::LanguageId;
 use crate::ast::treesitter::parsers::{AstLanguageParser, internal_error, ParserError};
 use crate::ast::treesitter::parsers::utils::{CandidateInfo, get_guid};
@@ -21,22 +25,78 @@ pub(crate) struct KotlinParser {
 }
 
 static KOTLIN_KEYWORDS: [&str; 64] = [
-    "abstract", "actual", "annotation", "as", "break", "by", "catch", "class", "companion", "const",
-    "constructor", "continue", "crossinline", "data", "do", "dynamic", "else", "enum", "expect", "external",
-    "final", "finally", "for", "fun", "get", "if", "import", "in", "infix", "init", "inline", "inner",
-    "interface", "internal", "is", "lateinit", "noinline", "object", "open", "operator", "out", "override",
-    "package", "private", "protected", "public", "reified", "return", "sealed", "set", "super", "suspend",
-    "tailrec", "this", "throw", "try", "typealias", "typeof", "val", "var", "vararg", "when", "where", "while"
+    "abstract",
+    "actual",
+    "annotation",
+    "as",
+    "break",
+    "by",
+    "catch",
+    "class",
+    "companion",
+    "const",
+    "constructor",
+    "continue",
+    "crossinline",
+    "data",
+    "do",
+    "dynamic",
+    "else",
+    "enum",
+    "expect",
+    "external",
+    "final",
+    "finally",
+    "for",
+    "fun",
+    "get",
+    "if",
+    "import",
+    "in",
+    "infix",
+    "init",
+    "inline",
+    "inner",
+    "interface",
+    "internal",
+    "is",
+    "lateinit",
+    "noinline",
+    "object",
+    "open",
+    "operator",
+    "out",
+    "override",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "reified",
+    "return",
+    "sealed",
+    "set",
+    "super",
+    "suspend",
+    "tailrec",
+    "this",
+    "throw",
+    "try",
+    "typealias",
+    "typeof",
+    "val",
+    "var",
+    "vararg",
+    "when",
+    "where",
+    "while",
 ];
 
-static SYSTEM_MODULES: [&str; 2] = [
-    "kotlin", "java",
-];
+static SYSTEM_MODULES: [&str; 2] = ["kotlin", "java"];
 
 pub fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
     let kind = parent.kind();
     let text = code.slice(parent.byte_range()).to_string();
-    
+
     match kind {
         "type_identifier" | "identifier" | "user_type" => {
             return Some(TypeDef {
@@ -130,9 +190,9 @@ pub fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
                 let child = parent.child(i).unwrap();
                 if child.kind() == "type_identifier" {
                     parts.push(code.slice(child.byte_range()).to_string());
-                    }
-                    }
-            
+                }
+            }
+
             if !parts.is_empty() {
                 decl.name = Some(parts.join("."));
             }
@@ -148,7 +208,7 @@ pub fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
                 guid: None,
                 nested_types: vec![],
             };
-            
+
             if let Some(parameters) = parent.child_by_field_name("parameters") {
                 for i in 0..parameters.child_count() {
                     let child = parameters.child(i).unwrap();
@@ -157,13 +217,13 @@ pub fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
                     }
                 }
             }
-            
+
             if let Some(return_type) = parent.child_by_field_name("return_type") {
                 if let Some(t) = parse_type(&return_type, code) {
                     decl.nested_types.push(t);
                 }
             }
-            
+
             return Some(decl);
         }
         _ => {}
@@ -173,14 +233,14 @@ pub fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
 
 fn parse_function_arg(parent: &Node, code: &str) -> FunctionArg {
     let mut arg = FunctionArg::default();
-    
+
     if let Some(name) = parent.child_by_field_name("name") {
         arg.name = code.slice(name.byte_range()).to_string();
     }
 
     if let Some(type_node) = parent.child_by_field_name("type") {
         if let Some(dtype) = parse_type(&type_node, code) {
-                arg.type_ = Some(dtype);
+            arg.type_ = Some(dtype);
         }
     }
 
@@ -196,7 +256,12 @@ impl KotlinParser {
         Ok(KotlinParser { parser })
     }
 
-    fn parse_class_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_class_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut decl = StructDeclaration::default();
 
@@ -209,7 +274,12 @@ impl KotlinParser {
         decl.ast_fields.guid = get_guid();
         decl.ast_fields.is_error = info.ast_fields.is_error;
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         if let Some(name_node) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name_node.byte_range()).to_string();
@@ -224,7 +294,12 @@ impl KotlinParser {
         }
 
         if let Some(node) = info.node.child_by_field_name("supertype") {
-            symbols.extend(self.find_error_usages(&node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &node,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
                 if let Some(dtype) = parse_type(&child, code) {
@@ -232,12 +307,22 @@ impl KotlinParser {
                 }
             }
         }
-        
+
         if let Some(node) = info.node.child_by_field_name("delegation_specifiers") {
-            symbols.extend(self.find_error_usages(&node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &node,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
-                symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+                symbols.extend(self.find_error_usages(
+                    &child,
+                    code,
+                    &info.ast_fields.file_path,
+                    &decl.ast_fields.guid,
+                ));
                 match child.kind() {
                     "type_list" => {
                         for i in 0..child.child_count() {
@@ -251,7 +336,7 @@ impl KotlinParser {
                 }
             }
         }
-        
+
         if let Some(_) = info.node.child_by_field_name("type_parameters") {}
 
         if let Some(body) = info.node.child_by_field_name("body") {
@@ -296,8 +381,12 @@ impl KotlinParser {
         } else {
             for i in 0..info.node.child_count() {
                 let child = info.node.child(i).unwrap();
-                if child.kind() == "class_body" || child.kind() == "body" || child.kind() == "members" || 
-                   child.kind() == "{" || child.kind().contains("body") {
+                if child.kind() == "class_body"
+                    || child.kind() == "body"
+                    || child.kind() == "members"
+                    || child.kind() == "{"
+                    || child.kind().contains("body")
+                {
                     candidates.push_back(CandidateInfo {
                         ast_fields: decl.ast_fields.clone(),
                         node: child,
@@ -311,20 +400,30 @@ impl KotlinParser {
         symbols
     }
 
-    fn parse_function_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_function_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut decl = FunctionDeclaration::default();
 
-                    decl.ast_fields.language = info.ast_fields.language;
-                    decl.ast_fields.full_range = info.node.range();
+        decl.ast_fields.language = info.ast_fields.language;
+        decl.ast_fields.full_range = info.node.range();
         decl.ast_fields.declaration_range = info.node.range();
         decl.ast_fields.definition_range = info.node.range();
-                    decl.ast_fields.file_path = info.ast_fields.file_path.clone();
-                    decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
-                    decl.ast_fields.guid = get_guid();
-                    decl.ast_fields.is_error = info.ast_fields.is_error;
+        decl.ast_fields.file_path = info.ast_fields.file_path.clone();
+        decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
+        decl.ast_fields.guid = get_guid();
+        decl.ast_fields.is_error = info.ast_fields.is_error;
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         if let Some(name_node) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name_node.byte_range()).to_string();
@@ -339,7 +438,12 @@ impl KotlinParser {
         }
 
         if let Some(parameters_node) = info.node.child_by_field_name("parameters") {
-            symbols.extend(self.find_error_usages(&parameters_node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &parameters_node,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             decl.ast_fields.declaration_range = Range {
                 start_byte: decl.ast_fields.full_range.start_byte,
                 end_byte: parameters_node.end_byte(),
@@ -350,7 +454,12 @@ impl KotlinParser {
             let mut function_args = vec![];
             for i in 0..parameters_node.child_count() {
                 let child = parameters_node.child(i).unwrap();
-                symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+                symbols.extend(self.find_error_usages(
+                    &child,
+                    code,
+                    &info.ast_fields.file_path,
+                    &decl.ast_fields.guid,
+                ));
                 if child.kind() == "parameter" {
                     function_args.push(parse_function_arg(&child, code));
                 }
@@ -360,7 +469,12 @@ impl KotlinParser {
 
         if let Some(return_type) = info.node.child_by_field_name("type") {
             decl.return_type = parse_type(&return_type, code);
-            symbols.extend(self.find_error_usages(&return_type, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &return_type,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
         }
 
         if let Some(body_node) = info.node.child_by_field_name("body") {
@@ -371,7 +485,7 @@ impl KotlinParser {
                 start_point: decl.ast_fields.full_range.start_point,
                 end_point: decl.ast_fields.definition_range.start_point,
             };
-            
+
             for i in 0..body_node.child_count() {
                 let child = body_node.child(i).unwrap();
                 candidates.push_back(CandidateInfo {
@@ -398,25 +512,30 @@ impl KotlinParser {
         symbols
     }
 
-    fn parse_property_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_property_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
-        
+
         let mut decl = ClassFieldDeclaration::default();
 
-                    decl.ast_fields.language = info.ast_fields.language;
-                    decl.ast_fields.full_range = info.node.range();
-                    decl.ast_fields.declaration_range = info.node.range();
-                    decl.ast_fields.file_path = info.ast_fields.file_path.clone();
-                    decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
-                    decl.ast_fields.guid = get_guid();
-                    decl.ast_fields.is_error = info.ast_fields.is_error;
+        decl.ast_fields.language = info.ast_fields.language;
+        decl.ast_fields.full_range = info.node.range();
+        decl.ast_fields.declaration_range = info.node.range();
+        decl.ast_fields.file_path = info.ast_fields.file_path.clone();
+        decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
+        decl.ast_fields.guid = get_guid();
+        decl.ast_fields.is_error = info.ast_fields.is_error;
 
         if let Some(name) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name.byte_range()).to_string();
         } else {
             for i in 0..info.node.child_count() {
                 let child = info.node.child(i).unwrap();
-                
+
                 if child.kind() == "variable_declaration" {
                     for j in 0..child.child_count() {
                         let subchild = child.child(j).unwrap();
@@ -442,13 +561,16 @@ impl KotlinParser {
         } else {
             for i in 0..info.node.child_count() {
                 let child = info.node.child(i).unwrap();
-                
+
                 if child.kind() == "variable_declaration" {
                     for j in 0..child.child_count() {
                         let subchild = child.child(j).unwrap();
-                        if subchild.kind() == "function_type" || subchild.kind() == "type_identifier" || 
-                           subchild.kind() == "nullable_type" || subchild.kind() == "generic_type" ||
-                           subchild.kind() == "user_type" {
+                        if subchild.kind() == "function_type"
+                            || subchild.kind() == "type_identifier"
+                            || subchild.kind() == "nullable_type"
+                            || subchild.kind() == "generic_type"
+                            || subchild.kind() == "user_type"
+                        {
                             if let Some(dtype) = parse_type(&subchild, code) {
                                 decl.type_ = dtype;
                                 break;
@@ -458,9 +580,12 @@ impl KotlinParser {
                     if decl.type_.name.is_some() {
                         break;
                     }
-                } else if child.kind() == "function_type" || child.kind() == "type_identifier" || 
-                          child.kind() == "nullable_type" || child.kind() == "generic_type" ||
-                          child.kind() == "user_type" {
+                } else if child.kind() == "function_type"
+                    || child.kind() == "type_identifier"
+                    || child.kind() == "nullable_type"
+                    || child.kind() == "generic_type"
+                    || child.kind() == "user_type"
+                {
                     if let Some(dtype) = parse_type(&child, code) {
                         decl.type_ = dtype;
                         break;
@@ -471,11 +596,11 @@ impl KotlinParser {
 
         if let Some(initializer) = info.node.child_by_field_name("initializer") {
             decl.type_.inference_info = Some(code.slice(initializer.byte_range()).to_string());
-            
+
             for i in 0..initializer.child_count() {
                 let child = initializer.child(i).unwrap();
                 if child.kind() == "lambda_literal" || child.kind() == "lambda_expression" {
-                        candidates.push_back(CandidateInfo {
+                    candidates.push_back(CandidateInfo {
                         ast_fields: {
                             let mut ast_fields = AstSymbolFields::default();
                             ast_fields.language = info.ast_fields.language;
@@ -522,7 +647,12 @@ impl KotlinParser {
         symbols
     }
 
-    fn parse_variable_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, _candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_variable_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        _candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut type_ = TypeDef::default();
 
@@ -537,20 +667,21 @@ impl KotlinParser {
             match child.kind() {
                 "variable_declarator" => {
                     let mut decl = VariableDefinition::default();
-        decl.ast_fields.language = info.ast_fields.language;
-        decl.ast_fields.full_range = info.node.range();
-        decl.ast_fields.file_path = info.ast_fields.file_path.clone();
-        decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
-        decl.ast_fields.guid = get_guid();
-        decl.ast_fields.is_error = info.ast_fields.is_error;
+                    decl.ast_fields.language = info.ast_fields.language;
+                    decl.ast_fields.full_range = info.node.range();
+                    decl.ast_fields.file_path = info.ast_fields.file_path.clone();
+                    decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
+                    decl.ast_fields.guid = get_guid();
+                    decl.ast_fields.is_error = info.ast_fields.is_error;
                     decl.type_ = type_.clone();
 
                     if let Some(name) = child.child_by_field_name("name") {
-            decl.ast_fields.name = code.slice(name.byte_range()).to_string();
-        }
+                        decl.ast_fields.name = code.slice(name.byte_range()).to_string();
+                    }
 
                     if let Some(value) = child.child_by_field_name("value") {
-                        decl.type_.inference_info = Some(code.slice(value.byte_range()).to_string());
+                        decl.type_.inference_info =
+                            Some(code.slice(value.byte_range()).to_string());
                     }
 
                     symbols.push(Arc::new(RwLock::new(Box::new(decl))));
@@ -562,10 +693,15 @@ impl KotlinParser {
         symbols
     }
 
-    fn parse_identifier<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, _candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_identifier<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        _candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let name = code.slice(info.node.byte_range()).to_string();
-        
+
         if KOTLIN_KEYWORDS.contains(&name.as_str()) {
             return symbols;
         }
@@ -586,7 +722,12 @@ impl KotlinParser {
         symbols
     }
 
-    fn parse_call_expression<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_call_expression<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut decl = FunctionCall::default();
 
@@ -601,13 +742,23 @@ impl KotlinParser {
         }
         decl.ast_fields.caller_guid = Some(get_guid());
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         if let Some(name) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name.byte_range()).to_string();
         }
         if let Some(type_) = info.node.child_by_field_name("type") {
-            symbols.extend(self.find_error_usages(&type_, code, &info.ast_fields.file_path, &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &type_,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             if let Some(dtype) = parse_type(&type_, code) {
                 if let Some(name) = dtype.name {
                     decl.ast_fields.name = name;
@@ -619,83 +770,106 @@ impl KotlinParser {
             }
         }
         if let Some(arguments) = info.node.child_by_field_name("arguments") {
-            symbols.extend(self.find_error_usages(&arguments, code, &info.ast_fields.file_path, &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &arguments,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             let mut new_ast_fields = info.ast_fields.clone();
             new_ast_fields.caller_guid = None;
             for i in 0..arguments.child_count() {
                 let child = arguments.child(i).unwrap();
-                    candidates.push_back(CandidateInfo {
+                candidates.push_back(CandidateInfo {
                     ast_fields: new_ast_fields.clone(),
-                        node: child,
-                        parent_guid: info.parent_guid.clone(),
-                    });
-                }
+                    node: child,
+                    parent_guid: info.parent_guid.clone(),
+                });
             }
+        }
         if let Some(object) = info.node.child_by_field_name("receiver") {
-                    candidates.push_back(CandidateInfo {
+            candidates.push_back(CandidateInfo {
                 ast_fields: decl.ast_fields.clone(),
                 node: object,
-                        parent_guid: info.parent_guid.clone(),
-                    });
-                }
+                parent_guid: info.parent_guid.clone(),
+            });
+        }
 
         symbols.push(Arc::new(RwLock::new(Box::new(decl))));
         symbols
-            }
+    }
 
-    fn parse_annotation<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, _candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_annotation<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        _candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
-                let mut usage = VariableUsage::default();
-        
-                usage.ast_fields.name = code.slice(info.node.byte_range()).to_string();
-                usage.ast_fields.language = info.ast_fields.language;
-                usage.ast_fields.full_range = info.node.range();
-                usage.ast_fields.file_path = info.ast_fields.file_path.clone();
-                usage.ast_fields.parent_guid = Some(info.parent_guid.clone());
-                usage.ast_fields.guid = get_guid();
-                usage.ast_fields.is_error = info.ast_fields.is_error;
-        
+        let mut usage = VariableUsage::default();
+
+        usage.ast_fields.name = code.slice(info.node.byte_range()).to_string();
+        usage.ast_fields.language = info.ast_fields.language;
+        usage.ast_fields.full_range = info.node.range();
+        usage.ast_fields.file_path = info.ast_fields.file_path.clone();
+        usage.ast_fields.parent_guid = Some(info.parent_guid.clone());
+        usage.ast_fields.guid = get_guid();
+        usage.ast_fields.is_error = info.ast_fields.is_error;
+
         if usage.ast_fields.name.starts_with('@') {
             usage.ast_fields.name = usage.ast_fields.name[1..].to_string();
         }
-        
-                symbols.push(Arc::new(RwLock::new(Box::new(usage))));
-        symbols
-            }
 
-    fn parse_field_access<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
-        let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
-        
-                if let (Some(object), Some(field)) = (info.node.child_by_field_name("receiver"), info.node.child_by_field_name("field")) {
-                    let mut usage = VariableUsage::default();
-                    usage.ast_fields.name = code.slice(field.byte_range()).to_string();
-                    usage.ast_fields.language = info.ast_fields.language;
-                    usage.ast_fields.full_range = info.node.range();
-                    usage.ast_fields.file_path = info.ast_fields.file_path.clone();
-                    usage.ast_fields.guid = get_guid();
-                    usage.ast_fields.parent_guid = Some(info.parent_guid.clone());
-                    usage.ast_fields.caller_guid = Some(get_guid());
-                    if let Some(caller_guid) = info.ast_fields.caller_guid.clone() {
-                        usage.ast_fields.guid = caller_guid;
-                    }
-                    candidates.push_back(CandidateInfo {
-                        ast_fields: usage.ast_fields.clone(),
-                        node: object,
-                        parent_guid: info.parent_guid.clone(),
-                    });
-                    symbols.push(Arc::new(RwLock::new(Box::new(usage))));
-                }
-        
+        symbols.push(Arc::new(RwLock::new(Box::new(usage))));
         symbols
     }
 
-    fn parse_lambda_expression<'a>(&mut self, info: &CandidateInfo<'a>, _code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_field_access<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
+        let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
+
+        if let (Some(object), Some(field)) = (
+            info.node.child_by_field_name("receiver"),
+            info.node.child_by_field_name("field"),
+        ) {
+            let mut usage = VariableUsage::default();
+            usage.ast_fields.name = code.slice(field.byte_range()).to_string();
+            usage.ast_fields.language = info.ast_fields.language;
+            usage.ast_fields.full_range = info.node.range();
+            usage.ast_fields.file_path = info.ast_fields.file_path.clone();
+            usage.ast_fields.guid = get_guid();
+            usage.ast_fields.parent_guid = Some(info.parent_guid.clone());
+            usage.ast_fields.caller_guid = Some(get_guid());
+            if let Some(caller_guid) = info.ast_fields.caller_guid.clone() {
+                usage.ast_fields.guid = caller_guid;
+            }
+            candidates.push_back(CandidateInfo {
+                ast_fields: usage.ast_fields.clone(),
+                node: object,
+                parent_guid: info.parent_guid.clone(),
+            });
+            symbols.push(Arc::new(RwLock::new(Box::new(usage))));
+        }
+
+        symbols
+    }
+
+    fn parse_lambda_expression<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        _code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let symbols: Vec<AstSymbolInstanceArc> = vec![];
-        
+
         if let Some(parameters) = info.node.child_by_field_name("parameters") {
             for i in 0..parameters.child_count() {
                 let child = parameters.child(i).unwrap();
-                    candidates.push_back(CandidateInfo {
+                candidates.push_back(CandidateInfo {
                     ast_fields: {
                         let mut ast_fields = AstSymbolFields::default();
                         ast_fields.language = info.ast_fields.language;
@@ -707,16 +881,16 @@ impl KotlinParser {
                         ast_fields.caller_guid = None;
                         ast_fields
                     },
-                        node: child,
-                        parent_guid: info.parent_guid.clone(),
-                    });
+                    node: child,
+                    parent_guid: info.parent_guid.clone(),
+                });
             }
         }
-        
+
         if let Some(body) = info.node.child_by_field_name("body") {
             for i in 0..body.child_count() {
                 let child = body.child(i).unwrap();
-                    candidates.push_back(CandidateInfo {
+                candidates.push_back(CandidateInfo {
                     ast_fields: {
                         let mut ast_fields = AstSymbolFields::default();
                         ast_fields.language = info.ast_fields.language;
@@ -728,16 +902,22 @@ impl KotlinParser {
                         ast_fields.caller_guid = None;
                         ast_fields
                     },
-                        node: child,
-                        parent_guid: info.parent_guid.clone(),
+                    node: child,
+                    parent_guid: info.parent_guid.clone(),
                 });
-                }
             }
-        
+        }
+
         symbols
     }
 
-    fn find_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn find_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         for i in 0..parent.child_count() {
             let child = parent.child(i).unwrap();
@@ -748,7 +928,13 @@ impl KotlinParser {
         symbols
     }
 
-    fn parse_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn parse_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         match parent.kind() {
             "identifier" => {
@@ -768,7 +954,10 @@ impl KotlinParser {
                 symbols.push(Arc::new(RwLock::new(Box::new(usage))));
             }
             "field_access" | "navigation_expression" => {
-                if let (Some(object), Some(field)) = (parent.child_by_field_name("receiver"), parent.child_by_field_name("field")) {
+                if let (Some(object), Some(field)) = (
+                    parent.child_by_field_name("receiver"),
+                    parent.child_by_field_name("field"),
+                ) {
                     let usages = self.parse_error_usages(&object, code, path, parent_guid);
                     let mut usage = VariableUsage::default();
                     usage.ast_fields.name = code.slice(field.byte_range()).to_string();
@@ -796,22 +985,44 @@ impl KotlinParser {
         symbols
     }
 
-    fn parse_usages_<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_usages_<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let kind = info.node.kind();
-        
-        
+
         match kind {
-            "class_declaration" | "interface_declaration" | "enum_declaration" | "object_declaration" => {
-                self.parse_class_declaration(info, code, candidates)
-            }
-            "function_declaration" | "fun" | "method_declaration" | "method" | "constructor" | "init" | "getter" | "setter" |
-            "function" | "member_function" | "class_function" | "method_definition" | "function_definition" => {
-                self.parse_function_declaration(info, code, candidates)
-            }
-            "property_declaration" | "val" | "var" | "property" | "mutable_property" | "immutable_property" | "lateinit" |
-            "val_declaration" | "var_declaration" | "const_declaration" | "member_property" | "class_property" => {
-                self.parse_property_declaration(info, code, candidates)
-            }
+            "class_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "object_declaration" => self.parse_class_declaration(info, code, candidates),
+            "function_declaration"
+            | "fun"
+            | "method_declaration"
+            | "method"
+            | "constructor"
+            | "init"
+            | "getter"
+            | "setter"
+            | "function"
+            | "member_function"
+            | "class_function"
+            | "method_definition"
+            | "function_definition" => self.parse_function_declaration(info, code, candidates),
+            "property_declaration"
+            | "val"
+            | "var"
+            | "property"
+            | "mutable_property"
+            | "immutable_property"
+            | "lateinit"
+            | "val_declaration"
+            | "var_declaration"
+            | "const_declaration"
+            | "member_property"
+            | "class_property" => self.parse_property_declaration(info, code, candidates),
             "companion_object" => {
                 let symbols: Vec<AstSymbolInstanceArc> = vec![];
                 for i in 0..info.node.child_count() {
@@ -843,15 +1054,11 @@ impl KotlinParser {
             "lambda_literal" | "lambda_expression" => {
                 self.parse_lambda_expression(info, code, candidates)
             }
-            "identifier" => {
-                self.parse_identifier(info, code, candidates)
-            }
+            "identifier" => self.parse_identifier(info, code, candidates),
             "field_access" | "navigation_expression" => {
                 self.parse_field_access(info, code, candidates)
             }
-            "annotation" => {
-                self.parse_annotation(info, code, candidates)
-            }
+            "annotation" => self.parse_annotation(info, code, candidates),
             "import_declaration" => {
                 let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
                 let mut def = ImportDeclaration::default();
@@ -860,7 +1067,7 @@ impl KotlinParser {
                 def.ast_fields.file_path = info.ast_fields.file_path.clone();
                 def.ast_fields.parent_guid = Some(info.parent_guid.clone());
                 def.ast_fields.guid = get_guid();
-                
+
                 for i in 0..info.node.child_count() {
                     let child = info.node.child(i).unwrap();
                     if ["scoped_identifier", "identifier"].contains(&child.kind()) {
@@ -873,10 +1080,10 @@ impl KotlinParser {
                         }
                     }
                 }
-                
+
                 symbols.push(Arc::new(RwLock::new(Box::new(def))));
-        symbols
-    }
+                symbols
+            }
             "block_comment" | "line_comment" => {
                 let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
                 let mut def = CommentDefinition::default();
@@ -911,29 +1118,7 @@ impl KotlinParser {
                 let symbols: Vec<AstSymbolInstanceArc> = vec![];
                 for i in 0..info.node.child_count() {
                     let child = info.node.child(i).unwrap();
-                candidates.push_back(CandidateInfo {
-                        ast_fields: {
-                            let mut ast_fields = AstSymbolFields::default();
-                            ast_fields.language = info.ast_fields.language;
-                            ast_fields.full_range = child.range();
-                            ast_fields.file_path = info.ast_fields.file_path.clone();
-                            ast_fields.parent_guid = Some(info.parent_guid.clone());
-                            ast_fields.guid = get_guid();
-                            ast_fields.is_error = false;
-                            ast_fields.caller_guid = None;
-                            ast_fields
-                        },
-                    node: child,
-                    parent_guid: info.parent_guid.clone(),
-                });
-            }
-                symbols
-            }
-            _ => {
-                let symbols: Vec<AstSymbolInstanceArc> = vec![];
-                for i in 0..info.node.child_count() {
-                    let child = info.node.child(i).unwrap();
-                candidates.push_back(CandidateInfo {
+                    candidates.push_back(CandidateInfo {
                         ast_fields: {
                             let mut ast_fields = AstSymbolFields::default();
                             ast_fields.language = info.ast_fields.language;
@@ -946,10 +1131,32 @@ impl KotlinParser {
                             ast_fields
                         },
                         node: child,
-                    parent_guid: info.parent_guid.clone(),
-                });
+                        parent_guid: info.parent_guid.clone(),
+                    });
+                }
+                symbols
             }
-        symbols
+            _ => {
+                let symbols: Vec<AstSymbolInstanceArc> = vec![];
+                for i in 0..info.node.child_count() {
+                    let child = info.node.child(i).unwrap();
+                    candidates.push_back(CandidateInfo {
+                        ast_fields: {
+                            let mut ast_fields = AstSymbolFields::default();
+                            ast_fields.language = info.ast_fields.language;
+                            ast_fields.full_range = child.range();
+                            ast_fields.file_path = info.ast_fields.file_path.clone();
+                            ast_fields.parent_guid = Some(info.parent_guid.clone());
+                            ast_fields.guid = get_guid();
+                            ast_fields.is_error = false;
+                            ast_fields.caller_guid = None;
+                            ast_fields
+                        },
+                        node: child,
+                        parent_guid: info.parent_guid.clone(),
+                    });
+                }
+                symbols
             }
         }
     }
@@ -972,7 +1179,8 @@ impl KotlinParser {
             symbols.extend(symbols_l);
         }
 
-        let guid_to_symbol_map: HashMap<Uuid, AstSymbolInstanceArc> = symbols.iter()
+        let guid_to_symbol_map: HashMap<Uuid, AstSymbolInstanceArc> = symbols
+            .iter()
             .map(|s| (s.read().guid().clone(), s.clone()))
             .collect();
 
@@ -988,10 +1196,20 @@ impl KotlinParser {
         #[cfg(test)]
         for symbol in symbols.iter_mut() {
             let mut sym = symbol.write();
-            sym.fields_mut().childs_guid = sym.fields_mut().childs_guid.iter()
+            sym.fields_mut().childs_guid = sym
+                .fields_mut()
+                .childs_guid
+                .iter()
                 .sorted_by_key(|x| {
-                    guid_to_symbol_map.get(*x).unwrap().read().full_range().start_byte
-                }).map(|x| x.clone()).collect();
+                    guid_to_symbol_map
+                        .get(*x)
+                        .unwrap()
+                        .read()
+                        .full_range()
+                        .start_byte
+                })
+                .map(|x| x.clone())
+                .collect();
         }
 
         symbols

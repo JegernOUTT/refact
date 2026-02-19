@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { ChatContent } from ".";
@@ -27,7 +28,6 @@ import {
   goodPing,
   goodPrompts,
   goodUser,
-  makeKnowledgeFromChat,
   noCommandPreview,
   noCompletions,
   noTools,
@@ -46,19 +46,36 @@ const MockedStore: React.FC<{
       wasSuggested: false,
     },
   };
+  const threadId = threadData.id;
   const store = setUpStore({
     chat: {
-      streaming: false,
-      prevent_send: false,
-      waiting_for_response: false,
+      current_thread_id: threadId,
+      open_thread_ids: [threadId],
+      threads: {
+        [threadId]: {
+          thread: threadData,
+          streaming: false,
+          waiting_for_response: false,
+          prevent_send: false,
+          error: null,
+          queued_items: [],
+          send_immediately: false,
+          attached_images: [],
+          attached_text_files: [],
+          confirmation: {
+            pause: false,
+            pause_reasons: [],
+            status: { wasInteracted: false, confirmationStatus: true },
+          },
+          snapshot_received: true,
+          task_widget_expanded: false,
+        },
+      },
       max_new_tokens: 4096,
       tool_use: "quick",
-      send_immediately: false,
-      error: null,
-      cache: {},
       system_prompt: {},
-      thread: threadData,
-      queued_messages: [],
+      sse_refresh_requested: null,
+      stream_version: 0,
     },
   });
 
@@ -147,7 +164,8 @@ export const MultiModal: Story = {
 
 export const IntegrationChat: Story = {
   args: {
-    thread: CHAT_CONFIG_THREAD.thread,
+    thread:
+      CHAT_CONFIG_THREAD.threads[CHAT_CONFIG_THREAD.current_thread_id]!.thread,
   },
   parameters: {
     msw: {
@@ -173,7 +191,7 @@ export const TextDoc: Story = {
         goodUser,
         // noChatLinks,
         noTools,
-        makeKnowledgeFromChat,
+
         ToolConfirmation,
         noCompletions,
         noCommandPreview,
@@ -195,7 +213,7 @@ export const MarkdownIssue: Story = {
         goodUser,
         // noChatLinks,
         noTools,
-        makeKnowledgeFromChat,
+
         ToolConfirmation,
         noCompletions,
         noCommandPreview,
@@ -237,7 +255,7 @@ export const ToolWaiting: Story = {
         goodUser,
         // noChatLinks,
         noTools,
-        makeKnowledgeFromChat,
+
         ToolConfirmation,
         noCompletions,
         noCommandPreview,

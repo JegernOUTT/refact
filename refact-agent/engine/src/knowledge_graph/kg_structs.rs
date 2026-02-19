@@ -29,6 +29,31 @@ pub struct KnowledgeFrontmatter {
     pub deprecated_at: Option<String>,
     #[serde(default)]
     pub review_after: Option<String>,
+    #[serde(default)]
+    pub source_chat_id: Option<String>,
+
+    // Optional richer metadata for effective retrieval (new docs going forward).
+    // Old docs will simply have these unset.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub entities: Vec<String>,
+    #[serde(default)]
+    pub related_files: Vec<String>,
+    #[serde(default)]
+    pub related_entities: Vec<String>,
+    #[serde(default)]
+    pub content_hash: Option<String>,
+    #[serde(default)]
+    pub source_tool: Option<String>,
+    #[serde(default)]
+    pub source_trajectory_id: Option<String>,
+    #[serde(default)]
+    pub source_message_range: Option<String>,
 }
 
 impl KnowledgeFrontmatter {
@@ -80,21 +105,27 @@ impl KnowledgeFrontmatter {
             lines.push(format!("status: {}", status));
         }
         if !self.tags.is_empty() {
-            let tags_str = self.tags.iter()
+            let tags_str = self
+                .tags
+                .iter()
                 .map(|t| format!("\"{}\"", t))
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("tags: [{}]", tags_str));
         }
         if !self.filenames.is_empty() {
-            let files_str = self.filenames.iter()
+            let files_str = self
+                .filenames
+                .iter()
                 .map(|f| format!("\"{}\"", f))
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("filenames: [{}]", files_str));
         }
         if !self.links.is_empty() {
-            let links_str = self.links.iter()
+            let links_str = self
+                .links
+                .iter()
                 .map(|l| format!("\"{}\"", l))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -105,6 +136,67 @@ impl KnowledgeFrontmatter {
         }
         if let Some(deprecated_at) = &self.deprecated_at {
             lines.push(format!("deprecated_at: {}", deprecated_at));
+        }
+        if let Some(source_chat_id) = &self.source_chat_id {
+            lines.push(format!("source_chat_id: \"{}\"", source_chat_id.replace('"', "\\\"")));
+        }
+
+        if let Some(created_at) = &self.created_at {
+            lines.push(format!("created_at: \"{}\"", created_at.replace('"', "\\\"")));
+        }
+        if let Some(summary) = &self.summary {
+            lines.push(format!("summary: \"{}\"", summary.replace('"', "\\\"")));
+        }
+        if let Some(description) = &self.description {
+            lines.push(format!(
+                "description: \"{}\"",
+                description.replace('"', "\\\"")
+            ));
+        }
+        if !self.entities.is_empty() {
+            let entities_str = self
+                .entities
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("entities: [{}]", entities_str));
+        }
+        if !self.related_files.is_empty() {
+            let files_str = self
+                .related_files
+                .iter()
+                .map(|f| format!("\"{}\"", f.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("related_files: [{}]", files_str));
+        }
+        if !self.related_entities.is_empty() {
+            let entities_str = self
+                .related_entities
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("related_entities: [{}]", entities_str));
+        }
+        if let Some(content_hash) = &self.content_hash {
+            lines.push(format!("content_hash: \"{}\"", content_hash.replace('"', "\\\"")));
+        }
+        if let Some(source_tool) = &self.source_tool {
+            lines.push(format!("source_tool: \"{}\"", source_tool.replace('"', "\\\"")));
+        }
+        if let Some(source_trajectory_id) = &self.source_trajectory_id {
+            lines.push(format!(
+                "source_trajectory_id: \"{}\"",
+                source_trajectory_id.replace('"', "\\\"")
+            ));
+        }
+        if let Some(source_message_range) = &self.source_message_range {
+            lines.push(format!(
+                "source_message_range: \"{}\"",
+                source_message_range.replace('"', "\\\"")
+            ));
         }
 
         lines.push("---".to_string());
@@ -124,7 +216,13 @@ impl KnowledgeFrontmatter {
     }
 
     pub fn kind_or_default(&self) -> &str {
-        self.kind.as_deref().unwrap_or(if self.filenames.is_empty() { "domain" } else { "code" })
+        self.kind
+            .as_deref()
+            .unwrap_or(if self.filenames.is_empty() {
+                "domain"
+            } else {
+                "code"
+            })
     }
 }
 
@@ -194,6 +292,15 @@ impl KnowledgeGraph {
 
     pub fn get_or_create_file(&mut self, path: &str, exists: bool) -> NodeIndex {
         if let Some(&idx) = self.file_index.get(path) {
+            // If we already created the node as `exists=false`, and later discover
+            // the file exists, upgrade it to keep KG consistent.
+            if exists {
+                if let Some(KgNode::FileRef { exists: ref mut ex }) =
+                    self.graph.node_weight_mut(idx)
+                {
+                    *ex = true;
+                }
+            }
             return idx;
         }
         let idx = self.graph.add_node(KgNode::FileRef { exists });
@@ -211,7 +318,11 @@ impl KnowledgeGraph {
     }
 
     pub fn add_doc(&mut self, doc: KnowledgeDoc) -> NodeIndex {
-        let id = doc.frontmatter.id.clone().unwrap_or_else(|| doc.path.to_string_lossy().to_string());
+        let id = doc
+            .frontmatter
+            .id
+            .clone()
+            .unwrap_or_else(|| doc.path.to_string_lossy().to_string());
         let path = doc.path.clone();
 
         let doc_idx = self.graph.add_node(KgNode::Doc { id: id.clone() });
@@ -225,7 +336,8 @@ impl KnowledgeGraph {
 
         for filename in &doc.frontmatter.filenames {
             let file_idx = self.get_or_create_file(filename, true);
-            self.graph.add_edge(doc_idx, file_idx, KgEdge::ReferencesFile);
+            self.graph
+                .add_edge(doc_idx, file_idx, KgEdge::ReferencesFile);
         }
 
         for entity in &doc.entities {
@@ -238,26 +350,41 @@ impl KnowledgeGraph {
     }
 
     pub fn link_docs(&mut self) {
-        let links: Vec<(String, String)> = self.docs.iter()
+        let links: Vec<(String, String)> = self
+            .docs
+            .iter()
             .flat_map(|(id, doc)| {
-                doc.frontmatter.links.iter().map(|link| (id.clone(), link.clone())).collect::<Vec<_>>()
+                doc.frontmatter
+                    .links
+                    .iter()
+                    .map(|link| (id.clone(), link.clone()))
+                    .collect::<Vec<_>>()
             })
             .collect();
 
         for (from_id, to_id) in links {
-            if let (Some(&from_idx), Some(&to_idx)) = (self.doc_index.get(&from_id), self.doc_index.get(&to_id)) {
+            if let (Some(&from_idx), Some(&to_idx)) =
+                (self.doc_index.get(&from_id), self.doc_index.get(&to_id))
+            {
                 self.graph.add_edge(from_idx, to_idx, KgEdge::LinksTo);
             }
         }
 
-        let supersedes: Vec<(String, String)> = self.docs.iter()
+        let supersedes: Vec<(String, String)> = self
+            .docs
+            .iter()
             .filter_map(|(id, doc)| {
-                doc.frontmatter.superseded_by.as_ref().map(|s| (id.clone(), s.clone()))
+                doc.frontmatter
+                    .superseded_by
+                    .as_ref()
+                    .map(|s| (id.clone(), s.clone()))
             })
             .collect();
 
         for (old_id, new_id) in supersedes {
-            if let (Some(&old_idx), Some(&new_idx)) = (self.doc_index.get(&old_id), self.doc_index.get(&new_id)) {
+            if let (Some(&old_idx), Some(&new_idx)) =
+                (self.doc_index.get(&old_id), self.doc_index.get(&new_id))
+            {
                 self.graph.add_edge(old_idx, new_idx, KgEdge::SupersededBy);
             }
         }
@@ -268,14 +395,13 @@ impl KnowledgeGraph {
     }
 
     pub fn get_doc_by_path(&self, path: &PathBuf) -> Option<&KnowledgeDoc> {
-        self.doc_path_index.get(path)
-            .and_then(|idx| {
-                if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(*idx) {
-                    self.docs.get(id)
-                } else {
-                    None
-                }
-            })
+        self.doc_path_index.get(path).and_then(|idx| {
+            if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(*idx) {
+                self.docs.get(id)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn active_docs(&self) -> impl Iterator<Item = &KnowledgeDoc> {
@@ -288,7 +414,8 @@ impl KnowledgeGraph {
             return HashSet::new();
         };
 
-        self.graph.neighbors_directed(tag_idx, petgraph::Direction::Incoming)
+        self.graph
+            .neighbors_directed(tag_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
                 if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
                     Some(id.clone())
@@ -304,7 +431,8 @@ impl KnowledgeGraph {
             return HashSet::new();
         };
 
-        self.graph.neighbors_directed(file_idx, petgraph::Direction::Incoming)
+        self.graph
+            .neighbors_directed(file_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
                 if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
                     Some(id.clone())
@@ -320,7 +448,8 @@ impl KnowledgeGraph {
             return HashSet::new();
         };
 
-        self.graph.neighbors_directed(entity_idx, petgraph::Direction::Incoming)
+        self.graph
+            .neighbors_directed(entity_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
                 if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
                     Some(id.clone())

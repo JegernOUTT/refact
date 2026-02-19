@@ -38,28 +38,32 @@ impl AtCommand for AtLoadKnowledge {
         let search_key = args.iter().map(|x| x.text.clone()).join(" ");
         let gcx = ccx.lock().await.global_context.clone();
 
-        let memories = memories_search(gcx, &search_key, 5).await?;
+        let memories = memories_search(gcx, &search_key, 5, 0, None).await?;
         let mut seen_memids = HashSet::new();
-        let unique_memories: Vec<_> = memories.into_iter()
+        let unique_memories: Vec<_> = memories
+            .into_iter()
             .filter(|m| seen_memids.insert(m.memid.clone()))
             .collect();
 
-        let results = unique_memories.iter().map(|m| {
-            let mut result = String::new();
-            if let Some(path) = &m.file_path {
-                result.push_str(&format!("📄 {}", path.display()));
-                if let Some((start, end)) = m.line_range {
-                    result.push_str(&format!(":{}-{}", start, end));
+        let results = unique_memories
+            .iter()
+            .map(|m| {
+                let mut result = String::new();
+                if let Some(path) = &m.file_path {
+                    result.push_str(&format!("📄 {}", path.display()));
+                    if let Some((start, end)) = m.line_range {
+                        result.push_str(&format!(":{}-{}", start, end));
+                    }
+                    result.push('\n');
                 }
-                result.push('\n');
-            }
-            if let Some(title) = &m.title {
-                result.push_str(&format!("📌 {}\n", title));
-            }
-            result.push_str(&m.content);
-            result.push_str("\n\n");
-            result
-        }).collect::<String>();
+                if let Some(title) = &m.title {
+                    result.push_str(&format!("📌 {}\n", title));
+                }
+                result.push_str(&m.content);
+                result.push_str("\n\n");
+                result
+            })
+            .collect::<String>();
 
         let context = ContextEnum::ChatMessage(ChatMessage::new("plain_text".to_string(), results));
         Ok((vec![context], "".to_string()))

@@ -1,5 +1,6 @@
 .rootFlex {
   height: 100vh;
+  overflow: hidden;
 }
 
 .integrationsPagePadding {

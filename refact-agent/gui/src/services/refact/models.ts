@@ -245,7 +245,7 @@ export type SimplifiedModel = {
 export type ModelsResponse = {
   completion_models: SimplifiedModel[];
   chat_models: SimplifiedModel[];
-  embedding_model: SimplifiedModel;
+  embedding_model: SimplifiedModel | null;
 };
 
 export type ModelType = "embedding" | "completion" | "chat";
@@ -272,8 +272,6 @@ export type DeleteModelRequestBody = Omit<UpdateModelRequestBody, "model"> & {
   model: string;
 };
 
-export type SupportsReasoningStyle = "openai" | "anthropic" | "deepseek" | null;
-
 export type CodeChatModel = {
   n_ctx: number;
   name: string;
@@ -284,9 +282,13 @@ export type CodeChatModel = {
   supports_multimodality: boolean;
   supports_clicks: boolean;
   supports_agent: boolean;
-  supports_reasoning: SupportsReasoningStyle;
-  supports_boost_reasoning: boolean;
+  reasoning_effort_options?: string[] | null;
+  supports_thinking_budget?: boolean;
+  supports_adaptive_thinking_budget?: boolean;
   default_temperature: number | null;
+  default_frequency_penalty?: number | null;
+  default_max_tokens?: number | null;
+  max_output_tokens?: number | null;
 
   enabled: boolean;
 
@@ -350,14 +352,6 @@ export function isCodeChatModel(data: unknown): data is CodeChatModel {
   if (!("supports_clicks" in data) || typeof data.supports_clicks !== "boolean")
     return false;
   if (!("supports_agent" in data) || typeof data.supports_agent !== "boolean")
-    return false;
-
-  if (!("supports_reasoning" in data)) return false;
-
-  if (
-    !("supports_boost_reasoning" in data) ||
-    typeof data.supports_boost_reasoning !== "boolean"
-  )
     return false;
 
   if (!("default_temperature" in data)) return false;

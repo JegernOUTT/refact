@@ -5,53 +5,40 @@ import {
   ClockIcon,
   LightningBoltIcon,
 } from "@radix-ui/react-icons";
-import { useAppDispatch } from "../../hooks";
-import { dequeueUserMessage, QueuedUserMessage } from "../../features/Chat";
+import { QueuedItem } from "../../features/Chat";
+import { useChatActions } from "../../hooks";
 import styles from "./ChatContent.module.css";
 import classNames from "classnames";
 
 type QueuedMessageProps = {
-  queuedMessage: QueuedUserMessage;
+  queuedItem: QueuedItem;
   position: number;
 };
 
-function getMessagePreview(message: QueuedUserMessage["message"]): string {
-  if (typeof message.content === "string") {
-    return message.content;
-  }
-  // Handle multimodal content
-  const textPart = message.content.find(
-    (part) => "type" in part && part.type === "text",
-  );
-  if (textPart && "text" in textPart) {
-    return textPart.text;
-  }
-  return "[Image attachment]";
-}
-
 export const QueuedMessage: React.FC<QueuedMessageProps> = ({
-  queuedMessage,
+  queuedItem,
   position,
 }) => {
-  const dispatch = useAppDispatch();
-  const isPriority = queuedMessage.priority;
+  const { cancelQueued } = useChatActions();
 
   const handleCancel = useCallback(() => {
-    dispatch(dequeueUserMessage({ queuedId: queuedMessage.id }));
-  }, [dispatch, queuedMessage.id]);
-
-  const preview = getMessagePreview(queuedMessage.message);
+    void cancelQueued(queuedItem.client_request_id);
+  }, [cancelQueued, queuedItem.client_request_id]);
 
   return (
     <Card
       className={classNames(styles.queuedMessage, {
-        [styles.queuedMessagePriority]: isPriority,
+        [styles.queuedMessagePriority]: queuedItem.priority,
       })}
     >
-      <Flex gap="2" align="start" justify="between">
+      <Flex gap="2" align="center" justify="between">
         <Flex gap="2" align="center" style={{ flex: 1, minWidth: 0 }}>
-          <Badge color={isPriority ? "blue" : "amber"} variant="soft" size="1">
-            {isPriority ? (
+          <Badge
+            color={queuedItem.priority ? "blue" : "amber"}
+            variant="soft"
+            size="1"
+          >
+            {queuedItem.priority ? (
               <LightningBoltIcon width={12} height={12} />
             ) : (
               <ClockIcon width={12} height={12} />
@@ -62,9 +49,9 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
             size="2"
             color="gray"
             className={styles.queuedMessageText}
-            title={preview}
+            title={queuedItem.preview}
           >
-            {preview}
+            {queuedItem.preview || `[${queuedItem.command_type}]`}
           </Text>
         </Flex>
         <IconButton

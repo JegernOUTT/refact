@@ -13,7 +13,6 @@ use tokio::sync::RwLock as ARwLock;
 use crate::global_context::GlobalContext;
 use crate::ast::ast_indexer_thread::ast_indexer_enqueue_files;
 
-
 pub async fn enqueue_all_docs_from_jsonl(
     gcx: Arc<ARwLock<GlobalContext>>,
     paths: Vec<PathBuf>,
@@ -28,7 +27,10 @@ pub async fn enqueue_all_docs_from_jsonl(
         docs.push(d.to_string_lossy().to_string());
     }
     let (vec_db_module, ast_service) = {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
         let gcx_locked = gcx.write().await;
         *gcx_locked.documents_state.cache_dirty.lock().await = now;
         let jsonl_files = &mut gcx_locked.documents_state.jsonl_files.lock().unwrap();
@@ -44,7 +46,7 @@ pub async fn enqueue_all_docs_from_jsonl(
     }
     match *vec_db_module.lock().await {
         Some(ref mut db) => db.vectorizer_enqueue_files(&docs, false).await,
-        None => {},
+        None => {}
     };
 }
 
@@ -61,9 +63,15 @@ async fn parse_jsonl(jsonl_path: &String) -> Result<Vec<PathBuf>, String> {
     if jsonl_path.is_empty() {
         return Ok(vec![]);
     }
-    let file = File::open(jsonl_path).await.map_err(|_| format!("File not found: {:?}", jsonl_path))?;
+    let file = File::open(jsonl_path)
+        .await
+        .map_err(|_| format!("File not found: {:?}", jsonl_path))?;
     let reader = BufReader::new(file);
-    let base_path = PathBuf::from(jsonl_path).parent().or(Some(Path::new("/"))).unwrap().to_path_buf();
+    let base_path = PathBuf::from(jsonl_path)
+        .parent()
+        .or(Some(Path::new("/")))
+        .unwrap()
+        .to_path_buf();
 
     let mut lines = reader.lines();
 
@@ -72,7 +80,6 @@ async fn parse_jsonl(jsonl_path: &String) -> Result<Vec<PathBuf>, String> {
         let line = line.map_err(|_| "Error reading line".to_string())?;
         if let Ok(value) = serde_json::from_str::<Value>(&line) {
             if value.is_object() {
-
                 if let Some(filename) = value.get("path").and_then(|v| v.as_str()) {
                     // TODO: join, why it's there?
                     let path = base_path.join(filename);
@@ -110,39 +117,44 @@ fn make_async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::
     Ok((watcher, rx))
 }
 
-pub async fn reload_if_jsonl_changes_background_task(
-    gcx: Arc<ARwLock<GlobalContext>>,
-) {
+pub async fn reload_if_jsonl_changes_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     async fn on_modify(gcx: Arc<ARwLock<GlobalContext>>) {
         enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false, false).await;
     }
     let (mut watcher, mut rx) = make_async_watcher().expect("Failed to make file watcher");
     let files_jsonl_path = gcx.read().await.cmdline.files_jsonl_path.clone();
     on_modify(gcx.clone()).await;
-    if watcher.watch(&PathBuf::from(files_jsonl_path.clone()), RecursiveMode::Recursive).is_err() {
-        error!("file watcher {:?} failed to start watching", files_jsonl_path);
+    if watcher
+        .watch(
+            &PathBuf::from(files_jsonl_path.clone()),
+            RecursiveMode::Recursive,
+        )
+        .is_err()
+    {
+        error!(
+            "file watcher {:?} failed to start watching",
+            files_jsonl_path
+        );
         return;
     }
     while let Some(res) = rx.next().await {
         match res {
-            Ok(event) => {
-                match event.kind {
-                    EventKind::Any => {}
-                    EventKind::Access(_) => {}
-                    EventKind::Create(_) => {
-                        info!("files_jsonl_path {:?} was created", files_jsonl_path);
-                    }
-                    EventKind::Modify(_) => {
-                        info!("files_jsonl_path {:?} was modified", files_jsonl_path);
-                        enqueue_all_docs_from_jsonl(gcx.clone(), vec![], false, false).await;
-                    }
-                    EventKind::Remove(_) => {
-                        info!("files_jsonl_path {:?} was removed", files_jsonl_path);
-                        enqueue_all_docs_from_jsonl(gcx.clone(), vec![], false, false).await;
-                    }
-                    EventKind::Other => {}
+            Ok(event) => match event.kind {
+                EventKind::Any => {}
+                EventKind::Access(_) => {}
+                EventKind::Create(_) => {
+                    info!("files_jsonl_path {:?} was created", files_jsonl_path);
                 }
-            }
+                EventKind::Modify(_) => {
+                    info!("files_jsonl_path {:?} was modified", files_jsonl_path);
+                    enqueue_all_docs_from_jsonl(gcx.clone(), vec![], false, false).await;
+                }
+                EventKind::Remove(_) => {
+                    info!("files_jsonl_path {:?} was removed", files_jsonl_path);
+                    enqueue_all_docs_from_jsonl(gcx.clone(), vec![], false, false).await;
+                }
+                EventKind::Other => {}
+            },
             Err(e) => info!("file watch error: {:?}", e),
         }
     }

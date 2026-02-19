@@ -2,13 +2,12 @@ import React, { Key, useMemo } from "react";
 import ReactMarkdown, { Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import classNames from "classnames";
-// import "./highlightjs.css";
 import styles from "./Markdown.module.css";
 import {
-  MarkdownCodeBlock,
-  type MarkdownCodeBlockProps,
+  ShikiCodeBlock,
+  type ShikiCodeBlockProps,
   type MarkdownControls,
-} from "./CodeBlock";
+} from "./ShikiCodeBlock";
 import {
   Text,
   Heading,
@@ -25,23 +24,21 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import remarkGfm from "remark-gfm";
 import "katex/dist/katex.min.css";
+import type { PluggableList } from "unified";
 import { useLinksFromLsp } from "../../hooks";
+
+const REMARK_PLUGINS: PluggableList = [remarkBreaks, remarkMath, remarkGfm];
+const REHYPE_PLUGINS: PluggableList = [rehypeKatex];
 
 import { ChatLinkButton } from "../ChatLinks";
 import { extractLinkFromPuzzle } from "../../utils/extractLinkFromPuzzle";
+import { useInternalLinkHandler } from "../../contexts/internalLinkUtils";
 
 export type MarkdownProps = Pick<
   React.ComponentProps<typeof ReactMarkdown>,
   "children" | "allowedElements" | "unwrapDisallowed"
 > &
-  Pick<
-    MarkdownCodeBlockProps,
-    | "startingLineNumber"
-    | "showLineNumbers"
-    | "useInlineStyles"
-    | "style"
-    | "color"
-  > & {
+  Pick<ShikiCodeBlockProps, "showLineNumbers" | "color"> & {
     canHaveInteractiveElements?: boolean;
     wrap?: boolean;
   } & Partial<MarkdownControls>;
@@ -74,7 +71,7 @@ const MaybeInteractiveElement: React.FC<{
   });
 
   return (
-    <Text className={styles.maybe_pin} my="2">
+    <Text as="div" className={styles.maybe_pin} my="2">
       {processed}
     </Text>
   );
@@ -86,8 +83,12 @@ const _Markdown: React.FC<MarkdownProps> = ({
   unwrapDisallowed,
   canHaveInteractiveElements,
   color,
-  ...rest
+  showLineNumbers,
+  wrap,
+  onCopyClick,
 }) => {
+  const internalLinkContext = useInternalLinkHandler();
+
   const components: Partial<Components> = useMemo(() => {
     return {
       ol(props) {
@@ -100,8 +101,24 @@ const _Markdown: React.FC<MarkdownProps> = ({
           <ul {...props} className={classNames(styles.list, props.className)} />
         );
       },
+      li({ color: _color, ref: _ref, node: _node, ...props }) {
+        return (
+          <li
+            {...props}
+            className={classNames(styles.list_item, props.className)}
+          />
+        );
+      },
       code({ style: _style, color: _color, ...props }) {
-        return <MarkdownCodeBlock color={color} {...props} {...rest} />;
+        return (
+          <ShikiCodeBlock
+            color={color}
+            showLineNumbers={showLineNumbers}
+            wrap={wrap}
+            onCopyClick={onCopyClick}
+            {...props}
+          />
+        );
       },
       p({ color: _color, ref: _ref, node: _node, ...props }) {
         if (canHaveInteractiveElements) {
@@ -137,13 +154,36 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <Kbd {...props} />;
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
-        const shouldTargetBeBlank =
-          props.href &&
-          (props.href.startsWith("http") || props.href.startsWith("https"));
+        const href = props.href ?? "";
+        const isInternalLink = href.startsWith("refact://");
+        const isHttpLink =
+          href.startsWith("http://") || href.startsWith("https://");
+        const isMailtoLink = href.startsWith("mailto:");
+        const isSafeProtocol = isInternalLink || isHttpLink || isMailtoLink;
+
+        if (!isSafeProtocol && href.includes(":")) {
+          return <span>{props.children}</span>;
+        }
+
+        if (isInternalLink) {
+          return (
+            <Link
+              {...props}
+              onClick={(e: React.MouseEvent) => {
+                if (internalLinkContext?.handleInternalLink(href)) {
+                  e.preventDefault();
+                }
+              }}
+              style={{ cursor: "pointer" }}
+            />
+          );
+        }
+
         return (
           <Link
             {...props}
-            target={shouldTargetBeBlank ? "_blank" : undefined}
+            target={isHttpLink ? "_blank" : undefined}
+            rel={isHttpLink ? "noopener noreferrer" : undefined}
           />
         );
       },
@@ -178,12 +218,19 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <Table.Cell {...props} />;
       },
     };
-  }, [rest, canHaveInteractiveElements, color]);
+  }, [
+    canHaveInteractiveElements,
+    color,
+    internalLinkContext,
+    showLineNumbers,
+    wrap,
+    onCopyClick,
+  ]);
   return (
     <ReactMarkdown
       className={styles.markdown}
-      remarkPlugins={[remarkBreaks, remarkMath, remarkGfm]}
-      rehypePlugins={[rehypeKatex]}
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
       allowedElements={allowedElements}
       unwrapDisallowed={unwrapDisallowed}
       components={components}

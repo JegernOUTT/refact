@@ -9,7 +9,11 @@ use similar::DiffableStr;
 use tree_sitter::{Node, Parser, Range};
 use uuid::Uuid;
 
-use crate::ast::treesitter::ast_instance_structs::{AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg, FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, TypeDef, VariableDefinition, VariableUsage};
+use crate::ast::treesitter::ast_instance_structs::{
+    AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg,
+    FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, TypeDef,
+    VariableDefinition, VariableUsage,
+};
 use crate::ast::treesitter::language_id::LanguageId;
 use crate::ast::treesitter::parsers::{AstLanguageParser, internal_error, ParserError};
 use crate::ast::treesitter::parsers::utils::{CandidateInfo, get_guid};
@@ -18,34 +22,182 @@ pub(crate) struct CppParser {
     pub parser: Parser,
 }
 
-
 static CPP_KEYWORDS: [&str; 92] = [
-    "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor",
-    "bool", "break", "case", "catch", "char", "char8_t", "char16_t", "char32_t",
-    "class", "compl", "concept", "const", "consteval", "constexpr", "constinit",
-    "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype", "default",
-    "delete", "do", "double", "dynamic_cast", "else", "enum", "explicit", "export", "extern",
-    "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable",
-    "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq",
-    "private", "protected", "public", "register", "reinterpret_cast", "requires", "return",
-    "short", "signed", "sizeof", "static", "static_assert", "static_cast", "struct", "switch",
-    "template", "this", "thread_local", "throw", "true", "try", "typedef", "typeid", "typename",
-    "union", "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while", "xor", "xor_eq"
+    "alignas",
+    "alignof",
+    "and",
+    "and_eq",
+    "asm",
+    "auto",
+    "bitand",
+    "bitor",
+    "bool",
+    "break",
+    "case",
+    "catch",
+    "char",
+    "char8_t",
+    "char16_t",
+    "char32_t",
+    "class",
+    "compl",
+    "concept",
+    "const",
+    "consteval",
+    "constexpr",
+    "constinit",
+    "const_cast",
+    "continue",
+    "co_await",
+    "co_return",
+    "co_yield",
+    "decltype",
+    "default",
+    "delete",
+    "do",
+    "double",
+    "dynamic_cast",
+    "else",
+    "enum",
+    "explicit",
+    "export",
+    "extern",
+    "false",
+    "float",
+    "for",
+    "friend",
+    "goto",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "mutable",
+    "namespace",
+    "new",
+    "noexcept",
+    "not",
+    "not_eq",
+    "nullptr",
+    "operator",
+    "or",
+    "or_eq",
+    "private",
+    "protected",
+    "public",
+    "register",
+    "reinterpret_cast",
+    "requires",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "static_assert",
+    "static_cast",
+    "struct",
+    "switch",
+    "template",
+    "this",
+    "thread_local",
+    "throw",
+    "true",
+    "try",
+    "typedef",
+    "typeid",
+    "typename",
+    "union",
+    "unsigned",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "wchar_t",
+    "while",
+    "xor",
+    "xor_eq",
 ];
 
 static SYSTEM_HEADERS: [&str; 79] = [
-    "algorithm", "bitset", "cassert", "cctype", "cerrno", "cfenv", "cfloat", "chrono", "cinttypes",
-    "climits", "clocale", "cmath", "codecvt", "complex", "condition_variable", "csetjmp",
-    "csignal", "cstdarg", "cstdbool", "cstddef", "cstdint", "cstdio", "cstdlib", "cstring", "ctgmath",
-    "ctime", "cuchar", "cwchar", "cwctype", "deque", "exception", "filesystem", "forward_list", "fstream",
-    "functional", "future", "initializer_list", "iomanip", "ios", "iosfwd", "iostream", "istream",
-    "iterator", "limits", "list", "locale", "map", "memory", "mutex", "new", "numeric", "optional",
-    "ostream", "queue", "random", "ratio", "regex", "scoped_allocator", "set", "shared_mutex",
-    "sstream", "stack", "stdexcept", "streambuf", "string", "string_view", "system_error", "thread",
-    "tuple", "type_traits", "unordered_map", "unordered_set", "utility", "valarray", "variant", "vector",
-    "version", "wchar.h", "wctype.h",
+    "algorithm",
+    "bitset",
+    "cassert",
+    "cctype",
+    "cerrno",
+    "cfenv",
+    "cfloat",
+    "chrono",
+    "cinttypes",
+    "climits",
+    "clocale",
+    "cmath",
+    "codecvt",
+    "complex",
+    "condition_variable",
+    "csetjmp",
+    "csignal",
+    "cstdarg",
+    "cstdbool",
+    "cstddef",
+    "cstdint",
+    "cstdio",
+    "cstdlib",
+    "cstring",
+    "ctgmath",
+    "ctime",
+    "cuchar",
+    "cwchar",
+    "cwctype",
+    "deque",
+    "exception",
+    "filesystem",
+    "forward_list",
+    "fstream",
+    "functional",
+    "future",
+    "initializer_list",
+    "iomanip",
+    "ios",
+    "iosfwd",
+    "iostream",
+    "istream",
+    "iterator",
+    "limits",
+    "list",
+    "locale",
+    "map",
+    "memory",
+    "mutex",
+    "new",
+    "numeric",
+    "optional",
+    "ostream",
+    "queue",
+    "random",
+    "ratio",
+    "regex",
+    "scoped_allocator",
+    "set",
+    "shared_mutex",
+    "sstream",
+    "stack",
+    "stdexcept",
+    "streambuf",
+    "string",
+    "string_view",
+    "system_error",
+    "thread",
+    "tuple",
+    "type_traits",
+    "unordered_map",
+    "unordered_set",
+    "utility",
+    "valarray",
+    "variant",
+    "vector",
+    "version",
+    "wchar.h",
+    "wctype.h",
 ];
-
 
 pub fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
     let kind = parent.kind();
@@ -108,8 +260,8 @@ impl CppParser {
         &mut self,
         info: &CandidateInfo<'a>,
         code: &str,
-        candidates: &mut VecDeque<CandidateInfo<'a>>)
-        -> Vec<AstSymbolInstanceArc> {
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = StructDeclaration::default();
 
@@ -122,13 +274,22 @@ impl CppParser {
         decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
         decl.ast_fields.guid = get_guid();
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         let mut template_parent_node = info.node.parent();
         while let Some(parent) = template_parent_node {
             match parent.kind() {
-                "enum_specifier" | "class_specifier" | "struct_specifier" |
-                "template_declaration" | "namespace_definition" | "function_definition" => {
+                "enum_specifier"
+                | "class_specifier"
+                | "struct_specifier"
+                | "template_declaration"
+                | "namespace_definition"
+                | "function_definition" => {
                     break;
                 }
                 &_ => {}
@@ -142,21 +303,29 @@ impl CppParser {
                 start_byte: decl.ast_fields.full_range.start_byte,
                 end_byte: name.end_byte(),
                 start_point: decl.ast_fields.full_range.start_point,
-                end_point: name.end_position()
+                end_point: name.end_position(),
             };
         } else {
             decl.ast_fields.name = format!("anon-{}", decl.ast_fields.guid);
         }
 
         if let Some(template_parent) = template_parent_node {
-            symbols.extend(self.find_error_usages(&template_parent, code, &info.ast_fields.file_path,
-                                                  &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &template_parent,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             if template_parent.kind() == "template_declaration" {
                 if let Some(parameters) = template_parent.child_by_field_name("parameters") {
                     for i in 0..parameters.child_count() {
                         let child = parameters.child(i).unwrap();
-                        symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path,
-                                                              &decl.ast_fields.guid));
+                        symbols.extend(self.find_error_usages(
+                            &child,
+                            code,
+                            &info.ast_fields.file_path,
+                            &decl.ast_fields.guid,
+                        ));
                         if let Some(arg) = parse_type(&child, code) {
                             decl.template_types.push(arg);
                         }
@@ -167,13 +336,21 @@ impl CppParser {
         // find base classes
         for i in 0..info.node.child_count() {
             let base_class_clause = info.node.child(i).unwrap();
-            symbols.extend(self.find_error_usages(&base_class_clause, code, &info.ast_fields.file_path,
-                                                  &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &base_class_clause,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             if base_class_clause.kind() == "base_class_clause" {
                 for i in 0..base_class_clause.child_count() {
                     let child = base_class_clause.child(i).unwrap();
-                    symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path,
-                                                          &decl.ast_fields.guid));
+                    symbols.extend(self.find_error_usages(
+                        &child,
+                        code,
+                        &info.ast_fields.file_path,
+                        &decl.ast_fields.guid,
+                    ));
                     if let Some(base_class) = parse_type(&child, code) {
                         decl.inherited_types.push(base_class);
                     }
@@ -182,7 +359,7 @@ impl CppParser {
                     start_byte: decl.ast_fields.full_range.start_byte,
                     end_byte: base_class_clause.end_byte(),
                     start_point: decl.ast_fields.full_range.start_point,
-                    end_point: base_class_clause.end_position()
+                    end_point: base_class_clause.end_position(),
                 };
             }
         }
@@ -199,11 +376,18 @@ impl CppParser {
         symbols
     }
 
-    fn parse_variable_definition<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_variable_definition<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut type_ = TypeDef::default();
         if let Some(type_node) = info.node.child_by_field_name("type") {
-            if vec!["class_specifier", "struct_specifier", "enum_specifier"].contains(&type_node.kind()) {
+            if vec!["class_specifier", "struct_specifier", "enum_specifier"]
+                .contains(&type_node.kind())
+            {
                 let usages = self.parse_struct_declaration(info, code, candidates);
                 type_.guid = Some(*usages.last().unwrap().read().guid());
                 type_.name = Some(usages.last().unwrap().read().name().to_string());
@@ -215,15 +399,29 @@ impl CppParser {
             }
         }
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         let mut cursor = info.node.walk();
         for child in info.node.children_by_field_name("declarator", &mut cursor) {
-            symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path,
-                                                  &info.parent_guid));
-            let (symbols_l, _, name_l, namespace_l) =
-                self.parse_declaration(&child, code, &info.ast_fields.file_path,
-                                       &info.parent_guid, info.ast_fields.is_error, candidates);
+            symbols.extend(self.find_error_usages(
+                &child,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
+            let (symbols_l, _, name_l, namespace_l) = self.parse_declaration(
+                &child,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+                info.ast_fields.is_error,
+                candidates,
+            );
             symbols.extend(symbols_l);
 
             let mut decl = VariableDefinition::default();
@@ -242,7 +440,12 @@ impl CppParser {
         symbols
     }
 
-    fn parse_field_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_field_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut dtype = TypeDef::default();
         if let Some(type_node) = info.node.child_by_field_name("type") {
@@ -253,9 +456,15 @@ impl CppParser {
         // symbols.extend(self.find_error_usages(&parent, code, path, parent_guid));
 
         let mut cursor = info.node.walk();
-        let declarators = info.node.children_by_field_name("declarator", &mut cursor).collect::<Vec<Node>>();
+        let declarators = info
+            .node
+            .children_by_field_name("declarator", &mut cursor)
+            .collect::<Vec<Node>>();
         cursor = info.node.walk();
-        let default_values = info.node.children_by_field_name("default_value", &mut cursor).collect::<Vec<Node>>();
+        let default_values = info
+            .node
+            .children_by_field_name("default_value", &mut cursor)
+            .collect::<Vec<Node>>();
 
         let match_declarators_to_default_value = || {
             let mut result: Vec<(Node, Option<Node>)> = vec![];
@@ -270,7 +479,9 @@ impl CppParser {
                     let default_value_range = default_value.range();
                     if let Some(next) = next_mb {
                         let next_range = next.range();
-                        if default_value_range.start_byte > current_range.end_byte && default_value_range.end_byte < next_range.start_byte {
+                        if default_value_range.start_byte > current_range.end_byte
+                            && default_value_range.end_byte < next_range.start_byte
+                        {
                             default_value_candidate = Some(default_value.clone());
                             break;
                         }
@@ -286,11 +497,15 @@ impl CppParser {
             result
         };
 
-
         for (declarator, default_value_mb) in match_declarators_to_default_value() {
-            let (symbols_l, _, name_l, _) =
-                self.parse_declaration(&declarator, code, &info.ast_fields.file_path,
-                                       &info.parent_guid, info.ast_fields.is_error, candidates);
+            let (symbols_l, _, name_l, _) = self.parse_declaration(
+                &declarator,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+                info.ast_fields.is_error,
+                candidates,
+            );
             if name_l.is_empty() {
                 continue;
             }
@@ -314,7 +529,8 @@ impl CppParser {
                     parent_guid: info.parent_guid.clone(),
                 });
 
-                decl.type_.inference_info = Some(code.slice(default_value.byte_range()).to_string());
+                decl.type_.inference_info =
+                    Some(code.slice(default_value.byte_range()).to_string());
             }
             decl.type_ = local_dtype;
             symbols.push(Arc::new(RwLock::new(Box::new(decl))));
@@ -322,7 +538,12 @@ impl CppParser {
         symbols
     }
 
-    fn parse_enum_field_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_enum_field_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut decl = ClassFieldDeclaration::default();
         decl.ast_fields.language = info.ast_fields.language;
@@ -332,7 +553,12 @@ impl CppParser {
         decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
         decl.ast_fields.guid = get_guid();
 
-        symbols.extend(self.find_error_usages(&info.node, code, &decl.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &decl.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         if let Some(name) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name.byte_range()).to_string();
@@ -349,21 +575,22 @@ impl CppParser {
         symbols
     }
 
-    fn parse_declaration<'a>(&mut self,
-                             parent: &Node<'a>,
-                             code: &str,
-                             path: &PathBuf,
-                             parent_guid: &Uuid,
-                             is_error: bool,
-                             candidates: &mut VecDeque<CandidateInfo<'a>>)
-                             -> (Vec<AstSymbolInstanceArc>, Vec<TypeDef>, String, String) {
+    fn parse_declaration<'a>(
+        &mut self,
+        parent: &Node<'a>,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+        is_error: bool,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> (Vec<AstSymbolInstanceArc>, Vec<TypeDef>, String, String) {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut types: Vec<TypeDef> = Default::default();
         let mut name: String = String::new();
         let mut namespace: String = String::new();
         #[cfg(test)]
         #[allow(unused)]
-            let text = code.slice(parent.byte_range());
+        let text = code.slice(parent.byte_range());
         let kind = parent.kind();
         match kind {
             "identifier" | "field_identifier" => {
@@ -375,13 +602,18 @@ impl CppParser {
                     symbols.extend(self.find_error_usages(&name_node, code, path, &parent_guid));
                 }
                 if let Some(arguments_node) = parent.child_by_field_name("arguments") {
-                    symbols.extend(self.find_error_usages(&arguments_node, code, path, &parent_guid));
+                    symbols.extend(self.find_error_usages(
+                        &arguments_node,
+                        code,
+                        path,
+                        &parent_guid,
+                    ));
                     self.find_error_usages(&arguments_node, code, path, &parent_guid);
                     for i in 0..arguments_node.child_count() {
                         let child = arguments_node.child(i).unwrap();
                         #[cfg(test)]
                         #[allow(unused)]
-                            let text = code.slice(child.byte_range());
+                        let text = code.slice(child.byte_range());
                         symbols.extend(self.find_error_usages(&child, code, path, &parent_guid));
                         self.find_error_usages(&child, code, path, &parent_guid);
                         if let Some(dtype) = parse_type(&child, code) {
@@ -392,14 +624,24 @@ impl CppParser {
             }
             "init_declarator" => {
                 if let Some(declarator) = parent.child_by_field_name("declarator") {
-                    let (symbols_l, _, name_l, _) =
-                        self.parse_declaration(&declarator, code, path, parent_guid, is_error, candidates);
+                    let (symbols_l, _, name_l, _) = self.parse_declaration(
+                        &declarator,
+                        code,
+                        path,
+                        parent_guid,
+                        is_error,
+                        candidates,
+                    );
                     symbols.extend(symbols_l);
                     name = name_l;
                 }
                 if let Some(value) = parent.child_by_field_name("value") {
                     candidates.push_back(CandidateInfo {
-                        ast_fields: AstSymbolFields::from_data(LanguageId::Cpp, path.clone(), is_error),
+                        ast_fields: AstSymbolFields::from_data(
+                            LanguageId::Cpp,
+                            path.clone(),
+                            is_error,
+                        ),
                         node: value,
                         parent_guid: parent_guid.clone(),
                     });
@@ -409,26 +651,50 @@ impl CppParser {
             "qualified_identifier" => {
                 if let Some(scope) = parent.child_by_field_name("scope") {
                     symbols.extend(self.find_error_usages(&scope, code, path, &parent_guid));
-                    let (symbols_l, types_l, name_l, namespace_l) =
-                        self.parse_declaration(&scope, code, path, parent_guid, is_error, candidates);
+                    let (symbols_l, types_l, name_l, namespace_l) = self.parse_declaration(
+                        &scope,
+                        code,
+                        path,
+                        parent_guid,
+                        is_error,
+                        candidates,
+                    );
                     symbols.extend(symbols_l);
                     types.extend(types_l);
-                    namespace = vec![namespace, name_l, namespace_l].iter().filter(|x| !x.is_empty()).join("::");
+                    namespace = vec![namespace, name_l, namespace_l]
+                        .iter()
+                        .filter(|x| !x.is_empty())
+                        .join("::");
                 }
                 if let Some(name_node) = parent.child_by_field_name("name") {
                     symbols.extend(self.find_error_usages(&name_node, code, path, &parent_guid));
-                    let (symbols_l, types_l, name_l, namespace_l) =
-                        self.parse_declaration(&name_node, code, path, parent_guid, is_error, candidates);
+                    let (symbols_l, types_l, name_l, namespace_l) = self.parse_declaration(
+                        &name_node,
+                        code,
+                        path,
+                        parent_guid,
+                        is_error,
+                        candidates,
+                    );
                     symbols.extend(symbols_l);
                     types.extend(types_l);
                     name = name_l;
-                    namespace = vec![namespace, namespace_l].iter().filter(|x| !x.is_empty()).join("::");
+                    namespace = vec![namespace, namespace_l]
+                        .iter()
+                        .filter(|x| !x.is_empty())
+                        .join("::");
                 }
             }
             "pointer_declarator" => {
                 if let Some(declarator) = parent.child_by_field_name("declarator") {
-                    let (symbols_l, _, name_l, _) =
-                        self.parse_declaration(&declarator, code, path, parent_guid, is_error, candidates);
+                    let (symbols_l, _, name_l, _) = self.parse_declaration(
+                        &declarator,
+                        code,
+                        path,
+                        parent_guid,
+                        is_error,
+                        candidates,
+                    );
                     symbols.extend(symbols_l);
                     name = name_l;
                 }
@@ -437,8 +703,14 @@ impl CppParser {
                 for i in 0..parent.child_count() {
                     let child = parent.child(i).unwrap();
                     symbols.extend(self.find_error_usages(&child, code, path, &parent_guid));
-                    let (symbols_l, _, name_l, _) =
-                        self.parse_declaration(&child, code, path, parent_guid, is_error, candidates);
+                    let (symbols_l, _, name_l, _) = self.parse_declaration(
+                        &child,
+                        code,
+                        path,
+                        parent_guid,
+                        is_error,
+                        candidates,
+                    );
                     symbols.extend(symbols_l);
                     if !name_l.is_empty() {
                         name = name_l;
@@ -452,8 +724,14 @@ impl CppParser {
                     }
                 }
                 if let Some(declarator) = parent.child_by_field_name("declarator") {
-                    let (symbols_l, _, name_l, _) =
-                        self.parse_declaration(&declarator, code, path, parent_guid, is_error, candidates);
+                    let (symbols_l, _, name_l, _) = self.parse_declaration(
+                        &declarator,
+                        code,
+                        path,
+                        parent_guid,
+                        is_error,
+                        candidates,
+                    );
                     symbols.extend(symbols_l);
                     name = name_l;
                 }
@@ -464,7 +742,12 @@ impl CppParser {
         (symbols, types, name, namespace)
     }
 
-    pub fn parse_function_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    pub fn parse_function_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = FunctionDeclaration::default();
         decl.ast_fields.language = info.ast_fields.language;
@@ -476,13 +759,22 @@ impl CppParser {
         decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
         decl.ast_fields.guid = get_guid();
 
-        symbols.extend(self.find_error_usages(&info.node, code, &decl.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &decl.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         let mut template_parent_node = info.node.parent();
         while let Some(parent) = template_parent_node {
             match parent.kind() {
-                "enum_specifier" | "class_specifier" | "struct_specifier" |
-                "template_declaration" | "namespace_definition" | "function_definition" => {
+                "enum_specifier"
+                | "class_specifier"
+                | "struct_specifier"
+                | "template_declaration"
+                | "namespace_definition"
+                | "function_definition" => {
                     break;
                 }
                 &_ => {}
@@ -494,38 +786,69 @@ impl CppParser {
                 if let Some(parameters) = template_parent.child_by_field_name("parameters") {
                     for i in 0..parameters.child_count() {
                         let child = parameters.child(i).unwrap();
-                        let (_, types_l, _, _) =
-                            self.parse_declaration(&child, code, &decl.ast_fields.file_path,
-                                                   &decl.ast_fields.guid, decl.ast_fields.is_error,
-                                                   candidates);
+                        let (_, types_l, _, _) = self.parse_declaration(
+                            &child,
+                            code,
+                            &decl.ast_fields.file_path,
+                            &decl.ast_fields.guid,
+                            decl.ast_fields.is_error,
+                            candidates,
+                        );
 
                         decl.template_types.extend(types_l);
-                        symbols.extend(self.find_error_usages(&child, code, &decl.ast_fields.file_path, &decl.ast_fields.guid));
+                        symbols.extend(self.find_error_usages(
+                            &child,
+                            code,
+                            &decl.ast_fields.file_path,
+                            &decl.ast_fields.guid,
+                        ));
                     }
                 }
             }
         }
 
         if let Some(declarator) = info.node.child_by_field_name("declarator") {
-            symbols.extend(self.find_error_usages(&declarator, code, &decl.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &declarator,
+                code,
+                &decl.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             if let Some(declarator) = declarator.child_by_field_name("declarator") {
-                symbols.extend(self.find_error_usages(&declarator, code, &decl.ast_fields.file_path, &decl.ast_fields.guid));
-                let (symbols_l, types_l, name_l, namespace_l) =
-                    self.parse_declaration(&declarator, code, &decl.ast_fields.file_path,
-                                           &decl.ast_fields.guid, decl.ast_fields.is_error,
-                                           candidates);
+                symbols.extend(self.find_error_usages(
+                    &declarator,
+                    code,
+                    &decl.ast_fields.file_path,
+                    &decl.ast_fields.guid,
+                ));
+                let (symbols_l, types_l, name_l, namespace_l) = self.parse_declaration(
+                    &declarator,
+                    code,
+                    &decl.ast_fields.file_path,
+                    &decl.ast_fields.guid,
+                    decl.ast_fields.is_error,
+                    candidates,
+                );
                 symbols.extend(symbols_l);
                 decl.ast_fields.name = name_l;
                 decl.ast_fields.namespace = namespace_l;
                 decl.template_types = types_l;
             }
             if let Some(parameters) = declarator.child_by_field_name("parameters") {
-                symbols.extend(self.find_error_usages(&parameters, code, &decl.ast_fields.file_path,
-                                                      &decl.ast_fields.guid));
+                symbols.extend(self.find_error_usages(
+                    &parameters,
+                    code,
+                    &decl.ast_fields.file_path,
+                    &decl.ast_fields.guid,
+                ));
                 for i in 0..parameters.child_count() {
                     let child = parameters.child(i).unwrap();
-                    symbols.extend(self.find_error_usages(&child, code, &decl.ast_fields.file_path,
-                                                          &decl.ast_fields.guid));
+                    symbols.extend(self.find_error_usages(
+                        &child,
+                        code,
+                        &decl.ast_fields.file_path,
+                        &decl.ast_fields.guid,
+                    ));
                     match child.kind() {
                         "parameter_declaration" => {
                             let mut arg = FunctionArg::default();
@@ -533,10 +856,14 @@ impl CppParser {
                                 arg.type_ = parse_type(&type_, code);
                             }
                             if let Some(declarator) = child.child_by_field_name("declarator") {
-                                let (symbols_l, _, name_l, _) =
-                                    self.parse_declaration(&declarator, code, &decl.ast_fields.file_path,
-                                                           &decl.ast_fields.guid, decl.ast_fields.is_error,
-                                                           candidates);
+                                let (symbols_l, _, name_l, _) = self.parse_declaration(
+                                    &declarator,
+                                    code,
+                                    &decl.ast_fields.file_path,
+                                    &decl.ast_fields.guid,
+                                    decl.ast_fields.is_error,
+                                    candidates,
+                                );
                                 symbols.extend(symbols_l);
                                 arg.name = name_l;
                             }
@@ -545,7 +872,6 @@ impl CppParser {
                         &_ => {}
                     }
                 }
-
             }
         }
 
@@ -581,7 +907,12 @@ impl CppParser {
         symbols
     }
 
-    pub fn parse_call_expression<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    pub fn parse_call_expression<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = FunctionCall::default();
         decl.ast_fields.language = info.ast_fields.language;
@@ -595,17 +926,26 @@ impl CppParser {
         }
         decl.ast_fields.caller_guid = Some(get_guid());
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         if let Some(function) = info.node.child_by_field_name("function") {
-            symbols.extend(self.find_error_usages(&function, code, &info.ast_fields.file_path,
-                                                  &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &function,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             match function.kind() {
                 "identifier" => {
                     decl.ast_fields.name = code.slice(function.byte_range()).to_string();
                 }
                 "field_expression" => {
-                    if let Some(field) =  function.child_by_field_name("field") {
+                    if let Some(field) = function.child_by_field_name("field") {
                         decl.ast_fields.name = code.slice(field.byte_range()).to_string();
                     }
                     if let Some(argument) = function.child_by_field_name("argument") {
@@ -626,8 +966,12 @@ impl CppParser {
             }
         }
         if let Some(arguments) = info.node.child_by_field_name("arguments") {
-            symbols.extend(self.find_error_usages(&arguments, code, &info.ast_fields.file_path,
-                                                  &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &arguments,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             let mut new_ast_fields = info.ast_fields.clone();
             new_ast_fields.caller_guid = None;
 
@@ -644,7 +988,13 @@ impl CppParser {
         symbols
     }
 
-    fn find_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn find_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         for i in 0..parent.child_count() {
             let child = parent.child(i).unwrap();
@@ -655,7 +1005,13 @@ impl CppParser {
         symbols
     }
 
-    fn parse_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn parse_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         match parent.kind() {
             "identifier" | "field_identifier" => {
@@ -703,13 +1059,18 @@ impl CppParser {
         symbols
     }
 
-    fn parse_usages_<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_usages_<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
 
         let kind = info.node.kind();
         #[cfg(test)]
         #[allow(unused)]
-            let text = code.slice(info.node.byte_range());
+        let text = code.slice(info.node.byte_range());
         match kind {
             "enum_specifier" | "class_specifier" | "struct_specifier" => {
                 symbols.extend(self.parse_struct_declaration(info, code, candidates));
@@ -764,7 +1125,12 @@ impl CppParser {
                         node: argument,
                         parent_guid: info.parent_guid.clone(),
                     });
-                    symbols.extend(self.find_error_usages(&argument, code, &info.ast_fields.file_path, &info.parent_guid));
+                    symbols.extend(self.find_error_usages(
+                        &argument,
+                        code,
+                        &info.ast_fields.file_path,
+                        &info.parent_guid,
+                    ));
                 }
                 symbols.push(Arc::new(RwLock::new(Box::new(usage))));
             }
@@ -801,12 +1167,11 @@ impl CppParser {
                     match path.kind() {
                         "system_lib_string" | "string_literal" => {
                             let mut name = code.slice(path.byte_range()).to_string();
-                            name = name.slice(1..name.len()-1).to_string();
+                            name = name.slice(1..name.len() - 1).to_string();
                             def.path_components = name.split("/").map(|x| x.to_string()).collect();
                             if SYSTEM_HEADERS.contains(&&name.as_str()) {
                                 def.import_type = ImportType::System;
                             }
-
                         }
                         &_ => {}
                     }
@@ -867,8 +1232,10 @@ impl CppParser {
             let symbols_l = self.parse_usages_(&candidate, code, &mut candidates);
             symbols.extend(symbols_l);
         }
-        let guid_to_symbol_map = symbols.iter()
-            .map(|s| (s.clone().read().guid().clone(), s.clone())).collect::<HashMap<_, _>>();
+        let guid_to_symbol_map = symbols
+            .iter()
+            .map(|s| (s.clone().read().guid().clone(), s.clone()))
+            .collect::<HashMap<_, _>>();
         for symbol in symbols.iter_mut() {
             let guid = symbol.read().guid().clone();
             if let Some(parent_guid) = symbol.read().parent_guid() {
@@ -881,10 +1248,20 @@ impl CppParser {
         #[cfg(test)]
         for symbol in symbols.iter_mut() {
             let mut sym = symbol.write();
-            sym.fields_mut().childs_guid = sym.fields_mut().childs_guid.iter()
+            sym.fields_mut().childs_guid = sym
+                .fields_mut()
+                .childs_guid
+                .iter()
                 .sorted_by_key(|x| {
-                    guid_to_symbol_map.get(*x).unwrap().read().full_range().start_byte
-                }).map(|x| x.clone()).collect();
+                    guid_to_symbol_map
+                        .get(*x)
+                        .unwrap()
+                        .read()
+                        .full_range()
+                        .start_byte
+                })
+                .map(|x| x.clone())
+                .collect();
         }
 
         symbols
@@ -898,5 +1275,3 @@ impl AstLanguageParser for CppParser {
         symbols
     }
 }
-
-

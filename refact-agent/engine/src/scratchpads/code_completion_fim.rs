@@ -19,7 +19,6 @@ use crate::scratchpads::completon_rag::retrieve_ast_based_extra_context;
 use crate::telemetry::snippets_collection;
 use crate::telemetry::telemetry_structs;
 
-
 const DEBUG: bool = false;
 
 pub struct FillInTheMiddleScratchpad {
@@ -76,19 +75,51 @@ impl FillInTheMiddleScratchpad {
 
 #[async_trait]
 impl ScratchpadAbstract for FillInTheMiddleScratchpad {
-    async fn apply_model_adaptation_patch(
-        &mut self,
-        patch: &Value,
-    ) -> Result<(), String> {
+    async fn apply_model_adaptation_patch(&mut self, patch: &Value) -> Result<(), String> {
         // That will work for some models (starcoder) without patching
-        self.fim_prefix = patch.get("fim_prefix").and_then(|x| x.as_str()).unwrap_or("<fim_prefix>").to_string();
-        self.fim_suffix = patch.get("fim_suffix").and_then(|x| x.as_str()).unwrap_or("<fim_suffix>").to_string();
-        self.fim_middle = patch.get("fim_middle").and_then(|x| x.as_str()).unwrap_or("<fim_middle>").to_string();
-        self.extra_stop_tokens = patch.get("extra_stop_tokens").map(|x| x.as_array().unwrap().into_iter().map(|x| x.as_str().unwrap().to_string()).collect::<Vec<String>>()).unwrap_or(vec![]);
-        self.t.eot = patch.get("eot").and_then(|x| x.as_str()).unwrap_or("<|endoftext|>").to_string();
-        self.t.eos = patch.get("eos").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        self.t.context_format = patch.get("context_format").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-        self.t.rag_ratio = patch.get("rag_ratio").and_then(|x| x.as_f64()).unwrap_or(0.5);
+        self.fim_prefix = patch
+            .get("fim_prefix")
+            .and_then(|x| x.as_str())
+            .unwrap_or("<fim_prefix>")
+            .to_string();
+        self.fim_suffix = patch
+            .get("fim_suffix")
+            .and_then(|x| x.as_str())
+            .unwrap_or("<fim_suffix>")
+            .to_string();
+        self.fim_middle = patch
+            .get("fim_middle")
+            .and_then(|x| x.as_str())
+            .unwrap_or("<fim_middle>")
+            .to_string();
+        self.extra_stop_tokens = patch
+            .get("extra_stop_tokens")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        self.t.eot = patch
+            .get("eot")
+            .and_then(|x| x.as_str())
+            .unwrap_or("<|endoftext|>")
+            .to_string();
+        self.t.eos = patch
+            .get("eos")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        self.t.context_format = patch
+            .get("context_format")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        self.t.rag_ratio = patch
+            .get("rag_ratio")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.5);
         if self.t.tokenizer.is_some() {
             self.t.assert_one_token(&self.fim_prefix.as_str())?;
             self.t.assert_one_token(&self.fim_suffix.as_str())?;
@@ -108,20 +139,32 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
     ) -> Result<String, String> {
         let n_ctx = ccx.lock().await.n_ctx;
         let fim_t0 = Instant::now();
-        let use_rag = !self.t.context_format.is_empty() && self.t.rag_ratio > 0.0 && self.post.use_ast && self.ast_service.is_some();
+        let use_rag = !self.t.context_format.is_empty()
+            && self.t.rag_ratio > 0.0
+            && self.post.use_ast
+            && self.ast_service.is_some();
         let mut rag_tokens_n = if self.post.rag_tokens_n > 0 {
             self.post.rag_tokens_n.min(4096).max(50)
         } else {
-            ((n_ctx as f64 * self.t.rag_ratio) as usize).min(4096).max(50)
+            ((n_ctx as f64 * self.t.rag_ratio) as usize)
+                .min(4096)
+                .max(50)
         };
         if !use_rag {
             rag_tokens_n = 0;
         }
         if !use_rag && self.post.use_ast {
-            tracing::warn!("will not use ast because {}{}{}{}", self.t.context_format.is_empty() as i32, self.post.use_ast as i32, (rag_tokens_n > 0) as i32, self.ast_service.is_some() as i32);
+            tracing::warn!(
+                "will not use ast because {}{}{}{}",
+                self.t.context_format.is_empty() as i32,
+                self.post.use_ast as i32,
+                (rag_tokens_n > 0) as i32,
+                self.ast_service.is_some() as i32
+            );
         }
 
-        let limit: i32 = (n_ctx as i32) - (self.post.parameters.max_new_tokens as i32) - (rag_tokens_n as i32);
+        let limit: i32 =
+            (n_ctx as i32) - (self.post.parameters.max_new_tokens as i32) - (rag_tokens_n as i32);
         if limit < 512 {
             let msg = format!("n_ctx={} - max_new_tokens={} - rag_tokens_n={} leaves too little {} space for completion to work",
             n_ctx, self.post.parameters.max_new_tokens, rag_tokens_n, limit);
@@ -135,14 +178,18 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         if supports_stop {
             let mut stop_list = vec![self.t.eot.clone(), "\n\n".to_string()];
             if !self.post.inputs.multiline {
-                stop_list.push("\n".to_string());  // This doesn't stop hf inference, only whole tokens do
+                stop_list.push("\n".to_string()); // This doesn't stop hf inference, only whole tokens do
             }
             stop_list.extend(self.extra_stop_tokens.clone());
             sampling_parameters_to_patch.stop = stop_list;
         }
-        let mut source = self.post.inputs.sources.get(
-                &self.post.inputs.cursor.file
-            ).ok_or("Cursor is in file not found in sources".to_string())?.clone();
+        let mut source = self
+            .post
+            .inputs
+            .sources
+            .get(&self.post.inputs.cursor.file)
+            .ok_or("Cursor is in file not found in sources".to_string())?
+            .clone();
         source = self.cleanup_prompt(&source);
 
         let text = Rope::from_str(&*source);
@@ -174,9 +221,9 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         let mut after = String::new();
         let mut fim_line1: i32 = i32::MAX;
         let mut fim_line2: i32 = i32::MIN;
-        tokens_used += self.t.count_tokens(
-            (cursor_line1.clone() + &cursor_line2).as_str()
-        )?;
+        tokens_used += self
+            .t
+            .count_tokens((cursor_line1.clone() + &cursor_line2).as_str())?;
         let mut rel_line_n: i32 = 0;
         while before_line.is_some() || after_line.is_some() {
             rel_line_n += 1;
@@ -205,7 +252,12 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         }
 
         let before = before.into_iter().rev().collect::<Vec<_>>().join("");
-        info!("{} FIM prompt {} tokens used < limit {}", crate::nicer_logs::last_n_chars(&cpath.display().to_string(), 30), tokens_used, limit);
+        info!(
+            "{} FIM prompt {} tokens used < limit {}",
+            crate::nicer_logs::last_n_chars(&cpath.display().to_string(), 30),
+            tokens_used,
+            limit
+        );
         let mut prompt: String;
         if self.order == "PSM" {
             prompt = format!(
@@ -240,12 +292,12 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         self.context_used["rag_tokens_limit".to_string()] = Value::from(rag_tokens_n as i64);
         info!(" -- /post fim {}ms-- ", fim_ms);
 
-
         if use_rag && rag_tokens_n > 0 {
-            let pp_settings = {
+            let mut pp_settings = {
                 let ccx_locked = ccx.lock().await;
                 ccx_locked.postprocess_parameters.clone()
             };
+            pp_settings.max_files_n = pp_settings.max_files_n.max(1);
 
             // NOTE: why do we need this loop?
             // postprocess_context_files doesn't care about additional tokens after lines skip
@@ -263,8 +315,9 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
                     (fim_line1, fim_line2),
                     pp_settings.clone(),
                     content_tokens_budget as usize,
-                    &mut self.context_used
-                ).await;
+                    &mut self.context_used,
+                )
+                .await;
                 let content_tokens_n = self.t.count_tokens(&extra_context.as_str())?;
                 if content_tokens_n <= content_tokens_budget || extra_content_collect_counter > 1 {
                     prompt = format!("{extra_context}{prompt}");
@@ -279,33 +332,52 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         if DEBUG {
             info!("cursor position\n{:?}", self.post.inputs.cursor);
             info!("prompt\n{}", prompt);
-            info!("re-encode whole prompt again gives {} tokens", self.t.count_tokens(prompt.as_str())?);
+            info!(
+                "re-encode whole prompt again gives {} tokens",
+                self.t.count_tokens(prompt.as_str())?
+            );
         }
-        info!("re-encode whole prompt again gives {} tokens", self.t.count_tokens(prompt.as_str())?);
+        info!(
+            "re-encode whole prompt again gives {} tokens",
+            self.t.count_tokens(prompt.as_str())?
+        );
         Ok(prompt)
     }
 
     fn response_n_choices(
         &mut self,
         choices: Vec<String>,
-        finish_reasons: Vec<FinishReason>
+        finish_reasons: Vec<FinishReason>,
     ) -> Result<Value, String> {
-        let json_choices = choices.iter().enumerate().map(|(i, x)| {
-            let cc = _cut_result(&x, self.t.eot.as_str(), self.post.inputs.multiline, &self.extra_stop_tokens);
-            if i==0 {
-                self.data4cache.completion0_text = cc.clone();
-                self.data4cache.completion0_finish_reason = finish_reasons[i].to_string();
-            }
-            json!({
-                "index": i,
-                "code_completion": cc,
-                "finish_reason": finish_reasons[i].to_json_val(),
+        let json_choices = choices
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let cc = _cut_result(
+                    &x,
+                    self.t.eot.as_str(),
+                    self.post.inputs.multiline,
+                    &self.extra_stop_tokens,
+                );
+                if i == 0 {
+                    self.data4cache.completion0_text = cc.clone();
+                    self.data4cache.completion0_finish_reason = finish_reasons[i].to_string();
+                }
+                json!({
+                    "index": i,
+                    "code_completion": cc,
+                    "finish_reason": finish_reasons[i].to_json_val(),
+                })
             })
-        }).collect::<Vec<_>>();
+            .collect::<Vec<_>>();
         if DEBUG {
             info!("response_n_choices\n{:?}", json_choices);
         }
-        snippets_collection::snippet_register_from_data4cache(&self.data4snippet, &mut self.data4cache, self.context_used != json!({}));
+        snippets_collection::snippet_register_from_data4cache(
+            &self.data4snippet,
+            &mut self.data4cache,
+            self.context_used != json!({}),
+        );
         Ok(json!(
             {
                 "choices": json_choices,
@@ -319,10 +391,15 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
     fn response_streaming(
         &mut self,
         delta: String,
-        finish_reason: FinishReason
+        finish_reason: FinishReason,
     ) -> Result<(Value, FinishReason), String> {
-        let json_choices= if !delta.is_empty() || finish_reason == FinishReason::Stop {
-            let mut s: String = _cut_result(&delta, self.t.eot.as_str(), self.post.inputs.multiline, &self.extra_stop_tokens);
+        let json_choices = if !delta.is_empty() || finish_reason == FinishReason::Stop {
+            let mut s: String = _cut_result(
+                &delta,
+                self.t.eot.as_str(),
+                self.post.inputs.multiline,
+                &self.extra_stop_tokens,
+            );
             if finish_reason.is_finished() {
                 s = s.trim_end().to_string();
             }
@@ -341,11 +418,18 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
             }])
         };
         self.data4cache.completion0_finish_reason = finish_reason.to_string();
-        snippets_collection::snippet_register_from_data4cache(&self.data4snippet, &mut self.data4cache, self.context_used != json!({}));
-        Ok((json!({
-            "choices": json_choices,
-            "snippet_telemetry_id": self.data4cache.completion0_snippet_telemetry_id,
-        }), finish_reason))
+        snippets_collection::snippet_register_from_data4cache(
+            &self.data4snippet,
+            &mut self.data4cache,
+            self.context_used != json!({}),
+        );
+        Ok((
+            json!({
+                "choices": json_choices,
+                "snippet_telemetry_id": self.data4cache.completion0_snippet_telemetry_id,
+            }),
+            finish_reason,
+        ))
     }
 
     fn response_message_streaming(
@@ -356,13 +440,17 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         Err("not implemented".to_string())
     }
 
-    fn response_spontaneous(&mut self) -> Result<Vec<Value>, String>  {
+    fn response_spontaneous(&mut self) -> Result<Vec<Value>, String> {
         Err("".to_string())
     }
 
     fn streaming_finished(&mut self, finish_reason: FinishReason) -> Result<Value, String> {
         self.data4cache.completion0_finish_reason = finish_reason.to_string();
-        snippets_collection::snippet_register_from_data4cache(&self.data4snippet, &mut self.data4cache, self.context_used != json!({}));
+        snippets_collection::snippet_register_from_data4cache(
+            &self.data4snippet,
+            &mut self.data4cache,
+            self.context_used != json!({}),
+        );
         Ok(json!({
             "choices": [{
                 "index": 0,
@@ -374,7 +462,12 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
     }
 }
 
-fn _cut_result(text: &str, eot_token: &str, multiline: bool, extra_stop_tokens: &Vec<String>) -> String {
+fn _cut_result(
+    text: &str,
+    eot_token: &str,
+    multiline: bool,
+    extra_stop_tokens: &Vec<String>,
+) -> String {
     let mut cut_at = vec![];
     if let Some(x) = text.find(eot_token) {
         cut_at.push(x);

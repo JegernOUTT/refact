@@ -1,7 +1,7 @@
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
     "dpkg --add-architecture arm64",
-    "apt-get update && apt-get install --assume-yes libssl-dev:arm64 curl unzip",
+    "apt-get update && apt-get install --assume-yes libssl-dev:arm64 libclang-dev curl unzip",
 ]
 [target.aarch64-unknown-linux-gnu.env]
 passthrough = [
@@ -12,7 +12,7 @@ passthrough = [
 
 [target.x86_64-unknown-linux-gnu]
 pre-build = [
-    "apt-get update && apt-get install --assume-yes libssl-dev curl unzip",
+    "apt-get update && apt-get install --assume-yes libssl-dev libclang-dev curl unzip",
 ]
 [target.x86_64-unknown-linux-gnu.env]
 passthrough = [

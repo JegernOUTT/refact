@@ -12,7 +12,6 @@ use tokio::io::AsyncBufReadExt;
 use crate::dashboard::dashboard::records2plots;
 use crate::dashboard::structs::RHData;
 
-
 #[derive(Debug, Deserialize)]
 struct RHResponse {
     // retcode: String,
@@ -32,13 +31,18 @@ async fn fetch_data(
     let response = match http_client
         .get(url)
         .header("Authorization", format!("Bearer {}", api_key))
-        .send().await {
+        .send()
+        .await
+    {
         Ok(response) => response,
         Err(e) => return Err(format!("Error fetching reports: {}", e)),
     };
     info!("{:?}", &response.status());
     if !response.status().is_success() {
-        return Err(format!("Error fetching reports: status code: {}", response.status()));
+        return Err(format!(
+            "Error fetching reports: status code: {}",
+            response.status()
+        ));
     }
     let body_mb = response.bytes().await;
     if body_mb.is_err() {
@@ -63,37 +67,52 @@ pub async fn get_dashboard_plots(
     Extension(global_context): Extension<SharedGlobalContext>,
     _: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
-
-    let caps = crate::global_context::try_load_caps_quickly_if_not_present(global_context.clone(), 0).await?;
+    let caps =
+        crate::global_context::try_load_caps_quickly_if_not_present(global_context.clone(), 0)
+            .await?;
     let (http_client, api_key, url) = {
         let gcx_locked = global_context.read().await;
-        (gcx_locked.http_client.clone(), gcx_locked.cmdline.api_key.clone(), caps.telemetry_basic_retrieve_my_own.clone())
+        (
+            gcx_locked.http_client.clone(),
+            gcx_locked.cmdline.api_key.clone(),
+            caps.telemetry_basic_retrieve_my_own.clone(),
+        )
     };
     if url.is_empty() {
-        return Err(ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "Error: no url provided from caps".to_string()));
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Error: no url provided from caps".to_string(),
+        ));
     }
 
-    let mut records = match fetch_data(
-        &http_client,
-        &url,
-        &api_key
-    ).await {
+    let mut records = match fetch_data(&http_client, &url, &api_key).await {
         Ok(res) => res,
         Err(e) => {
-            return Err(ScratchError::new(StatusCode::NO_CONTENT, format!("Error fetching reports: {}", e)));
+            return Err(ScratchError::new(
+                StatusCode::NO_CONTENT,
+                format!("Error fetching reports: {}", e),
+            ));
         }
     };
 
     let plots = match records2plots(&mut records).await {
         Ok(plots) => plots,
         Err(e) => {
-            return Err(ScratchError::new(StatusCode::NO_CONTENT, format!("Error plotting reports: {}", e)));
+            return Err(ScratchError::new(
+                StatusCode::NO_CONTENT,
+                format!("Error plotting reports: {}", e),
+            ));
         }
     };
-    let body = match serde_json::to_string_pretty(&DashboardPlotsResponse{data: plots.to_string()}) {
+    let body = match serde_json::to_string_pretty(&DashboardPlotsResponse {
+        data: plots.to_string(),
+    }) {
         Ok(res) => res,
         Err(e) => {
-            return Err(ScratchError::new(StatusCode::NO_CONTENT, format!("Error serializing plots: {}", e)));
+            return Err(ScratchError::new(
+                StatusCode::NO_CONTENT,
+                format!("Error serializing plots: {}", e),
+            ));
         }
     };
     Ok(Response::builder()

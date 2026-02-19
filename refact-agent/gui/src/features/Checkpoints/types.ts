@@ -18,10 +18,14 @@ export type RevertedCheckpointData = {
 
 export type PreviewCheckpointsPayload = {
   checkpoints: Checkpoint[];
+  chat_id: string;
+  chat_mode?: string;
 };
 
 export type RestoreCheckpointsPayload = {
   checkpoints: Checkpoint[];
+  chat_id: string;
+  chat_mode?: string;
 };
 
 export type PreviewCheckpointsResponse = {
@@ -64,6 +68,10 @@ export function isPreviewCheckpointsResponse(
   // Check reverted_changes array
   if (!Array.isArray(json.reverted_changes)) return false;
   if (!json.reverted_changes.every(isRevertedCheckpointData)) return false;
+
+  // Check error_log array
+  if (!("error_log" in json) || !Array.isArray(json.error_log)) return false;
+  if (!json.error_log.every((item) => typeof item === "string")) return false;
 
   return true;
 }

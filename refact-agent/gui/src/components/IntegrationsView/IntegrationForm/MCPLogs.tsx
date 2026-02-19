@@ -2,7 +2,7 @@ import React from "react";
 import { useGetMCPLogs } from "./useGetMCPLogs";
 import { ScrollArea } from "../../ScrollArea";
 import { Box, Flex, Heading, Text } from "@radix-ui/themes";
-import { MarkdownCodeBlock } from "../../Markdown/CodeBlock";
+import { ShikiCodeBlock } from "../../Markdown/ShikiCodeBlock";
 
 type MCPLogsProps = {
   integrationPath: string;
@@ -41,16 +41,15 @@ export const MCPLogs: React.FC<MCPLogsProps> = ({
       </Text>
       <ScrollArea scrollbars="horizontal" style={{ width: "100%" }} asChild>
         <Box maxHeight="250px">
-          <MarkdownCodeBlock
+          <ShikiCodeBlock
             className="language-bash"
-            startingLineNumber={1}
             showLineNumbers={false}
             preOptions={{
               noMargin: true,
             }}
           >
             {formattedData}
-          </MarkdownCodeBlock>
+          </ShikiCodeBlock>
         </Box>
       </ScrollArea>
     </Flex>

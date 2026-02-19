@@ -1,17 +1,22 @@
-/** Override radix-themes defaults **/
-
 .radix-themes {
-  /* --default-font-family: Space Grotesk, sans-serif; */
+  --default-font-family: system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --code-font-family: "SF Mono", "Fira Code", "JetBrains Mono", Consolas,
+    "Liberation Mono", Menlo, monospace;
+  --default-font-size: 14px;
+  --default-line-height: 1.5;
 }
 
-/** Force dark tooltips in dark theme **/
+:where(.radix-themes) :where(.rt-Code) {
+  font-family: var(--code-font-family);
+}
+
 :where(.radix-themes) :where(.rt-TooltipContent) {
   background-color: #1a1a1a !important;
   color: #fcfcfc !important;
   border: 1px solid rgba(255, 255, 255, 0.1) !important;
 }
 
-/** Light theme tooltips **/
 :where(.radix-themes[data-appearance="light"]) :where(.rt-TooltipContent) {
   background-color: #fcfcfc !important;
   color: #1a1a1a !important;

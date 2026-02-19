@@ -4,17 +4,19 @@ use serde_json::{json, Value};
 use crate::dashboard::structs::{RHData, RHTableStatsByDate, RHTableStatsByLang};
 use crate::dashboard::utils::{get_week_n};
 
-
 async fn table_stats_by_lang(records: &Vec<RHData>) -> Value {
     let mut lang2stats: HashMap<String, RHTableStatsByLang> = HashMap::new();
 
     for r in records.iter() {
         let lang = r.file_extension.clone();
-        let stats = lang2stats.entry(lang.clone()).or_insert(RHTableStatsByLang::new(lang.clone()));
+        let stats = lang2stats
+            .entry(lang.clone())
+            .or_insert(RHTableStatsByLang::new(lang.clone()));
         stats.update(r);
     }
 
-    let mut lang_stats_records: Vec<RHTableStatsByLang> = lang2stats.iter().map(|(_, v)| v.clone()).collect();
+    let mut lang_stats_records: Vec<RHTableStatsByLang> =
+        lang2stats.iter().map(|(_, v)| v.clone()).collect();
     lang_stats_records.sort_by(|a, b| b.total.cmp(&a.total));
     json!({
         "data": lang_stats_records,
@@ -23,18 +25,20 @@ async fn table_stats_by_lang(records: &Vec<RHData>) -> Value {
     })
 }
 
-async fn refact_impact_dates(
-    context: &DashboardContext,
-    records: &Vec<RHData>
-) -> Value{
+async fn refact_impact_dates(context: &DashboardContext, records: &Vec<RHData>) -> Value {
     let mut day2stats: HashMap<String, RHTableStatsByDate> = HashMap::new();
     let mut week_n2stats: HashMap<i32, RHTableStatsByDate> = HashMap::new();
     let mut week_str2stats: HashMap<String, RHTableStatsByDate> = HashMap::new();
 
     for r in records.iter() {
-        let day = DateTime::from_timestamp(r.ts_end, 0).unwrap().format("%Y-%m-%d").to_string();
+        let day = DateTime::from_timestamp(r.ts_end, 0)
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
 
-        let stats = day2stats.entry(day.clone()).or_insert(RHTableStatsByDate::new());
+        let stats = day2stats
+            .entry(day.clone())
+            .or_insert(RHTableStatsByDate::new());
         stats.update(r);
 
         let week_n = context.date2week_n.get(&day);
@@ -42,7 +46,9 @@ async fn refact_impact_dates(
             continue;
         }
         let week_n = week_n.unwrap();
-        let stats_week_n = week_n2stats.entry(*week_n).or_insert(RHTableStatsByDate::new());
+        let stats_week_n = week_n2stats
+            .entry(*week_n)
+            .or_insert(RHTableStatsByDate::new());
         stats_week_n.update(r);
     }
 
@@ -67,12 +73,13 @@ struct DashboardContext {
     week_n2date: HashMap<i32, String>,
 }
 
-
 async fn get_context(records: &Vec<RHData>) -> Result<DashboardContext, String> {
     if records.is_empty() {
-        return Err("no records".to_string())
+        return Err("no records".to_string());
     }
-    let from_year = DateTime::from_timestamp(records.get(0).unwrap().ts_end, 0).unwrap().year();
+    let from_year = DateTime::from_timestamp(records.get(0).unwrap().ts_end, 0)
+        .unwrap()
+        .year();
     let mut date2week_n: HashMap<String, i32> = HashMap::new();
 
     for r in records {
@@ -94,7 +101,7 @@ async fn get_context(records: &Vec<RHData>) -> Result<DashboardContext, String> 
         week_n2date,
     })
 }
-pub async fn records2plots(records: &mut Vec<RHData>) -> Result<Value, String>{
+pub async fn records2plots(records: &mut Vec<RHData>) -> Result<Value, String> {
     records.sort_by(|a, b| a.ts_end.cmp(&b.ts_end));
 
     let context = get_context(records).await?;

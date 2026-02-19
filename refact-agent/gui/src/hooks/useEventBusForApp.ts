@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import { useConfig } from "./useConfig";
@@ -6,14 +6,18 @@ import { updateConfig } from "../features/Config/configSlice";
 import { setFileInfo } from "../features/Chat/activeFile";
 import { setSelectedSnippet } from "../features/Chat/selectedSnippet";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
-import { newChatAction } from "../features/Chat/Thread/actions";
+import {
+  newChatAction,
+  newChatWithInitialMessages,
+} from "../features/Chat/Thread/actions";
 import {
   isPageInHistory,
   push,
   selectPages,
 } from "../features/Pages/pagesSlice";
-import { ideToolCallResponse } from "./useEventBusForIDE";
+import { ideToolCallResponse, ideSwitchToThread } from "./useEventBusForIDE";
 import { createAction } from "@reduxjs/toolkit/react";
+import { switchToThread } from "../features/Chat/Thread/actions";
 
 export const ideAttachFileToChat = createAction<string>("ide/attachFileToChat");
 
@@ -21,6 +25,8 @@ export function useEventBusForApp() {
   const config = useConfig();
   const dispatch = useAppDispatch();
   const pages = useAppSelector(selectPages);
+  const pagesRef = useRef(pages);
+  pagesRef.current = pages;
 
   useEffect(() => {
     const listener = (event: MessageEvent) => {
@@ -37,10 +43,20 @@ export function useEventBusForApp() {
       }
 
       if (newChatAction.match(event.data)) {
-        if (!isPageInHistory({ pages }, "chat")) {
+        if (!isPageInHistory({ pages: pagesRef.current }, "chat")) {
           dispatch(push({ name: "chat" }));
         }
-        dispatch(newChatAction(event.data.payload));
+        const payload = event.data.payload;
+        if (payload?.messages && payload.messages.length > 0) {
+          void dispatch(
+            newChatWithInitialMessages({
+              title: payload.title,
+              messages: payload.messages,
+            }),
+          );
+        } else {
+          dispatch(newChatAction(payload));
+        }
       }
 
       if (setCurrentProjectInfo.match(event.data)) {
@@ -49,6 +65,13 @@ export function useEventBusForApp() {
 
       if (ideToolCallResponse.match(event.data)) {
         dispatch(event.data);
+      }
+
+      if (ideSwitchToThread.match(event.data)) {
+        if (!isPageInHistory({ pages: pagesRef.current }, "chat")) {
+          dispatch(push({ name: "chat" }));
+        }
+        dispatch(switchToThread({ id: event.data.payload.chatId }));
       }
 
       // TODO: ideToolEditResponse.
@@ -63,5 +86,5 @@ export function useEventBusForApp() {
     return () => {
       window.removeEventListener("message", listener);
     };
-  }, [config.host, dispatch, pages]);
+  }, [config.host, dispatch]);
 }

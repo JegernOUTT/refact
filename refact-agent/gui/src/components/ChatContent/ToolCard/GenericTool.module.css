@@ -1,0 +1,16 @@
+.args {
+  color: var(--gray-11);
+  font-family: var(--code-font-family);
+  font-size: inherit;
+}
+
+.resultContent {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.markdownContent {
+  padding: var(--space-2);
+  font-size: var(--font-size-1);
+}

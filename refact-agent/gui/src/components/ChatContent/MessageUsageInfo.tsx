@@ -3,6 +3,7 @@ import { Box, Card, Flex, Text, HoverCard } from "@radix-ui/themes";
 import { Usage } from "../../services/refact";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
 import { calculateUsageInputTokens } from "../../utils/calculateUsageInputTokens";
+import { formatUsd } from "../../utils/getMetering";
 import { Coin } from "../../images";
 
 type MessageUsageInfoProps = {
@@ -11,7 +12,6 @@ type MessageUsageInfoProps = {
   metering_coins_generated?: number;
   metering_coins_cache_creation?: number;
   metering_coins_cache_read?: number;
-  topOffset?: string;
 };
 
 const TokenDisplay: React.FC<{ label: string; value: number }> = ({
@@ -42,13 +42,24 @@ const CoinDisplay: React.FC<{ label: string; value: number }> = ({
   </Flex>
 );
 
+const UsdDisplay: React.FC<{ label: string; value: number | undefined }> = ({
+  label,
+  value,
+}) => (
+  <Flex align="center" justify="between" width="100%" gap="4">
+    <Text size="1" weight="bold">
+      {label}
+    </Text>
+    <Text size="1">{formatUsd(value)}</Text>
+  </Flex>
+);
+
 export const MessageUsageInfo: React.FC<MessageUsageInfoProps> = ({
   usage,
   metering_coins_prompt = 0,
   metering_coins_generated = 0,
   metering_coins_cache_creation = 0,
   metering_coins_cache_read = 0,
-  topOffset = "0",
 }) => {
   const outputTokens = useMemo(() => {
     return calculateUsageInputTokens({
@@ -71,18 +82,29 @@ export const MessageUsageInfo: React.FC<MessageUsageInfoProps> = ({
     metering_coins_cache_read,
   ]);
 
-  const contextTokens = usage?.prompt_tokens ?? 0;
+  // Context tokens includes prompt + cache tokens for accurate context size
+  const contextTokens = useMemo(() => {
+    return calculateUsageInputTokens({
+      usage,
+      keys: [
+        "prompt_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+      ],
+    });
+  }, [usage]);
 
-  if (!usage && totalCoins === 0) return null;
+  const cacheReadTokens = usage?.cache_read_input_tokens ?? 0;
+  const cacheCreationTokens = usage?.cache_creation_input_tokens ?? 0;
+
+  const meteringUsd = usage?.metering_usd;
+  const hasUsd = meteringUsd !== undefined && meteringUsd.total_usd > 0;
+  const showCoins = !hasUsd && totalCoins > 0;
+
+  if (!usage && !showCoins && !hasUsd) return null;
 
   return (
-    <Box
-      style={{
-        position: "absolute",
-        right: "var(--space-3)",
-        top: topOffset,
-      }}
-    >
+    <Flex justify="end" mt="2">
       <HoverCard.Root>
         <HoverCard.Trigger>
           <Card
@@ -92,9 +114,26 @@ export const MessageUsageInfo: React.FC<MessageUsageInfoProps> = ({
               cursor: "pointer",
             }}
           >
-            <Flex align="center" gap="1">
-              <Text size="1">{Math.round(totalCoins)}</Text>
-              <Coin width="10px" height="10px" />
+            <Flex align="center" gap="3">
+              {contextTokens > 0 && (
+                <Flex align="center" gap="1">
+                  <Text size="1" color="gray">
+                    ctx:
+                  </Text>
+                  <Text size="1">{formatNumberToFixed(contextTokens)}</Text>
+                </Flex>
+              )}
+              {showCoins && (
+                <Flex align="center" gap="1">
+                  <Text size="1">{Math.round(totalCoins)}</Text>
+                  <Coin width="10px" height="10px" />
+                </Flex>
+              )}
+              {hasUsd && (
+                <Flex align="center" gap="1">
+                  <Text size="1">{formatUsd(meteringUsd.total_usd)}</Text>
+                </Flex>
+              )}
             </Flex>
           </Card>
         </HoverCard.Trigger>
@@ -107,6 +146,15 @@ export const MessageUsageInfo: React.FC<MessageUsageInfoProps> = ({
             {usage && (
               <>
                 <TokenDisplay label="Context size" value={contextTokens} />
+                {cacheReadTokens > 0 && (
+                  <TokenDisplay label="Cache read" value={cacheReadTokens} />
+                )}
+                {cacheCreationTokens > 0 && (
+                  <TokenDisplay
+                    label="Cache creation"
+                    value={cacheCreationTokens}
+                  />
+                )}
                 <TokenDisplay label="Output tokens" value={outputTokens} />
                 {usage.completion_tokens_details?.reasoning_tokens !== null &&
                   usage.completion_tokens_details?.reasoning_tokens !==
@@ -120,7 +168,7 @@ export const MessageUsageInfo: React.FC<MessageUsageInfoProps> = ({
               </>
             )}
 
-            {totalCoins > 0 && (
+            {showCoins && (
               <>
                 <Box my="2" style={{ borderTop: "1px solid var(--gray-a6)" }} />
                 <Flex align="center" justify="between" width="100%" mb="1">
@@ -157,9 +205,40 @@ export const MessageUsageInfo: React.FC<MessageUsageInfoProps> = ({
                 )}
               </>
             )}
+
+            {hasUsd && (
+              <>
+                <Box my="2" style={{ borderTop: "1px solid var(--gray-a6)" }} />
+                <Flex align="center" justify="between" width="100%" mb="1">
+                  <Text size="2" weight="bold">
+                    Cost
+                  </Text>
+                  <Text size="2">{formatUsd(meteringUsd.total_usd)}</Text>
+                </Flex>
+                <UsdDisplay label="Prompt" value={meteringUsd.prompt_usd} />
+                <UsdDisplay
+                  label="Completion"
+                  value={meteringUsd.generated_usd}
+                />
+                {meteringUsd.cache_read_usd !== undefined &&
+                  meteringUsd.cache_read_usd > 0 && (
+                    <UsdDisplay
+                      label="Cache read"
+                      value={meteringUsd.cache_read_usd}
+                    />
+                  )}
+                {meteringUsd.cache_creation_usd !== undefined &&
+                  meteringUsd.cache_creation_usd > 0 && (
+                    <UsdDisplay
+                      label="Cache creation"
+                      value={meteringUsd.cache_creation_usd}
+                    />
+                  )}
+              </>
+            )}
           </Flex>
         </HoverCard.Content>
       </HoverCard.Root>
-    </Box>
+    </Flex>
   );
 };

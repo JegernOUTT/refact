@@ -1,0 +1,15 @@
+.url {
+  font-family: var(--code-font-family);
+  font-size: 0.95em;
+  color: var(--accent-11);
+}
+
+.query {
+  color: var(--accent-11);
+}
+
+.resultContent {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  max-height: 300px;
+  overflow-y: auto;
+}

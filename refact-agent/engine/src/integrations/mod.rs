@@ -7,66 +7,82 @@
 // use crate::tools::tools_description::Tool;
 // use crate::yaml_configs::create_configs::{integrations_enabled_cfg, read_yaml_into_value};
 
-
+pub mod browser_runtime;
+pub mod browser_types;
 pub mod integr_abstract;
-pub mod integr_github;
-pub mod integr_gitlab;
 pub mod integr_bitbucket;
-pub mod integr_pdb;
 pub mod integr_chrome;
-pub mod integr_postgres;
-pub mod integr_mysql;
 pub mod integr_cmdline;
 pub mod integr_cmdline_service;
-pub mod integr_shell;
+pub mod integr_github;
+pub mod integr_gitlab;
+pub mod integr_mysql;
+pub mod integr_pdb;
+pub mod integr_postgres;
 pub mod mcp;
 
-pub mod process_io_utils;
-pub mod docker;
-pub mod sessions;
 pub mod config_chat;
+pub mod process_io_utils;
 pub mod project_summary_chat;
-pub mod yaml_schema;
-pub mod setting_up_integrations;
 pub mod running_integrations;
+pub mod sessions;
+pub mod setting_up_integrations;
 pub mod utils;
+pub mod yaml_schema;
 
 use integr_abstract::IntegrationTrait;
 
-
-pub fn integration_from_name(n: &str) -> Result<Box<dyn IntegrationTrait + Send + Sync>, String>
-{
+pub fn integration_from_name(n: &str) -> Result<Box<dyn IntegrationTrait + Send + Sync>, String> {
     match n {
-        "github" => Ok(Box::new(integr_github::ToolGithub { ..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "gitlab" => Ok(Box::new(integr_gitlab::ToolGitlab { ..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "bitbucket" => Ok(Box::new(integr_bitbucket::ToolBitbucket { ..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "pdb" => Ok(Box::new(integr_pdb::ToolPdb { ..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "chrome" => Ok(Box::new(integr_chrome::ToolChrome { ..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "postgres" => Ok(Box::new(integr_postgres::ToolPostgres { ..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "mysql" => Ok(Box::new(integr_mysql::ToolMysql { ..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "docker" => Ok(Box::new(docker::integr_docker::ToolDocker {..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "shell" => Ok(Box::new(integr_shell::ToolShell {..Default::default() }) as Box<dyn IntegrationTrait + Send + Sync>),
+        "github" => Ok(Box::new(integr_github::ToolGithub {
+            ..Default::default()
+        }) as Box<dyn IntegrationTrait + Send + Sync>),
+        "gitlab" => Ok(Box::new(integr_gitlab::ToolGitlab {
+            ..Default::default()
+        }) as Box<dyn IntegrationTrait + Send + Sync>),
+        "bitbucket" => Ok(Box::new(integr_bitbucket::ToolBitbucket {
+            ..Default::default()
+        }) as Box<dyn IntegrationTrait + Send + Sync>),
+        "pdb" => Ok(Box::new(integr_pdb::ToolPdb {
+            ..Default::default()
+        }) as Box<dyn IntegrationTrait + Send + Sync>),
+        "chrome" => Ok(Box::new(integr_chrome::ToolChrome {
+            ..Default::default()
+        }) as Box<dyn IntegrationTrait + Send + Sync>),
+        "postgres" => Ok(Box::new(integr_postgres::ToolPostgres {
+            ..Default::default()
+        }) as Box<dyn IntegrationTrait + Send + Sync>),
+        "mysql" => Ok(Box::new(integr_mysql::ToolMysql {
+            ..Default::default()
+        }) as Box<dyn IntegrationTrait + Send + Sync>),
         cmdline if cmdline.starts_with("cmdline_") => {
             // let tool_name = cmdline.strip_prefix("cmdline_").unwrap();
-            Ok(Box::new(integr_cmdline::ToolCmdline {..Default::default()}) as Box<dyn IntegrationTrait + Send + Sync>)
-        },
+            Ok(Box::new(integr_cmdline::ToolCmdline {
+                ..Default::default()
+            }) as Box<dyn IntegrationTrait + Send + Sync>)
+        }
         service if service.starts_with("service_") => {
-            Ok(Box::new(integr_cmdline_service::ToolService {..Default::default()}) as Box<dyn IntegrationTrait + Send + Sync>)
-        },
+            Ok(Box::new(integr_cmdline_service::ToolService {
+                ..Default::default()
+            }) as Box<dyn IntegrationTrait + Send + Sync>)
+        }
         mcp_sse if mcp_sse.starts_with("mcp_sse_") => {
-            Ok(Box::new(mcp::integr_mcp_sse::IntegrationMCPSse {..Default::default()}) as Box<dyn IntegrationTrait + Send + Sync>)
-        },
+            Ok(Box::new(mcp::integr_mcp_sse::IntegrationMCPSse {
+                ..Default::default()
+            }) as Box<dyn IntegrationTrait + Send + Sync>)
+        }
         // We support also mcp_* as mcp_stdio_* for backwards compatibility, some users already have it configured.
         mcp_stdio if mcp_stdio.starts_with("mcp_stdio_") || mcp_stdio.starts_with("mcp_") => {
-            Ok(Box::new(mcp::integr_mcp_stdio::IntegrationMCPStdio {..Default::default()}) as Box<dyn IntegrationTrait + Send + Sync>)
-        },
-        "isolation" => Ok(Box::new(docker::integr_isolation::IntegrationIsolation {..Default::default()}) as Box<dyn IntegrationTrait + Send + Sync>),
+            Ok(Box::new(mcp::integr_mcp_stdio::IntegrationMCPStdio {
+                ..Default::default()
+            }) as Box<dyn IntegrationTrait + Send + Sync>)
+        }
         _ => Err(format!("Unknown integration name: {}", n)),
     }
 }
 
-pub fn integrations_list(allow_experimental: bool) -> Vec<&'static str> {
-    let mut integrations = vec![
+pub fn integrations_list(_allow_experimental: bool) -> Vec<&'static str> {
+    let integrations = vec![
         "github",
         "gitlab",
         "bitbucket",
@@ -78,14 +94,7 @@ pub fn integrations_list(allow_experimental: bool) -> Vec<&'static str> {
         "service_TEMPLATE",
         "mcp_stdio_TEMPLATE",
         "mcp_sse_TEMPLATE",
-        "docker",
-        "shell",
     ];
-    if allow_experimental {
-        integrations.extend(vec![
-            "isolation",
-        ]);
-    }
     integrations
 }
 

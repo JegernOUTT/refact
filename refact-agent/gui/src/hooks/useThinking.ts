@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useCapsForToolUse } from "./useCapsForToolUse";
 import { useAppSelector } from "./useAppSelector";
 import {
@@ -6,6 +6,7 @@ import {
   selectIsStreaming,
   selectIsWaiting,
   selectThreadBoostReasoning,
+  selectModel,
   setBoostReasoning,
 } from "../features/Chat";
 import { useAppDispatch } from "./useAppDispatch";
@@ -17,17 +18,25 @@ export function useThinking() {
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
   const chatId = useAppSelector(selectChatId);
+  const threadModel = useAppSelector(selectModel);
 
   const isBoostReasoningEnabled = useAppSelector(selectThreadBoostReasoning);
 
   const caps = useCapsForToolUse();
   const { data: userData } = useGetUser();
 
+  const currentModel = threadModel || caps.currentModel;
+
   const supportsBoostReasoning = useMemo(() => {
     const models = caps.data?.chat_models;
-    const item = models?.[caps.currentModel];
-    return item?.supports_boost_reasoning ?? false;
-  }, [caps.data?.chat_models, caps.currentModel]);
+    const item = models?.[currentModel];
+    if (!item) return false;
+    return (
+      !!item.reasoning_effort_options?.length ||
+      !!item.supports_thinking_budget ||
+      !!item.supports_adaptive_thinking_budget
+    );
+  }, [caps.data?.chat_models, currentModel]);
 
   const shouldBeTeasing = useMemo(
     () => userData?.inference === "FREE",
@@ -42,7 +51,7 @@ export function useThinking() {
 
   const noteText = useMemo(() => {
     if (!supportsBoostReasoning)
-      return `Note: ${caps.currentModel} doesn't support thinking`;
+      return `Note: ${currentModel} doesn't support thinking`;
     if (isStreaming || isWaiting)
       return `Note: you can't ${
         isBoostReasoningEnabled ? "disable" : "enable"
@@ -52,7 +61,7 @@ export function useThinking() {
     isStreaming,
     isWaiting,
     isBoostReasoningEnabled,
-    caps.currentModel,
+    currentModel,
   ]);
 
   const handleReasoningChange = useCallback(
@@ -64,17 +73,12 @@ export function useThinking() {
     [dispatch, chatId],
   );
 
-  useEffect(() => {
-    if (!supportsBoostReasoning) {
-      dispatch(setBoostReasoning({ chatId, value: supportsBoostReasoning }));
-    }
-  }, [dispatch, chatId, supportsBoostReasoning, shouldBeDisabled]);
-
   return {
     handleReasoningChange,
     shouldBeDisabled,
     shouldBeTeasing,
     noteText,
     areCapsInitialized: !caps.uninitialized,
+    supportsBoostReasoning,
   };
 }

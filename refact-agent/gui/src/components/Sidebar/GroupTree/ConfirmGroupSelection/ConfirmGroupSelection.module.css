@@ -7,6 +7,9 @@
   margin-right: auto;
   /* background: var(--color-panel-translucent, #181a20); */
   min-height: fit-content;
+  /* Force GPU compositing to fix JCEF repaint issues in JetBrains IDEs */
+  transform: translateZ(0);
+  will-change: transform;
 }
 
 .groupName {

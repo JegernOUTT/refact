@@ -10,7 +10,6 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, Too
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::postprocessing::pp_command_output::OutputFilter;
 
-
 pub struct ToolWeb {
     pub config_path: String,
 }
@@ -18,15 +17,24 @@ pub struct ToolWeb {
 const DEFAULT_OUTPUT_LIMIT: usize = 200;
 
 fn parse_output_filter(args: &HashMap<String, Value>) -> OutputFilter {
-    let output_filter = args.get("output_filter").and_then(|v| v.as_str()).unwrap_or("");
-    let output_limit = args.get("output_limit").and_then(|v| v.as_str()).unwrap_or("");
+    let output_filter = args
+        .get("output_filter")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let output_limit = args
+        .get("output_limit")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-    let is_unlimited = output_limit.eq_ignore_ascii_case("all");
+    let is_unlimited =
+        output_limit.eq_ignore_ascii_case("all") || output_limit.eq_ignore_ascii_case("full");
 
     let limit_lines = if is_unlimited {
         usize::MAX
     } else {
-        output_limit.parse::<usize>().unwrap_or(DEFAULT_OUTPUT_LIMIT)
+        output_limit
+            .parse::<usize>()
+            .unwrap_or(DEFAULT_OUTPUT_LIMIT)
     };
 
     OutputFilter {
@@ -36,14 +44,17 @@ fn parse_output_filter(args: &HashMap<String, Value>) -> OutputFilter {
         grep: output_filter.to_string(),
         grep_context_lines: 3,
         remove_from_output: "".to_string(),
-        limit_tokens: if is_unlimited { None } else { Some(limit_lines * 50) },
+        limit_tokens: if is_unlimited {
+            None
+        } else {
+            Some(limit_lines.saturating_mul(50))
+        },
+        skip: false,
     }
 }
 
 #[async_trait]
 impl Tool for ToolWeb {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "web".to_string(),
@@ -52,8 +63,8 @@ impl Tool for ToolWeb {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
+            allow_parallel: true,
             description: "Fetch a web page and convert to readable plain text. Supports regular web pages, PDFs, and JavaScript-rendered pages. Uses Jina Reader API with automatic fallback.".to_string(),
             parameters: vec![
                 ToolParam {
@@ -97,7 +108,7 @@ impl Tool for ToolWeb {
         let url = match args.get("url") {
             Some(Value::String(s)) => s.clone(),
             Some(v) => return Err(format!("argument `url` is not a string: {:?}", v)),
-            None => return Err("Missing argument `url`".to_string())
+            None => return Err("Missing argument `url`".to_string()),
         };
 
         let options: Option<HashMap<String, Value>> = match args.get("options") {
@@ -109,6 +120,11 @@ impl Tool for ToolWeb {
         };
 
         let text = execute_at_web(&url, options.as_ref()).await?;
+        let text = if text.is_empty() {
+            "No content retrieved from the URL.".to_string()
+        } else {
+            text
+        };
         let output_filter = parse_output_filter(args);
 
         let result = vec![ContextEnum::ChatMessage(ChatMessage {

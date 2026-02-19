@@ -1,0 +1,59 @@
+/* Shared scrollbar styles - use via composes: scrollbarThin from '../shared/scrollbar.module.css' */
+
+.scrollbarThin {
+  /* Reserve gutter to avoid layout shift; keep thumb hidden until hover. */
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.scrollbarThin::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.scrollbarThin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbarThin::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border-radius: 2px;
+  transition: background-color 150ms ease-out;
+  opacity: 0;
+}
+
+.scrollbarThin:hover {
+  scrollbar-color: var(--gray-a5) transparent;
+}
+
+.scrollbarThin:hover::-webkit-scrollbar-thumb {
+  background-color: var(--gray-a5);
+  opacity: 1;
+}
+
+.scrollbarThin::-webkit-scrollbar-thumb:hover {
+  background-color: var(--gray-a6);
+}
+
+.scrollbarThin::-webkit-scrollbar-thumb:active {
+  background-color: var(--gray-a7);
+}
+
+/* Hide thumb by default; reveal on hover (for compact panels). */
+.scrollbarHoverOnly {
+  /* Back-compat alias: scrollbarThin already hover-only now. */
+  scrollbar-color: transparent transparent;
+}
+
+.scrollbarHoverOnly::-webkit-scrollbar-thumb {
+  background-color: transparent;
+}
+
+.scrollbarHoverOnly:hover {
+  scrollbar-color: var(--gray-a3) transparent;
+}
+
+.scrollbarHoverOnly:hover::-webkit-scrollbar-thumb {
+  background-color: var(--gray-a3);
+}

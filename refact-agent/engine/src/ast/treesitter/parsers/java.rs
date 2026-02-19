@@ -11,7 +11,11 @@ use similar::DiffableStr;
 use tree_sitter::{Node, Parser, Range};
 use uuid::Uuid;
 
-use crate::ast::treesitter::ast_instance_structs::{AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg, FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, TypeDef, VariableDefinition, VariableUsage};
+use crate::ast::treesitter::ast_instance_structs::{
+    AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg,
+    FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, TypeDef,
+    VariableDefinition, VariableUsage,
+};
 use crate::ast::treesitter::language_id::LanguageId;
 use crate::ast::treesitter::parsers::{AstLanguageParser, internal_error, ParserError};
 use crate::ast::treesitter::parsers::utils::{CandidateInfo, get_guid};
@@ -21,16 +25,59 @@ pub(crate) struct JavaParser {
 }
 
 static JAVA_KEYWORDS: [&str; 50] = [
-    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
-    "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
-    "for", "if", "goto", "implements", "import", "instanceof", "int", "interface", "long", "native",
-    "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp", "super",
-    "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void", "volatile", "while"
+    "abstract",
+    "assert",
+    "boolean",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extends",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "if",
+    "goto",
+    "implements",
+    "import",
+    "instanceof",
+    "int",
+    "interface",
+    "long",
+    "native",
+    "new",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "short",
+    "static",
+    "strictfp",
+    "super",
+    "switch",
+    "synchronized",
+    "this",
+    "throw",
+    "throws",
+    "transient",
+    "try",
+    "void",
+    "volatile",
+    "while",
 ];
 
-static SYSTEM_MODULES: [&str; 2] = [
-    "java", "jdk",
-];
+static SYSTEM_MODULES: [&str; 2] = ["java", "jdk"];
 
 pub fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
     let kind = parent.kind();
@@ -140,7 +187,8 @@ pub fn parse_type(parent: &Node, code: &str) -> Option<TypeDef> {
                             if result.is_empty() {
                                 result = code.slice(child.byte_range()).to_string();
                             } else {
-                                result = result + "." + &*code.slice(child.byte_range()).to_string();
+                                result =
+                                    result + "." + &*code.slice(child.byte_range()).to_string();
                             }
                         }
                         "scoped_type_identifier" => {
@@ -214,7 +262,6 @@ fn parse_function_arg(parent: &Node, code: &str) -> FunctionArg {
     arg
 }
 
-
 impl JavaParser {
     pub fn new() -> Result<JavaParser, ParserError> {
         let mut parser = Parser::new();
@@ -242,14 +289,24 @@ impl JavaParser {
         decl.ast_fields.guid = get_guid();
         decl.ast_fields.is_error = info.ast_fields.is_error;
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         if let Some(name_node) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name_node.byte_range()).to_string();
         }
 
         if let Some(node) = info.node.child_by_field_name("superclass") {
-            symbols.extend(self.find_error_usages(&node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &node,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
                 if let Some(dtype) = parse_type(&child, code) {
@@ -258,10 +315,20 @@ impl JavaParser {
             }
         }
         if let Some(node) = info.node.child_by_field_name("interfaces") {
-            symbols.extend(self.find_error_usages(&node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &node,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
-                symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+                symbols.extend(self.find_error_usages(
+                    &child,
+                    code,
+                    &info.ast_fields.file_path,
+                    &decl.ast_fields.guid,
+                ));
                 match child.kind() {
                     "type_list" => {
                         for i in 0..child.child_count() {
@@ -276,7 +343,6 @@ impl JavaParser {
             }
         }
         if let Some(_) = info.node.child_by_field_name("type_parameters") {}
-
 
         if let Some(body) = info.node.child_by_field_name("body") {
             decl.ast_fields.definition_range = body.range();
@@ -297,21 +363,41 @@ impl JavaParser {
         symbols
     }
 
-    fn parse_variable_definition<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_variable_definition<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut type_ = TypeDef::default();
         if let Some(type_node) = info.node.child_by_field_name("type") {
-            symbols.extend(self.find_error_usages(&type_node, code,  &info.ast_fields.file_path, &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &type_node,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             if let Some(dtype) = parse_type(&type_node, code) {
                 type_ = dtype;
             }
         }
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         for i in 0..info.node.child_count() {
             let child = info.node.child(i).unwrap();
-            symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path, &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &child,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             match child.kind() {
                 "variable_declarator" => {
                     let local_dtype = type_.clone();
@@ -328,8 +414,14 @@ impl JavaParser {
                         decl.ast_fields.name = code.slice(name.byte_range()).to_string();
                     }
                     if let Some(value) = child.child_by_field_name("value") {
-                        symbols.extend(self.find_error_usages(&value, code, &info.ast_fields.file_path, &info.parent_guid));
-                        decl.type_.inference_info = Some(code.slice(value.byte_range()).to_string());
+                        symbols.extend(self.find_error_usages(
+                            &value,
+                            code,
+                            &info.ast_fields.file_path,
+                            &info.parent_guid,
+                        ));
+                        decl.type_.inference_info =
+                            Some(code.slice(value.byte_range()).to_string());
                         candidates.push_back(CandidateInfo {
                             ast_fields: decl.ast_fields.clone(),
                             node: value,
@@ -337,7 +429,12 @@ impl JavaParser {
                         });
                     }
                     if let Some(dimensions) = child.child_by_field_name("dimensions") {
-                        symbols.extend(self.find_error_usages(&dimensions, code, &info.ast_fields.file_path, &info.parent_guid));
+                        symbols.extend(self.find_error_usages(
+                            &dimensions,
+                            code,
+                            &info.ast_fields.file_path,
+                            &info.parent_guid,
+                        ));
                         decl.type_ = TypeDef {
                             name: Some(code.slice(dimensions.byte_range()).to_string()),
                             inference_info: None,
@@ -359,17 +456,32 @@ impl JavaParser {
         symbols
     }
 
-    fn parse_field_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_field_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut dtype = TypeDef::default();
         if let Some(type_node) = info.node.child_by_field_name("type") {
-            symbols.extend(self.find_error_usages(&type_node, code, &info.ast_fields.file_path, &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &type_node,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             if let Some(type_) = parse_type(&type_node, code) {
                 dtype = type_;
             }
         }
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         for i in 0..info.node.child_count() {
             let child = info.node.child(i).unwrap();
@@ -389,8 +501,14 @@ impl JavaParser {
                         decl.ast_fields.name = code.slice(name.byte_range()).to_string();
                     }
                     if let Some(value) = child.child_by_field_name("value") {
-                        symbols.extend(self.find_error_usages(&value, code, &info.ast_fields.file_path, &info.parent_guid));
-                        decl.type_.inference_info = Some(code.slice(value.byte_range()).to_string());
+                        symbols.extend(self.find_error_usages(
+                            &value,
+                            code,
+                            &info.ast_fields.file_path,
+                            &info.parent_guid,
+                        ));
+                        decl.type_.inference_info =
+                            Some(code.slice(value.byte_range()).to_string());
                         candidates.push_back(CandidateInfo {
                             ast_fields: info.ast_fields.clone(),
                             node: value,
@@ -398,7 +516,12 @@ impl JavaParser {
                         });
                     }
                     if let Some(dimensions) = child.child_by_field_name("dimensions") {
-                        symbols.extend(self.find_error_usages(&dimensions, code, &info.ast_fields.file_path, &info.parent_guid));
+                        symbols.extend(self.find_error_usages(
+                            &dimensions,
+                            code,
+                            &info.ast_fields.file_path,
+                            &info.parent_guid,
+                        ));
                         decl.type_ = TypeDef {
                             name: Some(code.slice(dimensions.byte_range()).to_string()),
                             inference_info: None,
@@ -419,7 +542,12 @@ impl JavaParser {
         symbols
     }
 
-    fn parse_enum_field_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_enum_field_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let mut decl = ClassFieldDeclaration::default();
         decl.ast_fields.language = info.ast_fields.language;
@@ -429,13 +557,23 @@ impl JavaParser {
         decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
         decl.ast_fields.guid = get_guid();
         decl.ast_fields.is_error = info.ast_fields.is_error;
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         if let Some(name) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name.byte_range()).to_string();
         }
         if let Some(arguments) = info.node.child_by_field_name("arguments") {
-            symbols.extend(self.find_error_usages(&arguments, code, &info.ast_fields.file_path, &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &arguments,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             decl.type_.inference_info = Some(code.slice(arguments.byte_range()).to_string());
             for i in 0..arguments.child_count() {
                 let child = arguments.child(i).unwrap();
@@ -453,20 +591,30 @@ impl JavaParser {
         symbols
     }
 
-    fn parse_usages_<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_usages_<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let kind = info.node.kind();
         #[cfg(test)]
         #[allow(unused)]
-            let text = code.slice(info.node.byte_range());
+        let text = code.slice(info.node.byte_range());
         match kind {
-            "class_declaration" | "interface_declaration" | "enum_declaration" | "annotation_type_declaration" => {
+            "class_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "annotation_type_declaration" => {
                 symbols.extend(self.parse_struct_declaration(info, code, candidates));
             }
             "local_variable_declaration" => {
                 symbols.extend(self.parse_variable_definition(info, code, candidates));
             }
-            "method_declaration" | "annotation_type_element_declaration" | "constructor_declaration" => {
+            "method_declaration"
+            | "annotation_type_element_declaration"
+            | "constructor_declaration" => {
                 symbols.extend(self.parse_function_declaration(info, code, candidates));
             }
             "method_invocation" | "object_creation_expression" => {
@@ -573,7 +721,13 @@ impl JavaParser {
         symbols
     }
 
-    fn find_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn find_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         for i in 0..parent.child_count() {
             let child = parent.child(i).unwrap();
@@ -584,7 +738,13 @@ impl JavaParser {
         symbols
     }
 
-    fn parse_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn parse_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         match parent.kind() {
             "identifier" => {
@@ -633,7 +793,12 @@ impl JavaParser {
         symbols
     }
 
-    pub fn parse_function_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    pub fn parse_function_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = FunctionDeclaration::default();
         decl.ast_fields.language = info.ast_fields.language;
@@ -645,14 +810,24 @@ impl JavaParser {
         decl.ast_fields.is_error = info.ast_fields.is_error;
         decl.ast_fields.guid = get_guid();
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         if let Some(name_node) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name_node.byte_range()).to_string();
         }
 
         if let Some(parameters_node) = info.node.child_by_field_name("parameters") {
-            symbols.extend(self.find_error_usages(&parameters_node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &parameters_node,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             decl.ast_fields.declaration_range = Range {
                 start_byte: decl.ast_fields.full_range.start_byte,
                 end_byte: parameters_node.end_byte(),
@@ -664,14 +839,24 @@ impl JavaParser {
             let mut function_args = vec![];
             for idx in 0..params_len {
                 let child = parameters_node.child(idx).unwrap();
-                symbols.extend(self.find_error_usages(&child, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+                symbols.extend(self.find_error_usages(
+                    &child,
+                    code,
+                    &info.ast_fields.file_path,
+                    &decl.ast_fields.guid,
+                ));
                 function_args.push(parse_function_arg(&child, code));
             }
             decl.args = function_args;
         }
         if let Some(return_type) = info.node.child_by_field_name("type") {
             decl.return_type = parse_type(&return_type, code);
-            symbols.extend(self.find_error_usages(&return_type, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &return_type,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
         }
 
         if let Some(body_node) = info.node.child_by_field_name("body") {
@@ -695,7 +880,12 @@ impl JavaParser {
         symbols
     }
 
-    pub fn parse_call_expression<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    pub fn parse_call_expression<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = FunctionCall::default();
         decl.ast_fields.language = info.ast_fields.language;
@@ -709,14 +899,24 @@ impl JavaParser {
         }
         decl.ast_fields.caller_guid = Some(get_guid());
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &info.parent_guid,
+        ));
 
         if let Some(name) = info.node.child_by_field_name("name") {
             decl.ast_fields.name = code.slice(name.byte_range()).to_string();
         }
         if let Some(type_) = info.node.child_by_field_name("type") {
-            symbols.extend(self.find_error_usages(&type_, code, &info.ast_fields.file_path, &info.parent_guid));
-            if let Some(dtype) =  parse_type(&type_, code) {
+            symbols.extend(self.find_error_usages(
+                &type_,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
+            if let Some(dtype) = parse_type(&type_, code) {
                 if let Some(name) = dtype.name {
                     decl.ast_fields.name = name;
                 } else {
@@ -727,8 +927,12 @@ impl JavaParser {
             }
         }
         if let Some(arguments) = info.node.child_by_field_name("arguments") {
-            symbols.extend(self.find_error_usages(&arguments, code, &info.ast_fields.file_path,
-                                                  &info.parent_guid));
+            symbols.extend(self.find_error_usages(
+                &arguments,
+                code,
+                &info.ast_fields.file_path,
+                &info.parent_guid,
+            ));
             let mut new_ast_fields = info.ast_fields.clone();
             new_ast_fields.caller_guid = None;
             for i in 0..arguments.child_count() {
@@ -768,8 +972,10 @@ impl JavaParser {
             let symbols_l = self.parse_usages_(&candidate, code, &mut candidates);
             symbols.extend(symbols_l);
         }
-        let guid_to_symbol_map = symbols.iter()
-            .map(|s| (s.clone().read().guid().clone(), s.clone())).collect::<HashMap<_, _>>();
+        let guid_to_symbol_map = symbols
+            .iter()
+            .map(|s| (s.clone().read().guid().clone(), s.clone()))
+            .collect::<HashMap<_, _>>();
         for symbol in symbols.iter_mut() {
             let guid = symbol.read().guid().clone();
             if let Some(parent_guid) = symbol.read().parent_guid() {
@@ -782,10 +988,20 @@ impl JavaParser {
         #[cfg(test)]
         for symbol in symbols.iter_mut() {
             let mut sym = symbol.write();
-            sym.fields_mut().childs_guid = sym.fields_mut().childs_guid.iter()
+            sym.fields_mut().childs_guid = sym
+                .fields_mut()
+                .childs_guid
+                .iter()
                 .sorted_by_key(|x| {
-                    guid_to_symbol_map.get(*x).unwrap().read().full_range().start_byte
-                }).map(|x| x.clone()).collect();
+                    guid_to_symbol_map
+                        .get(*x)
+                        .unwrap()
+                        .read()
+                        .full_range()
+                        .start_byte
+                })
+                .map(|x| x.clone())
+                .collect();
         }
 
         symbols

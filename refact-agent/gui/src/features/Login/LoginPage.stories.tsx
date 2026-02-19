@@ -19,9 +19,6 @@ const App = () => {
       addressURL: "Refact",
       themeProps: { appearance: "dark", accentColor: "gray" },
     },
-    tour: {
-      type: "finished",
-    },
   });
   return (
     <Provider store={store}>

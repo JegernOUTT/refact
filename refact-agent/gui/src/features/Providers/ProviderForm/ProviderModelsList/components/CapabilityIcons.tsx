@@ -5,7 +5,6 @@ import {
   ImageIcon,
   CursorArrowIcon,
   RocketIcon,
-  LightningBoltIcon,
   GearIcon,
 } from "@radix-ui/react-icons";
 import type { ModelCapabilities } from "../utils/groupModelsWithPricing";
@@ -46,21 +45,13 @@ export const CapabilityIcons: FC<CapabilityIconsProps> = ({
           <RocketIcon style={iconStyle} color="var(--gray-11)" />
         </span>
       )}
-      {capabilities.supportsReasoning && (
-        <span
-          title={`Reasoning: ${capabilities.supportsReasoning}${
-            capabilities.supportsBoostReasoning ? " (boostable)" : ""
-          }`}
-        >
+      {(!!capabilities.reasoningEffortOptions?.length ||
+        !!capabilities.supportsThinkingBudget ||
+        !!capabilities.supportsAdaptiveThinkingBudget) && (
+        <span title="Reasoning">
           <ChatBubbleIcon style={iconStyle} color="var(--blue-11)" />
         </span>
       )}
-      {capabilities.supportsBoostReasoning &&
-        !capabilities.supportsReasoning && (
-          <span title="Boost reasoning">
-            <LightningBoltIcon style={iconStyle} color="var(--amber-11)" />
-          </span>
-        )}
     </Flex>
   );
 };

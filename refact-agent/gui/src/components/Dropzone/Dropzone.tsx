@@ -1,6 +1,7 @@
 import React, { createContext, useCallback } from "react";
-import { Button, Slot, IconButton, Flex } from "@radix-ui/themes";
+import { Button, Slot, Flex, HoverCard, Text } from "@radix-ui/themes";
 import { Cross1Icon, ImageIcon } from "@radix-ui/react-icons";
+import styles from "./Dropzone.module.css";
 import { DropzoneInputProps, FileRejection, useDropzone } from "react-dropzone";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { TruncateLeft } from "../Text";
@@ -20,13 +21,30 @@ export const FileUploadContext = createContext<{
 export const DropzoneProvider: React.FC<
   React.PropsWithChildren<{ asChild?: boolean }>
 > = ({ asChild, ...props }) => {
-  const { setError, processAndInsertImages } = useAttachedImages();
+  const { setError, processAndInsertImages, processAndInsertTextFiles } =
+    useAttachedImages();
   const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]): void => {
-      if (!isMultimodalitySupportedForCurrentModel) return;
-      processAndInsertImages(acceptedFiles);
+      const imageFiles = acceptedFiles.filter(
+        (f) => f.type === "image/jpeg" || f.type === "image/png",
+      );
+      const textFiles = acceptedFiles.filter(
+        (f) => f.type !== "image/jpeg" && f.type !== "image/png",
+      );
+
+      if (imageFiles.length > 0) {
+        if (!isMultimodalitySupportedForCurrentModel) {
+          setError("Current model does not support images");
+        } else {
+          processAndInsertImages(imageFiles);
+        }
+      }
+
+      if (textFiles.length > 0) {
+        processAndInsertTextFiles(textFiles);
+      }
 
       if (fileRejections.length) {
         const rejectedFileMessage = fileRejections.map((file) => {
@@ -38,7 +56,12 @@ export const DropzoneProvider: React.FC<
         setError(rejectedFileMessage.join("\n"));
       }
     },
-    [processAndInsertImages, setError, isMultimodalitySupportedForCurrentModel],
+    [
+      processAndInsertImages,
+      processAndInsertTextFiles,
+      setError,
+      isMultimodalitySupportedForCurrentModel,
+    ],
   );
 
   // TODO: disable when chat is busy
@@ -46,19 +69,6 @@ export const DropzoneProvider: React.FC<
     disabled: false,
     noClick: true,
     noKeyboard: true,
-    accept: {
-      // "image/*": []
-      // "image/apng": [],
-      // "image/avif": [],
-      // "image/gif": [],
-      "image/jpeg": [],
-      "image/png": [],
-      // "image/svg+xml": [],
-      // "image/webp": [],
-      // "image/bmp": [],
-      // "image/x-icon": [],
-      // "image/tiff": []
-    },
     onDrop,
   });
 
@@ -104,17 +114,26 @@ export const AttachImagesButton = () => {
         return (
           <>
             <input {...inputProps} style={{ display: "none" }} />
-            <IconButton
-              variant="ghost"
-              size="1"
-              title="Attach images"
-              disabled={inputProps.disabled}
-              onClick={(event) => {
-                attachFileOnClick(event, open);
-              }}
-            >
-              <ImageIcon />
-            </IconButton>
+            <HoverCard.Root>
+              <HoverCard.Trigger>
+                <button
+                  type="button"
+                  className={styles.iconButton}
+                  disabled={inputProps.disabled}
+                  onClick={(event) => {
+                    attachFileOnClick(event, open);
+                  }}
+                  aria-label="Attach images"
+                >
+                  <ImageIcon />
+                </button>
+              </HoverCard.Trigger>
+              <HoverCard.Content size="1" side="top">
+                <Text as="p" size="2">
+                  Attach images
+                </Text>
+              </HoverCard.Content>
+            </HoverCard.Root>
           </>
         );
       }}
@@ -129,7 +148,7 @@ export const FileList: React.FC<FileListProps> = ({ attachedFiles }) => {
   const { images, removeImage } = useAttachedImages();
   if (images.length === 0 && attachedFiles.files.length === 0) return null;
   return (
-    <Flex wrap="wrap" gap="1" py="2" data-testid="attached_file_list">
+    <Flex wrap="wrap" gap="1" data-testid="attached_file_list">
       {images.map((file, index) => {
         const key = `image-${file.name}-${index}`;
         return (
@@ -160,6 +179,7 @@ const FileButton: React.FC<{ fileName: string; onClick: () => void }> = ({
 }) => {
   return (
     <Button
+      type="button"
       variant="soft"
       radius="full"
       size="1"

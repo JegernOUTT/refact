@@ -10,11 +10,17 @@ use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::files_correction::get_project_dirs;
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
+use crate::memories::get_global_knowledge_dir;
 
 use super::kg_structs::{KnowledgeDoc, KnowledgeFrontmatter, KnowledgeGraph};
 
+fn path_has_component(path: &std::path::Path, component: &str) -> bool {
+    path.components().any(|c| c.as_os_str() == component)
+}
+
 fn extract_entities(content: &str) -> Vec<String> {
-    let backtick_re = Regex::new(r"`([a-zA-Z_][a-zA-Z0-9_:]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*)`").unwrap();
+    let backtick_re =
+        Regex::new(r"`([a-zA-Z_][a-zA-Z0-9_:]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*)`").unwrap();
     let mut entities: HashSet<String> = HashSet::new();
 
     for caps in backtick_re.captures_iter(content) {
@@ -31,13 +37,20 @@ pub async fn build_knowledge_graph(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
     let mut graph = KnowledgeGraph::new();
 
     let project_dirs = get_project_dirs(gcx.clone()).await;
-    let knowledge_dirs: Vec<PathBuf> = project_dirs.iter()
+    let mut knowledge_dirs: Vec<PathBuf> = project_dirs
+        .iter()
         .map(|d| d.join(KNOWLEDGE_FOLDER_NAME))
         .filter(|d| d.exists())
         .collect();
 
+    // Include global knowledge dir as well (align KG with retrieval paths).
+    let global_dir = get_global_knowledge_dir(gcx.clone()).await;
+    if global_dir.exists() {
+        knowledge_dirs.push(global_dir);
+    }
+
     if knowledge_dirs.is_empty() {
-        info!("knowledge_graph: no .refact_knowledge directories found");
+        info!("knowledge_graph: no .refact/knowledge directories found");
         return graph;
     }
 
@@ -59,7 +72,7 @@ pub async fn build_knowledge_graph(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
                 continue;
             }
 
-            if path.to_string_lossy().contains("/archive/") {
+            if path_has_component(path, "archive") {
                 continue;
             }
 
@@ -99,20 +112,38 @@ pub async fn build_knowledge_graph(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
 
     graph.link_docs();
 
-    let active_count = graph.docs.values().filter(|d| d.frontmatter.is_active()).count();
-    let deprecated_count = graph.docs.values().filter(|d| d.frontmatter.is_deprecated()).count();
-    let trajectory_count = graph.docs.values()
+    let active_count = graph
+        .docs
+        .values()
+        .filter(|d| d.frontmatter.is_active())
+        .count();
+    let deprecated_count = graph
+        .docs
+        .values()
+        .filter(|d| d.frontmatter.is_deprecated())
+        .count();
+    let trajectory_count = graph
+        .docs
+        .values()
         .filter(|d| d.frontmatter.kind.as_deref() == Some("trajectory"))
         .count();
-    let code_count = graph.docs.values()
+    let code_count = graph
+        .docs
+        .values()
         .filter(|d| d.frontmatter.kind.as_deref() == Some("code"))
         .count();
 
     info!("knowledge_graph: built successfully");
-    info!("  Documents: {} total ({} active, {} deprecated, {} trajectories, {} code)",
-        doc_count, active_count, deprecated_count, trajectory_count, code_count);
-    info!("  Tags: {}, Files: {}, Entities: {}",
-        graph.tag_index.len(), graph.file_index.len(), graph.entity_index.len());
+    info!(
+        "  Documents: {} total ({} active, {} deprecated, {} trajectories, {} code)",
+        doc_count, active_count, deprecated_count, trajectory_count, code_count
+    );
+    info!(
+        "  Tags: {}, Files: {}, Entities: {}",
+        graph.tag_index.len(),
+        graph.file_index.len(),
+        graph.entity_index.len()
+    );
     info!("  Graph edges: {}", graph.graph.edge_count());
 
     graph
@@ -123,7 +154,8 @@ async fn collect_workspace_files(gcx: Arc<ARwLock<GlobalContext>>) -> HashSet<St
     let mut files = HashSet::new();
 
     for dir in project_dirs {
-        let indexing = crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await;
+        let indexing =
+            crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await;
         if let Ok(paths) = crate::files_in_workspace::ls_files(&*indexing, &dir, true) {
             for path in paths {
                 if let Ok(rel) = path.strip_prefix(&dir) {
@@ -136,5 +168,3 @@ async fn collect_workspace_files(gcx: Arc<ARwLock<GlobalContext>>) -> HashSet<St
 
     files
 }
-
-

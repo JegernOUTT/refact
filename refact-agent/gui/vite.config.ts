@@ -9,7 +9,27 @@ import dts from "vite-plugin-dts";
 
 import { execSync } from "child_process";
 
-const commitHash = execSync("git rev-parse --short HEAD").toString().trim();
+function resolveCommitHash(): string {
+  const envSha =
+    process.env.GITHUB_SHA ??
+    process.env.CI_COMMIT_SHA ??
+    process.env.VERCEL_GIT_COMMIT_SHA ??
+    process.env.BUILD_VCS_NUMBER;
+
+  if (envSha && envSha.length >= 7) return envSha.slice(0, 7);
+
+  try {
+    return execSync("git rev-parse --short HEAD", {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+  } catch {
+    return "unknown";
+  }
+}
+
+const commitHash = resolveCommitHash();
 
 // TODO: remove extra compile step when vscode can run esmodules  https://github.com/microsoft/vscode/issues/130367
 

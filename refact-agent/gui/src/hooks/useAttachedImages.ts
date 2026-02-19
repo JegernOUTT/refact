@@ -2,35 +2,55 @@ import { useCallback, useEffect } from "react";
 import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import {
-  selectAllImages,
-  removeImageByIndex,
-  addImage,
+  selectThreadImages,
+  selectThreadTextFiles,
+  selectChatId,
+  addThreadImage,
+  removeThreadImageByIndex,
+  resetThreadImages,
+  addThreadTextFile,
+  removeThreadTextFileByIndex,
+  resetThreadTextFiles,
   type ImageFile,
-  resetAttachedImagesSlice,
-} from "../features/AttachedImages";
+  type TextFile,
+} from "../features/Chat";
 import { setError } from "../features/Errors/errorsSlice";
 import { setInformation } from "../features/Errors/informationSlice";
 import { useCapsForToolUse } from "./useCapsForToolUse";
 
 export function useAttachedImages() {
-  const images = useAppSelector(selectAllImages);
+  const images = useAppSelector(selectThreadImages);
+  const textFiles = useAppSelector(selectThreadTextFiles);
+  const chatId = useAppSelector(selectChatId);
   const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
   const dispatch = useAppDispatch();
 
   const removeImage = useCallback(
     (index: number) => {
-      const action = removeImageByIndex(index);
-      dispatch(action);
+      dispatch(removeThreadImageByIndex({ id: chatId, index }));
     },
-    [dispatch],
+    [dispatch, chatId],
   );
 
   const insertImage = useCallback(
     (file: ImageFile) => {
-      const action = addImage(file);
-      dispatch(action);
+      dispatch(addThreadImage({ id: chatId, image: file }));
     },
-    [dispatch],
+    [dispatch, chatId],
+  );
+
+  const removeTextFile = useCallback(
+    (index: number) => {
+      dispatch(removeThreadTextFileByIndex({ id: chatId, index }));
+    },
+    [dispatch, chatId],
+  );
+
+  const insertTextFile = useCallback(
+    (file: TextFile) => {
+      dispatch(addThreadTextFile({ id: chatId, file }));
+    },
+    [dispatch, chatId],
   );
 
   const handleError = useCallback(
@@ -61,20 +81,34 @@ export function useAttachedImages() {
     [handleError, handleWarning, insertImage],
   );
 
+  const processAndInsertTextFiles = useCallback(
+    (files: File[]) => {
+      void processTextFiles(files, insertTextFile, handleError);
+    },
+    [handleError, insertTextFile],
+  );
+
+  const resetAllTextFiles = useCallback(() => {
+    dispatch(resetThreadTextFiles({ id: chatId }));
+  }, [dispatch, chatId]);
+
   useEffect(() => {
     if (!isMultimodalitySupportedForCurrentModel) {
-      const action = resetAttachedImagesSlice();
-      dispatch(action);
+      dispatch(resetThreadImages({ id: chatId }));
     }
-  }, [isMultimodalitySupportedForCurrentModel, dispatch]);
+  }, [isMultimodalitySupportedForCurrentModel, dispatch, chatId]);
 
   return {
     images,
+    textFiles,
     setError: handleError,
     setWarning: handleWarning,
     insertImage,
     removeImage,
     processAndInsertImages,
+    removeTextFile,
+    processAndInsertTextFiles,
+    resetAllTextFiles,
   };
 }
 
@@ -86,7 +120,7 @@ async function processImages(
 ) {
   for (const file of files) {
     if (file.type !== "image/jpeg" && file.type !== "image/png") {
-      onError(`file ${file.type} is not a supported. Use jpeg or png`);
+      onError(`file ${file.type} is not supported. Use jpeg or png`);
     } else {
       try {
         const scaledImage = await scaleImage(file, 800);
@@ -105,6 +139,33 @@ async function processImages(
       }
     }
   }
+}
+
+async function processTextFiles(
+  files: File[],
+  onSuccess: (file: TextFile) => void,
+  onError: (reason: string) => void,
+) {
+  for (const file of files) {
+    try {
+      const content = await readTextFile(file);
+      onSuccess({ name: file.name, content });
+    } catch (error) {
+      onError(`file ${file.name} processing has failed`);
+    }
+  }
+}
+
+function readTextFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      resolve(reader.result as string);
+    };
+    reader.onabort = () => reject("abort");
+    reader.onerror = () => reject("error");
+    reader.readAsText(file);
+  });
 }
 function scaleImage(file: File, maxSize: number): Promise<string> {
   return new Promise((resolve, reject) => {

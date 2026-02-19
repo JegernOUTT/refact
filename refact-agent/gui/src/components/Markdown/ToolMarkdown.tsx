@@ -4,7 +4,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import { MarkdownCodeBlock, type MarkdownCodeBlockProps } from "./CodeBlock";
+import { ShikiCodeBlock, type ShikiCodeBlockProps } from "./ShikiCodeBlock";
 import toolStyles from "./ToolMarkdown.module.css";
 import "katex/dist/katex.min.css";
 
@@ -12,7 +12,7 @@ export type ToolMarkdownProps = Pick<
   React.ComponentProps<typeof ReactMarkdown>,
   "children" | "allowedElements" | "unwrapDisallowed"
 > &
-  Pick<MarkdownCodeBlockProps, "style" | "color">;
+  Pick<ShikiCodeBlockProps, "color">;
 
 /**
  * ToolMarkdown - A specialized markdown renderer for tool outputs
@@ -27,7 +27,6 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
   children,
   allowedElements,
   unwrapDisallowed,
-  style,
   color,
 }) => {
   const components: Partial<Components> = useMemo(() => {
@@ -68,9 +67,8 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
         return <li className={toolStyles.listItem} {...props} />;
       },
 
-      // Code blocks - use the same style as tool output
       code({ style: _style, color: _color, ...props }) {
-        return <MarkdownCodeBlock color={color} style={style} {...props} />;
+        return <ShikiCodeBlock color={color} {...props} />;
       },
 
       // Inline elements
@@ -90,14 +88,22 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
         return <em {...props} />;
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
-        const shouldTargetBeBlank =
-          props.href &&
-          (props.href.startsWith("http") || props.href.startsWith("https"));
+        const href = props.href ?? "";
+        const isHttpLink =
+          href.startsWith("http://") || href.startsWith("https://");
+        const isMailtoLink = href.startsWith("mailto:");
+        const isSafeProtocol = isHttpLink || isMailtoLink;
+
+        if (!isSafeProtocol && href.includes(":")) {
+          return <span>{props.children}</span>;
+        }
+
         return (
           <a
             className={toolStyles.link}
             {...props}
-            target={shouldTargetBeBlank ? "_blank" : undefined}
+            target={isHttpLink ? "_blank" : undefined}
+            rel={isHttpLink ? "noopener noreferrer" : undefined}
           />
         );
       },
@@ -122,7 +128,7 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
         return <td className={toolStyles.td} {...props} />;
       },
     };
-  }, [style, color]);
+  }, [color]);
 
   return (
     <ReactMarkdown

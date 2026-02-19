@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import type { RestoreMode } from "../features/Checkpoints/Checkpoints";
 import { useAppSelector } from "./useAppSelector";
 import {
   selectCheckpointsMessageIndex,
@@ -20,6 +21,7 @@ import {
   newChatAction,
   selectChatId,
   selectMessages,
+  selectThreadMode,
 } from "../features/Chat";
 import { isUserMessage, telemetryApi } from "../services/refact";
 import { deleteChatById } from "../features/History/historySlice";
@@ -31,6 +33,7 @@ export const useCheckpoints = () => {
   const dispatch = useAppDispatch();
   const messages = useAppSelector(selectMessages);
   const chatId = useAppSelector(selectChatId);
+  const chatMode = useAppSelector(selectThreadMode);
   const configIdeHost = useAppSelector(selectConfig).host;
 
   const [sendTelemetryEvent] =
@@ -89,9 +92,15 @@ export const useCheckpoints = () => {
       if (!checkpoints) return;
       const amountOfUserMessages = messages.filter(isUserMessage);
       const firstUserMessage = amountOfUserMessages[0];
+      // Capture chat_id and mode at click time to avoid race conditions
+      const currentChatId = chatId;
+      const currentChatMode = chatMode;
       try {
-        const previewedChanges =
-          await previewChangesFromCheckpoints(checkpoints).unwrap();
+        const previewedChanges = await previewChangesFromCheckpoints(
+          checkpoints,
+          currentChatId,
+          currentChatMode,
+        ).unwrap();
         void sendTelemetryEvent({
           scope: `rollbackChanges/preview`,
           success: true,
@@ -103,6 +112,8 @@ export const useCheckpoints = () => {
             ...previewedChanges,
             current_checkpoints: checkpoints,
             messageIndex,
+            chat_id: currentChatId,
+            chat_mode: currentChatMode,
           }),
           setIsCheckpointsPopupIsVisible(true),
           setShouldNewChatBeStarted(
@@ -120,70 +131,90 @@ export const useCheckpoints = () => {
         });
       }
     },
-    [dispatch, previewChangesFromCheckpoints, sendTelemetryEvent, messages],
+    [
+      dispatch,
+      previewChangesFromCheckpoints,
+      sendTelemetryEvent,
+      messages,
+      chatId,
+      chatMode,
+    ],
   );
 
-  const handleFix = useCallback(async () => {
-    try {
-      const response = await restoreChangesFromCheckpoints(
-        latestRestoredCheckpointsResult.current_checkpoints,
-      ).unwrap();
-      if (response.success) {
-        void sendTelemetryEvent({
-          scope: `rollbackChanges/confirmed`,
-          success: true,
-          error_message: "",
-        });
-
-        if (configIdeHost === "jetbrains") {
-          const files =
-            latestRestoredCheckpointsResult.reverted_changes.flatMap(
-              (change) => change.files_changed,
-            );
-          files.forEach((file) => {
-            setForceReloadFileByPath(file.absolute_path);
+  const handleFix = useCallback(
+    async (restoreMode: RestoreMode = "files_and_messages") => {
+      try {
+        // Use chat_id and mode stored at preview time, not current state
+        const response = await restoreChangesFromCheckpoints(
+          latestRestoredCheckpointsResult.current_checkpoints,
+          latestRestoredCheckpointsResult.chat_id,
+          latestRestoredCheckpointsResult.chat_mode,
+        ).unwrap();
+        if (response.success) {
+          void sendTelemetryEvent({
+            scope: `rollbackChanges/confirmed`,
+            success: true,
+            error_message: "",
           });
+
+          if (configIdeHost === "jetbrains") {
+            const files =
+              latestRestoredCheckpointsResult.reverted_changes.flatMap(
+                (change) => change.files_changed,
+              );
+            files.forEach((file) => {
+              setForceReloadFileByPath(file.absolute_path);
+            });
+          }
+
+          dispatch(setIsCheckpointsPopupIsVisible(false));
+        } else {
+          dispatch(setCheckpointsErrorLog(response.error_log));
+          return;
         }
 
-        dispatch(setIsCheckpointsPopupIsVisible(false));
-      } else {
-        dispatch(setCheckpointsErrorLog(response.error_log));
-        return;
+        // Only undo messages if restoreMode is "files_and_messages"
+        if (restoreMode === "files_and_messages") {
+          if (shouldNewChatBeStarted || !maybeMessageIndex) {
+            const actions = [newChatAction(), deleteChatById(chatId)];
+            actions.forEach((action) => dispatch(action));
+          } else {
+            const usefulMessages = messages.slice(0, maybeMessageIndex);
+            dispatch(
+              backUpMessages({
+                id: chatId,
+                messages: usefulMessages,
+              }),
+            );
+          }
+        }
+        // If restoreMode is "files_only", we don't touch the messages
+      } catch (error) {
+        void sendTelemetryEvent({
+          scope: `rollbackChanges/failed`,
+          success: false,
+          error_message: `rollback: failed to apply previewed changes from checkpoints. checkpoints: ${JSON.stringify(
+            latestRestoredCheckpointsResult.current_checkpoints,
+          )}`,
+        });
       }
-      if (shouldNewChatBeStarted || !maybeMessageIndex) {
-        const actions = [newChatAction(), deleteChatById(chatId)];
-        actions.forEach((action) => dispatch(action));
-      } else {
-        const usefulMessages = messages.slice(0, maybeMessageIndex);
-        dispatch(
-          backUpMessages({
-            id: chatId,
-            messages: usefulMessages,
-          }),
-        );
-      }
-    } catch (error) {
-      void sendTelemetryEvent({
-        scope: `rollbackChanges/failed`,
-        success: false,
-        error_message: `rollback: failed to apply previewed changes from checkpoints. checkpoints: ${JSON.stringify(
-          latestRestoredCheckpointsResult.current_checkpoints,
-        )}`,
-      });
-    }
-  }, [
-    dispatch,
-    sendTelemetryEvent,
-    setForceReloadFileByPath,
-    restoreChangesFromCheckpoints,
-    configIdeHost,
-    shouldNewChatBeStarted,
-    maybeMessageIndex,
-    chatId,
-    messages,
-    latestRestoredCheckpointsResult.current_checkpoints,
-    latestRestoredCheckpointsResult.reverted_changes,
-  ]);
+    },
+    [
+      dispatch,
+      sendTelemetryEvent,
+      setForceReloadFileByPath,
+      restoreChangesFromCheckpoints,
+      configIdeHost,
+      shouldNewChatBeStarted,
+      maybeMessageIndex,
+      chatId,
+      messages,
+      latestRestoredCheckpointsResult.current_checkpoints,
+      latestRestoredCheckpointsResult.reverted_changes,
+      latestRestoredCheckpointsResult.chat_id,
+      latestRestoredCheckpointsResult.chat_mode,
+    ],
+  );
 
   return {
     shouldCheckpointsPopupBeShown,

@@ -2,9 +2,9 @@
   width: 100%;
   /* justify-content: center; */
   /* Fallback height for JB */
-  max-height: 100vh;
-  max-height: 100dvh;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 @media print {
   .PageWrapper {

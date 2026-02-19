@@ -1,14 +1,24 @@
 import React, { useMemo } from "react";
-import { Card, Flex, Text, Box, Spinner } from "@radix-ui/themes";
-import { ChatBubbleIcon, DotFilledIcon } from "@radix-ui/react-icons";
+import { Card, Flex, Text, Box, Spinner, Badge } from "@radix-ui/themes";
+import {
+  ChatBubbleIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  PauseIcon,
+  CrossCircledIcon,
+  CheckCircledIcon,
+} from "@radix-ui/react-icons";
 import { CloseButton } from "../Buttons/Buttons";
 import { IconButton } from "@radix-ui/themes";
 import { OpenInNewWindowIcon } from "@radix-ui/react-icons";
 import type { ChatHistoryItem } from "../../features/History/historySlice";
-import { isUserMessage } from "../../services/refact";
-import { useAppSelector } from "../../hooks";
-import { getTotalCostMeteringForMessages } from "../../utils/getMetering";
+import {
+  getTotalCostMeteringForMessages,
+  getTotalUsdMeteringForMessages,
+  formatUsd,
+} from "../../utils/getMetering";
 import { Coin } from "../../images";
+import { getStatusFromSessionState } from "../../utils/sessionStatus";
 
 export const HistoryItem: React.FC<{
   historyItem: ChatHistoryItem;
@@ -16,31 +26,50 @@ export const HistoryItem: React.FC<{
   onDelete: (id: string) => void;
   onOpenInTab?: (id: string) => void;
   disabled: boolean;
-}> = ({ historyItem, onClick, onDelete, onOpenInTab, disabled }) => {
+  badge?: string;
+  childCount?: number;
+  isExpanded?: boolean;
+  onToggleExpand?: () => void;
+}> = ({
+  historyItem,
+  onClick,
+  onDelete,
+  onOpenInTab,
+  disabled,
+  badge,
+  childCount,
+  isExpanded,
+  onToggleExpand,
+}) => {
   const dateCreated = new Date(historyItem.createdAt);
   const dateTimeString = dateCreated.toLocaleString();
-  const cache = useAppSelector((app) => app.chat.cache);
-
-  const totalCost = useMemo(() => {
+  const totalCoins = useMemo(() => {
     const totals = getTotalCostMeteringForMessages(historyItem.messages);
-
     if (totals === null) return null;
-
-    return (
+    const sum =
       totals.metering_coins_cache_creation +
       totals.metering_coins_cache_read +
       totals.metering_coins_generated +
-      totals.metering_coins_prompt
-    );
+      totals.metering_coins_prompt;
+    return sum > 0 ? sum : null;
   }, [historyItem.messages]);
 
-  const isStreaming = historyItem.id in cache;
+  const totalUsd = useMemo(() => {
+    const usd = getTotalUsdMeteringForMessages(historyItem.messages);
+    if (usd === null || usd.total_usd <= 0) return null;
+    return usd.total_usd;
+  }, [historyItem.messages]);
+
+  const statusState = getStatusFromSessionState(historyItem.session_state);
+  const isWorking = statusState === "in_progress";
+  const isPaused = statusState === "needs_attention";
+  const isError = statusState === "error";
+  const isCompleted = statusState === "completed";
   return (
     <Box style={{ position: "relative", width: "100%" }}>
       <Card
         style={{
           width: "100%",
-          marginBottom: "2px",
           opacity: disabled ? 0.8 : 1,
         }}
         variant="surface"
@@ -56,10 +85,26 @@ export const HistoryItem: React.FC<{
             onClick();
           }}
         >
-          <Flex gap="2px" align="center">
-            {isStreaming && <Spinner style={{ minWidth: 16, minHeight: 16 }} />}
-            {!isStreaming && historyItem.read === false && (
-              <DotFilledIcon style={{ minWidth: 16, minHeight: 16 }} />
+          <Flex gap="1" align="center">
+            {isWorking && <Spinner style={{ minWidth: 16, minHeight: 16 }} />}
+            {!isWorking && isPaused && (
+              <PauseIcon
+                style={{
+                  minWidth: 16,
+                  minHeight: 16,
+                  color: "var(--yellow-9)",
+                }}
+              />
+            )}
+            {!isWorking && !isPaused && isError && (
+              <CrossCircledIcon
+                style={{ minWidth: 16, minHeight: 16, color: "var(--red-9)" }}
+              />
+            )}
+            {!isWorking && !isPaused && !isError && isCompleted && (
+              <CheckCircledIcon
+                style={{ minWidth: 16, minHeight: 16, color: "var(--green-9)" }}
+              />
             )}
             <Text
               as="div"
@@ -73,6 +118,11 @@ export const HistoryItem: React.FC<{
             >
               {historyItem.title}
             </Text>
+            {badge && (
+              <Badge size="1" color="gray" variant="soft">
+                {badge}
+              </Badge>
+            )}
           </Flex>
 
           <Flex justify="between" mt="8px">
@@ -81,18 +131,23 @@ export const HistoryItem: React.FC<{
                 size="1"
                 style={{ display: "flex", gap: "4px", alignItems: "center" }}
               >
-                <ChatBubbleIcon />{" "}
-                {historyItem.messages.filter(isUserMessage).length}
+                <ChatBubbleIcon /> {historyItem.message_count ?? 0}
               </Text>
-              {totalCost ? (
+              {totalCoins !== null && totalUsd === null && (
                 <Text
                   size="1"
                   style={{ display: "flex", gap: "4px", alignItems: "center" }}
                 >
-                  <Coin width="15px" height="15px" /> {Math.round(totalCost)}
+                  <Coin width="15px" height="15px" /> {Math.round(totalCoins)}
                 </Text>
-              ) : (
-                false
+              )}
+              {totalUsd !== null && (
+                <Text
+                  size="1"
+                  style={{ display: "flex", gap: "4px", alignItems: "center" }}
+                >
+                  {formatUsd(totalUsd)}
+                </Text>
               )}
             </Flex>
 
@@ -101,6 +156,33 @@ export const HistoryItem: React.FC<{
         </button>
       </Card>
 
+      {childCount !== undefined && onToggleExpand && (
+        <Box
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleExpand();
+          }}
+          style={{
+            cursor: "pointer",
+            padding: "4px 8px",
+            borderRadius: "0 0 4px 4px",
+            marginTop: "-2px",
+            background: "var(--gray-a3)",
+          }}
+        >
+          <Flex align="center" justify="center" gap="1">
+            <Text size="1" color="gray">
+              {childCount} related {childCount === 1 ? "chat" : "chats"}
+            </Text>
+            {isExpanded ? (
+              <ChevronDownIcon width={12} height={12} />
+            ) : (
+              <ChevronRightIcon width={12} height={12} />
+            )}
+          </Flex>
+        </Box>
+      )}
+
       <Flex
         position="absolute"
         top="6px"
@@ -108,9 +190,7 @@ export const HistoryItem: React.FC<{
         gap="1"
         justify="end"
         align="center"
-        // justify to flex end
       >
-        {/**TODO: open in tab button */}
         {onOpenInTab && (
           <IconButton
             size="1"
@@ -128,7 +208,6 @@ export const HistoryItem: React.FC<{
 
         <CloseButton
           size="1"
-          // needs to be smaller
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();

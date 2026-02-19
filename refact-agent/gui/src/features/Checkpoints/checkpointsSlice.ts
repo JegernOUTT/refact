@@ -4,6 +4,8 @@ import { Checkpoint, PreviewCheckpointsResponse } from "./types";
 export type CheckpointsMeta = {
   latestCheckpointResult: PreviewCheckpointsResponse & {
     current_checkpoints: Checkpoint[];
+    chat_id: string;
+    chat_mode?: string;
   };
   isVisible: boolean;
   isUndoing: boolean;
@@ -18,6 +20,8 @@ const initialState: CheckpointsMeta = {
     current_checkpoints: [],
     reverted_changes: [],
     error_log: [],
+    chat_id: "",
+    chat_mode: undefined,
   },
   isVisible: false,
   isUndoing: false,
@@ -35,6 +39,8 @@ export const checkpointsSlice = createSlice({
         PreviewCheckpointsResponse & {
           messageIndex: number;
           current_checkpoints: Checkpoint[];
+          chat_id: string;
+          chat_mode?: string;
         }
       >,
     ) => {

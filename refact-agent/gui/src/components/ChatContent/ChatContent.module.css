@@ -1,5 +1,5 @@
 .content {
-  /* max-width: calc(100% - 12px); */
+  margin-right: 16px;
 }
 
 .file {
@@ -24,25 +24,65 @@
   flex-direction: column;
   gap: 0;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
   user-select: auto;
   max-width: calc(100% - var(--space-2) * 4.5);
-  padding: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   min-height: var(--base-button-height);
   height: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Mimic Button variant="soft" appearance */
+  background-color: var(--accent-a3);
+  border-radius: var(--radius-3);
+}
+
+.userInput:hover {
+  background-color: var(--accent-a4);
+}
+
+/* Reset Markdown margins inside user messages - override Radix styles */
+.userInput :global(.rt-Text),
+.userInput :global(.rt-Heading),
+.userInput :global(p),
+.userInput :global(h1),
+.userInput :global(h2),
+.userInput :global(h3),
+.userInput :global(h4),
+.userInput :global(h5),
+.userInput :global(h6),
+.userInput :global(ul),
+.userInput :global(ol),
+.userInput :global(pre) {
+  margin: 0 !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+/* Add small spacing between consecutive elements */
+.userInput :global(.rt-Text + .rt-Text),
+.userInput :global(.rt-Text + pre),
+.userInput :global(pre + .rt-Text),
+.userInput :global(p + p),
+.userInput :global(p + pre),
+.userInput :global(pre + p) {
+  margin-top: var(--space-1) !important;
+}
+
+/* Proper spacing between list items */
+.userInput :global(li) {
+  margin-bottom: 2px;
+}
+.userInput :global(li:last-child) {
+  margin-bottom: 0;
 }
 
 .break_word {
   word-break: break-word;
 }
 
-.tool_result {
-  width: 100%;
-}
-
 .diff {
-  background: #252525;
+  background: var(--gray-2);
   max-width: unset;
 }
 
@@ -88,29 +128,19 @@
     DejaVu Sans Mono,
     Bitstream Vera Sans Mono,
     Courier New;
-  color: #c6cdd5;
+  color: var(--gray-11);
 }
 
 .diff_line_number {
   min-width: 50px;
   padding-right: 8px;
   text-align: end;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  -khtml-user-select: none;
-  -moz-user-select: none;
-  -ms-user-select: none;
   user-select: none;
 }
 
 .diff_sign {
   padding-left: 6px;
   padding-right: 6px;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  -khtml-user-select: none;
-  -moz-user-select: none;
-  -ms-user-select: none;
   user-select: none;
 }
 
@@ -118,9 +148,8 @@
   flex: 1;
 }
 
-/** TODO: it seems the background doesn't grow inside of the scroll area */
-
 .tool_result {
+  width: 100%;
   margin-top: var(--space-1);
   box-sizing: border-box;
 }
@@ -148,20 +177,32 @@
   margin-top: 0 !important;
 }
 
+.queuedMessagesContainer {
+  position: absolute;
+  bottom: 60px;
+  right: 50px;
+  left: var(--space-2);
+  padding: var(--space-2);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.queuedMessagesContainer > * {
+  pointer-events: auto;
+}
+
 .queuedMessage {
-  --base-card-surface-box-shadow: 0 0 0 1px
-    color-mix(in oklab, var(--amber-a5), var(--amber-5) 25%);
-  background: var(--color-surface);
+  --base-card-surface-box-shadow: 0 0 0 1px var(--amber-6);
+  background: color-mix(in oklab, var(--amber-3) 40%, var(--color-surface));
   border-radius: var(--radius-2);
   padding: var(--space-2) var(--space-3);
   margin-left: auto;
   max-width: 85%;
-  opacity: 0.8;
 }
 
 .queuedMessagePriority {
-  --base-card-surface-box-shadow: 0 0 0 1px
-    color-mix(in oklab, var(--blue-a5), var(--blue-5) 25%);
+  --base-card-surface-box-shadow: 0 0 0 1px var(--blue-6);
+  background: color-mix(in oklab, var(--blue-3) 40%, var(--color-surface));
 }
 
 .queuedMessageText {
@@ -172,4 +213,21 @@
   -webkit-box-orient: vertical;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.plainTextTrigger {
+  cursor: pointer;
+  color: var(--gray-10);
+}
+
+.plainTextTrigger:hover {
+  color: var(--gray-11);
+}
+
+.virtuosoScroller {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+  height: 100%;
+
+  /* Keep gutter stable so content doesn't shift when thumb appears. */
+  scrollbar-gutter: stable;
 }

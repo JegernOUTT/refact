@@ -1,13 +1,38 @@
-import { Usage } from "../../../services/refact";
+import { ToolConfirmationPauseReason, Usage } from "../../../services/refact";
 import { SystemPrompts } from "../../../services/refact/prompts";
-import { ChatMessages, UserMessage } from "../../../services/refact/types";
+import { ChatMessages } from "../../../services/refact/types";
 import { parseOrElse } from "../../../utils/parseOrElse";
 
-export type QueuedUserMessage = {
+export type ImageFile = {
+  name: string;
+  content: string | ArrayBuffer | null;
+  type: string;
+};
+
+export type TextFile = {
+  name: string;
+  content: string;
+};
+
+export type ToolConfirmationStatus = {
+  wasInteracted: boolean;
+  confirmationStatus: boolean;
+};
+
+// Task Progress Widget types
+export type TodoStatus = "pending" | "in_progress" | "completed" | "failed";
+
+export type TodoItem = {
   id: string;
-  message: UserMessage;
-  createdAt: number;
-  priority?: boolean;
+  content: string;
+  status: TodoStatus;
+};
+
+export type QueuedItem = {
+  client_request_id: string;
+  priority: boolean;
+  command_type: string;
+  preview: string;
 };
 
 export type IntegrationMeta = {
@@ -16,6 +41,16 @@ export type IntegrationMeta = {
   project?: string;
   shouldIntermediatePageShowUp?: boolean;
 };
+
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
 export type ChatThread = {
   id: string;
   messages: ChatMessages;
@@ -24,20 +59,45 @@ export type ChatThread = {
   createdAt?: string;
   updatedAt?: string;
   tool_use?: ToolUse;
-  read?: boolean;
   isTitleGenerated?: boolean;
   boost_reasoning?: boolean;
+  /** Reasoning effort level: "low", "medium", "high", "xhigh", or "max". null = use backend default */
+  reasoning_effort?: ReasoningEffort | null;
+  /** Thinking budget in tokens (for Anthropic, Qwen, Gemini 2.5). null = use backend default */
+  thinking_budget?: number | null;
+  /** Temperature for sampling (0-2). null = use backend default */
+  temperature?: number | null;
+  /** Frequency penalty for sampling (-2 to 2). null = use backend default */
+  frequency_penalty?: number | null;
+  /** Maximum tokens for response. null = use backend default */
+  max_tokens?: number | null;
+  /** Whether to allow parallel tool calls. null = use backend default */
+  parallel_tool_calls?: boolean | null;
   integration?: IntegrationMeta | null;
-  mode?: LspChatMode;
+  mode?: ChatModeId;
   project_name?: string;
   last_user_message_id?: string;
   new_chat_suggested: SuggestedChat;
-  automatic_patch?: boolean;
+  auto_approve_editing_tools?: boolean;
+  auto_approve_dangerous_commands?: boolean;
   currentMaximumContextTokens?: number;
   currentMessageContextTokens?: number;
   increase_max_tokens?: boolean;
   include_project_info?: boolean;
   context_tokens_cap?: number;
+  checkpoints_enabled?: boolean;
+  /** If true, this chat belongs to a task workspace and should not appear in regular chat tabs */
+  is_task_chat?: boolean;
+  /** Task metadata for task-related chats */
+  task_meta?: {
+    task_id: string;
+    role: string;
+    agent_id?: string;
+    card_id?: string;
+  };
+
+  /** OpenAI Responses API multi-turn state: link next request to the previous response */
+  previous_response_id?: string;
 };
 
 export type SuggestedChat = {
@@ -47,22 +107,76 @@ export type SuggestedChat = {
 
 export type ToolUse = "quick" | "explore" | "agent";
 
-export type Chat = {
-  streaming: boolean;
+export type ChatModeId = string;
+
+export const DEFAULT_MODE: ChatModeId = "agent";
+
+export function normalizeLegacyMode(mode: string | undefined): ChatModeId {
+  if (!mode) return DEFAULT_MODE;
+  const upper = mode.toUpperCase();
+  switch (upper) {
+    case "NO_TOOLS":
+      return "explore";
+    case "EXPLORE":
+      return "explore";
+    case "AGENT":
+      return "agent";
+    case "CONFIGURE":
+      return "configurator";
+    case "PROJECT_SUMMARY":
+      return "project_summary";
+    case "TASK_PLANNER":
+      return "task_planner";
+    case "TASK_AGENT":
+      return "task_agent";
+    default:
+      if (mode === mode.toLowerCase()) return mode;
+      return DEFAULT_MODE;
+  }
+}
+
+export type ThreadConfirmation = {
+  pause: boolean;
+  pause_reasons: ToolConfirmationPauseReason[];
+  status: ToolConfirmationStatus;
+};
+
+export type ChatThreadRuntime = {
   thread: ChatThread;
-  error: null | string;
-  prevent_send: boolean;
-  checkpoints_enabled?: boolean;
+  streaming: boolean;
   waiting_for_response: boolean;
-  max_new_tokens?: number;
-  cache: Record<string, ChatThread>;
+  prevent_send: boolean;
+  error: string | null;
+  queued_items: QueuedItem[];
+  send_immediately: boolean;
+  attached_images: ImageFile[];
+  attached_text_files: TextFile[];
+  confirmation: ThreadConfirmation;
+  /** Whether the initial snapshot has been received from the backend */
+  snapshot_received: boolean;
+  /** Task progress widget expanded/collapsed state */
+  task_widget_expanded: boolean;
+  /** Actual session state from backend (for waiting_user_input, completed, etc.) */
+  session_state?: string;
+  /** Last applied chat SSE event seq for duplicate/out-of-order protection */
+  last_applied_seq?: string;
+  /** Fast lookup index from message_id to message index (rebuilt on snapshots/mutations) */
+  message_index_by_id?: Record<string, number>;
+};
+
+export type Chat = {
+  current_thread_id: string;
+  open_thread_ids: string[];
+  threads: Record<string, ChatThreadRuntime | undefined>;
   system_prompt: SystemPrompts;
   tool_use: ToolUse;
-  send_immediately: boolean;
+  checkpoints_enabled?: boolean;
   follow_ups_enabled?: boolean;
-  title_generation_enabled?: boolean;
-  use_compression?: boolean;
-  queued_messages: QueuedUserMessage[];
+  max_new_tokens?: number;
+  /** When set, useChatSubscription should reconnect to get fresh state */
+  sse_refresh_requested: string | null;
+  /** Increments on every stream_delta to force component re-renders */
+  stream_version: number;
 };
 
 export type PayloadWithId = { id: string };
@@ -121,42 +235,7 @@ export function isToolUse(str: string): str is ToolUse {
   return str === "quick" || str === "explore" || str === "agent";
 }
 
-export type LspChatMode =
-  | "NO_TOOLS"
-  | "EXPLORE"
-  | "AGENT"
-  | "CONFIGURE"
-  | "PROJECT_SUMMARY";
-
-export function isLspChatMode(mode: string): mode is LspChatMode {
-  return (
-    mode === "NO_TOOLS" ||
-    mode === "EXPLORE" ||
-    mode === "AGENT" ||
-    mode === "CONFIGURE" ||
-    mode === "PROJECT_SUMMARY"
-  );
-}
-
-export function chatModeToLspMode({
-  toolUse,
-  mode,
-  defaultMode,
-}: {
-  toolUse?: ToolUse;
-  mode?: LspChatMode;
-  defaultMode?: LspChatMode;
-}): LspChatMode {
-  if (defaultMode) {
-    return defaultMode;
-  }
-  if (mode) {
-    return mode;
-  }
-  if (toolUse === "agent") return "AGENT";
-  if (toolUse === "quick") return "NO_TOOLS";
-  return "EXPLORE";
-}
+export type LspChatMode = string;
 
 // Helper to detect server-executed tools (already executed by LLM provider)
 // These tools have IDs starting with "srvtoolu_" and should NOT be sent to backend for execution

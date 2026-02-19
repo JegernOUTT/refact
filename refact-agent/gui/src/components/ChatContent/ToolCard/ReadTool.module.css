@@ -1,0 +1,24 @@
+.filename {
+  font-family: var(--code-font-family);
+  font-size: inherit;
+  color: var(--accent-11);
+  cursor: pointer;
+  vertical-align: baseline;
+}
+
+.args {
+  color: var(--gray-11);
+  font-family: var(--code-font-family);
+  font-size: inherit;
+  vertical-align: baseline;
+}
+
+.filename:hover {
+  text-decoration: underline;
+}
+
+.resultContent {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  max-height: 300px;
+  overflow-y: auto;
+}

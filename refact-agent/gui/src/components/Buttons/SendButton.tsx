@@ -1,5 +1,12 @@
 import React from "react";
-import { DropdownMenu, IconButton, Flex, Badge } from "@radix-ui/themes";
+import {
+  DropdownMenu,
+  IconButton,
+  Flex,
+  Badge,
+  HoverCard,
+  Text,
+} from "@radix-ui/themes";
 import {
   PaperPlaneIcon,
   CaretDownIcon,
@@ -38,19 +45,28 @@ export const SendButtonWithDropdown: React.FC<SendButtonProps> = ({
             {queuedCount}
           </Badge>
         )}
-        <IconButton
-          variant="ghost"
-          disabled={disabled}
-          title="Send message"
-          size="1"
-          type="submit"
-          onClick={(e) => {
-            e.preventDefault();
-            onSend();
-          }}
-        >
-          <PaperPlaneIcon />
-        </IconButton>
+        <HoverCard.Root>
+          <HoverCard.Trigger>
+            <IconButton
+              variant="ghost"
+              disabled={disabled}
+              title={undefined}
+              size="1"
+              type="submit"
+              onClick={(e) => {
+                e.preventDefault();
+                onSend();
+              }}
+            >
+              <PaperPlaneIcon />
+            </IconButton>
+          </HoverCard.Trigger>
+          <HoverCard.Content size="1" side="top">
+            <Text as="p" size="2">
+              Send message
+            </Text>
+          </HoverCard.Content>
+        </HoverCard.Root>
       </Flex>
     );
   }
@@ -68,30 +84,39 @@ export const SendButtonWithDropdown: React.FC<SendButtonProps> = ({
           {queuedCount}
         </Badge>
       )}
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger>
-          <IconButton
-            variant="ghost"
-            disabled={disabled}
-            title="Send options"
-            size="1"
-          >
-            <PaperPlaneIcon />
-            <CaretDownIcon width={12} height={12} />
-          </IconButton>
-        </DropdownMenu.Trigger>
+      <HoverCard.Root>
+        <HoverCard.Trigger>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger>
+              <IconButton
+                variant="ghost"
+                disabled={disabled}
+                title={undefined}
+                size="1"
+              >
+                <PaperPlaneIcon />
+                <CaretDownIcon width={12} height={12} />
+              </IconButton>
+            </DropdownMenu.Trigger>
 
-        <DropdownMenu.Content size="1" align="end">
-          <DropdownMenu.Item onSelect={() => onSend()}>
-            <ClockIcon width={14} height={14} />
-            Queue message
-          </DropdownMenu.Item>
-          <DropdownMenu.Item onSelect={() => onSendImmediately()}>
-            <LightningBoltIcon width={14} height={14} />
-            Send next
-          </DropdownMenu.Item>
-        </DropdownMenu.Content>
-      </DropdownMenu.Root>
+            <DropdownMenu.Content size="1" align="end">
+              <DropdownMenu.Item onSelect={() => onSend()}>
+                <ClockIcon width={14} height={14} />
+                Queue message
+              </DropdownMenu.Item>
+              <DropdownMenu.Item onSelect={() => onSendImmediately()}>
+                <LightningBoltIcon width={14} height={14} />
+                Send next
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
+        </HoverCard.Trigger>
+        <HoverCard.Content size="1" side="top">
+          <Text as="p" size="2">
+            Send options
+          </Text>
+        </HoverCard.Content>
+      </HoverCard.Root>
     </Flex>
   );
 };

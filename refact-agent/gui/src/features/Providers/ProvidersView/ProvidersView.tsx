@@ -1,12 +1,10 @@
 import React, { useCallback, useState } from "react";
-import { Flex } from "@radix-ui/themes";
+import { Button, Flex } from "@radix-ui/themes";
+import { ArrowLeftIcon } from "@radix-ui/react-icons";
 
 import { ConfiguredProvidersView } from "./ConfiguredProvidersView";
 
-import type {
-  ConfiguredProvidersResponse,
-  SimplifiedProvider,
-} from "../../../services/refact";
+import type { ProviderListItem } from "../../../services/refact";
 import { ProviderPreview } from "../ProviderPreview";
 import {
   ErrorCallout,
@@ -24,11 +22,13 @@ import styles from "./ProvidersView.module.css";
 import { selectConfig } from "../../Config/configSlice";
 
 export type ProvidersViewProps = {
-  configuredProviders: ConfiguredProvidersResponse["providers"];
+  configuredProviders: ProviderListItem[];
+  backFromProviders: () => void;
 };
 
 export const ProvidersView: React.FC<ProvidersViewProps> = ({
   configuredProviders,
+  backFromProviders,
 }) => {
   const dispatch = useAppDispatch();
 
@@ -36,22 +36,37 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
   const globalError = useAppSelector(getErrorMessage);
   const information = useAppSelector(getInformationMessage);
 
-  const [currentProvider, setCurrentProvider] = useState<SimplifiedProvider<
-    "name" | "enabled" | "readonly" | "supports_completion"
-  > | null>(null);
+  const [currentProvider, setCurrentProvider] =
+    useState<ProviderListItem | null>(null);
   const handleSetCurrentProvider = useCallback(
-    (
-      provider: SimplifiedProvider<
-        "name" | "enabled" | "readonly" | "supports_completion"
-      > | null,
-    ) => {
+    (provider: ProviderListItem | null) => {
       setCurrentProvider(provider);
     },
     [],
   );
 
+  const handleBackClick = useCallback(() => {
+    if (currentProvider) {
+      setCurrentProvider(null);
+    } else {
+      backFromProviders();
+    }
+  }, [currentProvider, backFromProviders]);
+
   return (
     <Flex px="1" direction="column" height="100%" width="100%">
+      {currentHost === "vscode" ? (
+        <Flex gap="2" pb="3">
+          <Button variant="surface" onClick={handleBackClick}>
+            <ArrowLeftIcon width="16" height="16" />
+            Back
+          </Button>
+        </Flex>
+      ) : (
+        <Button mr="auto" variant="outline" onClick={handleBackClick} mb="4">
+          Back
+        </Button>
+      )}
       {!currentProvider && (
         <ConfiguredProvidersView
           configuredProviders={configuredProviders}

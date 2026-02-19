@@ -10,23 +10,12 @@ export interface CloudHost {
   userName: string;
 }
 
-export interface SelfHost {
-  type: "self";
-  endpointAddress: string;
-}
-
-export interface EnterpriseHost {
-  type: "enterprise";
-  endpointAddress: string;
-  apiKey: string;
-}
-
 export interface ActionFromSetup {
   type: EVENT_NAMES_FROM_SETUP;
   payload?: Record<string, unknown>;
 }
 
-export type HostSettings = CloudHost | SelfHost | EnterpriseHost;
+export type HostSettings = CloudHost;
 
 export function isActionFromSetup(action: unknown): action is ActionFromSetup {
   if (!action) return false;

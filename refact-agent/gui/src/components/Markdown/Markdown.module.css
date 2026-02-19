@@ -1,9 +1,21 @@
 .relative {
   position: relative;
 }
+
 .markdown {
   position: relative;
   max-width: 100%;
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+  line-height: 1.6;
+  white-space: normal;
 }
 
 .floatButton {
@@ -14,6 +26,9 @@
 .code {
   display: inline-block;
   max-width: 100%;
+  font-family: "SF Mono", "Fira Code", "JetBrains Mono", Consolas,
+    "Liberation Mono", Menlo, monospace;
+  font-size: 0.9em;
 }
 
 .code_no_margin {
@@ -28,11 +43,18 @@
   word-break: break-word;
   word-wrap: break-word;
   white-space: break-spaces;
+  background-color: var(--gray-a3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.875em;
 }
 
 .code_block {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
   color: inherit;
   background: none;
+  display: block;
+  overflow-x: auto;
 }
 
 .code_wrap {
@@ -47,8 +69,100 @@
   );
 }
 
+.shiki_wrapper {
+  display: block;
+  margin: var(--space-3) 0;
+}
+
+.shiki_pre {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+  position: relative;
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-2);
+  background-color: var(--gray-a2) !important;
+  overflow-x: auto;
+}
+
+/* Copy button - hidden by default, shown on hover or focus */
+.shiki_pre .copy_button {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 1;
+}
+
+.shiki_pre:hover .copy_button,
+.shiki_pre:focus-within .copy_button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.shiki_code {
+  display: flex;
+  flex-direction: row;
+  gap: var(--space-3);
+}
+
+.shiki_code code {
+  flex: 1;
+  font-family: "SF Mono", "Fira Code", "JetBrains Mono", Consolas,
+    "Liberation Mono", Menlo, monospace;
+  font-size: var(--font-size-1);
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.shiki_code :global(.line) {
+  display: block;
+  white-space: pre;
+  line-height: 1.4;
+}
+
+/* Empty lines need content to maintain height */
+.shiki_code :global(.line:empty)::before {
+  content: " ";
+}
+
+/* Wrap mode override */
+.code_wrap :global(.line) {
+  white-space: pre-wrap;
+}
+
+.line_numbers {
+  display: flex;
+  flex-direction: column;
+  text-align: right;
+  user-select: none;
+  color: var(--gray-9);
+  font-size: var(--font-size-1);
+  line-height: 1.4;
+  padding-right: var(--space-2);
+  border-right: 1px solid var(--gray-5);
+}
+
+.line_number {
+  line-height: 1.4;
+}
+
 .list {
   padding-inline-start: var(--space-6);
+  margin: var(--space-2) 0;
+}
+
+.list_item {
+  margin: 0;
+  padding: 0;
+  line-height: 1.5;
+}
+
+/* Remove margins from nested elements inside list items */
+.list_item > :global(.rt-Text),
+.list_item > :global(p) {
+  margin: 0 !important;
 }
 
 .maybe_pin {
@@ -73,4 +187,34 @@
 
 .maybe_pin:has(.patch_title) + pre pre {
   margin-top: 0;
+}
+
+@keyframes streamFadeIn {
+  from {
+    opacity: 0.6;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cursorBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.streaming_text {
+  animation: streamFadeIn 0.15s ease-out;
+}
+
+.streaming_cursor::after {
+  content: "▋";
+  animation: cursorBlink 1s step-end infinite;
+  color: var(--accent-9);
+  margin-left: 2px;
 }

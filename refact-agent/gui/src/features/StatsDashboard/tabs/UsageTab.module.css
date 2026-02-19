@@ -1,0 +1,58 @@
+.chartsRow {
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.chartBox {
+  flex: 1 1 280px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tableWrapper {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--gray-5);
+  color: var(--gray-11);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.th:hover {
+  color: var(--accent-9);
+}
+
+.td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--gray-4);
+  color: var(--gray-12);
+}
+
+.emptyText {
+  color: var(--gray-10);
+}
+
+.sectionTitle {
+  color: var(--gray-12);
+}
+
+.sortButton {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  width: 100%;
+  text-align: left;
+}

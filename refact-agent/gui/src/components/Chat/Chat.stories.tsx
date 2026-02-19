@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { Chat } from "./Chat";
@@ -20,9 +21,7 @@ import {
   goodTools,
   noTools,
   // noChatLinks,
-  makeKnowledgeFromChat,
 } from "../../__fixtures__/msw";
-import { TourProvider } from "../../features/Tour";
 import { Flex } from "@radix-ui/themes";
 import { http, HttpResponse } from "msw";
 
@@ -38,22 +37,36 @@ const Template: React.FC<{
       wasSuggested: false,
     },
   };
+  const threadId = threadData.id;
   const store = setUpStore({
-    tour: {
-      type: "finished",
-    },
     chat: {
-      streaming: false,
-      prevent_send: false,
-      waiting_for_response: false,
+      current_thread_id: threadId,
+      open_thread_ids: [threadId],
+      threads: {
+        [threadId]: {
+          thread: threadData,
+          streaming: false,
+          waiting_for_response: false,
+          prevent_send: false,
+          error: null,
+          queued_items: [],
+          send_immediately: false,
+          attached_images: [],
+          attached_text_files: [],
+          confirmation: {
+            pause: false,
+            pause_reasons: [],
+            status: { wasInteracted: false, confirmationStatus: true },
+          },
+          snapshot_received: true,
+          task_widget_expanded: false,
+        },
+      },
       max_new_tokens: 4096,
       tool_use: "agent",
-      send_immediately: false,
-      error: null,
-      cache: {},
       system_prompt: {},
-      thread: threadData,
-      queued_messages: [],
+      sse_refresh_requested: null,
+      stream_version: 0,
     },
     config,
   });
@@ -61,19 +74,17 @@ const Template: React.FC<{
   return (
     <Provider store={store}>
       <Theme>
-        <TourProvider>
-          <AbortControllerProvider>
-            <Flex direction="column" align="stretch" height="100dvh">
-              <Chat
-                unCalledTools={false}
-                host="web"
-                tabbed={false}
-                backFromChat={() => ({})}
-                maybeSendToSidebar={() => ({})}
-              />
-            </Flex>
-          </AbortControllerProvider>
-        </TourProvider>
+        <AbortControllerProvider>
+          <Flex direction="column" align="stretch" height="100dvh">
+            <Chat
+              unCalledTools={false}
+              host="web"
+              tabbed={false}
+              backFromChat={() => ({})}
+              maybeSendToSidebar={() => ({})}
+            />
+          </Flex>
+        </AbortControllerProvider>
       </Theme>
     </Provider>
   );
@@ -105,7 +116,8 @@ export const Primary: Story = {};
 
 export const Configuration: Story = {
   args: {
-    thread: CHAT_CONFIG_THREAD.thread,
+    thread:
+      CHAT_CONFIG_THREAD.threads[CHAT_CONFIG_THREAD.current_thread_id]!.thread,
   },
 };
 
@@ -148,7 +160,6 @@ export const Knowledge: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-        makeKnowledgeFromChat,
       ],
     },
   },
@@ -190,7 +201,6 @@ export const EmptySpaceAtBottom: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-        makeKnowledgeFromChat,
       ],
     },
   },
@@ -271,7 +281,6 @@ export const UserMessageEmptySpaceAtBottom: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-        makeKnowledgeFromChat,
       ],
     },
   },
@@ -354,7 +363,6 @@ export const CompressButton: Story = {
         // noChatLinks,
         chatLinks,
         noTools,
-        makeKnowledgeFromChat,
       ],
     },
   },
@@ -381,7 +389,6 @@ export const LowBalance: Story = {
       goodPrompts,
       chatLinks,
       noTools,
-      makeKnowledgeFromChat,
       lowBalance,
     },
   },

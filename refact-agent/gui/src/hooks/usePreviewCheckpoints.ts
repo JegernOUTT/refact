@@ -7,8 +7,8 @@ export const usePreviewCheckpoints = () => {
     checkpointsApi.usePreviewCheckpointsMutation();
 
   const previewChangesFromCheckpoints = useCallback(
-    (checkpoints: Checkpoint[]) => {
-      return mutationTrigger({ checkpoints });
+    (checkpoints: Checkpoint[], chat_id: string, chat_mode?: string) => {
+      return mutationTrigger({ checkpoints, chat_id, chat_mode });
     },
     [mutationTrigger],
   );

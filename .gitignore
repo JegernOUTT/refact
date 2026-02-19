@@ -294,3 +294,6 @@ dist
 .vite
 # Refact binary/symlink
 **/refact/bin/refact-lsp
+
+.refact_knowledge*/
+.refact*/

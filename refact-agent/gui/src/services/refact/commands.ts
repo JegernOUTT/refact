@@ -88,7 +88,7 @@ export const commandsApi = createApi({
       queryFn: async (args, api, _opts, baseQuery) => {
         const { messages, meta, model } = args;
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
+        const port = state.config.lspPort as unknown as number;
         const url = `http://127.0.0.1:${port}${AT_COMMAND_PREVIEW}`;
         const response = await baseQuery({
           url,
@@ -124,15 +124,20 @@ export const commandsApi = createApi({
           };
         }
 
-        const files = response.data.messages.reduce<
-          (ChatContextFile | string)[]
-        >((acc, curr) => {
-          if (curr.role === "context_file") {
-            const fileData = parseOrElse<ChatContextFile[]>(curr.content, []);
-            return [...acc, ...fileData];
+        const files: (ChatContextFile | string)[] = [];
+        for (const msg of response.data.messages) {
+          if (msg.role === "context_file") {
+            const content = msg.content;
+            if (Array.isArray(content)) {
+              files.push(...content);
+            } else {
+              const fileData = parseOrElse<ChatContextFile[]>(content, []);
+              files.push(...fileData);
+            }
+          } else {
+            files.push(msg.content);
           }
-          return [...acc, curr.content];
-        }, []);
+        }
 
         return { data: { ...response.data, files } };
       },
@@ -181,19 +186,22 @@ export function isDetailMessageWithErrorType(
   return true;
 }
 
-export type CommandPreviewContent = {
-  content: string;
-  role: "context_file" | "plain_text";
-};
+export type CommandPreviewContent =
+  | { role: "plain_text"; content: string }
+  | { role: "context_file"; content: ChatContextFile[] | string };
 
 function isCommandPreviewContent(json: unknown): json is CommandPreviewContent {
-  if (!json) return false;
-  if (typeof json !== "object") return false;
-  if (!("content" in json)) return false;
-  if (typeof json.content !== "string") return false;
-  if (!("role" in json)) return false;
-  if (json.role === "context_file") return true;
-  if (json.role === "plain_text") return true;
+  if (!json || typeof json !== "object") return false;
+  if (!("role" in json) || !("content" in json)) return false;
+
+  const obj = json as { role: unknown; content: unknown };
+
+  if (obj.role === "plain_text") {
+    return typeof obj.content === "string";
+  }
+  if (obj.role === "context_file") {
+    return Array.isArray(obj.content) || typeof obj.content === "string";
+  }
   return false;
 }
 
@@ -223,5 +231,5 @@ export function isCommandPreviewResponse(
 
   if (!json.messages.length) return true;
 
-  return json.messages.some(isCommandPreviewContent);
+  return json.messages.every(isCommandPreviewContent);
 }

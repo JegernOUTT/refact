@@ -1,0 +1,90 @@
+.guardCard {
+  width: 100%;
+  padding: 15px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-radius: 8px;
+  background-color: var(--gray-1);
+  flex-shrink: 0;
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+.heading {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.breakdownGrid {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 4px 12px;
+  font-size: 13px;
+  color: var(--gray-11);
+}
+
+.breakdownLabel {
+  font-weight: 500;
+}
+
+.breakdownCount {
+  color: var(--gray-9);
+}
+
+.breakdownSize {
+  text-align: right;
+  font-family: var(--default-font-family);
+  font-variant-numeric: tabular-nums;
+}
+
+.sliderContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sliderLabel {
+  font-size: 13px;
+  color: var(--gray-11);
+}
+
+.slider {
+  width: 100%;
+  accent-color: var(--accent-9);
+}
+
+.checkboxGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.checkboxItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--gray-11);
+  cursor: pointer;
+}
+
+.checkboxItem input[type="checkbox"] {
+  accent-color: var(--accent-9);
+}
+
+.liveTotal {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--gray-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

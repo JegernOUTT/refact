@@ -10,7 +10,11 @@ use similar::DiffableStr;
 use tree_sitter::{Node, Parser, Point, Range};
 use uuid::Uuid;
 
-use crate::ast::treesitter::ast_instance_structs::{AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg, FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration, SymbolInformation, TypeDef, VariableDefinition, VariableUsage};
+use crate::ast::treesitter::ast_instance_structs::{
+    AstSymbolFields, AstSymbolInstanceArc, ClassFieldDeclaration, CommentDefinition, FunctionArg,
+    FunctionCall, FunctionDeclaration, ImportDeclaration, ImportType, StructDeclaration,
+    SymbolInformation, TypeDef, VariableDefinition, VariableUsage,
+};
 use crate::ast::treesitter::language_id::LanguageId;
 use crate::ast::treesitter::parsers::{AstLanguageParser, internal_error, ParserError};
 use crate::ast::treesitter::parsers::utils::{CandidateInfo, get_children_guids, get_guid};
@@ -18,31 +22,210 @@ use crate::ast::treesitter::skeletonizer::SkeletonFormatter;
 use crate::ast::treesitter::structs::SymbolType;
 
 static PYTHON_MODULES: [&str; 203] = [
-    "abc", "aifc", "argparse", "array", "asynchat", "asyncio", "asyncore", "atexit", "audioop",
-    "base64", "bdb", "binascii", "binhex", "bisect", "builtins", "bz2", "calendar", "cgi", "cgitb",
-    "chunk", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "compileall",
-    "concurrent", "configparser", "contextlib", "contextvars", "copy", "copyreg", "crypt", "csv",
-    "ctypes", "curses", "datetime", "dbm", "decimal", "difflib", "dis", "distutils", "doctest",
-    "email", "encodings", "ensurepip", "enum", "errno", "faulthandler", "fcntl", "filecmp",
-    "fileinput", "fnmatch", "formatter", "fractions", "ftplib", "functools", "gc", "getopt",
-    "getpass", "gettext", "glob", "grp", "gzip", "hashlib", "heapq", "hmac", "html", "http",
-    "idlelib", "imaplib", "imghdr", "imp", "importlib", "inspect", "io", "ipaddress", "itertools",
-    "json", "keyword", "lib2to3", "linecache", "locale", "logging", "lzma", "macpath", "mailbox",
-    "mailcap", "marshal", "math", "mimetypes", "mmap", "modulefinder", "msilib", "msvcrt",
-    "multiprocessing", "netrc", "nntplib", "numbers", "operator", "optparse", "os", "ossaudiodev",
-    "parser", "pathlib", "pdb", "pickle", "pickletools", "pipes", "pkgutil", "platform", "plistlib",
-    "poplib", "posix", "pprint", "profile", "pstats", "pty", "pwd", "py_compile", "pyclbr", "pydoc",
-    "queue", "quopri", "random", "re", "readline", "reprlib", "resource", "rlcompleter", "runpy",
-    "sched", "secrets", "select", "selectors", "shelve", "shlex", "shutil", "signal", "site", "smtpd",
-    "smtplib", "sndhdr", "socket", "socketserver", "spwd", "sqlite3", "ssl", "stat", "statistics",
-    "string", "stringprep", "struct", "subprocess", "sunau", "symbol", "symtable", "sys", "sysconfig",
-    "syslog", "tabnanny", "tarfile", "telnetlib", "tempfile", "termios", "test", "textwrap",
-    "threading", "time", "timeit", "tkinter", "token", "tokenize", "trace", "traceback",
-    "tracemalloc", "tty", "turtle", "turtledemo", "types", "typing", "unicodedata", "unittest",
-    "urllib", "uu", "uuid", "venv", "warnings", "wave", "weakref", "webbrowser", "winreg", "winsound",
-    "wsgiref", "xdrlib", "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zoneinfo"
+    "abc",
+    "aifc",
+    "argparse",
+    "array",
+    "asynchat",
+    "asyncio",
+    "asyncore",
+    "atexit",
+    "audioop",
+    "base64",
+    "bdb",
+    "binascii",
+    "binhex",
+    "bisect",
+    "builtins",
+    "bz2",
+    "calendar",
+    "cgi",
+    "cgitb",
+    "chunk",
+    "cmath",
+    "cmd",
+    "code",
+    "codecs",
+    "codeop",
+    "collections",
+    "colorsys",
+    "compileall",
+    "concurrent",
+    "configparser",
+    "contextlib",
+    "contextvars",
+    "copy",
+    "copyreg",
+    "crypt",
+    "csv",
+    "ctypes",
+    "curses",
+    "datetime",
+    "dbm",
+    "decimal",
+    "difflib",
+    "dis",
+    "distutils",
+    "doctest",
+    "email",
+    "encodings",
+    "ensurepip",
+    "enum",
+    "errno",
+    "faulthandler",
+    "fcntl",
+    "filecmp",
+    "fileinput",
+    "fnmatch",
+    "formatter",
+    "fractions",
+    "ftplib",
+    "functools",
+    "gc",
+    "getopt",
+    "getpass",
+    "gettext",
+    "glob",
+    "grp",
+    "gzip",
+    "hashlib",
+    "heapq",
+    "hmac",
+    "html",
+    "http",
+    "idlelib",
+    "imaplib",
+    "imghdr",
+    "imp",
+    "importlib",
+    "inspect",
+    "io",
+    "ipaddress",
+    "itertools",
+    "json",
+    "keyword",
+    "lib2to3",
+    "linecache",
+    "locale",
+    "logging",
+    "lzma",
+    "macpath",
+    "mailbox",
+    "mailcap",
+    "marshal",
+    "math",
+    "mimetypes",
+    "mmap",
+    "modulefinder",
+    "msilib",
+    "msvcrt",
+    "multiprocessing",
+    "netrc",
+    "nntplib",
+    "numbers",
+    "operator",
+    "optparse",
+    "os",
+    "ossaudiodev",
+    "parser",
+    "pathlib",
+    "pdb",
+    "pickle",
+    "pickletools",
+    "pipes",
+    "pkgutil",
+    "platform",
+    "plistlib",
+    "poplib",
+    "posix",
+    "pprint",
+    "profile",
+    "pstats",
+    "pty",
+    "pwd",
+    "py_compile",
+    "pyclbr",
+    "pydoc",
+    "queue",
+    "quopri",
+    "random",
+    "re",
+    "readline",
+    "reprlib",
+    "resource",
+    "rlcompleter",
+    "runpy",
+    "sched",
+    "secrets",
+    "select",
+    "selectors",
+    "shelve",
+    "shlex",
+    "shutil",
+    "signal",
+    "site",
+    "smtpd",
+    "smtplib",
+    "sndhdr",
+    "socket",
+    "socketserver",
+    "spwd",
+    "sqlite3",
+    "ssl",
+    "stat",
+    "statistics",
+    "string",
+    "stringprep",
+    "struct",
+    "subprocess",
+    "sunau",
+    "symbol",
+    "symtable",
+    "sys",
+    "sysconfig",
+    "syslog",
+    "tabnanny",
+    "tarfile",
+    "telnetlib",
+    "tempfile",
+    "termios",
+    "test",
+    "textwrap",
+    "threading",
+    "time",
+    "timeit",
+    "tkinter",
+    "token",
+    "tokenize",
+    "trace",
+    "traceback",
+    "tracemalloc",
+    "tty",
+    "turtle",
+    "turtledemo",
+    "types",
+    "typing",
+    "unicodedata",
+    "unittest",
+    "urllib",
+    "uu",
+    "uuid",
+    "venv",
+    "warnings",
+    "wave",
+    "weakref",
+    "webbrowser",
+    "winreg",
+    "winsound",
+    "wsgiref",
+    "xdrlib",
+    "xml",
+    "xmlrpc",
+    "zipapp",
+    "zipfile",
+    "zipimport",
+    "zoneinfo",
 ];
-
 
 pub(crate) struct PythonParser {
     pub parser: Parser,
@@ -200,10 +383,10 @@ fn parse_function_arg(parent: &Node, code: &str) -> Vec<FunctionArg> {
 
 const SPECIAL_SYMBOLS: &str = "{}(),.;_|&";
 const PYTHON_KEYWORDS: [&'static str; 35] = [
-    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
-    "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
-    "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
-    "return", "try", "while", "with", "yield"
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
 ];
 
 impl PythonParser {
@@ -215,7 +398,12 @@ impl PythonParser {
         Ok(PythonParser { parser })
     }
 
-    pub fn parse_struct_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    pub fn parse_struct_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = StructDeclaration::default();
 
@@ -226,7 +414,12 @@ impl PythonParser {
         decl.ast_fields.guid = get_guid();
         decl.ast_fields.is_error = info.ast_fields.is_error;
 
-        symbols.extend(self.find_error_usages(&info.node, code, &decl.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &decl.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         if let Some(parent_node) = info.node.parent() {
             if parent_node.kind() == "decorated_definition" {
@@ -250,7 +443,12 @@ impl PythonParser {
                     decl.inherited_types.push(dtype);
                 }
             }
-            symbols.extend(self.find_error_usages(&superclasses, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &superclasses,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
             decl.ast_fields.declaration_range = Range {
                 start_byte: decl.ast_fields.full_range.start_byte,
                 end_byte: superclasses.end_byte(),
@@ -273,7 +471,12 @@ impl PythonParser {
         symbols
     }
 
-    fn parse_assignment<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_assignment<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut is_class_field = false;
         {
             let mut parent_mb = info.node.parent();
@@ -293,7 +496,6 @@ impl PythonParser {
             }
         }
 
-
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         if let Some(right) = info.node.child_by_field_name("right") {
             candidates.push_back(CandidateInfo {
@@ -310,10 +512,12 @@ impl PythonParser {
             });
         }
 
-        let mut candidates_: VecDeque<(Option<Node>, Option<Node>, Option<Node>)> = VecDeque::from(vec![
-            (info.node.child_by_field_name("left"),
-             info.node.child_by_field_name("type"),
-             info.node.child_by_field_name("right"))]);
+        let mut candidates_: VecDeque<(Option<Node>, Option<Node>, Option<Node>)> =
+            VecDeque::from(vec![(
+                info.node.child_by_field_name("left"),
+                info.node.child_by_field_name("type"),
+                info.node.child_by_field_name("right"),
+            )]);
         let mut right_for_all = false;
         while !candidates_.is_empty() {
             let (left_mb, type_mb, right_mb) = candidates_.pop_front().unwrap();
@@ -352,9 +556,11 @@ impl PythonParser {
                                 }
                             }
                             if let Some(right) = right_mb {
-                                decl.type_.inference_info = Some(code.slice(right.byte_range()).to_string());
-                                decl.type_.is_pod = vec!["integer", "string", "float", "false", "true"]
-                                    .contains(&right.kind());
+                                decl.type_.inference_info =
+                                    Some(code.slice(right.byte_range()).to_string());
+                                decl.type_.is_pod =
+                                    vec!["integer", "string", "float", "false", "true"]
+                                        .contains(&right.kind());
                             }
                             symbols.push(Arc::new(RwLock::new(Box::new(decl))));
                         }
@@ -399,7 +605,12 @@ impl PythonParser {
         symbols
     }
 
-    fn parse_usages_<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    fn parse_usages_<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = vec![];
         let kind = info.node.kind();
         let _text = code.slice(info.node.byte_range());
@@ -439,7 +650,8 @@ impl PythonParser {
                                 decl.ast_fields.parent_guid = Some(info.parent_guid.clone());
                                 decl.ast_fields.guid = get_guid();
                                 decl.ast_fields.name = text.to_string();
-                                decl.type_.inference_info = Some(code.slice(value.byte_range()).to_string());
+                                decl.type_.inference_info =
+                                    Some(code.slice(value.byte_range()).to_string());
                                 decl.ast_fields.is_error = info.ast_fields.is_error;
                                 symbols.push(Arc::new(RwLock::new(Box::new(decl))));
                             }
@@ -477,7 +689,9 @@ impl PythonParser {
                 let attribute = info.node.child_by_field_name("attribute").unwrap();
                 let name = code.slice(attribute.byte_range()).to_string();
                 let mut def = VariableDefinition::default();
-                def.type_ = info.node.parent()
+                def.type_ = info
+                    .node
+                    .parent()
                     .map(|x| x.child_by_field_name("type"))
                     .flatten()
                     .map(|x| parse_type(&x, code))
@@ -543,24 +757,36 @@ impl PythonParser {
                         let base_path = code.slice(module_name.byte_range()).to_string();
                         if base_path.starts_with("..") {
                             base_path_component.push("..".to_string());
-                            base_path_component.extend(base_path.slice(2..base_path.len()).split(".")
-                                .map(|x| x.to_string())
-                                .filter(|x| !x.is_empty())
-                                .collect::<Vec<String>>());
+                            base_path_component.extend(
+                                base_path
+                                    .slice(2..base_path.len())
+                                    .split(".")
+                                    .map(|x| x.to_string())
+                                    .filter(|x| !x.is_empty())
+                                    .collect::<Vec<String>>(),
+                            );
                         } else if base_path.starts_with(".") {
                             base_path_component.push(".".to_string());
-                            base_path_component.extend(base_path.slice(1..base_path.len()).split(".")
-                                .map(|x| x.to_string())
-                                .filter(|x| !x.is_empty())
-                                .collect::<Vec<String>>());
+                            base_path_component.extend(
+                                base_path
+                                    .slice(1..base_path.len())
+                                    .split(".")
+                                    .map(|x| x.to_string())
+                                    .filter(|x| !x.is_empty())
+                                    .collect::<Vec<String>>(),
+                            );
                         } else {
-                            base_path_component = base_path.split(".")
+                            base_path_component = base_path
+                                .split(".")
                                 .map(|x| x.to_string())
                                 .filter(|x| !x.is_empty())
                                 .collect();
                         }
                     } else {
-                        base_path_component = code.slice(module_name.byte_range()).to_string().split(".")
+                        base_path_component = code
+                            .slice(module_name.byte_range())
+                            .to_string()
+                            .split(".")
                             .map(|x| x.to_string())
                             .filter(|x| !x.is_empty())
                             .collect();
@@ -577,11 +803,21 @@ impl PythonParser {
                         let mut alias: Option<String> = None;
                         match child.kind() {
                             "dotted_name" => {
-                                path_components = code.slice(child.byte_range()).to_string().split(".").map(|x| x.to_string()).collect();
+                                path_components = code
+                                    .slice(child.byte_range())
+                                    .to_string()
+                                    .split(".")
+                                    .map(|x| x.to_string())
+                                    .collect();
                             }
                             "aliased_import" => {
                                 if let Some(name) = child.child_by_field_name("name") {
-                                    path_components = code.slice(name.byte_range()).to_string().split(".").map(|x| x.to_string()).collect();
+                                    path_components = code
+                                        .slice(name.byte_range())
+                                        .to_string()
+                                        .split(".")
+                                        .map(|x| x.to_string())
+                                        .collect();
                                 }
                                 if let Some(alias_node) = child.child_by_field_name("alias") {
                                     alias = Some(code.slice(alias_node.byte_range()).to_string());
@@ -597,7 +833,8 @@ impl PythonParser {
                                 def_local.import_type = ImportType::UserModule;
                             }
                         }
-                        def_local.ast_fields.name = def_local.path_components.last().unwrap().to_string();
+                        def_local.ast_fields.name =
+                            def_local.path_components.last().unwrap().to_string();
                         def_local.alias = alias;
 
                         symbols.push(Arc::new(RwLock::new(Box::new(def_local))));
@@ -608,7 +845,12 @@ impl PythonParser {
                 }
             }
             "ERROR" => {
-                symbols.extend(self.parse_error_usages(&info.node, code, &info.ast_fields.file_path, &info.parent_guid));
+                symbols.extend(self.parse_error_usages(
+                    &info.node,
+                    code,
+                    &info.ast_fields.file_path,
+                    &info.parent_guid,
+                ));
             }
             _ => {
                 for i in 0..info.node.child_count() {
@@ -624,7 +866,12 @@ impl PythonParser {
         symbols
     }
 
-    pub fn parse_function_declaration<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    pub fn parse_function_declaration<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = FunctionDeclaration::default();
         decl.ast_fields.language = info.ast_fields.language;
@@ -637,7 +884,12 @@ impl PythonParser {
                 decl.ast_fields.full_range = parent_node.range();
             }
         }
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         let mut decl_end_byte: usize = info.node.end_byte();
         let mut decl_end_point: Point = info.node.end_position();
@@ -649,7 +901,12 @@ impl PythonParser {
         if let Some(parameters_node) = info.node.child_by_field_name("parameters") {
             decl_end_byte = parameters_node.end_byte();
             decl_end_point = parameters_node.end_position();
-            symbols.extend(self.find_error_usages(&parameters_node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &parameters_node,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
 
             let params_len = parameters_node.child_count();
             let mut function_args = vec![];
@@ -664,7 +921,12 @@ impl PythonParser {
             decl.return_type = parse_type(&return_type, code);
             decl_end_byte = return_type.end_byte();
             decl_end_point = return_type.end_position();
-            symbols.extend(self.find_error_usages(&return_type, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+            symbols.extend(self.find_error_usages(
+                &return_type,
+                code,
+                &info.ast_fields.file_path,
+                &decl.ast_fields.guid,
+            ));
         }
 
         if let Some(body_node) = info.node.child_by_field_name("body") {
@@ -689,7 +951,13 @@ impl PythonParser {
         symbols
     }
 
-    fn find_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn find_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         for i in 0..parent.child_count() {
             let child = parent.child(i).unwrap();
@@ -700,7 +968,13 @@ impl PythonParser {
         symbols
     }
 
-    fn parse_error_usages(&mut self, parent: &Node, code: &str, path: &PathBuf, parent_guid: &Uuid) -> Vec<AstSymbolInstanceArc> {
+    fn parse_error_usages(
+        &mut self,
+        parent: &Node,
+        code: &str,
+        path: &PathBuf,
+        parent_guid: &Uuid,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         match parent.kind() {
             "identifier" => {
@@ -749,7 +1023,12 @@ impl PythonParser {
         symbols
     }
 
-    pub fn parse_call_expression<'a>(&mut self, info: &CandidateInfo<'a>, code: &str, candidates: &mut VecDeque<CandidateInfo<'a>>) -> Vec<AstSymbolInstanceArc> {
+    pub fn parse_call_expression<'a>(
+        &mut self,
+        info: &CandidateInfo<'a>,
+        code: &str,
+        candidates: &mut VecDeque<CandidateInfo<'a>>,
+    ) -> Vec<AstSymbolInstanceArc> {
         let mut symbols: Vec<AstSymbolInstanceArc> = Default::default();
         let mut decl = FunctionCall::default();
         decl.ast_fields.language = LanguageId::Python;
@@ -763,13 +1042,20 @@ impl PythonParser {
         decl.ast_fields.caller_guid = Some(get_guid());
         decl.ast_fields.is_error = info.ast_fields.is_error;
 
-        symbols.extend(self.find_error_usages(&info.node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &info.node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         let arguments_node = info.node.child_by_field_name("arguments").unwrap();
         for i in 0..arguments_node.child_count() {
             let child = arguments_node.child(i).unwrap();
             let text = code.slice(child.byte_range());
-            if SPECIAL_SYMBOLS.contains(&text) { continue; }
+            if SPECIAL_SYMBOLS.contains(&text) {
+                continue;
+            }
 
             let mut new_ast_fields = info.ast_fields.clone();
             new_ast_fields.caller_guid = None;
@@ -779,7 +1065,12 @@ impl PythonParser {
                 parent_guid: info.parent_guid.clone(),
             });
         }
-        symbols.extend(self.find_error_usages(&arguments_node, code, &info.ast_fields.file_path, &decl.ast_fields.guid));
+        symbols.extend(self.find_error_usages(
+            &arguments_node,
+            code,
+            &info.ast_fields.file_path,
+            &decl.ast_fields.guid,
+        ));
 
         let function_node = info.node.child_by_field_name("function").unwrap();
         let text = code.slice(function_node.byte_range());
@@ -828,8 +1119,10 @@ impl PythonParser {
             let symbols_l = self.parse_usages_(&candidate, code, &mut candidates);
             symbols.extend(symbols_l);
         }
-        let guid_to_symbol_map = symbols.iter()
-            .map(|s| (s.clone().read().guid().clone(), s.clone())).collect::<HashMap<_, _>>();
+        let guid_to_symbol_map = symbols
+            .iter()
+            .map(|s| (s.clone().read().guid().clone(), s.clone()))
+            .collect::<HashMap<_, _>>();
         for symbol in symbols.iter_mut() {
             let guid = symbol.read().guid().clone();
             if let Some(parent_guid) = symbol.read().parent_guid() {
@@ -842,10 +1135,20 @@ impl PythonParser {
         #[cfg(test)]
         for symbol in symbols.iter_mut() {
             let mut sym = symbol.write();
-            sym.fields_mut().childs_guid = sym.fields_mut().childs_guid.iter()
+            sym.fields_mut().childs_guid = sym
+                .fields_mut()
+                .childs_guid
+                .iter()
                 .sorted_by_key(|x| {
-                    guid_to_symbol_map.get(*x).unwrap().read().full_range().start_byte
-                }).map(|x| x.clone()).collect();
+                    guid_to_symbol_map
+                        .get(*x)
+                        .unwrap()
+                        .read()
+                        .full_range()
+                        .start_byte
+                })
+                .map(|x| x.clone())
+                .collect();
         }
 
         symbols
@@ -855,10 +1158,13 @@ impl PythonParser {
 pub struct PythonSkeletonFormatter;
 
 impl SkeletonFormatter for PythonSkeletonFormatter {
-    fn make_skeleton(&self, symbol: &SymbolInformation,
-                     text: &String,
-                     guid_to_children: &HashMap<Uuid, Vec<Uuid>>,
-                     guid_to_info: &HashMap<Uuid, &SymbolInformation>) -> String {
+    fn make_skeleton(
+        &self,
+        symbol: &SymbolInformation,
+        text: &String,
+        guid_to_children: &HashMap<Uuid, Vec<Uuid>>,
+        guid_to_info: &HashMap<Uuid, &SymbolInformation>,
+    ) -> String {
         let mut res_line = symbol.get_declaration_content(text).unwrap();
         let children = guid_to_children.get(&symbol.guid).unwrap();
         if children.is_empty() {
@@ -878,7 +1184,11 @@ impl SkeletonFormatter for PythonSkeletonFormatter {
                     res_line = format!("{}    ...\n", res_line);
                 }
                 SymbolType::ClassFieldDeclaration => {
-                    res_line = format!("{}  {}\n", res_line, child_symbol.get_content(text).unwrap());
+                    res_line = format!(
+                        "{}  {}\n",
+                        res_line,
+                        child_symbol.get_content(text).unwrap()
+                    );
                 }
                 _ => {}
             }
@@ -887,27 +1197,36 @@ impl SkeletonFormatter for PythonSkeletonFormatter {
         res_line
     }
 
-    fn get_declaration_with_comments(&self,
-                                     symbol: &SymbolInformation,
-                                     text: &String,
-                                     guid_to_children: &HashMap<Uuid, Vec<Uuid>>,
-                                     guid_to_info: &HashMap<Uuid, &SymbolInformation>) -> (String, (usize, usize)) {
+    fn get_declaration_with_comments(
+        &self,
+        symbol: &SymbolInformation,
+        text: &String,
+        guid_to_children: &HashMap<Uuid, Vec<Uuid>>,
+        guid_to_info: &HashMap<Uuid, &SymbolInformation>,
+    ) -> (String, (usize, usize)) {
         if let Some(children) = guid_to_children.get(&symbol.guid) {
             let mut res_line: Vec<String> = Default::default();
             let mut row = symbol.full_range.start_point.row;
-            let mut all_symbols = children.iter()
+            let mut all_symbols = children
+                .iter()
                 .filter_map(|guid| guid_to_info.get(guid))
                 .collect::<Vec<_>>();
-            all_symbols.sort_by(|a, b|
-                a.full_range.start_byte.cmp(&b.full_range.start_byte)
-            );
+            all_symbols.sort_by(|a, b| a.full_range.start_byte.cmp(&b.full_range.start_byte));
             if symbol.symbol_type == SymbolType::FunctionDeclaration {
-                res_line = symbol.get_content(text).unwrap().split("\n").map(|x| x.to_string()).collect::<Vec<_>>();
+                res_line = symbol
+                    .get_content(text)
+                    .unwrap()
+                    .split("\n")
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>();
                 row = symbol.full_range.end_point.row;
             } else {
-                let mut content_lines = symbol.get_declaration_content(text).unwrap()
+                let mut content_lines = symbol
+                    .get_declaration_content(text)
+                    .unwrap()
                     .split("\n")
-                    .map(|x| x.to_string().replace("\t", "    ")).collect::<Vec<_>>();
+                    .map(|x| x.to_string().replace("\t", "    "))
+                    .collect::<Vec<_>>();
                 let mut intent_n = 0;
                 if let Some(first) = content_lines.first_mut() {
                     intent_n = first.len() - first.trim_start().len();
@@ -919,9 +1238,7 @@ impl SkeletonFormatter for PythonSkeletonFormatter {
                     row = sym.full_range.end_point.row;
                     let content = sym.get_content(text).unwrap();
                     let lines = content.split("\n").collect::<Vec<_>>();
-                    let lines = lines.iter()
-                        .map(|x| x.to_string())
-                        .collect::<Vec<_>>();
+                    let lines = lines.iter().map(|x| x.to_string()).collect::<Vec<_>>();
                     res_line.extend(lines);
                 }
                 if res_line.is_empty() {

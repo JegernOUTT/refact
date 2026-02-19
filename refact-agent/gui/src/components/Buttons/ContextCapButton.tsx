@@ -8,7 +8,7 @@ import {
 } from "../../features/Chat/Thread";
 
 import { Select, type SelectProps } from "../Select";
-import { Skeleton } from "@radix-ui/themes";
+import { Skeleton, HoverCard, Text } from "@radix-ui/themes";
 
 const formatContextSize = (tokens: number): string => {
   if (tokens >= 1000000) {
@@ -132,12 +132,23 @@ export const ContextCapButton: React.FC = () => {
   const selectKey = `${threadModel}-${maxTokens}`;
 
   return (
-    <Select
-      key={selectKey}
-      title="Context cap"
-      options={capOptions}
-      defaultValue={safeDefaultValue}
-      onChange={handleCapChange}
-    />
+    <HoverCard.Root>
+      <HoverCard.Trigger>
+        <span>
+          <Select
+            key={selectKey}
+            title={undefined}
+            options={capOptions}
+            defaultValue={safeDefaultValue}
+            onChange={handleCapChange}
+          />
+        </span>
+      </HoverCard.Trigger>
+      <HoverCard.Content size="1" side="top">
+        <Text as="p" size="2">
+          Context cap
+        </Text>
+      </HoverCard.Content>
+    </HoverCard.Root>
   );
 };

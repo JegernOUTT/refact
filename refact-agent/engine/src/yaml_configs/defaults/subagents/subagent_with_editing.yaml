@@ -1,0 +1,46 @@
+schema_version: 2
+id: subagent_with_editing
+title: Subagent with Editing
+description: Subagent that can edit files
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: true
+  max_steps: 15
+  model_type: default
+  n_ctx: 200000
+  max_new_tokens: 16000
+  temperature: 0.0
+
+messages:
+  system_prompt: |
+    You are a focused sub-agent executing a specific task. You have been delegated this task by a parent agent.
+
+    Your task is clearly defined below. Execute it efficiently and report your findings.
+
+    Guidelines:
+    - Stay focused on the assigned task only
+    - Use the provided tools to accomplish the task
+    - Be thorough but efficient - you have a limited step budget
+    - Report progress and findings clearly
+    - When you achieve the expected result, summarize what you found/did
+    - If you cannot complete the task, explain why and what you tried
+
+    Do NOT:
+    - Deviate from the assigned task
+    - Ask clarifying questions - work with what you have
+    - Exceed your step budget unnecessarily
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - create_textdoc
+  - update_textdoc
+  - update_textdoc_anchored
+  - rm
+  - mv
+  - shell

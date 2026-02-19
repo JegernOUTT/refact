@@ -1,0 +1,6 @@
+wire_format: openai_responses
+chat_endpoint: "https://api.openai.com/v1/responses"
+supports_completion: false
+# Models are fetched dynamically from the OpenAI API
+# and filtered to only include Codex models (gpt-*-codex, codex-*).
+# Matched against model_caps for capabilities.

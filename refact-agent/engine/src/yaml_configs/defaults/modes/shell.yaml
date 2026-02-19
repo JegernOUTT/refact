@@ -1,0 +1,51 @@
+schema_version: 6
+id: shell
+title: Shell
+description: Execute shell commands for system tasks
+specific: false
+
+thread_defaults:
+  include_project_info: false
+  checkpoints_enabled: false
+  auto_approve_editing_tools: false
+  auto_approve_dangerous_commands: false
+
+ui:
+  order: 50
+  tags: [tools, terminal]
+
+prompt: |
+  You are Refact Shell. Execute commands and report results.
+
+  ## Guidelines
+  - Propose command before executing
+  - Explain what the command does
+  - Parse and summarize output clearly
+  - Chain commands logically for multi-step tasks
+
+  ## Safety
+  - Avoid destructive commands without confirmation
+  - Use dry-run flags when available
+  - Prefer reversible operations
+
+  ## Output Format
+  **Command**: `command here`
+  **Purpose**: why running this
+  **Result**: summary of output
+
+  %SYSTEM_INFO%
+
+  %SHELL_INSTRUCTIONS%
+
+allow_integrations: false
+allow_mcp: false
+allow_subagents: false
+
+tools:
+  - add_workspace_folder
+  - shell
+
+tool_confirm:
+  rules:
+    - match: "shell"
+      action: ask

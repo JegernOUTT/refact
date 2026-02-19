@@ -1,78 +1,50 @@
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, DiffChunk};
+use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
-use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel, PrivacySettings};
-use crate::tools::file_edit::auxiliary::{await_ast_indexing, convert_edit_to_diffchunks, str_replace_lines, sync_documents_ast};
-use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
+use crate::privacy::load_privacy_if_needed;
+use crate::tools::file_edit::auxiliary::{
+    await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary, parse_path_for_update,
+    parse_string_arg, str_replace_lines, sync_documents_ast,
+};
+use crate::tools::tools_description::{
+    MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType,
+};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
-use crate::files_correction::{canonicalize_normalized_path, get_project_dirs, preprocess_path_for_normalization};
 use tokio::sync::RwLock as ARwLock;
-use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
-use crate::global_context::GlobalContext;
-
-struct ToolUpdateTextDocByLinesArgs {
-    path: PathBuf,
-    content: String,
-    ranges: String,
-}
+use crate::knowledge_index::format_related_memories_section;
 
 pub struct ToolUpdateTextDocByLines {
     pub config_path: String,
 }
 
+struct Args {
+    path: PathBuf,
+    content: String,
+    ranges: String,
+}
+
 async fn parse_args(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    privacy_settings: Arc<PrivacySettings>
-) -> Result<ToolUpdateTextDocByLinesArgs, String> {
-    let path = match args.get("path") {
-        Some(Value::String(s)) => {
-            let raw_path = preprocess_path_for_normalization(s.trim().to_string());
-            let candidates_file = file_repair_candidates(gcx.clone(), &raw_path, 3, false).await;
-            let path = match return_one_candidate_or_a_good_error(gcx.clone(), &raw_path, &candidates_file, &get_project_dirs(gcx.clone()).await, false).await {
-                Ok(f) => canonicalize_normalized_path(PathBuf::from(f)),
-                Err(e) => return Err(e),
-            };
-            if check_file_privacy(privacy_settings, &path, &FilePrivacyLevel::AllowToSendAnywhere).is_err() {
-                return Err(format!(
-                    "Error: Cannot update the file '{:?}' due to privacy settings.",
-                    s.trim()
-                ));
-            }
-            if !path.exists() {
-                return Err(format!(
-                    "Error: The file '{:?}' does not exist. Please check if the path is correct and the file exists.",
-                    path
-                ));
-            }
-            path
-        }
-        Some(v) => return Err(format!("Error: The 'path' argument must be a string, but received: {:?}", v)),
-        None => return Err("Error: The 'path' argument is required but was not provided.".to_string()),
-    };
-
-    let content = match args.get("content") {
-        Some(Value::String(s)) => s.to_string(),
-        Some(v) => return Err(format!("Error: The 'content' argument must be a string containing the new text, but received: {:?}", v)),
-        None => return Err("Error: The 'content' argument is required. Please provide the new text that will replace the specified lines.".to_string())
-    };
-
-    let ranges = match args.get("ranges") {
-        Some(Value::String(s)) => s.trim().to_string(),
-        Some(v) => return Err(format!("Error: The 'ranges' argument must be a string, but received: {:?}", v)),
-        None => return Err("Error: The 'ranges' argument is required. Format: ':3' (lines 1-3), '40:50' (lines 40-50), '100:' (line 100 to end), or combine with commas like ':3,40:50,100:'.".to_string())
-    };
-
+    code_workdir: &Option<PathBuf>,
+) -> Result<Args, String> {
+    let privacy = load_privacy_if_needed(gcx.clone()).await;
+    let path = parse_path_for_update(gcx, args, privacy, code_workdir).await?;
+    let content = parse_string_arg(args, "content", "Provide the new text for the line range")?;
+    let ranges = parse_string_arg(args, "ranges", "Format: '10:20' or ':5' or '100:' or '5'")?;
+    let ranges = ranges.trim().to_string();
     if ranges.is_empty() {
-        return Err("Error: The 'ranges' argument cannot be empty.".to_string());
+        return Err(
+            "⚠️ 'ranges' cannot be empty. 💡 Format: '10:20' or ':5' or '100:'".to_string(),
+        );
     }
-
-    Ok(ToolUpdateTextDocByLinesArgs {
+    Ok(Args {
         path,
         content,
         ranges,
@@ -82,49 +54,76 @@ async fn parse_args(
 pub async fn tool_update_text_doc_by_lines_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    dry: bool
-) -> Result<(String, String, Vec<DiffChunk>), String> {
-    let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
-    let args = parse_args(gcx.clone(), args, privacy_settings).await?;
+    dry: bool,
+    code_workdir: &Option<PathBuf>,
+) -> Result<(String, String, Vec<DiffChunk>, String), String> {
+    let a = parse_args(gcx.clone(), args, code_workdir).await?;
     await_ast_indexing(gcx.clone()).await?;
-    let (before_text, after_text) = str_replace_lines(
-        gcx.clone(),
-        &args.path,
-        &args.content,
-        &args.ranges,
-        dry
-    ).await?;
-    sync_documents_ast(gcx.clone(), &args.path).await?;
-    let diff_chunks = convert_edit_to_diffchunks(args.path.clone(), &before_text, &after_text)?;
-    Ok((before_text, after_text, diff_chunks))
+    let (before, after) =
+        str_replace_lines(gcx.clone(), &a.path, &a.content, &a.ranges, dry).await?;
+    sync_documents_ast(gcx.clone(), &a.path).await?;
+    let chunks = convert_edit_to_diffchunks(a.path.clone(), &before, &after)?;
+    let summary = edit_result_summary(&before, &after, &a.path);
+    Ok((before, after, chunks, summary))
 }
 
 #[async_trait]
 impl Tool for ToolUpdateTextDocByLines {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let (_, _, diff_chunks) = tool_update_text_doc_by_lines_exec(gcx.clone(), args, false).await?;
-        let results = vec![ChatMessage {
+        let gcx = {
+            let ccx_locked = ccx.lock().await;
+            ccx_locked.global_context.clone()
+        };
+        let (_, _, chunks, _) =
+            tool_update_text_doc_by_lines_exec(gcx.clone(), args, false, &None).await?;
+
+        let related_section = {
+            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_guard = idx_arc.lock().await;
+            let mut paths: Vec<String> = Vec::new();
+            for c in chunks.iter() {
+                if !c.file_name.is_empty() {
+                    paths.push(c.file_name.clone());
+                }
+                if let Some(rename) = &c.file_name_rename {
+                    if !rename.is_empty() {
+                        paths.push(rename.clone());
+                    }
+                }
+            }
+            paths.sort();
+            paths.dedup();
+            let mut cards = idx_guard.related_for_files(&paths, 8);
+            if cards.is_empty() {
+                cards = idx_guard.related_for_related_files(&paths, 8);
+            }
+            format_related_memories_section(&cards, None)
+        };
+
+        let mut out = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "diff".to_string(),
-            content: ChatContent::SimpleText(json!(diff_chunks).to_string()),
+            content: ChatContent::SimpleText(json!(chunks).to_string()),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
-            usage: None,
             ..Default::default()
-        }]
-        .into_iter()
-        .map(|x| ContextEnum::ChatMessage(x))
-        .collect::<Vec<_>>();
-        Ok((false, results))
+        })];
+
+        if !related_section.trim().is_empty() {
+            out.push(ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(related_section),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            }));
+        }
+
+        Ok((false, out))
     }
 
     async fn match_against_confirm_deny(
@@ -132,24 +131,18 @@ impl Tool for ToolUpdateTextDocByLines {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
-
-        async fn can_execute_tool_edit(gcx: Arc<ARwLock<GlobalContext>>, args: &HashMap<String, Value>, privacy_settings: Arc<PrivacySettings>) -> Result<(), String> {
-            let _ = parse_args(gcx.clone(), args, privacy_settings).await?;
-            Ok(())
-        }
-
+        let gcx = {
+            let ccx_locked = ccx.lock().await;
+            ccx_locked.global_context.clone()
+        };
+        let can_exec = parse_args(gcx.clone(), args, &None).await.is_ok();
         let msgs_len = ccx.lock().await.messages.len();
-
-        if msgs_len != 0 {
-            if let Err(_) = can_execute_tool_edit(gcx.clone(), args, privacy_settings).await {
-                return Ok(MatchConfirmDeny {
-                    result: MatchConfirmDenyResult::PASS,
-                    command: "update_textdoc_by_lines".to_string(),
-                    rule: "".to_string(),
-                });
-            }
+        if msgs_len != 0 && !can_exec {
+            return Ok(MatchConfirmDeny {
+                result: MatchConfirmDenyResult::PASS,
+                command: "update_textdoc_by_lines".to_string(),
+                rule: "".to_string(),
+            });
         }
         Ok(MatchConfirmDeny {
             result: MatchConfirmDenyResult::CONFIRMATION,
@@ -181,8 +174,8 @@ impl Tool for ToolUpdateTextDocByLines {
                 source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
-            agentic: false,
             experimental: false,
+            allow_parallel: false,
             description: "Replaces line ranges in an existing file with new content. Line numbers are 1-based and inclusive. Supports multiple non-overlapping ranges.".to_string(),
             parameters: vec![
                 ToolParam {
@@ -201,11 +194,7 @@ impl Tool for ToolUpdateTextDocByLines {
                     param_type: "string".to_string(),
                 },
             ],
-            parameters_required: vec![
-                "path".to_string(),
-                "content".to_string(),
-                "ranges".to_string(),
-            ],
+            parameters_required: vec!["path".to_string(), "content".to_string(), "ranges".to_string()],
         }
     }
 }

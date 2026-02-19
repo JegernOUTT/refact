@@ -1,45 +1,50 @@
 import React from "react";
-import { Card, Flex, Heading } from "@radix-ui/themes";
+import { Badge, Card, Flex, Heading } from "@radix-ui/themes";
 
-import { OnOffSwitch } from "../../../components/OnOffSwitch/OnOffSwitch";
 import { iconsMap } from "../icons/iconsMap";
 
-import type { ConfiguredProvidersResponse } from "../../../services/refact";
+import type {
+  ProviderListItem,
+  ProviderStatus,
+} from "../../../services/refact";
 
 import { getProviderName } from "../getProviderName";
-import { useProviderCard } from "./useProviderCard";
 
 import styles from "./ProviderCard.module.css";
-import { useUpdateProvider } from "../useUpdateProvider";
-import classNames from "classnames";
 
 export type ProviderCardProps = {
-  provider: ConfiguredProvidersResponse["providers"][number];
-  setCurrentProvider: (
-    provider: ConfiguredProvidersResponse["providers"][number],
-  ) => void;
+  provider: ProviderListItem;
+  setCurrentProvider: (provider: ProviderListItem) => void;
+};
+
+const StatusDot: React.FC<{ status: ProviderStatus }> = ({ status }) => {
+  switch (status) {
+    case "active":
+      return (
+        <Badge color="green" size="1" variant="soft">
+          ●
+        </Badge>
+      );
+    case "configured":
+      return (
+        <Badge color="orange" size="1" variant="soft">
+          ●
+        </Badge>
+      );
+    default:
+      return null;
+  }
 };
 
 export const ProviderCard: React.FC<ProviderCardProps> = ({
   provider,
   setCurrentProvider,
 }) => {
-  const { isUpdatingEnabledState } = useUpdateProvider({
-    provider,
-  });
-
-  const { handleClickOnProvider, handleSwitchClick } = useProviderCard({
-    provider,
-    setCurrentProvider,
-  });
-
   return (
     <Card
       size="2"
-      onClick={handleClickOnProvider}
-      className={classNames(styles.providerCard, {
-        [styles.providerCardDisabled]: isUpdatingEnabledState,
-      })}
+      onClick={() => setCurrentProvider(provider)}
+      className={styles.providerCard}
     >
       <Flex align="center" justify="between">
         <Flex gap="3" align="center">
@@ -48,16 +53,15 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
             {getProviderName(provider)}
           </Heading>
         </Flex>
-        {!provider.readonly && (
-          <Flex align="center" gap="2">
-            <OnOffSwitch
-              isEnabled={provider.enabled}
-              isUpdating={isUpdatingEnabledState}
-              isUnavailable={isUpdatingEnabledState}
-              handleClick={handleSwitchClick}
-            />
-          </Flex>
-        )}
+        <Flex align="center" gap="2">
+          {provider.model_count > 0 && (
+            <Badge color="gray" size="1" variant="soft">
+              {provider.model_count} model
+              {provider.model_count !== 1 ? "s" : ""}
+            </Badge>
+          )}
+          <StatusDot status={provider.status} />
+        </Flex>
       </Flex>
     </Card>
   );

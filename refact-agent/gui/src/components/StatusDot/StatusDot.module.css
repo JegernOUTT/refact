@@ -1,0 +1,71 @@
+.dot {
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.small {
+  width: 8px;
+  height: 8px;
+}
+
+.medium {
+  width: 10px;
+  height: 10px;
+}
+
+/* Idle - gray dot */
+.idle {
+  background-color: var(--gray-8);
+}
+
+/* In Progress - pulsating blue */
+.inProgress {
+  background-color: var(--blue-9);
+  animation: pulseBlue 1.5s ease-in-out infinite;
+}
+
+@keyframes pulseBlue {
+  0% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 var(--blue-a7);
+  }
+  50% {
+    opacity: 0.8;
+    box-shadow: 0 0 0 4px transparent;
+  }
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* Needs Attention - pulsating yellow/amber */
+.needsAttention {
+  background-color: var(--amber-9);
+  animation: pulseYellow 1.5s ease-in-out infinite;
+}
+
+@keyframes pulseYellow {
+  0% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 var(--amber-a7);
+  }
+  50% {
+    opacity: 0.85;
+    box-shadow: 0 0 0 4px transparent;
+  }
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* Error - red dot */
+.error {
+  background-color: var(--red-9);
+}
+
+/* Completed - green dot */
+.completed {
+  background-color: var(--green-9);
+}

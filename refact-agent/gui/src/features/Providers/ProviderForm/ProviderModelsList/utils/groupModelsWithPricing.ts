@@ -22,8 +22,9 @@ export type ModelCapabilities = {
   supportsMultimodality?: boolean;
   supportsClicks?: boolean;
   supportsAgent?: boolean;
-  supportsReasoning?: string | null;
-  supportsBoostReasoning?: boolean;
+  reasoningEffortOptions?: string[] | null;
+  supportsThinkingBudget?: boolean;
+  supportsAdaptiveThinkingBudget?: boolean;
 };
 
 export type ModelGroup = {
@@ -46,39 +47,31 @@ export function formatContextWindow(nCtx: number): string {
   return nCtx.toString();
 }
 
-/**
- * Format pricing to compact string (in coins, $1 = 1000 coins)
- */
 export function formatPricing(cost: CapCost, compact = true): string {
-  // Convert dollars to coins ($1 = 1000 coins)
-  const toCoins = (n?: number) =>
-    typeof n === "number" && Number.isFinite(n) ? Math.round(n * 1000) : null;
-
-  const promptCoins = toCoins(cost.prompt);
-  const generatedCoins = toCoins(cost.generated);
-
-  const fmt = (coins: number | null) =>
-    coins !== null ? coins.toString() : "–";
+  const fmt = (n?: number) => {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "–";
+    if (n >= 1) return `$${n.toFixed(2)}`;
+    if (n >= 0.01) return `$${n.toFixed(2)}`;
+    return `$${n.toFixed(3)}`;
+  };
 
   if (compact) {
-    // Compact format for card display: "1000/5000 ⓒ" (prompt/output in coins)
-    return `${fmt(promptCoins)}/${fmt(generatedCoins)} ⓒ`;
+    return `${fmt(cost.prompt)}/${fmt(cost.generated)}`;
   }
 
-  // Detailed format for tooltip/popup
   const parts = [
-    `prompt: ${fmt(promptCoins)} ⓒ`,
-    `output: ${fmt(generatedCoins)} ⓒ`,
+    `input: ${fmt(cost.prompt)}`,
+    `output: ${fmt(cost.generated)}`,
   ];
 
-  const cacheReadCoins = toCoins(cost.cache_read);
-  const cacheCreationCoins = toCoins(cost.cache_creation);
-
-  if (cacheReadCoins !== null) {
-    parts.push(`cache read: ${fmt(cacheReadCoins)} ⓒ`);
+  if (typeof cost.cache_read === "number" && Number.isFinite(cost.cache_read)) {
+    parts.push(`cache read: ${fmt(cost.cache_read)}`);
   }
-  if (cacheCreationCoins !== null) {
-    parts.push(`cache create: ${fmt(cacheCreationCoins)} ⓒ`);
+  if (
+    typeof cost.cache_creation === "number" &&
+    Number.isFinite(cost.cache_creation)
+  ) {
+    parts.push(`cache create: ${fmt(cost.cache_creation)}`);
   }
 
   return parts.join(" • ") + " per 1M tokens";
@@ -86,25 +79,49 @@ export function formatPricing(cost: CapCost, compact = true): string {
 
 /**
  * Try to find the pricing key in caps.metadata.pricing that corresponds to a given model.
- * Based on actual /caps response, keys are bare model names (e.g., "gpt-4.1")
+ * Backend inserts pricing under both fully-qualified keys (provider/model) and bare model names.
  */
 function pickPricingKey(args: {
   caps: CapsResponse;
   modelName: string;
+  providerName?: string;
 }): string | null {
-  const { caps, modelName } = args;
+  const { caps, modelName, providerName } = args;
   const pricing = caps.metadata?.pricing;
   if (!pricing) return null;
 
-  // Try exact match first (most common case)
-  if (Object.prototype.hasOwnProperty.call(pricing, modelName)) {
+  const hasKey = (key: string) =>
+    Object.prototype.hasOwnProperty.call(pricing, key);
+
+  // 1. Try exact match first (handles both bare and qualified names)
+  if (hasKey(modelName)) {
     return modelName;
   }
 
-  // Try without "refact/" prefix if present
-  const nameWithoutProvider = modelName.replace(/^refact\//, "");
-  if (Object.prototype.hasOwnProperty.call(pricing, nameWithoutProvider)) {
-    return nameWithoutProvider;
+  // 2. Try fully-qualified key if we have provider context
+  if (providerName) {
+    const qualifiedKey = `${providerName}/${modelName}`;
+    if (hasKey(qualifiedKey)) {
+      return qualifiedKey;
+    }
+  }
+
+  // 3. Try stripping any provider prefix (e.g., "openai/gpt-4o" -> "gpt-4o")
+  if (modelName.includes("/")) {
+    const bareModel = modelName.split("/").pop();
+    if (bareModel && hasKey(bareModel)) {
+      return bareModel;
+    }
+  }
+
+  // 4. For multi-slash names (e.g., "openrouter/anthropic/claude-3-5-sonnet"),
+  //    try the last two segments as a key
+  const segments = modelName.split("/");
+  if (segments.length > 2) {
+    const lastTwoSegments = segments.slice(-2).join("/");
+    if (hasKey(lastTwoSegments)) {
+      return lastTwoSegments;
+    }
   }
 
   return null;
@@ -123,8 +140,9 @@ function extractCapabilities(
     supportsMultimodality: capsModel.supports_multimodality,
     supportsClicks: capsModel.supports_clicks,
     supportsAgent: capsModel.supports_agent,
-    supportsReasoning: capsModel.supports_reasoning,
-    supportsBoostReasoning: capsModel.supports_boost_reasoning,
+    reasoningEffortOptions: capsModel.reasoning_effort_options,
+    supportsThinkingBudget: capsModel.supports_thinking_budget,
+    supportsAdaptiveThinkingBudget: capsModel.supports_adaptive_thinking_budget,
   };
 }
 

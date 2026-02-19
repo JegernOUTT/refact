@@ -10,6 +10,8 @@ import {
 } from "../features/Config/configSlice";
 import { useOpenUrl } from "./useOpenUrl";
 import { useEventsBusForIDE } from "./useEventBusForIDE";
+import { push } from "../features/Pages/pagesSlice";
+import { newChatAction } from "../features/Chat";
 
 function makeTicket() {
   return (
@@ -28,9 +30,11 @@ export const useEmailLogin = () => {
   const [aborted, setAborted] = useState<boolean>(false);
   const [timeoutN, setTimeoutN] = useState<NodeJS.Timeout>();
   const abortRef = useRef<() => void>(() => ({}));
+  const hasNavigated = useRef(false);
 
   const emailLogin = useCallback(
     (email: string) => {
+      hasNavigated.current = false;
       const token = makeTicket();
       const action = emailLoginTrigger({ email, token });
       abortRef.current = () => action.abort();
@@ -51,7 +55,12 @@ export const useEmailLogin = () => {
         abortRef.current = () => action.abort();
       }, 5000);
       setTimeoutN(timer);
-    } else if (args && emailLoginResult.data?.status === "user_logged_in") {
+    } else if (
+      args &&
+      emailLoginResult.data?.status === "user_logged_in" &&
+      !hasNavigated.current
+    ) {
+      hasNavigated.current = true;
       dispatch(setApiKey(emailLoginResult.data.key));
       dispatch(setAddressURL("Refact"));
       setupHost({
@@ -59,6 +68,9 @@ export const useEmailLogin = () => {
         apiKey: emailLoginResult.data.key,
         userName: args.email,
       });
+      dispatch(push({ name: "history" }));
+      dispatch(newChatAction());
+      dispatch(push({ name: "chat" }));
     }
   }, [aborted, dispatch, emailLoginResult, emailLoginTrigger, setupHost]);
 
@@ -92,6 +104,7 @@ export const useLogin = () => {
   const { setupHost } = useEventsBusForIDE();
   const dispatch = useAppDispatch();
   const abortRef = useRef<() => void>(() => ({}));
+  const hasNavigated = useRef(false);
 
   const host = useAppSelector(selectHost);
   const openUrl = useOpenUrl();
@@ -100,6 +113,7 @@ export const useLogin = () => {
 
   const loginWithProvider = useCallback(
     (provider: "google" | "github") => {
+      hasNavigated.current = false;
       const ticket = makeTicket();
       const baseUrl = new URL(`https://refact.smallcloud.ai/authentication`);
       baseUrl.searchParams.set("token", ticket);
@@ -116,19 +130,20 @@ export const useLogin = () => {
   );
 
   useEffect(() => {
-    if (isGoodResponse(loginPollingResult.data)) {
-      const actions = [
-        setApiKey(loginPollingResult.data.secret_key),
-        setAddressURL("Refact"),
-      ];
-
-      actions.forEach((action) => dispatch(action));
+    if (isGoodResponse(loginPollingResult.data) && !hasNavigated.current) {
+      hasNavigated.current = true;
+      dispatch(setApiKey(loginPollingResult.data.secret_key));
+      dispatch(setAddressURL("Refact"));
 
       setupHost({
         type: "cloud",
         apiKey: loginPollingResult.data.secret_key,
         userName: loginPollingResult.data.account,
       });
+
+      dispatch(push({ name: "history" }));
+      dispatch(newChatAction());
+      dispatch(push({ name: "chat" }));
     }
   }, [dispatch, loginPollingResult.data, setupHost]);
 

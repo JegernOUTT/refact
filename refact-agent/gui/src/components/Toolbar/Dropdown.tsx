@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { selectHost, type Config } from "../../features/Config/configSlice";
-import { useTourRefs } from "../../features/Tour";
+import { push } from "../../features/Pages/pagesSlice";
 import {
   useGetUser,
   useLogout,
@@ -15,7 +15,6 @@ import {
   DropdownMenu,
   Flex,
   HoverCard,
-  IconButton,
   // Select,
   Text,
 } from "@radix-ui/themes";
@@ -25,13 +24,13 @@ import {
   QuestionMarkCircledIcon,
   GearIcon,
 } from "@radix-ui/react-icons";
-import { clearHistory } from "../../features/History/historySlice";
+import styles from "./Toolbar.module.css";
+
 import { PuzzleIcon } from "../../images/PuzzleIcon";
 import { Coin } from "../../images";
 import { useCoinBallance } from "../../hooks/useCoinBalance";
 import { isUserWithLoginMessage } from "../../services/smallcloud/types";
-import { resetActiveGroup, selectActiveGroup } from "../../features/Teams";
-import { popBackTo } from "../../features/Pages/pagesSlice";
+
 import { useActiveTeamsGroup } from "../../hooks/useActiveTeamsGroup";
 
 export type DropdownNavigationOptions =
@@ -39,25 +38,22 @@ export type DropdownNavigationOptions =
   | "stats"
   | "settings"
   | "hot keys"
-  | "restart tour"
   | "login page"
   | "integrations"
   | "providers"
+  | "knowledge graph"
+  | "customization"
+  | "default models"
   | "";
 
 type DropdownProps = {
   handleNavigation: (to: DropdownNavigationOptions) => void;
+  triggerClassName?: string;
+  useGhostTrigger?: boolean;
 };
 
-function linkForBugReports(host: Config["host"]): string {
-  switch (host) {
-    case "vscode":
-      return "https://github.com/smallcloudai/refact-vscode/issues";
-    case "jetbrains":
-      return "https://github.com/smallcloudai/refact-intellij/issues";
-    default:
-      return "https://github.com/smallcloudai/refact-chat-js/issues";
-  }
+function linkForBugReports(_host: Config["host"]): string {
+  return "https://github.com/smallcloudai/refact/issues";
 }
 
 function linkForAccount(host: Config["host"]): string {
@@ -73,12 +69,11 @@ function linkForAccount(host: Config["host"]): string {
 
 export const Dropdown: React.FC<DropdownProps> = ({
   handleNavigation,
+  triggerClassName,
 }: DropdownProps) => {
-  const refs = useTourRefs();
+  const dispatch = useAppDispatch();
   const user = useGetUser();
   const host = useAppSelector(selectHost);
-  const activeGroup = useAppSelector(selectActiveGroup);
-  const dispatch = useAppDispatch();
   // TODO: check how much of this is still used.
   // const { maxAgentUsageAmount, currentAgentUsage } = useAgentUsage();
   const coinBalance = useCoinBallance();
@@ -91,22 +86,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
   const discordUrl = "https://www.smallcloud.ai/discord";
   const accountLink = linkForAccount(host);
   const openUrl = useOpenUrl();
-  const {
-    openCustomizationFile,
-    openPrivacyFile,
-    setLoginMessage,
-    clearActiveTeamsGroupInIDE,
-  } = useEventsBusForIDE();
-
-  const handleChatHistoryCleanUp = () => {
-    dispatch(clearHistory());
-  };
-
-  const handleActiveGroupCleanUp = () => {
-    clearActiveTeamsGroupInIDE();
-    const actions = [resetActiveGroup(), popBackTo({ name: "history" })];
-    actions.forEach((action) => dispatch(action));
-  };
+  const { openPrivacyFile, setLoginMessage } = useEventsBusForIDE();
 
   const handleProUpgradeClick = useCallback(() => {
     startPollingForUser();
@@ -126,11 +106,24 @@ export const Dropdown: React.FC<DropdownProps> = ({
 
   return (
     <DropdownMenu.Root>
-      <DropdownMenu.Trigger>
-        <IconButton variant="outline" ref={(x) => refs.setMore(x)}>
-          <HamburgerMenuIcon />
-        </IconButton>
-      </DropdownMenu.Trigger>
+      <HoverCard.Root>
+        <HoverCard.Trigger>
+          <DropdownMenu.Trigger>
+            <button
+              type="button"
+              className={triggerClassName ?? styles.iconButton}
+              aria-label="Menu"
+            >
+              <HamburgerMenuIcon />
+            </button>
+          </DropdownMenu.Trigger>
+        </HoverCard.Trigger>
+        <HoverCard.Content size="1" side="bottom">
+          <Text as="p" size="2">
+            Menu
+          </Text>
+        </HoverCard.Content>
+      </HoverCard.Root>
 
       <DropdownMenu.Content>
         {user.data && (
@@ -260,10 +253,13 @@ export const Dropdown: React.FC<DropdownProps> = ({
           <GearIcon /> Configure Providers
         </DropdownMenu.Item>
 
+        <DropdownMenu.Item onSelect={() => handleNavigation("default models")}>
+          <GearIcon /> Default Models
+        </DropdownMenu.Item>
+
         {isKnowledgeFeatureAvailable && (
           <DropdownMenu.Item
-            // TODO: get real URL from cloud inference
-            onSelect={() => openUrl("https://flexus.team/")}
+            onSelect={() => handleNavigation("knowledge graph")}
           >
             Manage Knowledge
           </DropdownMenu.Item>
@@ -277,12 +273,8 @@ export const Dropdown: React.FC<DropdownProps> = ({
           IDE Hotkeys
         </DropdownMenu.Item>
 
-        <DropdownMenu.Item
-          onSelect={() => {
-            void openCustomizationFile();
-          }}
-        >
-          Edit customization.yaml
+        <DropdownMenu.Item onSelect={() => handleNavigation("customization")}>
+          Customize Modes & Agents
         </DropdownMenu.Item>
 
         <DropdownMenu.Item
@@ -294,10 +286,6 @@ export const Dropdown: React.FC<DropdownProps> = ({
         </DropdownMenu.Item>
 
         <DropdownMenu.Separator />
-
-        <DropdownMenu.Item onSelect={() => handleNavigation("restart tour")}>
-          Restart tour
-        </DropdownMenu.Item>
 
         <DropdownMenu.Item
           onSelect={(event) => {
@@ -313,31 +301,26 @@ export const Dropdown: React.FC<DropdownProps> = ({
         </DropdownMenu.Item>
 
         <DropdownMenu.Item onSelect={() => handleNavigation("stats")}>
-          Your Stats
+          Usage Dashboard
         </DropdownMenu.Item>
 
-        <DropdownMenu.Item onSelect={handleChatHistoryCleanUp}>
-          Clear Chat History
-        </DropdownMenu.Item>
-
-        {isKnowledgeFeatureAvailable && (
+        {user.data ? (
           <DropdownMenu.Item
-            onSelect={handleActiveGroupCleanUp}
-            disabled={activeGroup === null}
+            onSelect={(event) => {
+              event.preventDefault();
+              logout();
+              handleNavigation("login page");
+            }}
           >
-            Unselect Active Group
+            Logout
+          </DropdownMenu.Item>
+        ) : (
+          <DropdownMenu.Item
+            onSelect={() => dispatch(push({ name: "login page" }))}
+          >
+            Login to Refact Cloud
           </DropdownMenu.Item>
         )}
-
-        <DropdownMenu.Item
-          onSelect={(event) => {
-            event.preventDefault();
-            logout();
-            handleNavigation("login page");
-          }}
-        >
-          Logout
-        </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
   );

@@ -1,6 +1,5 @@
-import type { RootState } from "../app/store";
+import type { ChatHistoryItem } from "../features/History/historySlice";
 
-type ChatHistoryItem = RootState["history"]["messages"];
 export const HISTORY: ChatHistoryItem[] = [
   {
     id: "be20f605-824c-4e77-9dab-a45688f676fa",
@@ -61,11 +60,9 @@ export const HISTORY: ChatHistoryItem[] = [
       },
       {
         role: "tool",
-        content: {
-          tool_call_id: "call_D0rhujadTb1nvKlMbZ8ZYLEt",
-          content: "performed vecdb search, results below",
-          tool_failed: false,
-        },
+        tool_call_id: "call_D0rhujadTb1nvKlMbZ8ZYLEt",
+        content: "performed vecdb search, results below",
+        tool_failed: false,
       },
       {
         role: "context_file",

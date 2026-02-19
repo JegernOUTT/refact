@@ -1,5 +1,6 @@
-chat_endpoint:       "https://api.openai.com/v1/chat/completions"
-embedding_endpoint:  "https://api.openai.com/v1/embeddings"
+wire_format: openai_chat_completions
+chat_endpoint: "https://api.openai.com/v1/chat/completions"
+embedding_endpoint: "https://api.openai.com/v1/embeddings"
 supports_completion: false
 
 api_key: "sk-..."
@@ -14,11 +15,3 @@ running_models:
   - o3-mini
   - o1-mini
   - o1
-
-model_default_settings_ui:
-  chat:
-    n_ctx: 200000
-    supports_tools: true
-    supports_multimodality: true
-    supports_agent: true
-    tokenizer: hf://Xenova/gpt-4o

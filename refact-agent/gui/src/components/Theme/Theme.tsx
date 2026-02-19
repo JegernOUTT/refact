@@ -1,8 +1,10 @@
 import React from "react";
-import { Theme as RadixTheme, IconButton } from "@radix-ui/themes";
+import { Theme as RadixTheme } from "@radix-ui/themes";
 import { MoonIcon, SunIcon } from "@radix-ui/react-icons";
 import "@radix-ui/themes/styles.css";
 import "./theme-config.css";
+import "../shared/tokens.css";
+import styles from "./Theme.module.css";
 import { useAppearance, useConfig } from "../../hooks";
 
 export type ThemeProps = {
@@ -49,15 +51,15 @@ const ThemeWithDarkMode: React.FC<ThemeProps> = ({ children, ...props }) => {
   const Icon = isDarkMode ? MoonIcon : SunIcon;
   return (
     <RadixTheme {...props} appearance={isDarkMode ? "dark" : "light"}>
-      <IconButton
-        variant="surface"
-        color="gray"
+      <button
+        type="button"
+        className={styles.themeToggle}
         title="toggle dark mode"
-        style={{ position: "fixed", zIndex: 999, right: 15, top: 15 }}
         onClick={toggle}
+        aria-label="Toggle dark mode"
       >
         <Icon />
-      </IconButton>
+      </button>
       {/** TODO: remove this in production */}
       {/** use cmd + c to open and close */}
       {/* <ThemePanel defaultOpen={false} /> */}

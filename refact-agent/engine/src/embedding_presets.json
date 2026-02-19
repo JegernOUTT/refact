@@ -1,0 +1,33 @@
+{
+    "embedding_models": {
+        "thenlper/gte-base": {
+            "n_ctx": 512,
+            "embedding_size": 768,
+            "rejection_threshold": 0.25,
+            "tokenizer": "hf://thenlper/gte-base"
+        },
+        "text-embedding-3-small": {
+            "n_ctx": 8191,
+            "embedding_size": 1536,
+            "rejection_threshold": 0.63,
+            "similar_models": [
+                "openai/text-embedding-3-small"
+            ],
+            "tokenizer": "hf://Xenova/text-embedding-ada-002"
+        },
+        "gemini-embedding-exp": {
+            "n_ctx": 8192,
+            "embedding_size": 3072,
+            "similar_models": [
+                "gemini-embedding-exp-03-07"
+            ],
+            "tokenizer": "hf://Xenova/gemma2-tokenizer"
+        },
+        "models/text-embedding-004": {
+            "n_ctx": 2048,
+            "embedding_size": 768,
+            "similar_models": [],
+            "tokenizer": "hf://Xenova/gemma2-tokenizer"
+        }
+    }
+}

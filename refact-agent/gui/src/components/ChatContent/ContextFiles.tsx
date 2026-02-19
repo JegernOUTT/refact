@@ -1,35 +1,30 @@
-import React from "react";
-import { Flex, Container, Box, HoverCard, Text } from "@radix-ui/themes";
-import styles from "./ChatContent.module.css";
-import { ChatContextFile } from "../../services/refact";
-import classnames from "classnames";
-import { TruncateLeft, Small } from "../Text";
-import * as Collapsible from "@radix-ui/react-collapsible";
-
-import { ScrollArea } from "../ScrollArea";
-import { Link } from "../Link";
+import React, { useState, useCallback } from "react";
+import { useStoredOpen } from "./useStoredOpen";
+import { Flex, Box, Text } from "@radix-ui/themes";
+import classNames from "classnames";
 import ReactMarkDown from "react-markdown";
-
-import { MarkdownCodeBlock } from "../Markdown/CodeBlock";
-import { Chevron } from "../Collapsible";
+import {
+  FileIcon,
+  ArchiveIcon,
+  ReaderIcon,
+  LightningBoltIcon,
+} from "@radix-ui/react-icons";
+import { ChatContextFile } from "../../services/refact";
+import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import { filename } from "../../utils";
 import { useEventsBusForIDE } from "../../hooks";
+import { useDelayedUnmount } from "../shared/useDelayedUnmount";
+import styles from "./ContextFiles.module.css";
 
+// Re-export Markdown for backward compatibility
 export const Markdown: React.FC<{
   children: string;
-  startingLineNumber?: number;
-}> = ({ startingLineNumber, ...props }) => {
+}> = (props) => {
   return (
     <ReactMarkDown
       components={{
         code({ style: _style, color: _color, ...codeProps }) {
-          return (
-            <MarkdownCodeBlock
-              {...codeProps}
-              showLineNumbers={false}
-              startingLineNumber={startingLineNumber}
-            />
-          );
+          return <ShikiCodeBlock {...codeProps} showLineNumbers={false} />;
         },
       }}
       {...props}
@@ -37,137 +32,420 @@ export const Markdown: React.FC<{
   );
 };
 
-function getFileInfoFromName(name: string) {
+function getExtensionFromName(name: string): string {
   const dot = name.lastIndexOf(".");
-
-  if (dot === -1)
-    return {
-      extension: "",
-      start: 1,
-    };
-  const extendsionAndLines = dot === -1 ? "" : name.substring(dot + 1);
-  const extension = extendsionAndLines.replace(/:\d*-\d*/, "");
-
-  if (!/:\d*-\d*/.test(extendsionAndLines)) {
-    return { extension, start: 1 };
-  }
-  const lineIndex = extendsionAndLines.lastIndexOf(":");
-  const lines = extendsionAndLines.substring(lineIndex + 1);
-
-  const [start] = lines.split("-");
-  const maybeNumber = Number(start);
-
-  return {
-    extension,
-    start: maybeNumber,
-  };
+  if (dot === -1) return "";
+  return name.substring(dot + 1).replace(/:\d*-\d*/, "");
 }
 
-export const ContextFile: React.FC<{
-  name: string;
-  children: string;
-  className?: string;
-  onClick?: React.MouseEventHandler<HTMLAnchorElement> | undefined;
-}> = ({ name, onClick, ...props }) => {
-  const [open, setOpen] = React.useState(false);
-  const { extension, start } = getFileInfoFromName(name);
-  const text = "```" + extension + "\n" + props.children + "\n```";
+type ContextVariant =
+  | "default"
+  | "enrichment"
+  | "project_context"
+  | "memories_context";
+
+function isInstructionFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
   return (
-    <Box position="relative">
-      <HoverCard.Root onOpenChange={setOpen} open={open}>
-        <HoverCard.Trigger>
-          <Box>
-            <Small className={classnames(styles.file, props.className)}>
-              &nbsp;&nbsp;&nbsp;&nbsp;
-              <TruncateLeft>
-                <Link onClick={onClick}>{name}</Link>
-              </TruncateLeft>
-            </Small>
-          </Box>
-        </HoverCard.Trigger>
-        <ScrollArea scrollbars="both" asChild>
-          <HoverCard.Content
-            size="1"
-            maxHeight="50vh"
-            maxWidth="90vw"
-            avoidCollisions
-          >
-            <Markdown startingLineNumber={start}>{text}</Markdown>
-          </HoverCard.Content>
-        </ScrollArea>
-      </HoverCard.Root>
+    lower.includes("agents.md") ||
+    lower.includes("claude.md") ||
+    lower.includes("gemini.md") ||
+    lower.includes("refact.md") ||
+    lower.includes(".cursorrules") ||
+    lower.includes(".cursor/rules") ||
+    lower.includes("global_rules.md") ||
+    lower.includes(".windsurf/rules") ||
+    lower.includes("copilot-instructions") ||
+    lower.includes(".github/instructions") ||
+    lower.includes(".aider.conf") ||
+    lower.includes(".refact/project_summary") ||
+    lower.includes(".refact/instructions")
+  );
+}
+
+function isIdeSettingFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return (
+    lower.includes(".vscode/") ||
+    lower.includes(".idea/") ||
+    lower.includes(".zed/") ||
+    lower.includes(".fleet/") ||
+    lower.includes(".claude/")
+  );
+}
+
+function formatFileName(
+  filePath: string,
+  line1?: number,
+  line2?: number,
+): string {
+  const name = filename(filePath);
+  if (line1 && line2 && line1 !== 0 && line2 !== 0) {
+    return `${name}:${line1}-${line2}`;
+  }
+  return name;
+}
+
+function extractEnrichmentDisplayName(filePath: string): string {
+  const fileName = filename(filePath);
+
+  const memoryMatch = fileName.match(
+    /^\d{4}-\d{2}-\d{2}_\d{6}_[a-f0-9]+_(.+)\.md$/,
+  );
+  if (memoryMatch) {
+    return memoryMatch[1].replace(/-/g, " ");
+  }
+
+  const trajectoryMatch = fileName.match(/^[a-f0-9-]{36}\.json$/);
+  if (trajectoryMatch) {
+    return "Past conversation";
+  }
+
+  return fileName;
+}
+
+function extractProjectContextDisplayName(filePath: string): string {
+  const parts = filePath.split("/");
+
+  const markers = [
+    ".vscode",
+    ".idea",
+    ".cursor",
+    ".windsurf",
+    ".github",
+    ".refact",
+    ".zed",
+    ".fleet",
+    ".claude",
+  ];
+  for (let i = 0; i < parts.length; i++) {
+    if (markers.includes(parts[i])) {
+      return parts.slice(i).join("/");
+    }
+  }
+
+  const fileName = filename(filePath);
+  const instructionFiles = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "REFACT.md",
+    ".cursorrules",
+    "global_rules.md",
+    "copilot-instructions.md",
+    ".aider.conf.yml",
+  ];
+  if (
+    instructionFiles.some((f) => fileName.toLowerCase() === f.toLowerCase())
+  ) {
+    return fileName;
+  }
+
+  if (parts.length >= 2) {
+    return parts.slice(-2).join("/");
+  }
+
+  return fileName;
+}
+
+const FileItem: React.FC<{
+  file: ChatContextFile;
+  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
+  variant: ContextVariant;
+}> = ({ file, onOpenFile, variant }) => {
+  const storeKey = `ctxfile:${file.file_name}:${file.line1 || 0}-${
+    file.line2 || 0
+  }`;
+  const [isOpen, toggleOpen] = useStoredOpen(storeKey, false);
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
+  const extension = getExtensionFromName(file.file_name);
+
+  const displayName =
+    variant === "enrichment"
+      ? extractEnrichmentDisplayName(file.file_name)
+      : variant === "project_context"
+        ? extractProjectContextDisplayName(file.file_name)
+        : formatFileName(file.file_name, file.line1, file.line2);
+
+  const relevance = file.usefulness ? Math.round(file.usefulness) : null;
+
+  const handleToggle = useCallback(() => {
+    toggleOpen();
+  }, [toggleOpen]);
+
+  const handleFileClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      void onOpenFile({
+        file_path: file.file_name,
+        line: file.line1,
+      });
+    },
+    [onOpenFile, file.file_name, file.line1],
+  );
+
+  return (
+    <div className={styles.fileItem}>
+      <Flex
+        className={styles.fileHeader}
+        align="center"
+        gap="2"
+        onClick={handleToggle}
+      >
+        <Text size="1" className={styles.fileName} onClick={handleFileClick}>
+          {displayName}
+        </Text>
+        {relevance !== null && (
+          <Text size="1" className={styles.relevance}>
+            {relevance}%
+          </Text>
+        )}
+      </Flex>
+
+      {shouldRender && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
+            <Box className={styles.fileContent}>
+              <ShikiCodeBlock showLineNumbers={false}>
+                {`\`\`\`${extension}\n${file.file_content}\n\`\`\``}
+              </ShikiCodeBlock>
+            </Box>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const FileSection: React.FC<{
+  icon: React.ReactNode;
+  title: string;
+  files: ChatContextFile[];
+  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
+  variant: ContextVariant;
+}> = ({ icon, title, files, onOpenFile, variant }) => {
+  return (
+    <Box className={styles.section}>
+      <Flex align="center" gap="2" className={styles.sectionHeader}>
+        <span className={styles.sectionIcon}>{icon}</span>
+        <Text size="1" className={styles.sectionTitle}>
+          {title}
+        </Text>
+      </Flex>
+      <Flex direction="column" gap="1" className={styles.sectionContent}>
+        {files.map((file, index) => (
+          <FileItem
+            key={file.file_name + index}
+            file={file}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
+        ))}
+      </Flex>
     </Box>
   );
 };
 
-const ContextFilesContent: React.FC<{
+const FilesContent: React.FC<{
   files: ChatContextFile[];
   onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
-}> = ({ files, onOpenFile }) => {
+  variant: ContextVariant;
+}> = ({ files, onOpenFile, variant }) => {
   if (files.length === 0) return null;
 
+  if (variant === "enrichment") {
+    const memories = files.filter((f) =>
+      f.file_name.includes("/.refact/memories/"),
+    );
+    const trajectories = files.filter((f) =>
+      f.file_name.includes("/.refact/trajectories/"),
+    );
+    const other = files.filter(
+      (f) =>
+        !f.file_name.includes("/.refact/memories/") &&
+        !f.file_name.includes("/.refact/trajectories/"),
+    );
+
+    return (
+      <Flex direction="column" gap="2">
+        {memories.length > 0 && (
+          <FileSection
+            icon={<ReaderIcon />}
+            title="Knowledge"
+            files={memories}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
+        )}
+        {trajectories.length > 0 && (
+          <FileSection
+            icon={<ArchiveIcon />}
+            title="Past Conversations"
+            files={trajectories}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
+        )}
+        {other.length > 0 && (
+          <FileSection
+            icon={<FileIcon />}
+            title="Related"
+            files={other}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
+        )}
+      </Flex>
+    );
+  }
+
+  if (variant === "project_context") {
+    const instructions = files.filter((f) => isInstructionFile(f.file_name));
+    const ideSettings = files.filter((f) => isIdeSettingFile(f.file_name));
+    const other = files.filter(
+      (f) => !isInstructionFile(f.file_name) && !isIdeSettingFile(f.file_name),
+    );
+
+    return (
+      <Flex direction="column" gap="2">
+        {instructions.length > 0 && (
+          <FileSection
+            icon={<ReaderIcon />}
+            title="Instructions"
+            files={instructions}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
+        )}
+        {ideSettings.length > 0 && (
+          <FileSection
+            icon={<ArchiveIcon />}
+            title="IDE Settings"
+            files={ideSettings}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
+        )}
+        {other.length > 0 && (
+          <FileSection
+            icon={<FileIcon />}
+            title="Other"
+            files={other}
+            onOpenFile={onOpenFile}
+            variant={variant}
+          />
+        )}
+      </Flex>
+    );
+  }
+
   return (
-    <Container>
-      <pre style={{ margin: 0 }}>
-        <Flex wrap="nowrap" direction="column">
-          {files.map((file, index) => {
-            const lineText =
-              file.line1 && file.line2 && file.line1 !== 0 && file.line2 !== 0
-                ? `:${file.line1}-${file.line2}`
-                : "";
-            const key = file.file_name + lineText + index;
-            return (
-              <ContextFile
-                onClick={(event) => {
-                  event.preventDefault();
-                  // TODO: this maybe will need to be reworked in the future
-                  // but VSCode handles well file_path to be relative to the actual file_name as file_path
-                  void onOpenFile({
-                    ...file,
-                    file_path: file.file_name,
-                  });
-                }}
-                key={key}
-                name={file.file_name + lineText}
-              >
-                {file.file_content}
-              </ContextFile>
-            );
-          })}
-        </Flex>
-      </pre>
-    </Container>
+    <Flex direction="column" gap="1">
+      {files.map((file, index) => (
+        <FileItem
+          key={file.file_name + index}
+          file={file}
+          onOpenFile={onOpenFile}
+          variant={variant}
+        />
+      ))}
+    </Flex>
   );
 };
 
-export const ContextFiles: React.FC<{
+const _ContextFiles: React.FC<{
   files: ChatContextFile[];
-}> = ({ files }) => {
-  const [open, setOpen] = React.useState(false);
+  toolCallId?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}> = ({ files, toolCallId, open: controlledOpen, onOpenChange }) => {
+  const [internalOpen, setInternalOpen] = useState(false);
   const { queryPathThenOpenFile } = useEventsBusForIDE();
 
-  if (files.length === 0) return null;
+  const isControlled = controlledOpen !== undefined;
+  const isOpen = isControlled ? controlledOpen : internalOpen;
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
 
-  const fileNames = files.map((file) => filename(file.file_name));
+  const handleToggle = useCallback(() => {
+    if (isControlled && onOpenChange) {
+      onOpenChange(!controlledOpen);
+    } else {
+      setInternalOpen((prev) => !prev);
+    }
+  }, [isControlled, onOpenChange, controlledOpen]);
+
+  if (!Array.isArray(files) || files.length === 0) return null;
+
+  const variant: ContextVariant =
+    toolCallId === "knowledge_enrichment"
+      ? "enrichment"
+      : toolCallId === "project_context"
+        ? "project_context"
+        : toolCallId === "memories_context"
+          ? "memories_context"
+          : "default";
+
+  const icon =
+    variant === "enrichment" ? (
+      <LightningBoltIcon />
+    ) : variant === "project_context" ? (
+      <ArchiveIcon />
+    ) : variant === "memories_context" ? (
+      <LightningBoltIcon />
+    ) : (
+      <FileIcon />
+    );
+
+  const label =
+    variant === "enrichment"
+      ? `Memories (${files.length})`
+      : variant === "project_context"
+        ? `Project context (${files.length})`
+        : variant === "memories_context"
+          ? `User memories (${files.length})`
+          : files
+              .map((f) => formatFileName(f.file_name, f.line1, f.line2))
+              .join(", ");
 
   return (
-    <Container>
-      <Collapsible.Root open={open} onOpenChange={setOpen}>
-        <Collapsible.Trigger asChild>
-          <Flex gap="2" align="start" py="2" style={{ cursor: "pointer" }}>
-            <Text weight="light" size="1">
-              📎 {fileNames.join(", ")}
-            </Text>
-            <Chevron open={open} />
-          </Flex>
-        </Collapsible.Trigger>
-        <Collapsible.Content>
-          <ContextFilesContent
-            files={files}
-            onOpenFile={queryPathThenOpenFile}
-          />
-        </Collapsible.Content>
-      </Collapsible.Root>
-    </Container>
+    <div className={styles.card}>
+      <Flex
+        className={styles.header}
+        align="center"
+        gap="2"
+        onClick={handleToggle}
+      >
+        <span className={styles.icon}>{icon}</span>
+        <Text size="1" className={styles.summary}>
+          {label}
+        </Text>
+      </Flex>
+
+      {shouldRender && (
+        <div
+          className={classNames(
+            styles.contentWrapper,
+            isAnimatingOpen && styles.contentWrapperOpen,
+          )}
+        >
+          <div className={styles.contentInner}>
+            <Box className={styles.content}>
+              <FilesContent
+                files={files}
+                onOpenFile={queryPathThenOpenFile}
+                variant={variant}
+              />
+            </Box>
+          </div>
+        </div>
+      )}
+    </div>
   );
 };
+
+export const ContextFiles = React.memo(_ContextFiles);

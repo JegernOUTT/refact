@@ -104,7 +104,7 @@ chat_models:
     supports_agent: true
     tokenizer: hf://your-tokenizer-path
 ```
-for more info about which config needs to be set up, you can see known_models.json
+for more info about which config needs to be set up, you can see completion_presets.json and embedding_presets.json
 
 
 ### Step 2: Test the Model

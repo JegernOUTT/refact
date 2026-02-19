@@ -78,6 +78,14 @@ jobs:
           rustup target add ${{ matrix.target }}
           rustup component add rust-src
 
+      - name: Install LLVM (Windows)
+        if: startsWith(matrix.os, 'windows')
+        run: choco install llvm -y
+
+      - name: Install LLVM (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: brew install llvm
+
       - name: setup cross-rs
         if: matrix.cross
         run: |

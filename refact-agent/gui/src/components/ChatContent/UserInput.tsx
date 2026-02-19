@@ -1,39 +1,57 @@
-import { Pencil2Icon } from "@radix-ui/react-icons";
-import { Button, Container, Flex, IconButton, Text } from "@radix-ui/themes";
+import { Box, Container, Flex } from "@radix-ui/themes";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import React, { useCallback, useMemo, useState } from "react";
-import { selectMessages } from "../../features/Chat";
-import { CheckpointButton } from "../../features/Checkpoints";
-import { useAppSelector } from "../../hooks";
-import {
-  isUserMessage,
-  ProcessedUserMessageContentWithImages,
-  UserMessageContentWithImage,
-  type UserMessage,
-} from "../../services/refact";
-import { takeWhile } from "../../utils";
+import type { UserMessage } from "../../services/refact";
+import type { Checkpoint } from "../../features/Checkpoints/types";
 import { RetryForm } from "../ChatForm";
 import { DialogImage } from "../DialogImage";
 import { Markdown } from "../Markdown";
 import styles from "./ChatContent.module.css";
 import { Reveal } from "../Reveal";
+import { MessageFooter, MessageWrapper } from "./MessageFooter";
 
 export type UserInputProps = {
   children: UserMessage["content"];
   messageIndex: number;
-  // maybe add images argument ?
+  messageId?: string;
+  checkpoints?: Checkpoint[];
   onRetry: (index: number, question: UserMessage["content"]) => void;
-  // disableRetry?: boolean;
+  onBranch?: (messageId: string) => void;
+  onDelete?: (messageId: string) => void;
 };
 
-export const UserInput: React.FC<UserInputProps> = ({
+const _UserInput: React.FC<UserInputProps> = ({
   messageIndex,
+  messageId,
+  checkpoints,
   children,
   onRetry,
+  onBranch,
+  onDelete,
 }) => {
-  const messages = useAppSelector(selectMessages);
+  const copyToClipboard = useCopyToClipboard();
 
   const [showTextArea, setShowTextArea] = useState(false);
-  const [isEditButtonVisible, setIsEditButtonVisible] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    const text =
+      typeof children === "string"
+        ? children
+        : children
+            .filter((c) => {
+              if ("type" in c && c.type === "text") return true;
+              if ("m_type" in c && c.m_type === "text") return true;
+              return false;
+            })
+            .map((c) => {
+              if ("text" in c) return c.text;
+              if ("m_content" in c) return String(c.m_content);
+              return "";
+            })
+            .filter(Boolean)
+            .join("\n");
+    copyToClipboard(text);
+  }, [children, copyToClipboard]);
 
   const handleSubmit = useCallback(
     (value: UserMessage["content"]) => {
@@ -43,196 +61,145 @@ export const UserInput: React.FC<UserInputProps> = ({
     [messageIndex, onRetry],
   );
 
-  const handleShowTextArea = useCallback(
-    (value: boolean) => {
-      setShowTextArea(value);
-      if (isEditButtonVisible) {
-        setIsEditButtonVisible(false);
-      }
-    },
-    [isEditButtonVisible],
-  );
+  const handleEditClick = useCallback((event: React.MouseEvent) => {
+    // Don't enter edit mode if user clicked on interactive elements
+    const target = event.target as HTMLElement;
+    const tagName = target.tagName.toLowerCase();
 
-  // const lines = children.split("\n"); // won't work if it's an array
-  const elements = process(children);
-  const isString = typeof children === "string";
-  const linesLength = isString ? children.split("\n").length : Infinity;
+    const isInteractiveElement =
+      tagName === "a" ||
+      tagName === "code" ||
+      tagName === "pre" ||
+      tagName === "button";
+    const hasInteractiveParent =
+      target.closest("a") !== null ||
+      target.closest("pre") !== null ||
+      target.closest("button") !== null;
 
-  const checkpointsFromMessage = useMemo(() => {
-    const maybeUserMessage = messages[messageIndex];
-    if (!isUserMessage(maybeUserMessage)) return null;
-    return maybeUserMessage.checkpoints;
-  }, [messageIndex, messages]);
+    if (isInteractiveElement || hasInteractiveParent) {
+      return;
+    }
+
+    // Skip if user is selecting text
+    const selection = window.getSelection();
+    if (selection && selection.toString().length > 0) {
+      return;
+    }
+
+    setShowTextArea(true);
+  }, []);
+
+  // Extract text content for rendering
+  const textContent = useMemo(() => {
+    if (typeof children === "string") return children;
+    return children
+      .filter((c) => {
+        if ("type" in c && c.type === "text") return true;
+        if ("m_type" in c && c.m_type === "text") return true;
+        return false;
+      })
+      .map((c) => {
+        if ("text" in c) return c.text;
+        if ("m_content" in c) return String(c.m_content);
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }, [children]);
+
+  // Extract images for rendering
+  const images = useMemo(() => {
+    if (typeof children === "string") return [];
+    return children.filter((c) => {
+      if ("type" in c && c.type === "image_url") return true;
+      if ("m_type" in c && c.m_type.startsWith("image/")) return true;
+      return false;
+    });
+  }, [children]);
+
+  const checkpointsFromMessage = checkpoints ?? null;
 
   const isCompressed = useMemo(() => {
     if (typeof children !== "string") return false;
     return children.startsWith("🗜️ ");
   }, [children]);
 
-  return (
-    <Container position="relative" pt="1">
-      {isCompressed ? (
-        <Reveal defaultOpen={false}>
-          <Flex direction="row" my="1" className={styles.userInput}>
-            {elements}
-          </Flex>
-        </Reveal>
-      ) : showTextArea ? (
+  if (showTextArea) {
+    return (
+      <Container pt="1">
         <RetryForm
           onSubmit={handleSubmit}
-          // TODO
-          // value={children}
           value={children}
-          onClose={() => handleShowTextArea(false)}
+          onClose={() => setShowTextArea(false)}
         />
-      ) : (
-        <Flex
-          direction="row"
-          // checking for the length of the lines to determine the position of the edit button
-          gap={linesLength <= 2 ? "2" : "1"}
-          // TODO: what is it's a really long sentence or word with out new lines?
-          align={linesLength <= 2 ? "center" : "end"}
-          my="1"
-          onMouseEnter={() => setIsEditButtonVisible(true)}
-          onMouseLeave={() => setIsEditButtonVisible(false)}
-        >
-          <Button
-            // ref={ref}
-            variant="soft"
-            size="4"
-            className={styles.userInput}
-            // TODO: should this work?
-            // onClick={() => handleShowTextArea(true)}
-            asChild
-          >
-            <div>{elements}</div>
-          </Button>
-          <Flex
-            direction={linesLength <= 3 ? "row" : "column"}
-            gap="1"
-            style={{
-              opacity: isEditButtonVisible ? 1 : 0,
-              visibility: isEditButtonVisible ? "visible" : "hidden",
-              transition: "opacity 0.15s, visibility 0.15s",
-            }}
-          >
-            {checkpointsFromMessage && checkpointsFromMessage.length > 0 && (
-              <CheckpointButton
-                checkpoints={checkpointsFromMessage}
-                messageIndex={messageIndex}
-              />
+      </Container>
+    );
+  }
+
+  return (
+    <MessageWrapper>
+      <Container pt="1">
+        <Flex justify="end">
+          <Box className={styles.userInput} onClick={handleEditClick}>
+            {isCompressed ? (
+              <Reveal defaultOpen={false}>
+                <Markdown canHaveInteractiveElements={false}>
+                  {textContent}
+                </Markdown>
+              </Reveal>
+            ) : (
+              <>
+                {textContent && (
+                  <Markdown canHaveInteractiveElements={true}>
+                    {textContent}
+                  </Markdown>
+                )}
+                {images.length > 0 && (
+                  <Flex
+                    gap="2"
+                    wrap="wrap"
+                    mt={textContent ? "2" : "0"}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {images.map((image, index) => {
+                      if ("type" in image && image.type === "image_url") {
+                        return (
+                          <DialogImage
+                            key={`img-${index}`}
+                            src={image.image_url.url}
+                          />
+                        );
+                      }
+                      if (
+                        "m_type" in image &&
+                        image.m_type.startsWith("image/")
+                      ) {
+                        const content = `data:${image.m_type};base64,${image.m_content}`;
+                        return (
+                          <DialogImage key={`img-${index}`} src={content} />
+                        );
+                      }
+                      return null;
+                    })}
+                  </Flex>
+                )}
+              </>
             )}
-            <IconButton
-              title="Edit message"
-              variant="soft"
-              size={"2"}
-              onClick={() => handleShowTextArea(true)}
-            >
-              <Pencil2Icon width={15} height={15} />
-            </IconButton>
-          </Flex>
+          </Box>
         </Flex>
-      )}
-    </Container>
+        <Flex justify="end">
+          <MessageFooter
+            messageId={messageId}
+            onCopy={handleCopy}
+            onBranch={onBranch}
+            onDelete={onDelete}
+            checkpoints={checkpointsFromMessage}
+            messageIndex={messageIndex}
+          />
+        </Flex>
+      </Container>
+    </MessageWrapper>
   );
 };
 
-function process(items: UserInputProps["children"]) {
-  if (typeof items !== "string") {
-    return processUserInputArray(items);
-  }
-  return processLines(items.split("\n"));
-}
-
-function processLines(
-  lines: string[],
-  processedLinesMemo: JSX.Element[] = [],
-): JSX.Element[] {
-  if (lines.length === 0) return processedLinesMemo;
-
-  const [head, ...tail] = lines;
-  const nextBackTicksIndex = tail.findIndex((l) => l.startsWith("```"));
-  const key = `line-${processedLinesMemo.length + 1}`;
-
-  if (!head.startsWith("```") || nextBackTicksIndex === -1) {
-    const processedLines = processedLinesMemo.concat(
-      <Text
-        size="2"
-        as="div"
-        key={key}
-        wrap="balance"
-        className={styles.break_word}
-      >
-        {head}
-      </Text>,
-    );
-    return processLines(tail, processedLines);
-  }
-
-  const endIndex = nextBackTicksIndex + 1;
-
-  const code = [head].concat(tail.slice(0, endIndex)).join("\n");
-  const processedLines = processedLinesMemo.concat(
-    <Markdown key={key}>{code}</Markdown>,
-  );
-
-  const next = tail.slice(endIndex);
-  return processLines(next, processedLines);
-}
-
-function isUserContentImage(
-  item: UserMessageContentWithImage | ProcessedUserMessageContentWithImages,
-) {
-  return (
-    ("m_type" in item && item.m_type.startsWith("image/")) ||
-    ("type" in item && item.type === "image_url")
-  );
-}
-
-function processUserInputArray(
-  items: (
-    | UserMessageContentWithImage
-    | ProcessedUserMessageContentWithImages
-  )[],
-  memo: JSX.Element[] = [],
-) {
-  if (items.length === 0) return memo;
-  const [head, ...tail] = items;
-
-  if ("type" in head && head.type === "text") {
-    const processedLines = processLines(head.text.split("\n"));
-    return processUserInputArray(tail, memo.concat(processedLines));
-  }
-
-  if ("m_type" in head && head.m_type === "text") {
-    const processedLines = processLines(head.m_content.split("\n"));
-    return processUserInputArray(tail, memo.concat(processedLines));
-  }
-
-  const isImage = isUserContentImage(head);
-
-  if (!isImage) return processUserInputArray(tail, memo);
-
-  const imagesInTail = takeWhile(tail, isUserContentImage);
-  const nextTail = tail.slice(imagesInTail.length);
-  const images = [head, ...imagesInTail];
-  const elem = (
-    <Flex key={`user-image-images-${memo.length}`} gap="2" wrap="wrap" my="2">
-      {images.map((image, index) => {
-        if ("type" in image && image.type === "image_url") {
-          const key = `user-input${memo.length}-${image.type}-${index}`;
-          const content = image.image_url.url;
-          return <DialogImage src={content} key={key} />;
-        }
-        if ("m_type" in image && image.m_type.startsWith("image/")) {
-          const key = `user-input${memo.length}-${image.m_type}-${index}`;
-          const content = `data:${image.m_type};base64,${image.m_content}`;
-          return <DialogImage src={content} key={key} />;
-        }
-        return null;
-      })}
-    </Flex>
-  );
-
-  return processUserInputArray(nextTail, memo.concat(elem));
-}
+export const UserInput = React.memo(_UserInput);

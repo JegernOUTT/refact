@@ -1,0 +1,13 @@
+schema_version: 1
+id: typos
+description: Fix typos
+selection_needed: [1, 50]
+
+messages:
+  - role: user
+    content: |
+      @file %CURRENT_FILE%:%CURSOR_LINE%
+      Rewrite the code block below to fix typos, especially inside strings and comments:
+      ```
+      %CODE_SELECTION%
+      ```

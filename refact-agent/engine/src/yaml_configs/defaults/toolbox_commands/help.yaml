@@ -1,0 +1,5 @@
+schema_version: 1
+id: help
+description: Show available commands
+
+messages: []

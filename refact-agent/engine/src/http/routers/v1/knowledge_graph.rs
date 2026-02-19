@@ -1,17 +1,35 @@
 use axum::Extension;
+use axum::extract::Query;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use serde::Serialize;
+use std::collections::HashMap;
 
 use crate::custom_error::ScratchError;
 use crate::global_context::SharedGlobalContext;
 use crate::knowledge_graph::build_knowledge_graph;
+
+fn normalize_tag(tag: &str) -> String {
+    tag.to_lowercase().trim().to_string()
+}
 
 #[derive(Serialize)]
 struct KgNodeJson {
     id: String,
     node_type: String,
     label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -41,8 +59,15 @@ struct KnowledgeGraphJson {
 }
 
 pub async fn handle_v1_knowledge_graph(
+    Query(params): Query<HashMap<String, String>>,
     Extension(gcx): Extension<SharedGlobalContext>,
 ) -> Result<Response<Body>, ScratchError> {
+    let include_content = params
+        .get("include_content")
+        .and_then(|v| v.parse::<u8>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(false);
+
     let kg = build_knowledge_graph(gcx).await;
 
     let mut nodes = Vec::new();
@@ -50,7 +75,8 @@ pub async fn handle_v1_knowledge_graph(
 
     for (id, doc) in &kg.docs {
         let label = doc.frontmatter.title.clone().unwrap_or_else(|| {
-            doc.path.file_stem()
+            doc.path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| id.clone())
         });
@@ -62,20 +88,37 @@ pub async fn handle_v1_knowledge_graph(
                 Some("code") => "doc_code",
                 Some("decision") => "doc_decision",
                 _ => "doc",
-            }
+            },
         };
         nodes.push(KgNodeJson {
             id: id.clone(),
             node_type: node_type.to_string(),
             label,
+            title: doc.frontmatter.title.clone(),
+            content: if include_content {
+                Some(doc.content.clone())
+            } else {
+                None
+            },
+            tags: Some(doc.frontmatter.tags.clone()),
+            created: doc.frontmatter.created.clone(),
+            file_path: Some(doc.path.to_string_lossy().to_string()),
+            kind: doc.frontmatter.kind.clone(),
         });
     }
 
     for (tag, _) in &kg.tag_index {
+        let normalized = normalize_tag(tag);
         nodes.push(KgNodeJson {
-            id: format!("tag:{}", tag),
+            id: format!("tag:{}", normalized),
             node_type: "tag".to_string(),
             label: tag.clone(),
+            title: None,
+            content: None,
+            tags: None,
+            created: None,
+            file_path: None,
+            kind: None,
         });
     }
 
@@ -88,6 +131,12 @@ pub async fn handle_v1_knowledge_graph(
             id: format!("file:{}", file),
             node_type: "file".to_string(),
             label,
+            title: None,
+            content: None,
+            tags: None,
+            created: None,
+            file_path: None,
+            kind: None,
         });
     }
 
@@ -96,6 +145,12 @@ pub async fn handle_v1_knowledge_graph(
             id: format!("entity:{}", entity),
             node_type: "entity".to_string(),
             label: entity.clone(),
+            title: None,
+            content: None,
+            tags: None,
+            created: None,
+            file_path: None,
+            kind: None,
         });
     }
 
@@ -103,7 +158,7 @@ pub async fn handle_v1_knowledge_graph(
         for tag in &doc.frontmatter.tags {
             edges.push(KgEdgeJson {
                 source: id.clone(),
-                target: format!("tag:{}", tag.to_lowercase()),
+                target: format!("tag:{}", normalize_tag(tag)),
                 edge_type: "tagged_with".to_string(),
             });
         }
@@ -141,9 +196,19 @@ pub async fn handle_v1_knowledge_graph(
         }
     }
 
-    let active_docs = kg.docs.values().filter(|d| d.frontmatter.is_active()).count();
-    let deprecated_docs = kg.docs.values().filter(|d| d.frontmatter.is_deprecated()).count();
-    let trajectory_count = kg.docs.values()
+    let active_docs = kg
+        .docs
+        .values()
+        .filter(|d| d.frontmatter.is_active())
+        .count();
+    let deprecated_docs = kg
+        .docs
+        .values()
+        .filter(|d| d.frontmatter.is_deprecated())
+        .count();
+    let trajectory_count = kg
+        .docs
+        .values()
         .filter(|d| d.frontmatter.kind.as_deref() == Some("trajectory"))
         .count();
 
@@ -158,10 +223,17 @@ pub async fn handle_v1_knowledge_graph(
         trajectory_count,
     };
 
-    let response = KnowledgeGraphJson { nodes, edges, stats };
+    let response = KnowledgeGraphJson {
+        nodes,
+        edges,
+        stats,
+    };
 
     let json_string = serde_json::to_string_pretty(&response).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization error: {}", e),
+        )
     })?;
 
     Ok(Response::builder()

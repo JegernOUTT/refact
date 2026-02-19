@@ -13,18 +13,21 @@ use crate::tools::tools_description::{Tool, ToolParam, ToolDesc, ToolSource, Too
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::postprocessing::pp_command_output::output_mini_postprocessing;
-use crate::integrations::process_io_utils::{blocking_read_until_token_or_timeout, is_someone_listening_on_that_tcp_port};
+use crate::integrations::process_io_utils::{
+    blocking_read_until_token_or_timeout, is_someone_listening_on_that_tcp_port,
+};
 use crate::integrations::sessions::IntegrationSession;
-use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon, IntegrationConfirmation};
+use crate::integrations::integr_abstract::{
+    IntegrationTrait, IntegrationCommon, IntegrationConfirmation,
+};
 use crate::integrations::integr_cmdline::*;
 use crate::custom_error::YamlError;
 
-
-const REALLY_HORRIBLE_ROUNDTRIP: u64 = 3000;   // 3000 should be a really bad ping via internet, just in rare case it's a remote port
+const REALLY_HORRIBLE_ROUNDTRIP: u64 = 3000; // 3000 should be a really bad ping via internet, just in rare case it's a remote port
 
 #[derive(Default)]
 pub struct ToolService {
-    pub common:  IntegrationCommon,
+    pub common: IntegrationCommon,
     pub name: String,
     pub cfg: CmdlineToolConfig,
     pub config_path: String,
@@ -32,9 +35,12 @@ pub struct ToolService {
 
 #[async_trait]
 impl IntegrationTrait for ToolService {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-
-    async fn integr_settings_apply(&mut self, _gcx: Arc<ARwLock<GlobalContext>>, config_path: String, value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    async fn integr_settings_apply(
+        &mut self,
+        _gcx: Arc<ARwLock<GlobalContext>>,
+        config_path: String,
+        value: &serde_json::Value,
+    ) -> Result<(), serde_json::Error> {
         self.cfg = serde_json::from_value(value.clone())?;
         self.common = serde_json::from_value(value.clone())?;
         self.config_path = config_path;
@@ -49,7 +55,10 @@ impl IntegrationTrait for ToolService {
         self.common.clone()
     }
 
-    async fn integr_tools(&self, integr_name: &str) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    async fn integr_tools(
+        &self,
+        integr_name: &str,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         vec![Box::new(ToolService {
             common: self.common.clone(),
             name: integr_name.to_string(),
@@ -58,8 +67,7 @@ impl IntegrationTrait for ToolService {
         })]
     }
 
-    fn integr_schema(&self) -> &str
-    {
+    fn integr_schema(&self) -> &str {
         CMDLINE_SERVICE_INTEGRATION_SCHEMA
     }
 }
@@ -78,26 +86,45 @@ impl IntegrationSession for CmdlineSession {
         self
     }
 
-    fn is_expired(&self) -> bool { false }
+    fn is_expired(&self) -> bool {
+        false
+    }
 
-    fn try_stop(&mut self, self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>) -> Box<dyn Future<Output = String> + Send> {
+    fn try_stop(
+        &mut self,
+        self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
+    ) -> Box<dyn Future<Output = String> + Send> {
         Box::new(async move {
             let mut session_locked = self_arc.lock().await;
-            let session = session_locked.as_any_mut().downcast_mut::<CmdlineSession>().unwrap();
+            let session = session_locked
+                .as_any_mut()
+                .downcast_mut::<CmdlineSession>()
+                .unwrap();
             _stop_locked(session).await
         })
     }
 }
 
 async fn _stop_locked(sess: &mut CmdlineSession) -> String {
-    tracing::info!("SERVICE STOP workdir {}:\n{:?}", sess.cmdline_workdir, sess.cmdline_string);
+    tracing::info!(
+        "SERVICE STOP workdir {}:\n{:?}",
+        sess.cmdline_workdir,
+        sess.cmdline_string
+    );
     let t0 = tokio::time::Instant::now();
     match Box::into_pin(sess.cmdline_process.kill()).await {
         Ok(_) => {
-            format!("Success, it took {:.3}s to stop it.\n\n", t0.elapsed().as_secs_f64())
-        },
+            format!(
+                "Success, it took {:.3}s to stop it.\n\n",
+                t0.elapsed().as_secs_f64()
+            )
+        }
         Err(e) => {
-            tracing::warn!("Failed to kill service '{}'. Error: {}. Assuming process died on its own.", sess.service_name, e);
+            tracing::warn!(
+                "Failed to kill service '{}'. Error: {}. Assuming process died on its own.",
+                sess.service_name,
+                e
+            );
             format!("Failed to kill service. Error: {}.\nAssuming process died on its own, let's continue.\n\n", e)
         }
     }
@@ -108,7 +135,8 @@ async fn get_stdout_and_stderr(
     stdout: &mut BufReader<tokio::process::ChildStdout>,
     stderr: &mut BufReader<tokio::process::ChildStderr>,
 ) -> Result<(String, String), String> {
-    let (stdout_out, stderr_out, _) = blocking_read_until_token_or_timeout(stdout, stderr, timeout_ms, "").await?;
+    let (stdout_out, stderr_out, _) =
+        blocking_read_until_token_or_timeout(stdout, stderr, timeout_ms, "").await?;
     Ok((stdout_out, stderr_out))
 }
 
@@ -122,19 +150,38 @@ async fn execute_background_command(
     env_variables: &HashMap<String, String>,
 ) -> Result<String, String> {
     let session_key = format!("custom_service_{service_name}");
-    let mut session_mb = gcx.read().await.integration_sessions.get(&session_key).cloned();
+    let mut session_mb = gcx
+        .read()
+        .await
+        .integration_sessions
+        .get(&session_key)
+        .cloned();
     let command_str = command_str.to_string();
     let mut actions_log = String::new();
 
     if session_mb.is_some() {
         let session_arc = session_mb.clone().unwrap();
         let mut session_locked = session_arc.lock().await;
-        let session = session_locked.as_any_mut().downcast_mut::<CmdlineSession>().unwrap();
-        actions_log.push_str(&format!("Currently the service is running.\nworkdir: {}\ncommand line: {}\n\n", session.cmdline_workdir, session.cmdline_string));
-        let (stdout_out, stderr_out) = get_stdout_and_stderr(100, &mut session.cmdline_stdout, &mut session.cmdline_stderr).await?;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<CmdlineSession>()
+            .unwrap();
+        actions_log.push_str(&format!(
+            "Currently the service is running.\nworkdir: {}\ncommand line: {}\n\n",
+            session.cmdline_workdir, session.cmdline_string
+        ));
+        let (stdout_out, stderr_out) = get_stdout_and_stderr(
+            100,
+            &mut session.cmdline_stdout,
+            &mut session.cmdline_stderr,
+        )
+        .await?;
         let filtered_stdout = output_mini_postprocessing(&cfg.output_filter, &stdout_out);
         let filtered_stderr = output_mini_postprocessing(&cfg.output_filter, &stderr_out);
-        actions_log.push_str(&format!("Here are stdin/stderr since the last checking out on the service:\n{}\n\n", format_output(&filtered_stdout, &filtered_stderr)));
+        actions_log.push_str(&format!(
+            "Here are stdin/stderr since the last checking out on the service:\n{}\n\n",
+            format_output(&filtered_stdout, &filtered_stderr)
+        ));
     } else {
         actions_log.push_str(&format!("Service is currently not running\n"));
     }
@@ -143,7 +190,10 @@ async fn execute_background_command(
         let session_arc = session_mb.clone().unwrap();
         {
             let mut session_locked = session_arc.lock().await;
-            let mut session = session_locked.as_any_mut().downcast_mut::<CmdlineSession>().unwrap();
+            let mut session = session_locked
+                .as_any_mut()
+                .downcast_mut::<CmdlineSession>()
+                .unwrap();
             actions_log.push_str(&format!("Stopping it...\n"));
             let stop_msg = _stop_locked(&mut session).await;
             actions_log.push_str(&stop_msg);
@@ -155,7 +205,11 @@ async fn execute_background_command(
     if session_mb.is_none() && (action == "restart" || action == "start") {
         let mut port_already_open = false;
         if let Some(wait_port) = cfg.startup_wait_port {
-            port_already_open = is_someone_listening_on_that_tcp_port(wait_port, tokio::time::Duration::from_millis(REALLY_HORRIBLE_ROUNDTRIP)).await;
+            port_already_open = is_someone_listening_on_that_tcp_port(
+                wait_port,
+                tokio::time::Duration::from_millis(REALLY_HORRIBLE_ROUNDTRIP),
+            )
+            .await;
             if port_already_open {
                 actions_log.push_str(&format!(
                     "This service startup sequence requires to wait until a TCP port gets occupied, but this port {} is already busy even before the service start is attempted. Not good, but let's try to run it anyway.\n\n",
@@ -163,11 +217,19 @@ async fn execute_background_command(
                 ));
             }
         }
-        tracing::info!("SERVICE START workdir {}:\n{:?}", cmdline_workdir, command_str);
-        actions_log.push_str(&format!("Starting service with the following command line:\n{}\n", command_str));
+        tracing::info!(
+            "SERVICE START workdir {}:\n{:?}",
+            cmdline_workdir,
+            command_str
+        );
+        actions_log.push_str(&format!(
+            "Starting service with the following command line:\n{}\n",
+            command_str
+        ));
         let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
 
-        let mut command = create_command_from_string(&command_str, cmdline_workdir, env_variables, project_dirs)?;
+        let mut command =
+            create_command_from_string(&command_str, cmdline_workdir, env_variables, project_dirs)?;
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut command_wrap = TokioCommandWrap::from(command);
@@ -175,10 +237,14 @@ async fn execute_background_command(
         command_wrap.wrap(ProcessGroup::leader());
         #[cfg(windows)]
         command_wrap.wrap(JobObject);
-        let mut process = command_wrap.spawn().map_err(|e| format!("failed to create process: {e}"))?;
+        let mut process = command_wrap
+            .spawn()
+            .map_err(|e| format!("failed to create process: {e}"))?;
 
-        let mut stdout_reader = BufReader::new(process.stdout().take().ok_or("Failed to open stdout")?);
-        let mut stderr_reader = BufReader::new(process.stderr().take().ok_or("Failed to open stderr")?);
+        let mut stdout_reader =
+            BufReader::new(process.stdout().take().ok_or("Failed to open stdout")?);
+        let mut stderr_reader =
+            BufReader::new(process.stderr().take().ok_or("Failed to open stderr")?);
 
         let t0 = tokio::time::Instant::now();
 
@@ -187,18 +253,31 @@ async fn execute_background_command(
         let mut exit_code: i32 = -100000;
 
         loop {
-            if t0.elapsed() >= tokio::time::Duration::from_secs(cfg.startup_wait.to_string().parse::<u64>().unwrap_or(10)) {
-                actions_log.push_str(&format!("Timeout {:.2}s reached while waiting for the service to start.\n\n", t0.elapsed().as_secs_f64()));
+            if t0.elapsed()
+                >= tokio::time::Duration::from_secs(
+                    cfg.startup_wait.to_string().parse::<u64>().unwrap_or(10),
+                )
+            {
+                actions_log.push_str(&format!(
+                    "Timeout {:.2}s reached while waiting for the service to start.\n\n",
+                    t0.elapsed().as_secs_f64()
+                ));
                 break;
             }
 
-            let (stdout_out, stderr_out) = get_stdout_and_stderr(100, &mut stdout_reader, &mut stderr_reader).await?;
+            let (stdout_out, stderr_out) =
+                get_stdout_and_stderr(100, &mut stdout_reader, &mut stderr_reader).await?;
             accumulated_stdout.push_str(&stdout_out);
             accumulated_stderr.push_str(&stderr_out);
 
             if !cfg.startup_wait_keyword.is_empty() {
-                if accumulated_stdout.contains(&cfg.startup_wait_keyword) || accumulated_stderr.contains(&cfg.startup_wait_keyword) {
-                    actions_log.push_str(&format!("Startup keyword '{}' found in output, success!\n\n", cfg.startup_wait_keyword));
+                if accumulated_stdout.contains(&cfg.startup_wait_keyword)
+                    || accumulated_stderr.contains(&cfg.startup_wait_keyword)
+                {
+                    actions_log.push_str(&format!(
+                        "Startup keyword '{}' found in output, success!\n\n",
+                        cfg.startup_wait_keyword
+                    ));
                     break;
                 }
             }
@@ -211,13 +290,19 @@ async fn execute_background_command(
             }
 
             if let Some(wait_port) = cfg.startup_wait_port {
-                match is_someone_listening_on_that_tcp_port(wait_port, tokio::time::Duration::from_millis(REALLY_HORRIBLE_ROUNDTRIP)).await {
+                match is_someone_listening_on_that_tcp_port(
+                    wait_port,
+                    tokio::time::Duration::from_millis(REALLY_HORRIBLE_ROUNDTRIP),
+                )
+                .await
+                {
                     true => {
                         if !port_already_open {
-                            actions_log.push_str(&format!("Port {} is now busy, success!\n", wait_port));
+                            actions_log
+                                .push_str(&format!("Port {} is now busy, success!\n", wait_port));
                             break;
                         }
-                    },
+                    }
                     false => {
                         if port_already_open {
                             port_already_open = false;
@@ -244,7 +329,10 @@ async fn execute_background_command(
                 cmdline_stderr: stderr_reader,
                 service_name: service_name.to_string(),
             });
-            gcx.write().await.integration_sessions.insert(session_key.to_string(), Arc::new(AMutex::new(session)));
+            gcx.write()
+                .await
+                .integration_sessions
+                .insert(session_key.to_string(), Arc::new(AMutex::new(session)));
         }
 
         tracing::info!("SERVICE START LOG:\n{}", actions_log);
@@ -255,8 +343,6 @@ async fn execute_background_command(
 
 #[async_trait]
 impl Tool for ToolService {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -268,13 +354,21 @@ impl Tool for ToolService {
 
         for (k, v) in args.iter() {
             match v {
-                serde_json::Value::String(s) => { args_str.insert(k.clone(), s.clone()); },
+                serde_json::Value::String(s) => {
+                    args_str.insert(k.clone(), s.clone());
+                }
                 _ => return Err(format!("argument `{}` is not a string: {:?}", k, v)),
             }
         }
 
         for param in &self.cfg.parameters {
-            if self.cfg.parameters_required.as_ref().map_or(false, |req| req.contains(&param.name)) && !args_str.contains_key(&param.name) {
+            if self
+                .cfg
+                .parameters_required
+                .as_ref()
+                .map_or(false, |req| req.contains(&param.name))
+                && !args_str.contains_key(&param.name)
+            {
                 return Err(format!("Missing required argument `{}`", param.name));
             }
         }
@@ -282,16 +376,31 @@ impl Tool for ToolService {
         let command = replace_args(self.cfg.command.as_str(), &args_str);
         let workdir = replace_args(self.cfg.command_workdir.as_str(), &args_str);
         let mut error_log = Vec::<YamlError>::new();
-        let env_variables = crate::integrations::setting_up_integrations::get_vars_for_replacements(gcx.clone(), &mut error_log).await;
+        let env_variables =
+            crate::integrations::setting_up_integrations::get_vars_for_replacements(
+                gcx.clone(),
+                &mut error_log,
+            )
+            .await;
 
         let tool_ouput = {
-            let action = args_str.get("action").cloned().unwrap_or("start".to_string());
+            let action = args_str
+                .get("action")
+                .cloned()
+                .unwrap_or("start".to_string());
             if !["start", "restart", "stop", "status"].contains(&action.as_str()) {
                 return Err("Tool call is invalid. Param 'action' must be one of 'start', 'restart', 'stop', 'status'. Try again".to_string());
             }
             execute_background_command(
-                gcx, &self.name, &command, &workdir, &self.cfg, action.as_str(), &env_variables,
-            ).await?
+                gcx,
+                &self.name,
+                &command,
+                &workdir,
+                &self.cfg,
+                action.as_str(),
+                &env_variables,
+            )
+            .await?
         };
 
         let result = vec![ContextEnum::ChatMessage(ChatMessage {
@@ -318,7 +427,11 @@ impl Tool for ToolService {
         });
 
         let parameters_required = self.cfg.parameters_required.clone().unwrap_or_else(|| {
-            self.cfg.parameters.iter().map(|param| param.name.clone()).collect()
+            self.cfg
+                .parameters
+                .iter()
+                .map(|param| param.name.clone())
+                .collect()
         });
 
         ToolDesc {
@@ -328,8 +441,8 @@ impl Tool for ToolService {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
+            allow_parallel: false,
             description: self.cfg.description.clone(),
             parameters,
             parameters_required,

@@ -13,11 +13,17 @@ import {
   UpdateRegexTextDocToolCall,
   UpdateTextDocToolCall,
   UpdateTextDocByLinesToolCall,
+  UpdateTextDocAnchoredToolCall,
+  ApplyPatchToolCall,
+  UndoTextDocToolCall,
   isCreateTextDocToolCall,
   isReplaceTextDocToolCall,
   isUpdateRegexTextDocToolCall,
   isUpdateTextDocToolCall,
   isUpdateTextDocByLinesToolCall,
+  isUpdateTextDocAnchoredToolCall,
+  isApplyPatchToolCall,
+  isUndoTextDocToolCall,
   parseRawTextDocToolCall,
 } from "./types";
 import { Box, Card, Flex, Button } from "@radix-ui/themes";
@@ -32,7 +38,7 @@ import { selectCanPaste, selectChatId } from "../../features/Chat";
 import { toolsApi } from "../../services/refact";
 import { ErrorCallout } from "../Callout";
 import { isRTKResponseErrorWithDetailMessage } from "../../utils";
-import { MarkdownCodeBlock } from "../Markdown/CodeBlock";
+import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import classNames from "classnames";
 
 export const TextDocTool: React.FC<{
@@ -64,8 +70,30 @@ export const TextDocTool: React.FC<{
     return <UpdateTextDocByLines toolCall={maybeTextDocToolCall} />;
   }
 
+  if (isUpdateTextDocAnchoredToolCall(maybeTextDocToolCall)) {
+    return <UpdateTextDocAnchored toolCall={maybeTextDocToolCall} />;
+  }
+
+  if (isApplyPatchToolCall(maybeTextDocToolCall)) {
+    return <ApplyPatch toolCall={maybeTextDocToolCall} />;
+  }
+
+  if (isUndoTextDocToolCall(maybeTextDocToolCall)) {
+    return <UndoTextDoc toolCall={maybeTextDocToolCall} />;
+  }
+
   return false;
 };
+
+function getToolCallPath(toolCall: TextDocToolCall): string | null {
+  if (isApplyPatchToolCall(toolCall)) {
+    const match = toolCall.function.arguments.patch.match(
+      /^[-+]{3}\s+[ab]\/(.+)$/m,
+    );
+    return match ? match[1] : null;
+  }
+  return (toolCall.function.arguments as { path?: string }).path ?? null;
+}
 
 type TextDocHeaderProps = { toolCall: TextDocToolCall };
 const TextDocHeader = forwardRef<HTMLDivElement, TextDocHeaderProps>(
@@ -78,15 +106,16 @@ const TextDocHeader = forwardRef<HTMLDivElement, TextDocHeaderProps>(
     const canPaste = useAppSelector(selectCanPaste);
     const chatId = useAppSelector(selectChatId);
 
+    const toolCallPath = useMemo(() => getToolCallPath(toolCall), [toolCall]);
+
     const clearErrorMessage = useCallback(() => setErrorMessage(""), []);
 
-    // move this
     const handleOpenFile = useCallback(async () => {
-      if (!toolCall.function.arguments.path) return;
+      if (!toolCallPath) return;
       await queryPathThenOpenFile({
-        file_path: toolCall.function.arguments.path,
+        file_path: toolCallPath,
       });
-    }, [toolCall.function.arguments.path, queryPathThenOpenFile]);
+    }, [toolCallPath, queryPathThenOpenFile]);
 
     const handleReplace = useCallback(
       (content: string) => {
@@ -148,7 +177,7 @@ const TextDocHeader = forwardRef<HTMLDivElement, TextDocHeaderProps>(
                 void handleOpenFile();
               }}
             >
-              {toolCall.function.arguments.path}
+              {toolCallPath ?? "apply_patch"}
             </Link>
           </TruncateLeft>{" "}
           <div style={{ flexGrow: 1 }} />
@@ -207,9 +236,9 @@ const CreateTextDoc: React.FC<{
       <TextDocHeader toolCall={toolCall} ref={ref} />
 
       <Reveal isRevealingCode defaultOpen={lineCount < 9} onClose={handleClose}>
-        <MarkdownCodeBlock onCopyClick={handleCopy} className={className}>
+        <ShikiCodeBlock onCopyClick={handleCopy} className={className}>
           {toolCall.function.arguments.content}
-        </MarkdownCodeBlock>
+        </ShikiCodeBlock>
       </Reveal>
     </Box>
   );
@@ -241,9 +270,9 @@ const ReplaceTextDoc: React.FC<{
     <Box className={styles.textdoc}>
       <TextDocHeader toolCall={toolCall} ref={ref} />
       <Reveal isRevealingCode defaultOpen={lineCount < 9} onClose={handleClose}>
-        <MarkdownCodeBlock onCopyClick={handleCopy} className={className}>
+        <ShikiCodeBlock onCopyClick={handleCopy} className={className}>
           {toolCall.function.arguments.replacement}
-        </MarkdownCodeBlock>
+        </ShikiCodeBlock>
       </Reveal>
     </Box>
   );
@@ -276,7 +305,7 @@ const UpdateRegexTextDoc: React.FC<{
     <Box className={styles.textdoc}>
       <TextDocHeader toolCall={toolCall} ref={ref} />
       <Reveal isRevealingCode defaultOpen={lineCount < 9} onClose={handleClose}>
-        <MarkdownCodeBlock className="language-py">{code}</MarkdownCodeBlock>
+        <ShikiCodeBlock className="language-py">{code}</ShikiCodeBlock>
       </Reveal>
     </Box>
   );
@@ -306,9 +335,9 @@ const UpdateTextDoc: React.FC<{
     <Box className={styles.textdoc}>
       <TextDocHeader toolCall={toolCall} ref={ref} />
       <Reveal isRevealingCode defaultOpen={lineCount < 9} onClose={handleClose}>
-        <MarkdownCodeBlock onCopyClick={handleCopy} className={className}>
+        <ShikiCodeBlock onCopyClick={handleCopy} className={className}>
           {toolCall.function.arguments.replacement}
-        </MarkdownCodeBlock>
+        </ShikiCodeBlock>
       </Reveal>
     </Box>
   );
@@ -338,10 +367,98 @@ const UpdateTextDocByLines: React.FC<{
     <Box className={styles.textdoc}>
       <TextDocHeader toolCall={toolCall} ref={ref} />
       <Reveal isRevealingCode defaultOpen={lineCount < 9} onClose={handleClose}>
-        <MarkdownCodeBlock onCopyClick={handleCopy} className={className}>
+        <ShikiCodeBlock onCopyClick={handleCopy} className={className}>
           {toolCall.function.arguments.content}
-        </MarkdownCodeBlock>
+        </ShikiCodeBlock>
       </Reveal>
+    </Box>
+  );
+};
+
+const UpdateTextDocAnchored: React.FC<{
+  toolCall: UpdateTextDocAnchoredToolCall;
+}> = ({ toolCall }) => {
+  const copyToClipBoard = useCopyToClipboard();
+  const ref = useRef<HTMLDivElement>(null);
+  const handleClose = useHideScroll(ref);
+  const handleCopy = useCallback(() => {
+    copyToClipBoard(toolCall.function.arguments.content);
+  }, [copyToClipBoard, toolCall.function.arguments.content]);
+
+  const className = useMemo(() => {
+    const extension = getFileExtension(toolCall.function.arguments.path);
+    return `language-${extension}`;
+  }, [toolCall.function.arguments.path]);
+
+  const lineCount = useMemo(
+    () => toolCall.function.arguments.content.split("\n").length,
+    [toolCall.function.arguments.content],
+  );
+
+  const modeLabels = {
+    replace_between: "Replace between anchors",
+    insert_after: "Insert after anchor",
+    insert_before: "Insert before anchor",
+  } as const;
+
+  const modeLabel = modeLabels[toolCall.function.arguments.mode];
+
+  return (
+    <Box className={styles.textdoc}>
+      <TextDocHeader toolCall={toolCall} ref={ref} />
+      <Box px="2" py="1">
+        <span style={{ fontSize: "11px", opacity: 0.7 }}>{modeLabel}</span>
+      </Box>
+      <Reveal isRevealingCode defaultOpen={lineCount < 9} onClose={handleClose}>
+        <ShikiCodeBlock onCopyClick={handleCopy} className={className}>
+          {toolCall.function.arguments.content}
+        </ShikiCodeBlock>
+      </Reveal>
+    </Box>
+  );
+};
+
+const ApplyPatch: React.FC<{
+  toolCall: ApplyPatchToolCall;
+}> = ({ toolCall }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const handleClose = useHideScroll(ref);
+
+  const lineCount = useMemo(
+    () => toolCall.function.arguments.patch.split("\n").length,
+    [toolCall.function.arguments.patch],
+  );
+
+  return (
+    <Box className={styles.textdoc}>
+      <TextDocHeader toolCall={toolCall} ref={ref} />
+      <Reveal
+        isRevealingCode
+        defaultOpen={lineCount < 15}
+        onClose={handleClose}
+      >
+        <ShikiCodeBlock className="language-diff">
+          {toolCall.function.arguments.patch}
+        </ShikiCodeBlock>
+      </Reveal>
+    </Box>
+  );
+};
+
+const UndoTextDoc: React.FC<{
+  toolCall: UndoTextDocToolCall;
+}> = ({ toolCall }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const steps = toolCall.function.arguments.steps ?? 1;
+
+  return (
+    <Box className={styles.textdoc}>
+      <TextDocHeader toolCall={toolCall} ref={ref} />
+      <Box px="2" py="1">
+        <span style={{ fontSize: "12px" }}>
+          ↩️ Undo {steps} step{steps > 1 ? "s" : ""}
+        </span>
+      </Box>
     </Box>
   );
 };

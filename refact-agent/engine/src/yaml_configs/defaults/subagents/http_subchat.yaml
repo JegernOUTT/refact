@@ -1,0 +1,17 @@
+schema_version: 2
+id: http_subchat
+title: HTTP Subchat
+description: Handle HTTP API subchat requests
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: default
+  n_ctx: 200000
+  max_new_tokens: 8192
+  temperature: 0.2
+  tokens_for_rag: 0
+
+tools: []

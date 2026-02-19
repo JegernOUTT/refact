@@ -1,0 +1,79 @@
+.widget {
+  background: transparent;
+}
+
+.header {
+  cursor: pointer;
+  opacity: 0.8;
+  transition: opacity 0.15s ease;
+}
+
+.header:hover {
+  opacity: 1;
+}
+
+.taskRow {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-2);
+  border-left: 2px solid transparent;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    opacity 0.2s ease;
+  opacity: 0.8;
+}
+
+.taskRow:hover {
+  opacity: 1;
+}
+
+.taskRow.active {
+  background: var(--accent-a3);
+  border-left-color: var(--accent-9);
+  opacity: 1;
+}
+
+.activeHint {
+}
+
+.headerIcon {
+  color: var(--gray-11);
+  flex-shrink: 0;
+}
+
+.content {
+  animation: slideDown 0.2s ease-out;
+  transform-origin: top;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.taskList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.taskRowEnter {
+  animation: taskFadeIn 0.2s ease-out forwards;
+}
+
+@keyframes taskFadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 0.8;
+    transform: translateX(0);
+  }
+}

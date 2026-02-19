@@ -18,7 +18,6 @@ export const checkpointsApi = createApi({
       const getState = api.getState as () => RootState;
       const state = getState();
       const token = state.config.apiKey;
-      headers.set("credentials", "same-origin");
       if (token) {
         headers.set("Authorization", `Bearer ${token}`);
       }
@@ -32,12 +31,9 @@ export const checkpointsApi = createApi({
     >({
       async queryFn(args, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const { checkpoints } = args;
-        const port = state.config.lspPort as unknown as number;
+        const { checkpoints, chat_id, chat_mode } = args;
+        const port = state.config.lspPort;
         const url = `http://127.0.0.1:${port}${PREVIEW_CHECKPOINTS}`;
-
-        const chat_id = state.chat.thread.id;
-        const mode = state.chat.thread.mode;
 
         const result = await baseQuery({
           url,
@@ -47,7 +43,7 @@ export const checkpointsApi = createApi({
           body: {
             meta: {
               chat_id,
-              chat_mode: mode ?? "EXPLORE",
+              chat_mode: chat_mode ?? "EXPLORE",
             },
             checkpoints,
           },
@@ -74,12 +70,9 @@ export const checkpointsApi = createApi({
     >({
       async queryFn(args, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const { checkpoints } = args;
-        const port = state.config.lspPort as unknown as number;
+        const { checkpoints, chat_id, chat_mode } = args;
+        const port = state.config.lspPort;
         const url = `http://127.0.0.1:${port}${RESTORE_CHECKPOINTS}`;
-
-        const chat_id = state.chat.thread.id;
-        const mode = state.chat.thread.mode;
 
         const result = await baseQuery({
           url,
@@ -89,7 +82,7 @@ export const checkpointsApi = createApi({
           body: {
             meta: {
               chat_id,
-              chat_mode: mode ?? "EXPLORE",
+              chat_mode: chat_mode ?? "EXPLORE",
             },
             checkpoints,
           },

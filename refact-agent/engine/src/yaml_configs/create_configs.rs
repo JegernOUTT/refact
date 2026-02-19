@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::global_context::GlobalContext;
 
-
 const DEFAULT_CHECKSUM_FILE: &str = "default-checksums.yaml";
-
 
 pub async fn yaml_configs_try_create_all(gcx: Arc<ARwLock<GlobalContext>>) -> String {
     let mut results = Vec::new();
@@ -29,19 +27,16 @@ pub async fn yaml_configs_try_create_all(gcx: Arc<ARwLock<GlobalContext>>) -> St
     }
 
     let files = vec![
-        ("customization.yaml", include_str!("default_customization.yaml")),
         ("privacy.yaml", include_str!("default_privacy.yaml")),
         ("indexing.yaml", include_str!("default_indexing.yaml")),
-        ("builtin_tools.yaml", include_str!("default_builtin_tools.yaml")),
-        ("integrations.d/shell.yaml", include_str!("default_shell.yaml")),
+        (
+            "builtin_tools.yaml",
+            include_str!("default_builtin_tools.yaml"),
+        ),
     ];
 
     for (file_name, content) in files {
-        let file_path = if file_name == "integrations.d/shell.yaml" {
-            config_dir.join("integrations.d").join("shell.yaml")
-        } else {
-            config_dir.join(file_name)
-        };
+        let file_path = config_dir.join(file_name);
 
         if let Err(e) = _yaml_file_exists_or_create(gcx.clone(), &file_path, content).await {
             tracing::warn!("{}", e);
@@ -57,24 +52,33 @@ pub async fn yaml_configs_try_create_all(gcx: Arc<ARwLock<GlobalContext>>) -> St
 async fn _yaml_file_exists_or_create(
     gcx: Arc<ARwLock<GlobalContext>>,
     config_path: &PathBuf,
-    the_default: &str
-) -> Result<String, String>
-{
+    the_default: &str,
+) -> Result<String, String> {
     let config_dir = gcx.read().await.config_dir.clone();
     let config_path_str = config_path.to_string_lossy().to_string();
-    let config_name = config_path.file_name().ok_or_else(|| format!("{} is not a file", config_path.display()))?.to_string_lossy().to_string();
+    let config_name = config_path
+        .file_name()
+        .ok_or_else(|| format!("{} is not a file", config_path.display()))?
+        .to_string_lossy()
+        .to_string();
 
     let checksums_dict = read_checksums(&config_dir).await?;
 
     if config_path.exists() {
-        let existing_content = tokio::fs::read_to_string(&config_path).await
+        let existing_content = tokio::fs::read_to_string(&config_path)
+            .await
             .map_err(|e| format!("failed to read {}: {}", config_name, e))?;
         if existing_content == the_default {
             // normal exit, content == default
             return Ok(config_path_str);
         }
         let existing_checksum = calculate_checksum(&existing_content);
-        if existing_checksum == checksums_dict.get(&config_name).map(|s| s.as_str()).unwrap_or("") {
+        if existing_checksum
+            == checksums_dict
+                .get(&config_name)
+                .map(|s| s.as_str())
+                .unwrap_or("")
+        {
             tracing::info!("\n * * * detected that {} is a default config from a previous version of this binary, no changes made by human, overwrite * * *\n", config_path.display());
         } else {
             // normal exit, config changed by user
@@ -82,9 +86,11 @@ async fn _yaml_file_exists_or_create(
         }
     }
 
-    let mut f = File::create(&config_path).await
+    let mut f = File::create(&config_path)
+        .await
         .map_err(|e| format!("failed to create {}: {}", config_name, e))?;
-    f.write_all(the_default.as_bytes()).await
+    f.write_all(the_default.as_bytes())
+        .await
         .map_err(|e| format!("failed to write into {}: {}", config_name, e))?;
     tracing::info!("created {}", config_path.display());
 
@@ -103,7 +109,8 @@ fn calculate_checksum(content: &str) -> String {
 async fn read_checksums(config_dir: &Path) -> Result<HashMap<String, String>, String> {
     let checksum_path = config_dir.join(DEFAULT_CHECKSUM_FILE);
     if checksum_path.exists() {
-        let content = tokio::fs::read_to_string(&checksum_path).await
+        let content = tokio::fs::read_to_string(&checksum_path)
+            .await
             .map_err(|e| format!("failed to read {}: {}", DEFAULT_CHECKSUM_FILE, e))?;
         let checksums: HashMap<String, String> = serde_yaml::from_str(&content)
             .map_err(|e| format!("failed to parse {}: {}", DEFAULT_CHECKSUM_FILE, e))?;
@@ -113,7 +120,11 @@ async fn read_checksums(config_dir: &Path) -> Result<HashMap<String, String>, St
     }
 }
 
-async fn update_checksum(config_dir: &Path, config_name: String, checksum: &str) -> Result<(), String> {
+async fn update_checksum(
+    config_dir: &Path,
+    config_name: String,
+    checksum: &str,
+) -> Result<(), String> {
     let checksum_path = config_dir.join(DEFAULT_CHECKSUM_FILE);
     let mut checksums = read_checksums(&config_dir).await?;
     checksums.insert(config_name.to_string(), checksum.to_string());
@@ -121,7 +132,8 @@ async fn update_checksum(config_dir: &Path, config_name: String, checksum: &str)
         "# This file allows to determine whether a config file still has the default text, so we can upgrade it.\n#\n{}",
         serde_yaml::to_string(&checksums).unwrap()
     );
-    tokio::fs::write(&checksum_path, content).await
+    tokio::fs::write(&checksum_path, content)
+        .await
         .map_err(|e| format!("failed to write {}: {}", DEFAULT_CHECKSUM_FILE, e))?;
     Ok(())
 }

@@ -1,0 +1,30 @@
+schema_version: 2
+id: code_review_gather_files
+title: Code Review File Gatherer
+description: File gatherer for code review
+expose_as_tool: false
+has_code: true
+
+subchat:
+  context_mode: fork
+  stateful: false
+  model_type: light
+  n_ctx: 200000
+  max_new_tokens: 8192
+  temperature: 0.2
+
+messages:
+  system_prompt: |
+    You are a focused sub-agent that identifies relevant files for code review.
+
+    Based on the conversation, determine which files need to be reviewed.
+    Use search tools to find relevant code, then use cat() to read the contents.
+    Focus on files that have been changed or are related to the changes.
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - search_semantic
+  - knowledge

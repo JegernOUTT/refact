@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
-import {
-  useAppDispatch,
-  useAppSelector,
-  useSendChatRequest,
-} from "../../hooks";
+import React, { useCallback, useEffect } from "react";
+import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectPages, change, ChatPage } from "../../features/Pages/pagesSlice";
 import { setInputValue, addInputValue } from "./actions";
 import { debugRefact } from "../../debugConfig";
+import { useDraftMessage } from "../../hooks/useDraftMessage";
+import { sendIdeMessagesToCurrentChat } from "../../features/Chat/Thread/actions";
 
 export function useInputValue(
   uncheckCheckboxes: () => void,
@@ -16,9 +14,9 @@ export function useInputValue(
   boolean,
   React.Dispatch<React.SetStateAction<boolean>>,
 ] {
-  const [value, setValue] = useState<string>("");
-  const [isSendImmediately, setIsSendImmediately] = useState<boolean>(false);
-  const { submit } = useSendChatRequest();
+  const { value, setValue } = useDraftMessage();
+  const [isSendImmediately, setIsSendImmediately] =
+    React.useState<boolean>(false);
   const dispatch = useAppDispatch();
   const pages = useAppSelector(selectPages);
 
@@ -40,12 +38,15 @@ export function useInputValue(
         );
         setUpIfNotReady();
 
-        if (payload.messages) {
+        if (payload.messages && payload.messages.length > 0) {
           debugRefact(`[DEBUG]: payload messages: `, payload.messages);
-          setIsSendImmediately(true);
-          submit({
-            maybeMessages: payload.messages,
-          });
+          setIsSendImmediately(payload.send_immediately);
+          void dispatch(
+            sendIdeMessagesToCurrentChat({
+              messages: payload.messages,
+              priority: payload.send_immediately,
+            }),
+          );
           return;
         }
       }
@@ -73,7 +74,7 @@ export function useInputValue(
         return;
       }
     },
-    [setUpIfNotReady, submit, uncheckCheckboxes],
+    [setUpIfNotReady, dispatch, uncheckCheckboxes, setValue],
   );
 
   useEffect(() => {

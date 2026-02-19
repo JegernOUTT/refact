@@ -1,0 +1,41 @@
+schema_version: 2
+id: code_review
+title: Code Review
+description: Thorough code review with file gathering
+expose_as_tool: true
+has_code: true
+
+tool:
+  description: Perform a thorough code review
+  agentic: true
+  parameters: []
+  required: []
+
+subchat:
+  context_mode: fork
+  stateful: false
+  model_type: thinking
+  n_ctx: 400000
+  max_new_tokens: 128000
+  tokens_for_rag: 200000
+  reasoning_effort: high
+
+gather_files:
+  subagent: code_review_gather_files
+  max_files: 30
+
+prompts:
+  reviewer: |
+    Your task is to perform a thorough code review of the changes discussed.
+
+    Check for:
+    - Bugs and logic errors
+    - Security vulnerabilities
+    - Performance issues
+    - Code style and consistency
+    - Missing tests
+    - Edge cases not handled
+
+  guardrails: "💿 Review complete. Present findings to the user."
+
+tools: []

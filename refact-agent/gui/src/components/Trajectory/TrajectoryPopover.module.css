@@ -1,0 +1,60 @@
+.popoverContent {
+  min-width: 320px;
+  max-width: 400px;
+  /* Force GPU compositing to fix JCEF repaint issues in JetBrains IDEs */
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+.tabsList {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.tabsTrigger {
+  flex: 1;
+}
+
+.optionsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.previewSection {
+  background: var(--gray-a2);
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.previewStats {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.actionsList {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.actionsListItem {
+  font-size: var(--font-size-1);
+  color: var(--gray-11);
+}
+
+.buttonRow {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.errorCallout {
+  background: var(--red-a2);
+  border: 1px solid var(--red-a6);
+  border-radius: 4px;
+  padding: 8px;
+  margin-bottom: 12px;
+}

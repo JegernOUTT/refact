@@ -1,44 +1,65 @@
-import React, { useCallback, useMemo } from "react";
+import React, {
+  useCallback,
+  useMemo,
+  useEffect,
+  useState,
+  useRef,
+} from "react";
+import { v4 as uuidv4 } from "uuid";
 import {
+  AssistantMessage,
+  ChatContextFile,
   ChatMessages,
-  isAssistantMessage,
+  DiffChunk,
+  DiffMessage,
   isChatContextFileMessage,
   isDiffMessage,
+  isAssistantMessage,
   isToolMessage,
-  isUserMessage,
+  isSystemMessage,
   UserMessage,
 } from "../../services/refact";
 import { UserInput } from "./UserInput";
-import { ScrollArea, ScrollAreaWithAnchor } from "../ScrollArea";
+import { ScrollArea } from "../ScrollArea";
 import { Flex, Container, Button, Box } from "@radix-ui/themes";
 import styles from "./ChatContent.module.css";
 import { ContextFiles } from "./ContextFiles";
+import { SystemPrompt } from "./SystemPrompt";
 import { AssistantInput } from "./AssistantInput";
 import { PlainText } from "./PlainText";
-import { useAppDispatch, useDiffFileReload } from "../../hooks";
-import { useAppSelector } from "../../hooks";
+import { useAppDispatch, useAppSelector, useDiffFileReload } from "../../hooks";
 import {
   selectIntegration,
-  selectIsStreaming,
-  selectIsWaiting,
-  selectMessages,
-  selectQueuedMessages,
-  selectThread,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectMessagesById,
+  selectQueuedItemsById,
+  selectSnapshotReceivedById,
+  selectThreadById,
+  selectChatId,
+  selectThreadPauseById,
 } from "../../features/Chat/Thread/selectors";
-import { takeWhile } from "../../utils";
+import {
+  createChatWithId,
+  switchToThread,
+} from "../../features/Chat/Thread/actions";
 import { GroupedDiffs } from "./DiffContent";
 import { popBackTo } from "../../features/Pages/pagesSlice";
 import { ChatLinks, UncommittedChangesWarning } from "../ChatLinks";
-import { telemetryApi } from "../../services/refact/telemetry";
 import { PlaceHolderText } from "./PlaceHolderText";
-import { UsageCounter } from "../UsageCounter";
 import { QueuedMessage } from "./QueuedMessage";
-import {
-  getConfirmationPauseStatus,
-  getPauseReasonsWithPauseStatus,
-} from "../../features/ToolConfirmation/confirmationSlice";
-import { useUsageCounter } from "../UsageCounter/useUsageCounter.ts";
+import { selectSseStatusForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
+import { ChatLoading } from "./ChatLoading";
+import {
+  removeMessage,
+  branchFromChat,
+} from "../../services/refact/chatCommands";
+import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
+import { VirtualizedChatList } from "./VirtualizedChatList";
+import { useCollapsibleState } from "./useCollapsibleState";
+import { useCollapsibleStoreProvider } from "./useCollapsibleStoreProvider";
+import { CollapsibleStoreProvider } from "./useStoredOpen";
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -50,95 +71,167 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   onRetry,
 }) => {
   const dispatch = useAppDispatch();
-  const pauseReasonsWithPause = useAppSelector(getPauseReasonsWithPauseStatus);
-  const messages = useAppSelector(selectMessages);
-  const queuedMessages = useAppSelector(selectQueuedMessages);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const thread = useAppSelector(selectThread);
-  const { shouldShow } = useUsageCounter();
-  const isConfig = thread.mode === "CONFIGURE";
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const [sendTelemetryEvent] =
-    telemetryApi.useLazySendTelemetryChatEventQuery();
-  const integrationMeta = useAppSelector(selectIntegration);
-  const isWaitingForConfirmation = useAppSelector(getConfirmationPauseStatus);
+  const chatId = useAppSelector(selectChatId);
+  const [renderChatId, setRenderChatId] = useState(chatId);
 
-  const onRetryWrapper = (index: number, question: UserMessage["content"]) => {
-    onRetry(index, question);
-  };
+  useEffect(() => {
+    if (chatId === renderChatId) return;
+    const rafId = requestAnimationFrame(() => {
+      setRenderChatId(chatId);
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [chatId, renderChatId]);
+
+  const switching = chatId !== renderChatId;
+
+  const messages = useAppSelector((s) => selectMessagesById(s, renderChatId));
+  const queuedItems = useAppSelector((s) =>
+    selectQueuedItemsById(s, renderChatId),
+  );
+  const isStreaming = useAppSelector((s) =>
+    selectIsStreamingById(s, renderChatId),
+  );
+  const snapshotReceived = useAppSelector((s) =>
+    selectSnapshotReceivedById(s, renderChatId),
+  );
+  const thread = useAppSelector((s) => selectThreadById(s, renderChatId));
+  const sseStatus = useAppSelector((s) =>
+    selectSseStatusForChat(s, renderChatId),
+  );
+
+  const isConfig = thread !== null && thread.mode === "CONFIGURE";
+  const isWaiting = useAppSelector((s) => selectIsWaitingById(s, renderChatId));
+  const integrationMeta = useAppSelector(selectIntegration);
+  const isWaitingForConfirmation = useAppSelector((s) =>
+    selectThreadPauseById(s, renderChatId),
+  );
+  const lspPort = useAppSelector(selectLspPort);
+  const apiKey = useAppSelector(selectApiKey);
+
+  const collapsibleState = useCollapsibleState(false);
+  const collapsibleStore = useCollapsibleStoreProvider(renderChatId);
+  const prevChatIdRef = useRef(renderChatId);
+  const prevDisplayMessagesRef = useRef<ChatMessages | null>(null);
+  const prevDisplayItemsRef = useRef<DisplayItem[] | null>(null);
+
+  useEffect(() => {
+    if (prevChatIdRef.current !== renderChatId) {
+      collapsibleState.reset();
+      prevDisplayMessagesRef.current = null;
+      prevDisplayItemsRef.current = null;
+      prevChatIdRef.current = renderChatId;
+    }
+  }, [renderChatId, collapsibleState]);
+
+  const handleBranch = useCallback(
+    (messageId: string) => {
+      const newChatId = uuidv4();
+      const title = `[branched] ${thread?.title ?? "Chat"}`;
+
+      dispatch(
+        createChatWithId({
+          id: newChatId,
+          title,
+        }),
+      );
+
+      dispatch(switchToThread({ id: newChatId }));
+
+      void branchFromChat(
+        newChatId,
+        renderChatId,
+        messageId,
+        lspPort,
+        apiKey ?? undefined,
+      ).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error("Failed to branch chat:", err);
+      });
+    },
+    [dispatch, thread?.title, renderChatId, lspPort, apiKey],
+  );
+
+  const handleDelete = useCallback(
+    (messageId: string) => {
+      void removeMessage(
+        renderChatId,
+        messageId,
+        lspPort,
+        apiKey ?? undefined,
+      ).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error("Failed to delete message:", err);
+      });
+    },
+    [renderChatId, lspPort, apiKey],
+  );
+
+  const onRetryWrapper = useCallback(
+    (index: number, question: UserMessage["content"]) => {
+      onRetry(index, question);
+    },
+    [onRetry],
+  );
 
   const handleReturnToConfigurationClick = useCallback(() => {
-    // console.log(`[DEBUG]: going back to configuration page`);
-    // TBD: should it be allowed to run in the background?
     onStopStreaming();
     dispatch(
       popBackTo({
         name: "integrations page",
-        projectPath: thread.integration?.project,
-        integrationName: thread.integration?.name,
-        integrationPath: thread.integration?.path,
+        projectPath: thread?.integration?.project,
+        integrationName: thread?.integration?.name,
+        integrationPath: thread?.integration?.path,
         wasOpenedThroughChat: true,
       }),
     );
   }, [
     onStopStreaming,
     dispatch,
-    thread.integration?.project,
-    thread.integration?.name,
-    thread.integration?.path,
+    thread?.integration?.project,
+    thread?.integration?.name,
+    thread?.integration?.path,
   ]);
-
-  const handleManualStopStreamingClick = useCallback(() => {
-    onStopStreaming();
-    void sendTelemetryEvent({
-      scope: `stopStreaming`,
-      success: true,
-      error_message: "",
-    });
-  }, [onStopStreaming, sendTelemetryEvent]);
 
   const shouldConfigButtonBeVisible = useMemo(() => {
     return isConfig && !integrationMeta?.path?.includes("project_summary");
   }, [isConfig, integrationMeta?.path]);
 
-  // Dedicated hook for handling file reloads
   useDiffFileReload();
 
-  return (
-    <ScrollAreaWithAnchor.ScrollArea
-      style={{ flexGrow: 1, height: "auto", position: "relative" }}
-      scrollbars="vertical"
-      type={isWaiting || isStreaming ? "auto" : "hover"}
-      fullHeight
-    >
-      <Flex
-        direction="column"
-        className={styles.content}
-        data-element="ChatContent"
-        p="2"
-        gap="1"
-      >
-        {messages.length === 0 && (
-          <Container>
-            <PlaceHolderText />
-          </Container>
-        )}
-        {renderMessages(messages, onRetryWrapper, isWaiting)}
-        {queuedMessages.length > 0 && (
-          <Flex direction="column" gap="2" mt="2">
-            {queuedMessages.map((queuedMsg, index) => (
-              <QueuedMessage
-                key={queuedMsg.id}
-                queuedMessage={queuedMsg}
-                position={index + 1}
-              />
-            ))}
-          </Flex>
-        )}
+  const showLoading =
+    switching ||
+    (!snapshotReceived && messages.length === 0) ||
+    (sseStatus === "connecting" && messages.length === 0);
+
+  const displayItems = useMemo(() => {
+    const prevMessages = prevDisplayMessagesRef.current;
+    const prevItems = prevDisplayItemsRef.current;
+
+    const incremental = tryIncrementalDisplayItemsUpdate(
+      prevMessages,
+      messages,
+      prevItems,
+      isStreaming,
+    );
+
+    const nextItems = incremental ?? buildDisplayItems(messages, isStreaming);
+
+    prevDisplayMessagesRef.current = messages;
+    prevDisplayItemsRef.current = nextItems;
+
+    return nextItems;
+  }, [messages, isStreaming]);
+
+  const initialScrollIndex = useMemo(() => {
+    return displayItems.length > 0 ? displayItems.length - 1 : undefined;
+  }, [displayItems]);
+
+  const virtuosoFooter = useMemo(
+    () => (
+      <>
         <Container>
           <UncommittedChangesWarning />
         </Container>
-        {shouldShow && <UsageCounter />}
         <Container pt="4" pb="8">
           {!isWaitingForConfirmation && (
             <LogoAnimation
@@ -148,136 +241,600 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             />
           )}
         </Container>
-      </Flex>
+      </>
+    ),
+    [isStreaming, isWaiting, isWaitingForConfirmation],
+  );
 
-      <Box
-        style={{
-          position: "absolute",
-          bottom: 0,
-          maxWidth: "100%", // TODO: make space for the down button
-        }}
+  const renderDisplayItem = useCallback(
+    (item: DisplayItem): React.ReactNode => {
+      switch (item.type) {
+        case "plain_text":
+          return <PlainText>{item.content}</PlainText>;
+
+        case "assistant":
+          return (
+            <AssistantInput
+              message={item.message.content}
+              reasoningContent={item.message.reasoning_content}
+              thinkingBlocks={item.message.thinking_blocks}
+              toolCalls={item.message.tool_calls}
+              serverExecutedTools={item.message.server_executed_tools}
+              serverContentBlocks={item.message.server_content_blocks}
+              citations={item.message.citations}
+              messageId={item.message.message_id}
+              onBranch={handleBranch}
+              onDelete={handleDelete}
+              contextFilesByToolId={item.contextFilesByToolId}
+              diffsByToolId={item.diffsByToolId}
+              usage={item.message.usage}
+              metering_coins_prompt={item.message.metering_coins_prompt}
+              metering_coins_generated={item.message.metering_coins_generated}
+              metering_coins_cache_creation={
+                item.message.metering_coins_cache_creation
+              }
+              metering_coins_cache_read={item.message.metering_coins_cache_read}
+              isStreaming={item.isStreaming}
+            />
+          );
+
+        case "user":
+          return (
+            <UserInput
+              onRetry={onRetryWrapper}
+              messageIndex={item.index}
+              messageId={item.message.message_id}
+              checkpoints={item.message.checkpoints}
+              onBranch={handleBranch}
+              onDelete={handleDelete}
+            >
+              {item.message.content}
+            </UserInput>
+          );
+
+        case "context_files": {
+          const stateKey = `context_files:${item.toolCallId ?? item.key}`;
+          return (
+            <ContextFiles
+              files={item.files}
+              toolCallId={item.toolCallId}
+              open={collapsibleState.isOpen(stateKey)}
+              onOpenChange={(open) => collapsibleState.setOpen(stateKey, open)}
+            />
+          );
+        }
+
+        case "diff_group": {
+          const stateKey = `diff_group:${item.key}`;
+          return (
+            <GroupedDiffs
+              diffs={item.diffs}
+              open={collapsibleState.isOpen(stateKey)}
+              onOpenChange={(open) => collapsibleState.setOpen(stateKey, open)}
+            />
+          );
+        }
+
+        case "system":
+          return <SystemPrompt content={item.content} />;
+
+        default:
+          return null;
+      }
+    },
+    [handleBranch, handleDelete, onRetryWrapper, collapsibleState],
+  );
+
+  if (showLoading) {
+    return (
+      <Flex
+        direction="column"
+        className={styles.content}
+        data-element="ChatContent"
+        p="2"
+        gap="1"
+        style={{ flexGrow: 1, height: "100%" }}
       >
-        <ScrollArea scrollbars="horizontal">
-          <Flex align="start" gap="3" pb="2">
-            {(isWaiting || isStreaming) && !pauseReasonsWithPause.pause && (
-              <Button
-                // ml="auto"
-                color="red"
-                title="stop streaming"
-                onClick={handleManualStopStreamingClick}
-              >
-                Stop
-              </Button>
-            )}
-            {shouldConfigButtonBeVisible && (
-              <Button
-                // ml="auto"
-                color="gray"
-                title="Return to configuration page"
-                onClick={handleReturnToConfigurationClick}
-              >
-                Return
-              </Button>
-            )}
+        <ChatLoading />
+      </Flex>
+    );
+  }
 
-            <ChatLinks />
-          </Flex>
-        </ScrollArea>
+  if (messages.length === 0) {
+    return (
+      <Flex
+        direction="column"
+        className={styles.content}
+        data-element="ChatContent"
+        p="2"
+        gap="1"
+        style={{ flexGrow: 1, height: "100%" }}
+      >
+        <Container>
+          <PlaceHolderText />
+        </Container>
+      </Flex>
+    );
+  }
+
+  return (
+    <CollapsibleStoreProvider value={collapsibleStore}>
+      <Box
+        style={{ flexGrow: 1, height: "100%", position: "relative" }}
+        data-element="ChatContent"
+      >
+        <VirtualizedChatList
+          key={renderChatId}
+          items={displayItems}
+          renderItem={renderDisplayItem}
+          initialScrollIndex={initialScrollIndex}
+          footer={virtuosoFooter}
+          isStreaming={isStreaming}
+        />
+
+        <Box
+          style={{
+            position: "absolute",
+            bottom: 0,
+            maxWidth: "100%",
+          }}
+        >
+          <ScrollArea scrollbars="horizontal">
+            <Flex align="start" gap="3" pb="2">
+              {shouldConfigButtonBeVisible && (
+                <Button
+                  color="gray"
+                  title="Return to configuration page"
+                  onClick={handleReturnToConfigurationClick}
+                >
+                  Return
+                </Button>
+              )}
+              <ChatLinks />
+            </Flex>
+          </ScrollArea>
+        </Box>
+
+        {queuedItems.length > 0 && (
+          <Box className={styles.queuedMessagesContainer}>
+            <Flex direction="column" gap="2" align="end">
+              {queuedItems.map((item, index) => (
+                <QueuedMessage
+                  key={item.client_request_id}
+                  queuedItem={item}
+                  position={index + 1}
+                />
+              ))}
+            </Flex>
+          </Box>
+        )}
       </Box>
-    </ScrollAreaWithAnchor.ScrollArea>
+    </CollapsibleStoreProvider>
   );
 };
 
 ChatContent.displayName = "ChatContent";
 
-function renderMessages(
+function getMessageKey(message: ChatMessages[number], index: number): string {
+  if (message.message_id) return message.message_id;
+  if ("tool_call_id" in message && message.tool_call_id) {
+    return `${message.role}-${message.tool_call_id}-${index}`;
+  }
+  return `${message.role}-${index}`;
+}
+
+const READ_TOOLS = new Set([
+  "cat",
+  "tree",
+  "search_pattern",
+  "search_semantic",
+  "search_symbol_definition",
+  "web",
+  "web_search",
+  "knowledge",
+  "search_trajectories",
+  "get_trajectory_context",
+]);
+
+const EDIT_TOOLS = new Set([
+  "create_textdoc",
+  "update_textdoc",
+  "replace_textdoc",
+  "update_textdoc_regex",
+  "update_textdoc_by_lines",
+  "update_textdoc_anchored",
+  "apply_patch",
+  "undo_textdoc",
+  "rm",
+]);
+
+type DisplayItemAssistant = {
+  type: "assistant";
+  key: string;
+  index: number;
+  message: AssistantMessage;
+  contextFilesByToolId: Record<string, ChatContextFile[]>;
+  diffsByToolId: Record<string, DiffChunk[]>;
+  isStreaming: boolean;
+};
+
+type DisplayItemUser = {
+  type: "user";
+  key: string;
+  index: number;
+  message: UserMessage;
+  isLastUser: boolean;
+};
+
+type DisplayItemContextFiles = {
+  type: "context_files";
+  key: string;
+  files: ChatContextFile[];
+  toolCallId?: string;
+};
+
+type DisplayItemDiffGroup = {
+  type: "diff_group";
+  key: string;
+  diffs: DiffMessage[];
+};
+
+type DisplayItemSystem = {
+  type: "system";
+  key: string;
+  content: string;
+};
+
+type DisplayItemPlainText = {
+  type: "plain_text";
+  key: string;
+  content: string;
+};
+
+type DisplayItem =
+  | DisplayItemAssistant
+  | DisplayItemUser
+  | DisplayItemContextFiles
+  | DisplayItemDiffGroup
+  | DisplayItemSystem
+  | DisplayItemPlainText;
+
+function buildDisplayItems(
   messages: ChatMessages,
-  onRetry: (index: number, question: UserMessage["content"]) => void,
-  waiting: boolean,
-  memo: React.ReactNode[] = [],
-  index = 0,
-) {
-  if (messages.length === 0) return memo;
-  const [head, ...tail] = messages;
-  if (head.role === "tool") {
-    return renderMessages(tail, onRetry, waiting, memo, index + 1);
+  isStreaming: boolean,
+): DisplayItem[] {
+  const items: DisplayItem[] = [];
+  if (messages.length === 0) return items;
+
+  const hiddenQaIndices = computeHiddenQaMessageIndices(messages);
+
+  let lastUserIdx = -1;
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === "user" && !hiddenQaIndices.has(i) && lastUserIdx === -1) {
+      lastUserIdx = i;
+    }
+    if (msg.role === "assistant" && lastAssistantIdx === -1) {
+      lastAssistantIdx = i;
+    }
+    if (lastUserIdx !== -1 && lastAssistantIdx !== -1) break;
   }
 
-  if (head.role === "plain_text") {
-    const key = "plain-text-" + index;
-    const nextMemo = [...memo, <PlainText key={key}>{head.content}</PlainText>];
-    return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
+  for (let i = 0; i < messages.length; i++) {
+    const head = messages[i];
+
+    if (isToolMessage(head)) continue;
+
+    if (head.role === "plain_text") {
+      items.push({
+        type: "plain_text",
+        key: getMessageKey(head, i),
+        content: head.content,
+      });
+      continue;
+    }
+
+    if (head.role === "assistant") {
+      const key = getMessageKey(head, i);
+      const contextFilesAfter: DisplayItemContextFiles[] = [];
+      const diffMessagesAfter: DiffMessage[] = [];
+      const contextFilesByToolId: Record<string, ChatContextFile[]> = {};
+      const diffsByToolId: Record<string, DiffChunk[]> = {};
+
+      const toolCalls = head.tool_calls ?? [];
+      const eligibleToolCalls = toolCalls.filter(
+        (tc) => tc.id && tc.function.name && READ_TOOLS.has(tc.function.name),
+      );
+      const eligibleToolIds = new Set(
+        eligibleToolCalls
+          .map((tc) => tc.id)
+          .filter((id): id is string => Boolean(id)),
+      );
+      const lastEligibleToolId =
+        eligibleToolCalls.length > 0
+          ? eligibleToolCalls[eligibleToolCalls.length - 1].id
+          : null;
+
+      const editToolCalls = toolCalls.filter(
+        (tc) => tc.id && tc.function.name && EDIT_TOOLS.has(tc.function.name),
+      );
+      const editToolIds = new Set(
+        editToolCalls
+          .map((tc) => tc.id)
+          .filter((id): id is string => Boolean(id)),
+      );
+
+      let j = i + 1;
+      while (j < messages.length) {
+        const nextMsg = messages[j];
+
+        if (isToolMessage(nextMsg)) {
+          j++;
+          continue;
+        }
+
+        if (isChatContextFileMessage(nextMsg)) {
+          if (
+            nextMsg.tool_call_id === "knowledge_enrichment" ||
+            nextMsg.tool_call_id === "project_context"
+          ) {
+            break;
+          }
+
+          let targetToolId: string | null = null;
+
+          if (
+            nextMsg.tool_call_id &&
+            eligibleToolIds.has(nextMsg.tool_call_id)
+          ) {
+            targetToolId = nextMsg.tool_call_id;
+          } else if (!nextMsg.tool_call_id && lastEligibleToolId) {
+            targetToolId = lastEligibleToolId;
+          }
+
+          if (targetToolId) {
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            const prev = contextFilesByToolId[targetToolId] || [];
+            contextFilesByToolId[targetToolId] = [...prev, ...nextMsg.content];
+          } else {
+            contextFilesAfter.push({
+              type: "context_files",
+              key: getMessageKey(nextMsg, j),
+              files: nextMsg.content,
+              toolCallId: nextMsg.tool_call_id,
+            });
+          }
+          j++;
+          continue;
+        }
+
+        if (isDiffMessage(nextMsg)) {
+          if (nextMsg.tool_call_id && editToolIds.has(nextMsg.tool_call_id)) {
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            const prevDiffs = diffsByToolId[nextMsg.tool_call_id] || [];
+            diffsByToolId[nextMsg.tool_call_id] = [
+              ...prevDiffs,
+              ...nextMsg.content,
+            ];
+          } else {
+            diffMessagesAfter.push(nextMsg);
+          }
+          j++;
+          continue;
+        }
+
+        break;
+      }
+
+      items.push({
+        type: "assistant",
+        key,
+        index: i,
+        message: head,
+        contextFilesByToolId,
+        diffsByToolId,
+        isStreaming: isStreaming && i === lastAssistantIdx,
+      });
+
+      for (const ctxItem of contextFilesAfter) {
+        items.push(ctxItem);
+      }
+
+      if (diffMessagesAfter.length > 0) {
+        items.push({
+          type: "diff_group",
+          key: `diffs-${key}`,
+          diffs: diffMessagesAfter,
+        });
+      }
+
+      i = j - 1;
+      continue;
+    }
+
+    if (head.role === "user") {
+      if (hiddenQaIndices.has(i)) {
+        continue;
+      }
+
+      items.push({
+        type: "user",
+        key: getMessageKey(head, i),
+        index: i,
+        message: head,
+        isLastUser: i === lastUserIdx,
+      });
+      continue;
+    }
+
+    if (isChatContextFileMessage(head)) {
+      items.push({
+        type: "context_files",
+        key: getMessageKey(head, i),
+        files: head.content,
+        toolCallId: head.tool_call_id,
+      });
+      continue;
+    }
+
+    if (isSystemMessage(head)) {
+      items.push({
+        type: "system",
+        key: getMessageKey(head, i),
+        content: head.content,
+      });
+      continue;
+    }
+
+    if (isDiffMessage(head)) {
+      const key = getMessageKey(head, i);
+      const diffs: DiffMessage[] = [head];
+      let j = i + 1;
+      while (j < messages.length) {
+        const m = messages[j];
+        if (isToolMessage(m)) {
+          j++;
+          continue;
+        }
+        if (isDiffMessage(m)) {
+          diffs.push(m);
+          j++;
+          continue;
+        }
+        break;
+      }
+
+      items.push({
+        type: "diff_group",
+        key: `diffs-${key}`,
+        diffs,
+      });
+      i = j - 1;
+      continue;
+    }
   }
 
-  if (head.role === "assistant") {
-    const key = "assistant-input-" + index;
-    const isLast = !tail.some(isAssistantMessage);
-    const nextMemo = [
-      ...memo,
-      <AssistantInput
-        key={key}
-        message={head.content}
-        reasoningContent={head.reasoning_content}
-        toolCalls={head.tool_calls}
-        serverExecutedTools={head.server_executed_tools}
-        citations={head.citations}
-        isLast={isLast}
-        usage={head.usage}
-        metering_coins_prompt={head.metering_coins_prompt}
-        metering_coins_generated={head.metering_coins_generated}
-        metering_coins_cache_creation={head.metering_coins_cache_creation}
-        metering_coins_cache_read={head.metering_coins_cache_read}
-      />,
-    ];
+  return items;
+}
 
-    return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
+function tryIncrementalDisplayItemsUpdate(
+  previousMessages: ChatMessages | null,
+  nextMessages: ChatMessages,
+  previousItems: DisplayItem[] | null,
+  isStreaming: boolean,
+): DisplayItem[] | null {
+  if (!previousMessages || !previousItems) return null;
+  if (previousMessages.length !== nextMessages.length) return null;
+
+  let changedIndex = -1;
+  for (let i = 0; i < nextMessages.length; i++) {
+    if (previousMessages[i] !== nextMessages[i]) {
+      if (changedIndex !== -1) return null;
+      changedIndex = i;
+    }
   }
 
-  if (head.role === "user") {
-    const key = "user-input-" + index;
-    const isLastUserMessage = !tail.some(isUserMessage);
-    const nextMemo = [
-      ...memo,
-      isLastUserMessage && (
-        <ScrollAreaWithAnchor.ScrollAnchor
-          key={`${key}-anchor`}
-          behavior="smooth"
-          block="start"
-          // my="-2"
-        />
-      ),
-      <UserInput onRetry={onRetry} key={key} messageIndex={index}>
-        {head.content}
-      </UserInput>,
-    ];
-    return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
+  let lastAssistantIdx = -1;
+  for (let i = nextMessages.length - 1; i >= 0; i--) {
+    if (nextMessages[i].role === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
   }
 
-  if (isChatContextFileMessage(head)) {
-    const key = "context-file-" + index;
-    const nextMemo = [...memo, <ContextFiles key={key} files={head.content} />];
-    return renderMessages(tail, onRetry, waiting, nextMemo, index + 1);
-  }
-
-  if (isDiffMessage(head)) {
-    const restInTail = takeWhile(tail, (message) => {
-      return isDiffMessage(message) || isToolMessage(message);
+  if (changedIndex === -1) {
+    let needsStreamingPatch = false;
+    for (const item of previousItems) {
+      if (item.type !== "assistant") continue;
+      const shouldStream = isStreaming && item.index === lastAssistantIdx;
+      if (shouldStream !== item.isStreaming) {
+        needsStreamingPatch = true;
+        break;
+      }
+    }
+    if (!needsStreamingPatch) return previousItems;
+    return previousItems.map((item) => {
+      if (item.type !== "assistant") return item;
+      const shouldStream = isStreaming && item.index === lastAssistantIdx;
+      return shouldStream === item.isStreaming
+        ? item
+        : { ...item, isStreaming: shouldStream };
     });
-
-    const nextTail = tail.slice(restInTail.length);
-    const diffMessages = [head, ...restInTail.filter(isDiffMessage)];
-    const key = "diffs-" + index;
-
-    const nextMemo = [...memo, <GroupedDiffs key={key} diffs={diffMessages} />];
-
-    return renderMessages(
-      nextTail,
-      onRetry,
-      waiting,
-      nextMemo,
-      index + diffMessages.length,
-    );
   }
 
-  return renderMessages(tail, onRetry, waiting, memo, index + 1);
+  const changedMessage = nextMessages[changedIndex];
+  if (changedMessage.role !== "assistant") return null;
+  if (!isAssistantMessage(changedMessage)) return null;
+
+  const nextItems = previousItems.map((item) => {
+    if (item.type !== "assistant") return item;
+    if (item.index !== changedIndex) {
+      const shouldStream = isStreaming && item.index === lastAssistantIdx;
+      return shouldStream === item.isStreaming
+        ? item
+        : {
+            ...item,
+            isStreaming: shouldStream,
+          };
+    }
+
+    return {
+      ...item,
+      message: changedMessage,
+      isStreaming: isStreaming && item.index === lastAssistantIdx,
+    };
+  });
+
+  return nextItems;
+}
+
+function extractUserMessageText(content: UserMessage["content"]): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  for (const item of content) {
+    if ("type" in item && item.type === "text" && "text" in item) {
+      return item.text;
+    }
+    if ("m_type" in item && item.m_type === "text" && "m_content" in item) {
+      return String(item.m_content);
+    }
+  }
+  return "";
+}
+
+function computeHiddenQaMessageIndices(messages: ChatMessages): Set<number> {
+  const hiddenIndices = new Set<number>();
+  const askQuestionsToolIds = new Map<string, number>();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role === "assistant" && "tool_calls" in msg && msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        if (tc.function.name === "ask_questions" && tc.id) {
+          askQuestionsToolIds.set(tc.id, i);
+        }
+      }
+    }
+  }
+
+  for (const [toolCallId, assistantIdx] of askQuestionsToolIds) {
+    let foundToolResult = false;
+    for (let j = assistantIdx + 1; j < messages.length; j++) {
+      const msg = messages[j];
+      if (isToolMessage(msg) && msg.tool_call_id === toolCallId) {
+        foundToolResult = true;
+        continue;
+      }
+      if (foundToolResult && msg.role === "user") {
+        const contentStr = extractUserMessageText(msg.content);
+        if (contentStr.startsWith(`[QA:${toolCallId}]`)) {
+          hiddenIndices.add(j);
+        }
+        break;
+      }
+    }
+  }
+
+  return hiddenIndices;
 }

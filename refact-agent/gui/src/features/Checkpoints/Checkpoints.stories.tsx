@@ -14,9 +14,6 @@ const Template: React.FC<{ initialState?: CheckpointsMeta }> = ({
   initialState,
 }) => {
   const store = setUpStore({
-    tour: {
-      type: "finished",
-    },
     config: {
       apiKey: "foo",
       addressURL: "Refact",

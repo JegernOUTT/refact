@@ -16,6 +16,7 @@ import {
 } from "../../../../../hooks/useModelsQuery";
 
 import { FormField } from "./FormField";
+import { FormSelect } from "./FormSelect";
 import { CapabilityBadge } from "./CapabilityBadge";
 
 import type {
@@ -25,20 +26,10 @@ import type {
   Model,
   ModelType,
   SimplifiedModel,
-  SupportsReasoningStyle,
 } from "../../../../../services/refact";
 
-import { extractHumanReadableReasoningType } from "../utils";
 import { useEffectOnce } from "../../../../../hooks";
-import { FormSelect } from "./FormSelect";
 import { Spinner } from "../../../../../components/Spinner";
-
-const SUPPORTED_REASONING_STYLES: SupportsReasoningStyle[] = [
-  "openai",
-  "deepseek",
-  "anthropic",
-  null,
-];
 
 export type ModelCardPopupProps = {
   minifiedModel?: SimplifiedModel;
@@ -374,28 +365,47 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
       .split("")
       .map((s) => (s === "." ? undefined : s));
 
-    if (value > 1 || digits.length > 8) {
-      e.target.value = "1";
+    if (value > 2 || digits.length > 8) {
+      e.target.value = "2";
     }
 
     setEditedModelData({
       ...editedModelData,
       type: "chat",
       default_temperature:
-        e.target.value === "" ? null : Math.min(parseFloat(e.target.value), 1),
+        e.target.value === "" ? null : Math.min(parseFloat(e.target.value), 2),
     });
   };
 
-  const handleReasoningStyleChange = (value: string) => {
+  const handleFrequencyPenaltyChange = (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
     if (!editedModelData) return;
+    const value = parseFloat(e.target.value);
+
+    if (value < -2 || value > 2) {
+      e.target.value = Math.max(-2, Math.min(2, value)).toString();
+    }
 
     setEditedModelData({
       ...editedModelData,
       type: "chat",
-      supports_boost_reasoning:
-        value === "null" ? false : editedModelData.supports_boost_reasoning,
-      supports_reasoning:
-        value === "null" ? null : (value as SupportsReasoningStyle),
+      default_frequency_penalty:
+        e.target.value === ""
+          ? null
+          : Math.max(-2, Math.min(2, parseFloat(e.target.value))),
+    });
+  };
+
+  const handleMaxTokensChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!editedModelData) return;
+    const value = parseInt(e.target.value, 10);
+
+    setEditedModelData({
+      ...editedModelData,
+      type: "chat",
+      default_max_tokens:
+        e.target.value === "" || isNaN(value) ? null : Math.max(0, value),
     });
   };
 
@@ -420,20 +430,27 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
       <FormField
         label="Default Temperature"
         value={editedModelData.default_temperature?.toString() ?? ""}
-        placeholder="Default temperature"
+        placeholder="Default temperature (0-2)"
         type="number"
-        max="1"
+        max="2"
         onChange={handleTemperatureChange}
+      />
+      <FormField
+        label="Default Frequency Penalty"
+        value={editedModelData.default_frequency_penalty?.toString() ?? ""}
+        placeholder="Default frequency penalty (-2 to 2)"
+        type="number"
+        onChange={handleFrequencyPenaltyChange}
+      />
+      <FormField
+        label="Default Max Tokens"
+        value={editedModelData.default_max_tokens?.toString() ?? ""}
+        placeholder="Default max tokens"
+        type="number"
+        onChange={handleMaxTokensChange}
       />
 
       <Flex direction="column" gap="2">
-        <FormSelect
-          label="Reasoning Style"
-          value={editedModelData.supports_reasoning ?? "null"}
-          onValueChange={handleReasoningStyleChange}
-          options={SUPPORTED_REASONING_STYLES}
-          optionTransformer={extractHumanReadableReasoningType}
-        />
         <Text as="div" size="2" weight="bold">
           Capabilities
         </Text>
@@ -458,13 +475,11 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
             enabled={editedModelData.supports_agent}
             onClick={() => toggleCapability("supports_agent")}
           />
-          {editedModelData.supports_reasoning && (
-            <CapabilityBadge
-              name="Boost Reasoning"
-              enabled={!!editedModelData.supports_boost_reasoning}
-              onClick={() => toggleCapability("supports_boost_reasoning")}
-            />
-          )}
+          <CapabilityBadge
+            name="Thinking Budget"
+            enabled={!!editedModelData.supports_thinking_budget}
+            onClick={() => toggleCapability("supports_thinking_budget")}
+          />
         </Flex>
       </Flex>
     </>

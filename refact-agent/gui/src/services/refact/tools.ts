@@ -196,6 +196,7 @@ export type ToolSpec = {
   parameters_required?: string[];
   agentic: boolean;
   experimental?: boolean;
+  allow_parallel?: boolean;
 };
 
 export type Tool = {
@@ -204,7 +205,9 @@ export type Tool = {
 };
 
 export type ToolConfirmationPauseReason = {
-  type: "confirmation" | "denial";
+  type: "confirmation" | "denial" | "unknown";
+  raw_type?: string;
+  tool_name: string;
   command: string;
   rule: string;
   tool_call_id: string;

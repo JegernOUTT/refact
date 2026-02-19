@@ -1,56 +1,27 @@
 import React from "react";
-import "./highlightjs.css";
-import { Flex, Button } from "@radix-ui/themes";
-import { useConfig } from "../../hooks";
-import { RightButtonGroup, RightButton } from "../Buttons";
+import { IconButton, Tooltip } from "@radix-ui/themes";
+import { CopyIcon } from "@radix-ui/react-icons";
+import styles from "./Markdown.module.css";
 
 const PreTagWithButtons: React.FC<
   React.PropsWithChildren<{
     onCopyClick: () => void;
+    className?: string;
   }>
-> = ({ children, onCopyClick, ...props }) => {
-  const config = useConfig();
-
+> = ({ children, onCopyClick, className, ...props }) => {
   return (
-    <pre {...props}>
-      {config.host === "web" ? (
-        <RightButtonGroup
-          direction="column"
-          style={{
-            position: "static",
-            minHeight: "var(--space-6)",
-          }}
+    <pre className={className} {...props}>
+      <Tooltip content="Copy">
+        <IconButton
+          size="1"
+          variant="soft"
+          className={styles.copy_button}
+          onClick={onCopyClick}
+          aria-label="Copy code"
         >
-          <Flex
-            gap="1"
-            justify="end"
-            style={{ position: "absolute", right: "0" }}
-            pr="2"
-            pt="1"
-          >
-            <RightButton onClick={onCopyClick}>Copy</RightButton>
-          </Flex>
-        </RightButtonGroup>
-      ) : (
-        <RightButtonGroup
-          direction="column"
-          style={{
-            position: "static",
-            minHeight: "var(--space-5)",
-          }}
-        >
-          <Flex
-            gap="1"
-            justify="end"
-            style={{ position: "absolute", right: "0" }}
-            pr="2"
-          >
-            <Button size="1" variant="surface" onClick={onCopyClick}>
-              ⿻ Copy
-            </Button>
-          </Flex>
-        </RightButtonGroup>
-      )}
+          <CopyIcon width={12} height={12} />
+        </IconButton>
+      </Tooltip>
       {children}
     </pre>
   );
@@ -58,13 +29,29 @@ const PreTagWithButtons: React.FC<
 
 export type PreTagProps = {
   onCopyClick?: () => void;
+  className?: string;
 };
 
-export const PreTag: React.FC<React.PropsWithChildren<PreTagProps>> = (
-  props,
-) => {
-  if (props.onCopyClick) {
-    return <PreTagWithButtons {...props} onCopyClick={props.onCopyClick} />;
+export const PreTag: React.FC<React.PropsWithChildren<PreTagProps>> = ({
+  onCopyClick,
+  className,
+  children,
+  ...rest
+}) => {
+  if (onCopyClick) {
+    return (
+      <PreTagWithButtons
+        onCopyClick={onCopyClick}
+        className={className}
+        {...rest}
+      >
+        {children}
+      </PreTagWithButtons>
+    );
   }
-  return <pre {...props} />;
+  return (
+    <pre className={className} {...rest}>
+      {children}
+    </pre>
+  );
 };

@@ -6,18 +6,16 @@ use tracing::error;
 use crate::ast::treesitter::ast_instance_structs::AstSymbolInstanceArc;
 use crate::ast::treesitter::language_id::LanguageId;
 
-
+mod cpp;
+mod java;
+mod js;
+mod kotlin;
 pub(crate) mod python;
 pub(crate) mod rust;
 #[cfg(test)]
 mod tests;
-mod utils;
-mod java;
-mod kotlin;
-mod cpp;
 mod ts;
-mod js;
-
+mod utils;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ParserError {
@@ -36,7 +34,9 @@ fn internal_error<E: Display>(err: E) -> ParserError {
     }
 }
 
-pub(crate) fn get_ast_parser(language_id: LanguageId) -> Result<Box<dyn AstLanguageParser + 'static>, ParserError> {
+pub(crate) fn get_ast_parser(
+    language_id: LanguageId,
+) -> Result<Box<dyn AstLanguageParser + 'static>, ParserError> {
     match language_id {
         LanguageId::Rust => {
             let parser = rust::RustParser::new()?;
@@ -71,26 +71,37 @@ pub(crate) fn get_ast_parser(language_id: LanguageId) -> Result<Box<dyn AstLangu
             Ok(Box::new(parser))
         }
         other => Err(ParserError {
-            message: "Unsupported language id: ".to_string() + &other.to_string()
+            message: "Unsupported language id: ".to_string() + &other.to_string(),
         }),
     }
 }
 
-
-pub fn get_ast_parser_by_filename(filename: &PathBuf) -> Result<(Box<dyn AstLanguageParser + 'static>, LanguageId), ParserError> {
-    let suffix = filename.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+pub fn get_ast_parser_by_filename(
+    filename: &PathBuf,
+) -> Result<(Box<dyn AstLanguageParser + 'static>, LanguageId), ParserError> {
+    let suffix = filename
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     let maybe_language_id = get_language_id_by_filename(filename);
     match maybe_language_id {
         Some(language_id) => {
             let parser = get_ast_parser(language_id)?;
             Ok((parser, language_id))
         }
-        None => Err(ParserError { message: format!("not supported {}", suffix) }),
+        None => Err(ParserError {
+            message: format!("not supported {}", suffix),
+        }),
     }
 }
 
 pub fn get_language_id_by_filename(filename: &PathBuf) -> Option<LanguageId> {
-    let suffix = filename.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let suffix = filename
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     match suffix.as_str() {
         "cpp" | "cc" | "cxx" | "c++" | "c" | "h" | "hpp" | "hxx" | "hh" => Some(LanguageId::Cpp),
         "inl" | "inc" | "tpp" | "tpl" => Some(LanguageId::Cpp),
@@ -101,7 +112,6 @@ pub fn get_language_id_by_filename(filename: &PathBuf) -> Option<LanguageId> {
         "rs" => Some(LanguageId::Rust),
         "ts" => Some(LanguageId::TypeScript),
         "tsx" => Some(LanguageId::TypeScriptReact),
-        _ => None
+        _ => None,
     }
 }
-

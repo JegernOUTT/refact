@@ -42,32 +42,35 @@ fn parse_table_timestamp(table_name: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-pub async fn cleanup_old_emb_tables(conn: &Connection, days: usize, max_count: usize) -> Result<(), String> {
-    async fn get_all_emb_tables(
-        conn: &Connection,
-    ) -> rusqlite::Result<Vec<TableInfo>, String> {
-        Ok(conn.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'emb_%'",
-            )?;
-            let tables = stmt.query_map([], |row| {
-                let name: String = row.get(0)?;
-                Ok(name)
-            })?;
-            let mut table_infos = Vec::new();
-            for table_result in tables {
-                let table_name = table_result?;
-                if let Some(creation_time) = parse_table_timestamp(&table_name) {
-                    table_infos.push(TableInfo {
-                        name: table_name,
-                        creation_time,
-                    });
+pub async fn cleanup_old_emb_tables(
+    conn: &Connection,
+    days: usize,
+    max_count: usize,
+) -> Result<(), String> {
+    async fn get_all_emb_tables(conn: &Connection) -> rusqlite::Result<Vec<TableInfo>, String> {
+        Ok(conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'emb_%'",
+                )?;
+                let tables = stmt.query_map([], |row| {
+                    let name: String = row.get(0)?;
+                    Ok(name)
+                })?;
+                let mut table_infos = Vec::new();
+                for table_result in tables {
+                    let table_name = table_result?;
+                    if let Some(creation_time) = parse_table_timestamp(&table_name) {
+                        table_infos.push(TableInfo {
+                            name: table_name,
+                            creation_time,
+                        });
+                    }
                 }
-            }
-            Ok(table_infos)
-        })
-        .await
-        .map_err(|e| e.to_string())?)
+                Ok(table_infos)
+            })
+            .await
+            .map_err(|e| e.to_string())?)
     }
 
     let mut tables = get_all_emb_tables(conn).await?;

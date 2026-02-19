@@ -1,0 +1,47 @@
+schema_version: 2
+id: memo_extraction
+title: Memo Extraction
+description: Extract memos and insights from chat trajectories
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 200000
+  max_new_tokens: 8192
+  temperature: 0.2
+  tokens_for_rag: 0
+
+messages:
+  user_template: |
+    Analyze this conversation and provide:
+
+    1. FIRST LINE: A JSON with overview and title:
+    {"overview": "<2-3 sentence summary of what was accomplished>", "title": "<2-4 word descriptive title>"}
+
+    2. FOLLOWING LINES: Extract separate, useful memory items (3-10 max):
+    {"type": "<type>", "content": "<concise insight>"}
+
+    Types for memory items:
+    - pattern: Reusable code patterns or approaches discovered
+    - preference: User preferences about coding style, communication, tools
+    - lesson: What went wrong and how it was fixed
+    - decision: Important architectural or design decisions made
+    - insight: General useful observations about the codebase or project
+
+    Rules:
+    - Overview should capture the main goal and outcome
+    - Title should be descriptive and specific (e.g., "Fix Auth Middleware" not "Bug Fix")
+    - Each memory item should be self-contained and actionable
+    - Keep content concise (1-3 sentences max)
+    - Only extract genuinely useful, reusable knowledge
+    - Skip trivial details or conversation noise
+
+    Example output:
+    {"overview": "Implemented a custom VecDB splitter for trajectory files to enable semantic search over past conversations. Added two new tools for searching and retrieving trajectory context.", "title": "Trajectory Search Tools"}
+    {"type": "pattern", "content": "When implementing async file operations in this project, use tokio::fs instead of std::fs to avoid blocking."}
+    {"type": "preference", "content": "User prefers concise code without excessive comments."}
+
+tools: []

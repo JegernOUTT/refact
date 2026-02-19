@@ -15,58 +15,65 @@ use crate::background_tasks::start_background_tasks;
 use crate::lsp::spawn_lsp_task;
 use crate::telemetry::{basic_transmit, snippets_transmit};
 use crate::yaml_configs::create_configs::yaml_configs_try_create_all;
-use crate::yaml_configs::customization_loader::load_customization;
+use crate::yaml_configs::customization_registry::get_project_registry;
 use sqlite_vec::sqlite3_vec_init;
 use rusqlite::ffi::sqlite3_auto_extension;
 
 // mods roughly sorted by dependency ↓
 
-mod version;
-mod custom_error;
-mod nicer_logs;
+mod background_tasks;
 mod caps;
-mod telemetry;
+mod custom_error;
 mod global_context;
 mod indexing_utils;
-mod background_tasks;
-mod yaml_configs;
 mod json_utils;
+mod nicer_logs;
+mod telemetry;
+mod version;
+mod yaml_configs;
 
-mod file_filter;
-mod files_in_workspace;
-mod files_in_jsonl;
-mod files_blocklist;
-mod fuzzy_search;
-mod files_correction;
-mod vecdb;
 mod ast;
-mod subchat;
 mod at_commands;
-mod tools;
-mod postprocessing;
 mod completion_cache;
-mod tokens;
+mod file_filter;
+mod files_blocklist;
+mod files_correction;
+mod files_in_jsonl;
+mod files_in_workspace;
+mod fuzzy_search;
+mod postprocessing;
 mod scratchpad_abstract;
 mod scratchpads;
+mod subchat;
+mod tokens;
+mod tools;
+mod vecdb;
 
 mod fetch_embedding;
-mod forward_to_hf_endpoint;
 mod forward_to_openai_endpoint;
+mod llm;
+mod providers;
 mod restream;
 
 mod call_validation;
+mod chat;
 mod dashboard;
-mod lsp;
 mod http;
+mod lsp;
 
-mod integrations;
-mod privacy;
-mod git;
 mod agentic;
-mod memories;
-mod files_correction_cache;
-mod knowledge_graph;
 pub mod constants;
+mod files_correction_cache;
+mod git;
+mod integrations;
+mod knowledge_graph;
+mod knowledge_index;
+mod memories;
+mod privacy;
+mod stats;
+mod tasks;
+mod trajectory_memos;
+mod voice;
 
 #[tokio::main]
 async fn main() {
@@ -81,13 +88,27 @@ async fn main() {
     }
 
     let cpu_num = std::thread::available_parallelism().unwrap().get();
-    rayon::ThreadPoolBuilder::new().num_threads(cpu_num / 2).build_global().unwrap();
-    let home_dir = canonical_path(home::home_dir().ok_or(()).expect("failed to find home dir").to_string_lossy().to_string());
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(std::cmp::max(1, cpu_num / 2))
+        .build_global()
+        .unwrap();
+    let home_dir = canonical_path(
+        home::home_dir()
+            .ok_or(())
+            .expect("failed to find home dir")
+            .to_string_lossy()
+            .to_string(),
+    );
     let cache_dir = home_dir.join(".cache").join("refact");
     let config_dir = home_dir.join(".config").join("refact");
-    tokio::fs::create_dir_all(&cache_dir).await.expect("failed to create cache dir");
-    tokio::fs::create_dir_all(&config_dir).await.expect("failed to create cache dir");
-    let (gcx, ask_shutdown_receiver, cmdline) = global_context::create_global_context(cache_dir.clone(), config_dir.clone()).await;
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .expect("failed to create cache dir");
+    tokio::fs::create_dir_all(&config_dir)
+        .await
+        .expect("failed to create cache dir");
+    let (gcx, ask_shutdown_receiver, cmdline) =
+        global_context::create_global_context(cache_dir.clone(), config_dir.clone()).await;
     let mut writer_is_stderr = false;
     let (logs_writer, _guard) = if cmdline.logs_stderr {
         writer_is_stderr = true;
@@ -95,28 +116,36 @@ async fn main() {
     } else if !cmdline.logs_to_file.is_empty() {
         tracing_appender::non_blocking(tracing_appender::rolling::RollingFileAppender::new(
             tracing_appender::rolling::Rotation::NEVER,
-            std::path::Path::new(&cmdline.logs_to_file).parent().unwrap(),
-            std::path::Path::new(&cmdline.logs_to_file).file_name().unwrap()
+            std::path::Path::new(&cmdline.logs_to_file)
+                .parent()
+                .unwrap(),
+            std::path::Path::new(&cmdline.logs_to_file)
+                .file_name()
+                .unwrap(),
         ))
     } else {
         let _ = write!(std::io::stderr(), "This rust binary keeps logs as files, rotated daily. Try\ntail -f {}/logs/\nor use --logs-stderr for debugging. Any errors will duplicate here in stderr.\n\n", cache_dir.display());
-        tracing_appender::non_blocking(tracing_appender::rolling::RollingFileAppender::builder()
-            .rotation(tracing_appender::rolling::Rotation::DAILY)
-            .filename_prefix("rustbinary")
-            .max_log_files(30)
-            .build(cache_dir.join("logs")).unwrap()
+        tracing_appender::non_blocking(
+            tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix("rustbinary")
+                .max_log_files(30)
+                .build(cache_dir.join("logs"))
+                .unwrap(),
         )
     };
     let my_layer = nicer_logs::CustomLayer::new(
         logs_writer.clone(),
         writer_is_stderr,
-        if cmdline.verbose { Level::DEBUG } else { Level::INFO },
+        if cmdline.verbose {
+            Level::DEBUG
+        } else {
+            Level::INFO
+        },
         Level::ERROR,
-        cmdline.lsp_stdin_stdout == 0
+        cmdline.lsp_stdin_stdout == 0,
     );
-    let _tracing = tracing_subscriber::registry()
-        .with(my_layer)
-        .init();
+    let _tracing = tracing_subscriber::registry().with(my_layer).init();
 
     panic::set_hook(Box::new(|panic_info| {
         let backtrace = backtrace::Backtrace::new();
@@ -126,7 +155,10 @@ async fn main() {
     match global_context::migrate_to_config_folder(&config_dir, &cache_dir).await {
         Ok(_) => {}
         Err(err) => {
-            tracing::error!("failed to migrate config files from .cache to .config, exiting: {:?}", err);
+            tracing::error!(
+                "failed to migrate config files from .cache to .config, exiting: {:?}",
+                err
+            );
         }
     }
 
@@ -138,8 +170,18 @@ async fn main() {
         info!("cache dir: {}", cache_dir.display());
         let mut api_key_at: usize = usize::MAX;
         for (arg_n, arg_v) in env::args().enumerate() {
-            info!("cmdline[{}]: {:?}", arg_n, if arg_n != api_key_at { arg_v.as_str() } else { "***" } );
-            if arg_v == "--api-key" { api_key_at = arg_n + 1; }
+            info!(
+                "cmdline[{}]: {:?}",
+                arg_n,
+                if arg_n != api_key_at {
+                    arg_v.as_str()
+                } else {
+                    "***"
+                }
+            );
+            if arg_v == "--api-key" {
+                api_key_at = arg_n + 1;
+            }
         }
     }
 
@@ -149,18 +191,26 @@ async fn main() {
         std::process::exit(0);
     }
 
-    if cmdline.print_customization {  // used in JB
-        let mut error_log = Vec::new();
-        let cust = load_customization(gcx.clone(), false, &mut error_log).await;
-        for e in error_log.iter() {
-            eprintln!("{e}");
+    if cmdline.print_customization {
+        if let Some(registry) = get_project_registry(gcx.clone()).await {
+            for e in registry.errors.iter() {
+                eprintln!("{}: {}", e.file_path, e.error);
+            }
+            println!("{}", serde_json::to_string_pretty(&registry).unwrap());
+        } else {
+            eprintln!("Failed to load project registry");
         }
-        println!("{}", serde_json::to_string_pretty(&cust).unwrap());
         std::process::exit(0);
     }
 
     if cmdline.ast {
-        let tmp = Some(crate::ast::ast_indexer_thread::ast_service_init(cmdline.ast_permanent.clone(), cmdline.ast_max_files).await);
+        let tmp = Some(
+            crate::ast::ast_indexer_thread::ast_service_init(
+                cmdline.ast_permanent.clone(),
+                cmdline.ast_max_files,
+            )
+            .await,
+        );
         let mut gcx_locked = gcx.write().await;
         gcx_locked.ast_service = tmp;
     }
@@ -178,8 +228,8 @@ async fn main() {
     // vector db will spontaneously start if the downloaded caps and command line parameters are right
 
     let should_start_http = cmdline.http_port != 0;
-    let should_start_lsp = (cmdline.lsp_port == 0 && cmdline.lsp_stdin_stdout == 1) ||
-        (cmdline.lsp_port != 0 && cmdline.lsp_stdin_stdout == 0);
+    let should_start_lsp = (cmdline.lsp_port == 0 && cmdline.lsp_stdin_stdout == 1)
+        || (cmdline.lsp_port != 0 && cmdline.lsp_stdin_stdout == 0);
 
     let mut main_handle: Option<JoinHandle<()>> = None;
     if should_start_http {
@@ -197,6 +247,7 @@ async fn main() {
         let _ = main_handle.unwrap().await;
     }
 
+    chat::close_all_chat_sessions(gcx.clone()).await;
     background_tasks.abort().await;
     git::checkpoints::abort_init_shadow_repos(gcx.clone()).await;
     integrations::sessions::stop_sessions(gcx.clone()).await;

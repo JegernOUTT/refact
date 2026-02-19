@@ -1,26 +1,11 @@
-import { SupportsReasoningStyle } from "../../../../../services/refact";
-import { BEAUTIFUL_PROVIDER_NAMES } from "../../../constants";
-
-export function isSupportsReasoningStyle(
-  data: string | null,
-): data is SupportsReasoningStyle {
+export function hasReasoningSupport(model: {
+  reasoning_effort_options?: string[] | null;
+  supports_thinking_budget?: boolean;
+  supports_adaptive_thinking_budget?: boolean;
+}): boolean {
   return (
-    data === "openai" ||
-    data === "anthropic" ||
-    data === "deepseek" ||
-    data === null
+    !!model.reasoning_effort_options?.length ||
+    !!model.supports_thinking_budget ||
+    !!model.supports_adaptive_thinking_budget
   );
-}
-
-export function extractHumanReadableReasoningType(
-  reasoningType: string | null,
-) {
-  if (!isSupportsReasoningStyle(reasoningType)) return null;
-  if (!reasoningType) return null;
-
-  const maybeReadableReasoningType = BEAUTIFUL_PROVIDER_NAMES[reasoningType];
-
-  return maybeReadableReasoningType
-    ? maybeReadableReasoningType
-    : reasoningType;
 }

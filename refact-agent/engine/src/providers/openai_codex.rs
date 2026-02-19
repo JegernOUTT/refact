@@ -1,0 +1,363 @@
+use std::any::Any;
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::caps::model_caps::ModelCapabilities;
+use crate::llm::adapter::WireFormat;
+use crate::providers::openai_codex_oauth::OAuthTokens;
+use crate::providers::traits::{
+    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+};
+use crate::providers::pricing::openai_pricing;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AuthSource {
+    InAppOAuth,
+    CodexCli,
+    None,
+}
+
+#[derive(Debug, Clone)]
+enum CodexAuth {
+    PlatformApiKey { api_key: String },
+    ChatGptBackendOAuth {
+        access_token: String,
+        chatgpt_account_id: String,
+    },
+    None,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenAICodexProvider {
+    #[serde(default)]
+    pub enabled_models: Vec<String>,
+    #[serde(default)]
+    pub custom_models: HashMap<String, CustomModelConfig>,
+    #[serde(default)]
+    pub oauth_tokens: OAuthTokens,
+}
+
+impl OpenAICodexProvider {
+    /// Returns the credential to use for api.openai.com endpoints.
+    ///
+    /// IMPORTANT: Codex/ChatGPT OAuth produces an OAuth access token, but the OpenAI Platform
+    /// API requires an API key with `api.responses.write` scope. Codex CLI obtains that API key
+    /// via OAuth token-exchange and stores it as OPENAI_API_KEY.
+    fn resolve_auth(&self) -> (AuthSource, CodexAuth) {
+        // Prefer API key obtained via token-exchange in our OAuth flow.
+        if !self.oauth_tokens.openai_api_key.is_empty() {
+            return (
+                AuthSource::InAppOAuth,
+                CodexAuth::PlatformApiKey {
+                    api_key: self.oauth_tokens.openai_api_key.clone(),
+                },
+            );
+        }
+
+        // If we have a ChatGPT OAuth access token + chatgpt_account_id, we can use
+        // ChatGPT backend endpoint (Codex-style) without an OpenAI Platform org.
+        if self.oauth_tokens.has_valid_access_token() && !self.oauth_tokens.chatgpt_account_id.is_empty() {
+            return (
+                AuthSource::InAppOAuth,
+                CodexAuth::ChatGptBackendOAuth {
+                    access_token: self.oauth_tokens.access_token.clone(),
+                    chatgpt_account_id: self.oauth_tokens.chatgpt_account_id.clone(),
+                },
+            );
+        }
+
+        // Fall back to Codex CLI credentials: prefer OPENAI_API_KEY if present.
+        if let Ok(cli_tokens) = crate::providers::openai_codex_oauth::read_codex_cli_credentials() {
+            if !cli_tokens.openai_api_key.is_empty() {
+                return (
+                    AuthSource::CodexCli,
+                    CodexAuth::PlatformApiKey {
+                        api_key: cli_tokens.openai_api_key,
+                    },
+                );
+            }
+        }
+
+        // Last resort: OAuth access token only (usually not enough).
+        if self.oauth_tokens.has_valid_access_token() {
+            return (
+                AuthSource::InAppOAuth,
+                CodexAuth::ChatGptBackendOAuth {
+                    access_token: self.oauth_tokens.access_token.clone(),
+                    chatgpt_account_id: String::new(),
+                },
+            );
+        }
+
+        (AuthSource::None, CodexAuth::None)
+    }
+
+    fn diagnose_auth_status(&self) -> String {
+        if !self.oauth_tokens.openai_api_key.is_empty() {
+            return "OK (OAuth login — Platform API key)".to_string();
+        }
+
+        if self.oauth_tokens.has_valid_access_token() {
+            if !self.oauth_tokens.chatgpt_account_id.is_empty() {
+                if self.oauth_tokens.api_key_exchange_error.is_empty() {
+                    return "Connected (ChatGPT backend)".to_string();
+                }
+                // Keep details in `api_key_exchange_error`; show a short user-friendly status.
+                return "Connected (ChatGPT backend). Platform API key not available for this account.".to_string();
+            }
+            return "OAuth login incomplete: missing chatgpt_account_id".to_string();
+        }
+
+        if !self.oauth_tokens.is_empty() && self.oauth_tokens.has_refresh_token() {
+            return "OAuth token expired — needs refresh".to_string();
+        }
+        if crate::providers::openai_codex_oauth::codex_cli_credentials_exist() {
+            return "OK (Codex CLI session)".to_string();
+        }
+        "No credentials found".to_string()
+    }
+}
+
+#[async_trait]
+impl ProviderTrait for OpenAICodexProvider {
+    fn name(&self) -> &'static str {
+        "openai_codex"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "OpenAI Codex"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn ProviderTrait> {
+        Box::new(self.clone())
+    }
+
+    fn default_wire_format(&self) -> WireFormat {
+        WireFormat::OpenaiResponses
+    }
+
+    fn model_filter_regex(&self) -> Option<&'static str> {
+        Some(r"^(gpt-.*codex|codex-)")
+    }
+
+    fn provider_schema(&self) -> &'static str {
+        r#"
+fields: {}
+oauth:
+  supported: true
+  methods:
+    - id: chatgpt
+      label: "ChatGPT Plus/Pro"
+      description: "Login with your ChatGPT Plus or Pro subscription"
+description: |
+  Use your ChatGPT Plus/Pro subscription to access OpenAI Codex models (GPT-5-Codex family).
+
+  **Setup:** Click **Login with OpenAI** below, or install Codex CLI and run `codex login`.
+available:
+  on_your_laptop_possible: true
+  when_isolated_possible: true
+"#
+    }
+
+    fn provider_settings_apply(&mut self, yaml: serde_yaml::Value) -> Result<(), String> {
+        if let Some(oauth_tokens) = yaml.get("oauth_tokens") {
+            self.oauth_tokens = serde_yaml::from_value(oauth_tokens.clone())
+                .unwrap_or_default();
+        }
+        parse_enabled_models(&yaml, &mut self.enabled_models);
+        parse_custom_models(&yaml, &mut self.custom_models);
+        Ok(())
+    }
+
+    fn provider_settings_as_json(&self) -> serde_json::Value {
+        let auth_status = self.diagnose_auth_status();
+        let oauth_connected = self.oauth_tokens.has_valid_access_token() || self.oauth_tokens.has_refresh_token();
+        let api_key_ready = !self.oauth_tokens.openai_api_key.is_empty();
+
+        json!({
+            "auth_status": auth_status,
+            "oauth_connected": oauth_connected,
+            "api_key_ready": api_key_ready,
+            "api_key_exchange_error": self.oauth_tokens.api_key_exchange_error,
+            "enabled_models": self.enabled_models,
+            "custom_models": self.custom_models
+        })
+    }
+
+    fn build_runtime(&self) -> Result<ProviderRuntime, String> {
+        let (_, auth) = self.resolve_auth();
+        let mut extra_headers = HashMap::new();
+
+        let (chat_endpoint, api_key) = match auth {
+            CodexAuth::PlatformApiKey { api_key } => ("https://api.openai.com/v1/responses".to_string(), api_key),
+            CodexAuth::ChatGptBackendOAuth { access_token, chatgpt_account_id, .. } => {
+                // OpenCode/Codex-style endpoint: ChatGPT backend
+                // Requires store:false (set in adapter by endpoint), and special headers.
+                if !chatgpt_account_id.is_empty() {
+                    extra_headers.insert("chatgpt-account-id".to_string(), chatgpt_account_id);
+                }
+                extra_headers.insert("OpenAI-Beta".to_string(), "responses=experimental".to_string());
+                extra_headers.insert("originator".to_string(), "codex_cli_rs".to_string());
+                extra_headers.insert("accept".to_string(), "text/event-stream".to_string());
+                (
+                    "https://chatgpt.com/backend-api/codex/responses".to_string(),
+                    access_token,
+                )
+            }
+            CodexAuth::None => (String::new(), String::new()),
+        };
+
+        let has_auth = !api_key.is_empty() && !chat_endpoint.is_empty();
+
+        Ok(ProviderRuntime {
+            name: self.name().to_string(),
+            display_name: self.display_name().to_string(),
+            enabled: has_auth && !self.enabled_models.is_empty(),
+            readonly: false,
+            wire_format: self.default_wire_format(),
+            chat_endpoint,
+            completion_endpoint: String::new(),
+            embedding_endpoint: String::new(),
+            api_key,
+            auth_token: String::new(),
+            tokenizer_api_key: String::new(),
+            extra_headers,
+            support_metadata: false,
+            chat_models: Vec::new(),
+            completion_models: Vec::new(),
+            embedding_model: None,
+        })
+    }
+
+    fn has_credentials(&self) -> bool {
+        if !self.oauth_tokens.openai_api_key.is_empty() {
+            return true;
+        }
+        if self.oauth_tokens.has_valid_access_token() {
+            return true;
+        }
+        if self.oauth_tokens.has_refresh_token() {
+            return true;
+        }
+        crate::providers::openai_codex_oauth::codex_cli_credentials_exist()
+    }
+
+    fn model_source(&self) -> ModelSource {
+        ModelSource::ModelCaps
+    }
+
+    fn enabled_models(&self) -> &[String] {
+        &self.enabled_models
+    }
+
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
+        &self.custom_models
+    }
+
+    async fn fetch_available_models(
+        &self,
+        _http_client: &reqwest::Client,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let (_, auth) = self.resolve_auth();
+        let has_auth = match auth {
+            CodexAuth::PlatformApiKey { ref api_key } => !api_key.is_empty(),
+            CodexAuth::ChatGptBackendOAuth { ref access_token, .. } => !access_token.is_empty(),
+            CodexAuth::None => false,
+        };
+        if !has_auth {
+            tracing::warn!("OpenAI Codex: no auth");
+            return self.get_custom_models_only();
+        }
+
+        let mut codex_model_ids: Vec<String> = vec![
+            "gpt-5.3-codex".to_string(),
+            "gpt-5.2-codex".to_string(),
+            "gpt-5.1-codex-max".to_string(),
+            "gpt-5.2".to_string(),
+            "gpt-5.1-codex-mini".to_string(),
+        ];
+
+        let codex_pattern = regex::Regex::new(r"(?i)^gpt.*codex").expect("valid static regex");
+        for model_id in model_caps.keys() {
+            if codex_pattern.is_match(model_id) && !codex_model_ids.contains(model_id) {
+                codex_model_ids.push(model_id.clone());
+            }
+        }
+
+        tracing::info!("OpenAI Codex: {} models available (hardcoded + discovered)", codex_model_ids.len());
+
+        let enabled_set: std::collections::HashSet<_> =
+            self.enabled_models.iter().map(|s| s.as_str()).collect();
+
+        let mut models: Vec<AvailableModel> = Vec::new();
+
+        for model_id in &codex_model_ids {
+            let enabled = enabled_set.contains(model_id.as_str());
+            let pricing = self.model_pricing(model_id);
+
+            if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, model_id) {
+                let model = AvailableModel::from_caps(model_id, &caps.caps, enabled, pricing);
+                models.push(model);
+            } else {
+                tracing::debug!("OpenAI Codex: no model_caps match for '{}', using defaults", model_id);
+                models.push(AvailableModel {
+                    id: model_id.to_string(),
+                    display_name: None,
+                    n_ctx: 200_000,
+                    supports_tools: true,
+                    supports_multimodality: true,
+                    reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
+                    supports_thinking_budget: false,
+                    supports_adaptive_thinking_budget: false,
+                    tokenizer: None,
+                    enabled,
+                    is_custom: false,
+                    pricing,
+                    available_providers: Vec::new(),
+                    selected_provider: None,
+                    max_output_tokens: None,
+                    provider_variants: Vec::new(),
+                });
+            }
+        }
+
+        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
+
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
+
+    fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
+        set_model_enabled_impl(&mut self.enabled_models, model_id, enabled);
+    }
+
+    fn add_custom_model(&mut self, model_id: String, config: CustomModelConfig) {
+        self.custom_models.insert(model_id, config);
+    }
+
+    fn remove_custom_model(&mut self, model_id: &str) -> bool {
+        self.custom_models.remove(model_id).is_some()
+    }
+
+    fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
+        if let Some(config) = self.custom_models.get(model_id) {
+            if config.pricing.is_some() {
+                return config.pricing.clone();
+            }
+        }
+        openai_pricing(model_id)
+    }
+}

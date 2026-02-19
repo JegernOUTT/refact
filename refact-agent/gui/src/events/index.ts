@@ -6,7 +6,10 @@ export {
   type Chat,
   type ToolUse,
 } from "../features/Chat/Thread/types";
-export { newChatAction } from "../features/Chat/Thread/actions";
+export {
+  newChatAction,
+  newChatWithInitialMessages,
+} from "../features/Chat/Thread/actions";
 import { type Chat } from "../features/Chat/Thread/types";
 import type { Snippet } from "../features/Chat/selectedSnippet";
 import type { Config } from "../features/Config/configSlice";
@@ -15,7 +18,6 @@ import { request, ready, receive, error } from "../features/FIM/actions";
 import type { HistoryState } from "../features/History/historySlice";
 import type { TipOfTheDayState } from "../features/TipOfTheDay";
 import type { PageSliceState } from "../features/Pages/pagesSlice";
-import type { TourState } from "../features/Tour";
 import type { FIMDebugState } from "../hooks";
 import { CurrentProjectInfo } from "../features/Chat/currentProject";
 import { TeamsSliceState } from "../features/Teams";
@@ -49,7 +51,6 @@ export type {
 export type InitialState = {
   teams: TeamsSliceState;
   fim: FIMDebugState;
-  tour: TourState;
   tipOfTheDay: TipOfTheDayState;
   config: Config;
   active_file: FileInfo;
@@ -81,6 +82,9 @@ export {
   ideSetLoginMessage,
   ideSetActiveTeamsGroup,
   ideClearActiveTeamsGroup,
+  ideTaskDone,
+  ideAskQuestions,
+  ideSwitchToThread,
 } from "../hooks/useEventBusForIDE";
 
 export { ideAttachFileToChat } from "../hooks/useEventBusForApp";

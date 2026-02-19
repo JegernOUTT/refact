@@ -20,8 +20,6 @@ export const useUpdateProvider = ({
   const [getProviderData] = providersApi.useLazyGetProviderQuery();
   const [saveProviderData] = providersApi.useUpdateProviderMutation();
 
-  // Use the provider name as the key to track state
-  // then get updating state from context
   const providerKey = provider.name;
   const isUpdatingEnabledState = updatingProviders[providerKey] || false;
 
@@ -37,11 +35,14 @@ export const useUpdateProvider = ({
       return;
     }
 
-    const enabled = providerData.enabled;
+    const newSettings = {
+      ...providerData.settings,
+      enabled: !providerData.enabled,
+    };
 
     const response = await saveProviderData({
-      ...providerData,
-      enabled: !enabled,
+      providerName: provider.name,
+      settings: newSettings,
     });
 
     if (response.error) {
@@ -57,9 +58,7 @@ export const useUpdateProvider = ({
     }
 
     dispatch(
-      providersApi.util.invalidateTags([
-        { type: "CONFIGURED_PROVIDERS", id: "LIST" },
-      ]),
+      providersApi.util.invalidateTags([{ type: "PROVIDERS", id: "LIST" }]),
     );
     setTimeout(() => {
       setProviderUpdating(providerKey, false);

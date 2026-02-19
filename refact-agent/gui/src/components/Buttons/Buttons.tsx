@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback } from "react";
-import { IconButton, Button, Flex } from "@radix-ui/themes";
+import { IconButton, Button, Flex, HoverCard, Text } from "@radix-ui/themes";
 import {
   PaperPlaneIcon,
   ExitIcon,
@@ -8,6 +8,7 @@ import {
 } from "@radix-ui/react-icons";
 import classNames from "classnames";
 import styles from "./button.module.css";
+import iconStyles from "./iconButton.module.css";
 import { useOpenUrl } from "../../hooks/useOpenUrl";
 import { useAppSelector } from "../../hooks";
 import { selectApiKey } from "../../features/Config/configSlice";
@@ -21,13 +22,30 @@ export const PaperPlaneButton: React.FC<IconButtonProps> = (props) => (
     <PaperPlaneIcon />
   </IconButton>
 );
+type PlainButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
+
 export const AgentIntegrationsButton = forwardRef<
   HTMLButtonElement,
-  IconButtonProps
+  PlainButtonProps
 >((props, ref) => (
-  <IconButton variant="ghost" {...props} ref={ref}>
-    <PuzzleIcon />
-  </IconButton>
+  <HoverCard.Root>
+    <HoverCard.Trigger>
+      <button
+        type="button"
+        className={iconStyles.iconButton}
+        aria-label="Set up Agent Integrations"
+        {...props}
+        ref={ref}
+      >
+        <PuzzleIcon />
+      </button>
+    </HoverCard.Trigger>
+    <HoverCard.Content size="1" side="top">
+      <Text as="p" size="2">
+        Set up Agent Integrations
+      </Text>
+    </HoverCard.Content>
+  </HoverCard.Root>
 ));
 
 AgentIntegrationsButton.displayName = "AgentIntegrationsButton";
@@ -38,10 +56,24 @@ export const ThreadHistoryButton: React.FC<IconButtonProps> = (props) => (
   </IconButton>
 );
 
-export const BackToSideBarButton: React.FC<IconButtonProps> = (props) => (
-  <IconButton variant="ghost" {...props}>
-    <ExitIcon style={{ transform: "scaleX(-1)" }} />
-  </IconButton>
+export const BackToSideBarButton: React.FC<PlainButtonProps> = (props) => (
+  <HoverCard.Root>
+    <HoverCard.Trigger>
+      <button
+        type="button"
+        className={iconStyles.iconButton}
+        aria-label="Return to sidebar"
+        {...props}
+      >
+        <ExitIcon style={{ transform: "scaleX(-1)" }} />
+      </button>
+    </HoverCard.Trigger>
+    <HoverCard.Content size="1" side="top">
+      <Text as="p" size="2">
+        Return to sidebar
+      </Text>
+    </HoverCard.Content>
+  </HoverCard.Root>
 );
 
 export const CloseButton: React.FC<

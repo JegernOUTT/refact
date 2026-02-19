@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use crate::call_validation::CodeCompletionInputs;
 use crate::telemetry::utils;
 
-
 #[derive(Debug)]
 pub struct Storage {
     // pub last_flushed_ts: i64,
@@ -35,8 +34,8 @@ impl Storage {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TelemetryNetwork {
-    pub url: String,           // communication with url
-    pub scope: String,         // in relation to what
+    pub url: String,   // communication with url
+    pub scope: String, // in relation to what
     pub success: bool,
     pub error_message: String, // empty if no error
 }
@@ -84,9 +83,7 @@ pub struct TeleRobotHumanAccum {
 }
 
 impl TeleRobotHumanAccum {
-    pub fn new(
-        uri: String, baseline_text: String
-    ) -> Self {
+    pub fn new(uri: String, baseline_text: String) -> Self {
         Self {
             uri: uri.clone(),
             file_extension: utils::extract_extension_or_filename(&uri),
@@ -123,7 +120,12 @@ pub struct TeleCompletionAccum {
 
 impl TeleCompletionAccum {
     pub fn new(
-        snippet_telemetry_id: u64, uri: String, model: String, init_file_text: String, init_grey_text: String, created_ts: i64
+        snippet_telemetry_id: u64,
+        uri: String,
+        model: String,
+        init_file_text: String,
+        init_grey_text: String,
+        created_ts: i64,
     ) -> Self {
         Self {
             snippet_telemetry_id,
@@ -146,7 +148,7 @@ impl TeleCompletionAccum {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TelemetryChat {
-    pub scope: String,         // in relation to what
+    pub scope: String, // in relation to what
     pub success: bool,
     pub error_message: String, // empty if no error
 }

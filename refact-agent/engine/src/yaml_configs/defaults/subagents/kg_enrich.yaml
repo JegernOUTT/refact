@@ -1,0 +1,43 @@
+schema_version: 2
+id: kg_enrich
+title: Knowledge Graph Enrich
+description: Enrich knowledge graph entries with metadata
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 32000
+  max_new_tokens: 4096
+  temperature: 0.0
+  tokens_for_rag: 0
+
+messages:
+  user_template: |
+    Analyze the following knowledge content and extract metadata.
+
+    CONTENT:
+    {content}
+
+    EXTRACTED ENTITIES (backticked identifiers found):
+    {entities}
+
+    CANDIDATE FILES (from workspace, pick only relevant ones):
+    {candidate_files}
+
+    CANDIDATE RELATED DOCS (from knowledge base, pick only relevant ones):
+    {candidate_docs}
+
+    Return a JSON object with:
+    - title: a concise title for this knowledge (max 80 chars)
+    - tags: array of relevant tags (lowercase, max 8 tags)
+    - filenames: array of file paths this knowledge relates to (only from candidates)
+    - kind: one of "code", "decision", "domain", "process" (based on content)
+    - links: array of related doc IDs (only from candidates)
+    - review_after_days: suggested review period (90 for code/decision, 180 for domain)
+
+    JSON only, no explanation:
+
+tools: []

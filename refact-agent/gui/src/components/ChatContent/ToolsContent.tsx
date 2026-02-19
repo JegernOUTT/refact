@@ -1,17 +1,16 @@
-import React, { forwardRef, useCallback, useMemo, useRef } from "react";
+import React, {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
+import { Container, Flex, Text, Box, Spinner } from "@radix-ui/themes";
 import {
-  Container,
-  Flex,
-  Text,
-  Box,
-  Spinner,
-  Card,
-  Separator,
-} from "@radix-ui/themes";
-import {
+  ChatContextFile,
+  DiffChunk,
   isMultiModalToolResult,
-  // knowledgeApi,
   MultiModalToolResult,
   ToolCall,
   ToolResult,
@@ -35,18 +34,54 @@ import { DialogImage } from "../DialogImage";
 import { RootState } from "../../app/store";
 import { selectFeatures } from "../../features/Config/configSlice";
 import { isRawTextDocToolCall } from "../Tools/types";
-import { TextDocTool } from "../Tools/Textdoc";
-import { MarkdownCodeBlock } from "../Markdown/CodeBlock";
+import { useCollapsibleStore } from "./useStoredOpen";
+import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import { Markdown } from "../Markdown";
 import classNames from "classnames";
-import resultStyle from "react-syntax-highlighter/dist/esm/styles/hljs/arta";
-import { FadedButton } from "../Buttons";
 import { AnimatedText } from "../Text";
+import {
+  ReadTool,
+  ListTool,
+  SearchTool,
+  WebTool,
+  KnowledgeTool,
+  ShellTool as NewShellTool,
+  SubagentTool as NewSubagentTool,
+  PlanningTool,
+  CodeReviewTool as NewCodeReviewTool,
+  ResearchTool,
+  ShellServiceTool as NewShellServiceTool,
+  EditTool,
+  FileOpTool,
+  TasksTool,
+  GenericTool,
+  TaskDoneTool,
+  AskQuestionsTool,
+  OpenAIResponsesTool,
+  OpenAIWebSearchCallTool,
+  OpenAIFileSearchCallTool,
+  OpenAICodeInterpreterCallTool,
+  OpenAIComputerCallTool,
+  OpenAIComputerCallOutputTool,
+  OpenAIImageGenerationCallTool,
+  OpenAIAudioTool,
+  OpenAIRefusalTool,
+  OpenAIMcpCallTool,
+  OpenAIMcpListToolsTool,
+} from "./ToolCard";
+
+function parseProgressEntry(entry: string): { step?: string; text: string } {
+  const m = entry.match(/^(\d+\/\d+):\s*([\s\S]+)$/);
+  if (!m) return { text: entry };
+  const [, step, text] = m;
+  return { step, text };
+}
 
 type ResultProps = {
   children: string;
   isInsideScrollArea?: boolean;
   onClose?: () => void;
+  storeKey?: string;
 };
 
 function looksLikeMarkdown(text: string): boolean {
@@ -67,14 +102,19 @@ function looksLikeMarkdown(text: string): boolean {
 
 const MAX_MD_RENDER_CHARS = 50_000;
 
-const Result: React.FC<ResultProps> = ({ children, onClose }) => {
+const Result: React.FC<ResultProps> = ({ children, onClose, storeKey }) => {
   const lines = children.split("\n");
 
   const shouldRenderMarkdown =
     children.length <= MAX_MD_RENDER_CHARS && looksLikeMarkdown(children);
 
   return (
-    <Reveal defaultOpen={lines.length < 9} isRevealingCode onClose={onClose}>
+    <Reveal
+      defaultOpen={lines.length < 9}
+      isRevealingCode
+      onClose={onClose}
+      storeKey={storeKey}
+    >
       {shouldRenderMarkdown ? (
         <Text size="2">
           <Box
@@ -83,16 +123,13 @@ const Result: React.FC<ResultProps> = ({ children, onClose }) => {
               styles.tool_result_markdown,
             )}
           >
-            <Markdown style={resultStyle}>{children}</Markdown>
+            <Markdown>{children}</Markdown>
           </Box>
         </Text>
       ) : (
-        <MarkdownCodeBlock
-          className={classNames(styles.tool_result)}
-          style={resultStyle}
-        >
+        <ShikiCodeBlock className={classNames(styles.tool_result)}>
           {children}
-        </MarkdownCodeBlock>
+        </ShikiCodeBlock>
       )}
     </Reveal>
   );
@@ -143,7 +180,11 @@ const ToolMessage: React.FC<{
         </Box>
       </ScrollArea>
       {maybeResult?.content && (
-        <Result isInsideScrollArea onClose={onClose}>
+        <Result
+          isInsideScrollArea
+          onClose={onClose}
+          storeKey={toolCall.id ? `rv:${toolCall.id}` : undefined}
+        >
           {maybeResult.content}
         </Result>
       )}
@@ -167,23 +208,44 @@ const ToolUsageDisplay: React.FC<{
 export const SingleModelToolContent: React.FC<{
   toolCalls: ToolCall[];
 }> = ({ toolCalls }) => {
-  const [open, setOpen] = React.useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const handleHide = useHideScroll(ref);
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
+  const store = useCollapsibleStore();
 
   const toolCallsId = useMemo(() => {
-    const ids = toolCalls.reduce<string[]>((acc, toolCall) => {
+    return toolCalls.reduce<string[]>((acc, toolCall) => {
       if (typeof toolCall.id === "string") return [...acc, toolCall.id];
       return acc;
     }, []);
-
-    return ids;
   }, [toolCalls]);
 
-  const results = useAppSelector(selectManyToolResultsByIds(toolCallsId));
-  const diffs = useAppSelector(selectManyDiffMessageByIds(toolCallsId));
+  const toolCallsIdKey = toolCallsId.join("|");
+  const storeKey = toolCallsId[0] ? `tg:${toolCallsId[0]}` : undefined;
+  const [open, setOpen] = React.useState(() => {
+    if (storeKey && store) {
+      const stored = store.get(storeKey);
+      if (stored !== undefined) return stored;
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (storeKey && store) store.set(storeKey, open);
+  }, [storeKey, store, open]);
+  const selectResults = useMemo(
+    () => selectManyToolResultsByIds(toolCallsId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [toolCallsIdKey],
+  );
+  const selectDiffs = useMemo(
+    () => selectManyDiffMessageByIds(toolCallsId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [toolCallsIdKey],
+  );
+  const results = useAppSelector(selectResults);
+  const diffs = useAppSelector(selectDiffs);
   const allResolved = useMemo(() => {
     return results.length + diffs.length === toolCallsId.length;
   }, [diffs.length, results.length, toolCallsId.length]);
@@ -225,15 +287,12 @@ export const SingleModelToolContent: React.FC<{
     };
   });
 
-  const subchat: string | undefined = toolCalls
-    .map((toolCall) => toolCall.subchat)
-    .filter((x) => x)[0];
+  const subchatLog: string[] = toolCalls.flatMap((tc) => tc.subchat_log ?? []);
   const attachedFiles = toolCalls
-    .map((toolCall) => toolCall.attached_files)
-    .filter((x) => x)
-    .flat();
-  const shownAttachedFiles = attachedFiles.slice(-4);
-  const hiddenFiles = attachedFiles.length - 4;
+    .flatMap((tc) => tc.attached_files ?? [])
+    .filter((f, i, arr) => arr.indexOf(f) === i);
+  const shownAttachedFiles = attachedFiles.slice(-6);
+  const hiddenFiles = Math.max(0, attachedFiles.length - 6);
 
   // Use this for single tool result
   return (
@@ -245,7 +304,7 @@ export const SingleModelToolContent: React.FC<{
             toolUsageAmount={toolUsageAmount}
             hiddenFiles={hiddenFiles}
             shownAttachedFiles={shownAttachedFiles}
-            subchat={subchat}
+            subchatLog={subchatLog}
             open={open}
             onClick={() => setOpen((prev) => !prev)}
             waiting={busy}
@@ -275,9 +334,15 @@ export const SingleModelToolContent: React.FC<{
 
 export type ToolContentProps = {
   toolCalls: ToolCall[];
+  contextFilesByToolId?: Record<string, ChatContextFile[]>;
+  diffsByToolId?: Record<string, DiffChunk[]>;
 };
 
-export const ToolContent: React.FC<ToolContentProps> = ({ toolCalls }) => {
+export const ToolContent: React.FC<ToolContentProps> = ({
+  toolCalls,
+  contextFilesByToolId,
+  diffsByToolId,
+}) => {
   const features = useAppSelector(selectFeatures);
   const ids = toolCalls.reduce<string[]>((acc, cur) => {
     if (cur.id !== undefined) return [...acc, cur.id];
@@ -285,7 +350,14 @@ export const ToolContent: React.FC<ToolContentProps> = ({ toolCalls }) => {
   }, []);
   const allToolResults = useAppSelector(selectManyToolResultsByIds(ids));
 
-  return processToolCalls(toolCalls, allToolResults, features);
+  return processToolCalls(
+    toolCalls,
+    allToolResults,
+    features,
+    [],
+    contextFilesByToolId,
+    diffsByToolId,
+  );
 };
 
 function processToolCalls(
@@ -293,30 +365,543 @@ function processToolCalls(
   toolResults: ToolResult[],
   features: RootState["config"]["features"] = {},
   processed: React.ReactNode[] = [],
+  contextFilesByToolId: Record<string, ChatContextFile[]> = {},
+  diffsByToolId: Record<string, DiffChunk[]> = {},
 ) {
   if (toolCalls.length === 0) return processed;
   const [head, ...tail] = toolCalls;
   const result = toolResults.find((result) => result.tool_call_id === head.id);
+  const contextFiles = head.id ? contextFilesByToolId[head.id] : undefined;
+  const diffs = head.id ? diffsByToolId[head.id] : undefined;
 
-  // TODO: handle knowledge differently.
-  // memories are split in content with 🗃️019957b6ff
-
-  if (result && head.function.name === "knowledge") {
+  if (head.function.name === "cat") {
     const elem = (
-      <Knowledge key={`knowledge-tool-${processed.length}`} toolCall={head} />
+      <ReadTool
+        key={`read-tool-${processed.length}`}
+        toolCall={head}
+        contextFiles={contextFiles}
+      />
     );
-    return processToolCalls(tail, toolResults, features, [...processed, elem]);
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "tree") {
+    const elem = (
+      <ListTool
+        key={`list-tool-${processed.length}`}
+        toolCall={head}
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "search_pattern") {
+    const elem = (
+      <SearchTool
+        key={`search-pattern-tool-${processed.length}`}
+        toolCall={head}
+        toolType="search_pattern"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "search_semantic") {
+    const elem = (
+      <SearchTool
+        key={`search-semantic-tool-${processed.length}`}
+        toolCall={head}
+        toolType="search_semantic"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "search_symbol_definition") {
+    const elem = (
+      <SearchTool
+        key={`search-symbol-tool-${processed.length}`}
+        toolCall={head}
+        toolType="search_symbol_definition"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "shell") {
+    const elem = (
+      <NewShellTool key={`shell-tool-${processed.length}`} toolCall={head} />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "shell_service") {
+    const elem = (
+      <NewShellServiceTool
+        key={`shell-service-tool-${processed.length}`}
+        toolCall={head}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "subagent") {
+    const elem = (
+      <NewSubagentTool
+        key={`subagent-tool-${processed.length}`}
+        toolCall={head}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "strategic_planning") {
+    const elem = (
+      <PlanningTool
+        key={`strategic-planning-tool-${processed.length}`}
+        toolCall={head}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "code_review") {
+    const elem = (
+      <NewCodeReviewTool
+        key={`code-review-tool-${processed.length}`}
+        toolCall={head}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "deep_research") {
+    const elem = (
+      <ResearchTool
+        key={`deep-research-tool-${processed.length}`}
+        toolCall={head}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "knowledge") {
+    const elem = (
+      <KnowledgeTool
+        key={`knowledge-tool-${processed.length}`}
+        toolCall={head}
+        toolType="knowledge"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "search_trajectories") {
+    const elem = (
+      <KnowledgeTool
+        key={`trajectories-tool-${processed.length}`}
+        toolCall={head}
+        toolType="search_trajectories"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "get_trajectory_context") {
+    const elem = (
+      <KnowledgeTool
+        key={`trajectory-context-tool-${processed.length}`}
+        toolCall={head}
+        toolType="trajectories"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "create_knowledge") {
+    const elem = (
+      <KnowledgeTool
+        key={`create-knowledge-tool-${processed.length}`}
+        toolCall={head}
+        toolType="create_knowledge"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "web") {
+    const elem = (
+      <WebTool
+        key={`web-tool-${processed.length}`}
+        toolCall={head}
+        toolType="web"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "web_search") {
+    const elem = (
+      <WebTool
+        key={`web-search-tool-${processed.length}`}
+        toolCall={head}
+        toolType="web_search"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
   }
 
   if (isRawTextDocToolCall(head)) {
     const elem = (
-      <TextDocTool
-        key={`textdoc-tool-${head.function.name}-${processed.length}`}
+      <EditTool
+        key={`edit-tool-${head.function.name}-${processed.length}`}
         toolCall={head}
-        toolFailed={result?.tool_failed}
+        diffs={diffs}
       />
     );
-    return processToolCalls(tail, toolResults, features, [...processed, elem]);
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "mv") {
+    const elem = (
+      <FileOpTool
+        key={`mv-tool-${processed.length}`}
+        toolCall={head}
+        toolType="mv"
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "rm") {
+    const elem = (
+      <FileOpTool
+        key={`rm-tool-${processed.length}`}
+        toolCall={head}
+        toolType="rm"
+        diffs={diffs}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "add_workspace_folder") {
+    const elem = (
+      <FileOpTool
+        key={`add-workspace-tool-${processed.length}`}
+        toolCall={head}
+        toolType="add_workspace_folder"
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "tasks_set") {
+    const elem = (
+      <TasksTool key={`tasks-tool-${processed.length}`} toolCall={head} />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "task_done") {
+    const elem = (
+      <TaskDoneTool
+        key={`task-done-tool-${processed.length}`}
+        toolCall={head}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name === "ask_questions") {
+    const elem = (
+      <AskQuestionsTool
+        key={`ask-questions-tool-${processed.length}`}
+        toolCall={head}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (head.function.name?.startsWith("openai_")) {
+    const name = head.function.name;
+    let elem: React.ReactNode;
+    switch (name) {
+      case "openai_web_search_call":
+        elem = (
+          <OpenAIWebSearchCallTool
+            key={`openai-web-search-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_file_search_call":
+        elem = (
+          <OpenAIFileSearchCallTool
+            key={`openai-file-search-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_code_interpreter_call":
+        elem = (
+          <OpenAICodeInterpreterCallTool
+            key={`openai-code-interpreter-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_computer_call":
+        elem = (
+          <OpenAIComputerCallTool
+            key={`openai-computer-call-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_computer_call_output":
+        elem = (
+          <OpenAIComputerCallOutputTool
+            key={`openai-computer-output-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_image_generation_call":
+        elem = (
+          <OpenAIImageGenerationCallTool
+            key={`openai-image-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_audio":
+        elem = (
+          <OpenAIAudioTool
+            key={`openai-audio-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_refusal":
+        elem = (
+          <OpenAIRefusalTool
+            key={`openai-refusal-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_mcp_call":
+        elem = (
+          <OpenAIMcpCallTool
+            key={`openai-mcp-call-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      case "openai_mcp_list_tools":
+        elem = (
+          <OpenAIMcpListToolsTool
+            key={`openai-mcp-list-tools-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+        break;
+      default:
+        elem = (
+          <OpenAIResponsesTool
+            key={`openai-responses-tool-${head.id ?? processed.length}`}
+            toolCall={head}
+          />
+        );
+    }
+
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
   }
 
   if (result && isMultiModalToolResult(result)) {
@@ -341,74 +926,85 @@ function processToolCalls(
         toolResults={multiModalToolResults}
       />
     );
-    return processToolCalls(nextTail, toolResults, features, [
-      ...processed,
-      elem,
-    ]);
+    return processToolCalls(
+      nextTail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
   }
 
-  const restInTail = takeWhile(tail, (toolCall) => {
-    const item = toolResults.find(
-      (result) => result.tool_call_id === toolCall.id,
-    );
-    return item === undefined || !isMultiModalToolResult(item);
-  });
-  const nextTail = tail.slice(restInTail.length);
-
+  // Fallback: use GenericTool for any unhandled tool
   const elem = (
-    <SingleModelToolContent
-      key={`single-model-tool-call-${processed.length}`}
-      toolCalls={[head, ...restInTail]}
+    <GenericTool
+      key={`generic-tool-${head.id ?? processed.length}`}
+      toolCall={head}
     />
   );
-  return processToolCalls(nextTail, toolResults, features, [
-    ...processed,
-    elem,
-  ]);
+  return processToolCalls(
+    tail,
+    toolResults,
+    features,
+    [...processed, elem],
+    contextFilesByToolId,
+    diffsByToolId,
+  );
 }
 
 const MultiModalToolContent: React.FC<{
   toolCalls: ToolCall[];
   toolResults: MultiModalToolResult[];
 }> = ({ toolCalls, toolResults }) => {
-  const [open, setOpen] = React.useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const handleHide = useHideScroll(ref);
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
+  const store = useCollapsibleStore();
+
   const ids = useMemo(() => {
-    return toolCalls.reduce<string[]>((acc, cur) => {
-      if (typeof cur === "string") return [...acc, cur];
-      return acc;
-    }, []);
+    return toolCalls
+      .map((tc) => tc.id)
+      .filter((id): id is string => typeof id === "string");
   }, [toolCalls]);
 
-  const diffs = useAppSelector(selectManyDiffMessageByIds(ids));
+  const idsKey = ids.join("|");
+  const mmStoreKey = ids[0] ? `mm:${ids[0]}` : undefined;
+  const [open, setOpen] = React.useState(() => {
+    if (mmStoreKey && store) {
+      const stored = store.get(mmStoreKey);
+      if (stored !== undefined) return stored;
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (mmStoreKey && store) store.set(mmStoreKey, open);
+  }, [mmStoreKey, store, open]);
+
+  const selectDiffs = useMemo(
+    () => selectManyDiffMessageByIds(ids),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [idsKey],
+  );
+  const diffs = useAppSelector(selectDiffs);
 
   const handleClose = useCallback(() => {
     handleHide();
     setOpen(false);
   }, [handleHide]);
-  // const content = toolResults.map((toolResult) => toolResult.content);
 
   const hasImages = toolResults.some((toolResult) =>
     toolResult.content.some((content) => content.m_type.startsWith("image/")),
   );
 
-  // TOOD: duplicated
   const toolNames = toolCalls.reduce<string[]>((acc, toolCall) => {
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    if (toolCall === null) {
-      // eslint-disable-next-line no-console
-      console.error("toolCall is null");
-      return acc;
-    }
     if (!toolCall.function.name) return acc;
     if (acc.includes(toolCall.function.name)) return acc;
     return [...acc, toolCall.function.name];
   }, []);
 
-  // TODO: duplicated
   const toolUsageAmount = toolNames.map<ToolUsage>((toolName) => {
     return {
       functionName: toolName,
@@ -472,7 +1068,6 @@ const MultiModalToolContent: React.FC<{
                   direction="column"
                   key={`tool-call-command-${toolCall.id}-${i}`}
                   py="2"
-                  ref={ref}
                 >
                   <ScrollArea scrollbars="horizontal" style={{ width: "100%" }}>
                     <Box>
@@ -520,12 +1115,28 @@ const MultiModalToolContent: React.FC<{
 type ToolUsageSummaryProps = {
   toolUsageAmount: ToolUsage[];
   hiddenFiles?: number;
-  shownAttachedFiles?: (string | undefined)[];
-  subchat?: string;
+  shownAttachedFiles?: string[];
+  subchatLog?: string[];
   open: boolean;
   onClick?: () => void;
   waiting: boolean;
 };
+
+function getFileIcon(path: string): string {
+  if (path.endsWith("/") || !path.includes(".")) return "📂";
+  return "📄";
+}
+
+function truncatePath(path: string, maxLen = 50): string {
+  if (path.length <= maxLen) return path;
+  const parts = path.split("/");
+  if (parts.length <= 2) return "…" + path.slice(-maxLen + 1);
+  const filename = parts[parts.length - 1];
+  const dir = parts[parts.length - 2];
+  const short = `…/${dir}/${filename}`;
+  if (short.length <= maxLen) return short;
+  return "…" + path.slice(-maxLen + 1);
+}
 
 const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
   (
@@ -533,13 +1144,15 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
       toolUsageAmount,
       hiddenFiles,
       shownAttachedFiles,
-      subchat,
+      subchatLog,
       open,
       onClick,
       waiting,
     },
     ref,
   ) => {
+    const currentStep = (subchatLog ?? []).slice(-1)[0];
+
     return (
       <AnimatedText as="div" weight="light" size="1" animating={waiting}>
         <Flex gap="2" align="end" onClick={onClick} ref={ref} my="2">
@@ -550,7 +1163,7 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
             style={{ cursor: "pointer" }}
           >
             <Flex gap="2" align="center" justify="center">
-              {waiting ? <Spinner /> : "🔨"} {/* 🔨{" "} */}
+              {waiting ? <Spinner /> : "🔨"}
               {toolUsageAmount.map(({ functionName, amountOfCalls }, index) => (
                 <span key={functionName}>
                   <ToolUsageDisplay
@@ -562,28 +1175,44 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
               ))}
             </Flex>
 
-            {hiddenFiles && hiddenFiles > 0 && (
+            {hiddenFiles !== undefined && hiddenFiles > 0 && (
               <Text weight="light" size="1" ml="4">
-                {`🔎 <${hiddenFiles} files hidden>`}
+                {`<+${hiddenFiles} more files>`}
               </Text>
             )}
-            {shownAttachedFiles?.map((file, index) => {
-              if (!file) return null;
-
-              return (
-                <Text weight="light" size="1" key={index} ml="4">
-                  🔎 {file}
-                </Text>
-              );
-            })}
-            {subchat && (
-              <Flex ml="4">
-                {waiting && <Spinner />}
-                <Text weight="light" size="1" ml="4px">
-                  {subchat}
-                </Text>
-              </Flex>
-            )}
+            {shownAttachedFiles?.map((file, index) => (
+              <Text weight="light" size="1" key={index} ml="4">
+                {getFileIcon(file)} {truncatePath(file)}
+              </Text>
+            ))}
+            {currentStep &&
+              (() => {
+                const parsed = parseProgressEntry(currentStep);
+                return (
+                  <Flex direction="column" gap="1" ml="4" mt="1">
+                    {parsed.step && (
+                      <Flex align="center" gap="1">
+                        {waiting && <Spinner size="1" />}
+                        <Text weight="light" size="1">
+                          {parsed.step}:
+                        </Text>
+                      </Flex>
+                    )}
+                    <Text
+                      size="1"
+                      color="gray"
+                      as="div"
+                      ml={parsed.step ? "4" : "0"}
+                      style={{
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {parsed.text}
+                    </Text>
+                  </Flex>
+                );
+              })()}
           </Flex>
           <Chevron open={open} />
         </Flex>
@@ -592,114 +1221,3 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
   },
 );
 ToolUsageSummary.displayName = "ToolUsageSummary";
-
-// TODO: make this look nicer.
-const Knowledge: React.FC<{ toolCall: ToolCall }> = ({ toolCall }) => {
-  const [open, setOpen] = React.useState(false);
-  const ref = useRef(null);
-  const scrollOnHide = useHideScroll(ref);
-
-  const handleHide = useCallback(() => {
-    setOpen(false);
-    scrollOnHide();
-  }, [scrollOnHide]);
-
-  const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
-  );
-
-  const argsString = React.useMemo(() => {
-    return toolCallArgsToString(toolCall.function.arguments);
-  }, [toolCall.function.arguments]);
-
-  const memories = useMemo(() => {
-    if (typeof maybeResult?.content !== "string") return [];
-    return splitMemories(maybeResult.content);
-  }, [maybeResult?.content]);
-
-  const functionCalled = "```python\n" + name + "(" + argsString + ")\n```";
-
-  return (
-    <Container>
-      <Collapsible.Root open={open} onOpenChange={setOpen}>
-        <Collapsible.Trigger asChild>
-          <Flex
-            gap="2"
-            align="end"
-            onClick={() => setOpen((prev) => !prev)}
-            ref={ref}
-          >
-            <Flex
-              gap="1"
-              align="start"
-              direction="column"
-              style={{ cursor: "pointer" }}
-            >
-              <Text weight="light" size="1">
-                📚 Knowledge
-              </Text>
-            </Flex>
-            <Chevron open={open} />
-          </Flex>
-        </Collapsible.Trigger>
-        <Collapsible.Content>
-          <Flex direction="column" pt="4">
-            <ScrollArea scrollbars="horizontal" style={{ width: "100%" }}>
-              <Box>
-                <CommandMarkdown isInsideScrollArea>
-                  {functionCalled}
-                </CommandMarkdown>
-              </Box>
-            </ScrollArea>
-            <Flex gap="4" direction="column" py="4">
-              {memories.map((memory) => {
-                return (
-                  <Memory
-                    key={memory.memid}
-                    id={memory.memid}
-                    content={memory.content}
-                  />
-                );
-              })}
-            </Flex>
-            <FadedButton color="gray" onClick={handleHide} mx="2">
-              Hide Memories
-            </FadedButton>
-          </Flex>
-        </Collapsible.Content>
-      </Collapsible.Root>
-    </Container>
-  );
-};
-
-const Memory: React.FC<{ id: string; content: string }> = ({ id, content }) => {
-  return (
-    <Card>
-      <Flex direction="column" gap="2">
-        <Flex justify="between" align="center">
-          <Text size="1" weight="light">
-            Memory: {id}
-          </Text>
-        </Flex>
-        <Separator size="4" />
-        <Text size="2">{content}</Text>
-      </Flex>
-    </Card>
-  );
-};
-
-function splitMemories(text: string): { memid: string; content: string }[] {
-  // Split by 🗃️ and filter out empty strings
-  const parts = text.split("🗃️").filter((part) => part.trim());
-
-  return parts.map((part) => {
-    const newlineIndex = part.indexOf("\n");
-    const memid = part.substring(0, newlineIndex);
-    const content = part.substring(newlineIndex + 1);
-
-    return {
-      memid,
-      content,
-    };
-  });
-}

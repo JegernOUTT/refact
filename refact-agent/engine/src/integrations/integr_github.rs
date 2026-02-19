@@ -14,9 +14,10 @@ use crate::files_correction::canonical_path;
 use crate::integrations::go_to_configuration_message;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolParam, ToolSource, ToolSourceType};
 use serde_json::Value;
-use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation, IntegrationTrait};
+use crate::integrations::integr_abstract::{
+    IntegrationCommon, IntegrationConfirmation, IntegrationTrait,
+};
 use crate::integrations::process_io_utils::AnsiStrippable;
-
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 #[allow(non_snake_case)]
@@ -28,14 +29,18 @@ pub struct SettingsGitHub {
 #[derive(Default)]
 pub struct ToolGithub {
     pub common: IntegrationCommon,
-    pub settings_github: SettingsGitHub, pub config_path: String,
+    pub settings_github: SettingsGitHub,
+    pub config_path: String,
 }
 
 #[async_trait]
 impl IntegrationTrait for ToolGithub {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-
-    async fn integr_settings_apply(&mut self, _gcx: Arc<ARwLock<GlobalContext>>, config_path: String, value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    async fn integr_settings_apply(
+        &mut self,
+        _gcx: Arc<ARwLock<GlobalContext>>,
+        config_path: String,
+        value: &serde_json::Value,
+    ) -> Result<(), serde_json::Error> {
         self.settings_github = serde_json::from_value(value.clone())?;
         self.common = serde_json::from_value(value.clone())?;
         self.config_path = config_path;
@@ -50,7 +55,10 @@ impl IntegrationTrait for ToolGithub {
         self.common.clone()
     }
 
-    async fn integr_tools(&self, _integr_name: &str) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    async fn integr_tools(
+        &self,
+        _integr_name: &str,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         vec![Box::new(ToolGithub {
             common: self.common.clone(),
             settings_github: self.settings_github.clone(),
@@ -58,13 +66,13 @@ impl IntegrationTrait for ToolGithub {
         })]
     }
 
-    fn integr_schema(&self) -> &str { GITHUB_INTEGRATION_SCHEMA }
+    fn integr_schema(&self) -> &str {
+        GITHUB_INTEGRATION_SCHEMA
+    }
 }
 
 #[async_trait]
 impl Tool for ToolGithub {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "github".to_string(),
@@ -73,8 +81,8 @@ impl Tool for ToolGithub {
                 source_type: ToolSourceType::Integration,
                 config_path: self.config_path.clone(),
             },
-            agentic: true,
             experimental: false,
+            allow_parallel: false,
             description: "Access to gh command line command, to fetch issues, review PRs.".to_string(),
             parameters: vec![
                 ToolParam {
@@ -101,7 +109,7 @@ impl Tool for ToolGithub {
         let project_dir = match args.get("project_dir") {
             Some(Value::String(s)) => s,
             Some(v) => return Err(format!("argument `project_dir` is not a string: {:?}", v)),
-            None => return Err("Missing argument `project_dir`".to_string())
+            None => return Err("Missing argument `project_dir`".to_string()),
         };
         let command_args = parse_command_args(args)?;
 
@@ -117,8 +125,14 @@ impl Tool for ToolGithub {
             .stdin(std::process::Stdio::null())
             .output()
             .await
-            .map_err(|e| format!("!{}, {} failed:\n{}",
-                go_to_configuration_message("github"), gh_binary_path, e.to_string()))?;
+            .map_err(|e| {
+                format!(
+                    "!{}, {} failed:\n{}",
+                    go_to_configuration_message("github"),
+                    gh_binary_path,
+                    e.to_string()
+                )
+            })?;
 
         let stdout = output.stdout.to_string_lossy_and_strip_ansi();
         let stderr = output.stderr.to_string_lossy_and_strip_ansi();
@@ -130,7 +144,7 @@ impl Tool for ToolGithub {
                     format!("{}\n\n💿 The UI has the capability to view tool result json efficiently. The result contains {} rows. Unless user specified otherwise, write no more than 3 rows as text and possibly \"and N more\" wording, keep it short.",
                         stdout, row_count
                     )
-                },
+                }
                 Ok(_) => stdout,
                 Err(_) => stdout,
             }
@@ -175,7 +189,9 @@ impl Tool for ToolGithub {
     fn usage(&mut self) -> &mut Option<ChatUsage> {
         static mut DEFAULT_USAGE: Option<ChatUsage> = None;
         #[allow(static_mut_refs)]
-        unsafe { &mut DEFAULT_USAGE }
+        unsafe {
+            &mut DEFAULT_USAGE
+        }
     }
 
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
@@ -191,7 +207,7 @@ fn parse_command_args(args: &HashMap<String, Value>) -> Result<Vec<String>, Stri
     let command = match args.get("command") {
         Some(Value::String(s)) => s,
         Some(v) => return Err(format!("argument `command` is not a string: {:?}", v)),
-        None => return Err("Missing argument `command`".to_string())
+        None => return Err("Missing argument `command`".to_string()),
     };
 
     let mut parsed_args = shell_words::split(&command).map_err(|e| e.to_string())?;
