@@ -244,6 +244,66 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
     (d) => d.total_cost_usd > 0 || (d.total_cost_coins ?? 0) > 0,
   );
 
+  const hasCacheData = days.some(
+    (d) => d.total_cache_read_tokens > 0 || d.total_cache_creation_tokens > 0,
+  );
+
+  const cacheBarOption = {
+    textStyle: { color: theme.text },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      textStyle: { color: theme.tooltip.text },
+      backgroundColor: theme.tooltip.bg,
+      borderColor: theme.tooltip.border,
+    },
+    legend: {
+      data: ["Cache Read", "Cache Created"],
+      textStyle: { color: theme.text },
+    },
+    grid: {
+      left: "3%",
+      right: "4%",
+      bottom: "3%",
+      top: "15%",
+      containLabel: true,
+    },
+    xAxis: [
+      {
+        type: "category",
+        data: dayLabels,
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisLabel: { color: theme.text },
+      },
+    ],
+    yAxis: [
+      {
+        type: "value",
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisLabel: { color: theme.text },
+        splitLine: {
+          lineStyle: { color: theme.splitLine },
+        },
+      },
+    ],
+    series: [
+      {
+        name: "Cache Read",
+        type: "bar",
+        stack: "cache",
+        data: days.map((d) => d.total_cache_read_tokens),
+        itemStyle: { color: theme.palette[4] },
+      },
+      {
+        name: "Cache Created",
+        type: "bar",
+        stack: "cache",
+        data: days.map((d) => d.total_cache_creation_tokens),
+        itemStyle: { color: theme.palette[5] },
+      },
+    ],
+  };
+
   const costBarOption = {
     textStyle: { color: theme.text },
     tooltip: {
@@ -398,6 +458,21 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
         )}
       </Flex>
 
+      {hasCacheData && (
+        <Flex className={styles.chartsRow}>
+          <Box className={styles.chartBox}>
+            <Text size="2" weight="medium" className={styles.sectionTitle}>
+              Cache Tokens Per Day
+            </Text>
+            <ReactEChartsCore
+              echarts={echarts}
+              option={cacheBarOption}
+              style={{ width: "100%", height: "220px" }}
+            />
+          </Box>
+        </Flex>
+      )}
+
       <Box>
         <Text
           size="3"
@@ -441,6 +516,8 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                       : ""}
                   </button>
                 </th>
+                <th className={styles.th}>Cache Read</th>
+                <th className={styles.th}>Cache Created</th>
                 <th className={styles.th}>
                   <button
                     type="button"
@@ -464,6 +541,12 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                   <td className={styles.td}>{p.total_calls}</td>
                   <td className={styles.td}>
                     {formatTokenCount(p.total_tokens)}
+                  </td>
+                  <td className={styles.td}>
+                    {formatTokenCount(p.total_cache_read_tokens)}
+                  </td>
+                  <td className={styles.td}>
+                    {formatTokenCount(p.total_cache_creation_tokens)}
                   </td>
                   <td className={styles.td}>
                     {formatCostDisplay(p.total_cost_usd, p.total_cost_coins)}
@@ -506,6 +589,8 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 </th>
                 <th className={styles.th}>Prompt</th>
                 <th className={styles.th}>Completion</th>
+                <th className={styles.th}>Cache Read</th>
+                <th className={styles.th}>Cache Created</th>
                 <th className={styles.th}>
                   <button
                     type="button"
@@ -546,6 +631,12 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                   </td>
                   <td className={styles.td}>
                     {formatTokenCount(m.total_completion_tokens)}
+                  </td>
+                  <td className={styles.td}>
+                    {formatTokenCount(m.total_cache_read_tokens)}
+                  </td>
+                  <td className={styles.td}>
+                    {formatTokenCount(m.total_cache_creation_tokens)}
                   </td>
                   <td className={styles.td}>
                     {formatCostDisplay(m.total_cost_usd, m.total_cost_coins)}

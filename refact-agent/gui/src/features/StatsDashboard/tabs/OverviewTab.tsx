@@ -106,6 +106,11 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
             t.total_cache_read_tokens,
           )} tokens read from cache`}
         />
+        <StatCard
+          title="Cache Created"
+          value={formatTokenCount(t.total_cache_creation_tokens)}
+          subtitle="tokens written to cache for future reuse"
+        />
       </Flex>
 
       {topConversations.length > 0 && (
