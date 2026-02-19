@@ -21,9 +21,7 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
   const allModes = data?.by_mode ?? [];
 
   if (!data || allModes.length === 0) {
-    return (
-      <Text className={styles.emptyText}>No usage data by mode yet.</Text>
-    );
+    return <Text className={styles.emptyText}>No usage data by mode yet.</Text>;
   }
 
   return (

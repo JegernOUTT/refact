@@ -139,10 +139,7 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
                 {topConversations.map((c) => (
                   <tr key={c.chat_id}>
                     <td className={styles.td}>
-                      <span
-                        className={styles.chatId}
-                        title={c.chat_id}
-                      >
+                      <span className={styles.chatId} title={c.chat_id}>
                         {c.chat_id.slice(0, 8)}
                       </span>
                     </td>

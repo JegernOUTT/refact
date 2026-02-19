@@ -78,7 +78,16 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
         axisLine: "#a0a0a3",
         splitLine: "#2e2e32",
         tooltip: { bg: "#1c1c1e", border: "#3a3a3c", text: "#ededef" },
-        palette: ["#3e63dd", "#7c66dc", "#e5c07b", "#e06c75", "#56b6c2", "#d19a66", "#98c379", "#c678dd"],
+        palette: [
+          "#3e63dd",
+          "#7c66dc",
+          "#e5c07b",
+          "#e06c75",
+          "#56b6c2",
+          "#d19a66",
+          "#98c379",
+          "#c678dd",
+        ],
       }
     : {
         text: "#1c2024",
@@ -86,7 +95,16 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
         axisLine: "#60646c",
         splitLine: "#e0e0e2",
         tooltip: { bg: "#ffffff", border: "#d0d0d2", text: "#1c2024" },
-        palette: ["#3e63dd", "#7c66dc", "#e5c07b", "#e06c75", "#56b6c2", "#d19a66", "#98c379", "#c678dd"],
+        palette: [
+          "#3e63dd",
+          "#7c66dc",
+          "#e5c07b",
+          "#e06c75",
+          "#56b6c2",
+          "#d19a66",
+          "#98c379",
+          "#c678dd",
+        ],
       };
 
   const [modelSort, setModelSort] = useState<{ key: SortKey; asc: boolean }>({
@@ -176,13 +194,19 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
     ],
   };
 
-  const sortedByTokens = [...data.by_model].sort((a, b) => b.total_tokens - a.total_tokens);
+  const sortedByTokens = [...data.by_model].sort(
+    (a, b) => b.total_tokens - a.total_tokens,
+  );
   const topModels = sortedByTokens.slice(0, 5);
-  const otherTokens = sortedByTokens.slice(5).reduce((sum, m) => sum + m.total_tokens, 0);
-  const modelPieData: { name: string; value: number }[] = topModels.map((m) => ({
-    name: m.model,
-    value: m.total_tokens,
-  }));
+  const otherTokens = sortedByTokens
+    .slice(5)
+    .reduce((sum, m) => sum + m.total_tokens, 0);
+  const modelPieData: { name: string; value: number }[] = topModels.map(
+    (m) => ({
+      name: m.model,
+      value: m.total_tokens,
+    }),
+  );
   if (otherTokens > 0) {
     modelPieData.push({ name: "Others", value: otherTokens });
   }

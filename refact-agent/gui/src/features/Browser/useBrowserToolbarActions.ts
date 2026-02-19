@@ -16,12 +16,15 @@ import { formatBrowserDraftBlock, insertBrowserDraft } from "./draftInsert";
 function formatAnnotationsText(annotations: BrowserAnnotation[]): string {
   if (annotations.length === 0) return "(no annotations)";
   return annotations
-    .map(
-      (a) =>
-        `[${a.index}] ${a.selector} — "${a.innerText.substring(0, 120)}" (${
-          a.bbox.x
-        },${a.bbox.y} ${a.bbox.width}×${a.bbox.height})`,
-    )
+    .map((a) => {
+      const caption = a.caption ? ` "${a.caption}"` : "";
+      const bbox = `(${a.bbox.x},${a.bbox.y} ${a.bbox.width}×${a.bbox.height})`;
+      if (a.type === "rect") {
+        return `[${a.index}] Rectangle${caption} ${bbox}`;
+      }
+      const text = a.innerText ? ` — "${a.innerText.substring(0, 120)}"` : "";
+      return `[${a.index}] ${a.selector}${caption}${text} ${bbox}`;
+    })
     .join("\n");
 }
 
@@ -63,7 +66,8 @@ export function useBrowserToolbarActions(chatId: string) {
   const executeAction = useCallback(
     async (action: string) => {
       switch (action) {
-        case "annotate": {
+        case "annotate":
+        case "rect_highlight": {
           await browserAnnotateStart({ chat_id: chatId }).unwrap();
           dispatch(setAnnotateActive({ chatId, active: true }));
           break;

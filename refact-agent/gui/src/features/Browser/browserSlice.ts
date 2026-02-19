@@ -60,7 +60,8 @@ export type BrowserToolbarActionType =
   | "extract_json"
   | "annotate"
   | "annotate_send"
-  | "annotate_clear";
+  | "annotate_clear"
+  | "rect_highlight";
 
 export type BrowserRuntime = {
   runtime_id: string;
@@ -107,6 +108,7 @@ const VALID_TOOLBAR_ACTIONS = [
   "annotate",
   "annotate_send",
   "annotate_clear",
+  "rect_highlight",
 ] as const;
 
 export function makeBrowserRuntime(runtime_id: string): BrowserRuntime {

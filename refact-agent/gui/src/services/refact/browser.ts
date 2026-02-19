@@ -124,8 +124,10 @@ export type BrowserAnnotateStartResponse = {
 
 export type BrowserAnnotation = {
   index: number;
+  type?: "element" | "rect";
   selector: string;
   innerText: string;
+  caption?: string;
   bbox: { x: number; y: number; width: number; height: number };
 };
 

@@ -397,19 +397,22 @@ pub async fn handle_browser_element_pick(
         if (window.__refact_picker_active) return;
         window.__refact_picker_active = true;
         window.__refact_picked_element = null;
+        var prevEl = null;
         var overlay = document.createElement('div');
         overlay.id = '__refact_picker_overlay';
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483647;cursor:crosshair;';
         document.body.appendChild(overlay);
         overlay.addEventListener('mousemove', function(e) {
+            if (prevEl) { prevEl.style.outline = prevEl.__refact_prev_pick_outline || ''; prevEl = null; }
             overlay.style.display = 'none';
             var el = document.elementFromPoint(e.clientX, e.clientY);
             overlay.style.display = '';
-            if (el) el.style.outline = '2px solid red';
+            if (el) { el.__refact_prev_pick_outline = el.style.outline; el.style.outline = '2px solid #E7150D'; prevEl = el; }
         });
         overlay.addEventListener('click', function(e) {
             e.preventDefault();
             e.stopPropagation();
+            if (prevEl) { prevEl.style.outline = prevEl.__refact_prev_pick_outline || ''; prevEl = null; }
             overlay.style.display = 'none';
             var el = document.elementFromPoint(e.clientX, e.clientY);
             overlay.remove();
@@ -499,19 +502,118 @@ pub async fn handle_browser_annotate_start(
         window.__refact_annotations = window.__refact_annotations || [];
         window.__refact_annotated_elements = window.__refact_annotated_elements || [];
         var nextIndex = window.__refact_annotations.length + 1;
+        var COLOR = '#E7150D';
+        var captionInput = null;
+        if (typeof window.__refact_toolbar_setAnnotateActive === 'function') {
+            window.__refact_toolbar_setAnnotateActive(true);
+        }
+
+        function addGuides(bbox) {
+            var gc = 'rgba(231,21,13,0.3)';
+            var gs = 'position:fixed;z-index:2147483644;pointer-events:none;';
+            var h1 = document.createElement('div'); h1.className = '__refact_annotation_guide';
+            h1.style.cssText = gs+'left:0;width:100%;height:0;border-top:1px dashed '+gc+';top:'+bbox.y+'px;';
+            document.body.appendChild(h1);
+            var h2 = document.createElement('div'); h2.className = '__refact_annotation_guide';
+            h2.style.cssText = gs+'left:0;width:100%;height:0;border-top:1px dashed '+gc+';top:'+(bbox.y+bbox.height)+'px;';
+            document.body.appendChild(h2);
+            var v1 = document.createElement('div'); v1.className = '__refact_annotation_guide';
+            v1.style.cssText = gs+'top:0;height:100%;width:0;border-left:1px dashed '+gc+';left:'+bbox.x+'px;';
+            document.body.appendChild(v1);
+            var v2 = document.createElement('div'); v2.className = '__refact_annotation_guide';
+            v2.style.cssText = gs+'top:0;height:100%;width:0;border-left:1px dashed '+gc+';left:'+(bbox.x+bbox.width)+'px;';
+            document.body.appendChild(v2);
+        }
+
+        function addMarker(idx, bbox) {
+            var mt = Math.max(0, bbox.y - 28);
+            var ml = bbox.x + bbox.width / 2 - 12;
+            var m = document.createElement('div'); m.className = '__refact_annotation_marker';
+            m.style.cssText = 'position:fixed;z-index:2147483646;width:24px;height:24px;border-radius:50%;'
+                +'background:'+COLOR+';color:white;font-size:12px;font-weight:bold;font-family:sans-serif;'
+                +'display:flex;align-items:center;justify-content:center;pointer-events:none;'
+                +'box-shadow:0 2px 8px rgba(0,0,0,0.3);border:2px solid white;'
+                +'left:'+Math.round(ml)+'px;top:'+Math.round(mt)+'px;';
+            m.textContent = String(idx);
+            document.body.appendChild(m);
+            return {left:ml, top:mt};
+        }
+
+        function showCaptionInput(ml, mt, cb) {
+            var w = document.createElement('div'); w.className = '__refact_annotation_caption_wrap';
+            w.style.cssText = 'position:fixed;z-index:2147483647;left:'+Math.round(ml+30)+'px;top:'+Math.round(mt)+'px;';
+            var inp = document.createElement('input'); inp.type = 'text';
+            inp.placeholder = 'Caption (Enter to skip)';
+            inp.style.cssText = 'width:180px;height:24px;border:1px solid rgba(231,21,13,0.5);border-radius:4px;'
+                +'background:rgba(24,24,27,0.95);color:white;font-size:11px;padding:0 6px;outline:none;'
+                +'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
+            w.appendChild(inp); document.body.appendChild(w);
+            captionInput = inp;
+            var ov = document.getElementById('__refact_annotate_overlay');
+            if (ov) ov.style.pointerEvents = 'none';
+            inp.focus();
+            function fin() {
+                var t = inp.value.trim(); w.remove(); captionInput = null;
+                if (ov) ov.style.pointerEvents = '';
+                cb(t);
+            }
+            inp.addEventListener('keydown', function(e) {
+                e.stopPropagation();
+                if (e.key==='Enter'||e.key==='Escape') { e.preventDefault(); fin(); }
+            });
+            inp.addEventListener('blur', function() {
+                setTimeout(function() { if (captionInput===inp) fin(); }, 150);
+            });
+        }
+
+        function addCaptionLabel(text, ml, mt) {
+            if (!text) return;
+            var l = document.createElement('div'); l.className = '__refact_annotation_label';
+            l.style.cssText = 'position:fixed;z-index:2147483646;pointer-events:none;'
+                +'background:rgba(24,24,27,0.9);color:white;font-size:10px;padding:2px 6px;'
+                +'border-radius:3px;font-family:sans-serif;max-width:200px;overflow:hidden;'
+                +'text-overflow:ellipsis;white-space:nowrap;border:1px solid rgba(231,21,13,0.4);'
+                +'left:'+Math.round(ml+28)+'px;top:'+Math.round(mt+2)+'px;';
+            l.textContent = text; document.body.appendChild(l);
+        }
+
+        function clearAll() {
+            ['.__refact_annotation_marker','.__refact_annotation_label','.__refact_annotation_guide','.__refact_annotation_rect'].forEach(function(s) {
+                var els = document.querySelectorAll(s);
+                for (var i=0;i<els.length;i++) els[i].remove();
+            });
+            var elems = window.__refact_annotated_elements || [];
+            for (var i=0;i<elems.length;i++) {
+                var el=elems[i];
+                if(el&&el.style){el.style.outline=el.__refact_prev_outline_saved||'';el.style.outlineOffset=el.__refact_prev_outlineOffset_saved||'';}
+            }
+            window.__refact_annotated_elements=[];
+            window.__refact_annotations=[];
+            nextIndex=1;
+        }
 
         function exitOverlay() {
-            if (hovered) {
-                hovered.style.outline = hovered.__refact_prev_outline || '';
-                hovered.style.outlineOffset = hovered.__refact_prev_outlineOffset || '';
-                hovered = null;
-            }
-            var ov = document.getElementById('__refact_annotate_overlay');
-            if (ov) ov.remove();
+            if (captionInput) { var cw=captionInput.parentElement; if(cw)cw.remove(); captionInput=null; }
+            if (hovered) { hovered.style.outline=hovered.__refact_prev_outline||''; hovered.style.outlineOffset=hovered.__refact_prev_outlineOffset||''; hovered=null; }
+            var ov = document.getElementById('__refact_annotate_overlay'); if(ov)ov.remove();
             window.__refact_annotate_active = false;
-            if (window.__refact_annotate_key_handler) {
-                document.removeEventListener('keydown', window.__refact_annotate_key_handler);
-                window.__refact_annotate_key_handler = null;
+            if (window.__refact_annotate_key_handler) { document.removeEventListener('keydown',window.__refact_annotate_key_handler); window.__refact_annotate_key_handler=null; }
+            if (typeof window.__refact_toolbar_setAnnotateActive==='function') window.__refact_toolbar_setAnnotateActive(false);
+        }
+
+        function undoLast() {
+            if (window.__refact_annotations.length===0) return;
+            var last = window.__refact_annotations.pop(); nextIndex--;
+            var markers=document.querySelectorAll('.__refact_annotation_marker');
+            if(markers.length>0)markers[markers.length-1].remove();
+            var labels=document.querySelectorAll('.__refact_annotation_label');
+            if(labels.length>0)labels[labels.length-1].remove();
+            var guides=document.querySelectorAll('.__refact_annotation_guide');
+            for(var i=0;i<4&&guides.length-1-i>=0;i++) guides[guides.length-1-i].remove();
+            if(last&&last.type==='rect'){var rects=document.querySelectorAll('.__refact_annotation_rect');if(rects.length>0)rects[rects.length-1].remove();}
+            if(last&&last.type!=='rect'){
+                var elems=window.__refact_annotated_elements;
+                if(elems.length>0){var el=elems.pop();if(el&&el.style){el.style.outline=el.__refact_prev_outline_saved||'';el.style.outlineOffset=el.__refact_prev_outlineOffset_saved||'';}}
             }
         }
 
@@ -520,80 +622,82 @@ pub async fn handle_browser_annotate_start(
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483645;cursor:crosshair;';
         document.body.appendChild(overlay);
 
-        var hovered = null;
+        var hovered=null, dragStart=null, dragRect=null, DRAG_THRESHOLD=8;
+
         overlay.addEventListener('mousemove', function(e) {
-            if (hovered) {
-                hovered.style.outline = hovered.__refact_prev_outline || '';
-                hovered.style.outlineOffset = hovered.__refact_prev_outlineOffset || '';
+            if (captionInput) return;
+            if (dragStart) {
+                var x=Math.min(e.clientX,dragStart.x), y=Math.min(e.clientY,dragStart.y);
+                var w=Math.abs(e.clientX-dragStart.x), h=Math.abs(e.clientY-dragStart.y);
+                if (!dragRect) {
+                    dragRect=document.createElement('div');
+                    dragRect.style.cssText='position:fixed;z-index:2147483646;pointer-events:none;border:2px dashed '+COLOR+';background:rgba(231,21,13,0.08);border-radius:2px;';
+                    document.body.appendChild(dragRect);
+                }
+                dragRect.style.left=x+'px';dragRect.style.top=y+'px';dragRect.style.width=w+'px';dragRect.style.height=h+'px';
+                if(hovered){hovered.style.outline=hovered.__refact_prev_outline||'';hovered.style.outlineOffset=hovered.__refact_prev_outlineOffset||'';hovered=null;}
+                return;
             }
-            overlay.style.display = 'none';
-            var el = document.elementFromPoint(e.clientX, e.clientY);
-            overlay.style.display = '';
-            if (el && el.id !== '__refact_toolbar_host') {
-                el.__refact_prev_outline = el.style.outline;
-                el.__refact_prev_outlineOffset = el.style.outlineOffset;
-                el.style.outline = '2px solid #7c6aef';
-                hovered = el;
+            if(hovered){hovered.style.outline=hovered.__refact_prev_outline||'';hovered.style.outlineOffset=hovered.__refact_prev_outlineOffset||'';}
+            overlay.style.display='none';
+            var el=document.elementFromPoint(e.clientX,e.clientY);
+            overlay.style.display='';
+            if(el&&el.id!=='__refact_toolbar_host'&&!(el.closest&&el.closest('.__refact_annotation_caption_wrap'))){
+                el.__refact_prev_outline=el.style.outline;el.__refact_prev_outlineOffset=el.style.outlineOffset;
+                el.style.outline='2px solid '+COLOR;hovered=el;
+            } else { hovered=null; }
+        });
+
+        overlay.addEventListener('mousedown', function(e) { if(captionInput||e.button!==0)return; dragStart={x:e.clientX,y:e.clientY}; dragRect=null; });
+
+        overlay.addEventListener('mouseup', function(e) {
+            if(captionInput||e.button!==0||!dragStart)return;
+            var dx=Math.abs(e.clientX-dragStart.x), dy=Math.abs(e.clientY-dragStart.y);
+            if (dx>DRAG_THRESHOLD||dy>DRAG_THRESHOLD) {
+                if(dragRect)dragRect.remove(); dragRect=null;
+                var bx=Math.min(e.clientX,dragStart.x), by=Math.min(e.clientY,dragStart.y);
+                var bw=Math.abs(e.clientX-dragStart.x), bh=Math.abs(e.clientY-dragStart.y);
+                dragStart=null; if(bw<5||bh<5)return;
+                var bbox={x:Math.round(bx),y:Math.round(by),width:Math.round(bw),height:Math.round(bh)};
+                var idx=nextIndex++;
+                var r=document.createElement('div'); r.className='__refact_annotation_rect';
+                r.style.cssText='position:fixed;z-index:2147483644;pointer-events:none;border:2px solid '+COLOR+';background:rgba(231,21,13,0.06);border-radius:2px;'
+                    +'left:'+bbox.x+'px;top:'+bbox.y+'px;width:'+bbox.width+'px;height:'+bbox.height+'px;';
+                document.body.appendChild(r);
+                var mp=addMarker(idx,bbox); addGuides(bbox);
+                showCaptionInput(mp.left,mp.top,function(cap){
+                    window.__refact_annotations.push({index:idx,type:'rect',selector:'',innerText:'',caption:cap||'',bbox:bbox});
+                    addCaptionLabel(cap,mp.left,mp.top);
+                });
             } else {
-                hovered = null;
+                dragStart=null; if(dragRect){dragRect.remove();dragRect=null;}
+                overlay.style.display='none';
+                var el=document.elementFromPoint(e.clientX,e.clientY);
+                overlay.style.display='';
+                if(hovered){hovered.style.outline=hovered.__refact_prev_outline||'';hovered.style.outlineOffset=hovered.__refact_prev_outlineOffset||'';hovered=null;}
+                if(!el||el.id==='__refact_toolbar_host')return;
+                var rect=el.getBoundingClientRect();
+                var sel=el.id?'#'+el.id:el.tagName.toLowerCase();
+                if(!el.id&&el.className&&typeof el.className==='string'){sel=el.tagName.toLowerCase()+'.'+el.className.trim().split(/\s+/).join('.');}
+                var bbox={x:Math.round(rect.x),y:Math.round(rect.y),width:Math.round(rect.width),height:Math.round(rect.height)};
+                var idx=nextIndex++;
+                el.__refact_prev_outline_saved=el.style.outline;el.__refact_prev_outlineOffset_saved=el.style.outlineOffset;
+                el.style.outline='2px solid '+COLOR;el.style.outlineOffset='2px';
+                window.__refact_annotated_elements.push(el);
+                var mp=addMarker(idx,bbox); addGuides(bbox);
+                showCaptionInput(mp.left,mp.top,function(cap){
+                    window.__refact_annotations.push({index:idx,type:'element',selector:sel,innerText:(el.innerText||'').substring(0,300),caption:cap||'',bbox:bbox});
+                    addCaptionLabel(cap,mp.left,mp.top);
+                });
             }
         });
 
-        overlay.addEventListener('click', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            overlay.style.display = 'none';
-            var el = document.elementFromPoint(e.clientX, e.clientY);
-            overlay.style.display = '';
-            if (hovered) {
-                hovered.style.outline = hovered.__refact_prev_outline || '';
-                hovered.style.outlineOffset = hovered.__refact_prev_outlineOffset || '';
-                hovered = null;
-            }
-            if (!el || el.id === '__refact_toolbar_host') return;
+        overlay.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); });
 
-            var rect = el.getBoundingClientRect();
-            var sel = el.id ? '#' + el.id : el.tagName.toLowerCase();
-            if (!el.id && el.className && typeof el.className === 'string') {
-                sel = el.tagName.toLowerCase() + '.' + el.className.trim().split(/\s+/).join('.');
-            }
-            var idx = nextIndex++;
-            window.__refact_annotations.push({
-                index: idx,
-                selector: sel,
-                innerText: (el.innerText || '').substring(0, 300),
-                bbox: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }
-            });
-
-            var markerTop = Math.max(0, Math.round(rect.y - 28));
-            var marker = document.createElement('div');
-            marker.className = '__refact_annotation_marker';
-            marker.style.cssText = 'position:fixed;z-index:2147483646;width:24px;height:24px;border-radius:50%;'
-                + 'background:#7c6aef;color:white;font-size:12px;font-weight:bold;font-family:sans-serif;'
-                + 'display:flex;align-items:center;justify-content:center;pointer-events:none;'
-                + 'box-shadow:0 2px 8px rgba(0,0,0,0.3);border:2px solid white;'
-                + 'left:' + Math.round(rect.x + rect.width/2 - 12) + 'px;'
-                + 'top:' + markerTop + 'px;';
-            marker.textContent = String(idx);
-            document.body.appendChild(marker);
-
-            el.__refact_prev_outline_saved = el.style.outline;
-            el.__refact_prev_outlineOffset_saved = el.style.outlineOffset;
-            el.style.outline = '2px solid #7c6aef';
-            el.style.outlineOffset = '2px';
-            window.__refact_annotated_elements.push(el);
-        });
-
-        overlay.addEventListener('contextmenu', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            exitOverlay();
-        });
+        overlay.addEventListener('contextmenu', function(e) { e.preventDefault(); e.stopPropagation(); undoLast(); });
 
         window.__refact_annotate_key_handler = function(e) {
-            if (e.key === 'Escape' && window.__refact_annotate_active) {
-                exitOverlay();
-            }
+            if(e.key==='Escape'){if(captionInput)return; clearAll(); exitOverlay();}
         };
         document.addEventListener('keydown', window.__refact_annotate_key_handler);
 
@@ -669,23 +773,22 @@ pub async fn handle_browser_annotate_clear(
 
     let clear_js = r#"
     (function() {
-        window.__refact_annotations = [];
-        window.__refact_annotate_active = false;
-        var overlay = document.getElementById('__refact_annotate_overlay');
-        if (overlay) overlay.remove();
-        if (window.__refact_annotate_key_handler) {
-            document.removeEventListener('keydown', window.__refact_annotate_key_handler);
-            window.__refact_annotate_key_handler = null;
-        }
-        var markers = document.querySelectorAll('.__refact_annotation_marker');
-        for (var i = 0; i < markers.length; i++) markers[i].remove();
+        ['.__refact_annotation_marker','.__refact_annotation_label','.__refact_annotation_guide','.__refact_annotation_rect'].forEach(function(s) {
+            var els = document.querySelectorAll(s);
+            for (var i=0;i<els.length;i++) els[i].remove();
+        });
         var elems = window.__refact_annotated_elements || [];
-        for (var i = 0; i < elems.length; i++) {
-            var el = elems[i];
-            el.style.outline = el.__refact_prev_outline_saved || '';
-            el.style.outlineOffset = el.__refact_prev_outlineOffset_saved || '';
+        for (var i=0;i<elems.length;i++) {
+            var el=elems[i];
+            if(el&&el.style){el.style.outline=el.__refact_prev_outline_saved||'';el.style.outlineOffset=el.__refact_prev_outlineOffset_saved||'';}
         }
-        window.__refact_annotated_elements = [];
+        window.__refact_annotated_elements=[];
+        window.__refact_annotations=[];
+        window.__refact_annotate_active=false;
+        var overlay=document.getElementById('__refact_annotate_overlay');
+        if(overlay)overlay.remove();
+        if(window.__refact_annotate_key_handler){document.removeEventListener('keydown',window.__refact_annotate_key_handler);window.__refact_annotate_key_handler=null;}
+        if(typeof window.__refact_toolbar_setAnnotateActive==='function') window.__refact_toolbar_setAnnotateActive(false);
         return 'cleared';
     })()
     "#;
