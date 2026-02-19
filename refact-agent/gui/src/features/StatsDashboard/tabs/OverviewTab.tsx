@@ -1,5 +1,5 @@
 import React from "react";
-import { Flex, Text } from "@radix-ui/themes";
+import { Box, Flex, Text } from "@radix-ui/themes";
 import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
@@ -53,6 +53,8 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
       ? Math.round((t.total_cache_read_tokens / t.total_tokens) * 100)
       : 0;
 
+  const topConversations = data.top_conversations;
+
   return (
     <Flex direction="column" gap="4">
       <Flex className={styles.cardsRow}>
@@ -105,6 +107,55 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
           )} tokens read from cache`}
         />
       </Flex>
+
+      {topConversations.length > 0 && (
+        <Box>
+          <Text
+            size="3"
+            weight="medium"
+            className={styles.sectionTitle}
+            mb="2"
+            as="p"
+          >
+            Top Conversations by Token Usage
+          </Text>
+          <Box className={styles.tableWrapper}>
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th className={styles.th}>Chat ID</th>
+                  <th className={styles.th}>Model</th>
+                  <th className={styles.th}>Calls</th>
+                  <th className={styles.th}>Tokens</th>
+                  <th className={styles.th}>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topConversations.map((c) => (
+                  <tr key={c.chat_id}>
+                    <td className={styles.td}>
+                      <span
+                        className={styles.chatId}
+                        title={c.chat_id}
+                      >
+                        {c.chat_id.slice(0, 8)}
+                      </span>
+                    </td>
+                    <td className={styles.td}>{c.model_id}</td>
+                    <td className={styles.td}>{c.total_calls}</td>
+                    <td className={styles.td}>
+                      {formatTokenCount(c.total_tokens)}
+                    </td>
+                    <td className={styles.td}>
+                      {formatCostDisplay(c.total_cost_usd, c.total_cost_coins)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Box>
+        </Box>
+      )}
     </Flex>
   );
 };

@@ -18,13 +18,11 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
   if (isLoading) return <Spinner spinning />;
   if (isError) return <ErrorCallout>Failed to load stats</ErrorCallout>;
 
-  const taskModes = data?.by_mode.filter(
-    (m) => m.mode === "task_planner" || m.mode === "task_agent",
-  );
+  const allModes = data?.by_mode ?? [];
 
-  if (!data || !taskModes || taskModes.length === 0) {
+  if (!data || allModes.length === 0) {
     return (
-      <Text className={styles.emptyText}>No task or agent usage data yet.</Text>
+      <Text className={styles.emptyText}>No usage data by mode yet.</Text>
     );
   }
 
@@ -41,7 +39,7 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
             </tr>
           </thead>
           <tbody>
-            {taskModes.map((m) => (
+            {allModes.map((m) => (
               <tr key={m.mode}>
                 <td className={styles.td}>{m.mode}</td>
                 <td className={styles.td}>{m.total_calls}</td>

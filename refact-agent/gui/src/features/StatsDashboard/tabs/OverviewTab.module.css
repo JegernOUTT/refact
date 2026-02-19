@@ -7,3 +7,39 @@
 .emptyText {
   color: var(--gray-10);
 }
+
+.sectionTitle {
+  color: var(--gray-12);
+}
+
+.tableWrapper {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--gray-5);
+  color: var(--gray-11);
+  white-space: nowrap;
+}
+
+.td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--gray-4);
+  white-space: nowrap;
+  color: var(--gray-12);
+}
+
+.chatId {
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+  display: inline-block;
+}

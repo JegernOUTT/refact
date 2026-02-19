@@ -228,6 +228,120 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
     );
   }
 
+  const hasCostData = days.some(
+    (d) => d.total_cost_usd > 0 || (d.total_cost_coins ?? 0) > 0,
+  );
+
+  const costBarOption = {
+    textStyle: { color: axisColor },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      textStyle: { color: getCssVar("--gray-12", axisColor) },
+      backgroundColor: getCssVar(
+        "--color-panel-solid",
+        isDarkMode ? "#1a1a1a" : "#fff",
+      ),
+      borderColor: getCssVar("--gray-6", "#333"),
+    },
+    legend: {
+      data: ["USD Cost", "Coins Cost"],
+      textStyle: { color: getCssVar("--gray-12", axisColor) },
+    },
+    grid: {
+      left: "3%",
+      right: "4%",
+      bottom: "3%",
+      top: "15%",
+      containLabel: true,
+    },
+    xAxis: [
+      {
+        type: "category",
+        data: dayLabels,
+        axisLine: { lineStyle: { color: axisColor } },
+        axisLabel: { color: axisColor },
+      },
+    ],
+    yAxis: [
+      {
+        type: "value",
+        axisLine: { lineStyle: { color: axisColor } },
+        axisLabel: { color: axisColor },
+        splitLine: {
+          lineStyle: { color: getCssVar("--gray-5", "#333") },
+        },
+      },
+    ],
+    series: [
+      {
+        name: "USD Cost",
+        type: "bar",
+        stack: "cost",
+        data: days.map((d) => d.total_cost_usd),
+        itemStyle: { color: chartPalette[2] },
+      },
+      {
+        name: "Coins Cost",
+        type: "bar",
+        stack: "cost",
+        data: days.map((d) => d.total_cost_coins ?? 0),
+        itemStyle: { color: chartPalette[3] },
+      },
+    ],
+  };
+
+  const callsBarOption = {
+    textStyle: { color: axisColor },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      textStyle: { color: getCssVar("--gray-12", axisColor) },
+      backgroundColor: getCssVar(
+        "--color-panel-solid",
+        isDarkMode ? "#1a1a1a" : "#fff",
+      ),
+      borderColor: getCssVar("--gray-6", "#333"),
+    },
+    legend: {
+      data: ["Calls"],
+      textStyle: { color: getCssVar("--gray-12", axisColor) },
+    },
+    grid: {
+      left: "3%",
+      right: "4%",
+      bottom: "3%",
+      top: "15%",
+      containLabel: true,
+    },
+    xAxis: [
+      {
+        type: "category",
+        data: dayLabels,
+        axisLine: { lineStyle: { color: axisColor } },
+        axisLabel: { color: axisColor },
+      },
+    ],
+    yAxis: [
+      {
+        type: "value",
+        axisLine: { lineStyle: { color: axisColor } },
+        axisLabel: { color: axisColor },
+        splitLine: {
+          lineStyle: { color: getCssVar("--gray-5", "#333") },
+        },
+      },
+    ],
+    series: [
+      {
+        name: "Calls",
+        type: "bar",
+        data: days.map((d) => d.total_calls),
+        itemStyle: { color: chartPalette[0] },
+      },
+    ],
+  };
+
   return (
     <Flex direction="column" gap="5">
       <Flex className={styles.chartsRow}>
@@ -251,6 +365,31 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
             style={{ width: "100%", height: "220px" }}
           />
         </Box>
+      </Flex>
+
+      <Flex className={styles.chartsRow}>
+        <Box className={styles.chartBox}>
+          <Text size="2" weight="medium" className={styles.sectionTitle}>
+            Calls Per Day
+          </Text>
+          <ReactEChartsCore
+            echarts={echarts}
+            option={callsBarOption}
+            style={{ width: "100%", height: "220px" }}
+          />
+        </Box>
+        {hasCostData && (
+          <Box className={styles.chartBox}>
+            <Text size="2" weight="medium" className={styles.sectionTitle}>
+              Cost Per Day
+            </Text>
+            <ReactEChartsCore
+              echarts={echarts}
+              option={costBarOption}
+              style={{ width: "100%", height: "220px" }}
+            />
+          </Box>
+        )}
       </Flex>
 
       <Box>
