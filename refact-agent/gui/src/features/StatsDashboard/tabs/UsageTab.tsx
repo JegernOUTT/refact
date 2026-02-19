@@ -65,28 +65,29 @@ function sortProviders(
   });
 }
 
-function getCssVar(name: string, fallback: string): string {
-  if (typeof document === "undefined") return fallback;
-  const value = getComputedStyle(document.documentElement)
-    .getPropertyValue(name)
-    .trim();
-  return value || fallback;
-}
-
 export const UsageTab: React.FC<Props> = ({ dateRange }) => {
   const { data, isLoading, isError } = useGetStatsSummaryQuery(
     dateRangeToApiArgs(dateRange),
   );
   const { isDarkMode } = useAppearance();
-  const axisColor = getCssVar("--gray-11", isDarkMode ? "#ffffff" : "#646464");
-  const chartPalette = [
-    getCssVar("--accent-9", "#5470c6"),
-    getCssVar("--accent-7", "#91cc75"),
-    getCssVar("--yellow-9", "#fac858"),
-    getCssVar("--crimson-9", "#ee6666"),
-    getCssVar("--cyan-9", "#73c0de"),
-    getCssVar("--orange-9", "#fc8452"),
-  ];
+
+  const theme = isDarkMode
+    ? {
+        text: "#ededef",
+        textMuted: "#a0a0a3",
+        axisLine: "#a0a0a3",
+        splitLine: "#2e2e32",
+        tooltip: { bg: "#1c1c1e", border: "#3a3a3c", text: "#ededef" },
+        palette: ["#3e63dd", "#7c66dc", "#e5c07b", "#e06c75", "#56b6c2", "#d19a66", "#98c379", "#c678dd"],
+      }
+    : {
+        text: "#1c2024",
+        textMuted: "#60646c",
+        axisLine: "#60646c",
+        splitLine: "#e0e0e2",
+        tooltip: { bg: "#ffffff", border: "#d0d0d2", text: "#1c2024" },
+        palette: ["#3e63dd", "#7c66dc", "#e5c07b", "#e06c75", "#56b6c2", "#d19a66", "#98c379", "#c678dd"],
+      };
 
   const [modelSort, setModelSort] = useState<{ key: SortKey; asc: boolean }>({
     key: "total_tokens",
@@ -120,20 +121,17 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
   );
 
   const barOption = {
-    textStyle: { color: axisColor },
+    textStyle: { color: theme.text },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "shadow" },
-      textStyle: { color: getCssVar("--gray-12", axisColor) },
-      backgroundColor: getCssVar(
-        "--color-panel-solid",
-        isDarkMode ? "#1a1a1a" : "#fff",
-      ),
-      borderColor: getCssVar("--gray-6", "#333"),
+      textStyle: { color: theme.tooltip.text },
+      backgroundColor: theme.tooltip.bg,
+      borderColor: theme.tooltip.border,
     },
     legend: {
       data: ["Prompt Tokens", "Completion Tokens"],
-      textStyle: { color: getCssVar("--gray-12", axisColor) },
+      textStyle: { color: theme.text },
     },
     grid: {
       left: "3%",
@@ -146,17 +144,17 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
       {
         type: "category",
         data: dayLabels,
-        axisLine: { lineStyle: { color: axisColor } },
-        axisLabel: { color: axisColor },
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisLabel: { color: theme.text },
       },
     ],
     yAxis: [
       {
         type: "value",
-        axisLine: { lineStyle: { color: axisColor } },
-        axisLabel: { color: axisColor },
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisLabel: { color: theme.text },
         splitLine: {
-          lineStyle: { color: getCssVar("--gray-5", "#333") },
+          lineStyle: { color: theme.splitLine },
         },
       },
     ],
@@ -166,45 +164,59 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
         type: "bar",
         stack: "tokens",
         data: days.map((d) => d.total_prompt_tokens),
-        itemStyle: { color: chartPalette[0] },
+        itemStyle: { color: theme.palette[0] },
       },
       {
         name: "Completion Tokens",
         type: "bar",
         stack: "tokens",
         data: days.map((d) => d.total_completion_tokens),
-        itemStyle: { color: chartPalette[1] },
+        itemStyle: { color: theme.palette[1] },
       },
     ],
   };
 
-  const modelPieData = data.by_model.map((m) => ({
+  const sortedByTokens = [...data.by_model].sort((a, b) => b.total_tokens - a.total_tokens);
+  const topModels = sortedByTokens.slice(0, 5);
+  const otherTokens = sortedByTokens.slice(5).reduce((sum, m) => sum + m.total_tokens, 0);
+  const modelPieData: { name: string; value: number }[] = topModels.map((m) => ({
     name: m.model,
     value: m.total_tokens,
   }));
+  if (otherTokens > 0) {
+    modelPieData.push({ name: "Others", value: otherTokens });
+  }
 
   const pieOption = {
-    textStyle: { color: axisColor },
+    textStyle: { color: theme.text },
     tooltip: {
       trigger: "item",
       formatter: "{b}: {c} ({d}%)",
-      textStyle: { color: getCssVar("--gray-12", axisColor) },
-      backgroundColor: getCssVar(
-        "--color-panel-solid",
-        isDarkMode ? "#1a1a1a" : "#fff",
-      ),
-      borderColor: getCssVar("--gray-6", "#333"),
+      textStyle: { color: theme.tooltip.text },
+      backgroundColor: theme.tooltip.bg,
+      borderColor: theme.tooltip.border,
     },
     legend: {
-      textStyle: { color: getCssVar("--gray-12", axisColor) },
+      orient: "horizontal",
+      bottom: 0,
+      textStyle: { color: theme.text },
     },
-    color: chartPalette,
+    color: theme.palette,
     series: [
       {
         type: "pie",
         radius: ["40%", "70%"],
         data: modelPieData,
-        label: { color: axisColor },
+        label: {
+          color: theme.text,
+          formatter: "{b}: {d}%",
+          overflow: "truncate",
+          ellipsis: "...",
+        },
+        labelLine: { lineStyle: { color: theme.textMuted } },
+        emphasis: {
+          label: { show: true, fontWeight: "bold" },
+        },
       },
     ],
   };
@@ -233,20 +245,17 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
   );
 
   const costBarOption = {
-    textStyle: { color: axisColor },
+    textStyle: { color: theme.text },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "shadow" },
-      textStyle: { color: getCssVar("--gray-12", axisColor) },
-      backgroundColor: getCssVar(
-        "--color-panel-solid",
-        isDarkMode ? "#1a1a1a" : "#fff",
-      ),
-      borderColor: getCssVar("--gray-6", "#333"),
+      textStyle: { color: theme.tooltip.text },
+      backgroundColor: theme.tooltip.bg,
+      borderColor: theme.tooltip.border,
     },
     legend: {
       data: ["USD Cost", "Coins Cost"],
-      textStyle: { color: getCssVar("--gray-12", axisColor) },
+      textStyle: { color: theme.text },
     },
     grid: {
       left: "3%",
@@ -259,17 +268,17 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
       {
         type: "category",
         data: dayLabels,
-        axisLine: { lineStyle: { color: axisColor } },
-        axisLabel: { color: axisColor },
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisLabel: { color: theme.text },
       },
     ],
     yAxis: [
       {
         type: "value",
-        axisLine: { lineStyle: { color: axisColor } },
-        axisLabel: { color: axisColor },
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisLabel: { color: theme.text },
         splitLine: {
-          lineStyle: { color: getCssVar("--gray-5", "#333") },
+          lineStyle: { color: theme.splitLine },
         },
       },
     ],
@@ -279,33 +288,30 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
         type: "bar",
         stack: "cost",
         data: days.map((d) => d.total_cost_usd),
-        itemStyle: { color: chartPalette[2] },
+        itemStyle: { color: theme.palette[2] },
       },
       {
         name: "Coins Cost",
         type: "bar",
         stack: "cost",
         data: days.map((d) => d.total_cost_coins ?? 0),
-        itemStyle: { color: chartPalette[3] },
+        itemStyle: { color: theme.palette[3] },
       },
     ],
   };
 
   const callsBarOption = {
-    textStyle: { color: axisColor },
+    textStyle: { color: theme.text },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "shadow" },
-      textStyle: { color: getCssVar("--gray-12", axisColor) },
-      backgroundColor: getCssVar(
-        "--color-panel-solid",
-        isDarkMode ? "#1a1a1a" : "#fff",
-      ),
-      borderColor: getCssVar("--gray-6", "#333"),
+      textStyle: { color: theme.tooltip.text },
+      backgroundColor: theme.tooltip.bg,
+      borderColor: theme.tooltip.border,
     },
     legend: {
       data: ["Calls"],
-      textStyle: { color: getCssVar("--gray-12", axisColor) },
+      textStyle: { color: theme.text },
     },
     grid: {
       left: "3%",
@@ -318,17 +324,17 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
       {
         type: "category",
         data: dayLabels,
-        axisLine: { lineStyle: { color: axisColor } },
-        axisLabel: { color: axisColor },
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisLabel: { color: theme.text },
       },
     ],
     yAxis: [
       {
         type: "value",
-        axisLine: { lineStyle: { color: axisColor } },
-        axisLabel: { color: axisColor },
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisLabel: { color: theme.text },
         splitLine: {
-          lineStyle: { color: getCssVar("--gray-5", "#333") },
+          lineStyle: { color: theme.splitLine },
         },
       },
     ],
@@ -337,7 +343,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
         name: "Calls",
         type: "bar",
         data: days.map((d) => d.total_calls),
-        itemStyle: { color: chartPalette[0] },
+        itemStyle: { color: theme.palette[0] },
       },
     ],
   };
@@ -362,7 +368,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
           <ReactEChartsCore
             echarts={echarts}
             option={pieOption}
-            style={{ width: "100%", height: "220px" }}
+            style={{ width: "100%", height: "280px" }}
           />
         </Box>
       </Flex>
