@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
+use crate::ext::hooks::HookEvent;
+use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
 
 use super::types::*;
 use super::types::{session_idle_timeout, session_cleanup_interval};
@@ -701,7 +703,7 @@ pub async fn get_or_create_session_with_trajectory(
 
     session.trajectory_events_tx = trajectory_events_tx.clone();
 
-    let (session_arc, _inserted) = {
+    let (session_arc, inserted) = {
         let mut sessions_write = sessions.write().await;
         match sessions_write.entry(chat_id.to_string()) {
             std::collections::hash_map::Entry::Vacant(e) => {
@@ -714,6 +716,25 @@ pub async fn get_or_create_session_with_trajectory(
             }
         }
     };
+
+    if inserted && is_new {
+        let gcx_clone = gcx.clone();
+        let chat_id_clone = chat_id.to_string();
+        tokio::spawn(async move {
+            let project_dir = get_project_dir_string(gcx_clone.clone()).await;
+            let payload = HookPayload {
+                hook_event_name: "SessionStart".to_string(),
+                session_id: chat_id_clone,
+                project_dir,
+                tool_name: None,
+                tool_input: None,
+                tool_output: None,
+                user_prompt: None,
+                extra: std::collections::HashMap::new(),
+            };
+            run_hooks(gcx_clone, HookEvent::SessionStart, payload).await;
+        });
+    }
 
     session_arc
 }
@@ -783,6 +804,23 @@ pub fn start_session_cleanup_task(gcx: Arc<ARwLock<GlobalContext>>) {
             info!("Cleaning up {} idle sessions", to_cleanup.len());
 
             for (chat_id, session_arc) in &to_cleanup {
+                let gcx_hook = gcx.clone();
+                let chat_id_hook = chat_id.clone();
+                tokio::spawn(async move {
+                    let project_dir = get_project_dir_string(gcx_hook.clone()).await;
+                    let payload = HookPayload {
+                        hook_event_name: "SessionEnd".to_string(),
+                        session_id: chat_id_hook,
+                        project_dir,
+                        tool_name: None,
+                        tool_input: None,
+                        tool_output: None,
+                        user_prompt: None,
+                        extra: std::collections::HashMap::new(),
+                    };
+                    run_hooks(gcx_hook, HookEvent::SessionEnd, payload).await;
+                });
+
                 {
                     let mut session = session_arc.lock().await;
                     session.close_event_channel(); // sets closed + closed_flag

@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
+use crate::ext::hooks::HookEvent;
+use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
 
 use super::types::*;
 use super::browser_context;
@@ -508,6 +510,38 @@ pub async fn process_command_queue(
                     has_browser_meta,
                     attach_screenshot_on_send,
                 ).await;
+
+                let (session_id_for_hook, project_dir_for_hook) = {
+                    let session = session_arc.lock().await;
+                    let sid = session.chat_id.clone();
+                    drop(session);
+                    let pd = get_project_dir_string(gcx.clone()).await;
+                    (sid, pd)
+                };
+                let prompt_text = match &content {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => serde_json::to_string(other).unwrap_or_default(),
+                };
+                let prompt_payload = HookPayload {
+                    hook_event_name: "UserPromptSubmit".to_string(),
+                    session_id: session_id_for_hook.clone(),
+                    project_dir: project_dir_for_hook,
+                    tool_name: None,
+                    tool_input: None,
+                    tool_output: None,
+                    user_prompt: Some(prompt_text),
+                    extra: std::collections::HashMap::new(),
+                };
+                let prompt_results = run_hooks(gcx.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
+                if let Some(reason) = first_block_reason(&prompt_results) {
+                    let mut session = session_arc.lock().await;
+                    session.emit(super::types::ChatEvent::RuntimeUpdated {
+                        state: super::types::SessionState::Error,
+                        error: Some(format!("Message blocked by hook: {}", reason)),
+                    });
+                    session.set_runtime_state(super::types::SessionState::Idle, None);
+                    continue;
+                }
 
                 let is_oversize = browser_ctx_result.as_ref().map_or(false, |(_, oversize)| *oversize);
 

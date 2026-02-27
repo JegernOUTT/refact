@@ -16,6 +16,8 @@ use crate::global_context::GlobalContext;
 use crate::constants::CHAT_TOP_N;
 use crate::postprocessing::pp_tool_results::{postprocess_tool_results, ToolBudget};
 use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id, match_tool_confirm_action};
+use crate::ext::hooks::HookEvent;
+use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
 
 #[derive(Default)]
 pub struct ExecuteToolsOptions {
@@ -552,11 +554,56 @@ pub async fn process_tool_calls_once(
         }
     }
 
-    let tools_to_execute: Vec<_> = tool_calls
+    let mut tools_to_execute: Vec<_> = tool_calls
         .iter()
         .filter(|tc| !denied_ids.contains(&tc.id))
         .cloned()
         .collect();
+
+    if tools_to_execute.is_empty() {
+        return ToolStepOutcome::Continue;
+    }
+
+    let (session_id, project_dir) = {
+        let session = session_arc.lock().await;
+        let id = session.chat_id.clone();
+        drop(session);
+        let pd = get_project_dir_string(gcx.clone()).await;
+        (id, pd)
+    };
+
+    let mut pre_hook_blocked_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for tc in &tools_to_execute {
+        let args_value: Option<serde_json::Value> = tc.function.parse_args().ok()
+            .map(|m| serde_json::Value::Object(m.into_iter().collect()));
+        let payload = HookPayload {
+            hook_event_name: "PreToolUse".to_string(),
+            session_id: session_id.clone(),
+            project_dir: project_dir.clone(),
+            tool_name: Some(tc.function.name.clone()),
+            tool_input: args_value,
+            tool_output: None,
+            user_prompt: None,
+            extra: std::collections::HashMap::new(),
+        };
+        let results = run_hooks(gcx.clone(), HookEvent::PreToolUse, payload).await;
+        if let Some(reason) = first_block_reason(&results) {
+            pre_hook_blocked_ids.insert(tc.id.clone());
+            let block_message = ChatMessage {
+                message_id: Uuid::new_v4().to_string(),
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(format!("Blocked by hook: {}", reason)),
+                tool_call_id: tc.id.clone(),
+                tool_failed: Some(true),
+                ..Default::default()
+            };
+            let mut session = session_arc.lock().await;
+            session.add_message(block_message);
+        }
+    }
+    if !pre_hook_blocked_ids.is_empty() {
+        tools_to_execute.retain(|tc| !pre_hook_blocked_ids.contains(&tc.id));
+    }
 
     if tools_to_execute.is_empty() {
         return ToolStepOutcome::Continue;
@@ -959,7 +1006,15 @@ async fn execute_single_tool(
 
     info!("Executing tool: {}({:?})", tool_call.function.name, args);
 
-    if allow_parallel {
+    let (session_id, project_dir) = {
+        let ccx_locked = ccx.lock().await;
+        let sid = ccx_locked.chat_id.clone();
+        drop(ccx_locked);
+        let pd = get_project_dir_string(gcx.clone()).await;
+        (sid, pd)
+    };
+
+    let (idx, had_corrections, msgs, files) = if allow_parallel {
         let mut tool = match instantiate_tool_for_call(
             gcx.clone(),
             mode_id,
@@ -1091,7 +1146,44 @@ async fn execute_single_tool(
                 )
             }
         }
+    };
+
+    let tool_output_text = msgs.iter()
+        .filter(|m| m.role == "tool")
+        .map(|m| m.content.content_text_only())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let args_value: Option<serde_json::Value> = tool_call.function.parse_args().ok()
+        .map(|m| serde_json::Value::Object(m.into_iter().collect()));
+    let post_payload = HookPayload {
+        hook_event_name: "PostToolUse".to_string(),
+        session_id,
+        project_dir,
+        tool_name: Some(tool_call.function.name.clone()),
+        tool_input: args_value,
+        tool_output: Some(tool_output_text),
+        user_prompt: None,
+        extra: std::collections::HashMap::new(),
+    };
+    let post_results = run_hooks(gcx.clone(), HookEvent::PostToolUse, post_payload).await;
+    if let Some(reason) = first_block_reason(&post_results) {
+        return (
+            idx,
+            true,
+            vec![ChatMessage {
+                message_id: Uuid::new_v4().to_string(),
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(format!("Blocked by hook: {}", reason)),
+                tool_call_id: tool_call.id.clone(),
+                tool_failed: Some(true),
+                ..Default::default()
+            }],
+            vec![],
+        );
     }
+
+    (idx, had_corrections, msgs, files)
 }
 
 async fn execute_tools_inner(

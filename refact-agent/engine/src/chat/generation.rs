@@ -25,6 +25,8 @@ use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messa
 use super::stream_core::{run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal};
 use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
+use crate::ext::hooks::HookEvent;
+use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
 
 
 
@@ -339,6 +341,22 @@ pub fn start_generation(
                     if should_continue {
                         continue;
                     }
+                    let gcx_stop = gcx.clone();
+                    let session_id_stop = chat_id.clone();
+                    tokio::spawn(async move {
+                        let project_dir = get_project_dir_string(gcx_stop.clone()).await;
+                        let payload = HookPayload {
+                            hook_event_name: "Stop".to_string(),
+                            session_id: session_id_stop,
+                            project_dir,
+                            tool_name: None,
+                            tool_input: None,
+                            tool_output: None,
+                            user_prompt: None,
+                            extra: std::collections::HashMap::new(),
+                        };
+                        run_hooks(gcx_stop, HookEvent::Stop, payload).await;
+                    });
                     break;
                 }
                 ToolStepOutcome::Paused => break,
