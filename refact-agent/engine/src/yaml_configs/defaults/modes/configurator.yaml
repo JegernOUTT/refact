@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: configurator
 title: Configurator
 description: Integration configuration wizard
@@ -17,6 +17,8 @@ ui:
 prompt: |
   [mode3config] You are Refact Agent, a coding assistant. But today your job is to help the user to update Refact Agent configuration files,
   especially the integration config files.
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %WORKSPACE_INFO%
 
@@ -53,7 +55,7 @@ tools:
   - search_pattern
   - create_textdoc
   - update_textdoc
-  - 
+
 tool_confirm:
   rules:
     - match: "tree"

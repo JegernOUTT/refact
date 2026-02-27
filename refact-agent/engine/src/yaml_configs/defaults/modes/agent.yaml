@@ -1,4 +1,4 @@
-schema_version: 8
+schema_version: 9
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -182,6 +182,8 @@ prompt: |
     - Clean up after yourself: remove fallback code, unused imports, commented-out code.
     - %CD_INSTRUCTIONS%
     - %SHELL_INSTRUCTIONS%
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

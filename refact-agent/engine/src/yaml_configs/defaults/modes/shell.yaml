@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 7
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -32,6 +32,8 @@ prompt: |
   **Command**: `command here`
   **Purpose**: why running this
   **Result**: summary of output
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

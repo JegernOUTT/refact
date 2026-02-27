@@ -1,4 +1,4 @@
-schema_version: 8
+schema_version: 9
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -84,6 +84,8 @@ prompt: |
   If impossible → `task_agent_finish(success=false, report="reason")`
 
   %AGENT_WORKTREE%
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

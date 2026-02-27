@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: project_summary
 title: Project Summary
 description: Generate project summary and integrations
@@ -16,6 +16,8 @@ ui:
 
 prompt: |
   [mode3summary] You are Refact Agent, a coding assistant. Your task today is to create a config file with a summary of the project and integrations for it.
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %WORKSPACE_INFO%
 

@@ -149,7 +149,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
       )}
       {message && (
         <Box py="4">
-          <Markdown canHaveInteractiveElements={true} onCopyClick={handleCopy}>
+          <Markdown canHaveInteractiveElements={true} onCopyClick={handleCopy} isStreaming={isStreaming}>
             {message}
           </Markdown>
         </Box>

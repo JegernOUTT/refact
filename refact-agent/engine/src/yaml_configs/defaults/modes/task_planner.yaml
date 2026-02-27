@@ -1,4 +1,4 @@
-schema_version: 8
+schema_version: 9
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -195,6 +195,8 @@ prompt: |
   Example: `ask_questions(questions='[{"id":"plan","type":"yes_no","text":"Does this plan look right?"}]')`
 
   %CD_INSTRUCTIONS%
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

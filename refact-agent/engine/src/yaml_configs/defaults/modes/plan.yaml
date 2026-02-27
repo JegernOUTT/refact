@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: plan
 title: Plan
 description: Design implementation plans through questions and strategic analysis
@@ -69,6 +69,8 @@ prompt: |
   - Ask questions early and often
   - Deliver final plan via `task_done`
 
+  %RICH_CONTENT_INSTRUCTIONS%
+
   %SYSTEM_INFO%
 
   %WORKSPACE_INFO%
@@ -76,7 +78,7 @@ prompt: |
   %PROJECT_SUMMARY%
 
   %GIT_INFO%
-  
+
 allow_integrations: true
 allow_mcp: true
 allow_subagents: true

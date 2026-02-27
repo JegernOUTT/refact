@@ -9,8 +9,10 @@ import { useShiki } from "../../hooks/useShiki";
 import { useAppearance } from "../../hooks/useAppearance";
 import { MermaidBlock } from "./MermaidBlock";
 import { SvgBlock } from "./SvgBlock";
+import { ArtifactBlock } from "./ArtifactBlock";
 
 const DIAGRAM_LANGUAGES = new Set(["mermaid", "svg"]);
+const ARTIFACT_LANGUAGES = new Set(["html"]);
 
 export type MarkdownControls = {
   onCopyClick: (str: string) => void;
@@ -26,6 +28,7 @@ export type ShikiCodeBlockProps = React.JSX.IntrinsicElements["code"] & {
   };
   color?: CodeProps["color"];
   showLineNumbers?: boolean;
+  isStreaming?: boolean;
 } & Partial<MarkdownControls>;
 
 const MAX_HIGHLIGHT_CHARS = 50000;
@@ -38,6 +41,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
   preOptions = { widthMaxContent: false, noMargin: false },
   color = undefined,
   showLineNumbers = false,
+  isStreaming,
 }) => {
   const codeRef = React.useRef<HTMLElement | null>(null);
   const { highlight, isReady } = useShiki();
@@ -53,8 +57,13 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
   const language: string = match?.[1] ?? "text";
   const isDark = appearance === "dark";
 
+  const isSpecialBlock =
+    isBlock &&
+    (DIAGRAM_LANGUAGES.has(language) || ARTIFACT_LANGUAGES.has(language));
+
   const shouldHighlight =
     isBlock &&
+    !isSpecialBlock &&
     isReady &&
     textWithOutIndent &&
     textWithOutIndent.length <= MAX_HIGHLIGHT_CHARS;
@@ -107,6 +116,17 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
     if (language === "svg") {
       return <SvgBlock code={diagramCode} onCopyClick={onCopyClick} />;
     }
+  }
+
+  if (isBlock && ARTIFACT_LANGUAGES.has(language)) {
+    const artifactCode = textWithOutIndent ?? String(children);
+    return (
+      <ArtifactBlock
+        code={artifactCode}
+        isStreaming={isStreaming}
+        onCopyClick={onCopyClick}
+      />
+    );
   }
 
   if (!isBlock) {

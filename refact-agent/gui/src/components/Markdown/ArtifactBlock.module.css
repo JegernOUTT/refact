@@ -1,0 +1,41 @@
+.artifact_container {
+  position: relative;
+  border-radius: var(--radius-2);
+  overflow: hidden;
+  background-color: var(--gray-a2);
+}
+
+.tab_bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--gray-a3);
+}
+
+.tab_bar_spacer {
+  flex: 1;
+}
+
+.iframe {
+  width: 100%;
+  border: none;
+  display: block;
+  min-height: 60px;
+  background: white;
+  border-radius: 0 0 var(--radius-2) var(--radius-2);
+}
+
+.source_view {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.error_bar {
+  padding: var(--space-1) var(--space-2);
+  color: var(--red-9);
+  font-size: var(--font-size-1);
+  border-top: 1px solid var(--gray-a4);
+  background: var(--red-a2);
+}
+

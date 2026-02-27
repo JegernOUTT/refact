@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: review
 title: Review
 description: Autonomous code review with correctness validation
@@ -72,6 +72,8 @@ prompt: |
   - Verify API usage against current documentation
   - ALWAYS deliver findings via `task_done`
 
+  %RICH_CONTENT_INSTRUCTIONS%
+
   %SYSTEM_INFO%
 
   %WORKSPACE_INFO%
@@ -79,7 +81,7 @@ prompt: |
   %PROJECT_SUMMARY%
 
   %GIT_INFO%
-  
+
 allow_integrations: true
 allow_mcp: true
 allow_subagents: true

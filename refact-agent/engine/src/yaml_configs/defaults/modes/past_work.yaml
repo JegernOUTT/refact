@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: past_work
 title: Past Work
 description: Search conversation history and project knowledge
@@ -58,8 +58,10 @@ prompt: |
   - Note when something was done vs just discussed
   - If nothing found, say so clearly
 
+  %RICH_CONTENT_INSTRUCTIONS%
+
   %SYSTEM_INFO%
-  
+
 allow_integrations: false
 allow_mcp: false
 allow_subagents: true

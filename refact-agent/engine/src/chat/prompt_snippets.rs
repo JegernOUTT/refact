@@ -62,3 +62,10 @@ pub const AGENT_EXECUTION_INSTRUCTIONS_NO_TOOLS: &str = r#"  - Propose the chang
     - the exact files/functions to modify or create
     - the new or updated tests to add
     - the expected outcome and success criteria"#;
+
+pub const RICH_CONTENT_INSTRUCTIONS: &str = r#"The chat window renders rich visual content from fenced code blocks. When you write these, the user sees the rendered result directly in the conversation (not raw code):
+- ` ```mermaid ` — the user sees a rendered Mermaid diagram (flowcharts, sequence diagrams, ER diagrams, etc.)
+- ` ```svg ` — the user sees the rendered SVG image inline
+- ` ```html ` — the user sees a live interactive preview in a sandboxed iframe (HTML + CSS + JS). You can load CDN libraries via <script src="https://cdn.jsdelivr.net/npm/..."> for charts (Chart.js, D3), 3D (Three.js), or any web framework.
+
+Prefer these over plain text descriptions when visual representation would be clearer: architecture diagrams, flowcharts, data visualizations, interactive demos, UI prototypes."#;

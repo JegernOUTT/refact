@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -49,6 +49,8 @@ prompt: |
   Example: `ask_questions(questions='[{"id":"q1","type":"yes_no","text":"Should I explore this module further?"},{"id":"q2","type":"free_text","text":"Any specific aspects to focus on?"}]')`
 
   %CD_INSTRUCTIONS%
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

@@ -362,6 +362,13 @@ pub async fn system_prompt_add_extra_instructions(
         );
     }
 
+    if system_prompt.contains("%RICH_CONTENT_INSTRUCTIONS%") {
+        system_prompt = system_prompt.replace(
+            "%RICH_CONTENT_INSTRUCTIONS%",
+            super::prompt_snippets::RICH_CONTENT_INSTRUCTIONS
+        );
+    }
+
     system_prompt
 }
 

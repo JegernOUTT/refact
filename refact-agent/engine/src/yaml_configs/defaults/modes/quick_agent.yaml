@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: quick_agent
 title: Quick Agent
 description: Fast autonomous coding with minimal overhead
@@ -42,6 +42,8 @@ prompt: |
 
   %CD_INSTRUCTIONS%
   %SHELL_INSTRUCTIONS%
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

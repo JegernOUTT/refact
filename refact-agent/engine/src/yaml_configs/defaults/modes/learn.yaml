@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: learn
 title: Learn
 description: Understand code with clear explanations
@@ -68,6 +68,8 @@ prompt: |
   - Reference external docs with `web_search` for standard concepts
   - Use `shell` to demonstrate behavior (run examples, show output)
   - Explore codebase thoroughly before explaining
+
+  %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 
