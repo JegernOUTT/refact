@@ -12,6 +12,7 @@ use crate::http::routers::v1::ast::{
 };
 use crate::http::routers::v1::at_commands::{
     handle_v1_command_completion, handle_v1_command_preview, handle_v1_at_command_execute,
+    handle_v1_slash_commands,
 };
 use crate::http::routers::v1::at_tools::{
     handle_v1_get_tools, handle_v1_tools_check_if_confirmation_needed, handle_v1_tools_execute,
@@ -213,6 +214,7 @@ pub fn make_v1_router() -> Router {
         .route("/at-command-completion", post(handle_v1_command_completion))
         .route("/at-command-preview", post(handle_v1_command_preview))
         .route("/at-command-execute", post(handle_v1_at_command_execute))
+        .route("/slash-commands", get(handle_v1_slash_commands))
         .route("/fullpath", post(handle_v1_fullpath))
         .route("/integrations", get(handle_v1_integrations))
         .route(

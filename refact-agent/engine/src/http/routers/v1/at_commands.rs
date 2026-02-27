@@ -3,7 +3,9 @@ use axum::Extension;
 use hyper::{Body, Response, StatusCode};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio::sync::RwLock as ARwLock;
 use tokio::sync::Mutex as AMutex;
@@ -11,6 +13,10 @@ use strsim::jaro_winkler;
 use itertools::Itertools;
 use tokenizers::Tokenizer;
 use tracing::info;
+
+use crate::ext::config_dirs::{CommandSource, get_ext_dirs};
+use crate::ext::slash_commands::{SlashCommand, load_slash_commands};
+use crate::ext::skills::{SkillIndex, load_skill_indices};
 
 use crate::at_commands::execute_at::run_at_commands_locally;
 use crate::indexing_utils::wait_for_indexing_if_needed;
@@ -35,10 +41,126 @@ struct CommandCompletionPost {
     top_n: usize,
 }
 #[derive(Serialize, Deserialize, Clone)]
+pub struct CompletionDetail {
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    pub source: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 struct CommandCompletionResponse {
     completions: Vec<String>,
     replace: (i64, i64),
     is_cmd_executable: bool,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    completion_details: HashMap<String, CompletionDetail>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SlashCommandInfo {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    pub source: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub user_invocable: bool,
+    pub source: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SlashCommandsListResponse {
+    pub commands: Vec<SlashCommandInfo>,
+    pub skills: Vec<SkillInfo>,
+}
+
+const SLASH_CACHE_TTL: Duration = Duration::from_secs(5);
+
+struct SlashCacheEntry {
+    commands: Vec<SlashCommand>,
+    skills: Vec<SkillIndex>,
+    loaded_at: Instant,
+}
+
+static SLASH_CACHE: OnceLock<tokio::sync::RwLock<Option<SlashCacheEntry>>> = OnceLock::new();
+
+async fn load_slash_commands_and_skills(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> (Vec<SlashCommand>, Vec<SkillIndex>) {
+    let lock = SLASH_CACHE.get_or_init(|| tokio::sync::RwLock::new(None));
+    {
+        let read = lock.read().await;
+        if let Some(entry) = &*read {
+            if entry.loaded_at.elapsed() < SLASH_CACHE_TTL {
+                return (entry.commands.clone(), entry.skills.clone());
+            }
+        }
+    }
+    let ext_dirs = get_ext_dirs(gcx).await;
+    let commands = load_slash_commands(&ext_dirs).await;
+    let skills = load_skill_indices(&ext_dirs).await;
+    let mut write = lock.write().await;
+    *write = Some(SlashCacheEntry {
+        commands: commands.clone(),
+        skills: skills.clone(),
+        loaded_at: Instant::now(),
+    });
+    (commands, skills)
+}
+
+fn source_label(source: &CommandSource) -> String {
+    match source {
+        CommandSource::GlobalClaude => "global_claude".to_string(),
+        CommandSource::GlobalRefact => "global_refact".to_string(),
+        CommandSource::ProjectClaude(_) => "project_claude".to_string(),
+        CommandSource::ProjectRefact(_) => "project_refact".to_string(),
+    }
+}
+
+pub fn slash_completions_for_prefix(
+    commands: &[SlashCommand],
+    skills: &[SkillIndex],
+    prefix: &str,
+) -> (Vec<String>, HashMap<String, CompletionDetail>) {
+    if !prefix.starts_with('/') {
+        return (Vec::new(), HashMap::new());
+    }
+    let mut completions: Vec<String> = Vec::new();
+    let mut details: HashMap<String, CompletionDetail> = HashMap::new();
+    for cmd in commands {
+        let name_with_slash = format!("/{}", cmd.name);
+        if name_with_slash.starts_with(prefix) {
+            details.insert(name_with_slash.clone(), CompletionDetail {
+                description: cmd.description.clone(),
+                argument_hint: if cmd.argument_hint.is_empty() { None } else { Some(cmd.argument_hint.clone()) },
+                source: source_label(&cmd.source),
+            });
+            completions.push(name_with_slash);
+        }
+    }
+    for skill in skills {
+        if !skill.user_invocable {
+            continue;
+        }
+        let name_with_slash = format!("/{}", skill.name);
+        if name_with_slash.starts_with(prefix) && !details.contains_key(&name_with_slash) {
+            details.insert(name_with_slash.clone(), CompletionDetail {
+                description: skill.description.clone(),
+                argument_hint: None,
+                source: source_label(&skill.source),
+            });
+            completions.push(name_with_slash);
+        }
+    }
+    completions.sort();
+    completions.dedup();
+    (completions, details)
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -116,23 +238,35 @@ pub async fn handle_v1_command_completion(
     let mut pos1 = -1;
     let mut pos2 = -1;
     let mut is_cmd_executable = false;
+    let mut completion_details: HashMap<String, CompletionDetail> = HashMap::new();
 
     if let Ok((query_line_val, cursor_rel, cursor_line_start)) =
         get_line_with_cursor(&post.query, post.cursor)
     {
-        let query_line_val = query_line_val
+        let query_line_val_at_cursor = query_line_val
             .chars()
             .take(cursor_rel as usize)
             .collect::<String>();
         let args = query_line_args(
-            &query_line_val,
+            &query_line_val_at_cursor,
             cursor_rel,
             cursor_line_start,
             &at_command_names,
         );
         info!("args: {:?}", args);
-        (completions, is_cmd_executable, pos1, pos2) =
-            command_completion(ccx.clone(), args, post.cursor).await;
+        let focused_slash = args.iter().find(|a| a.focused && a.value.starts_with('/'));
+        if let Some(focused) = focused_slash {
+            let (slash_cmds, skills) = load_slash_commands_and_skills(global_context.clone()).await;
+            let (raw_completions, details) = slash_completions_for_prefix(&slash_cmds, &skills, &focused.value);
+            is_cmd_executable = raw_completions.iter().any(|c| c == &focused.value);
+            pos1 = focused.pos1;
+            pos2 = focused.pos2;
+            completion_details = details;
+            completions = raw_completions;
+        } else {
+            (completions, is_cmd_executable, pos1, pos2) =
+                command_completion(ccx.clone(), args, post.cursor).await;
+        }
     }
     let completions: Vec<_> = completions
         .into_iter()
@@ -144,6 +278,7 @@ pub async fn handle_v1_command_completion(
         completions,
         replace: (pos1, pos2),
         is_cmd_executable,
+        completion_details,
     };
 
     Ok(Response::builder()
@@ -570,4 +705,166 @@ pub struct QueryLineArg {
     pub pos1: i64,
     pub pos2: i64,
     pub focused: bool,
+}
+
+pub async fn handle_v1_slash_commands(
+    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<Response<Body>, ScratchError> {
+    let (commands, skills) = load_slash_commands_and_skills(global_context).await;
+    let response = SlashCommandsListResponse {
+        commands: commands.iter().map(|cmd| SlashCommandInfo {
+            name: cmd.name.clone(),
+            description: cmd.description.clone(),
+            argument_hint: if cmd.argument_hint.is_empty() { None } else { Some(cmd.argument_hint.clone()) },
+            source: source_label(&cmd.source),
+        }).collect(),
+        skills: skills.iter().map(|skill| SkillInfo {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            user_invocable: skill.user_invocable,
+            source: source_label(&skill.source),
+        }).collect(),
+    };
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&response).unwrap()))
+        .unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ext::config_dirs::CommandSource;
+    use crate::ext::skills::SkillIndex;
+    use crate::ext::slash_commands::SlashCommand;
+
+    fn make_slash_command(name: &str, desc: &str, arg_hint: &str) -> SlashCommand {
+        SlashCommand {
+            name: name.to_string(),
+            description: desc.to_string(),
+            argument_hint: arg_hint.to_string(),
+            allowed_tools: vec![],
+            model: None,
+            body: String::new(),
+            source: CommandSource::GlobalRefact,
+        }
+    }
+
+    fn make_skill(name: &str, desc: &str, user_invocable: bool) -> SkillIndex {
+        SkillIndex {
+            name: name.to_string(),
+            description: desc.to_string(),
+            user_invocable,
+            disable_model_invocation: false,
+            source: CommandSource::GlobalRefact,
+        }
+    }
+
+    #[test]
+    fn test_at_command_slash_completion_prefix_filter() {
+        let commands = vec![
+            make_slash_command("optimize", "Optimize code", "[file]"),
+            make_slash_command("options", "Show options", ""),
+            make_slash_command("review", "Review code", ""),
+        ];
+        let (completions, details) = slash_completions_for_prefix(&commands, &[], "/opt");
+        assert_eq!(completions.len(), 2);
+        assert!(completions.contains(&"/optimize".to_string()));
+        assert!(completions.contains(&"/options".to_string()));
+        assert!(!completions.contains(&"/review".to_string()));
+        assert!(details.contains_key("/optimize"));
+        assert!(details.contains_key("/options"));
+    }
+
+    #[test]
+    fn test_at_command_slash_completion_all_for_slash() {
+        let commands = vec![
+            make_slash_command("optimize", "Optimize", ""),
+            make_slash_command("review", "Review", ""),
+        ];
+        let (completions, _) = slash_completions_for_prefix(&commands, &[], "/");
+        assert_eq!(completions.len(), 2);
+        assert!(completions.contains(&"/optimize".to_string()));
+        assert!(completions.contains(&"/review".to_string()));
+    }
+
+    #[test]
+    fn test_at_command_slash_completion_excludes_non_invocable_skills() {
+        let skills = vec![
+            make_skill("public-skill", "Public", true),
+            make_skill("private-skill", "Private", false),
+        ];
+        let (completions, _) = slash_completions_for_prefix(&[], &skills, "/");
+        assert_eq!(completions.len(), 1);
+        assert!(completions.contains(&"/public-skill".to_string()));
+        assert!(!completions.contains(&"/private-skill".to_string()));
+    }
+
+    #[test]
+    fn test_at_command_slash_completion_details_populated() {
+        let commands = vec![make_slash_command("format", "Format code", "<file-path>")];
+        let (completions, details) = slash_completions_for_prefix(&commands, &[], "/");
+        assert_eq!(completions.len(), 1);
+        let detail = details.get("/format").unwrap();
+        assert_eq!(detail.description, "Format code");
+        assert_eq!(detail.argument_hint, Some("<file-path>".to_string()));
+        assert_eq!(detail.source, "global_refact");
+    }
+
+    #[test]
+    fn test_at_command_slash_completion_empty_prefix_no_match() {
+        let commands = vec![make_slash_command("optimize", "Optimize", "")];
+        let (completions, _) = slash_completions_for_prefix(&commands, &[], "");
+        assert!(completions.is_empty());
+    }
+
+    #[test]
+    fn test_at_command_slash_completion_at_prefix_no_match() {
+        let commands = vec![make_slash_command("file", "File command", "")];
+        let (completions, _) = slash_completions_for_prefix(&commands, &[], "@file");
+        assert!(completions.is_empty());
+    }
+
+    #[test]
+    fn test_at_command_slash_completion_skills_included() {
+        let skills = vec![make_skill("code-explainer", "Explains code", true)];
+        let (completions, details) = slash_completions_for_prefix(&[], &skills, "/");
+        assert_eq!(completions.len(), 1);
+        assert!(completions.contains(&"/code-explainer".to_string()));
+        assert!(details.contains_key("/code-explainer"));
+    }
+
+    #[test]
+    fn test_at_command_slash_completion_hint_none_when_empty() {
+        let commands = vec![make_slash_command("no-hint", "No hint", "")];
+        let (_, details) = slash_completions_for_prefix(&commands, &[], "/");
+        let detail = details.get("/no-hint").unwrap();
+        assert!(detail.argument_hint.is_none());
+    }
+
+    #[test]
+    fn test_at_command_slash_commands_list_response_format() {
+        let cmd = SlashCommandInfo {
+            name: "optimize".to_string(),
+            description: "Optimize code".to_string(),
+            argument_hint: Some("[file]".to_string()),
+            source: "project_refact".to_string(),
+        };
+        let skill = SkillInfo {
+            name: "explainer".to_string(),
+            description: "Explains code".to_string(),
+            user_invocable: true,
+            source: "global_refact".to_string(),
+        };
+        let resp = SlashCommandsListResponse {
+            commands: vec![cmd],
+            skills: vec![skill],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"commands\""));
+        assert!(json.contains("\"skills\""));
+        assert!(json.contains("\"optimize\""));
+        assert!(json.contains("\"explainer\""));
+    }
 }
