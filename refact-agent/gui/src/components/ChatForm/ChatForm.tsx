@@ -545,7 +545,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 isVoiceActive
                   ? "Listening..."
                   : commands.completions.length < 1
-                    ? "Type @ for commands"
+                    ? "Type @ or / for commands"
                     : ""
               }
               render={(props) => (

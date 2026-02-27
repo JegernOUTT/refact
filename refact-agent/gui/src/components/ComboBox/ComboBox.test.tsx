@@ -491,3 +491,165 @@ describe("ComboBox", () => {
   //   expect(textarea.textContent).toEqual("");
   // });
 });
+
+const SlashApp = (props: Partial<ComboBoxProps>) => {
+  const [value, setValue] = React.useState<string>(props.value ?? "");
+  const [commands, setCommands] = React.useState<ComboBoxProps["commands"]>({
+    completions: [],
+    replace: [0, 0],
+    is_cmd_executable: false,
+  });
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const fakeRequestCommands = React.useCallback(
+    useDebounceCallback(
+      (query: string, cursor: number) => {
+        if (query === "/" && cursor === 1) {
+          setCommands({
+            completions: ["/optimize", "/review"],
+            completion_details: {
+              "/optimize": {
+                description: "Optimize code for performance",
+                argument_hint: "[file-path]",
+                source: "project",
+              },
+              "/review": {
+                description: "Review code for issues",
+                source: "global",
+              },
+            },
+            replace: [0, cursor],
+            is_cmd_executable: false,
+          });
+          return;
+        }
+
+        if (query === "/opt" && cursor === 4) {
+          setCommands({
+            completions: ["/optimize"],
+            completion_details: {
+              "/optimize": {
+                description: "Optimize code for performance",
+                argument_hint: "[file-path]",
+                source: "project",
+              },
+            },
+            replace: [0, cursor],
+            is_cmd_executable: false,
+          });
+          return;
+        }
+
+        if (query === "@" && cursor === 1) {
+          setCommands({
+            completions: defaultCommands,
+            replace: [0, cursor],
+            is_cmd_executable: false,
+          });
+          return;
+        }
+
+        setCommands({
+          completions: [],
+          replace: [-1, -1],
+          is_cmd_executable: false,
+        });
+      },
+      0,
+      { leading: true },
+    ),
+    [],
+  );
+
+  const defaultProps: ComboBoxProps = {
+    commands,
+    requestCommandsCompletion: fakeRequestCommands,
+    onSubmit: () => ({}),
+    value: value,
+    onChange: setValue,
+    placeholder: "Type @ or / for commands",
+    render: (props: TextAreaProps) => <TextArea {...props} />,
+    onHelpClick: () => ({}),
+    ...props,
+  };
+
+  return <ComboBox {...defaultProps} />;
+};
+
+describe("ComboBox slash commands", () => {
+  afterEach(cleanup);
+
+  test("typing / shows slash command completions", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    expect(app.queryByText("/optimize")).not.toBeNull();
+    expect(app.queryByText("/review")).not.toBeNull();
+  });
+
+  test("slash command suggestions show description", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    expect(
+      app.queryByText("Optimize code for performance"),
+    ).not.toBeNull();
+  });
+
+  test("slash command suggestions show argument hint", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    expect(app.queryByText("[file-path]")).not.toBeNull();
+  });
+
+  test("slash command suggestions show source badge", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    expect(app.queryByText("project")).not.toBeNull();
+    expect(app.queryByText("global")).not.toBeNull();
+  });
+
+  test("selecting a slash command replaces input text", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    const suggestion = app.getByText("/optimize");
+    await user.click(suggestion);
+    expect(textarea.textContent).toEqual("/optimize");
+  });
+
+  test("filtering narrows slash completions", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/opt");
+    expect(app.queryByText("/optimize")).not.toBeNull();
+    expect(app.queryByText("/review")).toBeNull();
+  });
+
+  test("empty results do not show dropdown", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/xyz");
+    expect(app.queryByText("/optimize")).toBeNull();
+    expect(app.queryByText("/review")).toBeNull();
+  });
+
+  test("existing @-command autocomplete still works", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "@");
+    expect(app.queryByText("@file")).not.toBeNull();
+    expect(app.queryByText("@workspace")).not.toBeNull();
+  });
+
+  test("slash command dropdown closes on escape", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    expect(app.queryByText("/optimize")).not.toBeNull();
+    await user.keyboard("{Escape}");
+    expect(app.queryByText("/optimize")).toBeNull();
+  });
+});
