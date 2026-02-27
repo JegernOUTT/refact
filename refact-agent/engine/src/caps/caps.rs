@@ -20,8 +20,7 @@ use crate::caps::model_caps::{ModelCapabilities, get_model_caps, resolve_model_c
 use crate::llm::WireFormat;
 use crate::providers::traits::AvailableModel;
 
-pub const CAPS_FILENAME: &str = "refact-caps";
-pub const CAPS_FILENAME_FALLBACK: &str = "coding_assistant_caps.json";
+pub const MODEL_CATALOG_PATH: &str = "v1/model-catalog";
 
 #[derive(Debug, Serialize, Clone, Deserialize, Default, PartialEq)]
 pub struct BaseModelRecord {
@@ -381,19 +380,15 @@ pub async fn load_caps_value_from_url(
     gcx: Arc<ARwLock<GlobalContext>>,
 ) -> Result<(serde_json::Value, String), String> {
     let caps_urls = if cmdline.address_url.to_lowercase() == "refact" {
-        vec!["https://inference.smallcloud.ai/coding_assistant_caps.json".to_string()]
+        vec!["https://inference.smallcloud.ai/v1/model-catalog".to_string()]
     } else {
         let base_url = Url::parse(&cmdline.address_url)
             .map_err(|_| "failed to parse address url".to_string())?;
 
         vec![
             base_url
-                .join(&CAPS_FILENAME)
-                .map_err(|_| "failed to join caps URL".to_string())?
-                .to_string(),
-            base_url
-                .join(&CAPS_FILENAME_FALLBACK)
-                .map_err(|_| "failed to join fallback caps URL".to_string())?
+                .join(MODEL_CATALOG_PATH)
+                .map_err(|_| "failed to join model catalog URL".to_string())?
                 .to_string(),
         ]
     };
@@ -446,7 +441,7 @@ pub async fn load_caps_value_from_url(
         }
     }
 
-    Err(format!("cannot fetch caps, status={}", last_status))
+    Err(format!("cannot fetch model catalog, status={}", last_status))
 }
 
 /// Build ChatModelRecord from an AvailableModel and provider runtime info
@@ -961,17 +956,6 @@ pub async fn load_caps(
                     .map_err_with_prefix("Failed to parse caps provider:")?;
 
                 resolve_relative_urls(&mut server_provider, &caps_url)?;
-                if caps.cloud_name == "refact" {
-                    server_provider.wire_format = WireFormat::Refact;
-                    server_provider.support_metadata = true;
-                    if let Some(pricing_obj) = caps.metadata.pricing.as_object() {
-                        for model_name in pricing_obj.keys() {
-                            if !server_provider.running_models.contains(model_name) {
-                                server_provider.running_models.push(model_name.clone());
-                            }
-                        }
-                    }
-                }
 
                 info!(
                     "server_provider running_models({})={:?}, completion_endpoint={:?}, completion_default_model={:?}",
@@ -988,6 +972,9 @@ pub async fn load_caps(
                 (caps, vec![server_provider])
             }
             Err(e) => {
+                if is_refact {
+                    return Err(format!("Cloud model catalog fetch failed: {}", e));
+                }
                 warn!("Cloud caps fetch failed ({}), falling back to local providers only", e);
                 (CodeAssistantCaps::default(), vec![])
             }
@@ -1014,22 +1001,6 @@ pub async fn load_caps(
         }
     };
     caps.model_caps = Arc::new(model_caps_map);
-    if caps.cloud_name == "refact" {
-        let running_models = if let Some(pricing_obj) = caps.metadata.pricing.as_object() {
-            pricing_obj.keys().cloned().collect::<Vec<String>>()
-        } else {
-            Vec::new()
-        };
-        if !running_models.is_empty() {
-            let gcx_locked = gcx.write().await;
-            let mut registry = gcx_locked.providers.write().await;
-            if let Some(provider) = registry.get_mut("refact") {
-                provider.set_running_models(running_models);
-            }
-            drop(registry);
-            drop(gcx_locked);
-        }
-    }
 
     // Clear chat models from legacy CapsProviders that have a new ProviderTrait implementation.
     // The new system (populate_chat_models_from_providers) is the sole source of truth for
@@ -1313,7 +1284,6 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
 pub fn resolve_completion_model<'a>(
     caps: Arc<CodeAssistantCaps>,
     requested_model_id: &str,
-    try_refact_fallbacks: bool,
 ) -> Result<Arc<CompletionModelRecord>, String> {
     let model_id = if !requested_model_id.is_empty() {
         requested_model_id
@@ -1321,17 +1291,7 @@ pub fn resolve_completion_model<'a>(
         &caps.defaults.completion_default_model
     };
 
-    match resolve_model(&caps.completion_models, model_id) {
-        Ok(model) => Ok(model),
-        Err(first_err) if try_refact_fallbacks => {
-            if let Ok(model) = resolve_model(&caps.completion_models, &format!("refact/{model_id}"))
-            {
-                return Ok(model);
-            }
-            Err(first_err)
-        }
-        Err(err) => Err(err),
-    }
+    resolve_model(&caps.completion_models, model_id)
 }
 
 #[allow(dead_code)]

@@ -559,7 +559,7 @@ pub async fn create_global_context(
     let cx = GlobalContext {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         cmdline: cmdline.clone(),
-        http_client,
+        http_client: http_client.clone(),
         http_client_slowdown: Arc::new(Semaphore::new(2)),
         cache_dir,
         config_dir: config_dir.clone(),
@@ -597,7 +597,7 @@ pub async fn create_global_context(
         voice_service: crate::voice::VoiceService::new(),
         project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
         providers: Arc::new(ARwLock::new(
-            load_providers_from_config(&config_dir, &cmdline.address_url, &cmdline.api_key)
+            load_providers_from_config(&config_dir, &cmdline.address_url, &cmdline.api_key, &http_client)
                 .await
                 .unwrap_or_default()
         )),

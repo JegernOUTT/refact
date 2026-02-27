@@ -340,10 +340,6 @@ pub trait ProviderTrait: Send + Sync {
         None
     }
 
-    fn set_running_models(&mut self, _running_models: Vec<String>) {
-        // Default: no-op, providers that need running_models filtering override this
-    }
-
     /// Discover and return available models for this provider.
     /// Providers that need network access (API fetching) override this async method.
     /// Default implementation matches against model_caps using the provider's filter regex
@@ -355,6 +351,16 @@ pub trait ProviderTrait: Send + Sync {
     ) -> Vec<AvailableModel> {
         let _ = http_client; // unused in default impl
         self.get_available_models_from_caps(model_caps)
+    }
+
+    /// Optional startup hook for providers that need to refresh dynamic state
+    /// (for example, model catalogs) and persist provider-local config.
+    async fn startup_refresh_and_sync(
+        &mut self,
+        _http_client: &reqwest::Client,
+        _config_dir: &std::path::Path,
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     fn get_available_models_from_caps(

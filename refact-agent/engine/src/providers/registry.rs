@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use serde_yaml::Value;
+
 use crate::providers::traits::ProviderTrait;
 use crate::providers::{
     refact::RefactProvider,
@@ -101,6 +103,7 @@ pub async fn load_providers_from_config(
     config_dir: &Path,
     refact_address_url: &str,
     refact_api_key: &str,
+    http_client: &reqwest::Client,
 ) -> Result<ProviderRegistry, String> {
     let mut registry = ProviderRegistry::new();
 
@@ -133,7 +136,41 @@ pub async fn load_providers_from_config(
             Some(n) => n,
             None => continue,
         };
-        if name == "defaults" || name == "refact" {
+        if name == "defaults" {
+            continue;
+        }
+
+        if name == "refact" {
+            let content = match tokio::fs::read_to_string(&path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Failed to read provider config {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+
+            let mut yaml: Value = match serde_yaml::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Failed to parse provider config {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+
+            if let Some(map) = yaml.as_mapping_mut() {
+                map.remove(Value::String("api_key".to_string()));
+                map.remove(Value::String("address_url".to_string()));
+            }
+
+            if let Some(provider) = registry.get_mut("refact") {
+                if let Err(e) = provider.provider_settings_apply(yaml) {
+                    tracing::warn!(
+                        "Failed to apply provider config {} to refact provider: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
             continue;
         }
 
@@ -164,6 +201,16 @@ pub async fn load_providers_from_config(
         }
 
         registry.add(provider);
+    }
+
+    for provider in registry.providers.iter_mut() {
+        if let Err(e) = provider.startup_refresh_and_sync(http_client, config_dir).await {
+            tracing::warn!(
+                "Provider '{}' startup refresh failed: {}",
+                provider.name(),
+                e
+            );
+        }
     }
 
     Ok(registry)

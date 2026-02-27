@@ -877,8 +877,6 @@ async fn update_model_enabled_state(
         return Err(e);
     }
 
-    // Reload provider from disk to ensure the enabled flag is applied in-memory.
-    // (enabled is stored in YAML and used by build_runtime for caps population)
     reload_provider_from_disk(gcx.clone(), provider_name, &config_dir).await?;
 
     invalidate_caps(gcx).await;
@@ -1324,16 +1322,21 @@ async fn reload_provider_from_disk(
     let yaml: serde_yaml::Value = serde_yaml::from_str(&content)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid YAML after save: {}", e)))?;
 
-    let mut provider = create_provider(provider_name)
-        .ok_or_else(|| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create provider".to_string()))?;
-
-    provider
-        .provider_settings_apply(yaml)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply settings: {}", e)))?;
-
     let gcx_locked = gcx.read().await;
     let mut registry = gcx_locked.providers.write().await;
-    registry.add(provider);
+
+    if let Some(existing) = registry.get_mut(provider_name) {
+        existing
+            .provider_settings_apply(yaml)
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply settings: {}", e)))?;
+    } else {
+        let mut provider = create_provider(provider_name)
+            .ok_or_else(|| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create provider".to_string()))?;
+        provider
+            .provider_settings_apply(yaml)
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply settings: {}", e)))?;
+        registry.add(provider);
+    }
 
     Ok(())
 }

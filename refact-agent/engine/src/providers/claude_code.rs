@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,78 @@ pub struct ClaudeCodeProvider {
 }
 
 impl ClaudeCodeProvider {
+    fn needs_refresh_on_start(expires_at: i64) -> bool {
+        const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000;
+        if expires_at == 0 {
+            return true;
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        now_ms >= expires_at - REFRESH_BEFORE_EXPIRY_MS
+    }
+
+    async fn save_oauth_tokens_config(&self, config_dir: &std::path::Path) -> Result<(), String> {
+        let providers_dir = config_dir.join("providers.d");
+        let config_path = providers_dir.join("claude_code.yaml");
+
+        tokio::fs::create_dir_all(&providers_dir)
+            .await
+            .map_err(|e| format!("Failed to create providers.d: {}", e))?;
+
+        let mut yaml_map: serde_yaml::Mapping = if config_path.exists() {
+            let content = tokio::fs::read_to_string(&config_path)
+                .await
+                .map_err(|e| format!("Failed to read config: {}", e))?;
+            let value: serde_yaml::Value = serde_yaml::from_str(&content)
+                .map_err(|e| format!("Failed to parse YAML: {}", e))?;
+            value
+                .as_mapping()
+                .cloned()
+                .ok_or_else(|| "Config file root is not a YAML mapping. Cannot safely patch.".to_string())?
+        } else {
+            serde_yaml::Mapping::new()
+        };
+
+        let mut tokens_map = yaml_map
+            .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
+            .and_then(|v| v.as_mapping())
+            .cloned()
+            .unwrap_or_default();
+
+        tokens_map.insert(
+            serde_yaml::Value::String("access_token".to_string()),
+            serde_yaml::Value::String(self.oauth_tokens.access_token.clone()),
+        );
+        tokens_map.insert(
+            serde_yaml::Value::String("refresh_token".to_string()),
+            serde_yaml::Value::String(self.oauth_tokens.refresh_token.clone()),
+        );
+        tokens_map.insert(
+            serde_yaml::Value::String("expires_at".to_string()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(self.oauth_tokens.expires_at)),
+        );
+
+        yaml_map.insert(
+            serde_yaml::Value::String("oauth_tokens".to_string()),
+            serde_yaml::Value::Mapping(tokens_map),
+        );
+
+        let content = serde_yaml::to_string(&yaml_map)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_path = config_path.with_extension(format!("yaml.tmp.oauth.{}.{}", std::process::id(), unique_id));
+
+        tokio::fs::write(&temp_path, &content)
+            .await
+            .map_err(|e| format!("Failed to write temp config: {}", e))?;
+        tokio::fs::rename(&temp_path, &config_path)
+            .await
+            .map_err(|e| format!("Failed to rename config: {}", e))?;
+
+        Ok(())
+    }
+
     fn detect_cli_path(&self) -> Option<String> {
         if let Some(ref p) = self.cli_path {
             if std::path::Path::new(p).exists() {
@@ -414,6 +487,35 @@ available:
 
     fn remove_custom_model(&mut self, model_id: &str) -> bool {
         self.custom_models.remove(model_id).is_some()
+    }
+
+    async fn startup_refresh_and_sync(
+        &mut self,
+        http_client: &reqwest::Client,
+        config_dir: &std::path::Path,
+    ) -> Result<(), String> {
+        if self.oauth_tokens.is_empty() || self.oauth_tokens.refresh_token.is_empty() {
+            return Ok(());
+        }
+
+        if !Self::needs_refresh_on_start(self.oauth_tokens.expires_at) {
+            return Ok(());
+        }
+
+        tracing::info!("Claude Code: refreshing OAuth token on startup");
+        let refreshed = crate::providers::claude_code_oauth::refresh_access_token(
+            http_client,
+            &self.oauth_tokens.refresh_token,
+        )
+        .await?;
+
+        self.oauth_tokens.access_token = refreshed.access_token;
+        if !refreshed.refresh_token.is_empty() {
+            self.oauth_tokens.refresh_token = refreshed.refresh_token;
+        }
+        self.oauth_tokens.expires_at = refreshed.expires_at;
+
+        self.save_oauth_tokens_config(config_dir).await
     }
 }
 
