@@ -58,13 +58,13 @@ fn shell_split(s: &str) -> Vec<String> {
 fn expand_template(body: &str, args_str: &str, positional: &[String]) -> String {
     let mut result = body.to_string();
     result = result.replace("$ARGUMENTS", args_str);
-    for (i, arg) in positional.iter().enumerate() {
+    for i in (0..positional.len()).rev() {
         let placeholder = format!("${}", i + 1);
-        result = result.replace(&placeholder, arg);
+        result = result.replace(&placeholder, &positional[i]);
     }
     let max_seen = positional.len() + 3;
-    for i in (positional.len() + 1)..=max_seen {
-        let placeholder = format!("${}", i);
+    for i in (positional.len()..max_seen).rev() {
+        let placeholder = format!("${}", i + 1);
         result = result.replace(&placeholder, "");
     }
     result
@@ -187,6 +187,13 @@ mod tests {
     fn test_expand_template_with_at_commands() {
         let args = vec!["fix".to_string(), "it".to_string()];
         assert_eq!(expand_template("@file path.rs $ARGUMENTS", "fix it", &args), "@file path.rs fix it");
+    }
+
+    #[test]
+    fn test_expand_template_dollar_10_not_corrupted() {
+        let args: Vec<String> = (1..=10).map(|i| format!("arg{}", i)).collect();
+        let result = expand_template("$1 $10", "arg1 arg2 arg3 arg4 arg5 arg6 arg7 arg8 arg9 arg10", &args);
+        assert_eq!(result, "arg1 arg10", "$10 must not be corrupted by $1 replacement");
     }
 
     #[tokio::test]

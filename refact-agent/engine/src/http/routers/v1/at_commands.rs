@@ -271,7 +271,13 @@ pub async fn handle_v1_command_completion(
     let completions: Vec<_> = completions
         .into_iter()
         .unique()
-        .map(|x| format!("{} ", x))
+        .map(|x| {
+            if x.starts_with('/') {
+                x
+            } else {
+                format!("{} ", x)
+            }
+        })
         .collect();
 
     let response = CommandCompletionResponse {
@@ -841,6 +847,24 @@ mod tests {
         let (_, details) = slash_completions_for_prefix(&commands, &[], "/");
         let detail = details.get("/no-hint").unwrap();
         assert!(detail.argument_hint.is_none());
+    }
+
+    #[test]
+    fn test_completion_details_keys_match_completions() {
+        let commands = vec![
+            make_slash_command("format", "Format code", "<file>"),
+            make_slash_command("review", "Review code", ""),
+        ];
+        let (raw_completions, details) = slash_completions_for_prefix(&commands, &[], "/");
+        let completions: Vec<_> = raw_completions
+            .into_iter()
+            .unique()
+            .map(|x| if x.starts_with('/') { x } else { format!("{} ", x) })
+            .collect();
+        for c in &completions {
+            assert!(details.contains_key(c.as_str()), "No detail found for completion '{}'", c);
+        }
+        assert_eq!(completions, vec!["/format", "/review"]);
     }
 
     #[test]

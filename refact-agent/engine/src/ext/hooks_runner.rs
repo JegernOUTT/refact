@@ -122,16 +122,75 @@ async fn run_single_hook(config: &HookConfig, payload: &HookPayload) -> HookResu
     };
 
     let timeout_secs = config.timeout.unwrap_or(HOOK_DEFAULT_TIMEOUT_SECS);
-    let timeout = Duration::from_secs(timeout_secs);
+    let timeout_dur = Duration::from_secs(timeout_secs);
 
-    match tokio::time::timeout(timeout, run_hook_process(config, payload, &payload_json)).await {
-        Ok(result) => result,
+    let mut cmd = make_hook_command(config, payload);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("hooks_runner: failed to spawn '{}': {}", config.command, e);
+            return HookResult::Warning(format!("Failed to spawn: {}", e));
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload_json.as_bytes()).await;
+        drop(stdin);
+    }
+
+    let stdout_task = child.stdout.take().map(|mut out| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf).await;
+            buf
+        })
+    });
+    let stderr_task = child.stderr.take().map(|mut err| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf).await;
+            buf
+        })
+    });
+
+    match tokio::time::timeout(timeout_dur, child.wait()).await {
+        Ok(Ok(status)) => {
+            let stdout_bytes = if let Some(t) = stdout_task { t.await.unwrap_or_default() } else { Vec::new() };
+            let stderr_bytes = if let Some(t) = stderr_task { t.await.unwrap_or_default() } else { Vec::new() };
+            let stdout = truncate_bytes(&stdout_bytes, HOOK_MAX_OUTPUT_BYTES);
+            let stderr = truncate_bytes(&stderr_bytes, HOOK_MAX_OUTPUT_BYTES);
+            match status.code().unwrap_or(-1) {
+                0 => HookResult::Success(stdout),
+                2 => {
+                    let reason = if stderr.is_empty() { stdout } else { stderr };
+                    tracing::info!("hooks_runner: hook blocked action: {}", reason);
+                    HookResult::Block(reason)
+                }
+                code => {
+                    tracing::warn!(
+                        "hooks_runner: hook '{}' exited with code {}: {}",
+                        config.command,
+                        code,
+                        stderr
+                    );
+                    HookResult::Warning(stderr)
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("hooks_runner: failed to wait for '{}': {}", config.command, e);
+            HookResult::Warning(format!("Failed to wait: {}", e))
+        }
         Err(_) => {
             tracing::warn!(
-                "hooks_runner: hook timed out after {}s: {}",
+                "hooks_runner: hook timed out after {}s, killing process: {}",
                 timeout_secs,
                 config.command
             );
+            let _ = child.kill().await;
+            let _ = child.wait().await;
             HookResult::Timeout
         }
     }
@@ -163,63 +222,6 @@ fn make_hook_command(
         .env("REFACT_HOOK_EVENT", &payload.hook_event_name);
 
     cmd
-}
-
-async fn run_hook_process(
-    config: &HookConfig,
-    payload: &HookPayload,
-    payload_json: &str,
-) -> HookResult {
-    let mut cmd = make_hook_command(config, payload);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "hooks_runner: failed to spawn '{}': {}",
-                config.command,
-                e
-            );
-            return HookResult::Warning(format!("Failed to spawn: {}", e));
-        }
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload_json.as_bytes()).await;
-    }
-
-    let output = match child.wait_with_output().await {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!(
-                "hooks_runner: failed to wait for '{}': {}",
-                config.command,
-                e
-            );
-            return HookResult::Warning(format!("Failed to wait: {}", e));
-        }
-    };
-
-    let stdout = truncate_bytes(&output.stdout, HOOK_MAX_OUTPUT_BYTES);
-    let stderr = truncate_bytes(&output.stderr, HOOK_MAX_OUTPUT_BYTES);
-
-    match output.status.code().unwrap_or(-1) {
-        0 => HookResult::Success(stdout),
-        2 => {
-            let reason = if stderr.is_empty() { stdout } else { stderr };
-            tracing::info!("hooks_runner: hook blocked action: {}", reason);
-            HookResult::Block(reason)
-        }
-        code => {
-            tracing::warn!(
-                "hooks_runner: hook '{}' exited with code {}: {}",
-                config.command,
-                code,
-                stderr
-            );
-            HookResult::Warning(stderr)
-        }
-    }
 }
 
 fn truncate_bytes(data: &[u8], max_bytes: usize) -> String {
@@ -393,6 +395,39 @@ mod tests {
         let payload = make_payload("SessionStart", None);
         let result = run_single_hook(&config, &payload).await;
         assert!(matches!(result, HookResult::Timeout));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_timeout_kills_process() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let pid_file = tmpdir.path().join("pid.txt");
+        let pid_path_str = pid_file.to_str().unwrap().to_string();
+        let cmd = format!("echo $$ > '{}'; sleep 60", pid_path_str);
+        let config = crate::ext::hooks::HookConfig {
+            event: HookEvent::SessionStart,
+            matcher: None,
+            command: cmd,
+            timeout: Some(2),
+            source: crate::ext::config_dirs::CommandSource::GlobalRefact,
+        };
+        let payload = make_payload("SessionStart", None);
+        let result = run_single_hook(&config, &payload).await;
+        assert!(matches!(result, HookResult::Timeout));
+
+        let pid_str = std::fs::read_to_string(&pid_file)
+            .expect("PID file should have been written by the child process");
+        let pid: u32 = pid_str.trim().parse().expect("PID should be numeric");
+
+        let kill_output = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .expect("kill command should execute");
+        assert!(
+            !kill_output.status.success(),
+            "Process {} should have been killed and reaped after timeout, but kill -0 succeeded",
+            pid
+        );
     }
 
     #[test]
