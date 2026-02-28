@@ -35,6 +35,8 @@ import {
 import { chatModesApi } from "../services/refact/chatModes";
 import { customizationApi } from "../services/refact/customization";
 import { projectInformationApi } from "../services/refact/projectInformation";
+import { extensionsApi } from "../services/refact/extensions";
+import { pluginsApi } from "../services/refact/plugins";
 import { smallCloudApi } from "../services/smallcloud";
 import { reducer as fimReducer } from "../features/FIM/reducer";
 import { tipOfTheDaySlice } from "../features/TipOfTheDay";
@@ -112,6 +114,8 @@ const rootReducer = combineSlices(
     [chatModesApi.reducerPath]: chatModesApi.reducer,
     [customizationApi.reducerPath]: customizationApi.reducer,
     [projectInformationApi.reducerPath]: projectInformationApi.reducer,
+    [extensionsApi.reducerPath]: extensionsApi.reducer,
+    [pluginsApi.reducerPath]: pluginsApi.reducer,
   },
   historySlice,
   errorSlice,
@@ -203,6 +207,8 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           chatModesApi.middleware,
           customizationApi.middleware,
           projectInformationApi.middleware,
+          extensionsApi.middleware,
+          pluginsApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(listenerMiddleware.middleware);

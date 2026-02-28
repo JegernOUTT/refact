@@ -1,0 +1,18 @@
+.panelContainer {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 120px);
+  min-height: 300px;
+}
+
+.listPanel {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.placeholder {
+  padding: var(--space-4);
+  color: var(--gray-10);
+}

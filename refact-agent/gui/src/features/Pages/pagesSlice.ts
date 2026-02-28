@@ -68,6 +68,12 @@ export interface StatsDashboardPage {
   name: "stats dashboard";
 }
 
+export interface ExtensionsPage {
+  name: "extensions";
+  tab?: "skills" | "commands" | "hooks" | "marketplace";
+  itemId?: string;
+}
+
 export interface IntegrationsSetupPage {
   name: "integrations page";
   projectPath?: string;
@@ -93,12 +99,17 @@ export type Page =
   | KnowledgeGraphPage
   | CustomizationPage
   | DefaultModelsPage
-  | StatsDashboardPage;
+  | StatsDashboardPage
+  | ExtensionsPage;
 
 export function isIntegrationSetupPage(
   page: Page,
 ): page is IntegrationsSetupPage {
   return page.name === "integrations page";
+}
+
+export function isExtensionsPage(page: Page): page is ExtensionsPage {
+  return page.name === "extensions";
 }
 
 export type PageSliceState = Page[];

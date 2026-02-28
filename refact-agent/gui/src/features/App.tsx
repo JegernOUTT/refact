@@ -41,6 +41,7 @@ import { LoginPage } from "./Login";
 import { TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
 import { Customization } from "./Customization";
+import { Extensions } from "./Extensions";
 import { DefaultModels } from "./DefaultModels";
 import { StatsDashboard } from "./StatsDashboard";
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
@@ -308,6 +309,15 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             backFromDashboard={goBack}
             tabbed={config.tabbed}
             host={config.host}
+          />
+        )}
+        {!pageSwitching && renderedPage.name === "extensions" && (
+          <Extensions
+            backFromExtensions={goBack}
+            tabbed={config.tabbed}
+            host={config.host}
+            initialTab={renderedPage.tab}
+            initialItemId={renderedPage.itemId}
           />
         )}
       </PageWrapper>

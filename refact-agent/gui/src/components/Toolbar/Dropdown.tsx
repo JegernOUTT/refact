@@ -44,6 +44,7 @@ export type DropdownNavigationOptions =
   | "knowledge graph"
   | "customization"
   | "default models"
+  | "extensions"
   | "";
 
 type DropdownProps = {
@@ -275,6 +276,10 @@ export const Dropdown: React.FC<DropdownProps> = ({
 
         <DropdownMenu.Item onSelect={() => handleNavigation("customization")}>
           Customize Modes & Agents
+        </DropdownMenu.Item>
+
+        <DropdownMenu.Item onSelect={() => handleNavigation("extensions")}>
+          <GearIcon /> Skills, Commands & Hooks
         </DropdownMenu.Item>
 
         <DropdownMenu.Item
