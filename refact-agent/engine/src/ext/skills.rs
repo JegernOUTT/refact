@@ -155,11 +155,46 @@ pub async fn load_skill_full(ext_dirs: &ExtDirs, name: &str) -> Option<SkillFull
 }
 
 pub async fn load_skill_linked_file(skill_dir: &Path, relative_path: &str) -> Option<String> {
-    let path = skill_dir.join(relative_path);
-    match tokio::fs::read_to_string(&path).await {
+    let relative_path = relative_path.trim();
+    if Path::new(relative_path).is_absolute() {
+        tracing::warn!("Rejecting absolute @include path: {}", relative_path);
+        return None;
+    }
+    if relative_path.contains("..") {
+        tracing::warn!("Rejecting @include with path traversal: {}", relative_path);
+        return None;
+    }
+    let full_path = skill_dir.join(relative_path);
+    let canonical = match tokio::fs::canonicalize(&full_path).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to resolve @include path {:?}: {}", full_path, e);
+            return None;
+        }
+    };
+    let canonical_dir = match tokio::fs::canonicalize(skill_dir).await {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    if !canonical.starts_with(&canonical_dir) {
+        tracing::warn!("@include path escapes skill directory: {:?}", canonical);
+        return None;
+    }
+    match tokio::fs::metadata(&canonical).await {
+        Ok(meta) if meta.len() > 50 * 1024 => {
+            tracing::warn!("@include file too large (>50KB): {:?}", canonical);
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to stat @include file {:?}: {}", canonical, e);
+            return None;
+        }
+        _ => {}
+    }
+    match tokio::fs::read_to_string(&canonical).await {
         Ok(content) => Some(content),
         Err(e) => {
-            tracing::warn!("Failed to read linked skill file {:?}: {}", path, e);
+            tracing::warn!("Failed to read @include file {:?}: {}", canonical, e);
             None
         }
     }
@@ -362,6 +397,46 @@ mod tests {
     #[tokio::test]
     async fn test_load_skill_linked_file_missing() {
         let result = load_skill_linked_file(Path::new("/nonexistent"), "missing.md").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_include_path_traversal_rejected() {
+        let result = load_skill_linked_file(Path::new("/some/dir"), "../../secret.txt").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_include_absolute_path_rejected() {
+        let result = load_skill_linked_file(Path::new("/some/dir"), "/etc/passwd").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_include_valid_path_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates_dir = tmp.path().join("templates");
+        tokio::fs::create_dir_all(&templates_dir).await.unwrap();
+        tokio::fs::write(templates_dir.join("foo.md"), "template content").await.unwrap();
+
+        let result = load_skill_linked_file(tmp.path(), "templates/foo.md").await;
+        assert_eq!(result, Some("template content".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_include_symlink_escape_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skill_dir");
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+
+        let secret_file = tmp.path().join("secret.txt");
+        tokio::fs::write(&secret_file, "secret content").await.unwrap();
+
+        let symlink_path = skill_dir.join("link.md");
+        std::os::unix::fs::symlink(&secret_file, &symlink_path).unwrap();
+
+        let result = load_skill_linked_file(&skill_dir, "link.md").await;
         assert!(result.is_none());
     }
 

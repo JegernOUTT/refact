@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock as ARwLock;
 use serde::Serialize;
 
-use crate::ext::config_dirs::get_ext_dirs;
+use crate::ext::config_dirs::{get_ext_dirs, CommandSource};
 use crate::ext::hooks::{HookConfig, HookEvent, load_hooks};
 use crate::global_context::GlobalContext;
 
@@ -63,6 +63,25 @@ pub async fn get_project_dir_string(gcx: Arc<ARwLock<GlobalContext>>) -> String 
         .unwrap_or_default()
 }
 
+pub fn is_global_source(source: &CommandSource) -> bool {
+    matches!(source, CommandSource::GlobalClaude | CommandSource::GlobalRefact)
+}
+
+fn filter_trusted_hooks(hooks: Vec<HookConfig>) -> Vec<HookConfig> {
+    hooks.into_iter().filter(|h| {
+        if is_global_source(&h.source) {
+            true
+        } else {
+            tracing::warn!(
+                "Skipping untrusted project hook: {} from {:?}. Enable via global config.",
+                h.command,
+                h.source
+            );
+            false
+        }
+    }).collect()
+}
+
 pub async fn get_hooks_for_event(
     gcx: Arc<ARwLock<GlobalContext>>,
     event: HookEvent,
@@ -70,7 +89,8 @@ pub async fn get_hooks_for_event(
 ) -> Vec<HookConfig> {
     let ext_dirs = get_ext_dirs(gcx).await;
     let hooks = load_hooks(&ext_dirs).await;
-    hooks
+    let trusted = filter_trusted_hooks(hooks);
+    trusted
         .into_iter()
         .filter(|h| h.event == event)
         .filter(|h| matcher_matches(&h.matcher, tool_name))
@@ -401,6 +421,47 @@ mod tests {
     fn test_first_block_reason_empty() {
         let results: Vec<HookResult> = vec![];
         assert_eq!(first_block_reason(&results), None);
+    }
+
+    #[test]
+    fn test_is_global_source() {
+        use std::path::PathBuf;
+        assert!(is_global_source(&crate::ext::config_dirs::CommandSource::GlobalClaude));
+        assert!(is_global_source(&crate::ext::config_dirs::CommandSource::GlobalRefact));
+        assert!(!is_global_source(&crate::ext::config_dirs::CommandSource::ProjectClaude(PathBuf::from("/p"))));
+        assert!(!is_global_source(&crate::ext::config_dirs::CommandSource::ProjectRefact(PathBuf::from("/p"))));
+    }
+
+    #[test]
+    fn test_project_hooks_skipped_by_default() {
+        use std::path::PathBuf;
+        let hooks = vec![
+            crate::ext::hooks::HookConfig {
+                event: HookEvent::PreToolUse,
+                matcher: None,
+                command: "project_cmd".to_string(),
+                timeout: None,
+                source: crate::ext::config_dirs::CommandSource::ProjectRefact(PathBuf::from("/project")),
+            },
+        ];
+        let trusted = filter_trusted_hooks(hooks);
+        assert!(trusted.is_empty());
+    }
+
+    #[test]
+    fn test_global_hooks_still_run() {
+        let hooks = vec![
+            crate::ext::hooks::HookConfig {
+                event: HookEvent::PreToolUse,
+                matcher: None,
+                command: "global_cmd".to_string(),
+                timeout: None,
+                source: crate::ext::config_dirs::CommandSource::GlobalRefact,
+            },
+        ];
+        let trusted = filter_trusted_hooks(hooks);
+        assert_eq!(trusted.len(), 1);
+        assert_eq!(trusted[0].command, "global_cmd");
     }
 
     #[test]
