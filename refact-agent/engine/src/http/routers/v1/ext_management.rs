@@ -41,6 +41,7 @@ fn source_str(source: &CommandSource) -> String {
         CommandSource::GlobalRefact => "global_refact".to_string(),
         CommandSource::ProjectClaude(_) => "project_claude".to_string(),
         CommandSource::ProjectRefact(_) => "project_refact".to_string(),
+        CommandSource::InstalledPlugin(name) => format!("plugin:{}", name),
     }
 }
 
@@ -50,6 +51,7 @@ fn source_label_str(source: &CommandSource) -> String {
         CommandSource::GlobalRefact => "Global".to_string(),
         CommandSource::ProjectClaude(_) => "Project (.claude)".to_string(),
         CommandSource::ProjectRefact(_) => "Project (.refact)".to_string(),
+        CommandSource::InstalledPlugin(name) => format!("Plugin ({})", name),
     }
 }
 
@@ -57,11 +59,12 @@ fn scope_str(source: &CommandSource) -> String {
     match source {
         CommandSource::GlobalClaude | CommandSource::GlobalRefact => "global".to_string(),
         CommandSource::ProjectClaude(_) | CommandSource::ProjectRefact(_) => "local".to_string(),
+        CommandSource::InstalledPlugin(_) => "plugin".to_string(),
     }
 }
 
 fn is_read_only(source: &CommandSource) -> bool {
-    matches!(source, CommandSource::GlobalClaude | CommandSource::ProjectClaude(_))
+    matches!(source, CommandSource::GlobalClaude | CommandSource::ProjectClaude(_) | CommandSource::InstalledPlugin(_))
 }
 
 fn skill_file_path(source: &CommandSource, config_dir: &std::path::Path, name: &str) -> String {
@@ -74,6 +77,9 @@ fn skill_file_path(source: &CommandSource, config_dir: &std::path::Path, name: &
         }
         CommandSource::ProjectRefact(root) => root.join(".refact").join("skills").join(name).join("SKILL.md").display().to_string(),
         CommandSource::ProjectClaude(root) => root.join(".claude").join("skills").join(name).join("SKILL.md").display().to_string(),
+        CommandSource::InstalledPlugin(plugin_name) => {
+            config_dir.join("plugins").join("installed").join(plugin_name).join("skills").join(name).join("SKILL.md").display().to_string()
+        }
     }
 }
 
@@ -87,6 +93,9 @@ fn command_file_path(source: &CommandSource, config_dir: &std::path::Path, name:
         }
         CommandSource::ProjectRefact(root) => root.join(".refact").join("commands").join(format!("{}.md", name)).display().to_string(),
         CommandSource::ProjectClaude(root) => root.join(".claude").join("commands").join(format!("{}.md", name)).display().to_string(),
+        CommandSource::InstalledPlugin(plugin_name) => {
+            config_dir.join("plugins").join("installed").join(plugin_name).join("commands").join(format!("{}.md", name)).display().to_string()
+        }
     }
 }
 
@@ -139,9 +148,9 @@ async fn resolve_scope_dir(
 
 fn make_scope_ext_dirs(base_dir: PathBuf, scope: &str) -> ExtDirs {
     if scope == "global" {
-        ExtDirs { global_dirs: vec![base_dir], project_dirs: vec![] }
+        ExtDirs { global_dirs: vec![base_dir], project_dirs: vec![], installed_dirs: vec![] }
     } else {
-        ExtDirs { global_dirs: vec![], project_dirs: vec![base_dir] }
+        ExtDirs { global_dirs: vec![], project_dirs: vec![base_dir], installed_dirs: vec![] }
     }
 }
 
@@ -1197,6 +1206,7 @@ mod tests {
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
             project_dirs: vec![],
+            installed_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         let flat: Vec<HookConfigFlat> = hooks.iter().map(HookConfigFlat::from).collect();
