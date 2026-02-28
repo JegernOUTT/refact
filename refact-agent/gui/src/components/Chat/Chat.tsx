@@ -20,6 +20,7 @@ import {
   selectBrowserContextOversize,
   selectBrowserUiOpen,
 } from "../../features/Browser/browserSlice";
+import { SkillsIndicator } from "../ChatContent/SkillsIndicator";
 
 export type ChatProps = {
   host: Config["host"];
@@ -95,6 +96,10 @@ export const Chat: React.FC<ChatProps> = ({
         </Flex>
 
         <Flex direction="column" style={{ flex: "0 0 auto" }}>
+          <Container>
+            <SkillsIndicator chatId={chatId} />
+          </Container>
+
           <Container>
             <TaskProgressWidget />
           </Container>

@@ -66,6 +66,7 @@ import { coinBallanceSlice } from "../features/CoinBalance";
 import { tasksSlice } from "../features/Tasks";
 import { connectionSlice } from "../features/Connection";
 import { browserSlice } from "../features/Browser";
+import { skillsStatusApi } from "../services/refact/skillsStatus";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -111,6 +112,7 @@ const rootReducer = combineSlices(
     [trajectoryApi.reducerPath]: trajectoryApi.reducer,
     [tasksApi.reducerPath]: tasksApi.reducer,
     [browserApi.reducerPath]: browserApi.reducer,
+    [skillsStatusApi.reducerPath]: skillsStatusApi.reducer,
     [chatModesApi.reducerPath]: chatModesApi.reducer,
     [customizationApi.reducerPath]: customizationApi.reducer,
     [projectInformationApi.reducerPath]: projectInformationApi.reducer,
@@ -204,6 +206,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           trajectoryApi.middleware,
           tasksApi.middleware,
           browserApi.middleware,
+          skillsStatusApi.middleware,
           chatModesApi.middleware,
           customizationApi.middleware,
           projectInformationApi.middleware,

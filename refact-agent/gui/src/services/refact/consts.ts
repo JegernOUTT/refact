@@ -74,3 +74,5 @@ export const BROWSER_CONTEXT_ESTIMATE = "/v1/browser/context-estimate";
 export const BROWSER_ANNOTATE_START = "/v1/browser/annotate/start";
 export const BROWSER_ANNOTATE_RESULT = "/v1/browser/annotate/result";
 export const BROWSER_ANNOTATE_CLEAR = "/v1/browser/annotate/clear";
+
+export const SKILLS_STATUS_URL = "/v1/chats/{chat_id}/skills-status";
