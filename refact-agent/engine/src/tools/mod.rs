@@ -1,6 +1,9 @@
 pub mod scope_utils;
 pub mod tools_description;
 pub mod tools_list;
+
+#[cfg(test)]
+mod tests_schema;
 pub mod tool_helpers;
 pub mod subagent_phases;
 

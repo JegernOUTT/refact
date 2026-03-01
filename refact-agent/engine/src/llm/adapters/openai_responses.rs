@@ -1595,4 +1595,64 @@ mod tests {
         assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::AddCitation { .. })),
             "annotation.added should produce AddCitation");
     }
+
+    #[test]
+    fn test_convert_tools_to_responses_preserves_schema() {
+        let tools = vec![
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search the web",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query"},
+                            "limit": {"type": "integer"},
+                            "tags": {
+                                "type": "array",
+                                "items": {"type": "string"}
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }),
+        ];
+
+        let result = convert_tools_to_responses(&tools);
+        let converted = result.as_array().unwrap();
+        assert_eq!(converted.len(), 1);
+
+        let tool = &converted[0];
+        assert_eq!(tool["type"], json!("function"));
+        assert_eq!(tool["name"], json!("search"));
+        assert_eq!(tool["description"], json!("Search the web"));
+
+        let params = &tool["parameters"];
+        assert_eq!(params["type"], json!("object"));
+        assert_eq!(params["properties"]["query"]["type"], json!("string"));
+        assert_eq!(params["properties"]["limit"]["type"], json!("integer"));
+        assert_eq!(params["properties"]["tags"]["type"], json!("array"));
+        assert_eq!(params["properties"]["tags"]["items"]["type"], json!("string"));
+        assert_eq!(params["required"], json!(["query"]));
+        assert!(tool.get("function").is_none(), "function wrapper must not be present in responses format");
+    }
+
+    #[test]
+    fn test_convert_tools_to_responses_already_in_responses_format() {
+        let tools = vec![
+            json!({
+                "type": "function",
+                "name": "already_converted",
+                "description": "Already in responses format",
+                "parameters": {"type": "object", "properties": {}}
+            }),
+        ];
+
+        let result = convert_tools_to_responses(&tools);
+        let converted = result.as_array().unwrap();
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["name"], json!("already_converted"));
+    }
 }
