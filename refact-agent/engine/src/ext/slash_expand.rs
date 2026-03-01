@@ -71,56 +71,55 @@ fn expand_template(body: &str, args_str: &str, positional: &[String]) -> String 
 }
 
 async fn expand_with_dirs(ext_dirs: &ExtDirs, raw_input: &str) -> Result<Option<ExpandedCommand>, String> {
-    let trimmed = raw_input.trim_start();
-    if !trimmed.starts_with('/') {
-        return Ok(None);
-    }
-
-    let after_slash = &trimmed[1..];
-    let cmd_name_end = after_slash
-        .find(|c: char| c == ' ' || c == '\t' || c == '\n')
-        .unwrap_or(after_slash.len());
-    let cmd_name = &after_slash[..cmd_name_end];
-
-    if cmd_name.is_empty() {
-        return Ok(None);
-    }
-
-    let args_str = after_slash[cmd_name_end..].trim().to_string();
-    let positional = shell_split(&args_str);
-
     let commands = load_slash_commands(ext_dirs).await;
-    if let Some(command) = commands.into_iter().find(|c| c.name == cmd_name) {
-        let expanded_text = expand_template(&command.body, &args_str, &positional);
-        return Ok(Some(ExpandedCommand {
-            expanded_text,
-            model_override: command.model,
-            allowed_tools: command.allowed_tools,
-            source_command: cmd_name.to_string(),
-            context_fork: None,
-        }));
-    }
-
-    if let Some(skill) = load_skill_full(ext_dirs, cmd_name).await {
-        if !skill.index.user_invocable {
-            return Ok(None);
+    let char_bytes: Vec<(usize, char)> = raw_input.char_indices().collect();
+    for (char_idx, &(byte_pos, ch)) in char_bytes.iter().enumerate() {
+        if ch != '/' {
+            continue;
         }
-        let agent_name = skill.agent.clone().unwrap_or_else(|| "subagent".to_string());
-        let context_fork = if skill.context.as_deref() == Some("fork") {
-            Some(agent_name)
-        } else {
-            None
-        };
-        let expanded_text = expand_template(&skill.body, &args_str, &positional);
-        return Ok(Some(ExpandedCommand {
-            expanded_text,
-            model_override: skill.model.clone(),
-            allowed_tools: skill.allowed_tools.clone(),
-            source_command: cmd_name.to_string(),
-            context_fork,
-        }));
+        if char_idx > 0 && !char_bytes[char_idx - 1].1.is_whitespace() {
+            continue;
+        }
+        let name_byte_start = byte_pos + 1;
+        let name_byte_end = char_bytes[char_idx + 1..]
+            .iter()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(b, _)| *b)
+            .unwrap_or(raw_input.len());
+        let cmd_name = &raw_input[name_byte_start..name_byte_end];
+        if cmd_name.is_empty() {
+            continue;
+        }
+        let args_str = raw_input[name_byte_end..].trim().to_string();
+        let positional = shell_split(&args_str);
+        let prefix = &raw_input[..byte_pos];
+        if let Some(command) = commands.iter().find(|c| c.name == cmd_name) {
+            return Ok(Some(ExpandedCommand {
+                expanded_text: format!("{}{}", prefix, expand_template(&command.body, &args_str, &positional)),
+                model_override: command.model.clone(),
+                allowed_tools: command.allowed_tools.clone(),
+                source_command: cmd_name.to_string(),
+                context_fork: None,
+            }));
+        }
+        if let Some(skill) = load_skill_full(ext_dirs, cmd_name).await {
+            if skill.index.user_invocable {
+                let agent_name = skill.agent.clone().unwrap_or_else(|| "subagent".to_string());
+                let context_fork = if skill.context.as_deref() == Some("fork") {
+                    Some(agent_name)
+                } else {
+                    None
+                };
+                return Ok(Some(ExpandedCommand {
+                    expanded_text: format!("{}{}", prefix, expand_template(&skill.body, &args_str, &positional)),
+                    model_override: skill.model.clone(),
+                    allowed_tools: skill.allowed_tools.clone(),
+                    source_command: cmd_name.to_string(),
+                    context_fork,
+                }));
+            }
+        }
     }
-
     Ok(None)
 }
 
@@ -209,9 +208,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_not_at_start_returns_none() {
-        let ext_dirs = make_ext_dirs(PathBuf::from("/nonexistent"));
-        assert!(expand_with_dirs(&ext_dirs, "text /cmd arg").await.unwrap().is_none());
+    async fn test_mid_message_expansion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands_dir = tmp.path().join("commands");
+        tokio::fs::create_dir_all(&commands_dir).await.unwrap();
+        tokio::fs::write(commands_dir.join("cmd.md"), "Expanded: $ARGUMENTS").await.unwrap();
+
+        let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
+        let result = expand_with_dirs(&ext_dirs, "text /cmd arg").await.unwrap().unwrap();
+        assert_eq!(result.expanded_text, "text Expanded: arg");
+        assert_eq!(result.source_command, "cmd");
     }
 
     #[tokio::test]
@@ -248,7 +254,7 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
         let result = expand_with_dirs(&ext_dirs, "  /hi there").await.unwrap().unwrap();
-        assert_eq!(result.expanded_text, "Hi there");
+        assert_eq!(result.expanded_text, "  Hi there");
     }
 
     #[tokio::test]
@@ -374,5 +380,35 @@ mod tests {
         let result = expand_with_dirs(&ext_dirs, "/same-name arg").await.unwrap().unwrap();
         assert!(result.expanded_text.contains("Command body"), "Slash command should take precedence over skill");
         assert!(result.context_fork.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mid_message_preserves_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands_dir = tmp.path().join("commands");
+        tokio::fs::create_dir_all(&commands_dir).await.unwrap();
+        tokio::fs::write(commands_dir.join("greet.md"), "Hello $ARGUMENTS!").await.unwrap();
+
+        let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
+        let result = expand_with_dirs(&ext_dirs, "Please /greet world").await.unwrap().unwrap();
+        assert_eq!(result.expanded_text, "Please Hello world!");
+    }
+
+    #[tokio::test]
+    async fn test_unknown_slash_skipped_known_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands_dir = tmp.path().join("commands");
+        tokio::fs::create_dir_all(&commands_dir).await.unwrap();
+        tokio::fs::write(commands_dir.join("greet.md"), "Hello $ARGUMENTS!").await.unwrap();
+
+        let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
+        let result = expand_with_dirs(&ext_dirs, "see /usr/bin then /greet world").await.unwrap().unwrap();
+        assert_eq!(result.expanded_text, "see /usr/bin then Hello world!");
+    }
+
+    #[tokio::test]
+    async fn test_url_not_expanded() {
+        let ext_dirs = make_ext_dirs(PathBuf::from("/nonexistent"));
+        assert!(expand_with_dirs(&ext_dirs, "visit http://example.com/path").await.unwrap().is_none());
     }
 }
