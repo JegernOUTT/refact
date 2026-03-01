@@ -18,6 +18,7 @@ import {
   HooksEditor,
   CreateItemDialog,
 } from "./components";
+import { MarketplacePanel } from "./components/MarketplacePanel";
 
 import styles from "./Extensions.module.css";
 
@@ -166,9 +167,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
           </Tabs.Content>
 
           <Tabs.Content value="marketplace" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-            <Flex direction="column" className={styles.listPanel}>
-              <div className={styles.placeholder}>Marketplace coming soon.</div>
-            </Flex>
+            <MarketplacePanel />
           </Tabs.Content>
         </div>
       </Tabs.Root>

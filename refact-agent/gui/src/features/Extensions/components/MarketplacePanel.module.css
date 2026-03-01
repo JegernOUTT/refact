@@ -1,0 +1,77 @@
+.panel {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  overflow-y: auto;
+  padding: var(--space-3) 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 160px;
+}
+
+.marketplaceSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.marketplaceHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--gray-4);
+}
+
+.pluginsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+
+.installedSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.installedHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.installedList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.installedItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-2);
+  background: var(--gray-2);
+}
+
+.emptyState {
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  color: var(--gray-10);
+}

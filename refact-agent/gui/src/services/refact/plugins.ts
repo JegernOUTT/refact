@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { RootState } from "../../app/store";
+import { extensionsApi } from "./extensions";
 
 export interface MarketplaceEntry {
   name: string;
@@ -167,6 +168,10 @@ export const pluginsApi = createApi({
         return { data: undefined };
       },
       invalidatesTags: ["InstalledPlugins", "Marketplaces"],
+      onQueryStarted: async (_arg, { dispatch, queryFulfilled }) => {
+        await queryFulfilled;
+        dispatch(extensionsApi.util.invalidateTags(["ExtRegistry"]));
+      },
     }),
 
     getInstalled: builder.query<InstalledPluginsResponse, undefined>({
@@ -214,6 +219,10 @@ export const pluginsApi = createApi({
         return { data: undefined };
       },
       invalidatesTags: ["InstalledPlugins"],
+      onQueryStarted: async (_arg, { dispatch, queryFulfilled }) => {
+        await queryFulfilled;
+        dispatch(extensionsApi.util.invalidateTags(["ExtRegistry"]));
+      },
     }),
   }),
 });
