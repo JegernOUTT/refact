@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
 use rmcp::model::{RawContent, CallToolRequestParam, Tool as McpTool};
-use rmcp::{RoleClient, service::RunningService};
 use tokio::sync::Mutex as AMutex;
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -13,12 +12,12 @@ use crate::scratchpads::multimodality::MultimodalElement;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation};
-use super::session_mcp::{add_log_entry, mcp_session_wait_startup};
+use super::session_mcp::{McpRunningService, add_log_entry, mcp_session_wait_startup};
 
 pub struct ToolMCP {
     pub common: IntegrationCommon,
     pub config_path: String,
-    pub mcp_client: Arc<AMutex<Option<RunningService<RoleClient, ()>>>>,
+    pub mcp_client: Arc<AMutex<Option<McpRunningService>>>,
     pub mcp_tool: McpTool,
     pub request_timeout: u64,
 }

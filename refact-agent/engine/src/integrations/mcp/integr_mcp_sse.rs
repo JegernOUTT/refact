@@ -9,12 +9,11 @@ use tokio::time::Duration;
 use rmcp::transport::common::client_side_sse::ExponentialBackoff;
 use rmcp::transport::sse_client::{SseClientTransport, SseClientConfig};
 use rmcp::serve_client;
-use rmcp::{RoleClient, service::RunningService};
 use serde::{Deserialize, Serialize};
 
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon};
-use super::session_mcp::add_log_entry;
+use super::session_mcp::{McpClientHandler, McpRunningService, add_log_entry};
 use super::integr_mcp_common::{
     CommonMCPSettings, MCPTransportInitializer, mcp_integr_tools, mcp_session_setup,
 };
@@ -57,7 +56,8 @@ impl MCPTransportInitializer for IntegrationMCPSse {
         init_timeout: u64,
         _request_timeout: u64,
         _session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
-    ) -> Option<RunningService<RoleClient, ()>> {
+        handler: McpClientHandler,
+    ) -> Option<McpRunningService> {
         let log = async |level: tracing::Level, msg: String| {
             match level {
                 tracing::Level::ERROR => tracing::error!("{msg} for {debug_name}"),
@@ -134,7 +134,7 @@ impl MCPTransportInitializer for IntegrationMCPSse {
 
         match timeout(
             Duration::from_secs(init_timeout),
-            serve_client((), transport),
+            serve_client(handler, transport),
         )
         .await
         {

@@ -5,14 +5,14 @@ use tokio::sync::RwLock as ARwLock;
 use tokio::sync::Mutex as AMutex;
 use tokio::time::timeout;
 use tokio::time::Duration;
-use rmcp::{RoleClient, service::RunningService};
+use rmcp::{RoleClient, service::Peer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationCommon;
 use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num};
-use super::session_mcp::{SessionMCP, add_log_entry, cancel_mcp_client};
+use super::session_mcp::{SessionMCP, McpClientHandler, McpRunningService, add_log_entry, cancel_mcp_client};
 use super::tool_mcp::ToolMCP;
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default, Debug)]
@@ -48,7 +48,8 @@ pub trait MCPTransportInitializer: Send + Sync {
         init_timeout: u64,
         request_timeout: u64,
         session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
-    ) -> Option<RunningService<RoleClient, ()>>;
+        handler: McpClientHandler,
+    ) -> Option<McpRunningService>;
 }
 
 pub async fn mcp_integr_tools(
@@ -170,6 +171,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
             }
         }
 
+        let peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>> = Arc::new(AMutex::new(None));
+        let peer_arc_clone = peer_arc.clone();
+
         let startup_task_join_handle = tokio::spawn(async move {
             let (mcp_client, logs, debug_name, stderr_file) = {
                 let mut session_locked = session_arc_clone.lock().await;
@@ -211,6 +215,14 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                 }
             }
 
+            let handler = McpClientHandler {
+                peer_arc: peer_arc_clone.clone(),
+                session_arc: session_arc_clone.clone(),
+                logs: logs.clone(),
+                debug_name: debug_name.clone(),
+                request_timeout,
+            };
+
             let client = match transport_initializer
                 .init_mcp_transport(
                     logs.clone(),
@@ -218,6 +230,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                     init_timeout,
                     request_timeout,
                     session_arc_clone.clone(),
+                    handler,
                 )
                 .await
             {
@@ -254,6 +267,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
             let tools_len = tools.len();
 
             {
+                let peer = client.peer().clone();
+                *peer_arc.lock().await = Some(peer);
+
                 let mut session_locked = session_arc_clone.lock().await;
                 let session_downcasted = session_locked
                     .as_any_mut()

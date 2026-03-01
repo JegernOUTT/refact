@@ -5,21 +5,139 @@ use std::future::Future;
 use tokio::sync::Mutex as AMutex;
 use tokio::task::{AbortHandle, JoinHandle};
 use rmcp::{RoleClient, service::RunningService};
+use rmcp::handler::client::ClientHandler;
 use rmcp::model::Tool as McpTool;
-use tokio::time::{timeout, Duration};
+use rmcp::service::Peer;
+use tokio::time::{timeout, sleep, Duration};
 
 use crate::integrations::sessions::IntegrationSession;
 use crate::integrations::process_io_utils::read_file_with_cursor;
+
+pub type McpRunningService = RunningService<RoleClient, McpClientHandler>;
+
+pub struct McpClientHandler {
+    pub peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>>,
+    pub session_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
+    pub logs: Arc<AMutex<Vec<String>>>,
+    pub debug_name: String,
+    pub request_timeout: u64,
+}
+
+impl ClientHandler for McpClientHandler {
+    fn get_peer(&self) -> Option<Peer<RoleClient>> {
+        self.peer_arc.try_lock().ok().and_then(|g| g.clone())
+    }
+
+    fn set_peer(&mut self, peer: Peer<RoleClient>) {
+        if let Ok(mut g) = self.peer_arc.try_lock() {
+            *g = Some(peer);
+        }
+    }
+
+    fn on_tool_list_changed(&self) -> impl Future<Output = ()> + Send + '_ {
+        let peer_arc = self.peer_arc.clone();
+        let session_arc = self.session_arc.clone();
+        let logs = self.logs.clone();
+        let debug_name = self.debug_name.clone();
+        let request_timeout = self.request_timeout;
+        async move {
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(200)).await;
+                let peer = {
+                    let locked = peer_arc.lock().await;
+                    locked.clone()
+                };
+                let peer = match peer {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!("tools/list_changed: no peer available for {}", debug_name);
+                        return;
+                    }
+                };
+                let new_tools = match timeout(
+                    Duration::from_secs(request_timeout),
+                    peer.list_all_tools(),
+                )
+                .await
+                {
+                    Ok(Ok(tools)) => tools,
+                    Ok(Err(e)) => {
+                        let msg = format!("tools/list_changed: failed to list tools: {:?}", e);
+                        tracing::error!("{} for {}", msg, debug_name);
+                        add_log_entry(logs, msg).await;
+                        return;
+                    }
+                    Err(_) => {
+                        let msg = format!(
+                            "tools/list_changed: list_tools timed out after {}s",
+                            request_timeout
+                        );
+                        tracing::error!("{} for {}", msg, debug_name);
+                        add_log_entry(logs, msg).await;
+                        return;
+                    }
+                };
+                let old_count;
+                let new_count = new_tools.len();
+                {
+                    let mut session_locked = session_arc.lock().await;
+                    let session_downcasted = session_locked
+                        .as_any_mut()
+                        .downcast_mut::<SessionMCP>()
+                        .unwrap();
+                    old_count = session_downcasted.mcp_tools.len();
+                    let old_names: std::collections::HashSet<_> = session_downcasted
+                        .mcp_tools
+                        .iter()
+                        .map(|t| t.name.clone())
+                        .collect();
+                    let new_names: std::collections::HashSet<_> =
+                        new_tools.iter().map(|t| t.name.clone()).collect();
+                    let added: Vec<_> = new_names.difference(&old_names).collect();
+                    let removed: Vec<_> = old_names.difference(&new_names).collect();
+                    session_downcasted.mcp_tools = new_tools;
+                    let msg = format!(
+                        "tools/list_changed: {} → {} tools, added: {:?}, removed: {:?}",
+                        old_count, new_count, added, removed
+                    );
+                    tracing::info!("{} for {}", msg, debug_name);
+                    add_log_entry(logs, msg).await;
+                }
+            });
+        }
+    }
+
+    fn on_resource_list_changed(&self) -> impl Future<Output = ()> + Send + '_ {
+        let logs = self.logs.clone();
+        let debug_name = self.debug_name.clone();
+        async move {
+            let msg = "resources/list_changed notification received".to_string();
+            tracing::info!("{} for {}", msg, debug_name);
+            add_log_entry(logs, msg).await;
+        }
+    }
+
+    fn on_prompt_list_changed(&self) -> impl Future<Output = ()> + Send + '_ {
+        let logs = self.logs.clone();
+        let debug_name = self.debug_name.clone();
+        async move {
+            let msg = "prompts/list_changed notification received".to_string();
+            tracing::info!("{} for {}", msg, debug_name);
+            add_log_entry(logs, msg).await;
+        }
+    }
+}
+
 pub struct SessionMCP {
     pub debug_name: String,
-    pub config_path: String,             // to check if expired or not
-    pub launched_cfg: serde_json::Value, // a copy to compare against IntegrationMCP::cfg, to see if anything has changed
-    pub mcp_client: Option<Arc<AMutex<Option<RunningService<RoleClient, ()>>>>>,
+    pub config_path: String,
+    pub launched_cfg: serde_json::Value,
+    pub mcp_client: Option<Arc<AMutex<Option<McpRunningService>>>>,
     pub mcp_tools: Vec<McpTool>,
     pub startup_task_handles: Option<(Arc<AMutex<Option<JoinHandle<()>>>>, AbortHandle)>,
-    pub logs: Arc<AMutex<Vec<String>>>,    // Store log messages
-    pub stderr_file_path: Option<PathBuf>, // Path to the temporary file for stderr
-    pub stderr_cursor: Arc<AMutex<u64>>,   // Position in the file where we last read from
+    pub logs: Arc<AMutex<Vec<String>>>,
+    pub stderr_file_path: Option<PathBuf>,
+    pub stderr_cursor: Arc<AMutex<u64>>,
 }
 
 impl IntegrationSession for SessionMCP {
@@ -99,7 +217,7 @@ pub async fn update_logs_from_stderr(
 
 pub async fn cancel_mcp_client(
     debug_name: &str,
-    mcp_client: Arc<AMutex<Option<RunningService<RoleClient, ()>>>>,
+    mcp_client: Arc<AMutex<Option<McpRunningService>>>,
     session_logs: Arc<AMutex<Vec<String>>>,
 ) {
     tracing::info!("Stopping MCP Server for {}", debug_name);
@@ -128,6 +246,50 @@ pub async fn cancel_mcp_client(
                 add_log_entry(session_logs, error_msg).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_session_mcp(debug_name: &str) -> SessionMCP {
+        SessionMCP {
+            debug_name: debug_name.to_string(),
+            config_path: "/tmp/test.yaml".to_string(),
+            launched_cfg: serde_json::Value::Null,
+            mcp_client: None,
+            mcp_tools: Vec::new(),
+            startup_task_handles: None,
+            logs: Arc::new(AMutex::new(Vec::new())),
+            stderr_file_path: None,
+            stderr_cursor: Arc::new(AMutex::new(0)),
+        }
+    }
+
+    #[test]
+    fn test_mcp_client_handler_fields() {
+        let peer_arc: Arc<AMutex<Option<rmcp::service::Peer<rmcp::RoleClient>>>> =
+            Arc::new(AMutex::new(None));
+        let session: Box<dyn IntegrationSession> = Box::new(make_session_mcp("test"));
+        let session_arc = Arc::new(AMutex::new(session));
+        let logs = Arc::new(AMutex::new(Vec::new()));
+        let handler = McpClientHandler {
+            peer_arc: peer_arc.clone(),
+            session_arc,
+            logs,
+            debug_name: "test".to_string(),
+            request_timeout: 30,
+        };
+        assert_eq!(handler.debug_name, "test");
+        assert_eq!(handler.request_timeout, 30);
+        assert!(handler.get_peer().is_none());
+    }
+
+    #[test]
+    fn test_mcp_running_service_type_alias_exists() {
+        fn _accepts_type_alias(_: Option<McpRunningService>) {}
+        _accepts_type_alias(None);
     }
 }
 
