@@ -167,6 +167,9 @@ impl IntegrationTrait for IntegrationMCPStdio {
             self.clone(),
             self.cfg.common.init_timeout,
             self.cfg.common.request_timeout,
+            self.cfg.common.health_check_interval,
+            self.cfg.common.reconnect_max_attempts,
+            self.cfg.common.reconnect_enabled,
         )
         .await;
 

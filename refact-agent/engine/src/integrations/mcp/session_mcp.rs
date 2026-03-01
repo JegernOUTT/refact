@@ -2,6 +2,7 @@ use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::future::Future;
+use std::time::Instant;
 use tokio::sync::Mutex as AMutex;
 use tokio::task::{AbortHandle, JoinHandle};
 use rmcp::{RoleClient, service::RunningService};
@@ -9,9 +10,20 @@ use rmcp::handler::client::ClientHandler;
 use rmcp::model::Tool as McpTool;
 use rmcp::service::Peer;
 use tokio::time::{timeout, sleep, Duration};
+use serde::{Deserialize, Serialize};
 
 use crate::integrations::sessions::IntegrationSession;
 use crate::integrations::process_io_utils::read_file_with_cursor;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MCPConnectionStatus {
+    Connected,
+    Connecting,
+    Reconnecting { attempt: u32 },
+    Failed { message: String },
+    Disconnected,
+}
 
 pub type McpRunningService = RunningService<RoleClient, McpClientHandler>;
 
@@ -135,9 +147,12 @@ pub struct SessionMCP {
     pub mcp_client: Option<Arc<AMutex<Option<McpRunningService>>>>,
     pub mcp_tools: Vec<McpTool>,
     pub startup_task_handles: Option<(Arc<AMutex<Option<JoinHandle<()>>>>, AbortHandle)>,
+    pub health_task_handle: Option<AbortHandle>,
     pub logs: Arc<AMutex<Vec<String>>>,
     pub stderr_file_path: Option<PathBuf>,
     pub stderr_cursor: Arc<AMutex<u64>>,
+    pub connection_status: MCPConnectionStatus,
+    pub last_successful_connection: Option<Instant>,
 }
 
 impl IntegrationSession for SessionMCP {
@@ -154,7 +169,7 @@ impl IntegrationSession for SessionMCP {
         self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
     ) -> Box<dyn Future<Output = String> + Send> {
         Box::new(async move {
-            let (debug_name, client, logs, startup_task_handles, stderr_file) = {
+            let (debug_name, client, logs, startup_task_handles, health_task_handle, stderr_file) = {
                 let mut session_locked = self_arc.lock().await;
                 let session_downcasted = session_locked
                     .as_any_mut()
@@ -165,12 +180,17 @@ impl IntegrationSession for SessionMCP {
                     session_downcasted.mcp_client.clone(),
                     session_downcasted.logs.clone(),
                     session_downcasted.startup_task_handles.clone(),
+                    session_downcasted.health_task_handle.clone(),
                     session_downcasted.stderr_file_path.clone(),
                 )
             };
 
             if let Some((_, abort_handle)) = startup_task_handles {
                 add_log_entry(logs.clone(), "Aborted startup task".to_string()).await;
+                abort_handle.abort();
+            }
+
+            if let Some(abort_handle) = health_task_handle {
                 abort_handle.abort();
             }
 
@@ -261,9 +281,12 @@ mod tests {
             mcp_client: None,
             mcp_tools: Vec::new(),
             startup_task_handles: None,
+            health_task_handle: None,
             logs: Arc::new(AMutex::new(Vec::new())),
             stderr_file_path: None,
             stderr_cursor: Arc::new(AMutex::new(0)),
+            connection_status: MCPConnectionStatus::Disconnected,
+            last_successful_connection: None,
         }
     }
 

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::Weak;
+use std::time::Instant;
 use async_trait::async_trait;
 use tokio::sync::RwLock as ARwLock;
 use tokio::sync::Mutex as AMutex;
@@ -12,10 +13,10 @@ use serde_json::Value;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationCommon;
 use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num};
-use super::session_mcp::{SessionMCP, McpClientHandler, McpRunningService, add_log_entry, cancel_mcp_client};
+use super::session_mcp::{SessionMCP, McpClientHandler, McpRunningService, MCPConnectionStatus, add_log_entry, cancel_mcp_client};
 use super::tool_mcp::ToolMCP;
 
-#[derive(Deserialize, Serialize, Clone, PartialEq, Default, Debug)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
 pub struct CommonMCPSettings {
     #[serde(
         default = "default_init_timeout",
@@ -29,6 +30,20 @@ pub struct CommonMCPSettings {
         deserialize_with = "deserialize_str_to_num"
     )]
     pub request_timeout: u64,
+    #[serde(
+        default = "default_health_check_interval",
+        serialize_with = "serialize_num_to_str",
+        deserialize_with = "deserialize_str_to_num"
+    )]
+    pub health_check_interval: u64,
+    #[serde(
+        default = "default_reconnect_max_attempts",
+        serialize_with = "serialize_num_to_str",
+        deserialize_with = "deserialize_str_to_num"
+    )]
+    pub reconnect_max_attempts: u64,
+    #[serde(default = "default_reconnect_enabled")]
+    pub reconnect_enabled: bool,
 }
 
 pub fn default_init_timeout() -> u64 {
@@ -37,6 +52,30 @@ pub fn default_init_timeout() -> u64 {
 
 pub fn default_request_timeout() -> u64 {
     30
+}
+
+pub fn default_health_check_interval() -> u64 {
+    30
+}
+
+pub fn default_reconnect_max_attempts() -> u64 {
+    7
+}
+
+pub fn default_reconnect_enabled() -> bool {
+    true
+}
+
+impl Default for CommonMCPSettings {
+    fn default() -> Self {
+        Self {
+            init_timeout: default_init_timeout(),
+            request_timeout: default_request_timeout(),
+            health_check_interval: default_health_check_interval(),
+            reconnect_max_attempts: default_reconnect_max_attempts(),
+            reconnect_enabled: default_reconnect_enabled(),
+        }
+    }
 }
 
 #[async_trait]
@@ -99,6 +138,10 @@ pub async fn mcp_integr_tools(
             tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
             return vec![];
         }
+        let reconnecting = matches!(
+            &session_downcasted.connection_status,
+            MCPConnectionStatus::Reconnecting { .. }
+        );
         for tool in session_downcasted.mcp_tools.iter() {
             result.push(Box::new(ToolMCP {
                 common: common.clone(),
@@ -106,6 +149,7 @@ pub async fn mcp_integr_tools(
                 mcp_client: session_downcasted.mcp_client.clone().unwrap(),
                 mcp_tool: tool.clone(),
                 request_timeout,
+                reconnecting,
             }));
         }
     }
@@ -113,13 +157,16 @@ pub async fn mcp_integr_tools(
     result
 }
 
-pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
+pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync + 'static>(
     gcx: Arc<ARwLock<GlobalContext>>,
     config_path: String,
     new_cfg_value: Value,
     transport_initializer: T,
     init_timeout: u64,
     request_timeout: u64,
+    health_check_interval: u64,
+    reconnect_max_attempts: u64,
+    reconnect_enabled: bool,
 ) {
     let session_key = format!("{}", config_path);
 
@@ -136,9 +183,12 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                 mcp_client: None,
                 mcp_tools: Vec::new(),
                 startup_task_handles: None,
+                health_task_handle: None,
                 logs: Arc::new(AMutex::new(Vec::new())),
                 stderr_file_path: None,
                 stderr_cursor: Arc::new(AMutex::new(0)),
+                connection_status: MCPConnectionStatus::Connecting,
+                last_successful_connection: None,
             })));
             tracing::info!("MCP START SESSION {:?}", session_key);
             gcx_write
@@ -183,6 +233,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                     .unwrap();
                 mcp_session.stderr_cursor = Arc::new(AMutex::new(0));
                 mcp_session.launched_cfg = new_cfg_value.clone();
+                mcp_session.connection_status = MCPConnectionStatus::Connecting;
                 (
                     std::mem::take(&mut mcp_session.mcp_client),
                     mcp_session.logs.clone(),
@@ -235,7 +286,14 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                 .await
             {
                 Some(client) => client,
-                None => return,
+                None => {
+                    let mut session_locked = session_arc_clone.lock().await;
+                    let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                    mcp_session.connection_status = MCPConnectionStatus::Failed {
+                        message: "Transport initialization failed".to_string(),
+                    };
+                    return;
+                }
             };
 
             log(tracing::Level::INFO, "Listing tools".to_string()).await;
@@ -253,6 +311,11 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                         format!("Failed to list tools: {:?}", tools_error),
                     )
                     .await;
+                    let mut session_locked = session_arc_clone.lock().await;
+                    let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                    mcp_session.connection_status = MCPConnectionStatus::Failed {
+                        message: format!("Failed to list tools: {:?}", tools_error),
+                    };
                     return;
                 }
                 Err(_) => {
@@ -261,12 +324,17 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                         format!("Request timed out after {} seconds", request_timeout),
                     )
                     .await;
+                    let mut session_locked = session_arc_clone.lock().await;
+                    let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                    mcp_session.connection_status = MCPConnectionStatus::Failed {
+                        message: "List tools timed out".to_string(),
+                    };
                     return;
                 }
             };
             let tools_len = tools.len();
 
-            {
+            let client_arc = {
                 let peer = client.peer().clone();
                 *peer_arc.lock().await = Some(peer);
 
@@ -276,10 +344,12 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                     .downcast_mut::<SessionMCP>()
                     .unwrap();
 
-                session_downcasted.mcp_client = Some(Arc::new(AMutex::new(Some(client))));
+                let arc = Arc::new(AMutex::new(Some(client)));
+                session_downcasted.mcp_client = Some(arc.clone());
                 session_downcasted.mcp_tools = tools;
-
-                session_downcasted.mcp_tools.len()
+                session_downcasted.connection_status = MCPConnectionStatus::Connected;
+                session_downcasted.last_successful_connection = Some(Instant::now());
+                arc
             };
 
             log(
@@ -287,6 +357,26 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
                 format!("MCP session setup complete with {tools_len} tools"),
             )
             .await;
+
+            if reconnect_enabled {
+                let health_task = tokio::spawn(mcp_health_monitor(
+                    session_arc_clone.clone(),
+                    transport_initializer.clone(),
+                    client_arc,
+                    logs.clone(),
+                    debug_name.clone(),
+                    init_timeout,
+                    request_timeout,
+                    health_check_interval,
+                    reconnect_max_attempts,
+                ));
+                let health_abort = health_task.abort_handle();
+                let mut session_locked = session_arc_clone.lock().await;
+                let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                if let Some(old) = mcp_session.health_task_handle.replace(health_abort) {
+                    old.abort();
+                }
+            }
         });
 
         let startup_task_abort_handle = startup_task_join_handle.abort_handle();
@@ -294,5 +384,299 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + 'static>(
             Arc::new(AMutex::new(Some(startup_task_join_handle))),
             startup_task_abort_handle,
         ));
+    }
+}
+
+async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
+    session_arc: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+    transport_initializer: T,
+    client_arc: Arc<AMutex<Option<RunningService<RoleClient, ()>>>>,
+    logs: Arc<AMutex<Vec<String>>>,
+    debug_name: String,
+    init_timeout: u64,
+    request_timeout: u64,
+    health_check_interval: u64,
+    reconnect_max_attempts: u64,
+) {
+    let backoff_delays: Vec<u64> = vec![1, 2, 4, 8, 16, 30, 60];
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(health_check_interval)).await;
+
+        let is_alive = {
+            let client_locked = client_arc.lock().await;
+            client_locked.is_some()
+        };
+
+        if !is_alive {
+            tracing::info!("MCP health monitor: client gone for {}", debug_name);
+            add_log_entry(logs.clone(), "Health monitor: connection lost, starting reconnect".to_string()).await;
+
+            let reconnected = reconnect_with_backoff(
+                session_arc.clone(),
+                &transport_initializer,
+                client_arc.clone(),
+                logs.clone(),
+                &debug_name,
+                init_timeout,
+                request_timeout,
+                reconnect_max_attempts,
+                &backoff_delays,
+            ).await;
+
+            if !reconnected {
+                let mut session_locked = session_arc.lock().await;
+                let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                mcp_session.connection_status = MCPConnectionStatus::Failed {
+                    message: "Max reconnect attempts reached".to_string(),
+                };
+                add_log_entry(logs.clone(), "Health monitor: max reconnect attempts reached, giving up".to_string()).await;
+                return;
+            }
+        }
+    }
+}
+
+async fn reconnect_with_backoff<T: MCPTransportInitializer>(
+    session_arc: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+    transport_initializer: &T,
+    client_arc: Arc<AMutex<Option<RunningService<RoleClient, ()>>>>,
+    logs: Arc<AMutex<Vec<String>>>,
+    debug_name: &str,
+    init_timeout: u64,
+    request_timeout: u64,
+    reconnect_max_attempts: u64,
+    backoff_delays: &[u64],
+) -> bool {
+    let max_attempts = reconnect_max_attempts.min(backoff_delays.len() as u64) as usize;
+
+    for attempt in 0..max_attempts {
+        let delay = backoff_delays[attempt];
+
+        {
+            let mut session_locked = session_arc.lock().await;
+            let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+            mcp_session.connection_status = MCPConnectionStatus::Reconnecting { attempt: attempt as u32 };
+        }
+
+        let msg = format!("Reconnecting to {} (attempt {}/{}), waiting {}s", debug_name, attempt + 1, max_attempts, delay);
+        tracing::info!("{}", msg);
+        add_log_entry(logs.clone(), msg).await;
+
+        tokio::time::sleep(Duration::from_secs(delay)).await;
+
+        let new_client = transport_initializer
+            .init_mcp_transport(
+                logs.clone(),
+                debug_name.to_string(),
+                init_timeout,
+                request_timeout,
+                session_arc.clone(),
+            )
+            .await;
+
+        let new_client = match new_client {
+            Some(c) => c,
+            None => {
+                tracing::warn!("Reconnect attempt {} failed for {}", attempt + 1, debug_name);
+                continue;
+            }
+        };
+
+        let tools = match timeout(
+            Duration::from_secs(request_timeout),
+            new_client.list_all_tools(),
+        )
+        .await
+        {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                add_log_entry(logs.clone(), format!("Reconnect: failed to list tools: {:?}", e)).await;
+                continue;
+            }
+            Err(_) => {
+                add_log_entry(logs.clone(), "Reconnect: list tools timed out".to_string()).await;
+                continue;
+            }
+        };
+
+        let tools_len = tools.len();
+        {
+            let mut client_locked = client_arc.lock().await;
+            *client_locked = Some(new_client);
+        }
+        {
+            let mut session_locked = session_arc.lock().await;
+            let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+            mcp_session.mcp_tools = tools;
+            mcp_session.connection_status = MCPConnectionStatus::Connected;
+            mcp_session.last_successful_connection = Some(Instant::now());
+        }
+
+        let msg = format!("Reconnected to {} successfully with {} tools", debug_name, tools_len);
+        tracing::info!("{}", msg);
+        add_log_entry(logs.clone(), msg).await;
+        return true;
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use crate::integrations::sessions::IntegrationSession;
+
+    fn make_session_arc(status: MCPConnectionStatus) -> Arc<AMutex<Box<dyn IntegrationSession>>> {
+        Arc::new(AMutex::new(Box::new(super::super::session_mcp::SessionMCP {
+            debug_name: "test".to_string(),
+            config_path: "/tmp/test.yaml".to_string(),
+            launched_cfg: serde_json::Value::Null,
+            mcp_client: None,
+            mcp_tools: Vec::new(),
+            startup_task_handles: None,
+            health_task_handle: None,
+            logs: Arc::new(AMutex::new(Vec::new())),
+            stderr_file_path: None,
+            stderr_cursor: Arc::new(AMutex::new(0)),
+            connection_status: status,
+            last_successful_connection: None,
+        }) as Box<dyn IntegrationSession>))
+    }
+
+    #[test]
+    fn test_default_health_config() {
+        let cfg = CommonMCPSettings::default();
+        assert_eq!(cfg.health_check_interval, 30);
+        assert_eq!(cfg.reconnect_max_attempts, 7);
+        assert!(cfg.reconnect_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_state_transitions() {
+        let session_arc = make_session_arc(MCPConnectionStatus::Connected);
+        let logs = Arc::new(AMutex::new(Vec::new()));
+        let attempt_count = Arc::new(AtomicU32::new(0));
+
+        struct AlwaysFailInitializer {
+            attempts: Arc<AtomicU32>,
+        }
+
+        #[async_trait::async_trait]
+        impl MCPTransportInitializer for AlwaysFailInitializer {
+            async fn init_mcp_transport(
+                &self,
+                _logs: Arc<AMutex<Vec<String>>>,
+                _debug_name: String,
+                _init_timeout: u64,
+                _request_timeout: u64,
+                _session: Arc<AMutex<Box<dyn IntegrationSession>>>,
+            ) -> Option<RunningService<RoleClient, ()>> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+
+        let initializer = AlwaysFailInitializer { attempts: attempt_count.clone() };
+        let client_arc: Arc<AMutex<Option<RunningService<RoleClient, ()>>>> = Arc::new(AMutex::new(None));
+        let backoff_delays = vec![0u64, 0, 0];
+
+        let result = reconnect_with_backoff(
+            session_arc.clone(),
+            &initializer,
+            client_arc,
+            logs,
+            "test_server",
+            1,
+            1,
+            3,
+            &backoff_delays,
+        ).await;
+
+        assert!(!result, "Should return false when all attempts fail");
+        assert_eq!(attempt_count.load(Ordering::SeqCst), 3, "Should attempt exactly max_attempts times");
+
+        let mut session_locked = session_arc.lock().await;
+        let mcp_session = session_locked.as_any_mut().downcast_mut::<super::super::session_mcp::SessionMCP>().unwrap();
+        assert!(
+            matches!(mcp_session.connection_status, MCPConnectionStatus::Reconnecting { attempt: 2 }),
+            "Final status should be Reconnecting with last attempt index"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_max_attempts_capped_by_backoff_delays() {
+        let session_arc = make_session_arc(MCPConnectionStatus::Connected);
+        let logs = Arc::new(AMutex::new(Vec::new()));
+        let attempt_count = Arc::new(AtomicU32::new(0));
+
+        struct CountingInitializer {
+            attempts: Arc<AtomicU32>,
+        }
+
+        #[async_trait::async_trait]
+        impl MCPTransportInitializer for CountingInitializer {
+            async fn init_mcp_transport(
+                &self,
+                _logs: Arc<AMutex<Vec<String>>>,
+                _debug_name: String,
+                _init_timeout: u64,
+                _request_timeout: u64,
+                _session: Arc<AMutex<Box<dyn IntegrationSession>>>,
+            ) -> Option<RunningService<RoleClient, ()>> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+
+        let initializer = CountingInitializer { attempts: attempt_count.clone() };
+        let client_arc: Arc<AMutex<Option<RunningService<RoleClient, ()>>>> = Arc::new(AMutex::new(None));
+        let backoff_delays = vec![0u64, 0];
+
+        reconnect_with_backoff(
+            session_arc.clone(),
+            &initializer,
+            client_arc,
+            logs,
+            "test_server",
+            1,
+            1,
+            100,
+            &backoff_delays,
+        ).await;
+
+        assert_eq!(
+            attempt_count.load(Ordering::SeqCst), 2,
+            "Should be capped by backoff_delays length, not reconnect_max_attempts"
+        );
+    }
+
+    #[test]
+    fn test_mcp_connection_status_reconnecting_flag() {
+        let reconnecting = MCPConnectionStatus::Reconnecting { attempt: 2 };
+        let connected = MCPConnectionStatus::Connected;
+        let failed = MCPConnectionStatus::Failed { message: "oops".to_string() };
+
+        assert!(matches!(&reconnecting, MCPConnectionStatus::Reconnecting { .. }));
+        assert!(!matches!(&connected, MCPConnectionStatus::Reconnecting { .. }));
+        assert!(!matches!(&failed, MCPConnectionStatus::Reconnecting { .. }));
+    }
+
+    #[test]
+    fn test_mcp_connection_status_serialization() {
+        let status = MCPConnectionStatus::Reconnecting { attempt: 3 };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["status"], "reconnecting");
+        assert_eq!(json["attempt"], 3);
+
+        let connected = MCPConnectionStatus::Connected;
+        let json2 = serde_json::to_value(&connected).unwrap();
+        assert_eq!(json2["status"], "connected");
+
+        let failed = MCPConnectionStatus::Failed { message: "err".to_string() };
+        let json3 = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json3["status"], "failed");
+        assert_eq!(json3["message"], "err");
     }
 }

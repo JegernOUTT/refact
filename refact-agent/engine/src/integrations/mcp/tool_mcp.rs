@@ -20,6 +20,7 @@ pub struct ToolMCP {
     pub mcp_client: Arc<AMutex<Option<McpRunningService>>>,
     pub mcp_tool: McpTool,
     pub request_timeout: u64,
+    pub reconnecting: bool,
 }
 
 #[async_trait]
@@ -30,6 +31,13 @@ impl Tool for ToolMCP {
         tool_call_id: &String,
         args: &HashMap<String, serde_json::Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        if self.reconnecting {
+            return Err(format!(
+                "MCP server '{}' is reconnecting, please wait",
+                self.mcp_tool.name
+            ));
+        }
+
         let session_key = format!("{}", self.config_path);
         let (gcx, current_model) = {
             let ccx_locked = ccx.lock().await;
@@ -294,6 +302,7 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
+            reconnecting: false,
         }
     }
 
