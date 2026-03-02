@@ -462,6 +462,10 @@ pub async fn process_command_queue(
                         }
                         Err(e) => {
                             warn!("slash command expansion error: {}", e);
+                            let mut session = session_arc.lock().await;
+                            session.slash_allowed_tools = Vec::new();
+                            session.slash_model_override = None;
+                            session.slash_source_command = String::new();
                         }
                     }
                 }
