@@ -39,6 +39,25 @@ pub struct McpClientHandler {
     pub debug_name: String,
     pub request_timeout: u64,
     pub gcx: Weak<ARwLock<GlobalContext>>,
+    pub tool_refresh_handle: Arc<AMutex<Option<tokio::task::AbortHandle>>>,
+    pub resource_refresh_handle: Arc<AMutex<Option<tokio::task::AbortHandle>>>,
+    pub prompt_refresh_handle: Arc<AMutex<Option<tokio::task::AbortHandle>>>,
+}
+
+pub fn redact_sensitive_value(key: &str, value: &str) -> String {
+    let key_lower = key.to_lowercase();
+    if key_lower.contains("token") || key_lower.contains("secret")
+        || key_lower.contains("password") || key_lower.contains("key")
+        || key_lower.contains("authorization") || key_lower.contains("cookie")
+    {
+        if value.len() > 8 {
+            format!("{}...{}", &value[..4], &value[value.len()-4..])
+        } else {
+            "***REDACTED***".to_string()
+        }
+    } else {
+        value.to_string()
+    }
 }
 
 impl ClientHandler for McpClientHandler {
@@ -77,8 +96,15 @@ impl ClientHandler for McpClientHandler {
         let logs = self.logs.clone();
         let debug_name = self.debug_name.clone();
         let request_timeout = self.request_timeout;
+        let handle_arc = self.tool_refresh_handle.clone();
         async move {
-            tokio::spawn(async move {
+            {
+                let mut handle = handle_arc.lock().await;
+                if let Some(h) = handle.take() {
+                    h.abort();
+                }
+            }
+            let task = tokio::spawn(async move {
                 sleep(Duration::from_millis(200)).await;
                 let peer = {
                     let locked = peer_arc.lock().await;
@@ -141,6 +167,8 @@ impl ClientHandler for McpClientHandler {
                     add_log_entry(logs, msg).await;
                 }
             });
+            let mut handle = handle_arc.lock().await;
+            *handle = Some(task.abort_handle());
         }
     }
 
@@ -151,8 +179,15 @@ impl ClientHandler for McpClientHandler {
         let debug_name = self.debug_name.clone();
         let request_timeout = self.request_timeout;
         let gcx = self.gcx.clone();
+        let handle_arc = self.resource_refresh_handle.clone();
         async move {
-            tokio::spawn(async move {
+            {
+                let mut handle = handle_arc.lock().await;
+                if let Some(h) = handle.take() {
+                    h.abort();
+                }
+            }
+            let task = tokio::spawn(async move {
                 sleep(Duration::from_millis(200)).await;
                 let msg = "resources/list_changed: re-fetching resource list".to_string();
                 tracing::info!("{} for {}", msg, debug_name);
@@ -217,6 +252,8 @@ impl ClientHandler for McpClientHandler {
                     ));
                 }
             });
+            let mut handle = handle_arc.lock().await;
+            *handle = Some(task.abort_handle());
         }
     }
 
@@ -226,8 +263,15 @@ impl ClientHandler for McpClientHandler {
         let logs = self.logs.clone();
         let debug_name = self.debug_name.clone();
         let request_timeout = self.request_timeout;
+        let handle_arc = self.prompt_refresh_handle.clone();
         async move {
-            tokio::spawn(async move {
+            {
+                let mut handle = handle_arc.lock().await;
+                if let Some(h) = handle.take() {
+                    h.abort();
+                }
+            }
+            let task = tokio::spawn(async move {
                 sleep(Duration::from_millis(200)).await;
                 let peer = {
                     let locked = peer_arc.lock().await;
@@ -281,6 +325,8 @@ impl ClientHandler for McpClientHandler {
                 }
                 crate::http::routers::v1::at_commands::invalidate_slash_cache().await;
             });
+            let mut handle = handle_arc.lock().await;
+            *handle = Some(task.abort_handle());
         }
     }
 }
@@ -457,10 +503,24 @@ mod tests {
             debug_name: "test".to_string(),
             request_timeout: 30,
             gcx: Weak::new(),
+            tool_refresh_handle: Arc::new(AMutex::new(None)),
+            resource_refresh_handle: Arc::new(AMutex::new(None)),
+            prompt_refresh_handle: Arc::new(AMutex::new(None)),
         };
         assert_eq!(handler.debug_name, "test");
         assert_eq!(handler.request_timeout, 30);
         assert!(handler.get_peer().is_none());
+    }
+
+    #[test]
+    fn test_redact_sensitive_value() {
+        assert_eq!(redact_sensitive_value("Authorization", "Bearer sk-1234567890"), "Bear...7890");
+        assert_eq!(redact_sensitive_value("api_key", "short"), "***REDACTED***");
+        assert_eq!(redact_sensitive_value("description", "not secret"), "not secret");
+        assert_eq!(redact_sensitive_value("token", "abcdefghij"), "abcd...ghij");
+        assert_eq!(redact_sensitive_value("password", "abc"), "***REDACTED***");
+        assert_eq!(redact_sensitive_value("cookie", "session=xyz123456"), "sess...3456");
+        assert_eq!(redact_sensitive_value("Content-Type", "application/json"), "application/json");
     }
 
     #[test]

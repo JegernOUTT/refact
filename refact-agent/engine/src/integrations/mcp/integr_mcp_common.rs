@@ -274,6 +274,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 debug_name: debug_name.clone(),
                 request_timeout,
                 gcx: gcx_weak.clone(),
+                tool_refresh_handle: Arc::new(AMutex::new(None)),
+                resource_refresh_handle: Arc::new(AMutex::new(None)),
+                prompt_refresh_handle: Arc::new(AMutex::new(None)),
             };
 
             let client = match transport_initializer
@@ -547,6 +550,9 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
             debug_name: debug_name.to_string(),
             request_timeout,
             gcx: gcx_weak.clone(),
+            tool_refresh_handle: Arc::new(AMutex::new(None)),
+            resource_refresh_handle: Arc::new(AMutex::new(None)),
+            prompt_refresh_handle: Arc::new(AMutex::new(None)),
         };
 
         let new_client = transport_initializer

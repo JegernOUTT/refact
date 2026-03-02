@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon};
-use super::session_mcp::{McpClientHandler, McpRunningService, add_log_entry};
+use super::session_mcp::{McpClientHandler, McpRunningService, add_log_entry, redact_sensitive_value};
 use super::integr_mcp_common::{
     CommonMCPSettings, MCPTransportInitializer, mcp_integr_tools, mcp_session_setup,
 };
@@ -102,7 +102,7 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
                 _ => {
                     log(
                         tracing::Level::WARN,
-                        format!("Invalid header: {}: {}", k, v),
+                        format!("Invalid header: {}: {}", k, redact_sensitive_value(k, v)),
                     )
                     .await
                 }
