@@ -464,31 +464,6 @@ source:
         let any_corrections = results_no_corrections.iter().any(|(_, had_corrections, _, _)| *had_corrections);
         assert!(!any_corrections, "Should detect no corrections when all tools succeeded cleanly");
     }
-
-    #[test]
-    fn test_allowed_tools_auto_approve_listed() {
-        let allowed_tools = vec!["cat".to_string(), "tree".to_string()];
-
-        let cat_auto_approved = !allowed_tools.is_empty() && allowed_tools.contains(&"cat".to_string());
-        assert!(cat_auto_approved, "cat should be auto-approved when listed in allowed_tools");
-
-        let tree_auto_approved = !allowed_tools.is_empty() && allowed_tools.contains(&"tree".to_string());
-        assert!(tree_auto_approved, "tree should be auto-approved when listed in allowed_tools");
-
-        let shell_auto_approved = !allowed_tools.is_empty() && allowed_tools.contains(&"shell".to_string());
-        assert!(!shell_auto_approved, "shell should NOT be auto-approved, goes through normal confirmation flow");
-    }
-
-    #[test]
-    fn test_allowed_tools_empty_no_restriction() {
-        let allowed_tools: Vec<String> = vec![];
-
-        let cat_auto_approved = !allowed_tools.is_empty() && allowed_tools.contains(&"cat".to_string());
-        assert!(!cat_auto_approved, "empty allowed_tools means no special auto-approve, cat goes through normal flow");
-
-        let shell_auto_approved = !allowed_tools.is_empty() && allowed_tools.contains(&"shell".to_string());
-        assert!(!shell_auto_approved, "empty allowed_tools means no special auto-approve, shell goes through normal flow");
-    }
 }
 
 pub async fn process_tool_calls_once(
@@ -764,7 +739,7 @@ pub async fn check_tools_confirmation(
     mode_id: &str,
     model_id: Option<&str>,
     allowed_tools: &[String],
-    source_command: &str,
+    _source_command: &str,
 ) -> (Vec<PauseReason>, Vec<PauseReason>) {
     use crate::tools::tools_description::MatchConfirmDenyResult;
 
@@ -804,7 +779,15 @@ pub async fn check_tools_confirmation(
             .collect::<indexmap::IndexMap<_, _>>();
 
     for tool_call in tool_calls {
-        if !allowed_tools.is_empty() && allowed_tools.contains(&tool_call.function.name) {
+        if !allowed_tools.is_empty() && !allowed_tools.contains(&tool_call.function.name) {
+            denials.push(PauseReason {
+                reason_type: "denial".to_string(),
+                tool_name: tool_call.function.name.clone(),
+                command: tool_call.function.name.clone(),
+                rule: format!("Not in allowed-tools for /{}", source_command),
+                tool_call_id: tool_call.id.clone(),
+                integr_config_path: None,
+            });
             continue;
         }
 
