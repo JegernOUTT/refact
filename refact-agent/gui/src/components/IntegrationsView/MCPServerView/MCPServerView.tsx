@@ -11,6 +11,7 @@ import { MCPToolsList } from "./MCPToolsList";
 import { MCPResourcesList } from "./MCPResourcesList";
 import { MCPPromptsList } from "./MCPPromptsList";
 import { MCPLogs } from "../IntegrationForm/MCPLogs";
+import { MCPOAuth } from "./MCPOAuth";
 import { toPascalCase } from "../../../utils/toPascalCase";
 import styles from "./MCPServerView.module.css";
 
@@ -120,6 +121,8 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
       )}
 
       <Separator size="4" />
+
+      <MCPOAuth configPath={configPath} />
 
       <CollapsibleSection title="⚡ Connection" defaultExpanded>
         <MCPConnectionStatus
