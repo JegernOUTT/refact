@@ -272,6 +272,20 @@ pub async fn handle_v1_mcp_oauth_logout(
 }
 
 #[derive(Deserialize)]
+pub struct McpOAuthCancelRequest {
+    pub session_id: String,
+}
+
+pub async fn handle_v1_mcp_oauth_cancel(
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let req: McpOAuthCancelRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("Invalid JSON: {}", e)))?;
+    let cancelled = MCPOAuthSessionManager::cancel_oauth_flow(&req.session_id).await;
+    json_response(StatusCode::OK, &serde_json::json!({"cancelled": cancelled}))
+}
+
+#[derive(Deserialize)]
 pub struct McpOAuthStatusQuery {
     pub config_path: String,
 }

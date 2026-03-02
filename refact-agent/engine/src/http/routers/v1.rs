@@ -183,6 +183,7 @@ use crate::http::routers::v1::mcp_config_sharing::{
 use crate::http::routers::v1::mcp_oauth::{
     handle_v1_mcp_oauth_start, handle_v1_mcp_oauth_exchange,
     handle_v1_mcp_oauth_callback, handle_v1_mcp_oauth_logout, handle_v1_mcp_oauth_status,
+    handle_v1_mcp_oauth_cancel,
 };
 use crate::http::routers::v1::v1_browser::{
     handle_browser_start, handle_browser_stop, handle_browser_screenshot,
@@ -467,6 +468,7 @@ pub fn make_v1_router() -> Router {
         .route("/mcp/oauth/callback", get(handle_v1_mcp_oauth_callback))
         .route("/mcp/oauth/logout", post(handle_v1_mcp_oauth_logout))
         .route("/mcp/oauth/status", get(handle_v1_mcp_oauth_status))
+        .route("/mcp/oauth/cancel", post(handle_v1_mcp_oauth_cancel))
         ;
 
     builder.layer(axum::middleware::from_fn(telemetry_middleware))

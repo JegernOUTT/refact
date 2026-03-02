@@ -272,11 +272,6 @@ fn reconstruct_token_response(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    let expires_in_secs = if tokens.expires_at > now_ms {
-        (tokens.expires_at - now_ms) / 1000
-    } else {
-        0
-    };
 
     let mut token_json = serde_json::json!({
         "access_token": tokens.access_token,
@@ -285,7 +280,13 @@ fn reconstruct_token_response(
     if !tokens.refresh_token.is_empty() {
         token_json["refresh_token"] = serde_json::Value::String(tokens.refresh_token.clone());
     }
-    if expires_in_secs > 0 {
+    if tokens.expires_at > 0 {
+        let remaining_ms = tokens.expires_at - now_ms;
+        let expires_in_secs = if remaining_ms <= 0 {
+            0i64
+        } else {
+            (remaining_ms + 999) / 1000
+        };
         token_json["expires_in"] = serde_json::Value::Number(expires_in_secs.into());
     }
     serde_json::from_value(token_json)
@@ -491,19 +492,22 @@ impl MCPOAuthSessionManager {
     }
 
     pub async fn exchange_code(session_id: &str, code: &str) -> Result<(MCPOAuthTokens, String), String> {
-        let session = pending_sessions().lock().await.remove(session_id)
-            .ok_or_else(|| format!("No pending OAuth session: {}", session_id))?;
-        if !session.state_param.is_empty() {
-            state_index().lock().await.remove(&session.state_param);
-        }
-        let config_path = session.config_path.clone();
-        let mut oauth_state = session.oauth_state.lock().await;
+        let (oauth_state_arc, config_path, state_param) = {
+            let sessions = pending_sessions().lock().await;
+            let session = sessions.get(session_id)
+                .ok_or_else(|| format!("No pending OAuth session: {}", session_id))?;
+            (session.oauth_state.clone(), session.config_path.clone(), session.state_param.clone())
+        };
+
+        let mut oauth_state = oauth_state_arc.lock().await;
         oauth_state.handle_callback(code)
             .await
             .map_err(|e| format!("OAuth callback: {}", e))?;
         let (client_id, creds_opt) = oauth_state.get_credentials()
             .await
             .map_err(|e| format!("get OAuth credentials: {}", e))?;
+        drop(oauth_state);
+
         let token_response = creds_opt.ok_or_else(|| "No credentials after callback".to_string())?;
         let token_json = serde_json::to_value(&token_response)
             .map_err(|e| format!("serialize token response: {}", e))?;
@@ -525,6 +529,12 @@ impl MCPOAuthSessionManager {
                 now_ms + secs as i64 * 1000
             })
             .unwrap_or(0);
+
+        pending_sessions().lock().await.remove(session_id);
+        if !state_param.is_empty() {
+            state_index().lock().await.remove(&state_param);
+        }
+
         Ok((MCPOAuthTokens {
             access_token,
             refresh_token,
@@ -556,6 +566,18 @@ impl MCPOAuthSessionManager {
         let mut si = state_index().lock().await;
         for state in removed_states {
             si.remove(&state);
+        }
+    }
+
+    pub async fn cancel_oauth_flow(session_id: &str) -> bool {
+        let removed = pending_sessions().lock().await.remove(session_id);
+        if let Some(session) = removed {
+            if !session.state_param.is_empty() {
+                state_index().lock().await.remove(&session.state_param);
+            }
+            true
+        } else {
+            false
         }
     }
 }
@@ -822,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reconstruct_token_response_expired_no_expires_in() {
+    fn test_reconstruct_token_response_expired_has_zero_expires_in() {
         use oauth2::TokenResponse;
         let tokens = MCPOAuthTokens {
             access_token: "access_expired".to_string(),
@@ -834,7 +856,8 @@ mod tests {
         };
         let response = reconstruct_token_response(&tokens).unwrap();
         assert_eq!(response.access_token().secret(), "access_expired");
-        assert!(response.expires_in().is_none());
+        let expires_in = response.expires_in().expect("expires_in should be present for expired token");
+        assert_eq!(expires_in.as_secs(), 0);
     }
 
     #[test]
@@ -1084,5 +1107,109 @@ mod tests {
         let json = serde_json::json!({"auth_type": "bearer", "oauth2_scopes": ""});
         let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
         assert!(settings.oauth2_scopes.is_empty());
+    }
+
+    #[test]
+    fn test_reconstruct_near_expiry_produces_expires_in() {
+        use oauth2::TokenResponse;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let tokens = MCPOAuthTokens {
+            access_token: "tok".to_string(),
+            refresh_token: String::new(),
+            expires_at: now_ms + 500,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        let response = reconstruct_token_response(&tokens).unwrap();
+        let expires_in = response.expires_in().expect("expires_in should be present for near-expiry token");
+        assert_eq!(expires_in.as_secs(), 1, "500ms remaining should ceil to 1 second");
+    }
+
+    #[test]
+    fn test_reconstruct_expired_produces_zero_expires_in() {
+        use oauth2::TokenResponse;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let tokens = MCPOAuthTokens {
+            access_token: "tok".to_string(),
+            refresh_token: String::new(),
+            expires_at: now_ms - 1,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        let response = reconstruct_token_response(&tokens).unwrap();
+        let expires_in = response.expires_in().expect("expires_in should be present for expired token");
+        assert_eq!(expires_in.as_secs(), 0, "expired token should have expires_in = 0");
+    }
+
+    #[test]
+    fn test_reconstruct_no_expiry_omits_expires_in() {
+        use oauth2::TokenResponse;
+        let tokens = MCPOAuthTokens {
+            access_token: "tok".to_string(),
+            refresh_token: String::new(),
+            expires_at: 0,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        let response = reconstruct_token_response(&tokens).unwrap();
+        assert!(response.expires_in().is_none(), "non-expiring token (expires_at=0) should omit expires_in");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_removes_session() {
+        let session_id = format!("test-cancel-{}", Uuid::new_v4());
+        let state_val = format!("test-cancel-state-{}", Uuid::new_v4());
+
+        let oauth_state = OAuthState::new("http://localhost", None).await.unwrap();
+        pending_sessions().lock().await.insert(session_id.clone(), PendingOAuthSession {
+            oauth_state: Arc::new(AMutex::new(oauth_state)),
+            config_path: "/tmp/test.yaml".to_string(),
+            created_at: SystemTime::now(),
+            state_param: state_val.clone(),
+        });
+        state_index().lock().await.insert(state_val.clone(), session_id.clone());
+
+        let removed = MCPOAuthSessionManager::cancel_oauth_flow(&session_id).await;
+        assert!(removed, "cancel should return true for existing session");
+
+        assert!(!pending_sessions().lock().await.contains_key(&session_id),
+            "session should be removed after cancel");
+        assert!(!state_index().lock().await.contains_key(&state_val),
+            "state index should be cleaned up after cancel");
+
+        let double_cancel = MCPOAuthSessionManager::cancel_oauth_flow(&session_id).await;
+        assert!(!double_cancel, "cancel of already-removed session should return false");
+    }
+
+    #[tokio::test]
+    async fn test_exchange_failure_keeps_session() {
+        let session_id = format!("test-exchange-fail-{}", Uuid::new_v4());
+        let state_val = format!("test-efk-state-{}", Uuid::new_v4());
+
+        let oauth_state = OAuthState::new("http://localhost", None).await.unwrap();
+        pending_sessions().lock().await.insert(session_id.clone(), PendingOAuthSession {
+            oauth_state: Arc::new(AMutex::new(oauth_state)),
+            config_path: "/tmp/test.yaml".to_string(),
+            created_at: SystemTime::now(),
+            state_param: state_val.clone(),
+        });
+        state_index().lock().await.insert(state_val.clone(), session_id.clone());
+
+        let result = MCPOAuthSessionManager::exchange_code(&session_id, "fake_code").await;
+        assert!(result.is_err(), "exchange with uninitialized OAuth state should fail");
+
+        assert!(pending_sessions().lock().await.contains_key(&session_id),
+            "session should remain after failed exchange (for retry)");
+
+        MCPOAuthSessionManager::cancel_oauth_flow(&session_id).await;
     }
 }
