@@ -7,8 +7,9 @@ use tokio::sync::Mutex as AMutex;
 use tracing::warn;
 use uuid::Uuid;
 
-use oauth2::{StandardTokenResponse, EmptyExtraTokenFields, basic::BasicTokenType};
+use oauth2::{StandardTokenResponse, EmptyExtraTokenFields, basic::BasicTokenType, TokenResponse};
 use rmcp::transport::auth::{OAuthState, AuthorizationManager};
+use crate::integrations::sessions::IntegrationSession;
 
 fn default_auth_type() -> String {
     "none".to_string()
@@ -273,6 +274,124 @@ pub async fn create_auth_manager_from_tokens(
     state
         .into_authorization_manager()
         .ok_or_else(|| "Failed to extract AuthorizationManager after set_credentials".to_string())
+}
+
+const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000;
+
+pub fn needs_refresh(tokens: &MCPOAuthTokens) -> bool {
+    if tokens.expires_at <= 0 {
+        return false;
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    tokens.expires_at - now_ms < REFRESH_BEFORE_EXPIRY_MS
+}
+
+fn tokens_from_response(
+    client_id: String,
+    old_refresh_token: &str,
+    response: &StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
+) -> MCPOAuthTokens {
+    let access_token = response.access_token().secret().to_string();
+    let refresh_token = response.refresh_token()
+        .map(|r| r.secret().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| old_refresh_token.to_string());
+    let expires_at = response.expires_in().map(|d| {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        now_ms + d.as_millis() as i64
+    }).unwrap_or(0);
+    MCPOAuthTokens {
+        access_token,
+        refresh_token,
+        expires_at,
+        client_id,
+        client_secret: None,
+        scopes: vec![],
+    }
+}
+
+pub async fn mcp_oauth_refresh_task(
+    session_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
+    config_path: String,
+) {
+    use super::session_mcp::{SessionMCP, MCPAuthStatus};
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
+        let auth_manager_arc = {
+            let mut session_locked = session_arc.lock().await;
+            let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                Some(s) => s,
+                None => return,
+            };
+            mcp_session.auth_manager.clone()
+        };
+
+        let auth_manager_arc = match auth_manager_arc {
+            Some(am) => am,
+            None => return,
+        };
+
+        let tokens = match load_tokens_from_config(&config_path).await {
+            Some(t) if !t.access_token.is_empty() => t,
+            _ => {
+                warn!("OAuth refresh task: no tokens in config {}", config_path);
+                let mut session_locked = session_arc.lock().await;
+                if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    mcp_session.auth_status = MCPAuthStatus::NeedsLogin;
+                }
+                return;
+            }
+        };
+
+        if !needs_refresh(&tokens) {
+            continue;
+        }
+
+        {
+            let mut session_locked = session_arc.lock().await;
+            if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                mcp_session.auth_status = MCPAuthStatus::Refreshing;
+            }
+        }
+
+        let refresh_result = {
+            let am = auth_manager_arc.lock().await;
+            am.refresh_token().await
+        };
+
+        match refresh_result {
+            Ok(token_response) => {
+                let new_tokens = tokens_from_response(
+                    tokens.client_id.clone(),
+                    &tokens.refresh_token,
+                    &token_response,
+                );
+                if let Err(e) = save_tokens_to_config(&config_path, &new_tokens).await {
+                    warn!("OAuth refresh task: failed to persist tokens for {}: {}", config_path, e);
+                }
+                let mut session_locked = session_arc.lock().await;
+                if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    mcp_session.auth_status = MCPAuthStatus::Authenticated;
+                }
+            }
+            Err(e) => {
+                warn!("MCP OAuth refresh failed for {}: {}", config_path, e);
+                let mut session_locked = session_arc.lock().await;
+                if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    mcp_session.auth_status = MCPAuthStatus::NeedsReauth;
+                }
+                return;
+            }
+        }
+    }
 }
 
 struct PendingOAuthSession {
@@ -714,6 +833,88 @@ mod tests {
 
         let response = reconstruct_token_response(&loaded).unwrap();
         assert_eq!(response.access_token().secret(), "test_access");
+    }
+
+    #[test]
+    fn test_needs_refresh_no_expiry() {
+        let tokens = MCPOAuthTokens {
+            access_token: "tok".to_string(),
+            refresh_token: "ref".to_string(),
+            expires_at: 0,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        assert!(!needs_refresh(&tokens), "No expiry (0) should not trigger refresh");
+    }
+
+    #[test]
+    fn test_needs_refresh_expires_soon() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let tokens = MCPOAuthTokens {
+            access_token: "tok".to_string(),
+            refresh_token: "ref".to_string(),
+            expires_at: now_ms + 2 * 60 * 1000,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        assert!(needs_refresh(&tokens), "Expiry in 2 minutes should trigger refresh");
+    }
+
+    #[test]
+    fn test_needs_refresh_expires_later() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let tokens = MCPOAuthTokens {
+            access_token: "tok".to_string(),
+            refresh_token: "ref".to_string(),
+            expires_at: now_ms + 60 * 60 * 1000,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        assert!(!needs_refresh(&tokens), "Expiry in 1 hour should not trigger refresh");
+    }
+
+    #[test]
+    fn test_needs_refresh_already_expired() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let tokens = MCPOAuthTokens {
+            access_token: "tok".to_string(),
+            refresh_token: "ref".to_string(),
+            expires_at: now_ms - 1000,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        assert!(needs_refresh(&tokens), "Already expired token should trigger refresh");
+    }
+
+    #[test]
+    fn test_tokens_from_response_fallback_refresh_token() {
+        use oauth2::TokenResponse;
+        let tokens = MCPOAuthTokens {
+            access_token: "old_access".to_string(),
+            refresh_token: "old_refresh".to_string(),
+            expires_at: 0,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        let response = reconstruct_token_response(&tokens).unwrap();
+        let new_tokens = tokens_from_response("client".to_string(), "old_refresh", &response);
+        assert_eq!(new_tokens.access_token, "old_access");
+        assert_eq!(new_tokens.refresh_token, "old_refresh", "Should fall back to old refresh token");
+        assert_eq!(response.access_token().secret(), "old_access");
     }
 
     #[tokio::test]

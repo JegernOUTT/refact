@@ -32,6 +32,17 @@ pub enum MCPConnectionStatus {
     NeedsAuth,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MCPAuthStatus {
+    NotApplicable,
+    Authenticated,
+    NeedsLogin,
+    NeedsReauth,
+    Refreshing,
+    Error(String),
+}
+
 pub type McpRunningService = RunningService<RoleClient, McpClientHandler>;
 
 pub struct McpClientHandler {
@@ -374,6 +385,8 @@ pub struct SessionMCP {
     pub last_successful_connection: Option<Instant>,
     pub metrics: SharedMetrics,
     pub auth_manager: Option<Arc<AMutex<AuthorizationManager>>>,
+    pub auth_status: MCPAuthStatus,
+    pub oauth_refresh_task_handle: Option<AbortHandle>,
 }
 
 impl IntegrationSession for SessionMCP {
@@ -390,7 +403,7 @@ impl IntegrationSession for SessionMCP {
         self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
     ) -> Box<dyn Future<Output = String> + Send> {
         Box::new(async move {
-            let (debug_name, client, logs, startup_task_handles, health_task_handle, stderr_file) = {
+            let (debug_name, client, logs, startup_task_handles, health_task_handle, oauth_refresh_task_handle, stderr_file) = {
                 let mut session_locked = self_arc.lock().await;
                 let session_downcasted = session_locked
                     .as_any_mut()
@@ -402,6 +415,7 @@ impl IntegrationSession for SessionMCP {
                     session_downcasted.logs.clone(),
                     session_downcasted.startup_task_handles.clone(),
                     session_downcasted.health_task_handle.clone(),
+                    session_downcasted.oauth_refresh_task_handle.clone(),
                     session_downcasted.stderr_file_path.clone(),
                 )
             };
@@ -412,6 +426,10 @@ impl IntegrationSession for SessionMCP {
             }
 
             if let Some(abort_handle) = health_task_handle {
+                abort_handle.abort();
+            }
+
+            if let Some(abort_handle) = oauth_refresh_task_handle {
                 abort_handle.abort();
             }
 
@@ -513,6 +531,8 @@ mod tests {
             last_successful_connection: None,
             metrics: new_shared_metrics(),
             auth_manager: None,
+            auth_status: MCPAuthStatus::NotApplicable,
+            oauth_refresh_task_handle: None,
         }
     }
 
@@ -596,6 +616,49 @@ mod tests {
         assert_eq!(redact_sensitive_json(&serde_json::json!("hello")), "hello");
         assert_eq!(redact_sensitive_json(&serde_json::json!(42)), 42);
         assert_eq!(redact_sensitive_json(&serde_json::json!(null)), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_mcp_auth_status_serialization() {
+        let not_applicable = MCPAuthStatus::NotApplicable;
+        let json = serde_json::to_value(&not_applicable).unwrap();
+        assert_eq!(json, serde_json::json!("not_applicable"));
+
+        let authenticated = MCPAuthStatus::Authenticated;
+        let json = serde_json::to_value(&authenticated).unwrap();
+        assert_eq!(json, serde_json::json!("authenticated"));
+
+        let needs_login = MCPAuthStatus::NeedsLogin;
+        let json = serde_json::to_value(&needs_login).unwrap();
+        assert_eq!(json, serde_json::json!("needs_login"));
+
+        let needs_reauth = MCPAuthStatus::NeedsReauth;
+        let json = serde_json::to_value(&needs_reauth).unwrap();
+        assert_eq!(json, serde_json::json!("needs_reauth"));
+
+        let refreshing = MCPAuthStatus::Refreshing;
+        let json = serde_json::to_value(&refreshing).unwrap();
+        assert_eq!(json, serde_json::json!("refreshing"));
+
+        let error = MCPAuthStatus::Error("something went wrong".to_string());
+        let json = serde_json::to_value(&error).unwrap();
+        assert_eq!(json["error"], "something went wrong");
+    }
+
+    #[test]
+    fn test_mcp_auth_status_deserialization_roundtrip() {
+        let statuses = vec![
+            MCPAuthStatus::NotApplicable,
+            MCPAuthStatus::Authenticated,
+            MCPAuthStatus::NeedsLogin,
+            MCPAuthStatus::NeedsReauth,
+            MCPAuthStatus::Refreshing,
+        ];
+        for status in statuses {
+            let json = serde_json::to_value(&status).unwrap();
+            let roundtrip: MCPAuthStatus = serde_json::from_value(json).unwrap();
+            assert_eq!(status, roundtrip);
+        }
     }
 }
 

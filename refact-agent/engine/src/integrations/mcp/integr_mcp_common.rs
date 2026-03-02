@@ -15,8 +15,8 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationCommon;
 use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num};
 use rmcp::transport::auth::AuthClient;
-use super::session_mcp::{SessionMCP, McpClientHandler, McpRunningService, MCPConnectionStatus, add_log_entry, cancel_mcp_client, redact_sensitive_value};
-use super::mcp_auth::{MCPAuthSettings, MCPTokenManager, create_auth_manager_from_tokens, load_tokens_from_config};
+use super::session_mcp::{SessionMCP, McpClientHandler, McpRunningService, MCPConnectionStatus, MCPAuthStatus, add_log_entry, cancel_mcp_client, redact_sensitive_value};
+use super::mcp_auth::{MCPAuthSettings, MCPTokenManager, create_auth_manager_from_tokens, load_tokens_from_config, mcp_oauth_refresh_task};
 use super::mcp_metrics::new_shared_metrics;
 use super::tool_mcp::ToolMCP;
 
@@ -229,6 +229,7 @@ pub(crate) async fn build_auth_client_for_mcp(
                 let mut session_locked = session.lock().await;
                 let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
                 mcp_session.connection_status = MCPConnectionStatus::NeedsAuth;
+                mcp_session.auth_status = MCPAuthStatus::NeedsLogin;
             }
             return None;
         }
@@ -260,6 +261,7 @@ pub(crate) async fn build_auth_client_for_mcp(
         let mut session_locked = session.lock().await;
         let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
         mcp_session.auth_manager = Some(auth_manager_arc);
+        mcp_session.auth_status = MCPAuthStatus::Authenticated;
     }
     Some(auth_client)
 }
@@ -387,6 +389,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 last_successful_connection: None,
                 metrics: new_shared_metrics(),
                 auth_manager: None,
+                auth_status: MCPAuthStatus::NotApplicable,
+                oauth_refresh_task_handle: None,
             })));
             tracing::info!("MCP START SESSION {:?}", session_key);
             gcx_write
@@ -635,6 +639,20 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     old.abort();
                 }
             }
+
+            {
+                let mut session_locked = session_arc_clone.lock().await;
+                let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                if mcp_session.auth_manager.is_some() {
+                    let refresh_task = tokio::spawn(mcp_oauth_refresh_task(
+                        session_arc_clone.clone(),
+                        config_path.clone(),
+                    ));
+                    if let Some(old) = mcp_session.oauth_refresh_task_handle.replace(refresh_task.abort_handle()) {
+                        old.abort();
+                    }
+                }
+            }
         });
 
         let startup_task_abort_handle = startup_task_join_handle.abort_handle();
@@ -847,6 +865,8 @@ mod tests {
             last_successful_connection: None,
             metrics: super::super::mcp_metrics::new_shared_metrics(),
             auth_manager: None,
+            auth_status: super::super::session_mcp::MCPAuthStatus::NotApplicable,
+            oauth_refresh_task_handle: None,
         }) as Box<dyn IntegrationSession>))
     }
 
@@ -1015,6 +1035,8 @@ mod tests {
                 last_successful_connection: None,
                 metrics: new_shared_metrics(),
                 auth_manager: None,
+                auth_status: MCPAuthStatus::NotApplicable,
+                oauth_refresh_task_handle: None,
             }) as Box<dyn IntegrationSession>));
 
         let result = super::build_auth_client_for_mcp(
@@ -1037,6 +1059,11 @@ mod tests {
             matches!(mcp_session.connection_status, MCPConnectionStatus::NeedsAuth),
             "Status should be NeedsAuth when no tokens, got {:?}",
             mcp_session.connection_status
+        );
+        assert!(
+            matches!(mcp_session.auth_status, MCPAuthStatus::NeedsLogin),
+            "Auth status should be NeedsLogin when no tokens, got {:?}",
+            mcp_session.auth_status
         );
     }
 

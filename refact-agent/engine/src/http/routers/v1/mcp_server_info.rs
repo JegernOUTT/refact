@@ -9,7 +9,7 @@ use tokio::sync::RwLock as ARwLock;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::integrations::mcp::mcp_naming;
-use crate::integrations::mcp::session_mcp::{SessionMCP, MCPConnectionStatus};
+use crate::integrations::mcp::session_mcp::{SessionMCP, MCPConnectionStatus, MCPAuthStatus};
 use crate::integrations::mcp::mcp_metrics::MCPServerMetrics;
 use crate::integrations::running_integrations::load_integrations;
 
@@ -54,6 +54,7 @@ struct McpPromptInfo {
 struct McpServerInfoResponse {
     config_path: String,
     status: serde_json::Value,
+    auth_status: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     server_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,7 +86,7 @@ pub async fn handle_v1_mcp_server_info(
             format!("no session for {}", session_key),
         ))?;
 
-    let (config_path_clone, connection_status, server_info, tools_raw, resources_raw, prompts_raw, logs_arc, metrics_arc) = {
+    let (config_path_clone, connection_status, auth_status, server_info, tools_raw, resources_raw, prompts_raw, logs_arc, metrics_arc) = {
         let mut session_locked = session.lock().await;
         let mcp_session = session_locked
             .as_any_mut()
@@ -97,6 +98,7 @@ pub async fn handle_v1_mcp_server_info(
         (
             mcp_session.config_path.clone(),
             mcp_session.connection_status.clone(),
+            mcp_session.auth_status.clone(),
             mcp_session.server_info.clone(),
             mcp_session.mcp_tools.clone(),
             mcp_session.mcp_resources.clone(),
@@ -107,6 +109,7 @@ pub async fn handle_v1_mcp_server_info(
     };
 
     let status = serde_json::to_value(&connection_status).unwrap_or(serde_json::Value::Null);
+    let auth_status_json = serde_json::to_value(&auth_status).unwrap_or(serde_json::Value::Null);
 
     let (server_name, server_version, protocol_version, capabilities_json) =
         if let Some(ref info) = server_info {
@@ -195,6 +198,7 @@ pub async fn handle_v1_mcp_server_info(
     let response = McpServerInfoResponse {
         config_path: session_key,
         status,
+        auth_status: auth_status_json,
         server_name,
         server_version,
         protocol_version,
@@ -317,6 +321,7 @@ mod tests {
         let response = McpServerInfoResponse {
             config_path: "mcp_stdio_test.yaml".to_string(),
             status: serde_json::json!({"status": "connected"}),
+            auth_status: serde_json::json!("not_applicable"),
             server_name: Some("TestServer".to_string()),
             server_version: Some("1.0.0".to_string()),
             protocol_version: Some("2024-11-05".to_string()),
@@ -347,6 +352,7 @@ mod tests {
         let response = McpServerInfoResponse {
             config_path: "mcp_stdio_test.yaml".to_string(),
             status: serde_json::json!({"status": "disconnected"}),
+            auth_status: serde_json::json!("not_applicable"),
             server_name: None,
             server_version: None,
             protocol_version: None,
@@ -419,6 +425,8 @@ mod tests {
             last_successful_connection: None,
             metrics: new_shared_metrics(),
             auth_manager: None,
+            auth_status: MCPAuthStatus::NotApplicable,
+            oauth_refresh_task_handle: None,
         };
         session.connection_status = MCPConnectionStatus::Connecting;
         assert!(matches!(session.connection_status, MCPConnectionStatus::Connecting));
@@ -446,6 +454,8 @@ mod tests {
             last_successful_connection: None,
             metrics: new_shared_metrics(),
             auth_manager: None,
+            auth_status: MCPAuthStatus::NotApplicable,
+            oauth_refresh_task_handle: None,
         };
         assert_ne!(session.launched_cfg, serde_json::Value::Null);
         session.launched_cfg = serde_json::Value::Null;
