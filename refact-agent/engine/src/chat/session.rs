@@ -59,6 +59,7 @@ impl ChatSession {
             slash_allowed_tools: Vec::new(),
             slash_model_override: None,
             slash_source_command: String::new(),
+            slash_context_fork: None,
             skills_available_count: 0,
             skills_included: Vec::new(),
         }
@@ -101,6 +102,7 @@ impl ChatSession {
             slash_allowed_tools: Vec::new(),
             slash_model_override: None,
             slash_source_command: String::new(),
+            slash_context_fork: None,
             skills_available_count: 0,
             skills_included: Vec::new(),
         }
@@ -1709,5 +1711,41 @@ mod tests {
             recv_elapsed.as_millis(),
             limits().event_channel_capacity,
         );
+    }
+
+    #[test]
+    fn test_slash_context_fork_initial_none() {
+        let session = make_session();
+        assert!(session.slash_context_fork.is_none());
+    }
+
+    #[test]
+    fn test_slash_context_fork_stored_and_cleared() {
+        let mut session = make_session();
+        session.slash_context_fork = Some("my-agent".to_string());
+        assert_eq!(session.slash_context_fork, Some("my-agent".to_string()));
+        session.slash_context_fork = None;
+        assert!(session.slash_context_fork.is_none());
+    }
+
+    #[test]
+    fn test_new_with_trajectory_context_fork_none() {
+        use crate::call_validation::{ChatContent};
+        let msg = ChatMessage {
+            role: "user".into(),
+            content: ChatContent::SimpleText("hello".into()),
+            ..Default::default()
+        };
+        let thread = ThreadParams {
+            id: "traj-fork".into(),
+            ..Default::default()
+        };
+        let session = ChatSession::new_with_trajectory(
+            "traj-fork".into(),
+            vec![msg],
+            thread,
+            "2024-01-01T00:00:00Z".into(),
+        );
+        assert!(session.slash_context_fork.is_none());
     }
 }

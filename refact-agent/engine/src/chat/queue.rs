@@ -453,12 +453,14 @@ pub async fn process_command_queue(
                             session.slash_allowed_tools = expanded.allowed_tools;
                             session.slash_model_override = expanded.model_override;
                             session.slash_source_command = expanded.source_command;
+                            session.slash_context_fork = expanded.context_fork;
                         }
                         Ok(None) => {
                             let mut session = session_arc.lock().await;
                             session.slash_allowed_tools = Vec::new();
                             session.slash_model_override = None;
                             session.slash_source_command = String::new();
+                            session.slash_context_fork = None;
                         }
                         Err(e) => {
                             warn!("slash command expansion error: {}", e);

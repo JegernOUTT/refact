@@ -4,6 +4,8 @@ use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::subchat::{resolve_subchat_config, run_subchat};
+
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
     ChatContent, ChatMessage, ChatMeta, ChatUsage, SamplingParameters, is_agentic_mode_id,
@@ -247,6 +249,46 @@ fn tail_needs_assistant(messages: &[ChatMessage]) -> bool {
     false
 }
 
+async fn run_fork_subchat(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    agent_name: &str,
+    user_content: &str,
+    thread: &ThreadParams,
+    parent_chat_id: &str,
+) -> Result<String, String> {
+    let config = resolve_subchat_config(
+        gcx.clone(),
+        agent_name,
+        false,
+        None,
+        Some(format!("Fork: {}", agent_name)),
+        Some(parent_chat_id.to_string()),
+        Some("fork".to_string()),
+        None,
+        None,
+        10,
+        true,
+        None,
+        thread.mode.clone(),
+    )
+    .await?;
+
+    let messages = vec![
+        ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText(user_content.to_string()),
+            ..Default::default()
+        },
+    ];
+
+    let result = run_subchat(gcx, messages, config).await?;
+
+    let last_assistant = result.messages.iter().rev().find(|m| m.role == "assistant");
+    Ok(last_assistant
+        .map(|m| m.content.content_text_only())
+        .unwrap_or_else(|| "Fork skill completed but produced no response.".to_string()))
+}
+
 pub fn start_generation(
     gcx: Arc<ARwLock<GlobalContext>>,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -267,6 +309,52 @@ pub fn start_generation(
                         thread.model = m.clone();
                     }
                 }
+            }
+
+            let fork_agent_name = {
+                let session = session_arc.lock().await;
+                session.slash_context_fork.clone()
+            };
+
+            if let Some(agent_name) = fork_agent_name {
+                let user_content = {
+                    let session = session_arc.lock().await;
+                    session.messages.iter().rev()
+                        .find(|m| m.role == "user")
+                        .map(|m| m.content.content_text_only())
+                        .unwrap_or_default()
+                };
+                {
+                    let mut session = session_arc.lock().await;
+                    session.slash_context_fork = None;
+                }
+
+                let fork_result = run_fork_subchat(
+                    gcx.clone(),
+                    &agent_name,
+                    &user_content,
+                    &thread,
+                    &chat_id,
+                )
+                .await;
+
+                match fork_result {
+                    Ok(assistant_content) => {
+                        let mut session = session_arc.lock().await;
+                        session.add_message(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: ChatContent::SimpleText(assistant_content),
+                            ..Default::default()
+                        });
+                        session.set_runtime_state(SessionState::Idle, None);
+                    }
+                    Err(e) => {
+                        warn!("Fork skill subchat failed ({}), falling back to normal generation", e);
+                    }
+                }
+
+                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                break;
             }
 
             let abort_flag = {

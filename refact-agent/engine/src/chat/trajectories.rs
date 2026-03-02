@@ -3012,6 +3012,7 @@ mod tests {
             slash_allowed_tools: Vec::new(),
             slash_model_override: None,
             slash_source_command: String::new(),
+            slash_context_fork: None,
             skills_available_count: 0,
             skills_included: Vec::new(),
         };

@@ -663,6 +663,7 @@ pub struct ChatSession {
     pub slash_allowed_tools: Vec<String>,
     pub slash_model_override: Option<String>,
     pub slash_source_command: String,
+    pub slash_context_fork: Option<String>,
     pub skills_available_count: usize,
     pub skills_included: Vec<String>,
 }
