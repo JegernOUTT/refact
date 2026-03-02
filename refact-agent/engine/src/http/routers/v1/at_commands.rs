@@ -48,6 +48,7 @@ pub struct CompletionDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
     pub source: String,
+    pub kind: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -154,6 +155,7 @@ pub fn slash_completions_for_prefix(
                 description: cmd.description.clone(),
                 argument_hint: if cmd.argument_hint.is_empty() { None } else { Some(cmd.argument_hint.clone()) },
                 source: source_label(&cmd.source),
+                kind: "cmd".to_string(),
             });
             completions.push(name_with_slash);
         }
@@ -168,6 +170,7 @@ pub fn slash_completions_for_prefix(
                 description: skill.description.clone(),
                 argument_hint: None,
                 source: source_label(&skill.source),
+                kind: "skill".to_string(),
             });
             completions.push(name_with_slash);
         }

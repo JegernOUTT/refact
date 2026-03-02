@@ -150,6 +150,7 @@ export type CompletionDetail = {
   description?: string;
   argument_hint?: string;
   source?: string;
+  kind?: string;
 };
 
 export type CommandCompletionResponse = {

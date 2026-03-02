@@ -1,19 +1,23 @@
 .suggestion {
   width: 100%;
+  overflow: hidden;
 }
 
 .name {
   font-weight: var(--font-weight-bold);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .description {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100%;
+  flex: 1;
+  min-width: 0;
 }
 
-.hint {
-  font-style: italic;
-  color: var(--gray-10);
+.badge {
+  flex-shrink: 0;
+  margin-left: auto;
 }

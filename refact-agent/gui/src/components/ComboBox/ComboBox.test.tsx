@@ -511,11 +511,13 @@ const SlashApp = (props: Partial<ComboBoxProps>) => {
               "/optimize": {
                 description: "Optimize code for performance",
                 argument_hint: "[file-path]",
-                source: "project",
+                source: "project_refact",
+                kind: "cmd",
               },
               "/review": {
                 description: "Review code for issues",
-                source: "global",
+                source: "global_refact",
+                kind: "skill",
               },
             },
             replace: [0, cursor],
@@ -531,7 +533,8 @@ const SlashApp = (props: Partial<ComboBoxProps>) => {
               "/optimize": {
                 description: "Optimize code for performance",
                 argument_hint: "[file-path]",
-                source: "project",
+                source: "project_refact",
+                kind: "cmd",
               },
             },
             replace: [0, cursor],
@@ -596,19 +599,19 @@ describe("ComboBox slash commands", () => {
     ).not.toBeNull();
   });
 
-  test("slash command suggestions show argument hint", async () => {
+  test("slash command suggestions do not show argument hint", async () => {
     const { user, ...app } = render(<SlashApp />);
     const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
     await user.type(textarea, "/");
-    expect(app.queryByText("[file-path]")).not.toBeNull();
+    expect(app.queryByText("[file-path]")).toBeNull();
   });
 
-  test("slash command suggestions show source badge", async () => {
+  test("slash command suggestions show kind badge", async () => {
     const { user, ...app } = render(<SlashApp />);
     const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
     await user.type(textarea, "/");
-    expect(app.queryByText("project")).not.toBeNull();
-    expect(app.queryByText("global")).not.toBeNull();
+    expect(app.queryByText("cmd")).not.toBeNull();
+    expect(app.queryByText("skill")).not.toBeNull();
   });
 
   test("selecting a slash command replaces input text", async () => {

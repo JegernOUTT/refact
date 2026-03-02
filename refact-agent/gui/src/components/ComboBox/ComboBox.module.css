@@ -2,10 +2,7 @@
   position: relative;
   z-index: 50;
   min-width: 180px;
-  /* max-width: 280px; */
-  /* JB doesn't support dvw */
-  max-width: 50vw;
-  max-width: 50dvw;
+  max-width: 400px;
   border-radius: max(var(--radius-2), var(--radius-full));
   /* Force GPU compositing to fix JCEF repaint issues in JetBrains IDEs */
   transform: translateZ(0);
@@ -40,6 +37,8 @@
 
 .combobox__item {
   display: flex;
-  align-items: flex-start !important;
-  flex-direction: column !important;
+  align-items: center !important;
+  flex-direction: row !important;
+  width: 100%;
+  overflow: hidden;
 }

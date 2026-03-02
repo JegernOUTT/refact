@@ -12,7 +12,7 @@ export const SlashCommandSuggestion: React.FC<SlashCommandSuggestionProps> = ({
   name,
   detail,
 }) => (
-  <Flex direction="column" className={styles.suggestion}>
+  <Flex direction="row" align="center" gap="2" className={styles.suggestion}>
     <Text weight="bold" size="2" className={styles.name}>
       {name}
     </Text>
@@ -21,19 +21,13 @@ export const SlashCommandSuggestion: React.FC<SlashCommandSuggestionProps> = ({
         {detail.description}
       </Text>
     )}
-    {(detail?.argument_hint ?? detail?.source) && (
-      <Flex gap="2" align="center">
-        {detail?.argument_hint && (
-          <Text size="1" className={styles.hint}>
-            {detail.argument_hint}
-          </Text>
-        )}
-        {detail?.source && (
-          <Badge size="1" variant="soft">
-            {detail.source}
-          </Badge>
-        )}
-      </Flex>
-    )}
+    <Badge
+      size="1"
+      variant="soft"
+      color={detail?.kind === "skill" ? "indigo" : "gray"}
+      className={styles.badge}
+    >
+      {detail?.kind === "skill" ? "skill" : "cmd"}
+    </Badge>
   </Flex>
 );
