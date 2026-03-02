@@ -106,17 +106,17 @@ pub fn plugin_install_dir(config_dir: &Path, name: &str) -> PathBuf {
     config_dir.join("plugins").join("installed").join(name)
 }
 
-pub async fn load_plugins_db(config_dir: &Path) -> PluginsDb {
+pub async fn load_plugins_db(config_dir: &Path) -> Result<PluginsDb, String> {
     let path = plugins_db_path(config_dir);
     match tokio::fs::read_to_string(&path).await {
         Ok(content) => match serde_json::from_str(&content) {
-            Ok(db) => db,
+            Ok(db) => Ok(db),
             Err(e) => {
-                tracing::warn!("Failed to parse plugins database at {}: {}", path.display(), e);
-                PluginsDb::default()
+                tracing::warn!("plugins.json is corrupt at {}: {}", path.display(), e);
+                Err(format!("plugins.json is corrupt: {}", e))
             }
         },
-        Err(_) => PluginsDb::default(),
+        Err(_) => Ok(PluginsDb::default()),
     }
 }
 
@@ -125,6 +125,10 @@ pub async fn save_plugins_db(config_dir: &Path, db: &PluginsDb) -> Result<(), St
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await
             .map_err(|e| format!("create dir {:?}: {}", parent, e))?;
+    }
+    if path.exists() {
+        let bak = path.with_extension("json.bak");
+        let _ = tokio::fs::copy(&path, &bak).await;
     }
     let content = serde_json::to_string_pretty(db)
         .map_err(|e| format!("serialize plugins db: {}", e))?;
@@ -277,7 +281,7 @@ async fn add_marketplace_impl(
             }
         }
     }
-    let mut db = load_plugins_db(config_dir).await;
+    let mut db = load_plugins_db(config_dir).await?;
     db.marketplaces.retain(|m| m.name != name);
     db.marketplaces.push(MarketplaceEntry {
         name: name.clone(),
@@ -304,7 +308,7 @@ async fn ensure_default_marketplaces_with_source(
     cache_dir: &Path,
     default_sources: &[&str],
 ) -> Result<(), String> {
-    let db = load_plugins_db(config_dir).await;
+    let db = load_plugins_db(config_dir).await?;
     if !db.marketplaces.is_empty() {
         return Ok(());
     }
@@ -339,7 +343,7 @@ pub async fn remove_marketplace(
 ) -> Result<(), String> {
     validate_plugin_name(name)?;
     let config_dir = gcx.read().await.config_dir.clone();
-    let mut db = load_plugins_db(&config_dir).await;
+    let mut db = load_plugins_db(&config_dir).await?;
     db.marketplaces.retain(|m| m.name != name);
     save_plugins_db(&config_dir, &db).await
 }
@@ -353,7 +357,7 @@ pub async fn list_marketplace_plugins(
         let g = gcx.read().await;
         (g.config_dir.clone(), g.cache_dir.clone())
     };
-    let db = load_plugins_db(&config_dir).await;
+    let db = load_plugins_db(&config_dir).await?;
     let entry = db.marketplaces.iter().find(|m| m.name == name)
         .ok_or_else(|| format!("marketplace '{}' not found", name))?;
     let marketplace_dir = if is_local_source(&entry.source) {
@@ -376,7 +380,7 @@ pub async fn install_plugin(
         let g = gcx.read().await;
         (g.config_dir.clone(), g.cache_dir.clone())
     };
-    let db = load_plugins_db(&config_dir).await;
+    let db = load_plugins_db(&config_dir).await?;
     let market_entry = db.marketplaces.iter().find(|m| m.name == marketplace_name)
         .ok_or_else(|| format!("marketplace '{}' not found", marketplace_name))?;
     let marketplace_dir = if is_local_source(&market_entry.source) {
@@ -413,7 +417,7 @@ pub async fn install_plugin(
         install_dir: install_dir.to_string_lossy().to_string(),
         installed_at: Utc::now().to_rfc3339(),
     };
-    let mut db = load_plugins_db(&config_dir).await;
+    let mut db = load_plugins_db(&config_dir).await?;
     db.installed.retain(|i| i.name != plugin_name);
     db.installed.push(entry.clone());
     save_plugins_db(&config_dir, &db).await?;
@@ -428,10 +432,38 @@ fn resolve_plugin_source_dir(
     match source {
         serde_json::Value::String(s) => {
             let relative = s.trim_start_matches("./");
-            if Path::new(relative).is_absolute() || relative.contains("..") {
+            let path = Path::new(relative);
+            for component in path.components() {
+                match component {
+                    std::path::Component::ParentDir |
+                    std::path::Component::RootDir |
+                    std::path::Component::Prefix(_) => {
+                        return Err(format!("unsafe plugin source path: {}", s));
+                    }
+                    _ => {}
+                }
+            }
+            if path.is_absolute() {
                 return Err(format!("unsafe plugin source path: {}", s));
             }
-            Ok(marketplace_dir.join(relative))
+            let joined = marketplace_dir.join(relative);
+            match std::fs::symlink_metadata(&joined) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(format!("plugin source is a symlink (not allowed): {:?}", joined));
+                }
+                Err(e) => {
+                    return Err(format!("cannot stat plugin source {:?}: {}", joined, e));
+                }
+                _ => {}
+            }
+            let marketplace_canon = std::fs::canonicalize(marketplace_dir)
+                .map_err(|e| format!("canonicalize marketplace {:?}: {}", marketplace_dir, e))?;
+            let joined_canon = std::fs::canonicalize(&joined)
+                .map_err(|e| format!("canonicalize plugin source {:?}: {}", joined, e))?;
+            if !joined_canon.starts_with(&marketplace_canon) {
+                return Err(format!("plugin source escapes marketplace directory: {:?}", joined_canon));
+            }
+            Ok(joined)
         }
         serde_json::Value::Object(obj) => {
             let kind = obj.get("source").and_then(|v| v.as_str()).unwrap_or("");
@@ -453,7 +485,7 @@ pub async fn uninstall_plugin(
 ) -> Result<(), String> {
     validate_plugin_name(plugin_name)?;
     let config_dir = gcx.read().await.config_dir.clone();
-    let mut db = load_plugins_db(&config_dir).await;
+    let mut db = load_plugins_db(&config_dir).await?;
     let was_installed = db.installed.iter().any(|i| i.name == plugin_name);
     db.installed.retain(|i| i.name != plugin_name);
     save_plugins_db(&config_dir, &db).await?;
@@ -728,7 +760,7 @@ mod tests {
         let mut size_acc = 0u64;
         copy_dir_recursive(&plugin_src, &install_dir, &mut size_acc).await.unwrap();
 
-        let mut db = load_plugins_db(&config_dir).await;
+        let mut db = load_plugins_db(&config_dir).await.unwrap();
         db.installed.push(InstalledPluginEntry {
             name: "my-plugin".to_string(),
             marketplace: "test-market".to_string(),
@@ -741,7 +773,7 @@ mod tests {
         assert!(install_dir.exists());
         assert!(install_dir.join("SKILL.md").exists());
 
-        let db_after = load_plugins_db(&config_dir).await;
+        let db_after = load_plugins_db(&config_dir).await.unwrap();
         assert_eq!(db_after.installed.len(), 1);
         assert_eq!(db_after.installed[0].name, "my-plugin");
         assert_eq!(db_after.installed[0].marketplace, "test-market");
@@ -766,7 +798,7 @@ mod tests {
             }],
         };
         save_plugins_db(&config_dir, &db).await.unwrap();
-        let loaded = load_plugins_db(&config_dir).await;
+        let loaded = load_plugins_db(&config_dir).await.unwrap();
         assert_eq!(loaded.marketplaces.len(), 1);
         assert_eq!(loaded.marketplaces[0].name, "market");
         assert_eq!(loaded.installed.len(), 1);
@@ -775,7 +807,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_plugins_db_missing_file() {
-        let db = load_plugins_db(Path::new("/nonexistent/path")).await;
+        let result = load_plugins_db(Path::new("/nonexistent/path")).await;
+        assert!(result.is_ok());
+        let db = result.unwrap();
         assert!(db.marketplaces.is_empty());
         assert!(db.installed.is_empty());
     }
@@ -810,7 +844,7 @@ mod tests {
             &[source1.as_str(), source2.as_str()],
         ).await.unwrap();
 
-        let db = load_plugins_db(&config_dir).await;
+        let db = load_plugins_db(&config_dir).await.unwrap();
         assert_eq!(db.marketplaces.len(), 2);
         let names: Vec<&str> = db.marketplaces.iter().map(|m| m.name.as_str()).collect();
         assert!(names.contains(&"market-one"));
@@ -836,7 +870,7 @@ mod tests {
 
         ensure_default_marketplaces_with_source(&config_dir, &cache_dir, &["anthropics/claude-code"]).await.unwrap();
 
-        let db = load_plugins_db(&config_dir).await;
+        let db = load_plugins_db(&config_dir).await.unwrap();
         assert_eq!(db.marketplaces.len(), 1);
         assert_eq!(db.marketplaces[0].name, "existing");
     }
@@ -855,7 +889,7 @@ mod tests {
         ).await;
         assert!(result.is_ok(), "seeding failure should be non-fatal");
 
-        let db = load_plugins_db(&config_dir).await;
+        let db = load_plugins_db(&config_dir).await.unwrap();
         assert!(db.marketplaces.is_empty(), "failed seeding should not add anything");
     }
 
@@ -882,7 +916,7 @@ mod tests {
         ).await;
         assert!(result.is_ok(), "partial failure should be non-fatal");
 
-        let db = load_plugins_db(&config_dir).await;
+        let db = load_plugins_db(&config_dir).await.unwrap();
         assert_eq!(db.marketplaces.len(), 1, "good marketplace should be seeded despite earlier failure");
         assert_eq!(db.marketplaces[0].name, "good-market");
     }
@@ -958,7 +992,7 @@ mod tests {
         let result2 = add_marketplace_impl(&config_dir, &cache_dir, &source).await;
         assert!(result2.is_ok(), "second add failed: {:?}", result2);
 
-        let db = load_plugins_db(&config_dir).await;
+        let db = load_plugins_db(&config_dir).await.unwrap();
         assert_eq!(db.marketplaces.len(), 1, "should have exactly one entry after two adds");
         assert_eq!(db.marketplaces[0].name, "test-market");
         assert_eq!(db.marketplaces[0].source, source);
@@ -988,5 +1022,80 @@ mod tests {
         assert!(!tmp_dir.exists());
         let content = tokio::fs::read_to_string(final_dir.join("marketplace.json")).await.unwrap();
         assert!(content.contains("new-plugin"));
+    }
+
+    #[tokio::test]
+    async fn test_load_plugins_db_corrupt_json_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::fs::write(tmp.path().join("plugins.json"), "NOT VALID JSON {{{{").await.unwrap();
+        let result = load_plugins_db(tmp.path()).await;
+        assert!(result.is_err(), "corrupt JSON must return error, not empty default");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("corrupt"), "error should mention 'corrupt': {}", msg);
+    }
+
+    #[tokio::test]
+    async fn test_load_plugins_db_missing_file_returns_empty() {
+        let result = load_plugins_db(Path::new("/nonexistent/dir/that/does/not/exist")).await;
+        assert!(result.is_ok());
+        let db = result.unwrap();
+        assert!(db.marketplaces.is_empty());
+        assert!(db.installed.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_plugin_source_rejects_escape_via_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = resolve_plugin_source_dir(
+            tmp.path(),
+            &serde_json::json!("../../../etc/passwd"),
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("unsafe"), "error should mention 'unsafe': {}", msg);
+    }
+
+    #[test]
+    fn test_resolve_plugin_source_rejects_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = resolve_plugin_source_dir(
+            tmp.path(),
+            &serde_json::json!("/etc/passwd"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_resolve_plugin_source_rejects_symlink_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marketplace_dir = tmp.path().join("marketplace");
+        tokio::fs::create_dir_all(&marketplace_dir).await.unwrap();
+        let real_dir = tmp.path().join("real-target");
+        tokio::fs::create_dir_all(&real_dir).await.unwrap();
+        let symlink_path = marketplace_dir.join("symlinked-plugin");
+        std::os::unix::fs::symlink(&real_dir, &symlink_path).unwrap();
+
+        let result = resolve_plugin_source_dir(
+            &marketplace_dir,
+            &serde_json::json!("./symlinked-plugin"),
+        );
+        assert!(result.is_err(), "symlink source must be rejected");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("symlink"), "error should mention 'symlink': {}", msg);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_plugin_source_accepts_regular_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marketplace_dir = tmp.path().join("marketplace");
+        let plugin_dir = marketplace_dir.join("plugins").join("my-plugin");
+        tokio::fs::create_dir_all(&plugin_dir).await.unwrap();
+
+        let result = resolve_plugin_source_dir(
+            &marketplace_dir,
+            &serde_json::json!("./plugins/my-plugin"),
+        );
+        assert!(result.is_ok(), "regular dir should succeed: {:?}", result);
     }
 }

@@ -30,7 +30,8 @@ pub async fn handle_list_marketplaces(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let _ = ensure_default_marketplaces(gcx.clone()).await;
     let config_dir = gcx.read().await.config_dir.clone();
-    let db = load_plugins_db(&config_dir).await;
+    let db = load_plugins_db(&config_dir).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let summaries: Vec<Value> = db.marketplaces.iter().map(|m| {
         json!({
             "name": m.name,
@@ -135,7 +136,8 @@ pub async fn handle_list_installed(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let config_dir = gcx.read().await.config_dir.clone();
-    let db = load_plugins_db(&config_dir).await;
+    let db = load_plugins_db(&config_dir).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({ "installed": db.installed })))
 }
 
