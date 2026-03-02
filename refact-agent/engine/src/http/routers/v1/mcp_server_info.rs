@@ -418,6 +418,7 @@ mod tests {
             connection_status: MCPConnectionStatus::Disconnected,
             last_successful_connection: None,
             metrics: new_shared_metrics(),
+            auth_manager: None,
         };
         session.connection_status = MCPConnectionStatus::Connecting;
         assert!(matches!(session.connection_status, MCPConnectionStatus::Connecting));
@@ -444,6 +445,7 @@ mod tests {
             connection_status: MCPConnectionStatus::Connected,
             last_successful_connection: None,
             metrics: new_shared_metrics(),
+            auth_manager: None,
         };
         assert_ne!(session.launched_cfg, serde_json::Value::Null);
         session.launched_cfg = serde_json::Value::Null;

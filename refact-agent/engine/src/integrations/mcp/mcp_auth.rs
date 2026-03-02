@@ -7,7 +7,8 @@ use tokio::sync::Mutex as AMutex;
 use tracing::warn;
 use uuid::Uuid;
 
-use rmcp::transport::auth::OAuthState;
+use oauth2::{StandardTokenResponse, EmptyExtraTokenFields, basic::BasicTokenType};
+use rmcp::transport::auth::{OAuthState, AuthorizationManager};
 
 fn default_auth_type() -> String {
     "none".to_string()
@@ -228,6 +229,50 @@ impl MCPTokenManager {
             other => Err(format!("Unknown auth_type: {}", other)),
         }
     }
+}
+
+fn reconstruct_token_response(
+    tokens: &MCPOAuthTokens,
+) -> Result<StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let expires_in_secs = if tokens.expires_at > now_ms {
+        (tokens.expires_at - now_ms) / 1000
+    } else {
+        0
+    };
+
+    let mut token_json = serde_json::json!({
+        "access_token": tokens.access_token,
+        "token_type": "Bearer",
+    });
+    if !tokens.refresh_token.is_empty() {
+        token_json["refresh_token"] = serde_json::Value::String(tokens.refresh_token.clone());
+    }
+    if expires_in_secs > 0 {
+        token_json["expires_in"] = serde_json::Value::Number(expires_in_secs.into());
+    }
+    serde_json::from_value(token_json)
+        .map_err(|e| format!("Failed to reconstruct token response: {}", e))
+}
+
+pub async fn create_auth_manager_from_tokens(
+    mcp_url: &str,
+    tokens: &MCPOAuthTokens,
+) -> Result<AuthorizationManager, String> {
+    let mut state = OAuthState::new(mcp_url, None)
+        .await
+        .map_err(|e| format!("create OAuth state: {}", e))?;
+    let token_response = reconstruct_token_response(tokens)?;
+    state
+        .set_credentials(&tokens.client_id, token_response)
+        .await
+        .map_err(|e| format!("set OAuth credentials: {}", e))?;
+    state
+        .into_authorization_manager()
+        .ok_or_else(|| "Failed to extract AuthorizationManager after set_credentials".to_string())
 }
 
 struct PendingOAuthSession {
@@ -580,6 +625,95 @@ mod tests {
         let result = manager.apply_auth(&mut headers).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("oauth2_client_id is empty"));
+    }
+
+    #[test]
+    fn test_reconstruct_token_response_access_token() {
+        use oauth2::TokenResponse;
+        let tokens = MCPOAuthTokens {
+            access_token: "access_abc123".to_string(),
+            refresh_token: "refresh_xyz".to_string(),
+            expires_at: (SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64)
+                + 3_600_000,
+            client_id: "client_id_1".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        let response = reconstruct_token_response(&tokens).unwrap();
+        assert_eq!(response.access_token().secret(), "access_abc123");
+    }
+
+    #[test]
+    fn test_reconstruct_token_response_expired_no_expires_in() {
+        use oauth2::TokenResponse;
+        let tokens = MCPOAuthTokens {
+            access_token: "access_expired".to_string(),
+            refresh_token: "refresh_xyz".to_string(),
+            expires_at: 1_000_000,
+            client_id: "client_id_1".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        let response = reconstruct_token_response(&tokens).unwrap();
+        assert_eq!(response.access_token().secret(), "access_expired");
+        assert!(response.expires_in().is_none());
+    }
+
+    #[test]
+    fn test_reconstruct_token_response_no_refresh() {
+        use oauth2::TokenResponse;
+        let tokens = MCPOAuthTokens {
+            access_token: "access_only".to_string(),
+            refresh_token: "".to_string(),
+            expires_at: 0,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+        };
+        let response = reconstruct_token_response(&tokens).unwrap();
+        assert_eq!(response.access_token().secret(), "access_only");
+        assert!(response.refresh_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_no_tokens_in_config_returns_none() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let result = load_tokens_from_config(&path).await;
+        assert!(result.is_none(), "Empty config should return None for tokens");
+    }
+
+    #[tokio::test]
+    async fn test_persisted_tokens_loadable_for_reconstruction() {
+        use std::io::Write;
+        use oauth2::TokenResponse;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let yaml = "auth_type: oauth2_pkce\n";
+        tmp.write_all(yaml.as_bytes()).unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        let tokens = MCPOAuthTokens {
+            access_token: "test_access".to_string(),
+            refresh_token: "test_refresh".to_string(),
+            expires_at: (SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64)
+                + 3_600_000,
+            client_id: "client_123".to_string(),
+            client_secret: None,
+            scopes: vec!["mcp".to_string()],
+        };
+        save_tokens_to_config(&path, &tokens).await.unwrap();
+
+        let loaded = load_tokens_from_config(&path).await.unwrap();
+        assert_eq!(loaded.access_token, "test_access");
+
+        let response = reconstruct_token_response(&loaded).unwrap();
+        assert_eq!(response.access_token().secret(), "test_access");
     }
 
     #[tokio::test]

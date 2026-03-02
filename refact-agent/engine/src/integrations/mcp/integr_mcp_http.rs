@@ -16,7 +16,7 @@ use crate::integrations::integr_abstract::IntegrationCommon;
 use super::session_mcp::{McpClientHandler, McpRunningService};
 use super::integr_mcp_common::{
     CommonMCPSettings, MCPTransportInitializer,
-    build_reqwest_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
+    build_reqwest_client_for_mcp, build_auth_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
 };
 use super::mcp_auth::MCPAuthSettings;
 
@@ -56,18 +56,9 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
         debug_name: String,
         init_timeout: u64,
         _request_timeout: u64,
-        _session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+        session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
         handler: McpClientHandler,
     ) -> Option<McpRunningService> {
-        let client = build_reqwest_client_for_mcp(
-            self.cfg.mcp_url.trim(),
-            &self.cfg.mcp_headers,
-            &self.cfg.auth,
-            "Streamable HTTP",
-            logs.clone(),
-            &debug_name,
-        ).await?;
-
         let config = StreamableHttpClientTransportConfig {
             uri: Arc::<str>::from(self.cfg.mcp_url.trim()),
             retry_config: Arc::new(ExponentialBackoff {
@@ -76,15 +67,42 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
             }),
             ..Default::default()
         };
-        let transport = StreamableHttpClientTransport::with_client(client, config);
 
-        serve_client_with_timeout(
-            serve_client(handler, transport),
-            init_timeout,
-            "Streamable HTTP",
-            logs,
-            &debug_name,
-        ).await
+        if self.cfg.auth.auth_type == "oauth2_pkce" {
+            let auth_client = build_auth_client_for_mcp(
+                self.cfg.mcp_url.trim(),
+                &self.config_path,
+                "Streamable HTTP",
+                logs.clone(),
+                &debug_name,
+                session,
+            ).await?;
+            let transport = StreamableHttpClientTransport::with_client(auth_client, config);
+            serve_client_with_timeout(
+                serve_client(handler, transport),
+                init_timeout,
+                "Streamable HTTP",
+                logs,
+                &debug_name,
+            ).await
+        } else {
+            let client = build_reqwest_client_for_mcp(
+                self.cfg.mcp_url.trim(),
+                &self.cfg.mcp_headers,
+                &self.cfg.auth,
+                "Streamable HTTP",
+                logs.clone(),
+                &debug_name,
+            ).await?;
+            let transport = StreamableHttpClientTransport::with_client(client, config);
+            serve_client_with_timeout(
+                serve_client(handler, transport),
+                init_timeout,
+                "Streamable HTTP",
+                logs,
+                &debug_name,
+            ).await
+        }
     }
 }
 

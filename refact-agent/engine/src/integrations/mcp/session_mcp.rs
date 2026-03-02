@@ -6,6 +6,7 @@ use std::time::Instant;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use tokio::task::{AbortHandle, JoinHandle};
 use rmcp::{RoleClient, service::RunningService};
+use rmcp::transport::auth::AuthorizationManager;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{Tool as McpTool, Resource as McpResource, Prompt as McpPrompt, ServerInfo, ClientInfo, ClientCapabilities};
 use rmcp::service::{Peer, RequestContext};
@@ -28,6 +29,7 @@ pub enum MCPConnectionStatus {
     Reconnecting { attempt: u32 },
     Failed { message: String },
     Disconnected,
+    NeedsAuth,
 }
 
 pub type McpRunningService = RunningService<RoleClient, McpClientHandler>;
@@ -371,6 +373,7 @@ pub struct SessionMCP {
     pub connection_status: MCPConnectionStatus,
     pub last_successful_connection: Option<Instant>,
     pub metrics: SharedMetrics,
+    pub auth_manager: Option<Arc<AMutex<AuthorizationManager>>>,
 }
 
 impl IntegrationSession for SessionMCP {
@@ -509,6 +512,7 @@ mod tests {
             connection_status: MCPConnectionStatus::Disconnected,
             last_successful_connection: None,
             metrics: new_shared_metrics(),
+            auth_manager: None,
         }
     }
 

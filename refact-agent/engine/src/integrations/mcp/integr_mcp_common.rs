@@ -14,8 +14,9 @@ use serde_json::Value;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationCommon;
 use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num};
+use rmcp::transport::auth::AuthClient;
 use super::session_mcp::{SessionMCP, McpClientHandler, McpRunningService, MCPConnectionStatus, add_log_entry, cancel_mcp_client, redact_sensitive_value};
-use super::mcp_auth::{MCPAuthSettings, MCPTokenManager};
+use super::mcp_auth::{MCPAuthSettings, MCPTokenManager, create_auth_manager_from_tokens, load_tokens_from_config};
 use super::mcp_metrics::new_shared_metrics;
 use super::tool_mcp::ToolMCP;
 
@@ -209,6 +210,60 @@ pub(crate) async fn build_reqwest_client_for_mcp(
     }
 }
 
+pub(crate) async fn build_auth_client_for_mcp(
+    url: &str,
+    config_path: &str,
+    transport_name: &str,
+    logs: Arc<AMutex<Vec<String>>>,
+    debug_name: &str,
+    session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+) -> Option<AuthClient<reqwest::Client>> {
+    let tokens = load_tokens_from_config(config_path).await;
+    let tokens = match tokens {
+        Some(t) if !t.access_token.is_empty() => t,
+        _ => {
+            let msg = format!("No OAuth tokens found for {} transport; re-authentication required", transport_name);
+            tracing::warn!("{msg} for {debug_name}");
+            add_log_entry(logs, msg).await;
+            {
+                let mut session_locked = session.lock().await;
+                let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                mcp_session.connection_status = MCPConnectionStatus::NeedsAuth;
+            }
+            return None;
+        }
+    };
+
+    let auth_manager = match create_auth_manager_from_tokens(url, &tokens).await {
+        Ok(m) => m,
+        Err(e) => {
+            let msg = format!("Failed to restore OAuth session for {} transport: {}", transport_name, e);
+            tracing::error!("{msg} for {debug_name}");
+            add_log_entry(logs, msg).await;
+            return None;
+        }
+    };
+
+    let base_client = match reqwest::Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("Failed to build reqwest client: {}", e);
+            tracing::error!("{msg} for {debug_name}");
+            add_log_entry(logs, msg).await;
+            return None;
+        }
+    };
+
+    let auth_client = AuthClient::new(base_client, auth_manager);
+    let auth_manager_arc = auth_client.auth_manager.clone();
+    {
+        let mut session_locked = session.lock().await;
+        let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+        mcp_session.auth_manager = Some(auth_manager_arc);
+    }
+    Some(auth_client)
+}
+
 pub(crate) async fn serve_client_with_timeout<Fut, E>(
     serve_fut: Fut,
     init_timeout: u64,
@@ -331,6 +386,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 connection_status: MCPConnectionStatus::Connecting,
                 last_successful_connection: None,
                 metrics: new_shared_metrics(),
+                auth_manager: None,
             })));
             tracing::info!("MCP START SESSION {:?}", session_key);
             gcx_write
@@ -437,9 +493,11 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 None => {
                     let mut session_locked = session_arc_clone.lock().await;
                     let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
-                    mcp_session.connection_status = MCPConnectionStatus::Failed {
-                        message: "Transport initialization failed".to_string(),
-                    };
+                    if !matches!(mcp_session.connection_status, MCPConnectionStatus::NeedsAuth) {
+                        mcp_session.connection_status = MCPConnectionStatus::Failed {
+                            message: "Transport initialization failed".to_string(),
+                        };
+                    }
                     return;
                 }
             };
@@ -788,6 +846,7 @@ mod tests {
             connection_status: status,
             last_successful_connection: None,
             metrics: super::super::mcp_metrics::new_shared_metrics(),
+            auth_manager: None,
         }) as Box<dyn IntegrationSession>))
     }
 
@@ -925,6 +984,60 @@ mod tests {
         assert!(matches!(&reconnecting, MCPConnectionStatus::Reconnecting { .. }));
         assert!(!matches!(&connected, MCPConnectionStatus::Reconnecting { .. }));
         assert!(!matches!(&failed, MCPConnectionStatus::Reconnecting { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_build_auth_client_no_tokens_sets_needs_auth() {
+        use super::super::session_mcp::SessionMCP;
+        use super::super::mcp_metrics::new_shared_metrics;
+        use crate::integrations::sessions::IntegrationSession;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let config_path = tmp.path().to_str().unwrap().to_string();
+        let logs = Arc::new(AMutex::new(Vec::new()));
+
+        let session_arc: Arc<AMutex<Box<dyn IntegrationSession>>> =
+            Arc::new(AMutex::new(Box::new(SessionMCP {
+                debug_name: "test".to_string(),
+                config_path: config_path.clone(),
+                launched_cfg: serde_json::Value::Null,
+                mcp_client: None,
+                mcp_tools: Vec::new(),
+                mcp_resources: Vec::new(),
+                mcp_prompts: Vec::new(),
+                server_info: None,
+                startup_task_handles: None,
+                health_task_handle: None,
+                logs: logs.clone(),
+                stderr_file_path: None,
+                stderr_cursor: Arc::new(AMutex::new(0)),
+                connection_status: MCPConnectionStatus::Connecting,
+                last_successful_connection: None,
+                metrics: new_shared_metrics(),
+                auth_manager: None,
+            }) as Box<dyn IntegrationSession>));
+
+        let result = super::build_auth_client_for_mcp(
+            "http://localhost:8080",
+            &config_path,
+            "Streamable HTTP",
+            logs,
+            "test_server",
+            session_arc.clone(),
+        ).await;
+
+        assert!(result.is_none(), "Should return None when no tokens");
+
+        let mut session_locked = session_arc.lock().await;
+        let mcp_session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        assert!(
+            matches!(mcp_session.connection_status, MCPConnectionStatus::NeedsAuth),
+            "Status should be NeedsAuth when no tokens, got {:?}",
+            mcp_session.connection_status
+        );
     }
 
     #[test]

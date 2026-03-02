@@ -15,7 +15,7 @@ use crate::integrations::integr_abstract::IntegrationCommon;
 use super::session_mcp::{McpClientHandler, McpRunningService, add_log_entry};
 use super::integr_mcp_common::{
     CommonMCPSettings, MCPTransportInitializer,
-    build_reqwest_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
+    build_reqwest_client_for_mcp, build_auth_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
 };
 use super::mcp_auth::MCPAuthSettings;
 
@@ -55,18 +55,9 @@ impl MCPTransportInitializer for IntegrationMCPSse {
         debug_name: String,
         init_timeout: u64,
         _request_timeout: u64,
-        _session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+        session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
         handler: McpClientHandler,
     ) -> Option<McpRunningService> {
-        let client = build_reqwest_client_for_mcp(
-            self.cfg.mcp_url.trim(),
-            &self.cfg.mcp_headers,
-            &self.cfg.auth,
-            "SSE",
-            logs.clone(),
-            &debug_name,
-        ).await?;
-
         let client_config = SseClientConfig {
             sse_endpoint: Arc::<str>::from(self.cfg.mcp_url.trim()),
             retry_policy: Arc::new(ExponentialBackoff {
@@ -75,23 +66,58 @@ impl MCPTransportInitializer for IntegrationMCPSse {
             }),
             ..Default::default()
         };
-        let transport = match SseClientTransport::start_with_client(client, client_config).await {
-            Ok(t) => t,
-            Err(e) => {
-                let msg = format!("Failed to init SSE transport: {}", e);
-                tracing::error!("{msg} for {debug_name}");
-                add_log_entry(logs, msg).await;
-                return None;
-            }
-        };
 
-        serve_client_with_timeout(
-            serve_client(handler, transport),
-            init_timeout,
-            "SSE",
-            logs,
-            &debug_name,
-        ).await
+        if self.cfg.auth.auth_type == "oauth2_pkce" {
+            let auth_client = build_auth_client_for_mcp(
+                self.cfg.mcp_url.trim(),
+                &self.config_path,
+                "SSE",
+                logs.clone(),
+                &debug_name,
+                session,
+            ).await?;
+            let transport = match SseClientTransport::start_with_client(auth_client, client_config).await {
+                Ok(t) => t,
+                Err(e) => {
+                    let msg = format!("Failed to init SSE transport: {}", e);
+                    tracing::error!("{msg} for {debug_name}");
+                    add_log_entry(logs, msg).await;
+                    return None;
+                }
+            };
+            serve_client_with_timeout(
+                serve_client(handler, transport),
+                init_timeout,
+                "SSE",
+                logs,
+                &debug_name,
+            ).await
+        } else {
+            let client = build_reqwest_client_for_mcp(
+                self.cfg.mcp_url.trim(),
+                &self.cfg.mcp_headers,
+                &self.cfg.auth,
+                "SSE",
+                logs.clone(),
+                &debug_name,
+            ).await?;
+            let transport = match SseClientTransport::start_with_client(client, client_config).await {
+                Ok(t) => t,
+                Err(e) => {
+                    let msg = format!("Failed to init SSE transport: {}", e);
+                    tracing::error!("{msg} for {debug_name}");
+                    add_log_entry(logs, msg).await;
+                    return None;
+                }
+            };
+            serve_client_with_timeout(
+                serve_client(handler, transport),
+                init_timeout,
+                "SSE",
+                logs,
+                &debug_name,
+            ).await
+        }
     }
 }
 
