@@ -18,6 +18,7 @@ import { FormSmartlinks } from "./FormSmartlinks";
 import styles from "./IntegrationForm.module.css";
 import { MCPLogs } from "./MCPLogs";
 import { toPascalCase } from "../../../utils/toPascalCase";
+import { MCPServerView } from "../MCPServerView";
 
 type IntegrationFormProps = {
   integrationPath: string;
@@ -86,6 +87,15 @@ export const IntegrationForm: FC<IntegrationFormProps> = ({
         onDelete={handleDeleteIntegration}
         isApplying={isApplying}
         isDeletingIntegration={isDeletingIntegration}
+      />
+    );
+  }
+
+  if (integration.data.integr_name.includes("mcp")) {
+    return (
+      <MCPServerView
+        configPath={integration.data.integr_config_path}
+        integrName={integration.data.integr_name}
       />
     );
   }

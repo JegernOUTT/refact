@@ -1,0 +1,36 @@
+.toolRow {
+  padding: var(--space-2) var(--space-1);
+  border-bottom: 1px solid var(--gray-4);
+}
+
+.toolRow:last-child {
+  border-bottom: none;
+}
+
+.expandButton {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.expandButton:hover {
+  text-decoration: underline;
+}
+
+.schemaBox {
+  background: var(--gray-2);
+  border-radius: var(--radius-2);
+  padding: var(--space-2);
+  overflow: auto;
+  max-height: 200px;
+}
+
+.schemaPre {
+  margin: 0;
+  font-size: var(--font-size-1);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+}

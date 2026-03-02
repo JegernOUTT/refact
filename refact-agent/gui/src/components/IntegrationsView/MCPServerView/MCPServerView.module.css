@@ -1,0 +1,19 @@
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1) 0;
+  text-align: left;
+}
+
+.sectionHeader:hover {
+  opacity: 0.8;
+}
+
+.sectionContent {
+  padding: var(--space-2) 0;
+}

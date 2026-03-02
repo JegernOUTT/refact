@@ -67,6 +67,7 @@ import { tasksSlice } from "../features/Tasks";
 import { connectionSlice } from "../features/Connection";
 import { browserSlice } from "../features/Browser";
 import { skillsStatusApi } from "../services/refact/skillsStatus";
+import { mcpServerInfoApi } from "../services/refact/mcpServerInfo";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -113,6 +114,7 @@ const rootReducer = combineSlices(
     [tasksApi.reducerPath]: tasksApi.reducer,
     [browserApi.reducerPath]: browserApi.reducer,
     [skillsStatusApi.reducerPath]: skillsStatusApi.reducer,
+    [mcpServerInfoApi.reducerPath]: mcpServerInfoApi.reducer,
     [chatModesApi.reducerPath]: chatModesApi.reducer,
     [customizationApi.reducerPath]: customizationApi.reducer,
     [projectInformationApi.reducerPath]: projectInformationApi.reducer,
@@ -212,6 +214,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           projectInformationApi.middleware,
           extensionsApi.middleware,
           pluginsApi.middleware,
+          mcpServerInfoApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(listenerMiddleware.middleware);
