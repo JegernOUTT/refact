@@ -16,7 +16,7 @@ use crate::integrations::integr_abstract::IntegrationCommon;
 use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num};
 use rmcp::transport::auth::AuthClient;
 use super::session_mcp::{SessionMCP, McpClientHandler, McpRunningService, MCPConnectionStatus, MCPAuthStatus, add_log_entry, cancel_mcp_client, redact_sensitive_value};
-use super::mcp_auth::{MCPAuthSettings, MCPTokenManager, create_auth_manager_from_tokens, load_tokens_from_config, mcp_oauth_refresh_task};
+use super::mcp_auth::{MCPAuthSettings, MCPTokenManager, AuthType, create_auth_manager_from_tokens, load_tokens_from_config, mcp_oauth_refresh_task};
 use super::mcp_metrics::new_shared_metrics;
 use super::tool_mcp::ToolMCP;
 
@@ -174,7 +174,7 @@ pub(crate) async fn build_reqwest_client_for_mcp(
     let mut effective_headers = headers.clone();
     let token_manager = MCPTokenManager::new(auth.clone());
     if let Err(e) = token_manager.apply_auth(&mut effective_headers).await {
-        if auth.auth_type != "none" {
+        if auth.auth_type != AuthType::None {
             let msg = format!("Auth failed: {}", e);
             tracing::error!("{msg} for {debug_name}");
             add_log_entry(logs, msg).await;

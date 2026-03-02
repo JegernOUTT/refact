@@ -303,7 +303,7 @@ pub async fn handle_v1_mcp_server_reconnect(
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_default();
-    let _ = load_integrations(gcx.clone(), &[format!("**/{}", config_filename)]).await;
+    let _ = load_integrations(gcx.clone(), &[format!("**/integrations.d/{}", config_filename)]).await;
 
     Ok(Response::builder()
         .status(StatusCode::OK)

@@ -83,7 +83,7 @@ async fn reload_mcp_integration(gcx: Arc<ARwLock<GlobalContext>>, config_path: &
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_default();
     let _ = crate::integrations::running_integrations::load_integrations(
-        gcx, &[format!("**/{}", config_filename)],
+        gcx, &[format!("**/integrations.d/{}", config_filename)],
     ).await;
 }
 

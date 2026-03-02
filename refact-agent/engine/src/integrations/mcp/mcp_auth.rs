@@ -11,10 +11,6 @@ use oauth2::{StandardTokenResponse, EmptyExtraTokenFields, basic::BasicTokenType
 use rmcp::transport::auth::{OAuthState, AuthorizationManager};
 use crate::integrations::sessions::IntegrationSession;
 
-fn default_auth_type() -> String {
-    "none".to_string()
-}
-
 fn deserialize_scopes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     use serde::de::Deserialize;
     #[derive(Deserialize)]
@@ -39,19 +35,21 @@ fn deserialize_scopes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Stri
     }
 }
 
-fn deserialize_auth_type<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    let s = String::deserialize(d)?;
-    if s.as_str() == "oauth2" {
-        Ok("oauth2_client_credentials".to_string())
-    } else {
-        Ok(s)
-    }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthType {
+    #[default]
+    None,
+    Bearer,
+    #[serde(alias = "oauth2")]
+    Oauth2ClientCredentials,
+    Oauth2Pkce,
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq)]
 pub struct MCPAuthSettings {
-    #[serde(default = "default_auth_type", deserialize_with = "deserialize_auth_type")]
-    pub auth_type: String,
+    #[serde(default)]
+    pub auth_type: AuthType,
     #[serde(default)]
     pub bearer_token: String,
     #[serde(default)]
@@ -159,16 +157,16 @@ impl MCPTokenManager {
     }
 
     pub async fn get_token(&self) -> Result<String, String> {
-        match self.settings.auth_type.as_str() {
-            "none" => Err("No auth configured".to_string()),
-            "bearer" => {
+        match self.settings.auth_type {
+            AuthType::None => Err("No auth configured".to_string()),
+            AuthType::Bearer => {
                 if self.settings.bearer_token.is_empty() {
                     return Err("Bearer token is empty".to_string());
                 }
                 Ok(self.settings.bearer_token.clone())
             }
-            "oauth2_client_credentials" => self.get_oauth2_token().await,
-            "oauth2_pkce" => {
+            AuthType::Oauth2ClientCredentials => self.get_oauth2_token().await,
+            AuthType::Oauth2Pkce => {
                 if let Some(tokens) = &self.settings.oauth_tokens {
                     let now_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -180,7 +178,6 @@ impl MCPTokenManager {
                 }
                 Err("OAuth2 PKCE token expired or not set; re-authentication required".to_string())
             }
-            other => Err(format!("Unknown auth_type: {}", other)),
         }
     }
 
@@ -253,14 +250,13 @@ impl MCPTokenManager {
     }
 
     pub async fn apply_auth(&self, headers: &mut HashMap<String, String>) -> Result<(), String> {
-        match self.settings.auth_type.as_str() {
-            "none" => Ok(()),
-            "bearer" | "oauth2_client_credentials" | "oauth2_pkce" => {
+        match self.settings.auth_type {
+            AuthType::None => Ok(()),
+            AuthType::Bearer | AuthType::Oauth2ClientCredentials | AuthType::Oauth2Pkce => {
                 let token = self.get_token().await?;
                 headers.insert("Authorization".to_string(), format!("Bearer {}", token));
                 Ok(())
             }
-            other => Err(format!("Unknown auth_type: {}", other)),
         }
     }
 }
@@ -327,6 +323,7 @@ fn tokens_from_response(
     client_id: String,
     old_refresh_token: &str,
     response: &StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
+    old_scopes: &[String],
 ) -> MCPOAuthTokens {
     let access_token = response.access_token().secret().to_string();
     let refresh_token = response.refresh_token()
@@ -340,13 +337,17 @@ fn tokens_from_response(
             .as_millis() as i64;
         now_ms + d.as_millis() as i64
     }).unwrap_or(0);
+    let response_scopes: Vec<String> = response.scopes()
+        .map(|scopes| scopes.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    let scopes = if response_scopes.is_empty() { old_scopes.to_vec() } else { response_scopes };
     MCPOAuthTokens {
         access_token,
         refresh_token,
         expires_at,
         client_id,
         client_secret: None,
-        scopes: vec![],
+        scopes,
     }
 }
 
@@ -407,6 +408,7 @@ pub async fn mcp_oauth_refresh_task(
                     tokens.client_id.clone(),
                     &tokens.refresh_token,
                     &token_response,
+                    &tokens.scopes,
                 );
                 if let Err(e) = save_tokens_to_config(&config_path, &new_tokens).await {
                     warn!("OAuth refresh task: failed to persist tokens for {}: {}", config_path, e);
@@ -433,6 +435,7 @@ struct PendingOAuthSession {
     config_path: String,
     created_at: SystemTime,
     state_param: String,
+    scopes: Vec<String>,
 }
 
 static PENDING_SESSIONS: OnceLock<AMutex<HashMap<String, PendingOAuthSession>>> = OnceLock::new();
@@ -486,17 +489,18 @@ impl MCPOAuthSessionManager {
             config_path: config_path.to_string(),
             created_at: SystemTime::now(),
             state_param: state_param.clone(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
         });
         state_index().lock().await.insert(state_param, session_id.clone());
         Ok((session_id, auth_url))
     }
 
     pub async fn exchange_code(session_id: &str, code: &str) -> Result<(MCPOAuthTokens, String), String> {
-        let (oauth_state_arc, config_path, state_param) = {
+        let (oauth_state_arc, config_path, state_param, old_scopes) = {
             let sessions = pending_sessions().lock().await;
             let session = sessions.get(session_id)
                 .ok_or_else(|| format!("No pending OAuth session: {}", session_id))?;
-            (session.oauth_state.clone(), session.config_path.clone(), session.state_param.clone())
+            (session.oauth_state.clone(), session.config_path.clone(), session.state_param.clone(), session.scopes.clone())
         };
 
         let mut oauth_state = oauth_state_arc.lock().await;
@@ -535,13 +539,19 @@ impl MCPOAuthSessionManager {
             state_index().lock().await.remove(&state_param);
         }
 
+        let scopes_from_response: Vec<String> = token_json.get("scope")
+            .and_then(|v| v.as_str())
+            .map(|s| s.split_whitespace().map(|p| p.to_string()).filter(|p| !p.is_empty()).collect())
+            .unwrap_or_default();
+        let scopes = if scopes_from_response.is_empty() { old_scopes } else { scopes_from_response };
+
         Ok((MCPOAuthTokens {
             access_token,
             refresh_token,
             expires_at,
             client_id,
             client_secret: None,
-            scopes: vec![],
+            scopes,
         }, config_path))
     }
 
@@ -591,35 +601,57 @@ mod tests {
     #[test]
     fn test_auth_settings_default() {
         let s: MCPAuthSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.auth_type, "none");
+        assert_eq!(s.auth_type, AuthType::None);
         assert!(s.bearer_token.is_empty());
+    }
+
+    #[test]
+    fn test_auth_type_enum_roundtrip() {
+        for (variant, expected_str) in [
+            (AuthType::None, "\"none\""),
+            (AuthType::Bearer, "\"bearer\""),
+            (AuthType::Oauth2ClientCredentials, "\"oauth2_client_credentials\""),
+            (AuthType::Oauth2Pkce, "\"oauth2_pkce\""),
+        ] {
+            let serialized = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialized, expected_str);
+            let deserialized: AuthType = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    #[test]
+    fn test_auth_type_oauth2_alias() {
+        let json = serde_json::json!({"auth_type": "oauth2"});
+        let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(settings.auth_type, AuthType::Oauth2ClientCredentials);
     }
 
     #[test]
     fn test_auth_type_backward_compat_oauth2_alias() {
         let json = serde_json::json!({"auth_type": "oauth2"});
         let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings.auth_type, "oauth2_client_credentials");
+        assert_eq!(settings.auth_type, AuthType::Oauth2ClientCredentials);
     }
 
     #[test]
     fn test_auth_type_oauth2_client_credentials_unchanged() {
         let json = serde_json::json!({"auth_type": "oauth2_client_credentials"});
         let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings.auth_type, "oauth2_client_credentials");
+        assert_eq!(settings.auth_type, AuthType::Oauth2ClientCredentials);
     }
 
     #[test]
     fn test_auth_type_oauth2_pkce_deserialized() {
         let json = serde_json::json!({"auth_type": "oauth2_pkce"});
         let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings.auth_type, "oauth2_pkce");
+        assert_eq!(settings.auth_type, AuthType::Oauth2Pkce);
     }
 
     #[test]
     fn test_auth_settings_serialization_roundtrip() {
         let settings = MCPAuthSettings {
-            auth_type: "bearer".to_string(),
+            auth_type: AuthType::Bearer,
             bearer_token: "tok123".to_string(),
             oauth2_client_id: "".to_string(),
             oauth2_client_secret: "".to_string(),
@@ -729,6 +761,7 @@ mod tests {
                 config_path: "/tmp/test.yaml".to_string(),
                 created_at: SystemTime::now() - Duration::from_secs(700),
                 state_param: String::new(),
+                scopes: vec![],
             });
         }
 
@@ -740,6 +773,7 @@ mod tests {
                 config_path: "/tmp/test.yaml".to_string(),
                 created_at: SystemTime::now(),
                 state_param: String::new(),
+                scopes: vec![],
             });
         }
 
@@ -757,7 +791,7 @@ mod tests {
     #[tokio::test]
     async fn test_bearer_token_injection() {
         let settings = MCPAuthSettings {
-            auth_type: "bearer".to_string(),
+            auth_type: AuthType::Bearer,
             bearer_token: "my-secret-token".to_string(),
             ..Default::default()
         };
@@ -770,7 +804,7 @@ mod tests {
     #[tokio::test]
     async fn test_none_auth_does_not_inject_headers() {
         let settings = MCPAuthSettings {
-            auth_type: "none".to_string(),
+            auth_type: AuthType::None,
             ..Default::default()
         };
         let manager = MCPTokenManager::new(settings);
@@ -783,7 +817,7 @@ mod tests {
     #[tokio::test]
     async fn test_bearer_empty_token_returns_error() {
         let settings = MCPAuthSettings {
-            auth_type: "bearer".to_string(),
+            auth_type: AuthType::Bearer,
             bearer_token: "".to_string(),
             ..Default::default()
         };
@@ -797,7 +831,7 @@ mod tests {
     #[tokio::test]
     async fn test_oauth2_client_credentials_missing_token_url_returns_error() {
         let settings = MCPAuthSettings {
-            auth_type: "oauth2_client_credentials".to_string(),
+            auth_type: AuthType::Oauth2ClientCredentials,
             oauth2_client_id: "client123".to_string(),
             oauth2_token_url: "".to_string(),
             ..Default::default()
@@ -812,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn test_oauth2_client_credentials_missing_client_id_returns_error() {
         let settings = MCPAuthSettings {
-            auth_type: "oauth2_client_credentials".to_string(),
+            auth_type: AuthType::Oauth2ClientCredentials,
             oauth2_client_id: "".to_string(),
             oauth2_token_url: "https://example.com/token".to_string(),
             ..Default::default()
@@ -990,23 +1024,17 @@ mod tests {
             scopes: vec![],
         };
         let response = reconstruct_token_response(&tokens).unwrap();
-        let new_tokens = tokens_from_response("client".to_string(), "old_refresh", &response);
+        let new_tokens = tokens_from_response("client".to_string(), "old_refresh", &response, &[]);
         assert_eq!(new_tokens.access_token, "old_access");
         assert_eq!(new_tokens.refresh_token, "old_refresh", "Should fall back to old refresh token");
         assert_eq!(response.access_token().secret(), "old_access");
     }
 
-    #[tokio::test]
-    async fn test_unknown_auth_type_returns_error() {
-        let settings = MCPAuthSettings {
-            auth_type: "digest".to_string(),
-            ..Default::default()
-        };
-        let manager = MCPTokenManager::new(settings);
-        let mut headers = HashMap::new();
-        let result = manager.apply_auth(&mut headers).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unknown auth_type"));
+    #[test]
+    fn test_unknown_auth_type_fails_deserialization() {
+        let json = serde_json::json!({"auth_type": "digest"});
+        let result: Result<MCPAuthSettings, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "Unknown auth_type string should fail deserialization");
     }
 
     #[test]
@@ -1052,6 +1080,7 @@ mod tests {
                 config_path: "/tmp/test.yaml".to_string(),
                 created_at: SystemTime::now() - Duration::from_secs(700),
                 state_param: stale_state.clone(),
+                scopes: vec![],
             });
         }
         state_index().lock().await.insert(stale_state.clone(), stale_id.clone());
@@ -1175,6 +1204,7 @@ mod tests {
             config_path: "/tmp/test.yaml".to_string(),
             created_at: SystemTime::now(),
             state_param: state_val.clone(),
+            scopes: vec![],
         });
         state_index().lock().await.insert(state_val.clone(), session_id.clone());
 
@@ -1201,6 +1231,7 @@ mod tests {
             config_path: "/tmp/test.yaml".to_string(),
             created_at: SystemTime::now(),
             state_param: state_val.clone(),
+            scopes: vec![],
         });
         state_index().lock().await.insert(state_val.clone(), session_id.clone());
 

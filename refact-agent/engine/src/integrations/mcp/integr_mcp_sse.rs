@@ -17,7 +17,7 @@ use super::integr_mcp_common::{
     CommonMCPSettings, MCPTransportInitializer,
     build_reqwest_client_for_mcp, build_auth_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
 };
-use super::mcp_auth::MCPAuthSettings;
+use super::mcp_auth::{MCPAuthSettings, AuthType};
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default, Debug)]
 pub struct SettingsMCPSse {
@@ -67,7 +67,7 @@ impl MCPTransportInitializer for IntegrationMCPSse {
             ..Default::default()
         };
 
-        if self.cfg.auth.auth_type == "oauth2_pkce" {
+        if self.cfg.auth.auth_type == AuthType::Oauth2Pkce {
             let auth_client = build_auth_client_for_mcp(
                 self.cfg.mcp_url.trim(),
                 &self.cfg.mcp_headers,
