@@ -19,7 +19,6 @@ export const integrationsApi = createApi({
       const getState = api.getState as () => RootState;
       const state = getState();
       const token = state.config.apiKey;
-      headers.set("credentials", "same-origin");
       if (token) {
         headers.set("Authorization", `Bearer ${token}`);
       }
@@ -256,6 +255,23 @@ export const integrationsApi = createApi({
         });
         if (response.error) return { error: response.error };
         return { data: response.data as { success: boolean } };
+      },
+    }),
+
+    mcpOauthCancel: builder.mutation<{ cancelled: boolean }, { session_id: string }>({
+      invalidatesTags: ["MCP_OAUTH"],
+      async queryFn(arg, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort;
+        const url = `http://127.0.0.1:${port}/v1/mcp/oauth/cancel`;
+        const response = await baseQuery({
+          ...extraOptions,
+          url,
+          method: "POST",
+          body: arg,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as { cancelled: boolean } };
       },
     }),
 
@@ -740,6 +756,6 @@ export type MCPOAuthStartResponse = {
 export type MCPOAuthStatusResponse = {
   auth_type: string;
   authenticated: boolean;
-  expires_at?: number;
-  scopes?: string[];
+  expires_at: number;
+  scopes: string[];
 };

@@ -232,4 +232,107 @@ describe("MCPOAuth", () => {
       expect(screen.getByText(/Failed to start OAuth/i)).toBeInTheDocument();
     });
   });
+
+  test("cancel button shown during waiting state", async () => {
+    mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
+    server.use(
+      http.post("http://127.0.0.1:8001/v1/mcp/oauth/start", () => {
+        return HttpResponse.json({
+          session_id: "test-session-cancel-show",
+          authorize_url: "https://auth.example.com/authorize",
+        });
+      }),
+    );
+
+    const { user } = render(<MCPOAuth configPath={CONFIG_PATH} />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Login with OAuth/i }),
+      ).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Login with OAuth/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Cancel/i }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  test("cancel calls backend with session_id", async () => {
+    let cancelledSessionId: string | null = null;
+
+    mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
+    server.use(
+      http.post("http://127.0.0.1:8001/v1/mcp/oauth/start", () => {
+        return HttpResponse.json({
+          session_id: "test-session-to-cancel",
+          authorize_url: "https://auth.example.com/authorize",
+        });
+      }),
+      http.post("http://127.0.0.1:8001/v1/mcp/oauth/cancel", async ({ request }) => {
+        const body = await request.json() as { session_id: string };
+        cancelledSessionId = body.session_id;
+        return HttpResponse.json({ cancelled: true });
+      }),
+    );
+
+    const { user } = render(<MCPOAuth configPath={CONFIG_PATH} />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Login with OAuth/i }),
+      ).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Login with OAuth/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Waiting for authorization...")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Cancel/i }));
+
+    await waitFor(() => {
+      expect(cancelledSessionId).toBe("test-session-to-cancel");
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Not authenticated")).toBeInTheDocument();
+    });
+  });
+
+  test("polling stops when authenticated", async () => {
+    let callCount = 0;
+
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/mcp/oauth/status", () => {
+        callCount++;
+        return HttpResponse.json({
+          auth_type: "oauth2_pkce",
+          authenticated: true,
+          expires_at: Date.now() + 3600000,
+          scopes: [],
+        });
+      }),
+    );
+
+    render(<MCPOAuth configPath={CONFIG_PATH} />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Authenticated")).toBeInTheDocument();
+    });
+
+    const countAfterAuth = callCount;
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(countAfterAuth);
+  });
 });

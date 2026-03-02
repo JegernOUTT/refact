@@ -11,13 +11,16 @@ type MCPOAuthProps = {
 export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
   const openUrl = useOpenUrl();
 
+  const [pollingInterval, setPollingInterval] = useState(3000);
+
   const { data: status, isLoading } = integrationsApi.useMcpOauthStatusQuery(
     configPath,
-    { pollingInterval: 3000 },
+    { pollingInterval, skip: !configPath },
   );
   const [oauthStart] = integrationsApi.useMcpOauthStartMutation();
   const [oauthExchange] = integrationsApi.useMcpOauthExchangeMutation();
   const [oauthLogout] = integrationsApi.useMcpOauthLogoutMutation();
+  const [oauthCancel] = integrationsApi.useMcpOauthCancelMutation();
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
@@ -33,6 +36,13 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
       setAuthorizeUrl(null);
     }
   }, [waitingForCallback, status?.authenticated]);
+
+  useEffect(() => {
+    const shouldPoll =
+      waitingForCallback ||
+      (!status?.authenticated && status?.auth_type === "oauth2_pkce");
+    setPollingInterval(shouldPoll ? 3000 : status?.authenticated ? 0 : 0);
+  }, [waitingForCallback, status]);
 
   const handleStartOAuth = async () => {
     setError(null);
@@ -79,7 +89,14 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
     }
   };
 
-  const handleCancel = () => {
+  const handleCancel = async () => {
+    if (sessionId) {
+      try {
+        await oauthCancel({ session_id: sessionId }).unwrap();
+      } catch {
+        // ignore error, clean up locally
+      }
+    }
     setSessionId(null);
     setAuthorizeUrl(null);
     setCode("");
@@ -153,7 +170,7 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
               size="2"
               variant="ghost"
               color="gray"
-              onClick={handleCancel}
+              onClick={() => void handleCancel()}
             >
               Cancel
             </Button>
@@ -183,7 +200,7 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
 
   const isExpired =
     !status.authenticated &&
-    status.expires_at !== undefined &&
+    status.expires_at > 0 &&
     status.expires_at < Date.now();
 
   return (
