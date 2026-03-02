@@ -66,7 +66,13 @@ fn validate_config_name(name: &str) -> Result<(), String> {
 }
 
 fn parse_yaml_config(content: &str) -> HashMap<String, Value> {
-    serde_yaml::from_str::<HashMap<String, Value>>(content).unwrap_or_default()
+    match serde_yaml::from_str::<HashMap<String, Value>>(content) {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!("Failed to parse YAML config: {}", e);
+            HashMap::new()
+        }
+    }
 }
 
 fn determine_transport(config_name: &str) -> String {
@@ -107,7 +113,13 @@ async fn collect_mcp_yaml_files(integrations_dir: &std::path::Path) -> Vec<(Stri
         }
         let config_name = fname_str.trim_end_matches(".yaml").to_string();
         let path_str = entry.path().to_string_lossy().to_string();
-        let content = tokio::fs::read_to_string(entry.path()).await.unwrap_or_default();
+        let content = match tokio::fs::read_to_string(entry.path()).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to read config file {}: {}", entry.path().display(), e);
+                continue;
+            }
+        };
         result.push((config_name, path_str, content));
     }
     result
@@ -317,7 +329,13 @@ pub async fn handle_v1_mcp_project_config(
         if !config_path.exists() {
             continue;
         }
-        let content = tokio::fs::read_to_string(&config_path).await.unwrap_or_default();
+        let content = match tokio::fs::read_to_string(&config_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to read config file {}: {}", config_path.display(), e);
+                continue;
+            }
+        };
         let bundle: ExportBundle = match serde_json::from_str(&content) {
             Ok(b) => b,
             Err(e) => {

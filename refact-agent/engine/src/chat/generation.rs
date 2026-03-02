@@ -317,17 +317,23 @@ pub fn start_generation(
             };
 
             if let Some(agent_name) = fork_agent_name {
-                let user_content = {
+                let user_content_opt = {
                     let session = session_arc.lock().await;
                     session.messages.iter().rev()
                         .find(|m| m.role == "user")
                         .map(|m| m.content.content_text_only())
-                        .unwrap_or_default()
                 };
                 {
                     let mut session = session_arc.lock().await;
                     session.active_command.context_fork = None;
                 }
+                let user_content = match user_content_opt {
+                    Some(c) => c,
+                    None => {
+                        warn!("Fork skill '{}' skipped: no user message found in session {}", agent_name, chat_id);
+                        continue;
+                    }
+                };
 
                 let fork_result = run_fork_subchat(
                     gcx.clone(),

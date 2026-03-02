@@ -109,7 +109,13 @@ pub fn plugin_install_dir(config_dir: &Path, name: &str) -> PathBuf {
 pub async fn load_plugins_db(config_dir: &Path) -> PluginsDb {
     let path = plugins_db_path(config_dir);
     match tokio::fs::read_to_string(&path).await {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(db) => db,
+            Err(e) => {
+                tracing::warn!("Failed to parse plugins database at {}: {}", path.display(), e);
+                PluginsDb::default()
+            }
+        },
         Err(_) => PluginsDb::default(),
     }
 }
