@@ -1184,6 +1184,13 @@ async fn handle_tool_decisions(
             }
         }
 
+        {
+            let mut session = session_arc.lock().await;
+            if session.pending_skill_deactivation.is_some() {
+                session.perform_skill_deactivation_cleanup();
+            }
+        }
+
         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
 
         if was_aborted || tool_initiated_stop {

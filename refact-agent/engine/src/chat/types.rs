@@ -167,6 +167,9 @@ pub struct ThreadParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_meta: Option<BrowserMeta>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_skill: Option<String>,
 }
 
 impl Default for ThreadParams {
@@ -196,6 +199,7 @@ impl Default for ThreadParams {
             root_chat_id: None,
             previous_response_id: None,
             browser_meta: None,
+            active_skill: None,
         }
     }
 }

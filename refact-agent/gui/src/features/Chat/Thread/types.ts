@@ -99,6 +99,9 @@ export type ChatThread = {
 
   /** OpenAI Responses API multi-turn state: link next request to the previous response */
   previous_response_id?: string;
+
+  /** Currently active skill name, set by activate_skill tool */
+  active_skill?: string | null;
 };
 
 export type SuggestedChat = {

@@ -202,6 +202,7 @@ pub struct TrajectorySnapshot {
     pub parallel_tool_calls: Option<bool>,
 
     pub previous_response_id: Option<String>,
+    pub active_skill: Option<String>,
 }
 
 impl TrajectorySnapshot {
@@ -232,8 +233,8 @@ impl TrajectorySnapshot {
             frequency_penalty: session.thread.frequency_penalty,
             max_tokens: session.thread.max_tokens,
             parallel_tool_calls: session.thread.parallel_tool_calls,
-
             previous_response_id: session.thread.previous_response_id.clone(),
+            active_skill: session.thread.active_skill.clone(),
         }
     }
 }
@@ -497,6 +498,11 @@ pub async fn load_trajectory_for_chat(
         browser_meta: t
             .get("browser_meta")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+
+        active_skill: t
+            .get("active_skill")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
     };
 
     let auto_approve_editing_tools_present = t.get("auto_approve_editing_tools").and_then(|v| v.as_bool()).is_some();
@@ -658,6 +664,7 @@ pub async fn save_trajectory_as(
         max_tokens: thread.max_tokens,
         parallel_tool_calls: thread.parallel_tool_calls,
         previous_response_id: thread.previous_response_id.clone(),
+        active_skill: thread.active_skill.clone(),
     };
     if let Err(e) = save_trajectory_snapshot(gcx, snapshot).await {
         warn!("Failed to save trajectory: {}", e);
@@ -717,6 +724,9 @@ pub async fn save_trajectory_snapshot(
     }
     if let Some(parallel) = snapshot.parallel_tool_calls {
         trajectory["parallel_tool_calls"] = json!(parallel);
+    }
+    if let Some(ref skill) = snapshot.active_skill {
+        trajectory["active_skill"] = serde_json::Value::String(skill.clone());
     }
 
     if let Some(ref parent_id) = snapshot.parent_id {
@@ -2985,6 +2995,7 @@ mod tests {
                 root_chat_id: Some("root-chat-id".to_string()),
                 previous_response_id: None,
                 browser_meta: None,
+                active_skill: None,
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
             runtime: super::super::types::RuntimeState::default(),
@@ -3027,6 +3038,70 @@ mod tests {
         assert!(snapshot.is_title_generated);
         assert_eq!(snapshot.version, 5);
         assert_eq!(snapshot.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_trajectory_roundtrip_active_skill() {
+        use super::super::types::*;
+        use super::super::types::ActiveCommandContext;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::{broadcast, Notify};
+        use std::collections::VecDeque;
+        use std::time::Instant;
+
+        let (tx, _rx) = broadcast::channel(16);
+        let mut session = ChatSession {
+            chat_id: "skill-test".to_string(),
+            thread: ThreadParams {
+                id: "skill-test".to_string(),
+                active_skill: Some("my-skill".to_string()),
+                ..Default::default()
+            },
+            messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+            runtime: RuntimeState::default(),
+            draft_message: None,
+            draft_usage: None,
+            command_queue: VecDeque::new(),
+            event_seq: 0,
+            event_tx: tx,
+            recent_request_ids: VecDeque::new(),
+            abort_flag: Arc::new(AtomicBool::new(false)),
+            queue_processor_running: Arc::new(AtomicBool::new(false)),
+            queue_notify: Arc::new(Notify::new()),
+            last_activity: Instant::now(),
+            trajectory_dirty: false,
+            trajectory_version: 1,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            closed: false,
+            closed_flag: Arc::new(AtomicBool::new(false)),
+            external_reload_pending: false,
+            last_prompt_messages: Vec::new(),
+            cache_guard_snapshot: None,
+            cache_guard_force_next: false,
+            task_agent_error: None,
+            trajectory_events_tx: None,
+            pending_browser_message: None,
+            active_command: ActiveCommandContext::default(),
+            skills_available_count: 0,
+            skills_included: Vec::new(),
+            pending_skill_deactivation: None,
+        };
+
+        let snapshot = TrajectorySnapshot::from_session(&session);
+        assert_eq!(snapshot.active_skill, Some("my-skill".to_string()));
+
+        session.thread.active_skill = None;
+        let snapshot_none = TrajectorySnapshot::from_session(&session);
+        assert!(snapshot_none.active_skill.is_none());
+    }
+
+    #[test]
+    fn test_trajectory_load_without_active_skill_field() {
+        let json_str = r#"{"id":"chat-1","title":"T","model":"m","mode":"agent","tool_use":"agent","messages":[],"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","include_project_info":true,"checkpoints_enabled":true}"#;
+        let t: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let active_skill = t.get("active_skill").and_then(|v| v.as_str()).map(|s| s.to_string());
+        assert!(active_skill.is_none(), "Old trajectories must load with active_skill = None");
     }
 
     #[tokio::test]

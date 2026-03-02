@@ -108,6 +108,7 @@ impl Tool for ToolActivateSkill {
                 session.active_command.allowed_tools = allowed_tools;
                 session.active_command.model_override = model_override;
                 session.active_command.started_at_message_id = started_at;
+                session.set_active_skill(name.clone());
             }
         }
 
@@ -166,10 +167,10 @@ impl Tool for ToolDeactivateSkill {
             };
             if let Some(session_arc) = session_arc_opt {
                 let mut session = session_arc.lock().await;
-                if session.active_command.name.is_empty() {
-                    return Err("No active skill to deactivate".to_string());
-                }
-                let skill_name = session.active_command.name.clone();
+                let skill_name = match session.thread.active_skill.clone() {
+                    Some(name) => name,
+                    None => return Err("No active skill to deactivate".to_string()),
+                };
                 if let Some(start_msg_id) = session.active_command.started_at_message_id.clone() {
                     session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
                         start_message_id: start_msg_id,
@@ -180,6 +181,7 @@ impl Tool for ToolDeactivateSkill {
                     tracing::warn!("deactivate_skill: no started_at_message_id for skill '{}', skipping compaction", skill_name);
                 }
                 session.active_command = crate::chat::types::ActiveCommandContext::default();
+                session.clear_active_skill();
             }
         }
 
@@ -447,6 +449,68 @@ mod tests {
             Some("msg_1".to_string()),
             "Exact tool_call_id match must return msg_1 for call_1"
         );
+    }
+
+    #[test]
+    fn test_deactivate_uses_active_skill_not_active_command() {
+        use crate::chat::types::{ActiveCommandContext, ThreadParams};
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::{broadcast, Notify};
+        use std::collections::VecDeque;
+        use std::time::Instant;
+
+        let (tx, _rx) = broadcast::channel(16);
+        let mut session = crate::chat::types::ChatSession {
+            chat_id: "test".to_string(),
+            thread: ThreadParams {
+                id: "test".to_string(),
+                active_skill: Some("real-skill".to_string()),
+                ..Default::default()
+            },
+            active_command: ActiveCommandContext {
+                name: "some-slash-command".to_string(),
+                ..Default::default()
+            },
+            messages: Vec::new(),
+            runtime: crate::chat::types::RuntimeState::default(),
+            draft_message: None,
+            draft_usage: None,
+            command_queue: VecDeque::new(),
+            event_seq: 0,
+            event_tx: tx,
+            recent_request_ids: VecDeque::new(),
+            abort_flag: Arc::new(AtomicBool::new(false)),
+            queue_processor_running: Arc::new(AtomicBool::new(false)),
+            queue_notify: Arc::new(Notify::new()),
+            last_activity: Instant::now(),
+            trajectory_dirty: false,
+            trajectory_version: 0,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            closed: false,
+            closed_flag: Arc::new(AtomicBool::new(false)),
+            external_reload_pending: false,
+            last_prompt_messages: Vec::new(),
+            cache_guard_snapshot: None,
+            cache_guard_force_next: false,
+            task_agent_error: None,
+            trajectory_events_tx: None,
+            pending_browser_message: None,
+            skills_available_count: 0,
+            skills_included: Vec::new(),
+            pending_skill_deactivation: None,
+        };
+
+        let skill_name = match session.thread.active_skill.clone() {
+            Some(name) => name,
+            None => panic!("Expected active_skill to be set"),
+        };
+        assert_eq!(skill_name, "real-skill", "Must use active_skill, not active_command.name");
+        assert_ne!(skill_name, session.active_command.name);
+
+        session.active_command = ActiveCommandContext::default();
+        session.clear_active_skill();
+        assert!(session.thread.active_skill.is_none());
     }
 
     #[tokio::test]

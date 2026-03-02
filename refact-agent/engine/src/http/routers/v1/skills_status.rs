@@ -31,11 +31,7 @@ pub async fn handle_v1_skills_status(
         return Err(ScratchError::new(StatusCode::NOT_FOUND, format!("chat_id {} not found", chat_id)));
     };
     let session = session_arc.lock().await;
-    let active_skill = if session.active_command.name.is_empty() {
-        None
-    } else {
-        Some(session.active_command.name.clone())
-    };
+    let active_skill = session.thread.active_skill.clone();
     let response = SkillsStatusResponse {
         skills_available: session.skills_available_count,
         skills_included: session.skills_included.clone(),
@@ -118,19 +114,15 @@ mod tests {
     }
 
     #[test]
-    fn test_skills_status_active_skill_from_session_active_command() {
-        use crate::chat::types::ActiveCommandContext;
+    fn test_skills_status_active_skill_from_session_thread() {
         let mut session = ChatSession::new("test-chat".to_string());
-        session.active_command = ActiveCommandContext {
-            name: "review-skill".to_string(),
-            ..Default::default()
-        };
-        let active_skill = if session.active_command.name.is_empty() {
-            None
-        } else {
-            Some(session.active_command.name.clone())
-        };
+        session.thread.active_skill = Some("review-skill".to_string());
+        let active_skill = session.thread.active_skill.clone();
         assert_eq!(active_skill, Some("review-skill".to_string()));
+
+        session.thread.active_skill = None;
+        let active_skill_none = session.thread.active_skill.clone();
+        assert!(active_skill_none.is_none());
     }
 
     #[test]

@@ -301,6 +301,7 @@ pub async fn handle_handoff_apply(
         max_tokens: thread.max_tokens,
         parallel_tool_calls: thread.parallel_tool_calls,
         previous_response_id: None,
+        active_skill: None,
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "handoff")
@@ -490,6 +491,7 @@ pub async fn handle_mode_transition_apply(
         max_tokens: thread.max_tokens,
         parallel_tool_calls: thread.parallel_tool_calls,
         previous_response_id: None,
+        active_skill: None,
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "mode_transition")

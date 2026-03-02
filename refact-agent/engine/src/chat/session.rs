@@ -109,6 +109,16 @@ impl ChatSession {
         self.trajectory_dirty = true;
     }
 
+    pub fn set_active_skill(&mut self, name: String) {
+        self.thread.active_skill = Some(name);
+        self.increment_version();
+    }
+
+    pub fn clear_active_skill(&mut self) {
+        self.thread.active_skill = None;
+        self.increment_version();
+    }
+
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
     }
@@ -1778,5 +1788,16 @@ mod tests {
         );
         assert!(session.active_command.context_fork.is_none());
         assert!(session.active_command.model_override.is_none());
+    }
+
+    #[test]
+    fn test_set_clear_active_skill() {
+        let mut session = make_session();
+        assert!(session.thread.active_skill.is_none());
+        session.set_active_skill("test-skill".to_string());
+        assert_eq!(session.thread.active_skill, Some("test-skill".to_string()));
+        assert!(session.trajectory_dirty);
+        session.clear_active_skill();
+        assert!(session.thread.active_skill.is_none());
     }
 }
