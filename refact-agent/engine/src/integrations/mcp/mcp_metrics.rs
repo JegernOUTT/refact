@@ -167,7 +167,7 @@ impl MCPMetricsCollector {
             let elapsed_secs = now.duration_since(prev_time).as_secs_f64();
             if elapsed_secs > 0.0 {
                 let tick_delta = total_ticks.saturating_sub(prev_ticks) as f64;
-                let ticks_per_sec = 100.0_f64;
+                let ticks_per_sec = get_clock_ticks_per_sec();
                 let cpu_percent = (tick_delta / ticks_per_sec / elapsed_secs * 100.0) as f32;
                 self.last_cpu_stat = Some((total_ticks, now));
                 return Some(cpu_percent.min(100.0 * num_cpus()));
@@ -196,11 +196,15 @@ fn read_proc_rss(pid: u32) -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 unsafe fn libc_page_size() -> u64 {
-    extern "C" {
-        fn sysconf(name: i32) -> i64;
-    }
-    let sz = sysconf(30);
+    let sz = libc::sysconf(libc::_SC_PAGESIZE);
     if sz > 0 { sz as u64 } else { 4096 }
+}
+
+#[cfg(target_os = "linux")]
+fn get_clock_ticks_per_sec() -> f64 {
+    // Safety: sysconf is always safe to call with _SC_CLK_TCK
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks <= 0 { 100.0 } else { ticks as f64 }
 }
 
 #[cfg(target_os = "linux")]

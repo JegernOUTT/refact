@@ -36,18 +36,22 @@ fn dedup_path_entries(entries: Vec<String>) -> Vec<String> {
     entries.into_iter().filter(|e| seen.insert(e.clone())).collect()
 }
 
+/// Common directories where CLI tools are installed.
+/// We intentionally keep this list short and universal.
+/// Tool-specific version managers (nvm, volta, fnm, etc.) should be handled
+/// by the user's shell profile or by setting env.PATH in the MCP YAML config.
 fn extra_dirs() -> Vec<PathBuf> {
-    let home = home::home_dir();
-    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut dirs = Vec::new();
 
-    if let Some(ref h) = home {
-        dirs.push(h.join(".local").join("bin"));
-        dirs.push(h.join(".cargo").join("bin"));
-        dirs.push(h.join(".volta").join("bin"));
-        dirs.push(h.join(".bun").join("bin"));
-        dirs.push(h.join(".deno").join("bin"));
-        dirs.push(h.join("go").join("bin"));
-        dirs.push(h.join(".local").join("share").join("fnm").join("aliases").join("default").join("bin"));
+    if let Some(h) = home::home_dir() {
+        dirs.push(h.join(".local/bin"));
+        dirs.push(h.join(".cargo/bin"));
+        dirs.push(h.join(".bun/bin"));
+        dirs.push(h.join(".deno/bin"));
+        dirs.push(h.join("go/bin"));
+        dirs.push(h.join(".volta/bin"));
+        dirs.push(h.join(".nvm/current/bin"));
+        dirs.push(h.join(".local/share/fnm/aliases/default/bin"));
 
         #[cfg(windows)]
         {
@@ -55,33 +59,7 @@ fn extra_dirs() -> Vec<PathBuf> {
                 dirs.push(PathBuf::from(appdata).join("npm"));
             }
             if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-                let python_base = PathBuf::from(localappdata).join("Programs").join("Python");
-                if let Ok(entries) = std::fs::read_dir(&python_base) {
-                    for entry in entries.flatten() {
-                        dirs.push(entry.path());
-                    }
-                }
-            }
-        }
-
-        #[cfg(unix)]
-        {
-            if let Some(nvm_dir) = std::env::var("NVM_DIR").ok().map(PathBuf::from).or_else(|| Some(h.join(".nvm"))) {
-                let versions_dir = nvm_dir.join("versions").join("node");
-                if let Ok(entries) = std::fs::read_dir(&versions_dir) {
-                    let mut version_dirs: Vec<PathBuf> = entries
-                        .flatten()
-                        .map(|e| e.path().join("bin"))
-                        .collect();
-                    version_dirs.sort();
-                    if let Some(latest) = version_dirs.last() {
-                        dirs.push(latest.clone());
-                    }
-                }
-                let current_bin = nvm_dir.join("current").join("bin");
-                if current_bin.exists() {
-                    dirs.push(current_bin);
-                }
+                dirs.push(PathBuf::from(localappdata).join("Programs").join("Python"));
             }
         }
     }
@@ -90,7 +68,6 @@ fn extra_dirs() -> Vec<PathBuf> {
     {
         dirs.push(PathBuf::from("/usr/local/bin"));
         dirs.push(PathBuf::from("/opt/homebrew/bin"));
-        dirs.push(PathBuf::from("/opt/homebrew/sbin"));
     }
 
     dirs
