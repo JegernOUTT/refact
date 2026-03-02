@@ -572,7 +572,19 @@ pub async fn process_tool_calls_once(
             });
 
         if !remaining.is_empty() {
-            let auto_approved_ids: Vec<String> = auto_approved.iter().map(|c| c.tool_call_id.clone()).collect();
+            let mut auto_approved_ids: Vec<String> = auto_approved.iter().map(|c| c.tool_call_id.clone()).collect();
+            let paused_ids: std::collections::HashSet<&str> = remaining.iter()
+                .map(|r| r.tool_call_id.as_str())
+                .collect();
+            for tc in &tool_calls {
+                if !denied_ids.contains(&tc.id)
+                    && !paused_ids.contains(tc.id.as_str())
+                    && !auto_approved_ids.contains(&tc.id)
+                {
+                    auto_approved_ids.push(tc.id.clone());
+                }
+            }
+
             let mut session = session_arc.lock().await;
             session.set_paused_with_reasons_and_auto_approved(remaining, auto_approved_ids, Some(tool_message_index));
             return ToolStepOutcome::Paused;
