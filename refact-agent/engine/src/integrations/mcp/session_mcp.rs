@@ -60,6 +60,29 @@ pub fn redact_sensitive_value(key: &str, value: &str) -> String {
     }
 }
 
+pub fn redact_sensitive_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let redacted: serde_json::Map<String, serde_json::Value> = map.iter()
+                .map(|(k, v)| {
+                    let new_v = match v {
+                        serde_json::Value::String(s) => {
+                            serde_json::Value::String(redact_sensitive_value(k, s))
+                        }
+                        other => redact_sensitive_json(other),
+                    };
+                    (k.clone(), new_v)
+                })
+                .collect();
+            serde_json::Value::Object(redacted)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(redact_sensitive_json).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 impl ClientHandler for McpClientHandler {
     fn get_peer(&self) -> Option<Peer<RoleClient>> {
         self.peer_arc.try_lock().ok().and_then(|g| g.clone())
@@ -527,6 +550,48 @@ mod tests {
     fn test_mcp_running_service_type_alias_exists() {
         fn _accepts_type_alias(_: Option<McpRunningService>) {}
         _accepts_type_alias(None);
+    }
+
+    #[test]
+    fn test_redact_sensitive_json_nested() {
+        let input = serde_json::json!({
+            "name": "test",
+            "credentials": {
+                "token": "my_secret_token_value",
+                "username": "admin"
+            }
+        });
+        let result = redact_sensitive_json(&input);
+        assert_eq!(result["credentials"]["token"], "my_s...alue");
+        assert_eq!(result["credentials"]["username"], "admin");
+        assert_eq!(result["name"], "test");
+    }
+
+    #[test]
+    fn test_redact_sensitive_json_array() {
+        let input = serde_json::json!([
+            {"api_key": "secret123456", "name": "service1"},
+            {"api_key": "another_key_val", "name": "service2"}
+        ]);
+        let result = redact_sensitive_json(&input);
+        assert_eq!(result[0]["api_key"], "secr...3456");
+        assert_eq!(result[0]["name"], "service1");
+        assert_eq!(result[1]["api_key"], "anot..._val");
+    }
+
+    #[test]
+    fn test_redact_sensitive_json_flat() {
+        let input = serde_json::json!({"password": "abc123def", "host": "localhost"});
+        let result = redact_sensitive_json(&input);
+        assert_eq!(result["password"], "abc1...3def");
+        assert_eq!(result["host"], "localhost");
+    }
+
+    #[test]
+    fn test_redact_sensitive_json_primitives() {
+        assert_eq!(redact_sensitive_json(&serde_json::json!("hello")), "hello");
+        assert_eq!(redact_sensitive_json(&serde_json::json!(42)), 42);
+        assert_eq!(redact_sensitive_json(&serde_json::json!(null)), serde_json::Value::Null);
     }
 }
 

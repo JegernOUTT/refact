@@ -12,7 +12,7 @@ use crate::scratchpads::multimodality::MultimodalElement;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation};
-use super::session_mcp::{McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup, redact_sensitive_value};
+use super::session_mcp::{McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup, redact_sensitive_json};
 
 pub struct ToolMCP {
     pub common: IntegrationCommon,
@@ -79,14 +79,7 @@ impl Tool for ToolMCP {
         }
 
         let json_args = serde_json::json!(args);
-        let redacted_args: serde_json::Map<String, serde_json::Value> = args.iter()
-            .map(|(k, v)| {
-                let redacted = v.as_str()
-                    .map(|s| serde_json::Value::String(redact_sensitive_value(k, s)))
-                    .unwrap_or_else(|| v.clone());
-                (k.clone(), redacted)
-            })
-            .collect();
+        let redacted_args = redact_sensitive_json(&json_args);
         tracing::info!(
             "\n\nMCP CALL tool '{}' with arguments: {:?}",
             self.mcp_tool.name,
