@@ -321,9 +321,9 @@ pub async fn system_prompt_add_extra_instructions(
     }
 
     if system_prompt.contains("%SKILLS_INSTRUCTIONS%") {
-        if include_project_info {
-            let has_activate = tool_names.contains("activate_skill");
-            let has_deactivate = tool_names.contains("deactivate_skill");
+        let has_activate = tool_names.contains("activate_skill");
+        let has_deactivate = tool_names.contains("deactivate_skill");
+        if has_activate || has_deactivate {
             let skills_text = build_skills_prompt_text(gcx.clone(), has_activate, has_deactivate).await;
             system_prompt = system_prompt.replace("%SKILLS_INSTRUCTIONS%", &skills_text);
         } else {

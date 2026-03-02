@@ -20,8 +20,8 @@ pub struct SkillsTrackingInfo {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillsAutoTrigger {
-    #[default]
     InjectFull,
+    #[default]
     IndexOnly,
     Off,
 }
@@ -75,7 +75,7 @@ fn build_skills_prompt_markdown(
     has_deactivate_skill: bool,
 ) -> String {
     if displayable.is_empty() {
-        return String::new();
+        return "## Skills\n\nYou have access to a skills system. No skills are currently installed.\nUsers can create skills in the Extensions page.".to_string();
     }
     let available_skills_intro = if has_activate_skill {
         "The following skills are available. You can activate any skill using the `activate_skill(name)` tool when it's relevant to the user's request. Users can also invoke skills directly with `/skill-name`.".to_string()
@@ -101,7 +101,7 @@ fn build_skills_prompt_markdown(
     }
     lines.push("- Once activated, the skill's instructions guide your approach and its allowed-tools are auto-approved".to_string());
     if has_deactivate_skill {
-        lines.push("- Use `deactivate_skill()` to clear active skill state when done".to_string());
+        lines.push("- Use `deactivate_skill(report=\"summary of what was done and what changed\")` to clear active skill state when done — the report replaces skill context files with a clean summary".to_string());
     }
     lines.push("- Skills with `disable-model-invocation` are user-only (not listed above)".to_string());
     lines.join("\n")
@@ -114,7 +114,7 @@ pub async fn build_skills_prompt_text(
 ) -> String {
     let config = load_skills_config(gcx.clone()).await;
     if matches!(config.auto_trigger, SkillsAutoTrigger::Off) {
-        return String::new();
+        return "## Skills\n\nSkills system is disabled by configuration.".to_string();
     }
     let ext_dirs = get_ext_dirs(gcx).await;
     let indices = load_skill_indices(&ext_dirs).await;
@@ -284,13 +284,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skills_index_empty_when_no_skills() {
+    async fn test_skills_index_not_empty_when_no_skills() {
         let text = build_skills_prompt_markdown(&[], true, false);
-        assert!(text.is_empty());
+        assert!(!text.is_empty());
+        assert!(text.contains("## Skills"));
+        assert!(text.contains("No skills are currently installed"));
     }
 
     #[tokio::test]
-    async fn test_skills_index_empty_when_all_non_invocable() {
+    async fn test_skills_index_not_empty_when_all_non_invocable() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
             tmp.path(),
@@ -304,7 +306,8 @@ mod tests {
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
         let displayable: Vec<_> = indices.iter().filter(|s| s.user_invocable && !s.disable_model_invocation).collect();
         let text = build_skills_prompt_markdown(&displayable, true, false);
-        assert!(text.is_empty());
+        assert!(!text.is_empty());
+        assert!(!text.contains("hidden"), "Non-invocable skill must not appear in output");
     }
 
     #[tokio::test]
@@ -582,7 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skills_context_mode_inject_full_is_default() {
+    async fn test_skills_context_mode_index_only_is_default() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
             tmp.path(),
@@ -604,11 +607,11 @@ mod tests {
             &ext_dirs,
             "security review vulnerabilities auditing",
             None,
-            SkillsAutoTrigger::InjectFull,
+            SkillsAutoTrigger::IndexOnly,
         )
         .await;
 
-        assert_eq!(msgs_default.len(), msgs_explicit.len(), "Default mode must equal InjectFull");
+        assert_eq!(msgs_default.len(), msgs_explicit.len(), "Default mode must equal IndexOnly");
     }
 
     #[tokio::test]
@@ -727,9 +730,9 @@ mod tests {
     }
 
     #[test]
-    fn test_skills_config_default_is_inject_full() {
+    fn test_skills_config_default_is_index_only() {
         let config = SkillsConfig::default();
-        assert_eq!(config.auto_trigger, SkillsAutoTrigger::InjectFull);
+        assert_eq!(config.auto_trigger, SkillsAutoTrigger::IndexOnly);
     }
 
     #[test]
@@ -748,9 +751,9 @@ mod tests {
     }
 
     #[test]
-    fn test_skills_config_empty_yaml_defaults_to_inject_full() {
+    fn test_skills_config_empty_yaml_defaults_to_index_only() {
         let config: SkillsConfig = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(config.auto_trigger, SkillsAutoTrigger::InjectFull);
+        assert_eq!(config.auto_trigger, SkillsAutoTrigger::IndexOnly);
     }
 
     fn make_skill_index(name: &str, description: &str) -> crate::ext::skills::SkillIndex {
@@ -789,8 +792,9 @@ mod tests {
         let displayable = vec![&skill];
         let text_with = build_skills_prompt_markdown(&displayable, true, true);
         let text_without = build_skills_prompt_markdown(&displayable, true, false);
-        assert!(text_with.contains("deactivate_skill()"), "deactivate_skill must appear when has_deactivate_skill=true");
-        assert!(!text_without.contains("deactivate_skill()"), "deactivate_skill must not appear when has_deactivate_skill=false");
+        assert!(text_with.contains("deactivate_skill"), "deactivate_skill must appear when has_deactivate_skill=true");
+        assert!(text_with.contains("report="), "report parameter must appear when has_deactivate_skill=true");
+        assert!(!text_without.contains("deactivate_skill"), "deactivate_skill must not appear when has_deactivate_skill=false");
     }
 
     #[tokio::test]
@@ -877,5 +881,21 @@ mod tests {
         assert!(triggered.contains(&"normal-skill".to_string()), "normal-skill must be auto-triggered");
         assert!(!triggered.contains(&"disabled-skill".to_string()), "disabled-skill must not be auto-triggered");
         assert!(!triggered.contains(&"noninvocable-skill".to_string()), "noninvocable-skill must not be auto-triggered");
+    }
+
+    #[test]
+    fn test_skills_prompt_text_not_empty_when_no_skills() {
+        let text = build_skills_prompt_markdown(&[], true, true);
+        assert!(!text.is_empty());
+        assert!(text.contains("## Skills"));
+        assert!(text.contains("No skills are currently installed"));
+    }
+
+    #[test]
+    fn test_skills_prompt_text_not_empty_when_off() {
+        let text = "## Skills\n\nSkills system is disabled by configuration.";
+        assert!(!text.is_empty());
+        assert!(text.contains("## Skills"));
+        assert!(text.contains("disabled by configuration"));
     }
 }
