@@ -108,8 +108,12 @@ fn deduplicate_and_merge_context_files(
     let mut file_groups: BTreeMap<String, Vec<ContextFile>> = BTreeMap::new();
 
     for cf in context_files {
-        let canonical = canonical_path(&cf.file_name).to_string_lossy().to_string();
-        file_groups.entry(canonical).or_default().push(cf);
+        let key = if cf.file_name.contains("://") {
+            cf.file_name.clone()
+        } else {
+            canonical_path(&cf.file_name).to_string_lossy().to_string()
+        };
+        file_groups.entry(key).or_default().push(cf);
     }
 
     let mut result = Vec::new();
@@ -210,7 +214,12 @@ fn has_truncation_markers(content: &str) -> bool {
 }
 
 fn find_coverage_in_history(cf: &ContextFile, messages: &[ChatMessage]) -> Option<(usize, String)> {
-    let cf_canonical = canonical_path(&cf.file_name);
+    let is_virtual = cf.file_name.contains("://");
+    let cf_canonical = if is_virtual {
+        PathBuf::from(&cf.file_name)
+    } else {
+        canonical_path(&cf.file_name)
+    };
     let cf_start = if cf.line1 == 0 { 1 } else { cf.line1 };
     let cf_end = if cf.line2 == 0 { usize::MAX } else { cf.line2 };
 
@@ -218,7 +227,7 @@ fn find_coverage_in_history(cf: &ContextFile, messages: &[ChatMessage]) -> Optio
         if msg.role != "context_file" {
             continue;
         }
-        
+
         let files_to_check: Vec<ContextFile> = match &msg.content {
             ChatContent::ContextFiles(files) => files.clone(),
             ChatContent::SimpleText(text) => {
@@ -232,7 +241,12 @@ fn find_coverage_in_history(cf: &ContextFile, messages: &[ChatMessage]) -> Optio
         };
 
         for existing in files_to_check {
-            if canonical_path(&existing.file_name) != cf_canonical {
+            let existing_canonical = if existing.file_name.contains("://") {
+                PathBuf::from(&existing.file_name)
+            } else {
+                canonical_path(&existing.file_name)
+            };
+            if existing_canonical != cf_canonical {
                 continue;
             }
             let same_rev = matches!(
@@ -388,6 +402,49 @@ async fn fill_skip_pp_files_with_budget(
     }
 
     for mut cf in files {
+        // If content is already provided (e.g., skill:// virtual URIs), use it directly
+        if !cf.file_content.trim().is_empty() {
+            cf.file_rev = Some(official_text_hashing_function(&cf.file_content));
+
+            if let Some(dup_info) = find_duplicate_in_history(&cf, existing_messages) {
+                let range = if cf.line1 > 0 && cf.line2 > 0 {
+                    format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
+                } else {
+                    cf.file_name.clone()
+                };
+                notes.push(format!(
+                    "📎 Skipped `{}`: already retrieved in message #{} via `{}`.",
+                    range,
+                    dup_info.0 + 1,
+                    dup_info.1
+                ));
+                continue;
+            }
+
+            let tokens = count_text_tokens_with_fallback(tokenizer.clone(), &cf.file_content);
+            if tokens > per_file_budget {
+                // Simple line-based truncation for prefilled content (markdown/instructions)
+                let mut truncated = String::new();
+                for line in cf.file_content.lines() {
+                    let candidate = if truncated.is_empty() {
+                        line.to_string()
+                    } else {
+                        format!("{}\n{}", truncated, line)
+                    };
+                    if count_text_tokens_with_fallback(tokenizer.clone(), &candidate) > per_file_budget {
+                        if !truncated.is_empty() {
+                            truncated.push_str("\n\n... (content truncated to fit token budget)");
+                        }
+                        break;
+                    }
+                    truncated = candidate;
+                }
+                cf.file_content = truncated;
+            }
+            result.push(cf);
+            continue;
+        }
+
         match get_file_text_from_memory_or_disk(gcx.clone(), &PathBuf::from(&cf.file_name)).await {
             Ok(text) => {
                 cf.file_rev = Some(official_text_hashing_function(&text));
@@ -453,7 +510,12 @@ fn find_duplicate_in_history(
     cf: &ContextFile,
     messages: &[ChatMessage],
 ) -> Option<(usize, String)> {
-    let cf_canonical = canonical_path(&cf.file_name);
+    let is_virtual = cf.file_name.contains("://");
+    let cf_canonical = if is_virtual {
+        PathBuf::from(&cf.file_name)
+    } else {
+        canonical_path(&cf.file_name)
+    };
     let cf_start = if cf.line1 == 0 { 1 } else { cf.line1 };
     let cf_end = if cf.line2 == 0 { usize::MAX } else { cf.line2 };
 
@@ -463,7 +525,12 @@ fn find_duplicate_in_history(
         }
         if let ChatContent::ContextFiles(files) = &msg.content {
             for existing in files {
-                if canonical_path(&existing.file_name) != cf_canonical {
+                let existing_canonical = if existing.file_name.contains("://") {
+                    PathBuf::from(&existing.file_name)
+                } else {
+                    canonical_path(&existing.file_name)
+                };
+                if existing_canonical != cf_canonical {
                     continue;
                 }
                 let same_rev = matches!(
