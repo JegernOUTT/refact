@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-02-28",
+  "updated_at": "2026-03-02",
   "servers": [
     {
       "id": "github",
@@ -230,6 +230,290 @@
         "env": {
           "SENTRY_TOKEN": "",
           "SENTRY_ORG_SLUG": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "playwright",
+      "name": "Playwright",
+      "description": "Browser automation with Playwright: navigate, interact, screenshot web pages",
+      "publisher": "microsoft",
+      "tags": ["browser", "automation", "testing"],
+      "homepage": "https://github.com/microsoft/playwright-mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @playwright/mcp",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "description": "Manage issues, projects, and workflows in Linear",
+      "publisher": "linear",
+      "tags": ["project-management", "issues", "linear"],
+      "homepage": "https://github.com/linear/linear/tree/main/packages/mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @linear/mcp-server",
+        "env": {
+          "LINEAR_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "jira",
+      "name": "Jira",
+      "description": "Search issues, manage projects and epics in Atlassian Jira",
+      "publisher": "atlassian",
+      "tags": ["project-management", "issues", "jira"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @atlassian/mcp-server-jira",
+        "env": {
+          "JIRA_URL": "https://your-org.atlassian.net",
+          "JIRA_EMAIL": "",
+          "JIRA_API_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "confluence",
+      "name": "Confluence",
+      "description": "Read and write Confluence pages, spaces, and comments",
+      "publisher": "atlassian",
+      "tags": ["documentation", "wiki", "confluence"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @atlassian/mcp-server-confluence",
+        "env": {
+          "CONFLUENCE_URL": "https://your-org.atlassian.net/wiki",
+          "CONFLUENCE_EMAIL": "",
+          "CONFLUENCE_API_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "sqlite",
+      "name": "SQLite",
+      "description": "Query and manage local SQLite databases",
+      "publisher": "anthropic",
+      "tags": ["database", "sql", "sqlite"],
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx mcp-server-sqlite --db-path /path/to/database.db",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "description": "Read and write keys, lists, hashes, sets in Redis",
+      "publisher": "community",
+      "tags": ["database", "cache", "redis"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/redis",
+        "env": {
+          "REDIS_URL": "redis://localhost:6379"
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "mongodb",
+      "name": "MongoDB",
+      "description": "Query and manage MongoDB databases and collections",
+      "publisher": "community",
+      "tags": ["database", "nosql", "mongodb"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/mongodb",
+        "env": {
+          "MONGODB_URI": "mongodb://localhost:27017"
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "docker",
+      "name": "Docker",
+      "description": "Manage Docker containers, images, volumes, and networks",
+      "publisher": "community",
+      "tags": ["docker", "containers", "devops"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/docker",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "kubernetes",
+      "name": "Kubernetes",
+      "description": "Manage Kubernetes clusters, pods, deployments, and services",
+      "publisher": "community",
+      "tags": ["kubernetes", "k8s", "devops"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/kubernetes",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "aws-s3",
+      "name": "AWS S3",
+      "description": "Read, write, and manage files in AWS S3 buckets",
+      "publisher": "community",
+      "tags": ["aws", "storage", "s3"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/aws-s3",
+        "env": {
+          "AWS_ACCESS_KEY_ID": "",
+          "AWS_SECRET_ACCESS_KEY": "",
+          "AWS_REGION": "us-east-1"
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "todoist",
+      "name": "Todoist",
+      "description": "Manage tasks, projects, and labels in Todoist",
+      "publisher": "community",
+      "tags": ["productivity", "tasks", "todo"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/todoist",
+        "env": {
+          "TODOIST_API_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "twilio",
+      "name": "Twilio",
+      "description": "Send SMS, make calls, and manage communication with Twilio",
+      "publisher": "twilio",
+      "tags": ["communication", "sms", "twilio"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @twilio/mcp-server",
+        "env": {
+          "TWILIO_ACCOUNT_SID": "",
+          "TWILIO_AUTH_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "sendgrid",
+      "name": "SendGrid",
+      "description": "Send transactional emails and manage email templates via SendGrid",
+      "publisher": "community",
+      "tags": ["email", "communication", "sendgrid"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/sendgrid",
+        "env": {
+          "SENDGRID_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "obsidian",
+      "name": "Obsidian",
+      "description": "Read and write notes in your Obsidian vault",
+      "publisher": "community",
+      "tags": ["notes", "knowledge", "obsidian"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/obsidian",
+        "env": {
+          "OBSIDIAN_VAULT_PATH": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "terraform",
+      "name": "Terraform",
+      "description": "Manage infrastructure with Terraform: plan, apply, inspect state",
+      "publisher": "community",
+      "tags": ["devops", "infrastructure", "terraform"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/terraform",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "google-calendar",
+      "name": "Google Calendar",
+      "description": "Read and create events in Google Calendar",
+      "publisher": "community",
+      "tags": ["productivity", "calendar", "google"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/google-calendar",
+        "env": {
+          "GOOGLE_CALENDAR_CREDENTIALS": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "excel",
+      "name": "Excel / Spreadsheets",
+      "description": "Read and write Excel files and spreadsheet data",
+      "publisher": "community",
+      "tags": ["spreadsheet", "excel", "data"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/excel",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "openapi",
+      "name": "OpenAPI",
+      "description": "Interact with any REST API described by an OpenAPI spec",
+      "publisher": "community",
+      "tags": ["api", "rest", "openapi"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/openapi",
+        "env": {
+          "OPENAPI_SPEC_URL": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "exa",
+      "name": "Exa Search",
+      "description": "Search the web with Exa's neural search engine",
+      "publisher": "exa",
+      "tags": ["search", "web", "neural"],
+      "homepage": "https://docs.exa.ai/reference/mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y exa-mcp-server",
+        "env": {
+          "EXA_API_KEY": ""
         }
       },
       "confirmation_default": ["*"]

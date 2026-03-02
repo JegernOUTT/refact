@@ -132,6 +132,7 @@ mod project_configs;
 mod chat_modes;
 mod customization_editor;
 mod mcp_marketplace;
+mod mcp_marketplace_sources;
 mod mcp_config_sharing;
 pub mod project_information;
 mod v1_browser;
@@ -169,6 +170,10 @@ use crate::http::routers::v1::mcp_server_info::{handle_v1_mcp_server_info, handl
 use crate::http::routers::v1::mcp_marketplace::{
     handle_v1_mcp_marketplace_get, handle_v1_mcp_marketplace_install, handle_v1_mcp_marketplace_installed,
     handle_v1_mcp_auto_name,
+};
+use crate::http::routers::v1::mcp_marketplace_sources::{
+    handle_v1_mcp_marketplace_sources_get, handle_v1_mcp_marketplace_sources_post,
+    handle_v1_mcp_marketplace_sources_delete, handle_v1_mcp_marketplace_sources_configure,
 };
 use crate::http::routers::v1::mcp_config_sharing::{
     handle_v1_mcp_export, handle_v1_mcp_import, handle_v1_mcp_project_config,
@@ -444,6 +449,10 @@ pub fn make_v1_router() -> Router {
         .route("/mcp/marketplace/install", post(handle_v1_mcp_marketplace_install))
         .route("/mcp/marketplace/installed", get(handle_v1_mcp_marketplace_installed))
         .route("/mcp/auto-name", post(handle_v1_mcp_auto_name))
+        .route("/mcp/marketplace/sources", get(handle_v1_mcp_marketplace_sources_get))
+        .route("/mcp/marketplace/sources", post(handle_v1_mcp_marketplace_sources_post))
+        .route("/mcp/marketplace/sources/:id", delete(handle_v1_mcp_marketplace_sources_delete))
+        .route("/mcp/marketplace/sources/:id/configure", post(handle_v1_mcp_marketplace_sources_configure))
         .route("/mcp/export", post(handle_v1_mcp_export))
         .route("/mcp/import", post(handle_v1_mcp_import))
         .route("/mcp/project-config", get(handle_v1_mcp_project_config));

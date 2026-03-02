@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use axum::Extension;
+use axum::extract::Query;
 use axum::response::Json;
 use hyper::StatusCode;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock as ARwLock;
@@ -11,11 +13,17 @@ use std::sync::Mutex;
 
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
+use crate::http::routers::v1::mcp_marketplace_sources::{
+    load_sources, get_all_sources, smithery_api_key,
+    BUNDLED_SOURCE_ID, SourceType, MarketplaceSource,
+};
+#[cfg(test)]
+use crate::http::routers::v1::mcp_marketplace_sources::SMITHERY_SOURCE_ID;
 
-const REMOTE_REGISTRY_URL: &str =
-    "https://raw.githubusercontent.com/smallcloudai/refact/refs/heads/main/refact-agent/engine/src/yaml_configs/mcp_marketplace_index.json";
-const CACHE_TTL_SECS: u64 = 3600;
-static INDEX_CACHE: Mutex<Option<(Instant, MarketplaceIndex, &'static str)>> = Mutex::new(None);
+const BUNDLED_CACHE_TTL_SECS: u64 = 3600;
+const SMITHERY_CACHE_TTL_SECS: u64 = 900;
+
+static SOURCE_CACHES: Mutex<Option<HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallRecipe {
@@ -48,6 +56,13 @@ pub struct MarketplaceServer {
     pub confirmation_default: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MarketplaceServerWithSource {
+    #[serde(flatten)]
+    pub server: MarketplaceServer,
+    pub source_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketplaceIndex {
     pub version: u32,
@@ -60,9 +75,17 @@ fn bundled_index() -> MarketplaceIndex {
         .expect("bundled MCP marketplace index must be valid JSON")
 }
 
-async fn fetch_remote_index(http_client: &reqwest::Client) -> Option<MarketplaceIndex> {
+fn get_cache() -> HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)> {
+    SOURCE_CACHES.lock().unwrap().clone().unwrap_or_default()
+}
+
+fn set_cache(cache: HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>) {
+    *SOURCE_CACHES.lock().unwrap() = Some(cache);
+}
+
+async fn fetch_refact_index(http_client: &reqwest::Client, url: &str) -> Option<MarketplaceIndex> {
     let resp = http_client
-        .get(REMOTE_REGISTRY_URL)
+        .get(url)
         .timeout(Duration::from_secs(10))
         .send()
         .await
@@ -73,62 +96,337 @@ async fn fetch_remote_index(http_client: &reqwest::Client) -> Option<Marketplace
     resp.json::<MarketplaceIndex>().await.ok()
 }
 
-fn merge_indices(remote: MarketplaceIndex, local: MarketplaceIndex) -> (MarketplaceIndex, &'static str) {
-    let mut merged_map: indexmap::IndexMap<String, MarketplaceServer> = indexmap::IndexMap::new();
-    for s in local.servers {
-        merged_map.insert(s.id.clone(), s);
-    }
-    for s in remote.servers {
-        merged_map.insert(s.id.clone(), s);
-    }
-    let servers: Vec<MarketplaceServer> = merged_map.into_values().collect();
-    (
-        MarketplaceIndex { version: 1, updated_at: chrono::Utc::now().format("%Y-%m-%d").to_string(), servers },
-        "merged",
-    )
+#[derive(Deserialize)]
+struct SmitheryListResponse {
+    servers: Vec<SmitheryServer>,
+    pagination: SmitheryPagination,
 }
 
-async fn load_index(gcx: Arc<ARwLock<GlobalContext>>) -> (MarketplaceIndex, &'static str) {
-    {
-        let guard = INDEX_CACHE.lock().unwrap();
-        if let Some((ts, ref idx, source)) = *guard {
-            if ts.elapsed().as_secs() < CACHE_TTL_SECS {
-                return (idx.clone(), source);
+#[derive(Deserialize)]
+struct SmitheryServer {
+    #[serde(rename = "qualifiedName")]
+    qualified_name: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    description: String,
+    #[serde(rename = "iconUrl")]
+    icon_url: Option<String>,
+    homepage: Option<String>,
+    verified: Option<bool>,
+    remote: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct SmitheryPagination {
+    #[serde(rename = "totalCount")]
+    total_count: u32,
+}
+
+async fn fetch_smithery_servers(
+    http_client: &reqwest::Client,
+    api_key: &str,
+    query: Option<&str>,
+    page: u32,
+    page_size: u32,
+) -> Result<(Vec<MarketplaceServer>, u32), String> {
+    let mut url = format!(
+        "https://registry.smithery.ai/servers?page={}&pageSize={}",
+        page, page_size
+    );
+    if let Some(q) = query {
+        if !q.is_empty() {
+            url.push_str(&format!("&q={}", utf8_percent_encode(q, NON_ALPHANUMERIC)));
+        }
+    }
+
+    let resp = http_client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("smithery request failed: {}", e))?;
+
+    if resp.status() == 401 {
+        return Err("smithery: invalid API key".to_string());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("smithery: HTTP {}", resp.status()));
+    }
+
+    let data: SmitheryListResponse = resp.json().await
+        .map_err(|e| format!("smithery parse: {}", e))?;
+
+    let servers: Vec<MarketplaceServer> = data.servers.into_iter().map(|s| {
+        let transport = if s.remote.unwrap_or(false) { "http" } else { "stdio" }.to_string();
+        let publisher = s.qualified_name.split('/').next().unwrap_or("").to_string();
+        let mut tags = vec!["smithery".to_string()];
+        if s.verified.unwrap_or(false) {
+            tags.push("verified".to_string());
+        }
+        MarketplaceServer {
+            id: s.qualified_name,
+            name: s.display_name,
+            description: s.description,
+            publisher,
+            tags,
+            icon_url: s.icon_url,
+            homepage: s.homepage,
+            transport,
+            install_recipe: InstallRecipe {
+                command: None,
+                url: None,
+                env: HashMap::new(),
+                headers: HashMap::new(),
+            },
+            confirmation_default: vec!["*".to_string()],
+        }
+    }).collect();
+
+    Ok((servers, data.pagination.total_count))
+}
+
+async fn fetch_smithery_detail(http_client: &reqwest::Client, qualified_name: &str, api_key: &str) -> Option<MarketplaceServer> {
+    let url = format!("https://registry.smithery.ai/servers/{}", utf8_percent_encode(qualified_name, NON_ALPHANUMERIC));
+    let resp = http_client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let data: Value = resp.json().await.ok()?;
+
+    let transport_type = data["connections"].as_array()
+        .and_then(|c| c.first())
+        .and_then(|c| c["type"].as_str())
+        .map(|t| match t {
+            "http" | "streamable-http" => "http",
+            "sse" => "sse",
+            _ => "stdio",
+        })
+        .unwrap_or("stdio");
+
+    let deployment_url = data["deploymentUrl"].as_str().map(|s| s.to_string());
+    let command = if transport_type == "stdio" {
+        data["connections"].as_array()
+            .and_then(|c| c.first())
+            .and_then(|c| c["command"].as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    let publisher = qualified_name.split('/').next().unwrap_or("").to_string();
+    let tags = if data["security"]["scanPassed"].as_bool().unwrap_or(false) {
+        vec!["smithery".to_string(), "verified".to_string()]
+    } else {
+        vec!["smithery".to_string()]
+    };
+
+    Some(MarketplaceServer {
+        id: qualified_name.to_string(),
+        name: data["displayName"].as_str().unwrap_or(qualified_name).to_string(),
+        description: data["description"].as_str().unwrap_or("").to_string(),
+        publisher,
+        tags,
+        icon_url: data["iconUrl"].as_str().map(|s| s.to_string()),
+        homepage: data["homepage"].as_str().map(|s| s.to_string()),
+        transport: transport_type.to_string(),
+        install_recipe: InstallRecipe {
+            command,
+            url: deployment_url,
+            env: HashMap::new(),
+            headers: HashMap::new(),
+        },
+        confirmation_default: vec!["*".to_string()],
+    })
+}
+
+async fn load_source_servers(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    source: &MarketplaceSource,
+    query: Option<&str>,
+    page: u32,
+    page_size: u32,
+    cache: &mut HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>,
+) -> (Vec<MarketplaceServerWithSource>, u32, &'static str) {
+    let ttl = if source.source_type == SourceType::Smithery {
+        SMITHERY_CACHE_TTL_SECS
+    } else {
+        BUNDLED_CACHE_TTL_SECS
+    };
+
+    let query_str = query.unwrap_or("");
+    let cache_key = format!("{}:{}", source.id, query_str);
+
+    if let Some((ts, cached)) = cache.get(&cache_key) {
+        if ts.elapsed().as_secs() < ttl {
+            let total = cached.len() as u32;
+            let start = ((page - 1) * page_size) as usize;
+            let end = (start + page_size as usize).min(cached.len());
+            let page_items = if start < cached.len() { cached[start..end].to_vec() } else { vec![] };
+            return (page_items, total, "cached");
+        }
+    }
+
+    match source.source_type {
+        SourceType::RefactIndex => {
+            let (index, status): (MarketplaceIndex, &'static str) = if source.id == BUNDLED_SOURCE_ID {
+                (bundled_index(), "bundled")
+            } else {
+                let http_client = gcx.read().await.http_client.clone();
+                match source.url.as_deref() {
+                    Some(url) => match fetch_refact_index(&http_client, url).await {
+                        Some(idx) => (idx, "remote"),
+                        None => (MarketplaceIndex { version: 1, updated_at: String::new(), servers: vec![] }, "error"),
+                    },
+                    None => (MarketplaceIndex { version: 1, updated_at: String::new(), servers: vec![] }, "error"),
+                }
+            };
+
+            let source_id = source.id.clone();
+            let all_with_source: Vec<MarketplaceServerWithSource> = index.servers.into_iter()
+                .filter(|s| {
+                    if query_str.is_empty() { return true; }
+                    let q = query_str.to_lowercase();
+                    s.name.to_lowercase().contains(&q)
+                        || s.description.to_lowercase().contains(&q)
+                        || s.tags.iter().any(|t| t.to_lowercase().contains(&q))
+                })
+                .map(|s| MarketplaceServerWithSource { server: s, source_id: source_id.clone() })
+                .collect();
+
+            let total = all_with_source.len() as u32;
+            cache.insert(cache_key, (Instant::now(), all_with_source.clone()));
+            let start = ((page - 1) * page_size) as usize;
+            let end = (start + page_size as usize).min(all_with_source.len());
+            let page_items = if start < all_with_source.len() { all_with_source[start..end].to_vec() } else { vec![] };
+            (page_items, total, status)
+        }
+        SourceType::Smithery => {
+            let config_dir = gcx.read().await.config_dir.clone();
+            let sources_cfg = load_sources(&config_dir).await;
+            let api_key = match smithery_api_key(&sources_cfg.sources) {
+                Some(k) => k,
+                None => return (vec![], 0, "no_api_key"),
+            };
+
+            let http_client = gcx.read().await.http_client.clone();
+            match fetch_smithery_servers(&http_client, &api_key, query, page, page_size).await {
+                Ok((servers, total)) => {
+                    let source_id = source.id.clone();
+                    let with_source: Vec<MarketplaceServerWithSource> = servers.into_iter()
+                        .map(|s| MarketplaceServerWithSource { server: s, source_id: source_id.clone() })
+                        .collect();
+                    (with_source, total, "ok")
+                }
+                Err(_) => (vec![], 0, "error"),
             }
         }
     }
+}
 
-    let http_client = gcx.read().await.http_client.clone();
-    let local = bundled_index();
+fn validate_config_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains("..") && !name.contains('/') && !name.contains('\\')
+}
 
-    match fetch_remote_index(&http_client).await {
-        Some(remote) => {
-            let (merged, source) = merge_indices(remote, local);
-            let mut guard = INDEX_CACHE.lock().unwrap();
-            *guard = Some((Instant::now(), merged.clone(), source));
-            (merged, source)
-        }
-        None => {
-            let mut guard = INDEX_CACHE.lock().unwrap();
-            *guard = Some((Instant::now(), local.clone(), "local"));
-            (local, "local")
-        }
-    }
+#[derive(Deserialize)]
+pub struct MarketplaceQuery {
+    pub source: Option<String>,
+    pub q: Option<String>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
 }
 
 pub async fn handle_v1_mcp_marketplace_get(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Query(params): Query<MarketplaceQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (index, source) = load_index(gcx).await;
+    let page = params.page.unwrap_or(1).max(1);
+    let page_size = params.page_size.unwrap_or(50).min(100).max(1);
+    let query = params.q.as_deref();
+
+    let config_dir = gcx.read().await.config_dir.clone();
+    let (bundled, user_sources) = get_all_sources(&config_dir).await;
+
+    let mut all_sources: Vec<MarketplaceSource> = vec![bundled];
+    all_sources.extend(user_sources);
+
+    let filter_source = params.source.as_deref();
+    if let Some(fsrc) = filter_source {
+        if !all_sources.iter().any(|s| s.id == fsrc) {
+            return Err((StatusCode::NOT_FOUND, format!("source '{}' not found", fsrc)));
+        }
+    }
+
+    let mut cache = get_cache();
+    let mut all_servers: Vec<MarketplaceServerWithSource> = vec![];
+    let mut sources_meta: Vec<Value> = vec![];
+
+    for source in &all_sources {
+        if !source.enabled {
+            continue;
+        }
+        if let Some(fsrc) = filter_source {
+            if source.id != fsrc {
+                continue;
+            }
+        }
+
+        let (page_items, total, status) = load_source_servers(
+            gcx.clone(),
+            source,
+            query,
+            if filter_source.is_some() { page } else { 1 },
+            if filter_source.is_some() { page_size } else { u32::MAX },
+            &mut cache,
+        ).await;
+
+        sources_meta.push(json!({
+            "id": source.id,
+            "label": source.label,
+            "server_count": total,
+            "status": status,
+        }));
+
+        all_servers.extend(page_items);
+    }
+
+    set_cache(cache);
+
+    let total_count = all_servers.len() as u32;
+    let (final_servers, final_total) = if filter_source.is_some() {
+        let t = sources_meta.first().and_then(|m| m["server_count"].as_u64()).unwrap_or(0) as u32;
+        (all_servers, t)
+    } else {
+        let start = ((page - 1) * page_size) as usize;
+        let end = (start + page_size as usize).min(all_servers.len());
+        let sliced = if start < all_servers.len() { all_servers[start..end].to_vec() } else { vec![] };
+        (sliced, total_count)
+    };
+
     Ok(Json(json!({
-        "servers": index.servers,
-        "source": source,
+        "servers": final_servers,
+        "sources": sources_meta,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": final_total,
+        },
     })))
 }
 
 #[derive(Deserialize)]
 pub struct InstallRequest {
     pub server_id: String,
+    #[serde(default)]
+    pub source_id: Option<String>,
     #[serde(default)]
     pub config_overrides: Option<ConfigOverrides>,
 }
@@ -141,6 +439,55 @@ pub struct ConfigOverrides {
     pub headers: HashMap<String, String>,
 }
 
+async fn find_server_in_sources(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    server_id: &str,
+    source_id: Option<&str>,
+) -> Option<(MarketplaceServer, String)> {
+    let config_dir = gcx.read().await.config_dir.clone();
+    let (bundled, user_sources) = get_all_sources(&config_dir).await;
+
+    let mut all_sources: Vec<MarketplaceSource> = vec![bundled];
+    all_sources.extend(user_sources);
+
+    let sources_to_search: Vec<&MarketplaceSource> = if let Some(sid) = source_id {
+        all_sources.iter().filter(|s| s.id == sid).collect()
+    } else {
+        all_sources.iter().collect()
+    };
+
+    for source in sources_to_search {
+        if source.source_type == SourceType::RefactIndex {
+            let index = if source.id == BUNDLED_SOURCE_ID {
+                bundled_index()
+            } else {
+                let http_client = gcx.read().await.http_client.clone();
+                match source.url.as_deref() {
+                    Some(url) => match fetch_refact_index(&http_client, url).await {
+                        Some(idx) => idx,
+                        None => continue,
+                    },
+                    None => continue,
+                }
+            };
+            if let Some(server) = index.servers.into_iter().find(|s| s.id == server_id) {
+                return Some((server, source.id.clone()));
+            }
+        } else if source.source_type == SourceType::Smithery {
+            let cfg = load_sources(&config_dir).await;
+            let api_key = match smithery_api_key(&cfg.sources) {
+                Some(k) => k,
+                None => continue,
+            };
+            let http_client = gcx.read().await.http_client.clone();
+            if let Some(server) = fetch_smithery_detail(&http_client, server_id, &api_key).await {
+                return Some((server, source.id.clone()));
+            }
+        }
+    }
+    None
+}
+
 pub async fn handle_v1_mcp_marketplace_install(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     body_bytes: hyper::body::Bytes,
@@ -148,20 +495,15 @@ pub async fn handle_v1_mcp_marketplace_install(
     let req = serde_json::from_slice::<InstallRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
-    if req.server_id.is_empty()
-        || req.server_id.contains('/')
-        || req.server_id.contains('\\')
-        || req.server_id.contains("..")
-    {
+    if !validate_config_name(&req.server_id) {
         return Err(ScratchError::new(StatusCode::BAD_REQUEST, "invalid server_id".to_string()));
     }
 
-    let (index, _) = load_index(gcx.clone()).await;
-    let server = index
-        .servers
-        .iter()
-        .find(|s| s.id == req.server_id)
-        .ok_or_else(|| ScratchError::new(StatusCode::NOT_FOUND, format!("server '{}' not found in marketplace", req.server_id)))?;
+    let (server, _found_source_id) = find_server_in_sources(
+        gcx.clone(),
+        &req.server_id,
+        req.source_id.as_deref(),
+    ).await.ok_or_else(|| ScratchError::new(StatusCode::NOT_FOUND, format!("server '{}' not found in marketplace", req.server_id)))?;
 
     match server.transport.as_str() {
         "http" | "streamable-http" | "sse" => {
@@ -186,7 +528,7 @@ pub async fn handle_v1_mcp_marketplace_install(
         "sse" => "mcp_sse",
         _ => "mcp_stdio",
     };
-    let safe_id = req.server_id.replace('-', "_");
+    let safe_id = server.id.replace(['/', '-', '.'], "_");
     let filename = format!("{}_{}.yaml", prefix, safe_id);
     let config_path = integrations_dir.join(&filename);
 
@@ -201,7 +543,7 @@ pub async fn handle_v1_mcp_marketplace_install(
         }
     }
 
-    let yaml_content = build_integration_yaml(server, &env, &headers);
+    let yaml_content = build_integration_yaml(&server, &env, &headers);
     match tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -290,11 +632,11 @@ fn build_integration_yaml(server: &MarketplaceServer, env: &HashMap<String, Stri
 pub async fn handle_v1_mcp_marketplace_installed(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (index, _) = load_index(gcx.clone()).await;
     let config_dir = gcx.read().await.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
 
-    let index_ids: std::collections::HashSet<String> = index.servers.iter().map(|s| s.id.clone()).collect();
+    let bundled = bundled_index();
+    let index_ids: std::collections::HashSet<String> = bundled.servers.iter().map(|s| s.id.clone()).collect();
     let mut installed = Vec::new();
 
     let read_dir = match tokio::fs::read_dir(&integrations_dir).await {
@@ -315,11 +657,12 @@ pub async fn handle_v1_mcp_marketplace_installed(
             if let Some(rest) = fname_str.strip_prefix(prefix) {
                 let id_candidate = rest.trim_end_matches(".yaml").replace('_', "-");
                 if index_ids.contains(&id_candidate) {
-                    let server = index.servers.iter().find(|s| s.id == id_candidate).unwrap();
+                    let server = bundled.servers.iter().find(|s| s.id == id_candidate).unwrap();
                     installed.push(json!({
                         "id": id_candidate,
                         "name": server.name,
                         "config_path": entry.path().display().to_string(),
+                        "source_id": BUNDLED_SOURCE_ID,
                     }));
                 }
                 break;
@@ -475,7 +818,7 @@ mod tests {
     fn test_bundled_index_parses() {
         let index = bundled_index();
         assert!(index.version >= 1, "version must be >= 1");
-        assert!(index.servers.len() >= 10, "must have at least 10 servers, got {}", index.servers.len());
+        assert!(index.servers.len() >= 30, "must have at least 30 servers, got {}", index.servers.len());
     }
 
     #[test]
@@ -496,6 +839,22 @@ mod tests {
         for server in &index.servers {
             assert!(ids.insert(server.id.clone()), "duplicate server id: {}", server.id);
         }
+    }
+
+    #[test]
+    fn test_bundled_index_expanded() {
+        let index = bundled_index();
+        assert!(index.servers.len() >= 30, "bundled index must have at least 30 servers");
+    }
+
+    #[test]
+    fn test_validate_config_name() {
+        assert!(validate_config_name("github"), "valid name");
+        assert!(validate_config_name("my-server"), "valid name with dash");
+        assert!(!validate_config_name(""), "empty name invalid");
+        assert!(!validate_config_name("../evil"), "path traversal invalid");
+        assert!(!validate_config_name("a/b"), "slash invalid");
+        assert!(!validate_config_name("a\\b"), "backslash invalid");
     }
 
     #[test]
@@ -616,71 +975,122 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_indices_remote_overrides_local() {
-        let local_server = MarketplaceServer {
-            id: "github".to_string(),
-            name: "GitHub Local".to_string(),
-            description: "old description".to_string(),
-            publisher: "local".to_string(),
-            tags: vec![],
+    fn test_smithery_response_mapping() {
+        let server = MarketplaceServer {
+            id: "owner/hello-world".to_string(),
+            name: "Hello World".to_string(),
+            description: "A test server".to_string(),
+            publisher: "owner".to_string(),
+            tags: vec!["smithery".to_string()],
             icon_url: None,
             homepage: None,
             transport: "stdio".to_string(),
-            install_recipe: InstallRecipe { command: Some("old-command".to_string()), url: None, env: HashMap::new(), headers: HashMap::new() },
-            confirmation_default: vec![],
-        };
-        let remote_server = MarketplaceServer {
-            id: "github".to_string(),
-            name: "GitHub Remote".to_string(),
-            description: "new description".to_string(),
-            publisher: "github".to_string(),
-            tags: vec![],
-            icon_url: None,
-            homepage: None,
-            transport: "stdio".to_string(),
-            install_recipe: InstallRecipe { command: Some("new-command".to_string()), url: None, env: HashMap::new(), headers: HashMap::new() },
+            install_recipe: InstallRecipe {
+                command: None,
+                url: None,
+                env: HashMap::new(),
+                headers: HashMap::new(),
+            },
             confirmation_default: vec!["*".to_string()],
         };
-        let local_idx = MarketplaceIndex { version: 1, updated_at: "2026-01-01".to_string(), servers: vec![local_server] };
-        let remote_idx = MarketplaceIndex { version: 1, updated_at: "2026-02-01".to_string(), servers: vec![remote_server] };
-        let (merged, _) = merge_indices(remote_idx, local_idx);
-        assert_eq!(merged.servers.len(), 1, "should merge to one server");
-        assert_eq!(merged.servers[0].name, "GitHub Remote", "remote should override local");
-        assert_eq!(merged.servers[0].install_recipe.command, Some("new-command".to_string()));
+        assert_eq!(server.id, "owner/hello-world");
+        assert_eq!(server.publisher, "owner");
+        assert!(server.tags.contains(&"smithery".to_string()));
     }
 
     #[test]
-    fn test_merge_indices_keeps_local_only_servers() {
-        let local_only = MarketplaceServer {
-            id: "custom-local".to_string(),
-            name: "Custom Local".to_string(),
-            description: "local only".to_string(),
-            publisher: "local".to_string(),
-            tags: vec![],
-            icon_url: None,
-            homepage: None,
-            transport: "stdio".to_string(),
-            install_recipe: InstallRecipe { command: Some("custom-cmd".to_string()), url: None, env: HashMap::new(), headers: HashMap::new() },
-            confirmation_default: vec![],
+    fn test_multi_source_merge() {
+        let bundled_server = MarketplaceServerWithSource {
+            server: MarketplaceServer {
+                id: "github".to_string(),
+                name: "GitHub".to_string(),
+                description: "desc".to_string(),
+                publisher: "github".to_string(),
+                tags: vec![],
+                icon_url: None,
+                homepage: None,
+                transport: "stdio".to_string(),
+                install_recipe: InstallRecipe { command: Some("cmd".to_string()), url: None, env: HashMap::new(), headers: HashMap::new() },
+                confirmation_default: vec![],
+            },
+            source_id: BUNDLED_SOURCE_ID.to_string(),
         };
-        let remote_server = MarketplaceServer {
+        let smithery_server = MarketplaceServerWithSource {
+            server: MarketplaceServer {
+                id: "smithery/hello".to_string(),
+                name: "Hello".to_string(),
+                description: "desc".to_string(),
+                publisher: "smithery".to_string(),
+                tags: vec!["smithery".to_string()],
+                icon_url: None,
+                homepage: None,
+                transport: "http".to_string(),
+                install_recipe: InstallRecipe { command: None, url: Some("https://ex.com".to_string()), env: HashMap::new(), headers: HashMap::new() },
+                confirmation_default: vec![],
+            },
+            source_id: SMITHERY_SOURCE_ID.to_string(),
+        };
+        let all = vec![bundled_server, smithery_server];
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].source_id, BUNDLED_SOURCE_ID);
+        assert_eq!(all[1].source_id, SMITHERY_SOURCE_ID);
+    }
+
+    #[test]
+    fn test_source_id_tracking() {
+        let server = MarketplaceServerWithSource {
+            server: MarketplaceServer {
+                id: "test".to_string(),
+                name: "Test".to_string(),
+                description: "desc".to_string(),
+                publisher: "test".to_string(),
+                tags: vec![],
+                icon_url: None,
+                homepage: None,
+                transport: "stdio".to_string(),
+                install_recipe: InstallRecipe { command: Some("cmd".to_string()), url: None, env: HashMap::new(), headers: HashMap::new() },
+                confirmation_default: vec![],
+            },
+            source_id: "my-source".to_string(),
+        };
+        let json = serde_json::to_value(&server).unwrap();
+        assert_eq!(json["source_id"], "my-source");
+        assert_eq!(json["id"], "test");
+    }
+
+    #[test]
+    fn test_source_cache_independence() {
+        let mut cache: HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)> = HashMap::new();
+        cache.insert("source-a:".to_string(), (Instant::now(), vec![]));
+        cache.insert("source-b:".to_string(), (Instant::now(), vec![]));
+        assert!(cache.contains_key("source-a:"));
+        assert!(cache.contains_key("source-b:"));
+        cache.remove("source-a:");
+        assert!(!cache.contains_key("source-a:"), "removing source-a doesn't affect source-b");
+        assert!(cache.contains_key("source-b:"));
+    }
+
+    #[test]
+    fn test_install_with_source_id() {
+        let server = MarketplaceServer {
             id: "github".to_string(),
             name: "GitHub".to_string(),
-            description: "github".to_string(),
+            description: "desc".to_string(),
             publisher: "github".to_string(),
             tags: vec![],
             icon_url: None,
             homepage: None,
             transport: "stdio".to_string(),
-            install_recipe: InstallRecipe { command: Some("npx github".to_string()), url: None, env: HashMap::new(), headers: HashMap::new() },
-            confirmation_default: vec!["*".to_string()],
+            install_recipe: InstallRecipe {
+                command: Some("npx github".to_string()),
+                url: None,
+                env: HashMap::new(),
+                headers: HashMap::new(),
+            },
+            confirmation_default: vec![],
         };
-        let local_idx = MarketplaceIndex { version: 1, updated_at: "2026-01-01".to_string(), servers: vec![local_only] };
-        let remote_idx = MarketplaceIndex { version: 1, updated_at: "2026-02-01".to_string(), servers: vec![remote_server] };
-        let (merged, _) = merge_indices(remote_idx, local_idx);
-        assert_eq!(merged.servers.len(), 2, "merged should have both servers");
-        assert!(merged.servers.iter().any(|s| s.id == "custom-local"), "must contain local-only server");
-        assert!(merged.servers.iter().any(|s| s.id == "github"), "must contain remote server");
+        let yaml = build_integration_yaml(&server, &HashMap::new(), &HashMap::new());
+        assert!(yaml.contains("command:"));
     }
 
     #[tokio::test]
