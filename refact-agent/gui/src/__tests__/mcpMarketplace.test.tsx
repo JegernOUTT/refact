@@ -42,6 +42,15 @@ const MOCK_SOURCES: MarketplaceSource[] = [
     needs_api_key: true,
     has_api_key: false,
   },
+  {
+    id: "official-mcp",
+    label: "MCP Registry",
+    type: "official_mcp",
+    enabled: true,
+    removable: false,
+    server_count: 50,
+    status: "ok",
+  },
 ];
 
 const MOCK_RESPONSE: MarketplaceResponse = {
@@ -187,7 +196,7 @@ describe("SourceSelector", () => {
         onOpenSettings={() => undefined}
       />,
     );
-    expect(screen.getByText(/All \(1\)/)).toBeDefined();
+    expect(screen.getByText(/All \(51\)/)).toBeDefined();
     expect(screen.getByText(/Refact Built-in/)).toBeDefined();
     expect(screen.getByText(/Smithery\.ai/)).toBeDefined();
   });

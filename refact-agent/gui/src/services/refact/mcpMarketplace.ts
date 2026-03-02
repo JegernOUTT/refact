@@ -25,7 +25,7 @@ export type MCPServer = {
 export type MarketplaceSource = {
   id: string;
   label: string;
-  type: "refact_index" | "smithery";
+  type: "refact_index" | "smithery" | "official_mcp";
   enabled: boolean;
   removable: boolean;
   server_count?: number;
