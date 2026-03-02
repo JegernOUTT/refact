@@ -4,3 +4,4 @@ export { SkillEditor } from "./SkillEditor";
 export { CommandEditor } from "./CommandEditor";
 export { HooksEditor } from "./HooksEditor";
 export { CreateItemDialog } from "./CreateItemDialog";
+export { SkillsMPPanel } from "./SkillsMPPanel";
