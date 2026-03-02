@@ -15,6 +15,7 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon};
 use super::session_mcp::{McpClientHandler, McpRunningService, SessionMCP, add_log_entry};
 use super::mcp_metrics::SharedMetrics;
+use super::mcp_path_resolution;
 use super::integr_mcp_common::{
     CommonMCPSettings, MCPTransportInitializer, mcp_integr_tools, mcp_session_setup,
 };
@@ -85,8 +86,21 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
             }
         };
 
-        let mut command = tokio::process::Command::new(&parsed_args[0]);
+        let resolved = match mcp_path_resolution::resolve_command(
+            &parsed_args[0],
+            command,
+            self.cfg.mcp_env.get("PATH").map(|s| s.as_str()),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                log(tracing::Level::ERROR, e.to_user_message()).await;
+                return None;
+            }
+        };
+
+        let mut command = tokio::process::Command::new(&resolved.program);
         command.args(&parsed_args[1..]);
+        command.env("PATH", &resolved.effective_path);
         for (key, value) in &self.cfg.mcp_env {
             command.env(key, value);
         }
@@ -123,7 +137,7 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
             Err(e) => {
                 log(
                     tracing::Level::ERROR,
-                    format!("Failed to init Tokio child process: {}", e),
+                    format!("Failed to start MCP server process '{}': {}. Resolved binary: {}", &parsed_args[0], e, resolved.program.display()),
                 )
                 .await;
                 return None;
