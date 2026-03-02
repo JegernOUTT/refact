@@ -818,9 +818,15 @@ fn extract_name_from_url(url: &str) -> String {
     }
 
     let parts: Vec<&str> = host.split('.').collect();
+    // Country-code SLD pattern: e.g. example.co.uk, example.com.au
+    // Only trigger when last segment is 2-char country code AND second-to-last is a short
+    // known SLD (co, com, org, net, ac, gov, edu) — not for domains like mcp.myservice.io
     if parts.len() >= 3 {
         let last = parts[parts.len() - 1];
-        if last.len() == 2 {
+        let second_last = parts[parts.len() - 2];
+        let is_country_code_sld = last.len() == 2
+            && matches!(second_last, "co" | "com" | "org" | "net" | "ac" | "gov" | "edu" | "or" | "ne");
+        if is_country_code_sld {
             return parts[parts.len() - 3].to_string();
         }
     }
