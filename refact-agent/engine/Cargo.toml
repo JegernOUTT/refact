@@ -113,7 +113,7 @@ zerocopy = "0.8.14"
 
 # There you can use a local copy
 # rmcp = { path = "../../../rust-sdk/crates/rmcp/", "features" = ["client", "transport-child-process", "transport-sse"] }
-rmcp = { git = "https://github.com/smallcloudai/rust-sdk", branch = "main", features = ["client", "transport-child-process", "transport-sse-client", "transport-streamable-http-client", "reqwest"] }
+rmcp = { git = "https://github.com/smallcloudai/rust-sdk", branch = "main", features = ["client", "transport-child-process", "transport-sse-client", "transport-streamable-http-client", "reqwest", "auth"] }
 thiserror = "2.0.12"
 dirs = "5.0"
 whisper-rs = { version = "0.12", optional = true }

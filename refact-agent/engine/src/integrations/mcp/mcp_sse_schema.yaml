@@ -11,7 +11,7 @@ fields:
       Content-Type: application/json
   auth_type:
     f_type: string_short
-    f_desc: "Authentication type: none, bearer, or oauth2."
+    f_desc: "Authentication type: none, bearer, oauth2_client_credentials, or oauth2_pkce."
     f_default: "none"
   bearer_token:
     f_type: string_long
@@ -20,20 +20,20 @@ fields:
     f_extra: {"password": true}
   oauth2_client_id:
     f_type: string_short
-    f_desc: "OAuth2 client ID for auth_type=oauth2."
+    f_desc: "OAuth2 client ID for auth_type=oauth2_client_credentials."
     f_default: ""
   oauth2_client_secret:
     f_type: string_long
-    f_desc: "OAuth2 client secret for auth_type=oauth2."
+    f_desc: "OAuth2 client secret for auth_type=oauth2_client_credentials."
     f_default: ""
     f_extra: {"password": true}
   oauth2_token_url:
     f_type: string_long
-    f_desc: "OAuth2 token endpoint URL for auth_type=oauth2."
+    f_desc: "OAuth2 token endpoint URL for auth_type=oauth2_client_credentials."
     f_default: ""
   oauth2_scopes:
     f_type: string_long
-    f_desc: "OAuth2 scopes (comma-separated) for auth_type=oauth2."
+    f_desc: "OAuth2 scopes (comma-separated) for auth_type=oauth2_client_credentials."
     f_default: ""
   init_timeout:
     f_type: string_short
