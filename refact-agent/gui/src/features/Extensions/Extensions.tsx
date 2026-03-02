@@ -16,13 +16,12 @@ import {
   CommandEditor,
   HooksEditor,
   CreateItemDialog,
-  SkillsMPPanel,
 } from "./components";
 import { MarketplacePanel } from "./components/MarketplacePanel";
 
 import styles from "./Extensions.module.css";
 
-export type ExtensionsTab = "skills" | "commands" | "hooks" | "marketplace" | "skillsmp";
+export type ExtensionsTab = "skills" | "commands" | "hooks" | "marketplace";
 
 export type ExtensionsProps = {
   backFromExtensions: () => void;
@@ -150,7 +149,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
             </Tabs.Trigger>
             <Tabs.Trigger value="hooks">Hooks</Tabs.Trigger>
             <Tabs.Trigger value="marketplace">Marketplace</Tabs.Trigger>
-            <Tabs.Trigger value="skillsmp">Skills Directory</Tabs.Trigger>
+
           </Tabs.List>
         </Tabs.Root>
 
@@ -193,7 +192,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
 
           {activeTab === "marketplace" && <MarketplacePanel />}
 
-          {activeTab === "skillsmp" && <SkillsMPPanel />}
+
         </div>
 
         <CreateItemDialog
