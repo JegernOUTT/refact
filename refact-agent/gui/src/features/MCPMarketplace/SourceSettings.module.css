@@ -1,0 +1,32 @@
+.sourceRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--gray-4);
+}
+
+.sourceRow:last-child {
+  border-bottom: none;
+}
+
+.sourceLabel {
+  flex: 1;
+  min-width: 0;
+}
+
+.apiKeySection {
+  padding: var(--space-2) 0 0 var(--space-4);
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid var(--gray-5);
+  margin: var(--space-3) 0;
+}
+
+.addSourceSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}

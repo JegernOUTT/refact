@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Badge, Box, Button, Flex, Text } from "@radix-ui/themes";
-import { CheckIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
+import { CheckIcon, ExternalLinkIcon, StarFilledIcon } from "@radix-ui/react-icons";
 import type { MCPServer } from "../../services/refact/mcpMarketplace";
 import styles from "./MCPMarketplace.module.css";
 
@@ -10,6 +10,7 @@ type ServerCardProps = {
   onInstall: (server: MCPServer) => void;
   onViewDetail: (server: MCPServer) => void;
   isInstalling: boolean;
+  sourceLabel?: string;
 };
 
 export const ServerCard: React.FC<ServerCardProps> = ({
@@ -18,6 +19,7 @@ export const ServerCard: React.FC<ServerCardProps> = ({
   onInstall,
   onViewDetail,
   isInstalling,
+  sourceLabel,
 }) => {
   const [imgError, setImgError] = useState(false);
 
@@ -66,7 +68,23 @@ export const ServerCard: React.FC<ServerCardProps> = ({
           </Flex>
         )}
 
-        <Flex gap="2" mt="auto" align="center">
+        <Flex gap="2" mt="auto" align="center" wrap="wrap">
+          {server.verified && (
+            <Flex align="center" gap="1" className={styles.verifiedBadge}>
+              <StarFilledIcon width={10} height={10} />
+              <Text size="1">Verified</Text>
+            </Flex>
+          )}
+          {server.use_count !== undefined && server.use_count > 0 && (
+            <Text size="1" color="gray">{server.use_count} installs</Text>
+          )}
+          {sourceLabel && (
+            <Badge color="gray" variant="soft" size="1" className={styles.sourceBadgeInCard}>
+              {sourceLabel}
+            </Badge>
+          )}
+        </Flex>
+        <Flex gap="2" mt="2" align="center">
           {isInstalled ? (
             <Flex align="center" gap="1" style={{ flex: 1 }}>
               <CheckIcon color="var(--green-9)" />

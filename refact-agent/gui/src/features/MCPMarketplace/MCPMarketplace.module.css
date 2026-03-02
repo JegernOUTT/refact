@@ -66,3 +66,28 @@
   background: var(--accent-3);
   color: var(--accent-11);
 }
+
+.sourceTab {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sourceTab:hover {
+  opacity: 0.8;
+}
+
+.sourceBadgeInCard {
+  font-size: var(--font-size-1);
+}
+
+.verifiedBadge {
+  color: var(--green-9);
+  font-size: var(--font-size-1);
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}

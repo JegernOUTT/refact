@@ -49,7 +49,7 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
     );
     const configOverrides =
       Object.keys(definedEnv).length > 0 ? { env: definedEnv } : undefined;
-    await installServer({ server_id: server.id, config_overrides: configOverrides });
+    await installServer({ server_id: server.id, source_id: server.source_id, config_overrides: configOverrides });
   };
 
   const errorMessage =

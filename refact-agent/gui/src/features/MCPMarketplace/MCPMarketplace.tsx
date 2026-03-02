@@ -1,11 +1,11 @@
 import React, { useMemo, useState } from "react";
 import {
-  Badge,
   Box,
   Button,
   Callout,
   Flex,
   Heading,
+  Badge,
   Text,
   TextField,
 } from "@radix-ui/themes";
@@ -17,12 +17,16 @@ import {
   useGetInstalledServersQuery,
   useInstallServerMutation,
 } from "../../services/refact/mcpMarketplace";
-import type { MCPServer } from "../../services/refact/mcpMarketplace";
+import type { MCPServer, MarketplaceSource } from "../../services/refact/mcpMarketplace";
 import { ServerCard } from "./ServerCard";
 import { ServerDetail } from "./ServerDetail";
+import { SourceSelector } from "./SourceSelector";
+import { SourceSettings } from "./SourceSettings";
 import styles from "./MCPMarketplace.module.css";
 import type { Config } from "../Config/configSlice";
 import { Spinner } from "../../components/Spinner";
+
+const PAGE_SIZE = 20;
 
 type MCPMarketplaceProps = {
   host: Config["host"];
@@ -36,12 +40,27 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
 }) => {
   const [search, setSearch] = useState("");
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [selectedServer, setSelectedServer] = useState<MCPServer | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [page, setPage] = useState(1);
 
-  const { data: marketplaceData, isLoading, error } = useGetMarketplaceQuery(undefined);
+  const { data: marketplaceData, isLoading, error } = useGetMarketplaceQuery({
+    source: selectedSource ?? undefined,
+    page,
+    page_size: PAGE_SIZE,
+  });
   const { data: installedData } = useGetInstalledServersQuery(undefined);
   const [installServer] = useInstallServerMutation();
+
+  const sources: MarketplaceSource[] = marketplaceData?.sources ?? [];
+
+  const sourceMap = useMemo(() => {
+    const map = new Map<string, string>();
+    sources.forEach((s) => map.set(s.id, s.label));
+    return map;
+  }, [sources]);
 
   const installedIds = useMemo(
     () => new Set((installedData?.installed ?? []).map((s) => s.id)),
@@ -70,14 +89,26 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     });
   }, [marketplaceData, search, selectedTag]);
 
+  const pagination = marketplaceData?.pagination;
+  const totalPages = pagination ? Math.ceil(pagination.total / pagination.page_size) : 1;
+
   const handleInstall = async (server: MCPServer) => {
     setInstallingId(server.id);
     try {
-      await installServer({ server_id: server.id });
+      await installServer({ server_id: server.id, source_id: server.source_id });
     } finally {
       setInstallingId(null);
     }
   };
+
+  const handleSelectSource = (sourceId: string | null) => {
+    setSelectedSource(sourceId);
+    setPage(1);
+  };
+
+  const smitheryNeedsKey = sources.find(
+    (s) => s.type === "smithery" && s.needs_api_key && !s.has_api_key,
+  );
 
   const errorMessage =
     error && "data" in error
@@ -109,11 +140,6 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
               Back
             </Button>
             <Heading size="4">MCP Marketplace</Heading>
-            {marketplaceData && (
-              <Badge color="gray" variant="soft" className={styles.sourceBadge}>
-                {marketplaceData.source}
-              </Badge>
-            )}
           </Flex>
 
           <Flex gap="2" align="center">
@@ -130,6 +156,15 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
               </TextField.Root>
             </Box>
           </Flex>
+
+          {sources.length > 0 && (
+            <SourceSelector
+              sources={sources}
+              selectedSource={selectedSource}
+              onSelectSource={handleSelectSource}
+              onOpenSettings={() => setSettingsOpen(true)}
+            />
+          )}
 
           {allTags.length > 0 && (
             <Flex gap="2" wrap="wrap">
@@ -157,6 +192,20 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
             </Flex>
           )}
 
+          {smitheryNeedsKey && (
+            <Callout.Root color="blue" size="1">
+              <Callout.Icon>
+                <InfoCircledIcon />
+              </Callout.Icon>
+              <Callout.Text>
+                Smithery source requires an API key.{" "}
+                <Button variant="ghost" size="1" onClick={() => setSettingsOpen(true)}>
+                  Configure
+                </Button>
+              </Callout.Text>
+            </Callout.Root>
+          )}
+
           {errorMessage && (
             <Callout.Root color="red" size="1">
               <Callout.Icon>
@@ -178,18 +227,49 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
             <div className={styles.serverGrid}>
               {filteredServers.map((server) => (
                 <ServerCard
-                  key={server.id}
+                  key={`${server.source_id}:${server.id}`}
                   server={server}
                   isInstalled={installedIds.has(server.id)}
                   isInstalling={installingId === server.id}
                   onInstall={(s) => void handleInstall(s)}
                   onViewDetail={(s) => setSelectedServer(s)}
+                  sourceLabel={sourceMap.get(server.source_id)}
                 />
               ))}
             </div>
           )}
+
+          {totalPages > 1 && (
+            <Flex className={styles.pagination}>
+              <Button
+                size="1"
+                variant="soft"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => p - 1)}
+              >
+                Prev
+              </Button>
+              <Text size="1" color="gray">
+                Page {page} of {totalPages}
+              </Text>
+              <Button
+                size="1"
+                variant="soft"
+                disabled={page >= totalPages}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next
+              </Button>
+            </Flex>
+          )}
         </Flex>
       </ScrollArea>
+
+      <SourceSettings
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        sources={sources}
+      />
     </PageWrapper>
   );
 };

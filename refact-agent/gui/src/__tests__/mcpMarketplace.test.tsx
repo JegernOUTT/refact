@@ -4,10 +4,12 @@ import { http, HttpResponse } from "msw";
 import { server } from "../utils/mockServer";
 import { MCPMarketplace } from "../features/MCPMarketplace";
 import { ServerCard } from "../features/MCPMarketplace/ServerCard";
-import type { MCPServer, MarketplaceResponse } from "../services/refact/mcpMarketplace";
+import { SourceSelector } from "../features/MCPMarketplace/SourceSelector";
+import type { MCPServer, MarketplaceResponse, MarketplaceSource } from "../services/refact/mcpMarketplace";
 
 const MOCK_SERVER: MCPServer = {
   id: "test-server",
+  source_id: "refact-bundled",
   name: "Test Server",
   description: "A test MCP server for unit tests",
   publisher: "Test Publisher",
@@ -20,9 +22,31 @@ const MOCK_SERVER: MCPServer = {
   confirmation_default: [],
 };
 
+const MOCK_SOURCES: MarketplaceSource[] = [
+  {
+    id: "refact-bundled",
+    label: "Refact Built-in",
+    type: "refact_index",
+    enabled: true,
+    removable: false,
+    server_count: 1,
+    status: "ok",
+  },
+  {
+    id: "smithery",
+    label: "Smithery.ai",
+    type: "smithery",
+    enabled: false,
+    removable: false,
+    server_count: 0,
+    needs_api_key: true,
+    has_api_key: false,
+  },
+];
+
 const MOCK_RESPONSE: MarketplaceResponse = {
   servers: [MOCK_SERVER],
-  source: "local",
+  sources: MOCK_SOURCES,
 };
 
 const PRELOADED_STATE = {
@@ -108,6 +132,96 @@ describe("ServerCard", () => {
     expect(calledWith.length).toBe(1);
     expect(calledWith[0]?.id).toBe("test-server");
   });
+
+  it("renders source badge when sourceLabel is provided", () => {
+    render(
+      <ServerCard
+        server={MOCK_SERVER}
+        isInstalled={false}
+        isInstalling={false}
+        onInstall={() => undefined}
+        onViewDetail={() => undefined}
+        sourceLabel="Refact Built-in"
+      />,
+    );
+    expect(screen.getByText("Refact Built-in")).toBeDefined();
+  });
+
+  it("renders verified badge when server is verified", () => {
+    const verifiedServer = { ...MOCK_SERVER, verified: true };
+    render(
+      <ServerCard
+        server={verifiedServer}
+        isInstalled={false}
+        isInstalling={false}
+        onInstall={() => undefined}
+        onViewDetail={() => undefined}
+      />,
+    );
+    expect(screen.getByText("Verified")).toBeDefined();
+  });
+
+  it("renders use count when provided", () => {
+    const countedServer = { ...MOCK_SERVER, use_count: 42 };
+    render(
+      <ServerCard
+        server={countedServer}
+        isInstalled={false}
+        isInstalling={false}
+        onInstall={() => undefined}
+        onViewDetail={() => undefined}
+      />,
+    );
+    expect(screen.getByText("42 installs")).toBeDefined();
+  });
+});
+
+describe("SourceSelector", () => {
+  it("renders source tabs with correct counts", () => {
+    const onSelectSource = (id: string | null) => id;
+    render(
+      <SourceSelector
+        sources={MOCK_SOURCES}
+        selectedSource={null}
+        onSelectSource={onSelectSource}
+        onOpenSettings={() => undefined}
+      />,
+    );
+    expect(screen.getByText(/All \(1\)/)).toBeDefined();
+    expect(screen.getByText(/Refact Built-in/)).toBeDefined();
+    expect(screen.getByText(/Smithery\.ai/)).toBeDefined();
+  });
+
+  it("calls onSelectSource when a source tab is clicked", () => {
+    const selected: Array<string | null> = [];
+    render(
+      <SourceSelector
+        sources={MOCK_SOURCES}
+        selectedSource={null}
+        onSelectSource={(id) => selected.push(id)}
+        onOpenSettings={() => undefined}
+      />,
+    );
+    const builtinBadge = screen.getByText(/Refact Built-in/);
+    fireEvent.click(builtinBadge);
+    expect(selected.length).toBe(1);
+    expect(selected[0]).toBe("refact-bundled");
+  });
+
+  it("calls onOpenSettings when gear icon is clicked", () => {
+    const opened: boolean[] = [];
+    render(
+      <SourceSelector
+        sources={MOCK_SOURCES}
+        selectedSource={null}
+        onSelectSource={() => undefined}
+        onOpenSettings={() => opened.push(true)}
+      />,
+    );
+    const gearButton = screen.getByTitle("Manage marketplace sources");
+    fireEvent.click(gearButton);
+    expect(opened.length).toBe(1);
+  });
 });
 
 describe("MCPMarketplace", () => {
@@ -134,6 +248,30 @@ describe("MCPMarketplace", () => {
     expect(screen.getByText("MCP Marketplace")).toBeDefined();
   });
 
+  it("renders source selector tabs when sources are returned", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+        return HttpResponse.json(MOCK_RESPONSE);
+      }),
+      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({ installed: [] });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    expect(screen.getAllByText(/Refact Built-in/).length).toBeGreaterThan(0);
+    expect(screen.getByTitle("Manage marketplace sources")).toBeDefined();
+  });
+
   it("filters servers by search query", async () => {
     const secondServer: MCPServer = {
       ...MOCK_SERVER,
@@ -144,7 +282,7 @@ describe("MCPMarketplace", () => {
     };
     server.use(
       http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
-        return HttpResponse.json({ servers: [MOCK_SERVER, secondServer], source: "local" });
+        return HttpResponse.json({ servers: [MOCK_SERVER, secondServer], sources: MOCK_SOURCES });
       }),
       http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({ installed: [] });
@@ -193,5 +331,62 @@ describe("MCPMarketplace", () => {
 
     await screen.findByText("Test Server");
     expect(screen.getByText("Installed")).toBeDefined();
+  });
+
+  it("shows Smithery configure callout when Smithery source lacks API key", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+        return HttpResponse.json({
+          servers: [MOCK_SERVER],
+          sources: [
+            ...MOCK_SOURCES.filter((s) => s.id !== "smithery"),
+            { ...MOCK_SOURCES[1]!, enabled: true },
+          ],
+        });
+      }),
+      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({ installed: [] });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    expect(screen.getByText(/Smithery source requires an API key/)).toBeDefined();
+  });
+
+  it("source settings dialog opens and closes", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+        return HttpResponse.json(MOCK_RESPONSE);
+      }),
+      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({ installed: [] });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    const gearButton = screen.getByTitle("Manage marketplace sources");
+    fireEvent.click(gearButton);
+    expect(await screen.findByText("Marketplace Sources")).toBeDefined();
+
+    const closeButton = screen.getByRole("button", { name: /close/i });
+    fireEvent.click(closeButton);
   });
 });
