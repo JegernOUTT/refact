@@ -35,6 +35,7 @@ pub struct HookPayload {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum HookResult {
     Success(String),
     Block(String),
@@ -116,6 +117,7 @@ pub fn is_global_source(source: &CommandSource) -> bool {
     matches!(source, CommandSource::GlobalClaude | CommandSource::GlobalRefact)
 }
 
+#[cfg(test)]
 fn filter_trusted_hooks(hooks: Vec<HookConfig>) -> Vec<HookConfig> {
     hooks.into_iter().filter(|h| {
         if is_global_source(&h.source) {
@@ -170,11 +172,6 @@ pub async fn run_hooks(
     run_hooks_from_list(&matching_hooks, &payload).await
 }
 
-pub fn fire_notification_hook(gcx: Arc<ARwLock<GlobalContext>>, payload: HookPayload) {
-    tokio::spawn(async move {
-        run_hooks(gcx, HookEvent::Notification, payload).await;
-    });
-}
 
 async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(mut reader: R, max_bytes: usize) -> Vec<u8> {
     use tokio::io::AsyncReadExt;

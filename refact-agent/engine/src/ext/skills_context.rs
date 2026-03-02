@@ -91,6 +91,7 @@ async fn build_skills_index_from_dirs(ext_dirs: &ExtDirs) -> String {
     lines.join("\n")
 }
 
+#[cfg(test)]
 async fn auto_select_skills_from_dirs(ext_dirs: &ExtDirs, user_message: &str) -> Vec<SkillFull> {
     let indices = load_skill_indices(ext_dirs).await;
     let selected_names = select_relevant_skills(&indices, user_message, 2, 0.5);
@@ -184,29 +185,6 @@ async fn build_context_messages_from_dirs(
     }], tracking)
 }
 
-pub async fn build_skills_index(gcx: Arc<ARwLock<GlobalContext>>) -> String {
-    let ext_dirs = get_ext_dirs(gcx).await;
-    build_skills_index_from_dirs(&ext_dirs).await
-}
-
-pub async fn auto_select_skills(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    user_message: &str,
-) -> Vec<SkillFull> {
-    let ext_dirs = get_ext_dirs(gcx).await;
-    auto_select_skills_from_dirs(&ext_dirs, user_message).await
-}
-
-pub async fn build_skills_context_messages(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    user_message: &str,
-    explicit_skill: Option<&str>,
-) -> Vec<ChatMessage> {
-    let config = load_skills_config(gcx.clone()).await;
-    let ext_dirs = get_ext_dirs(gcx).await;
-    let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, user_message, explicit_skill, config.auto_trigger).await;
-    msgs
-}
 
 pub async fn build_skills_context_messages_tracked(
     gcx: Arc<ARwLock<GlobalContext>>,

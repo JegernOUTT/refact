@@ -1714,14 +1714,12 @@ mod tests {
         assert!(session.active_command.model_override.is_none());
         assert!(session.active_command.allowed_tools.is_empty());
         assert!(session.active_command.name.is_empty());
-        assert!(session.active_command.source_kind.is_empty());
     }
 
     #[test]
     fn test_active_command_stored_and_cleared() {
         let mut session = make_session();
         session.active_command = ActiveCommandContext {
-            source_kind: "skill".to_string(),
             name: "my-agent".to_string(),
             allowed_tools: vec!["cat".to_string()],
             model_override: Some("gpt-4".to_string()),

@@ -667,7 +667,6 @@ pub struct ChatSession {
 
 #[derive(Debug, Clone, Default)]
 pub struct ActiveCommandContext {
-    pub source_kind: String,
     pub name: String,
     pub allowed_tools: Vec<String>,
     pub model_override: Option<String>,

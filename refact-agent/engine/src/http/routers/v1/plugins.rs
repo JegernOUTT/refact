@@ -3,7 +3,7 @@ use axum::Extension;
 use axum::extract::Path;
 use axum::response::Json;
 use hyper::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::RwLock as ARwLock;
 
@@ -25,13 +25,6 @@ pub struct InstallPluginRequest {
     pub marketplace: String,
 }
 
-#[derive(Serialize)]
-pub struct MarketplaceSummary {
-    pub name: String,
-    pub source: String,
-    pub added_at: String,
-    pub plugin_count: usize,
-}
 
 pub async fn handle_list_marketplaces(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,

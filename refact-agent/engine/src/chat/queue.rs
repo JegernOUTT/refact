@@ -451,7 +451,6 @@ pub async fn process_command_queue(
                             content = serde_json::Value::String(expanded.expanded_text);
                             let mut session = session_arc.lock().await;
                             session.active_command = ActiveCommandContext {
-                                source_kind: String::new(),
                                 name: expanded.source_command,
                                 allowed_tools: expanded.allowed_tools,
                                 model_override: expanded.model_override,

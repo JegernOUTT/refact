@@ -1017,26 +1017,26 @@ pub async fn handle_v1_ext_hooks_delete_by_index(
     json_response(StatusCode::OK, &serde_json::json!({"ok": true}))
 }
 
-fn validate_name_clean(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('.')
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains("..")
-}
-
-fn build_skill_roundtrip(name: &str, description: &str, body: &str) -> String {
-    let mut map = serde_yaml::Mapping::new();
-    map.insert(serde_yaml::Value::String("name".to_string()), serde_yaml::Value::String(name.to_string()));
-    map.insert(serde_yaml::Value::String("description".to_string()), serde_yaml::Value::String(description.to_string()));
-    let fm = serde_yaml::Value::Mapping(map);
-    serialize_md_content(&fm, body).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ext::config_dirs::ExtDirs;
+
+    fn validate_name_clean(name: &str) -> bool {
+        !name.is_empty()
+            && !name.starts_with('.')
+            && !name.contains('/')
+            && !name.contains('\\')
+            && !name.contains("..")
+    }
+
+    fn build_skill_roundtrip(name: &str, description: &str, body: &str) -> String {
+        let mut map = serde_yaml::Mapping::new();
+        map.insert(serde_yaml::Value::String("name".to_string()), serde_yaml::Value::String(name.to_string()));
+        map.insert(serde_yaml::Value::String("description".to_string()), serde_yaml::Value::String(description.to_string()));
+        let fm = serde_yaml::Value::Mapping(map);
+        serialize_md_content(&fm, body).unwrap_or_default()
+    }
 
     #[test]
     fn test_validate_name_valid() {

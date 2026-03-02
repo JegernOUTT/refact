@@ -32,7 +32,7 @@ pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), 
         .map_err(|e| format!("Failed to rename: {}", e))
 }
 
-use super::types::{ActiveCommandContext, ThreadParams, SessionState, ChatSession};
+use super::types::{ThreadParams, SessionState, ChatSession};
 use super::config::timeouts;
 use super::SessionsMap;
 
@@ -2465,6 +2465,7 @@ pub async fn handle_v1_trajectories_subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::types::ActiveCommandContext;
 
     #[test]
     fn test_validate_trajectory_id_rejects_path_traversal() {
