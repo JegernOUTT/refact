@@ -12,7 +12,7 @@ use super::system_context::{
     self, create_instruction_files_message, create_memories_message, gather_system_context,
     generate_git_info_prompt, gather_git_info, PROJECT_CONTEXT_MARKER,
 };
-use crate::ext::skills_context::{build_skills_context_messages_tracked, SkillsTrackingInfo, SKILLS_CONTEXT_MARKER};
+use crate::ext::skills_context::{build_skills_context_messages_tracked, build_skills_prompt_text, SkillsTrackingInfo, SKILLS_CONTEXT_MARKER};
 use crate::yaml_configs::project_information::load_project_information_config;
 use crate::call_validation::{ChatMessage, ChatContent, ContextFile, canonical_mode_id};
 use crate::tasks::storage::infer_task_id_from_chat_id;
@@ -317,6 +317,15 @@ pub async fn system_prompt_add_extra_instructions(
             }
         } else {
             system_prompt = system_prompt.replace("%PROJECT_SUMMARY%", "");
+        }
+    }
+
+    if system_prompt.contains("%SKILLS_INSTRUCTIONS%") {
+        if include_project_info {
+            let skills_text = build_skills_prompt_text(gcx.clone()).await;
+            system_prompt = system_prompt.replace("%SKILLS_INSTRUCTIONS%", &skills_text);
+        } else {
+            system_prompt = system_prompt.replace("%SKILLS_INSTRUCTIONS%", "");
         }
     }
 

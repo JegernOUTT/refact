@@ -74,9 +74,9 @@ pub async fn expand_skill_includes(body: &str, skill_dir: &Path) -> String {
     new_lines.join("\n")
 }
 
-async fn build_skills_index_from_dirs(ext_dirs: &ExtDirs) -> String {
+pub async fn build_skills_index_from_dirs(ext_dirs: &ExtDirs) -> String {
     let indices = load_skill_indices(ext_dirs).await;
-    let displayable: Vec<_> = indices.iter().filter(|s| s.user_invocable).collect();
+    let displayable: Vec<_> = indices.iter().filter(|s| s.user_invocable && !s.disable_model_invocation).collect();
     if displayable.is_empty() {
         return String::new();
     }
@@ -88,6 +88,42 @@ async fn build_skills_index_from_dirs(ext_dirs: &ExtDirs) -> String {
     for skill in &displayable {
         lines.push(format!("- **{}**: {}", skill.name, skill.description));
     }
+    lines.join("\n")
+}
+
+pub async fn build_skills_prompt_text(gcx: Arc<ARwLock<GlobalContext>>) -> String {
+    let config = load_skills_config(gcx.clone()).await;
+    if matches!(config.auto_trigger, SkillsAutoTrigger::Off) {
+        return String::new();
+    }
+    let ext_dirs = get_ext_dirs(gcx).await;
+    let indices = load_skill_indices(&ext_dirs).await;
+    let displayable: Vec<_> = indices.iter()
+        .filter(|s| s.user_invocable && !s.disable_model_invocation)
+        .collect();
+    if displayable.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec![
+        "## Skills".to_string(),
+        String::new(),
+        "You have access to skills — specialized instruction sets that guide you through specific workflows.".to_string(),
+        String::new(),
+        "### Available Skills".to_string(),
+        "The following skills are available. You can activate any skill using the `activate_skill(name)` tool when it's relevant to the user's request. Users can also invoke skills directly with `/skill-name`.".to_string(),
+        String::new(),
+    ];
+    for skill in &displayable {
+        lines.push(format!("- **{}**: {}", skill.name, skill.description));
+    }
+    lines.extend([
+        String::new(),
+        "### How Skills Work".to_string(),
+        "- Call `activate_skill(name=\"skill-name\")` to load a skill's full instructions into context".to_string(),
+        "- Once activated, the skill's instructions guide your approach and its allowed-tools are auto-approved".to_string(),
+        "- Use `deactivate_skill()` to clear active skill state when done".to_string(),
+        "- Skills with `disable-model-invocation` are user-only (not listed above)".to_string(),
+    ]);
     lines.join("\n")
 }
 
@@ -116,24 +152,8 @@ async fn build_context_messages_from_dirs(
 
     let indices = load_skill_indices(ext_dirs).await;
     let available_count = indices.len();
-    let index_str = build_skills_index_from_dirs(ext_dirs).await;
 
     let mut context_files: Vec<ContextFile> = Vec::new();
-
-    if !index_str.is_empty() {
-        let line_count = index_str.lines().count().max(1);
-        context_files.push(ContextFile {
-            file_name: "skills://index".to_string(),
-            file_content: index_str,
-            line1: 1,
-            line2: line_count,
-            file_rev: None,
-            symbols: vec![],
-            gradient_type: 0,
-            usefulness: 80.0,
-            skip_pp: true,
-        });
-    }
 
     let skills_to_load: Vec<SkillFull> = if matches!(mode, SkillsAutoTrigger::IndexOnly) {
         vec![]
@@ -491,7 +511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skills_context_messages_include_index() {
+    async fn test_skills_context_messages_no_index_in_context_files() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
             tmp.path(),
@@ -503,16 +523,12 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "unrelated message", None, SkillsAutoTrigger::InjectFull).await;
-        assert!(!msgs.is_empty(), "Skills index should always be included when skills exist");
-        assert_eq!(msgs[0].tool_call_id, SKILLS_CONTEXT_MARKER);
-
-        let files = match &msgs[0].content {
-            crate::call_validation::ChatContent::ContextFiles(f) => f,
-            _ => panic!("Expected ContextFiles"),
-        };
-        let index_file = files.iter().find(|f| f.file_name == "skills://index");
-        assert!(index_file.is_some(), "Index file should be present");
-        assert!(index_file.unwrap().file_content.contains("test-skill"));
+        for msg in &msgs {
+            if let crate::call_validation::ChatContent::ContextFiles(files) = &msg.content {
+                let index_file = files.iter().find(|f| f.file_name == "skills://index");
+                assert!(index_file.is_none(), "skills://index must not be emitted as ContextFile (it is now in system prompt)");
+            }
+        }
     }
 
     #[tokio::test]
@@ -529,7 +545,7 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("empty-body"), SkillsAutoTrigger::InjectFull).await;
-        assert!(!msgs.is_empty(), "Should still return index even with empty skill body");
+        assert!(!msgs.is_empty(), "Should return skill body ContextFile for explicit invocation");
     }
 
     #[tokio::test]
@@ -551,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skills_context_mode_index_only_injects_index_not_body() {
+    async fn test_skills_context_mode_index_only_injects_no_context_files() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
             tmp.path(),
@@ -570,16 +586,9 @@ mod tests {
         )
         .await;
 
-        assert!(!msgs.is_empty(), "IndexOnly must still inject the skills index");
-        let files = match &msgs[0].content {
-            crate::call_validation::ChatContent::ContextFiles(f) => f,
-            _ => panic!("Expected ContextFiles"),
-        };
-        let index_file = files.iter().find(|f| f.file_name == "skills://index");
-        assert!(index_file.is_some(), "Index file must be present in index_only mode");
-        let skill_body_file = files.iter().find(|f| f.file_name == "skill://security-review");
-        assert!(skill_body_file.is_none(), "Skill body must not be injected in index_only mode");
+        assert!(msgs.is_empty(), "IndexOnly must not inject any ContextFiles (index is in system prompt)");
         assert!(tracking.included_names.is_empty(), "No skills included in index_only mode");
+        assert!(tracking.available_count > 0, "Tracking must still report available skills");
     }
 
     #[tokio::test]
@@ -613,7 +622,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skills_context_index_building_deduplicated() {
+    async fn test_skills_index_excludes_disable_model_invocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(
+            tmp.path(),
+            "user-skill",
+            "name: user-skill\ndescription: User invocable skill\nuser-invocable: true\ndisable-model-invocation: false",
+            "Body",
+        )
+        .await;
+        write_skill(
+            tmp.path(),
+            "model-disabled",
+            "name: model-disabled\ndescription: Model disabled skill\nuser-invocable: true\ndisable-model-invocation: true",
+            "Body",
+        )
+        .await;
+
+        let ext_dirs = make_ext_dirs(tmp.path());
+        let index = build_skills_index_from_dirs(&ext_dirs).await;
+        assert!(index.contains("user-skill"), "user-invocable skill must appear in index");
+        assert!(!index.contains("model-disabled"), "disable-model-invocation skill must not appear in index");
+    }
+
+    #[tokio::test]
+    async fn test_build_skills_context_no_skills_index_in_msgs() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
             tmp.path(),
@@ -624,18 +657,97 @@ mod tests {
         .await;
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let index_direct = build_skills_index_from_dirs(&ext_dirs).await;
         let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", None, SkillsAutoTrigger::InjectFull).await;
 
+        for msg in &msgs {
+            if let crate::call_validation::ChatContent::ContextFiles(files) = &msg.content {
+                let index_file = files.iter().find(|f| f.file_name == "skills://index");
+                assert!(index_file.is_none(), "skills://index must not be emitted as ContextFile");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_skills_prompt_text_returns_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(
+            tmp.path(),
+            "my-skill",
+            "name: my-skill\ndescription: Does something useful",
+            "Body",
+        )
+        .await;
+        write_skill(
+            tmp.path(),
+            "hidden-skill",
+            "name: hidden-skill\ndescription: Should be hidden\ndisable-model-invocation: true",
+            "Body",
+        )
+        .await;
+
+        let ext_dirs = make_ext_dirs(tmp.path());
+        let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
+        let displayable: Vec<_> = indices.iter()
+            .filter(|s| s.user_invocable && !s.disable_model_invocation)
+            .collect();
+        assert!(!displayable.is_empty(), "Expected at least one displayable skill");
+
+        let mut lines = vec![
+            "## Skills".to_string(),
+            String::new(),
+            "You have access to skills — specialized instruction sets that guide you through specific workflows.".to_string(),
+            String::new(),
+            "### Available Skills".to_string(),
+            "The following skills are available. You can activate any skill using the `activate_skill(name)` tool when it's relevant to the user's request. Users can also invoke skills directly with `/skill-name`.".to_string(),
+            String::new(),
+        ];
+        for skill in &displayable {
+            lines.push(format!("- **{}**: {}", skill.name, skill.description));
+        }
+        lines.extend([
+            String::new(),
+            "### How Skills Work".to_string(),
+        ]);
+        let prompt_text = lines.join("\n");
+
+        assert!(prompt_text.contains("## Skills"));
+        assert!(prompt_text.contains("### Available Skills"));
+        assert!(prompt_text.contains("### How Skills Work"));
+        assert!(prompt_text.contains("**my-skill**"));
+        assert!(prompt_text.contains("Does something useful"));
+        assert!(!prompt_text.contains("hidden-skill"), "disable-model-invocation skills must not appear");
+        assert!(prompt_text.contains("activate_skill"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_bodies_still_emitted_as_context_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(
+            tmp.path(),
+            "security-review",
+            "name: security-review\ndescription: reviews code for security vulnerabilities auditing",
+            "Full security review body content",
+        )
+        .await;
+
+        let ext_dirs = make_ext_dirs(tmp.path());
+        let (msgs, tracking) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "security vulnerabilities auditing code review",
+            None,
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
+
+        assert!(!msgs.is_empty(), "Skill bodies must still be emitted as ContextFiles");
         let files = match &msgs[0].content {
             crate::call_validation::ChatContent::ContextFiles(f) => f,
             _ => panic!("Expected ContextFiles"),
         };
-        let index_via_msgs = files.iter().find(|f| f.file_name == "skills://index").unwrap();
-        assert_eq!(
-            index_direct, index_via_msgs.file_content,
-            "Index from build_skills_index_from_dirs must match index in context messages"
-        );
+        let skill_body = files.iter().find(|f| f.file_name == "skill://security-review");
+        assert!(skill_body.is_some(), "Skill body ContextFile must be present");
+        assert!(skill_body.unwrap().file_content.contains("Full security review body content"));
+        assert!(tracking.included_names.contains(&"security-review".to_string()));
     }
 
     #[test]

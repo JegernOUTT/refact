@@ -80,6 +80,8 @@ prompt: |
 
   %PROJECT_SUMMARY%
 
+  %SKILLS_INSTRUCTIONS%
+
   %GIT_INFO%
 
 allow_integrations: true

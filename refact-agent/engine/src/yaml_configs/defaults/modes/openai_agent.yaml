@@ -204,6 +204,8 @@ override:
 
     %PROJECT_SUMMARY%
 
+    %SKILLS_INSTRUCTIONS%
+
     %PROJECT_CONFIGS%
 
     %GIT_INFO%

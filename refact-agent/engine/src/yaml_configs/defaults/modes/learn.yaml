@@ -77,6 +77,8 @@ prompt: |
 
   %PROJECT_SUMMARY%
 
+  %SKILLS_INSTRUCTIONS%
+
 allow_integrations: false
 allow_mcp: true
 allow_subagents: false
