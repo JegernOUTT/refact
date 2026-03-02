@@ -136,6 +136,7 @@ mod v1_browser;
 mod stats;
 mod plugins;
 mod skills_status;
+mod mcp_server_info;
 
 use crate::http::routers::v1::ext_management::{
     handle_v1_ext_registry,
@@ -162,6 +163,7 @@ use crate::http::routers::v1::plugins::{
     handle_list_installed, handle_uninstall_plugin,
 };
 use crate::http::routers::v1::skills_status::handle_v1_skills_status;
+use crate::http::routers::v1::mcp_server_info::{handle_v1_mcp_server_info, handle_v1_mcp_server_reconnect};
 use crate::http::routers::v1::v1_browser::{
     handle_browser_start, handle_browser_stop, handle_browser_screenshot,
     handle_browser_context, handle_browser_context_commit,
@@ -426,7 +428,9 @@ pub fn make_v1_router() -> Router {
         .route("/plugins/marketplace/:name/plugins", get(handle_list_marketplace_plugins))
         .route("/plugins/install", post(handle_install_plugin))
         .route("/plugins/installed", get(handle_list_installed))
-        .route("/plugins/installed/:name", delete(handle_uninstall_plugin));
+        .route("/plugins/installed/:name", delete(handle_uninstall_plugin))
+        .route("/mcp-server-info", get(handle_v1_mcp_server_info))
+        .route("/mcp-server-reconnect", post(handle_v1_mcp_server_reconnect));
 
     builder.layer(axum::middleware::from_fn(telemetry_middleware))
 }

@@ -182,6 +182,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 launched_cfg: new_cfg_value.clone(),
                 mcp_client: None,
                 mcp_tools: Vec::new(),
+                mcp_resources: Vec::new(),
+                mcp_prompts: Vec::new(),
+                server_info: None,
                 startup_task_handles: None,
                 health_task_handle: None,
                 logs: Arc::new(AMutex::new(Vec::new())),
@@ -336,7 +339,42 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
             let client_arc = {
                 let peer = client.peer().clone();
+                let server_info = client.peer_info().clone();
                 *peer_arc.lock().await = Some(peer);
+
+                let capabilities = server_info.capabilities.clone();
+
+                let resources = if capabilities.resources.is_some() {
+                    match timeout(Duration::from_secs(request_timeout), client.list_all_resources()).await {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => {
+                            add_log_entry(logs.clone(), format!("Failed to list resources: {:?}", e)).await;
+                            vec![]
+                        }
+                        Err(_) => {
+                            add_log_entry(logs.clone(), "List resources timed out".to_string()).await;
+                            vec![]
+                        }
+                    }
+                } else {
+                    vec![]
+                };
+
+                let prompts = if capabilities.prompts.is_some() {
+                    match timeout(Duration::from_secs(request_timeout), client.list_all_prompts()).await {
+                        Ok(Ok(p)) => p,
+                        Ok(Err(e)) => {
+                            add_log_entry(logs.clone(), format!("Failed to list prompts: {:?}", e)).await;
+                            vec![]
+                        }
+                        Err(_) => {
+                            add_log_entry(logs.clone(), "List prompts timed out".to_string()).await;
+                            vec![]
+                        }
+                    }
+                } else {
+                    vec![]
+                };
 
                 let mut session_locked = session_arc_clone.lock().await;
                 let session_downcasted = session_locked
@@ -347,6 +385,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 let arc = Arc::new(AMutex::new(Some(client)));
                 session_downcasted.mcp_client = Some(arc.clone());
                 session_downcasted.mcp_tools = tools;
+                session_downcasted.mcp_resources = resources;
+                session_downcasted.mcp_prompts = prompts;
+                session_downcasted.server_info = Some(server_info);
                 session_downcasted.connection_status = MCPConnectionStatus::Connected;
                 session_downcasted.last_successful_connection = Some(Instant::now());
                 arc
@@ -545,6 +586,9 @@ mod tests {
             launched_cfg: serde_json::Value::Null,
             mcp_client: None,
             mcp_tools: Vec::new(),
+            mcp_resources: Vec::new(),
+            mcp_prompts: Vec::new(),
+            server_info: None,
             startup_task_handles: None,
             health_task_handle: None,
             logs: Arc::new(AMutex::new(Vec::new())),

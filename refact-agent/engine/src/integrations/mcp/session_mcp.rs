@@ -7,7 +7,7 @@ use tokio::sync::Mutex as AMutex;
 use tokio::task::{AbortHandle, JoinHandle};
 use rmcp::{RoleClient, service::RunningService};
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::Tool as McpTool;
+use rmcp::model::{Tool as McpTool, Resource as McpResource, Prompt as McpPrompt, ServerInfo};
 use rmcp::service::Peer;
 use tokio::time::{timeout, sleep, Duration};
 use serde::{Deserialize, Serialize};
@@ -146,6 +146,9 @@ pub struct SessionMCP {
     pub launched_cfg: serde_json::Value,
     pub mcp_client: Option<Arc<AMutex<Option<McpRunningService>>>>,
     pub mcp_tools: Vec<McpTool>,
+    pub mcp_resources: Vec<McpResource>,
+    pub mcp_prompts: Vec<McpPrompt>,
+    pub server_info: Option<ServerInfo>,
     pub startup_task_handles: Option<(Arc<AMutex<Option<JoinHandle<()>>>>, AbortHandle)>,
     pub health_task_handle: Option<AbortHandle>,
     pub logs: Arc<AMutex<Vec<String>>>,
@@ -280,6 +283,9 @@ mod tests {
             launched_cfg: serde_json::Value::Null,
             mcp_client: None,
             mcp_tools: Vec::new(),
+            mcp_resources: Vec::new(),
+            mcp_prompts: Vec::new(),
+            server_info: None,
             startup_task_handles: None,
             health_task_handle: None,
             logs: Arc::new(AMutex::new(Vec::new())),
