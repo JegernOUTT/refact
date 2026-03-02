@@ -142,12 +142,78 @@ impl ClientHandler for McpClientHandler {
     }
 
     fn on_resource_list_changed(&self) -> impl Future<Output = ()> + Send + '_ {
+        let peer_arc = self.peer_arc.clone();
+        let session_arc = self.session_arc.clone();
         let logs = self.logs.clone();
         let debug_name = self.debug_name.clone();
+        let request_timeout = self.request_timeout;
+        let gcx = self.gcx.clone();
         async move {
-            let msg = "resources/list_changed notification received".to_string();
-            tracing::info!("{} for {}", msg, debug_name);
-            add_log_entry(logs, msg).await;
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(200)).await;
+                let msg = "resources/list_changed: re-fetching resource list".to_string();
+                tracing::info!("{} for {}", msg, debug_name);
+                add_log_entry(logs.clone(), msg).await;
+
+                let peer = {
+                    let locked = peer_arc.lock().await;
+                    locked.clone()
+                };
+                let peer = match peer {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!("resources/list_changed: no peer available for {}", debug_name);
+                        return;
+                    }
+                };
+
+                let new_resources = match timeout(
+                    Duration::from_secs(request_timeout),
+                    peer.list_all_resources(),
+                ).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        let msg = format!("resources/list_changed: failed to list resources: {:?}", e);
+                        tracing::error!("{} for {}", msg, debug_name);
+                        add_log_entry(logs, msg).await;
+                        return;
+                    }
+                    Err(_) => {
+                        let msg = format!("resources/list_changed: list_resources timed out after {}s", request_timeout);
+                        tracing::error!("{} for {}", msg, debug_name);
+                        add_log_entry(logs, msg).await;
+                        return;
+                    }
+                };
+
+                let (old_count, config_path) = {
+                    let mut session_locked = session_arc.lock().await;
+                    let session_downcasted = session_locked
+                        .as_any_mut()
+                        .downcast_mut::<SessionMCP>()
+                        .unwrap();
+                    let old_count = session_downcasted.mcp_resources.len();
+                    session_downcasted.mcp_resources = new_resources.clone();
+                    (old_count, session_downcasted.config_path.clone())
+                };
+
+                let msg = format!(
+                    "resources/list_changed: {} → {} resources",
+                    old_count, new_resources.len()
+                );
+                tracing::info!("{} for {}", msg, debug_name);
+                add_log_entry(logs.clone(), msg).await;
+
+                if !new_resources.is_empty() {
+                    tokio::spawn(super::mcp_resources::index_mcp_resources(
+                        gcx,
+                        config_path,
+                        peer,
+                        new_resources,
+                        logs,
+                    ));
+                }
+            });
         }
     }
 

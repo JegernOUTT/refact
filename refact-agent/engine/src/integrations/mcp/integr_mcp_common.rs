@@ -339,45 +339,45 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             };
             let tools_len = tools.len();
 
+            let peer = client.peer().clone();
+            let server_info = client.peer_info().clone();
+            *peer_arc.lock().await = Some(peer.clone());
+
+            let capabilities = server_info.capabilities.clone();
+
+            let resources = if capabilities.resources.is_some() {
+                match timeout(Duration::from_secs(request_timeout), client.list_all_resources()).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        add_log_entry(logs.clone(), format!("Failed to list resources: {:?}", e)).await;
+                        vec![]
+                    }
+                    Err(_) => {
+                        add_log_entry(logs.clone(), "List resources timed out".to_string()).await;
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            };
+
+            let prompts = if capabilities.prompts.is_some() {
+                match timeout(Duration::from_secs(request_timeout), client.list_all_prompts()).await {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => {
+                        add_log_entry(logs.clone(), format!("Failed to list prompts: {:?}", e)).await;
+                        vec![]
+                    }
+                    Err(_) => {
+                        add_log_entry(logs.clone(), "List prompts timed out".to_string()).await;
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            };
+
             let client_arc = {
-                let peer = client.peer().clone();
-                let server_info = client.peer_info().clone();
-                *peer_arc.lock().await = Some(peer);
-
-                let capabilities = server_info.capabilities.clone();
-
-                let resources = if capabilities.resources.is_some() {
-                    match timeout(Duration::from_secs(request_timeout), client.list_all_resources()).await {
-                        Ok(Ok(r)) => r,
-                        Ok(Err(e)) => {
-                            add_log_entry(logs.clone(), format!("Failed to list resources: {:?}", e)).await;
-                            vec![]
-                        }
-                        Err(_) => {
-                            add_log_entry(logs.clone(), "List resources timed out".to_string()).await;
-                            vec![]
-                        }
-                    }
-                } else {
-                    vec![]
-                };
-
-                let prompts = if capabilities.prompts.is_some() {
-                    match timeout(Duration::from_secs(request_timeout), client.list_all_prompts()).await {
-                        Ok(Ok(p)) => p,
-                        Ok(Err(e)) => {
-                            add_log_entry(logs.clone(), format!("Failed to list prompts: {:?}", e)).await;
-                            vec![]
-                        }
-                        Err(_) => {
-                            add_log_entry(logs.clone(), "List prompts timed out".to_string()).await;
-                            vec![]
-                        }
-                    }
-                } else {
-                    vec![]
-                };
-
                 let mut session_locked = session_arc_clone.lock().await;
                 let session_downcasted = session_locked
                     .as_any_mut()
@@ -387,13 +387,23 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 let arc = Arc::new(AMutex::new(Some(client)));
                 session_downcasted.mcp_client = Some(arc.clone());
                 session_downcasted.mcp_tools = tools;
-                session_downcasted.mcp_resources = resources;
+                session_downcasted.mcp_resources = resources.clone();
                 session_downcasted.mcp_prompts = prompts;
                 session_downcasted.server_info = Some(server_info);
                 session_downcasted.connection_status = MCPConnectionStatus::Connected;
                 session_downcasted.last_successful_connection = Some(Instant::now());
                 arc
             };
+
+            if !resources.is_empty() {
+                tokio::spawn(super::mcp_resources::index_mcp_resources(
+                    gcx_weak.clone(),
+                    config_path.clone(),
+                    peer,
+                    resources,
+                    logs.clone(),
+                ));
+            }
 
             log(
                 tracing::Level::INFO,
