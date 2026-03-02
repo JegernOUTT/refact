@@ -652,4 +652,25 @@ describe("ComboBox slash commands", () => {
     await user.keyboard("{Escape}");
     expect(app.queryByText("/optimize")).toBeNull();
   });
+
+  test("selecting slash command without argument_hint via Enter auto-submits", async () => {
+    const onSubmitSpy = vi.fn();
+    const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    await user.keyboard("{ArrowDown}{Enter}");
+    await waitFor(() => {
+      expect(onSubmitSpy).toHaveBeenCalled();
+    });
+  });
+
+  test("selecting slash command with argument_hint via Enter does not auto-submit", async () => {
+    const onSubmitSpy = vi.fn();
+    const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    await user.keyboard("{Enter}");
+    await pause(50);
+    expect(onSubmitSpy).not.toHaveBeenCalled();
+  });
 });

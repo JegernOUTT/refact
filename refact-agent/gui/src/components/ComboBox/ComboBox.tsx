@@ -178,6 +178,12 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
           onHelpClick();
         } else {
           handleReplace(command);
+          if (event.key === "Enter") {
+            const detail = commands.completion_details?.[command];
+            if (detail !== undefined && !detail.argument_hint) {
+              setTimeout(() => onSubmit(event), 0);
+            }
+          }
         }
       }
 
@@ -188,6 +194,8 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
     },
     [
       onHelpClick,
+      onSubmit,
+      commands,
       closeCombobox,
       escapeKeyPressed,
       combobox,
