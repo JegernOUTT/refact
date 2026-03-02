@@ -139,10 +139,6 @@ pub async fn mcp_integr_tools(
             tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
             return vec![];
         }
-        let reconnecting = matches!(
-            &session_downcasted.connection_status,
-            MCPConnectionStatus::Reconnecting { .. }
-        );
         for tool in session_downcasted.mcp_tools.iter() {
             result.push(Box::new(ToolMCP {
                 common: common.clone(),
@@ -150,7 +146,6 @@ pub async fn mcp_integr_tools(
                 mcp_client: session_downcasted.mcp_client.clone().unwrap(),
                 mcp_tool: tool.clone(),
                 request_timeout,
-                reconnecting,
             }));
         }
     }

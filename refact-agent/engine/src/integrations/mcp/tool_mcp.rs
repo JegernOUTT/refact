@@ -12,7 +12,7 @@ use crate::scratchpads::multimodality::MultimodalElement;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation};
-use super::session_mcp::{McpRunningService, add_log_entry, mcp_session_wait_startup};
+use super::session_mcp::{McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup};
 
 pub struct ToolMCP {
     pub common: IntegrationCommon,
@@ -20,7 +20,6 @@ pub struct ToolMCP {
     pub mcp_client: Arc<AMutex<Option<McpRunningService>>>,
     pub mcp_tool: McpTool,
     pub request_timeout: u64,
-    pub reconnecting: bool,
 }
 
 #[async_trait]
@@ -31,13 +30,6 @@ impl Tool for ToolMCP {
         tool_call_id: &String,
         args: &HashMap<String, serde_json::Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        if self.reconnecting {
-            return Err(format!(
-                "MCP server '{}' is reconnecting, please wait",
-                self.mcp_tool.name
-            ));
-        }
-
         let session_key = format!("{}", self.config_path);
         let (gcx, current_model) = {
             let ccx_locked = ccx.lock().await;
@@ -62,6 +54,29 @@ impl Tool for ToolMCP {
             resolve_chat_model(caps, &current_model).is_ok_and(|m| m.supports_multimodality)
         });
         mcp_session_wait_startup(session.clone()).await;
+
+        {
+            let mut session_locked = session.lock().await;
+            let session_downcasted = session_locked
+                .as_any_mut()
+                .downcast_mut::<super::session_mcp::SessionMCP>()
+                .unwrap();
+            match &session_downcasted.connection_status {
+                MCPConnectionStatus::Reconnecting { .. } => {
+                    return Err(format!(
+                        "MCP server '{}' is reconnecting, please try again shortly",
+                        self.mcp_tool.name
+                    ));
+                }
+                MCPConnectionStatus::Failed { message } => {
+                    return Err(format!(
+                        "MCP server '{}' connection failed: {}",
+                        self.mcp_tool.name, message
+                    ));
+                }
+                _ => {}
+            }
+        }
 
         let json_args = serde_json::json!(args);
         tracing::info!(
@@ -88,30 +103,31 @@ impl Tool for ToolMCP {
         )
         .await;
 
-        let call_start = std::time::Instant::now();
-        let result_probably = {
+        let peer = {
             let mcp_client_locked = self.mcp_client.lock().await;
-            if let Some(client) = &*mcp_client_locked {
-                match timeout(
-                    Duration::from_secs(self.request_timeout),
-                    client.call_tool(CallToolRequestParam {
-                        name: self.mcp_tool.name.clone(),
-                        arguments: match json_args {
-                            serde_json::Value::Object(map) => Some(map),
-                            _ => None,
-                        },
-                    }),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(rmcp::service::ServiceError::Timeout {
-                        timeout: Duration::from_secs(self.request_timeout),
-                    }),
-                }
-            } else {
-                return Err("MCP client is not available".to_string());
+            match &*mcp_client_locked {
+                Some(client) => client.peer().clone(),
+                None => return Err("MCP client is not available".to_string()),
             }
+        };
+
+        let call_start = std::time::Instant::now();
+        let result_probably = match timeout(
+            Duration::from_secs(self.request_timeout),
+            peer.call_tool(CallToolRequestParam {
+                name: self.mcp_tool.name.clone(),
+                arguments: match json_args {
+                    serde_json::Value::Object(map) => Some(map),
+                    _ => None,
+                },
+            }),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(rmcp::service::ServiceError::Timeout {
+                timeout: Duration::from_secs(self.request_timeout),
+            }),
         };
 
         let result_message = match result_probably {
@@ -248,6 +264,8 @@ impl Tool for ToolMCP {
                 format!("mcp_{}", stripped)
             } else if let Some(stripped) = yaml_name.strip_prefix("mcp_sse_") {
                 format!("mcp_{}", stripped)
+            } else if let Some(stripped) = yaml_name.strip_prefix("mcp_http_") {
+                format!("mcp_{}", stripped)
             } else {
                 yaml_name.to_string()
             };
@@ -315,7 +333,6 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
-            reconnecting: false,
         }
     }
 
@@ -332,7 +349,6 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
-            reconnecting: false,
         }
     }
 

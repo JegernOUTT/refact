@@ -21,7 +21,6 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
-            reconnecting: false,
         }
     }
 
@@ -177,7 +176,6 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
-            reconnecting: false,
         };
         let desc = tool.tool_description();
         assert_eq!(desc.description, "My special tool description");
@@ -196,9 +194,19 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
-            reconnecting: false,
         };
         let desc = tool.tool_description();
         assert_eq!(desc.description, "");
+    }
+
+    #[test]
+    fn test_mcp_http_prefix_stripped() {
+        let tool = make_tool_mcp(
+            "mcp_http_myserver.yaml",
+            json!({"type": "object", "properties": {}}),
+            "do_something",
+        );
+        let desc = tool.tool_description();
+        assert_eq!(desc.name, "mcp_myserver_do_something");
     }
 }
