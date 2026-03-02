@@ -464,6 +464,38 @@ source:
         let any_corrections = results_no_corrections.iter().any(|(_, had_corrections, _, _)| *had_corrections);
         assert!(!any_corrections, "Should detect no corrections when all tools succeeded cleanly");
     }
+
+    #[test]
+    fn test_allowed_tool_still_denied_if_tool_says_deny() {
+        use crate::tools::tools_description::MatchConfirmDenyResult;
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::DENY, None, true), "deny");
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::DENY, Some("auto"), true), "deny");
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::DENY, Some("ask"), true), "deny");
+    }
+
+    #[test]
+    fn test_allowed_tool_auto_approves_confirmation() {
+        use crate::tools::tools_description::MatchConfirmDenyResult;
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, None, true), "auto");
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("ask"), true), "auto");
+    }
+
+    #[test]
+    fn test_allowed_tool_respects_mode_deny() {
+        use crate::tools::tools_description::MatchConfirmDenyResult;
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("deny"), true), "deny");
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::PASS, Some("deny"), true), "deny");
+    }
+
+    #[test]
+    fn test_empty_allowed_tools_no_change() {
+        use crate::tools::tools_description::MatchConfirmDenyResult;
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, None, false), "ask");
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::PASS, None, false), "auto");
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("ask"), false), "ask");
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("auto"), false), "auto");
+        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("deny"), false), "deny");
+    }
 }
 
 pub async fn process_tool_calls_once(
@@ -732,6 +764,28 @@ fn format_openai_server_tool_result(tc: &ChatToolCall) -> String {
     out
 }
 
+fn compute_final_action(
+    tool_result: &crate::tools::tools_description::MatchConfirmDenyResult,
+    mode_action: Option<&str>,
+    is_auto_approved: bool,
+) -> &'static str {
+    use crate::tools::tools_description::MatchConfirmDenyResult;
+    if *tool_result == MatchConfirmDenyResult::DENY {
+        return "deny";
+    }
+    match mode_action {
+        Some("deny") => "deny",
+        _ if is_auto_approved => "auto",
+        Some("ask") => "ask",
+        Some("auto") => "auto",
+        _ => match tool_result {
+            MatchConfirmDenyResult::CONFIRMATION => "ask",
+            MatchConfirmDenyResult::PASS => "auto",
+            MatchConfirmDenyResult::DENY => "deny",
+        },
+    }
+}
+
 pub async fn check_tools_confirmation(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_calls: &[crate::call_validation::ChatToolCall],
@@ -779,10 +833,6 @@ pub async fn check_tools_confirmation(
             .collect::<indexmap::IndexMap<_, _>>();
 
     for tool_call in tool_calls {
-        if !allowed_tools.is_empty() && allowed_tools.contains(&tool_call.function.name) {
-            continue;
-        }
-
         let tool = match all_tools.get(&tool_call.function.name) {
             Some(t) => t,
             None => {
@@ -827,16 +877,9 @@ pub async fn check_tools_confirmation(
                     continue;
                 }
 
-                let final_action = match mode_action.as_deref() {
-                    Some("deny") => "deny",
-                    Some("ask") => "ask",
-                    Some("auto") => "auto",
-                    _ => match result.result {
-                        MatchConfirmDenyResult::CONFIRMATION => "ask",
-                        MatchConfirmDenyResult::PASS => "auto",
-                        MatchConfirmDenyResult::DENY => "deny",
-                    },
-                };
+                let is_auto_approved = !allowed_tools.is_empty()
+                    && allowed_tools.contains(&tool_call.function.name);
+                let final_action = compute_final_action(&result.result, mode_action.as_deref(), is_auto_approved);
 
                 let rule_text = match mode_action.as_deref() {
                     Some(action) => format!("mode policy: {}", action),
