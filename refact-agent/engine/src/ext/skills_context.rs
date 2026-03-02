@@ -172,9 +172,9 @@ async fn build_context_messages_from_dirs(
         vec![]
     } else if let Some(name) = explicit_skill {
         match load_skill_full(ext_dirs, name).await {
-            Some(full) if !full.index.disable_model_invocation => vec![full],
+            Some(full) if full.index.user_invocable && !full.index.disable_model_invocation => vec![full],
             Some(full) => {
-                tracing::warn!("Skipping explicit skill '{}': disable_model_invocation is true", full.index.name);
+                tracing::warn!("Skipping explicit skill '{}': user_invocable={}, disable_model_invocation={}", full.index.name, full.index.user_invocable, full.index.disable_model_invocation);
                 vec![]
             }
             None => vec![],
@@ -856,6 +856,22 @@ mod tests {
         let ext_dirs = make_ext_dirs(tmp.path());
         let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("locked-skill"), SkillsAutoTrigger::InjectFull).await;
         assert!(msgs.is_empty(), "disable_model_invocation=true must block explicit injection");
+    }
+
+    #[tokio::test]
+    async fn test_explicit_injection_rejects_non_invocable() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(
+            tmp.path(),
+            "non-invocable-skill",
+            "name: non-invocable-skill\ndescription: Non-invocable skill\nuser-invocable: false",
+            "Internal instructions",
+        )
+        .await;
+
+        let ext_dirs = make_ext_dirs(tmp.path());
+        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("non-invocable-skill"), SkillsAutoTrigger::InjectFull).await;
+        assert!(msgs.is_empty(), "user_invocable=false must block explicit injection");
     }
 
     #[tokio::test]

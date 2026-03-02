@@ -28,6 +28,9 @@ async fn activate_skill_inner(
     if !skill.index.user_invocable {
         return Err(format!("Skill '{}' is not available for activation", name));
     }
+    if skill.index.disable_model_invocation {
+        return Err(format!("Skill '{}' cannot be activated by the model", name));
+    }
     let body = expand_skill_includes(&skill.body, &skill.skill_dir).await;
     let line_count = body.lines().count().max(1);
     let cf = ContextFile {
@@ -69,7 +72,7 @@ impl Tool for ToolActivateSkill {
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
-        _tool_call_id: &String,
+        tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let name = match args.get("name") {
@@ -96,10 +99,9 @@ impl Tool for ToolActivateSkill {
             };
             if let Some(session_arc) = session_arc_opt {
                 let mut session = session_arc.lock().await;
-                // Find the assistant message that contains this activate_skill tool call
                 let started_at = session.messages.iter().rev()
                     .find(|m| m.role == "assistant" && m.tool_calls.as_ref().map_or(false, |tcs|
-                        tcs.iter().any(|tc| tc.function.name == "activate_skill")
+                        tcs.iter().any(|tc| tc.id == *tool_call_id)
                     ))
                     .map(|m| m.message_id.clone());
                 session.active_command.name = name.clone();
@@ -370,6 +372,81 @@ mod tests {
         let result: Vec<ContextEnum> = vec![];
         let has_context_file = result.iter().any(|e| matches!(e, ContextEnum::ContextFile(_)));
         assert!(!has_context_file, "deactivate_skill must not return ContextFile");
+    }
+
+    #[tokio::test]
+    async fn test_activate_rejects_disable_model_invocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(
+            tmp.path(),
+            "locked-skill",
+            "name: locked-skill\ndescription: Locked skill\nuser-invocable: true\ndisable-model-invocation: true",
+            "Sensitive instructions",
+        )
+        .await;
+
+        let ext_dirs = make_ext_dirs(tmp.path());
+        let result = activate_skill_inner(&ext_dirs, "locked-skill").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("cannot be activated by the model"),
+            "Expected 'cannot be activated by the model' in error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_activate_started_at_uses_exact_tool_call_id() {
+        use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction};
+
+        let make_assistant_msg = |msg_id: &str, call_id: &str| ChatMessage {
+            message_id: msg_id.to_string(),
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("".to_string()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: call_id.to_string(),
+                index: None,
+                function: ChatToolFunction {
+                    name: "activate_skill".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        };
+
+        let messages = vec![
+            make_assistant_msg("msg_1", "call_1"),
+            make_assistant_msg("msg_2", "call_2"),
+        ];
+
+        let tool_call_id = "call_2".to_string();
+        let started_at = messages.iter().rev()
+            .find(|m| m.role == "assistant" && m.tool_calls.as_ref().map_or(false, |tcs|
+                tcs.iter().any(|tc| tc.id == tool_call_id)
+            ))
+            .map(|m| m.message_id.clone());
+
+        assert_eq!(
+            started_at,
+            Some("msg_2".to_string()),
+            "Exact tool_call_id match must return msg_2, not msg_1"
+        );
+
+        let tool_call_id_first = "call_1".to_string();
+        let started_at_first = messages.iter().rev()
+            .find(|m| m.role == "assistant" && m.tool_calls.as_ref().map_or(false, |tcs|
+                tcs.iter().any(|tc| tc.id == tool_call_id_first)
+            ))
+            .map(|m| m.message_id.clone());
+
+        assert_eq!(
+            started_at_first,
+            Some("msg_1".to_string()),
+            "Exact tool_call_id match must return msg_1 for call_1"
+        );
     }
 
     #[tokio::test]
