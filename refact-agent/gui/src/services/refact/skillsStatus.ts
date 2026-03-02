@@ -5,6 +5,7 @@ export interface SkillsStatusResponse {
   skills_available: number;
   skills_included: string[];
   skills_enabled: boolean;
+  active_skill: string | null;
 }
 
 export const skillsStatusApi = createApi({

@@ -1,5 +1,5 @@
 import React from "react";
-import { Flex, Text } from "@radix-ui/themes";
+import { Badge, Flex, Text } from "@radix-ui/themes";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../../features/Pages/pagesSlice";
 import { useSkillsStatus } from "../../hooks/useSkillsStatus";
@@ -11,10 +11,9 @@ export type SkillsIndicatorProps = {
 
 export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
   const dispatch = useAppDispatch();
-  const { skillsEnabled, skillsAvailable, skillsIncluded } =
-    useSkillsStatus(chatId);
+  const { skillsAvailable, activeSkill } = useSkillsStatus(chatId);
 
-  if (!skillsEnabled || skillsAvailable === 0) {
+  if (activeSkill === null && skillsAvailable === 0) {
     return null;
   }
 
@@ -29,14 +28,10 @@ export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
     }
   };
 
-  const activeText =
-    skillsIncluded.length > 0
-      ? `${skillsIncluded.length} active (${skillsIncluded.join(", ")}) · `
-      : "";
-
   return (
     <Flex
       align="center"
+      gap="2"
       className={styles.indicator}
       role="button"
       tabIndex={0}
@@ -46,9 +41,27 @@ export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
       onKeyDown={handleKeyDown}
     >
       <Text size="1" color="gray">
-        🧠 Skills: {activeText}
-        {skillsAvailable} available
+        🧠
       </Text>
+      {activeSkill !== null ? (
+        <>
+          <Text size="1" color="gray">
+            Active skill:
+          </Text>
+          <Badge size="1" color="blue" variant="solid">
+            {activeSkill}
+          </Badge>
+          {skillsAvailable > 0 && (
+            <Text size="1" color="gray">
+              · {skillsAvailable} available
+            </Text>
+          )}
+        </>
+      ) : (
+        <Text size="1" color="gray">
+          Skills: {skillsAvailable} available
+        </Text>
+      )}
     </Flex>
   );
 };

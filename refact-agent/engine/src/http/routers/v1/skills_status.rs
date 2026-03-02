@@ -15,6 +15,7 @@ pub struct SkillsStatusResponse {
     pub skills_available: usize,
     pub skills_included: Vec<String>,
     pub skills_enabled: bool,
+    pub active_skill: Option<String>,
 }
 
 pub async fn handle_v1_skills_status(
@@ -30,10 +31,16 @@ pub async fn handle_v1_skills_status(
         return Err(ScratchError::new(StatusCode::NOT_FOUND, format!("chat_id {} not found", chat_id)));
     };
     let session = session_arc.lock().await;
+    let active_skill = if session.active_command.name.is_empty() {
+        None
+    } else {
+        Some(session.active_command.name.clone())
+    };
     let response = SkillsStatusResponse {
         skills_available: session.skills_available_count,
         skills_included: session.skills_included.clone(),
         skills_enabled: session.skills_available_count > 0,
+        active_skill,
     };
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -75,11 +82,13 @@ mod tests {
             skills_available: 3,
             skills_included: vec!["skill1".to_string()],
             skills_enabled: true,
+            active_skill: None,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["skills_available"], 3);
         assert_eq!(json["skills_enabled"], true);
         assert_eq!(json["skills_included"].as_array().unwrap().len(), 1);
+        assert!(json["active_skill"].is_null());
     }
 
     #[test]
@@ -88,11 +97,40 @@ mod tests {
             skills_available: 0,
             skills_included: vec![],
             skills_enabled: false,
+            active_skill: None,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["skills_available"], 0);
         assert_eq!(json["skills_enabled"], false);
         assert!(json["skills_included"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_skills_status_response_active_skill_set_when_command_active() {
+        let response = SkillsStatusResponse {
+            skills_available: 2,
+            skills_included: vec![],
+            skills_enabled: true,
+            active_skill: Some("my-skill".to_string()),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["active_skill"], "my-skill");
+    }
+
+    #[test]
+    fn test_skills_status_active_skill_from_session_active_command() {
+        use crate::chat::types::ActiveCommandContext;
+        let mut session = ChatSession::new("test-chat".to_string());
+        session.active_command = ActiveCommandContext {
+            name: "review-skill".to_string(),
+            ..Default::default()
+        };
+        let active_skill = if session.active_command.name.is_empty() {
+            None
+        } else {
+            Some(session.active_command.name.clone())
+        };
+        assert_eq!(active_skill, Some("review-skill".to_string()));
     }
 
     #[test]
