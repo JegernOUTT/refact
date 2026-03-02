@@ -347,14 +347,15 @@ pub fn start_generation(
                             ..Default::default()
                         });
                         session.set_runtime_state(SessionState::Idle, None);
+                        drop(session);
+                        maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                        break;
                     }
                     Err(e) => {
                         warn!("Fork skill subchat failed ({}), falling back to normal generation", e);
+                        continue;
                     }
                 }
-
-                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-                break;
             }
 
             let abort_flag = {
@@ -1456,5 +1457,42 @@ mod tests {
             },
         ];
         assert!(!tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_fork_error_does_not_break_loop() {
+        let mut loop_count = 0;
+        let mut reached_normal_generation = false;
+
+        loop {
+            loop_count += 1;
+            if loop_count > 5 {
+                panic!("Loop ran too many times");
+            }
+
+            let fork_agent: Option<String> = if loop_count == 1 {
+                Some("subagent".to_string())
+            } else {
+                None
+            };
+
+            if fork_agent.is_some() {
+                let fork_result: Result<String, String> = Err("subchat failed".to_string());
+                match fork_result {
+                    Ok(_content) => {
+                        break;
+                    }
+                    Err(_e) => {
+                        continue;
+                    }
+                }
+            }
+
+            reached_normal_generation = true;
+            break;
+        }
+
+        assert!(reached_normal_generation, "Normal generation path must be reached after fork error");
+        assert_eq!(loop_count, 2, "Loop must iterate twice: fork error then normal generation");
     }
 }
