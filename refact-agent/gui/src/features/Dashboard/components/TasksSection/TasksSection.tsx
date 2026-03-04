@@ -1,6 +1,7 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Badge, Flex, IconButton, Skeleton, Text, Tooltip } from "@radix-ui/themes";
 import { ChevronDownIcon, ChevronUpIcon, ChevronRightIcon, PlusIcon } from "@radix-ui/react-icons";
+import { Virtuoso } from "react-virtuoso";
 import { useAppDispatch } from "../../../../hooks";
 import { push } from "../../../Pages/pagesSlice";
 import { useListTasksQuery, useCreateTaskMutation } from "../../../../services/refact/tasks";
@@ -12,7 +13,6 @@ import styles from "./TasksSection.module.css";
 
 type TasksSectionProps = {
   breakpoint: DashboardBreakpoint;
-  compact?: boolean;
 };
 
 const INITIAL_VISIBLE = 4;
@@ -43,14 +43,13 @@ function getStatusColor(status: string): "blue" | "purple" | "amber" | "green" |
 
 export const TasksSection: React.FC<TasksSectionProps> = ({
   breakpoint,
-  compact,
 }) => {
   const dispatch = useAppDispatch();
   const { data: tasks, isLoading, isError } = useListTasksQuery(undefined);
   const [createTask, { isLoading: isCreatingTask }] = useCreateTaskMutation();
-  const [showAll, setShowAll] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
-  const sortedTasks = React.useMemo(() => {
+  const sortedTasks = useMemo(() => {
     if (!tasks) return [];
     const priority = new Map([
       ["active", 0], ["planning", 1], ["paused", 2], ["completed", 3], ["abandoned", 4],
@@ -81,8 +80,8 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
       });
   }, [createTask, dispatch]);
 
-  const toggleShowAll = useCallback(() => {
-    setShowAll((prev) => !prev);
+  const toggleExpand = useCallback(() => {
+    setExpanded((prev) => !prev);
   }, []);
 
   if (isLoading) {
@@ -91,7 +90,11 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
         <div className={styles.header}>
           <Text size="1" weight="bold" color="gray" className={styles.label}>TASKS</Text>
         </div>
-        <Skeleton height="32px" />
+        <Flex direction="column" gap="1">
+          {Array.from({ length: 3 }, (_, i) => (
+            <Skeleton key={i} height="28px" />
+          ))}
+        </Flex>
       </div>
     );
   }
@@ -132,26 +135,89 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
     );
   }
 
-  if (compact) {
-    const activeCount = sortedTasks.filter(
-      (t) => t.status === "active" || t.status === "planning" || t.status === "paused",
-    ).length;
-    return (
-      <Text size="1" color="gray">
-        📋 {activeCount} active / {sortedTasks.length} total tasks
-      </Text>
-    );
-  }
+  const visibleTasks = expanded ? sortedTasks : sortedTasks.slice(0, INITIAL_VISIBLE);
+  const useVirtualization = expanded && sortedTasks.length > 20;
 
-  const visibleTasks = showAll ? sortedTasks : sortedTasks.slice(0, INITIAL_VISIBLE);
-  const hiddenCount = sortedTasks.length - INITIAL_VISIBLE;
+  const renderTaskItem = (task: TaskMeta) => {
+    const progress = task.cards_total > 0
+      ? Math.min(100, Math.max(0, Math.round((task.cards_done / task.cards_total) * 100)))
+      : 0;
+    return (
+      <div
+        key={task.id}
+        role="button"
+        tabIndex={0}
+        className={styles.taskItem}
+        onClick={() => handleTaskClick(task)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handleTaskClick(task);
+          }
+        }}
+      >
+        <div className={styles.taskLeft}>
+          <StatusDot state={getTaskStatusDotState(task)} size="small" />
+          <Text size="2" truncate className={styles.taskName}>
+            {task.name}
+          </Text>
+        </div>
+        <div className={styles.taskRight}>
+          {task.cards_total > 0 && (
+            <Flex align="center" gap="1">
+              <div className={styles.progressBar}>
+                <div
+                  className={styles.progressFill}
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+              <Text size="1" color="gray">
+                {task.cards_done}/{task.cards_total}
+              </Text>
+            </Flex>
+          )}
+          {breakpoint !== "narrow" && task.agents_active > 0 && (
+            <Text size="1" color="gray">
+              {task.agents_active} agent{task.agents_active !== 1 ? "s" : ""}
+            </Text>
+          )}
+          <Badge size="1" variant="soft" color={getStatusColor(task.status)}>
+            {task.status}
+          </Badge>
+          <Text size="1" color="gray" className={styles.taskTime}>
+            {formatTaskTime(task.updated_at)}
+          </Text>
+          <ChevronRightIcon width={12} height={12} color="var(--gray-8)" className={styles.taskChevron} />
+        </div>
+      </div>
+    );
+  };
 
   return (
-    <div className={styles.section}>
+    <div className={styles.section} data-expanded={expanded || undefined}>
       <div className={styles.header}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          TASKS ({sortedTasks.length})
-        </Text>
+        <button
+          type="button"
+          className={styles.headerToggle}
+          onClick={toggleExpand}
+          aria-expanded={expanded}
+        >
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            TASKS ({sortedTasks.length})
+          </Text>
+          <Flex align="center" gap="1">
+            {!expanded && (
+              <Text size="1" color="gray">
+                {sortedTasks.filter((t) => t.status === "active" || t.status === "planning").length} active
+              </Text>
+            )}
+            {expanded ? (
+              <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
+            ) : (
+              <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
+            )}
+          </Flex>
+        </button>
         <Tooltip content="New Task">
           <IconButton
             size="1"
@@ -166,76 +232,18 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
         </Tooltip>
       </div>
       <div className={styles.list}>
-        {visibleTasks.map((task) => {
-          const progress = task.cards_total > 0
-            ? Math.min(100, Math.max(0, Math.round((task.cards_done / task.cards_total) * 100)))
-            : 0;
-          return (
-            <div
-              key={task.id}
-              role="button"
-              tabIndex={0}
-              className={styles.taskItem}
-              onClick={() => handleTaskClick(task)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  handleTaskClick(task);
-                }
-              }}
-            >
-              <div className={styles.taskLeft}>
-                <StatusDot state={getTaskStatusDotState(task)} size="small" />
-                <Text size="2" truncate className={styles.taskName}>
-                  {task.name}
-                </Text>
-              </div>
-              <div className={styles.taskRight}>
-                {task.cards_total > 0 && (
-                  <Flex align="center" gap="1">
-                    <div className={styles.progressBar}>
-                      <div
-                        className={styles.progressFill}
-                        style={{ width: `${progress}%` }}
-                      />
-                    </div>
-                    <Text size="1" color="gray">
-                      {task.cards_done}/{task.cards_total}
-                    </Text>
-                  </Flex>
-                )}
-                {breakpoint !== "narrow" && task.agents_active > 0 && (
-                  <Text size="1" color="gray">
-                    {task.agents_active} agent{task.agents_active !== 1 ? "s" : ""}
-                  </Text>
-                )}
-                <Badge size="1" variant="soft" color={getStatusColor(task.status)}>
-                  {task.status}
-                </Badge>
-                <Text size="1" color="gray" className={styles.taskTime}>
-                  {formatTaskTime(task.updated_at)}
-                </Text>
-                <ChevronRightIcon width={12} height={12} color="var(--gray-8)" className={styles.taskChevron} />
-              </div>
-            </div>
-          );
-        })}
+        {useVirtualization ? (
+          <Virtuoso
+            data={sortedTasks}
+            overscan={100}
+            className={styles.virtuosoList}
+            itemContent={(_index, task) => renderTaskItem(task)}
+          />
+        ) : (
+          visibleTasks.map((task) => renderTaskItem(task))
+        )}
       </div>
-      {hiddenCount > 0 && (
-        <button
-          type="button"
-          className={styles.viewAll}
-          onClick={toggleShowAll}
-        >
-          <Text size="1" color="gray">
-            {showAll ? "Show less" : `View all ${sortedTasks.length} tasks`}
-          </Text>
-          {showAll
-            ? <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
-            : <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
-          }
-        </button>
-      )}
+
     </div>
   );
 };

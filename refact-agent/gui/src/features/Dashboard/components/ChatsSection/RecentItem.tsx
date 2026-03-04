@@ -314,6 +314,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
             className={styles.expandButton}
             onClick={handleToggle}
             aria-label={isExpanded ? "Collapse" : "Expand"}
+            aria-expanded={isExpanded}
           >
             {isExpanded
               ? <ChevronDownIcon width={12} height={12} />

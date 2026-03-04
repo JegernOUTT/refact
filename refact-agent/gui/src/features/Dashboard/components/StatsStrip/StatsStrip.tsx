@@ -284,7 +284,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
 
         <div className={styles.cardSection}>
           {providerCount > 0 && (
-            <HoverStat label={`${providerCount} providers active`}>
+            <HoverStat label={`${providerCount} providers available`}>
               <Flex direction="column" gap="1">
                 <Text size="2" weight="bold">LLM Providers</Text>
                 <Text size="1" color="gray">

@@ -14,9 +14,9 @@ import { newChatAction, restoreChat } from "../../../Chat/Thread";
 import { push } from "../../../Pages/pagesSlice";
 import { RecentItem, getDateGroup } from "./RecentItem";
 import type { DashboardBreakpoint } from "../../types";
-import styles from "./RecentSection.module.css";
+import styles from "./ChatsSection.module.css";
 
-type RecentSectionProps = {
+type ChatsSectionProps = {
   breakpoint: DashboardBreakpoint;
   expanded: boolean;
   onToggleExpand: () => void;
@@ -81,7 +81,7 @@ function buildFlatList(
   return items;
 }
 
-export const RecentSection: React.FC<RecentSectionProps> = ({
+export const ChatsSection: React.FC<ChatsSectionProps> = ({
   breakpoint,
   expanded,
   onToggleExpand,
@@ -183,9 +183,10 @@ export const RecentSection: React.FC<RecentSectionProps> = ({
           type="button"
           className={styles.headerToggle}
           onClick={onToggleExpand}
+          aria-expanded={expanded}
         >
           <Text size="1" weight="bold" color="gray" className={styles.label}>
-            RECENT
+            CHATS
           </Text>
           <Flex align="center" gap="1">
             {!expanded && (

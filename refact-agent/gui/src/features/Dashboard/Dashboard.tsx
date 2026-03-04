@@ -2,7 +2,7 @@ import React, { useCallback, useRef, useState } from "react";
 import { StatsStrip } from "./components/StatsStrip/StatsStrip";
 import { OpenSection } from "./components/OpenSection/OpenSection";
 import { TasksSection } from "./components/TasksSection/TasksSection";
-import { RecentSection } from "./components/RecentSection/RecentSection";
+import { ChatsSection } from "./components/ChatsSection/ChatsSection";
 import { NavBar } from "./components/NavBar/NavBar";
 import { useDashboardLayout } from "./hooks/useDashboardLayout";
 import { useOpenTabsData } from "./hooks/useOpenTabsData";
@@ -34,7 +34,7 @@ export const Dashboard: React.FC = () => {
 
       <div className={styles.sectionDivider} />
 
-      {/* Open tabs section — compact when RECENT is expanded */}
+      {/* Open tabs section — compact when Chats is expanded */}
       {hasOpenTabs && !expanded && (
         <OpenSection
           tabs={openTabs}
@@ -45,16 +45,17 @@ export const Dashboard: React.FC = () => {
 
       <SetupBanner />
 
-      {/* Active tasks — compact when RECENT is expanded */}
-      {!expanded && <TasksSection breakpoint={breakpoint} />}
+      {/* Tasks section — scrollable list */}
+      <TasksSection breakpoint={breakpoint} />
+
       {expanded && hasOpenTabs && (
         <OpenSection tabs={openTabs} breakpoint={breakpoint} compact />
       )}
 
       <div className={styles.sectionDivider} />
 
-      {/* Recent history — expandable, virtualized */}
-      <RecentSection
+      {/* Chat history — expandable, virtualized */}
+      <ChatsSection
         breakpoint={breakpoint}
         expanded={expanded}
         onToggleExpand={toggleExpand}

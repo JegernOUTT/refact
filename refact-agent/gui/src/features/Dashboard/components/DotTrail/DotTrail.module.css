@@ -5,6 +5,7 @@
 }
 
 .dot {
+  display: inline-block;
   border-radius: 50%;
   border: none;
   padding: 0;

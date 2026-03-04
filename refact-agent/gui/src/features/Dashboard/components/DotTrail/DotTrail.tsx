@@ -135,8 +135,8 @@ export const DotTrail: React.FC<DotTrailProps> = ({
             )}
             <HoverCard.Root openDelay={300} closeDelay={100}>
               <HoverCard.Trigger>
-                <button
-                  type="button"
+                <span
+                  role={onDotClick ? "button" : undefined}
                   className={`${styles.dot} ${styles[dot.type]}`}
                   style={{
                     width: size,
@@ -146,6 +146,13 @@ export const DotTrail: React.FC<DotTrailProps> = ({
                   onClick={onDotClick ? (e: React.MouseEvent) => {
                     e.stopPropagation();
                     onDotClick(dot.chatId);
+                  } : undefined}
+                  onKeyDown={onDotClick ? (e: React.KeyboardEvent) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onDotClick(dot.chatId);
+                    }
                   } : undefined}
                   tabIndex={onDotClick ? 0 : -1}
                   aria-label={dotNode.title || "Chat"}
