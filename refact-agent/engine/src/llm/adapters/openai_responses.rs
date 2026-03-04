@@ -753,7 +753,12 @@ fn convert_tools_to_responses(tools: &[Value]) -> Value {
                     "type": "function",
                     "name": func.get("name")?,
                     "description": func.get("description").unwrap_or(&json!("")),
-                    "parameters": func.get("parameters").unwrap_or(&json!({}))
+                    "parameters": func.get("parameters").unwrap_or(&json!({})),
+                    // Responses API defaults strict=true, which causes the model to fill optional
+                    // parameters with empty strings "" instead of omitting them. Pass through the
+                    // strict value from the original tool definition, defaulting to false so that
+                    // optional params are simply absent (matching Chat Completions behavior).
+                    "strict": func.get("strict").unwrap_or(&json!(false))
                 }));
             }
             // Already in Responses API format (has "type" + "name" but no "function" wrapper)
@@ -1656,6 +1661,7 @@ mod tests {
         assert_eq!(tool["type"], json!("function"));
         assert_eq!(tool["name"], json!("search"));
         assert_eq!(tool["description"], json!("Search the web"));
+        assert_eq!(tool["strict"], json!(false), "strict must default to false to prevent optional params being filled with empty strings");
 
         let params = &tool["parameters"];
         assert_eq!(params["type"], json!("object"));
@@ -1665,6 +1671,32 @@ mod tests {
         assert_eq!(params["properties"]["tags"]["items"]["type"], json!("string"));
         assert_eq!(params["required"], json!(["query"]));
         assert!(tool.get("function").is_none(), "function wrapper must not be present in responses format");
+    }
+
+    #[test]
+    fn test_convert_tools_to_responses_strict_true_preserved() {
+        let tools = vec![
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "strict_tool",
+                    "description": "A strict tool",
+                    "strict": true,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }
+                }
+            }),
+        ];
+
+        let result = convert_tools_to_responses(&tools);
+        let converted = result.as_array().unwrap();
+        assert_eq!(converted[0]["strict"], json!(true), "strict=true must be passed through to Responses API format");
     }
 
     #[test]

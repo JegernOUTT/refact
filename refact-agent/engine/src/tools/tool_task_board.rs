@@ -39,7 +39,7 @@ async fn get_task_id(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
 ) -> Result<String, String> {
-    if let Some(id) = args.get("task_id").and_then(|v| v.as_str()) {
+    if let Some(id) = args.get("task_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
         return Ok(id.to_string());
     }
     let ccx_lock = ccx.lock().await;
@@ -89,7 +89,7 @@ impl Tool for ToolTaskBoardGet {
         let task_id = get_task_id(&ccx, args).await?;
         let gcx = ccx.lock().await.global_context.clone();
         let board = storage::load_board(gcx, &task_id).await?;
-        let card_id = args.get("card_id").and_then(|v| v.as_str());
+        let card_id = args.get("card_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
 
         let result = if let Some(cid) = card_id {
             let card = board

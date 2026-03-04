@@ -262,25 +262,34 @@ fn convert_messages_to_openai(messages: &[crate::call_validation::ChatMessage]) 
                     obj["content"] = json!(text);
                 }
                 crate::call_validation::ChatContent::Multimodal(elements) => {
-                    let content: Vec<Value> = elements
-                        .iter()
-                        .map(|el| {
-                            if el.is_image() {
-                                json!({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": format!("data:{};base64,{}", el.m_type, el.m_content)
-                                    }
-                                })
-                            } else {
-                                json!({
-                                    "type": "text",
-                                    "text": el.m_content
-                                })
-                            }
-                        })
-                        .collect();
-                    obj["content"] = json!(content);
+                    // Only use array format when content actually contains images.
+                    // Text-only multimodal (e.g. from trajectory deserialization or clients
+                    // sending [{"type":"text","text":"..."}]) must be normalized to plain string —
+                    // OpenAI Chat Completions requires string content for assistant/tool messages.
+                    let has_images = elements.iter().any(|el| el.is_image());
+                    if has_images {
+                        let content: Vec<Value> = elements
+                            .iter()
+                            .map(|el| {
+                                if el.is_image() {
+                                    json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": format!("data:{};base64,{}", el.m_type, el.m_content)
+                                        }
+                                    })
+                                } else {
+                                    json!({
+                                        "type": "text",
+                                        "text": el.m_content
+                                    })
+                                }
+                            })
+                            .collect();
+                        obj["content"] = json!(content);
+                    } else {
+                        obj["content"] = json!(msg.content.content_text_only());
+                    }
                 }
                 crate::call_validation::ChatContent::ContextFiles(_) => {
                     obj["content"] = json!(msg.content.content_text_only());
@@ -782,6 +791,76 @@ mod tests {
             assert_eq!(citation.get("url").and_then(|v| v.as_str()), Some("https://example.com"));
             assert_eq!(citation.get("title").and_then(|v| v.as_str()), Some("Example"));
         }
+    }
+
+    #[test]
+    fn test_text_only_multimodal_normalized_to_string() {
+        use crate::call_validation::ChatContent;
+        use crate::scratchpads::multimodality::MultimodalElement;
+
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::Multimodal(vec![MultimodalElement {
+                    m_type: "text".to_string(),
+                    m_content: "".to_string(),
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::Multimodal(vec![MultimodalElement {
+                    m_type: "text".to_string(),
+                    m_content: "rev: 0\ncards: []".to_string(),
+                }]),
+                tool_call_id: "call_123".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_openai(&messages);
+
+        // Text-only Multimodal must be serialized as plain string, not array
+        assert!(converted[0]["content"].is_string(),
+            "assistant text-only multimodal must serialize as string, got: {}", converted[0]["content"]);
+        assert_eq!(converted[0]["content"], "");
+
+        assert!(converted[1]["content"].is_string(),
+            "tool text-only multimodal must serialize as string, got: {}", converted[1]["content"]);
+        assert_eq!(converted[1]["content"], "rev: 0\ncards: []");
+    }
+
+    #[test]
+    fn test_multimodal_with_image_stays_array() {
+        use crate::call_validation::ChatContent;
+        use crate::scratchpads::multimodality::MultimodalElement;
+
+        let messages = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::Multimodal(vec![
+                    MultimodalElement {
+                        m_type: "text".to_string(),
+                        m_content: "Look at this".to_string(),
+                    },
+                    MultimodalElement {
+                        m_type: "image/png".to_string(),
+                        m_content: "base64data".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        let converted = convert_messages_to_openai(&messages);
+
+        // Multimodal with images must stay as array
+        assert!(converted[0]["content"].is_array(),
+            "user multimodal with image must serialize as array");
+        let arr = converted[0]["content"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[1]["type"], "image_url");
     }
 
     #[test]

@@ -698,13 +698,20 @@ pub async fn process_tool_calls_once(
     // Determine tool-requested final state before checking abort, since ask_questions,
     // task_done, and task_agent_finish set abort_flag=true as part of their normal operation to prevent
     // further LLM generation — but they still need their state transition applied.
+    // Only apply stop state if the tool actually succeeded (tool_failed != Some(true)), otherwise
+    // let the loop continue so the LLM can see the error and retry with correct arguments.
     let mut final_state = SessionState::Idle;
     for tool_call in &tools_to_execute {
-        match tool_call.function.name.as_str() {
-            "ask_questions" | "task_wait_for_agents" => final_state = SessionState::WaitingUserInput,
-            "task_done" => final_state = SessionState::Completed,
-            "task_agent_finish" => final_state = SessionState::Completed,
-            _ => {}
+        let failed = tool_results
+            .iter()
+            .any(|r| r.tool_call_id == tool_call.id && r.tool_failed == Some(true));
+        if !failed {
+            match tool_call.function.name.as_str() {
+                "ask_questions" | "task_wait_for_agents" => final_state = SessionState::WaitingUserInput,
+                "task_done" => final_state = SessionState::Completed,
+                "task_agent_finish" => final_state = SessionState::Completed,
+                _ => {}
+            }
         }
     }
     let tool_initiated_stop = matches!(
