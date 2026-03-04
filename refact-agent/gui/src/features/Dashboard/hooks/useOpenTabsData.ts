@@ -10,13 +10,13 @@ import { isToolMessage } from "../../../services/refact/types";
 import type { HistoryTreeNode } from "../../History/historySlice";
 import type { OpenTabData } from "../types";
 
-function findNodeById(
+function findNodeInList(
   nodes: HistoryTreeNode[],
   id: string,
 ): HistoryTreeNode | undefined {
   for (const n of nodes) {
     if (n.id === id) return n;
-    const found = findNodeById(n.children, id);
+    const found = findNodeInList(n.children, id);
     if (found) return found;
   }
   return undefined;
@@ -40,7 +40,7 @@ export function useOpenTabsData(): OpenTabData[] {
         const toolMessages = messages.filter(isToolMessage);
         todos = deriveTasksFromMessages(messages, toolMessages);
       }
-      const treeNode = findNodeById(tree, tab.id);
+      const treeNode = findNodeInList(tree, tab.id);
       return { ...tab, todos, treeNode };
     });
   }, [tabs, threads, tree]);

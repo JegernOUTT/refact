@@ -30,11 +30,19 @@
   gap: var(--space-1);
   min-width: 0;
   flex: 1;
+  overflow: hidden;
 }
 
 .title {
   min-width: 0;
   flex: 1;
+}
+
+.titleTrigger {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
 }
 
 .relationIcon {
@@ -52,19 +60,23 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .time {
   white-space: nowrap;
-  min-width: 50px;
+  min-width: 40px;
   text-align: right;
+  flex-shrink: 0;
 }
 
 .actions {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex-shrink: 0;
 }
 
 .actionButton {

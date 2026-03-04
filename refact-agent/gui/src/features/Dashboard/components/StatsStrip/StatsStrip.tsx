@@ -38,7 +38,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
   compact,
 }) => {
   const from = useMemo(() => get7DaysAgo(), []);
-  const { data, isLoading } = useGetStatsSummaryQuery({ from });
+  const { data, isLoading, isError } = useGetStatsSummaryQuery({ from });
   const { data: providersData } = useGetConfiguredProvidersQuery();
   const { data: integrationsData } = integrationsApi.useGetAllIntegrationsQuery(undefined);
   const { data: knowledgeData } = useGetKnowledgeGraphQuery(undefined);
@@ -46,6 +46,14 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
   const providerCount = providersData?.providers.length ?? 0;
   const integrationCount = integrationsData?.integrations.length ?? 0;
   const memoryCount = knowledgeData?.stats.active_docs ?? 0;
+
+  if (isError) {
+    return (
+      <div className={styles.compactRow}>
+        <Text size="1" color="red">Failed to load stats</Text>
+      </div>
+    );
+  }
 
   if (isLoading || !data) {
     if (compact) {
@@ -58,11 +66,11 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
     return (
       <div className={styles.statsGrid} data-breakpoint={breakpoint}>
         <div className={styles.card}>
-          <Skeleton width="100%" height="80px" />
+          <Skeleton width="100%" height="100px" />
         </div>
         {breakpoint !== "narrow" && (
           <div className={styles.card}>
-            <Skeleton width="100%" height="80px" />
+            <Skeleton width="100%" height="100px" />
           </div>
         )}
       </div>
@@ -108,7 +116,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
     );
   }
 
-  // Medium/Wide: 2-column cards
+  // Medium/Wide: 2-column cards with internal dividers
   const topModes = [...by_mode].sort((a, b) => b.total_calls - a.total_calls).slice(0, 3);
   const totalModeCalls = topModes.reduce((s, m) => s + m.total_calls, 0) || 1;
 
@@ -117,12 +125,18 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
       {/* Left: 7-Day Stats */}
       <div className={styles.card}>
         <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>7-DAY STATS</Text>
-        <Flex direction="column" gap="1">
+
+        <div className={styles.cardSection}>
           <Flex justify="between" align="center">
-            <Text size="1">{totals.total_conversations} conversations</Text>
+            <Text size="2" weight="medium">{totals.total_conversations} conversations</Text>
             <Text size="1" color="gray">{totals.total_messages_sent} messages</Text>
           </Flex>
-          <Flex align="center" gap="2">
+        </div>
+
+        <div className={styles.cardDivider} />
+
+        <div className={styles.cardSection}>
+          <Flex align="center" gap="3">
             <TokenDonut
               prompt={totals.total_prompt_tokens}
               completion={totals.total_completion_tokens}
@@ -130,52 +144,64 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
             />
           </Flex>
           <Flex justify="between" align="center">
-            <Text size="1">Cost: {costStr}</Text>
+            <Text size="1" color="gray">Cost: {costStr}</Text>
             {totals.total_calls > 0 && (
-              <Badge size="1" color={successColor} variant="soft">{successRate}%</Badge>
+              <Badge size="1" color={successColor} variant="soft">{successRate}% success</Badge>
             )}
           </Flex>
+        </div>
+
+        <div className={styles.cardDivider} />
+
+        <div className={styles.cardSection}>
           {totals.avg_duration_ms > 0 && (
-            <Text size="1" color="gray">Avg: {Math.round(totals.avg_duration_ms)}ms/call</Text>
+            <Text size="1" color="gray">Avg response: {Math.round(totals.avg_duration_ms)}ms</Text>
           )}
           <SparklineChart days={by_day} />
-        </Flex>
+        </div>
       </div>
 
       {/* Right: Project Pulse */}
       <div className={styles.card}>
         <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>PROJECT PULSE</Text>
-        <Flex direction="column" gap="1">
-          {topModes.length > 0 && (
-            <Flex direction="column" gap="1">
-              <Text size="1" color="gray">Modes used:</Text>
-              {topModes.map((m) => {
-                const pct = Math.round((m.total_calls / totalModeCalls) * 100);
-                return (
-                  <Flex key={m.mode} align="center" gap="1">
-                    <div
-                      className={styles.modeFill}
-                      style={{ width: `${Math.max(pct, 4)}%` }}
-                    />
-                    <Text size="1" truncate>{m.mode} ({pct}%)</Text>
-                  </Flex>
-                );
-              })}
-            </Flex>
-          )}
+
+        {topModes.length > 0 && (
+          <div className={styles.cardSection}>
+            <Text size="1" color="gray">Modes used:</Text>
+            {topModes.map((m) => {
+              const pct = Math.round((m.total_calls / totalModeCalls) * 100);
+              return (
+                <Flex key={m.mode} align="center" gap="2">
+                  <div
+                    className={styles.modeFill}
+                    style={{ width: `${Math.max(pct, 4)}%` }}
+                  />
+                  <Text size="1" truncate>{m.mode} ({pct}%)</Text>
+                </Flex>
+              );
+            })}
+          </div>
+        )}
+
+        <div className={styles.cardDivider} />
+
+        <div className={styles.cardSection}>
           <ModelBars models={by_model} />
-          <Flex direction="column" gap="1" pt="1">
-            {providerCount > 0 && (
-              <Text size="1" color="gray">{providerCount} providers active</Text>
-            )}
-            {integrationCount > 0 && (
-              <Text size="1" color="gray">{integrationCount} integrations configured</Text>
-            )}
-            {memoryCount > 0 && (
-              <Text size="1" color="gray">{memoryCount} knowledge memories</Text>
-            )}
-          </Flex>
-        </Flex>
+        </div>
+
+        <div className={styles.cardDivider} />
+
+        <div className={styles.cardSection}>
+          {providerCount > 0 && (
+            <Text size="1" color="gray">{providerCount} providers active</Text>
+          )}
+          {integrationCount > 0 && (
+            <Text size="1" color="gray">{integrationCount} integrations configured</Text>
+          )}
+          {memoryCount > 0 && (
+            <Text size="1" color="gray">{memoryCount} knowledge memories</Text>
+          )}
+        </div>
       </div>
     </div>
   );

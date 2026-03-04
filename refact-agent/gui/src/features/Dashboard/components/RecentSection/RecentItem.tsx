@@ -26,7 +26,9 @@ import styles from "./RecentItem.module.css";
 type RecentItemProps = {
   node: HistoryTreeNode;
   breakpoint: DashboardBreakpoint;
-  depth?: number;
+  depth: number;
+  isExpanded: boolean;
+  onToggleExpand: (id: string) => void;
   onClick: () => void;
   onDotClick?: (chatId: string) => void;
   onDelete?: (id: string) => void;
@@ -77,11 +79,11 @@ function getRelationInfo(node: HistoryTreeNode, depth: number): RelationInfo | n
   }
   switch (node.link_type) {
     case "subagent":
-      return { icon: <Link2Icon width={ICON_SIZE} height={ICON_SIZE} />, label: "Subagent", color: "var(--amber-9)" };
+      return { icon: <Link2Icon width={ICON_SIZE} height={ICON_SIZE} />, label: "Subagent", color: "var(--green-9)" };
     case "handoff":
       return { icon: <LoopIcon width={ICON_SIZE} height={ICON_SIZE} />, label: "Handoff", color: "var(--green-9)" };
     case "branch":
-      return { icon: <BorderSplitIcon width={ICON_SIZE} height={ICON_SIZE} />, label: "Branched", color: "var(--blue-9)" };
+      return { icon: <BorderSplitIcon width={ICON_SIZE} height={ICON_SIZE} />, label: "Branched", color: "var(--amber-9)" };
     case "mode_transition":
       return { icon: <LightningBoltIcon width={ICON_SIZE} height={ICON_SIZE} />, label: "Mode Switch", color: "var(--amber-9)" };
     default:
@@ -92,10 +94,93 @@ function getRelationInfo(node: HistoryTreeNode, depth: number): RelationInfo | n
   }
 }
 
+function ItemHoverContent({ node, relation }: { node: HistoryTreeNode; relation: RelationInfo | null }) {
+  const messageCount = node.message_count ?? 0;
+  return (
+    <Flex direction="column" gap="2">
+      <Text size="2" weight="bold" truncate>
+        {node.title || "New Chat"}
+      </Text>
+
+      {node.model && (
+        <Flex gap="1" align="center">
+          <Text size="1" color="gray">Model:</Text>
+          <Text size="1">{node.model}</Text>
+        </Flex>
+      )}
+
+      {node.mode && (
+        <Flex gap="1" align="center">
+          <Text size="1" color="gray">Mode:</Text>
+          <Badge size="1" color={getModeColor(node.mode)} variant="soft">{node.mode}</Badge>
+        </Flex>
+      )}
+
+      {relation && (
+        <Flex gap="1" align="center">
+          <Text size="1" color="gray">Type:</Text>
+          <Flex align="center" gap="1" style={{ color: relation.color }}>{relation.icon}<Text size="1">{relation.label}</Text></Flex>
+        </Flex>
+      )}
+
+      {messageCount > 0 && (
+        <Flex gap="1" align="center">
+          <Text size="1" color="gray">Messages:</Text>
+          <Text size="1">{messageCount}</Text>
+        </Flex>
+      )}
+
+      {(node.total_coins ?? 0) > 0 && (
+        <Flex gap="1" align="center">
+          <Text size="1" color="gray">Tokens:</Text>
+          <Text size="1">{formatTokenCount(node.total_coins ?? 0)}</Text>
+        </Flex>
+      )}
+
+      {((node.total_lines_added ?? 0) > 0 || (node.total_lines_removed ?? 0) > 0) && (
+        <Flex gap="1" align="center">
+          <Text size="1" color="gray">Changes:</Text>
+          {(node.total_lines_added ?? 0) > 0 && (
+            <Text size="1" style={{ color: "var(--green-9)" }}>+{node.total_lines_added}</Text>
+          )}
+          {(node.total_lines_removed ?? 0) > 0 && (
+            <Text size="1" style={{ color: "var(--red-9)" }}>−{node.total_lines_removed}</Text>
+          )}
+        </Flex>
+      )}
+
+      {(node.tasks_total ?? 0) > 0 && (
+        <Flex gap="1" align="center">
+          <Text size="1" color="gray">Tasks:</Text>
+          <Text size="1">
+            {node.tasks_done ?? 0}/{node.tasks_total}
+            {(node.tasks_failed ?? 0) > 0 && (
+              <Text size="1" color="red"> ({node.tasks_failed} failed)</Text>
+            )}
+          </Text>
+        </Flex>
+      )}
+
+      {node.session_state && node.session_state !== "idle" && (
+        <Flex gap="1" align="center">
+          <Text size="1" color="gray">Status:</Text>
+          <Text size="1">{node.session_state}</Text>
+        </Flex>
+      )}
+
+      <Text size="1" color="gray">
+        {new Date(node.createdAt).toLocaleString()}
+      </Text>
+    </Flex>
+  );
+}
+
 export const RecentItem: React.FC<RecentItemProps> = ({
   node,
   breakpoint,
-  depth = 0,
+  depth,
+  isExpanded,
+  onToggleExpand,
   onClick,
   onDotClick,
   onDelete,
@@ -103,12 +188,15 @@ export const RecentItem: React.FC<RecentItemProps> = ({
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState("");
-  const [isExpanded, setIsExpanded] = useState(false);
 
   const statusState = getStatusFromSessionState(node.session_state);
   const hasChildren = node.children.length > 0;
   const messageCount = node.message_count ?? 0;
   const relation = getRelationInfo(node, depth);
+
+  const hasStats = messageCount > 0 || (node.total_coins ?? 0) > 0
+    || (node.total_lines_added ?? 0) > 0 || (node.total_lines_removed ?? 0) > 0;
+  const showHover = hasStats || !!relation;
 
   const handleStartEdit = useCallback(
     (e: React.MouseEvent) => {
@@ -162,7 +250,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
     [node.id, onDelete],
   );
 
-  const handleKeyDown_row = useCallback(
+  const handleRowKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (isEditing) return;
       if (e.key === "Enter" || e.key === " ") {
@@ -173,34 +261,60 @@ export const RecentItem: React.FC<RecentItemProps> = ({
     [isEditing, onClick],
   );
 
-  const hasStats = messageCount > 0 || (node.total_coins ?? 0) > 0
-    || (node.total_lines_added ?? 0) > 0 || (node.total_lines_removed ?? 0) > 0;
-
-  const handleToggleExpand = useCallback(
+  const handleToggle = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      setIsExpanded((prev) => !prev);
+      onToggleExpand(node.id);
     },
-    [],
+    [node.id, onToggleExpand],
   );
 
   const indent = depth * 16;
 
-  const itemContent = (
+  const titleElement = isEditing ? (
+    <TextField.Root
+      size="1"
+      value={editValue}
+      onChange={(e) => setEditValue(e.target.value)}
+      onKeyDown={handleKeyDown}
+      onClick={(e) => e.stopPropagation()}
+      autoFocus
+      className={styles.editInput}
+    />
+  ) : showHover ? (
+    <HoverCard.Root openDelay={400} closeDelay={100}>
+      <HoverCard.Trigger>
+        <span className={styles.titleTrigger}>
+          <Text size="2" truncate className={styles.title}>
+            {node.title || "New Chat"}
+          </Text>
+        </span>
+      </HoverCard.Trigger>
+      <HoverCard.Content size="1" side="top" align="center" className={styles.hoverCard} avoidCollisions>
+        <ItemHoverContent node={node} relation={relation} />
+      </HoverCard.Content>
+    </HoverCard.Root>
+  ) : (
+    <Text size="2" truncate className={styles.title}>
+      {node.title || "New Chat"}
+    </Text>
+  );
+
+  return (
     <div
       role="button"
       tabIndex={0}
       className={styles.item}
       style={indent > 0 ? { paddingLeft: `calc(var(--space-2) + ${indent}px)` } : undefined}
       onClick={isEditing ? undefined : onClick}
-      onKeyDown={handleKeyDown_row}
+      onKeyDown={handleRowKeyDown}
     >
       <div className={styles.left}>
         {hasChildren ? (
           <button
             type="button"
             className={styles.expandButton}
-            onClick={handleToggleExpand}
+            onClick={handleToggle}
             aria-label={isExpanded ? "Collapse" : "Expand"}
           >
             {isExpanded
@@ -218,21 +332,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
             </span>
           </Tooltip>
         )}
-        {isEditing ? (
-          <TextField.Root
-            size="1"
-            value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onClick={(e) => e.stopPropagation()}
-            autoFocus
-            className={styles.editInput}
-          />
-        ) : (
-          <Text size="2" truncate className={styles.title}>
-            {node.title || "New Chat"}
-          </Text>
-        )}
+        {titleElement}
       </div>
       <div className={styles.right}>
         {hasChildren && (
@@ -258,12 +358,12 @@ export const RecentItem: React.FC<RecentItemProps> = ({
           {isEditing ? (
             <>
               <Tooltip content="Save">
-                <button type="button" className={styles.actionButton} onClick={handleConfirmEdit}>
+                <button type="button" className={styles.actionButton} onClick={handleConfirmEdit} aria-label="Save rename">
                   <CheckIcon width={12} height={12} />
                 </button>
               </Tooltip>
               <Tooltip content="Cancel">
-                <button type="button" className={styles.actionButton} onClick={handleCancelEdit}>
+                <button type="button" className={styles.actionButton} onClick={handleCancelEdit} aria-label="Cancel rename">
                   <Cross1Icon width={10} height={10} />
                 </button>
               </Tooltip>
@@ -272,14 +372,14 @@ export const RecentItem: React.FC<RecentItemProps> = ({
             <>
               {onRename && (
                 <Tooltip content="Rename">
-                  <button type="button" className={styles.actionButton} onClick={handleStartEdit}>
+                  <button type="button" className={styles.actionButton} onClick={handleStartEdit} aria-label="Rename chat">
                     <Pencil1Icon width={12} height={12} />
                   </button>
                 </Tooltip>
               )}
               {onDelete && (
                 <Tooltip content="Delete">
-                  <button type="button" className={styles.actionButton} onClick={handleDelete}>
+                  <button type="button" className={styles.actionButton} onClick={handleDelete} aria-label="Delete chat">
                     <Cross1Icon width={10} height={10} />
                   </button>
                 </Tooltip>
@@ -289,115 +389,5 @@ export const RecentItem: React.FC<RecentItemProps> = ({
         </div>
       </div>
     </div>
-  );
-
-  const childNodes = hasChildren && isExpanded ? (
-    node.children.map((child) => (
-      <RecentItem
-        key={child.id}
-        node={child}
-        breakpoint={breakpoint}
-        depth={depth + 1}
-        onClick={() => onDotClick?.(child.id)}
-        onDotClick={onDotClick}
-        onDelete={onDelete}
-        onRename={onRename}
-      />
-    ))
-  ) : null;
-
-  if (!hasStats && !relation) {
-    return (
-      <>
-        {itemContent}
-        {childNodes}
-      </>
-    );
-  }
-
-  return (
-    <>
-    <HoverCard.Root openDelay={400} closeDelay={100}>
-      <HoverCard.Trigger>{itemContent}</HoverCard.Trigger>
-      <HoverCard.Content size="1" side="top" align="center" className={styles.hoverCard} avoidCollisions>
-        <Flex direction="column" gap="2">
-          <Text size="2" weight="bold" truncate>
-            {node.title || "New Chat"}
-          </Text>
-
-          {node.model && (
-            <Flex gap="1" align="center">
-              <Text size="1" color="gray">Model:</Text>
-              <Text size="1">{node.model}</Text>
-            </Flex>
-          )}
-
-          {node.mode && (
-            <Flex gap="1" align="center">
-              <Text size="1" color="gray">Mode:</Text>
-              <Badge size="1" color={getModeColor(node.mode)} variant="soft">{node.mode}</Badge>
-            </Flex>
-          )}
-
-          {relation && (
-            <Flex gap="1" align="center">
-              <Text size="1" color="gray">Type:</Text>
-              <Flex align="center" gap="1" style={{ color: relation.color }}>{relation.icon}<Text size="1">{relation.label}</Text></Flex>
-            </Flex>
-          )}
-
-          {messageCount > 0 && (
-            <Flex gap="1" align="center">
-              <Text size="1" color="gray">Messages:</Text>
-              <Text size="1">{messageCount}</Text>
-            </Flex>
-          )}
-
-          {(node.total_coins ?? 0) > 0 && (
-            <Flex gap="1" align="center">
-              <Text size="1" color="gray">Tokens:</Text>
-              <Text size="1">{formatTokenCount(node.total_coins ?? 0)}</Text>
-            </Flex>
-          )}
-
-          {((node.total_lines_added ?? 0) > 0 || (node.total_lines_removed ?? 0) > 0) && (
-            <Flex gap="1" align="center">
-              <Text size="1" color="gray">Changes:</Text>
-              {(node.total_lines_added ?? 0) > 0 && (
-                <Text size="1" style={{ color: "var(--green-9)" }}>+{node.total_lines_added}</Text>
-              )}
-              {(node.total_lines_removed ?? 0) > 0 && (
-                <Text size="1" style={{ color: "var(--red-9)" }}>−{node.total_lines_removed}</Text>
-              )}
-            </Flex>
-          )}
-
-          {(node.tasks_total ?? 0) > 0 && (
-            <Flex gap="1" align="center">
-              <Text size="1" color="gray">Tasks:</Text>
-              <Text size="1">
-                {node.tasks_done ?? 0}/{node.tasks_total}
-                {(node.tasks_failed ?? 0) > 0 && (
-                  <Text size="1" color="red"> ({node.tasks_failed} failed)</Text>
-                )}
-              </Text>
-            </Flex>
-          )}
-
-          {node.session_state && node.session_state !== "idle" && (
-            <Flex gap="1" align="center">
-              <Text size="1" color="gray">Status:</Text>
-              <Text size="1">{node.session_state}</Text>
-            </Flex>
-          )}
-
-          <Text size="1" color="gray">
-            {new Date(node.createdAt).toLocaleString()}
-          </Text>
-        </Flex>
-      </HoverCard.Content>
-    </HoverCard.Root>
-    {childNodes}
-    </>
   );
 };

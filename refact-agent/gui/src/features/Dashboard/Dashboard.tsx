@@ -30,6 +30,8 @@ export const Dashboard: React.FC = () => {
       {/* Stats Strip — compact when RECENT is expanded */}
       <StatsStrip breakpoint={breakpoint} compact={expanded} />
 
+      <div className={styles.sectionDivider} />
+
       {/* Open tabs section — compact when RECENT is expanded */}
       {hasOpenTabs && !expanded && (
         <OpenSection
@@ -46,6 +48,8 @@ export const Dashboard: React.FC = () => {
       {expanded && hasOpenTabs && (
         <OpenSection tabs={openTabs} breakpoint={breakpoint} compact />
       )}
+
+      <div className={styles.sectionDivider} />
 
       {/* Recent history — expandable, virtualized */}
       <RecentSection

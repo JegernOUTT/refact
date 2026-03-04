@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useDeferredValue, useMemo, useState } from "react";
 import { Flex, IconButton, Skeleton, Spinner, Text, TextField, Tooltip } from "@radix-ui/themes";
 import { MagnifyingGlassIcon, ChevronDownIcon, ChevronUpIcon, PlusIcon, CheckboxIcon } from "@radix-ui/react-icons";
 import { Virtuoso } from "react-virtuoso";
@@ -23,14 +23,63 @@ type RecentSectionProps = {
   onToggleExpand: () => void;
 };
 
+const GROUP_ORDER = ["Today", "Yesterday", "Last 7 days", "Older"] as const;
+
+const DOT_LEGEND: { color: string; label: string }[] = [
+  { color: "var(--blue-8)", label: "Chat" },
+  { color: "var(--green-8)", label: "Subagent / Handoff" },
+  { color: "var(--amber-8)", label: "Fork / Branch" },
+  { color: "var(--blue-9)", label: "Active" },
+  { color: "var(--green-9)", label: "Done" },
+];
+
 function treeMatchesQuery(node: HistoryTreeNode, query: string): boolean {
-  if (
-    node.title.toLowerCase().includes(query) ||
-    (node.mode?.toLowerCase().includes(query) ?? false)
-  ) {
-    return true;
-  }
+  if (node.title.toLowerCase().includes(query)) return true;
+  if (node.mode?.toLowerCase().includes(query)) return true;
   return node.children.some((child) => treeMatchesQuery(child, query));
+}
+
+type FlatItem =
+  | { type: "header"; label: string }
+  | { type: "node"; node: HistoryTreeNode; depth: number };
+
+function flattenWithExpansion(
+  nodes: HistoryTreeNode[],
+  expandedIds: Set<string>,
+  depth: number,
+): FlatItem[] {
+  const out: FlatItem[] = [];
+  for (const n of nodes) {
+    out.push({ type: "node", node: n, depth });
+    if (expandedIds.has(n.id) && n.children.length > 0) {
+      out.push(...flattenWithExpansion(n.children, expandedIds, depth + 1));
+    }
+  }
+  return out;
+}
+
+function buildFlatList(
+  tree: HistoryTreeNode[],
+  expandedIds: Set<string>,
+): FlatItem[] {
+  const groups = new Map<string, HistoryTreeNode[]>();
+  for (const label of GROUP_ORDER) {
+    groups.set(label, []);
+  }
+  for (const node of tree) {
+    const group = getDateGroup(node.updatedAt);
+    if (!groups.has(group)) groups.set(group, []);
+    const arr = groups.get(group);
+    if (arr) arr.push(node);
+  }
+  const items: FlatItem[] = [];
+  for (const [key, nodes] of groups) {
+    if (nodes.length > 0) {
+      items.push({ type: "header", label: key });
+      items.push(...flattenWithExpansion(nodes, expandedIds, 0));
+    }
+  }
+  return items;
 }
 
 export const RecentSection: React.FC<RecentSectionProps> = ({
@@ -45,7 +94,9 @@ export const RecentSection: React.FC<RecentSectionProps> = ({
   });
 
   const [searchQuery, setSearchQuery] = useState("");
-  const [createTask] = useCreateTaskMutation();
+  const deferredQuery = useDeferredValue(searchQuery);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [createTask, { isLoading: isCreatingTask }] = useCreateTaskMutation();
 
   const {
     loadMore: loadMoreAsync,
@@ -58,15 +109,34 @@ export const RecentSection: React.FC<RecentSectionProps> = ({
   const tree = useMemo(() => buildHistoryTree(history), [history]);
 
   const filteredTree = useMemo(() => {
-    if (!searchQuery.trim()) return tree;
-    const q = searchQuery.toLowerCase();
+    if (!deferredQuery.trim()) return tree;
+    const q = deferredQuery.toLowerCase();
     return tree.filter((n) => treeMatchesQuery(n, q));
-  }, [tree, searchQuery]);
+  }, [tree, deferredQuery]);
+
+  const flatItems = useMemo(
+    () => buildFlatList(filteredTree, expandedIds),
+    [filteredTree, expandedIds],
+  );
+
+  const handleToggleExpand = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   const handleItemClick = useCallback(
     (node: HistoryTreeNode) => {
       const item = history[node.id] as ChatHistoryItem | undefined;
-      dispatch(restoreChat(item ?? (node as unknown as ChatHistoryItem)));
+      if (item) {
+        dispatch(restoreChat(item));
+      } else {
+        const { children: _, ...historyItem } = node;
+        dispatch(restoreChat(historyItem as ChatHistoryItem));
+      }
       dispatch(push({ name: "chat" }));
     },
     [dispatch, history],
@@ -107,35 +177,11 @@ export const RecentSection: React.FC<RecentSectionProps> = ({
       .unwrap()
       .then((task) => {
         dispatch(push({ name: "task workspace", taskId: task.id }));
+      })
+      .catch(() => {
+        // Task creation failed — mutation error state is shown by RTK Query
       });
   }, [createTask, dispatch]);
-
-  const GROUP_ORDER = ["Today", "Yesterday", "Last 7 days", "Older"];
-
-  // Build flat list for virtualization with group headers
-  const flatItems = useMemo(() => {
-    if (!expanded) return null;
-    const groups = new Map<string, HistoryTreeNode[]>();
-    for (const label of GROUP_ORDER) {
-      groups.set(label, []);
-    }
-    for (const node of filteredTree) {
-      const group = getDateGroup(node.updatedAt);
-      if (!groups.has(group)) groups.set(group, []);
-      const arr = groups.get(group);
-      if (arr) arr.push(node);
-    }
-    const items: ({ type: "header"; label: string } | { type: "item"; node: HistoryTreeNode })[] = [];
-    for (const [key, nodes] of groups) {
-      if (nodes.length > 0) {
-        items.push({ type: "header", label: key });
-        for (const node of nodes) {
-          items.push({ type: "item", node });
-        }
-      }
-    }
-    return items;
-  }, [expanded, filteredTree]);
 
   const handleEndReached = useCallback(() => {
     if (hasMore && !isLoadingMore) {
@@ -169,17 +215,41 @@ export const RecentSection: React.FC<RecentSectionProps> = ({
         </button>
         <Flex gap="1" align="center" className={styles.headerActions}>
           <Tooltip content="New Chat">
-            <IconButton size="1" variant="ghost" color="gray" onClick={handleNewChat}>
+            <IconButton
+              size="1"
+              variant="ghost"
+              color="gray"
+              onClick={handleNewChat}
+              aria-label="New Chat"
+            >
               <PlusIcon width={14} height={14} />
             </IconButton>
           </Tooltip>
           <Tooltip content="New Task">
-            <IconButton size="1" variant="ghost" color="gray" onClick={handleNewTask}>
+            <IconButton
+              size="1"
+              variant="ghost"
+              color="gray"
+              onClick={handleNewTask}
+              disabled={isCreatingTask}
+              aria-label="New Task"
+            >
               <CheckboxIcon width={14} height={14} />
             </IconButton>
           </Tooltip>
         </Flex>
       </div>
+
+      {breakpoint !== "narrow" && (
+        <div className={styles.legend}>
+          {DOT_LEGEND.map((item) => (
+            <div key={item.label} className={styles.legendItem}>
+              <div className={styles.legendDot} style={{ background: item.color }} />
+              <Text size="1" color="gray">{item.label}</Text>
+            </div>
+          ))}
+        </div>
+      )}
 
       {expanded && (
         <div className={styles.controls}>
@@ -208,7 +278,7 @@ export const RecentSection: React.FC<RecentSectionProps> = ({
               </Flex>
             ))}
           </Flex>
-        ) : expanded && flatItems ? (
+        ) : (
           <Virtuoso
             data={flatItems}
             endReached={handleEndReached}
@@ -217,19 +287,21 @@ export const RecentSection: React.FC<RecentSectionProps> = ({
             itemContent={(_index, item) => {
               if (item.type === "header") {
                 return (
-                  <Text
-                    size="1"
-                    color="gray"
-                    className={styles.groupLabel}
-                  >
-                    {item.label}
-                  </Text>
+                  <div className={styles.groupLabel}>
+                    <Text size="1" color="gray" className={styles.groupLabelText}>
+                      {item.label}
+                    </Text>
+                    <div className={styles.groupDivider} />
+                  </div>
                 );
               }
               return (
                 <RecentItem
                   node={item.node}
+                  depth={item.depth}
                   breakpoint={breakpoint}
+                  isExpanded={expandedIds.has(item.node.id)}
+                  onToggleExpand={handleToggleExpand}
                   onClick={() => handleItemClick(item.node)}
                   onDotClick={handleDotClick}
                   onDelete={handleDelete}
@@ -251,32 +323,6 @@ export const RecentSection: React.FC<RecentSectionProps> = ({
                         Load failed — click to retry
                       </Text>
                     </Flex>
-                  )}
-                </>
-              ),
-            }}
-          />
-        ) : (
-          <Virtuoso
-            data={filteredTree}
-            endReached={handleEndReached}
-            overscan={200}
-            className={styles.virtuosoList}
-            itemContent={(_index, node) => (
-              <RecentItem
-                node={node}
-                breakpoint={breakpoint}
-                onClick={() => handleItemClick(node)}
-                onDotClick={handleDotClick}
-                onDelete={handleDelete}
-                onRename={handleRename}
-              />
-            )}
-            components={{
-              Footer: () => (
-                <>
-                  {isLoadingMore && (
-                    <Flex justify="center" py="2"><Spinner size="2" /></Flex>
                   )}
                 </>
               ),

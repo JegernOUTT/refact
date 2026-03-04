@@ -1,7 +1,7 @@
 .statsGrid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
 
 .compactRow {
@@ -15,8 +15,8 @@
 .narrowStats {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2);
+  gap: var(--space-2);
+  padding: var(--space-3);
   border-radius: var(--radius-2);
   background: var(--gray-a2);
   flex-shrink: 0;
@@ -25,8 +25,8 @@
 .card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2);
+  gap: var(--space-3);
+  padding: var(--space-3);
   border-radius: var(--radius-2);
   background: var(--gray-a2);
   overflow: hidden;
@@ -35,7 +35,19 @@
 .cardTitle {
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin-bottom: var(--space-1);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--gray-a4);
+}
+
+.cardSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.cardDivider {
+  height: 1px;
+  background: var(--gray-a3);
 }
 
 .modeFill {
