@@ -64,7 +64,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
   const { data: integrationsData } = integrationsApi.useGetAllIntegrationsQuery(undefined);
   const { data: knowledgeData } = useGetKnowledgeGraphQuery(undefined);
 
-  const providerCount = providersData?.providers.length ?? 0;
+  const providerCount = providersData?.providers.filter((p) => p.enabled).length ?? 0;
   const integrationCount = integrationsData?.integrations.length ?? 0;
   const memoryCount = knowledgeData?.stats.active_docs ?? 0;
 
@@ -147,7 +147,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
           {totals.total_calls > 0 && (
             <Badge size="1" color={successColor} variant="soft">{successRate}% success</Badge>
           )}
-          {providerCount > 0 && <Text size="1" color="gray">{providerCount} providers</Text>}
+          {providerCount > 0 && <Text size="1" color="gray">{providerCount} active providers</Text>}
         </Flex>
         <SparklineChart days={by_day} />
       </div>
@@ -284,7 +284,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
 
         <div className={styles.cardSection}>
           {providerCount > 0 && (
-            <HoverStat label={`${providerCount} providers available`}>
+            <HoverStat label={`${providerCount} active providers`}>
               <Flex direction="column" gap="1">
                 <Text size="2" weight="bold">LLM Providers</Text>
                 <Text size="1" color="gray">

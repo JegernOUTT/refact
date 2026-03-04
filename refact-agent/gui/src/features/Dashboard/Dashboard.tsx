@@ -45,9 +45,6 @@ export const Dashboard: React.FC = () => {
 
       <SetupBanner />
 
-      {/* Tasks section — scrollable list */}
-      <TasksSection breakpoint={breakpoint} />
-
       {expanded && hasOpenTabs && (
         <OpenSection tabs={openTabs} breakpoint={breakpoint} compact />
       )}
@@ -60,6 +57,11 @@ export const Dashboard: React.FC = () => {
         expanded={expanded}
         onToggleExpand={toggleExpand}
       />
+
+      <div className={styles.sectionDivider} />
+
+      {/* Tasks section — scrollable list */}
+      <TasksSection breakpoint={breakpoint} />
 
       {/* Bottom nav bar */}
       <NavBar />
