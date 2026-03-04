@@ -3,7 +3,6 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::header::USER_AGENT;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
-use reqwest_eventsource::EventSource;
 use serde_json::json;
 use tracing::info;
 
@@ -136,7 +135,7 @@ pub async fn forward_to_openai_style_endpoint_streaming(
     client: &reqwest::Client,
     sampling_parameters: &SamplingParameters,
     meta: Option<ChatMeta>,
-) -> Result<EventSource, String> {
+) -> Result<reqwest::Response, String> {
     let mut headers = HeaderMap::new();
     headers.insert(
         CONTENT_TYPE,
@@ -214,13 +213,19 @@ pub async fn forward_to_openai_style_endpoint_streaming(
     if model_rec.endpoint.is_empty() {
         return Err(format!("No endpoint configured for {}", model_rec.id));
     }
-    let builder = client
+    let response = client
         .post(&model_rec.endpoint)
         .headers(headers)
-        .body(data.to_string());
-    let event_source: EventSource = EventSource::new(builder)
+        .body(data.to_string())
+        .send()
+        .await
         .map_err(|e| format!("can't stream from {}: {}", model_rec.endpoint, e))?;
-    Ok(event_source)
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {} from {}: {}", status, model_rec.endpoint, text));
+    }
+    Ok(response)
 }
 
 pub fn try_get_compression_from_prompt(_prompt: &str) -> serde_json::Value {

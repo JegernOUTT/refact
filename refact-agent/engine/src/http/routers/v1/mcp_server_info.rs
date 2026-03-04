@@ -315,6 +315,7 @@ pub async fn handle_v1_mcp_server_reconnect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
 
     #[test]
     fn test_mcp_server_info_response_serializes() {

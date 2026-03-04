@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
-use rmcp::model::{RawContent, CallToolRequestParam, Tool as McpTool};
+
+/// Maximum bytes of text content returned from a single MCP tool call.
+/// Prevents runaway context window growth from excessively large tool responses.
+const MAX_TOOL_OUTPUT_BYTES: usize = 200 * 1024; // 200 KB
+use rmcp::model::{RawContent, CallToolRequestParams, Tool as McpTool};
 use tokio::sync::Mutex as AMutex;
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -13,6 +17,29 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation};
 use super::session_mcp::{McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup, redact_sensitive_json};
+
+/// Truncates `text` so that the running `total_bytes` counter does not exceed `limit`.
+/// Appends a truncation notice when cutting. Returns the (possibly truncated) text.
+fn truncate_to_byte_limit(text: String, limit: usize, total_bytes: &mut usize) -> String {
+    if *total_bytes >= limit {
+        return String::new();
+    }
+    let remaining = limit - *total_bytes;
+    if text.len() <= remaining {
+        *total_bytes += text.len();
+        text
+    } else {
+        *total_bytes = limit;
+        // Truncate on a UTF-8 char boundary
+        let boundary = text
+            .char_indices()
+            .take_while(|(i, _)| *i < remaining.saturating_sub(64))
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}\n...(truncated, {} bytes omitted)", &text[..boundary], text.len() - boundary)
+    }
+}
 
 pub struct ToolMCP {
     pub common: IntegrationCommon,
@@ -60,7 +87,7 @@ impl Tool for ToolMCP {
             let session_downcasted = session_locked
                 .as_any_mut()
                 .downcast_mut::<super::session_mcp::SessionMCP>()
-                .unwrap();
+                .ok_or_else(|| format!("Internal error: session is not an MCP session for '{}'", self.mcp_tool.name))?;
             match &session_downcasted.connection_status {
                 MCPConnectionStatus::Reconnecting { .. } => {
                     return Err(format!(
@@ -91,7 +118,7 @@ impl Tool for ToolMCP {
             let session_downcasted = session_locked
                 .as_any_mut()
                 .downcast_mut::<super::session_mcp::SessionMCP>()
-                .unwrap();
+                .ok_or_else(|| format!("Internal error: session is not an MCP session for '{}'", self.mcp_tool.name))?;
             (session_downcasted.logs.clone(), session_downcasted.metrics.clone())
         };
 
@@ -113,15 +140,16 @@ impl Tool for ToolMCP {
         };
 
         let call_start = session_metrics.lock().await.record_call_start();
+        let call_params = {
+            let mut p = CallToolRequestParams::new(self.mcp_tool.name.clone());
+            if let serde_json::Value::Object(map) = json_args {
+                p = p.with_arguments(map);
+            }
+            p
+        };
         let result_probably = match timeout(
             Duration::from_secs(self.request_timeout),
-            peer.call_tool(CallToolRequestParam {
-                name: self.mcp_tool.name.clone(),
-                arguments: match json_args {
-                    serde_json::Value::Object(map) => Some(map),
-                    _ => None,
-                },
-            }),
+            peer.call_tool(call_params),
         )
         .await
         {
@@ -144,12 +172,16 @@ impl Tool for ToolMCP {
                 }
 
                 let mut elements = Vec::new();
+                let mut total_text_bytes: usize = 0;
                 for content in result.content {
                     match content.raw {
-                        RawContent::Text(text_content) => elements.push(MultimodalElement {
-                            m_type: "text".to_string(),
-                            m_content: text_content.text,
-                        }),
+                        RawContent::Text(text_content) => {
+                            let text = truncate_to_byte_limit(text_content.text, MAX_TOOL_OUTPUT_BYTES, &mut total_text_bytes);
+                            elements.push(MultimodalElement {
+                                m_type: "text".to_string(),
+                                m_content: text,
+                            });
+                        }
                         RawContent::Image(image_content) => {
                             if model_supports_multimodality {
                                 let mime_type = if image_content.mime_type.starts_with("image/") {
@@ -172,13 +204,13 @@ impl Tool for ToolMCP {
                             m_type: "text".to_string(),
                             m_content: format!(
                                 "[Audio content: {}, {} bytes - audio playback not supported]",
-                                audio_content.raw.mime_type,
-                                audio_content.raw.data.len(),
+                                audio_content.mime_type,
+                                audio_content.data.len(),
                             ),
                         }),
                         RawContent::Resource(embedded) => {
-                            let text = match &embedded.resource {
-                                rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, text } => {
+                            let raw_text = match &embedded.resource {
+                                rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, text, .. } => {
                                     format!(
                                         "[Resource: {} ({}) - {}]\n{}",
                                         uri,
@@ -187,7 +219,7 @@ impl Tool for ToolMCP {
                                         text,
                                     )
                                 }
-                                rmcp::model::ResourceContents::BlobResourceContents { uri, mime_type, blob } => {
+                                rmcp::model::ResourceContents::BlobResourceContents { uri, mime_type, blob, .. } => {
                                     format!(
                                         "[Resource: {} ({}) - {} bytes blob]",
                                         uri,
@@ -196,9 +228,16 @@ impl Tool for ToolMCP {
                                     )
                                 }
                             };
+                            let text = truncate_to_byte_limit(raw_text, MAX_TOOL_OUTPUT_BYTES, &mut total_text_bytes);
                             elements.push(MultimodalElement {
                                 m_type: "text".to_string(),
                                 m_content: text,
+                            });
+                        }
+                        RawContent::ResourceLink(resource) => {
+                            elements.push(MultimodalElement {
+                                m_type: "text".to_string(),
+                                m_content: format!("[Resource link: {}]", resource.uri),
                             });
                         }
                     }
@@ -261,15 +300,7 @@ impl Tool for ToolMCP {
                 .file_stem()
                 .and_then(|name| name.to_str())
                 .unwrap_or("unknown");
-            let shortened_yaml_name = if let Some(stripped) = yaml_name.strip_prefix("mcp_stdio_") {
-                format!("mcp_{}", stripped)
-            } else if let Some(stripped) = yaml_name.strip_prefix("mcp_sse_") {
-                format!("mcp_{}", stripped)
-            } else if let Some(stripped) = yaml_name.strip_prefix("mcp_http_") {
-                format!("mcp_{}", stripped)
-            } else {
-                yaml_name.to_string()
-            };
+            let shortened_yaml_name = super::mcp_naming::shorten_config_name(yaml_name);
             format!("{}_{}", shortened_yaml_name, self.mcp_tool.name)
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -437,19 +468,16 @@ mod tests {
 
     #[test]
     fn test_audio_content_produces_metadata_text() {
-        use rmcp::model::{RawContent, RawAudioContent, Annotated};
-        let audio = RawContent::Audio(Annotated {
-            raw: RawAudioContent {
-                data: "AAABBBCCC".to_string(),
-                mime_type: "audio/mp3".to_string(),
-            },
-            annotations: None,
+        use rmcp::model::{RawContent, RawAudioContent};
+        let audio = RawContent::Audio(RawAudioContent {
+            data: "AAABBBCCC".to_string(),
+            mime_type: "audio/mp3".to_string(),
         });
         let text = match audio {
             RawContent::Audio(audio_content) => format!(
                 "[Audio content: {}, {} bytes - audio playback not supported]",
-                audio_content.raw.mime_type,
-                audio_content.raw.data.len(),
+                audio_content.mime_type,
+                audio_content.data.len(),
             ),
             _ => panic!("expected audio"),
         };
@@ -461,16 +489,17 @@ mod tests {
     #[test]
     fn test_resource_text_content_includes_uri_and_text() {
         use rmcp::model::{RawContent, RawEmbeddedResource, ResourceContents};
-        let resource = RawContent::Resource(RawEmbeddedResource {
-            resource: ResourceContents::TextResourceContents {
+        let resource = RawContent::Resource(RawEmbeddedResource::new(
+            ResourceContents::TextResourceContents {
                 uri: "file:///path/to/file.txt".to_string(),
                 mime_type: Some("text/plain".to_string()),
                 text: "Hello from resource".to_string(),
+                meta: None,
             },
-        });
+        ));
         let text = match resource {
             RawContent::Resource(embedded) => match &embedded.resource {
-                ResourceContents::TextResourceContents { uri, mime_type, text } => {
+                ResourceContents::TextResourceContents { uri, mime_type, text, .. } => {
                     format!(
                         "[Resource: {} ({}) - {}]\n{}",
                         uri,
@@ -491,16 +520,17 @@ mod tests {
     #[test]
     fn test_resource_blob_content_includes_uri_and_size() {
         use rmcp::model::{RawContent, RawEmbeddedResource, ResourceContents};
-        let resource = RawContent::Resource(RawEmbeddedResource {
-            resource: ResourceContents::BlobResourceContents {
+        let resource = RawContent::Resource(RawEmbeddedResource::new(
+            ResourceContents::BlobResourceContents {
                 uri: "file:///path/to/data.bin".to_string(),
                 mime_type: Some("application/octet-stream".to_string()),
                 blob: "AABBCCDD".to_string(),
+                meta: None,
             },
-        });
+        ));
         let text = match resource {
             RawContent::Resource(embedded) => match &embedded.resource {
-                ResourceContents::BlobResourceContents { uri, mime_type, blob } => {
+                ResourceContents::BlobResourceContents { uri, mime_type, blob, .. } => {
                     format!(
                         "[Resource: {} ({}) - {} bytes blob]",
                         uri,

@@ -55,7 +55,7 @@ import {
   UnifiedSendButton,
   BrowserToggleButton,
 } from "../Buttons";
-import { StreamingTokenCounter, UsageCounter } from "../UsageCounter";
+import { StreamingTokenCounter, UsageCounter, ProviderUsageIndicator } from "../UsageCounter";
 import { TrajectoryButton } from "../Trajectory";
 import { TextAreaWithChips } from "../TextAreaWithChips";
 import { selectHost } from "../../features/Config/configSlice";
@@ -519,6 +519,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 />
                 <Flex align="center" gap="2">
                   <StreamingTokenCounter />
+                  <ProviderUsageIndicator />
                   <UsageCounter />
                   <TrajectoryButton />
                 </Flex>

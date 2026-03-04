@@ -1,6 +1,7 @@
 import React, { useCallback, useDeferredValue, useMemo, useState } from "react";
 import { Flex, Skeleton, Spinner, Text, TextField } from "@radix-ui/themes";
 import { MagnifyingGlassIcon, ChevronDownIcon, ChevronUpIcon, PlusIcon } from "@radix-ui/react-icons";
+import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import { Virtuoso } from "react-virtuoso";
 import { useAppDispatch, useAppSelector, useLoadMoreHistory } from "../../../../hooks";
 import {
@@ -17,19 +18,11 @@ import styles from "./ChatsSection.module.css";
 
 type ChatsSectionProps = {
   breakpoint: DashboardBreakpoint;
-  expanded: boolean;
-  onToggleExpand: () => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 };
 
 const GROUP_ORDER = ["Today", "Yesterday", "Earlier"] as const;
-
-const DOT_LEGEND: { color: string; label: string }[] = [
-  { color: "var(--blue-8)", label: "Chat" },
-  { color: "var(--green-8)", label: "Subagent / Handoff" },
-  { color: "var(--amber-8)", label: "Fork / Branch" },
-  { color: "var(--blue-9)", label: "Active" },
-  { color: "var(--green-9)", label: "Done" },
-];
 
 function treeMatchesQuery(node: HistoryTreeNode, query: string): boolean {
   if (node.title.toLowerCase().includes(query)) return true;
@@ -82,8 +75,8 @@ function buildFlatList(
 
 export const ChatsSection: React.FC<ChatsSectionProps> = ({
   breakpoint,
-  expanded,
-  onToggleExpand,
+  collapsed,
+  onToggleCollapsed,
 }) => {
   const dispatch = useAppDispatch();
   const isInitialLoading = useAppSelector((state) => state.history.isLoading);
@@ -169,27 +162,25 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
   }, [hasMore, isLoadingMore, loadMoreAsync]);
 
   return (
-    <div className={styles.section}>
+    <div className={styles.section} data-collapsed={collapsed || undefined}>
       <div className={styles.header}>
         <button
           type="button"
           className={styles.headerToggle}
-          onClick={onToggleExpand}
-          aria-expanded={expanded}
+          onClick={onToggleCollapsed}
+          aria-expanded={!collapsed}
         >
           <Text size="1" weight="bold" color="gray" className={styles.label}>
             CHATS
           </Text>
           <Flex align="center" gap="1">
-            {!expanded && (
-              <Text size="1" color="gray">
-                {filteredTree.length} total
-              </Text>
-            )}
-            {expanded ? (
-              <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
-            ) : (
+            <Text size="1" color="gray">
+              {filteredTree.length} total
+            </Text>
+            {collapsed ? (
               <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
+            ) : (
+              <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
             )}
           </Flex>
         </button>
@@ -203,100 +194,89 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
         </button>
       </div>
 
-      {breakpoint !== "narrow" && (
-        <div className={styles.legend}>
-          {DOT_LEGEND.map((item) => (
-            <div key={item.label} className={styles.legendItem}>
-              <div className={styles.legendDot} style={{ background: item.color }} />
-              <Text size="1" color="gray">{item.label}</Text>
-            </div>
-          ))}
-        </div>
-      )}
+      <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
+          <div className={styles.controls}>
+            <TextField.Root
+              size="1"
+              placeholder="Search..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            >
+              <TextField.Slot>
+                <MagnifyingGlassIcon width={12} height={12} />
+              </TextField.Slot>
+            </TextField.Root>
+          </div>
 
-      {expanded && (
-        <div className={styles.controls}>
-          <TextField.Root
-            size="1"
-            placeholder="Search..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          >
-            <TextField.Slot>
-              <MagnifyingGlassIcon width={12} height={12} />
-            </TextField.Slot>
-          </TextField.Root>
-        </div>
-      )}
-
-      <div className={styles.list}>
-        {isInitialLoading && filteredTree.length === 0 ? (
-          <Flex direction="column" gap="1" p="1">
-            {Array.from({ length: 8 }, (_, i) => (
-              <Flex key={i} align="center" gap="2" py="1" px="2">
-                <Skeleton><div style={{ width: 8, height: 8, borderRadius: "50%" }} /></Skeleton>
-                <Skeleton><Text size="2" style={{ width: `${120 + (i % 3) * 40}px` }}>&nbsp;</Text></Skeleton>
-                <div style={{ flex: 1 }} />
-                <Skeleton><Text size="1" style={{ width: 40 }}>&nbsp;</Text></Skeleton>
+          <div className={styles.list}>
+            {isInitialLoading && filteredTree.length === 0 ? (
+              <Flex direction="column" gap="1" p="1">
+                {Array.from({ length: 8 }, (_, i) => (
+                  <Flex key={i} align="center" gap="2" py="1" px="2">
+                    <Skeleton><div style={{ width: 8, height: 8, borderRadius: "50%" }} /></Skeleton>
+                    <Skeleton><Text size="2" style={{ width: `${120 + (i % 3) * 40}px` }}>&nbsp;</Text></Skeleton>
+                    <div style={{ flex: 1 }} />
+                    <Skeleton><Text size="1" style={{ width: 40 }}>&nbsp;</Text></Skeleton>
+                  </Flex>
+                ))}
               </Flex>
-            ))}
-          </Flex>
-        ) : (
-          <Virtuoso
-            data={flatItems}
-            endReached={handleEndReached}
-            overscan={200}
-            className={styles.virtuosoList}
-            itemContent={(_index, item) => {
-              if (item.type === "header") {
-                return (
-                  <div className={styles.groupLabel}>
-                    <Text size="1" color="gray" className={styles.groupLabelText}>
-                      {item.label}
-                    </Text>
-                    <div className={styles.groupDivider} />
-                  </div>
-                );
-              }
-              return (
-                <RecentItem
-                  node={item.node}
-                  depth={item.depth}
-                  breakpoint={breakpoint}
-                  isExpanded={expandedIds.has(item.node.id)}
-                  onToggleExpand={handleToggleExpand}
-                  onClick={() => handleItemClick(item.node)}
-                  onDotClick={handleDotClick}
-                  onDelete={handleDelete}
-                />
-              );
-            }}
-            components={{
-              Footer: () => (
-                <>
-                  {isLoadingMore && (
-                    <Flex justify="center" py="2">
-                      <Spinner size="2" />
-                    </Flex>
-                  )}
-                  {loadMoreError && (
-                    <Flex justify="center" py="2">
-                      <Text size="1" color="red" style={{ cursor: "pointer" }} onClick={retryLoadMore}>
-                        Load failed — click to retry
-                      </Text>
-                    </Flex>
-                  )}
-                </>
-              ),
-            }}
-          />
-        )}
-        {!isInitialLoading && filteredTree.length === 0 && (
-          <Text size="2" color="gray" style={{ padding: "var(--space-4)", textAlign: "center" }}>
-            {searchQuery ? "No matching chats" : "No chats yet — start a new one!"}
-          </Text>
-        )}
-      </div>
+            ) : (
+              <Virtuoso
+                data={flatItems}
+                endReached={handleEndReached}
+                overscan={200}
+                className={styles.virtuosoList}
+                itemContent={(_index, item) => {
+                  if (item.type === "header") {
+                    return (
+                      <div className={styles.groupLabel}>
+                        <Text size="1" color="gray" className={styles.groupLabelText}>
+                          {item.label}
+                        </Text>
+                        <div className={styles.groupDivider} />
+                      </div>
+                    );
+                  }
+                  return (
+                    <RecentItem
+                      node={item.node}
+                      depth={item.depth}
+                      breakpoint={breakpoint}
+                      isExpanded={expandedIds.has(item.node.id)}
+                      onToggleExpand={handleToggleExpand}
+                      onClick={() => handleItemClick(item.node)}
+                      onDotClick={handleDotClick}
+                      onDelete={handleDelete}
+                    />
+                  );
+                }}
+                components={{
+                  Footer: () => (
+                    <>
+                      {isLoadingMore && (
+                        <Flex justify="center" py="2">
+                          <Spinner size="2" />
+                        </Flex>
+                      )}
+                      {loadMoreError && (
+                        <Flex justify="center" py="2">
+                          <Text size="1" color="red" style={{ cursor: "pointer" }} onClick={retryLoadMore}>
+                            Load failed — click to retry
+                          </Text>
+                        </Flex>
+                      )}
+                    </>
+                  ),
+                }}
+              />
+            )}
+            {!isInitialLoading && filteredTree.length === 0 && (
+              <Text size="2" color="gray" style={{ padding: "var(--space-4)", textAlign: "center" }}>
+                {searchQuery ? "No matching chats" : "No chats yet — start a new one!"}
+              </Text>
+            )}
+          </div>
+      </CollapsePanel>
     </div>
   );
 };

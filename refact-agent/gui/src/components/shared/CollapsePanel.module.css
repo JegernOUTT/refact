@@ -1,0 +1,20 @@
+.panel {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--motion-medium, 200ms) ease,
+              opacity var(--motion-medium, 200ms) ease;
+  opacity: 1;
+  overflow: hidden;
+}
+
+.panel[data-collapsed] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.inner {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}

@@ -563,10 +563,10 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             let tools_len = tools.len();
 
             let peer = client.peer().clone();
-            let server_info = client.peer_info().clone();
+            let server_info = client.peer_info().cloned();
             *peer_arc.lock().await = Some(peer.clone());
 
-            let capabilities = server_info.capabilities.clone();
+            let capabilities = server_info.as_ref().map(|s| s.capabilities.clone()).unwrap_or_default();
 
             let resources = if capabilities.resources.is_some() {
                 match timeout(Duration::from_secs(request_timeout), client.list_all_resources()).await {
@@ -612,7 +612,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 session_downcasted.mcp_tools = tools;
                 session_downcasted.mcp_resources = resources.clone();
                 session_downcasted.mcp_prompts = prompts;
-                session_downcasted.server_info = Some(server_info);
+                session_downcasted.server_info = server_info;
                 session_downcasted.connection_status = MCPConnectionStatus::Connected;
                 session_downcasted.last_successful_connection = Some(Instant::now());
                 if let Ok(mut m) = session_downcasted.metrics.try_lock() {

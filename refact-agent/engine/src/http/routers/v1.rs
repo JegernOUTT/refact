@@ -55,6 +55,7 @@ use crate::providers::http::{
     handle_v1_provider_oauth_logout, handle_v1_provider_oauth_callback,
     handle_v1_openrouter_account_info, handle_v1_openrouter_health,
     handle_v1_google_gemini_health,
+    handle_v1_claude_code_usage, handle_v1_openai_codex_usage,
 };
 
 use crate::http::routers::v1::vecdb::{handle_v1_vecdb_search, handle_v1_vecdb_status};
@@ -306,6 +307,8 @@ pub fn make_v1_router() -> Router {
         .route("/defaults", post(handle_v1_defaults_update))
         .route("/openrouter/health", get(handle_v1_openrouter_health))
         .route("/google-gemini/health", get(handle_v1_google_gemini_health))
+        .route("/claude-code/usage", get(handle_v1_claude_code_usage))
+        .route("/openai-codex/usage", get(handle_v1_openai_codex_usage))
         // cloud related
         .route("/set-active-group-id", post(handle_v1_set_active_group_id))
         .route(

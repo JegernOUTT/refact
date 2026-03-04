@@ -1,6 +1,7 @@
-import React, { useCallback, useMemo } from "react";
-import { Badge, Flex, Skeleton, Text } from "@radix-ui/themes";
-import { ChevronRightIcon, PlusIcon } from "@radix-ui/react-icons";
+import React, { useCallback, useDeferredValue, useMemo, useState } from "react";
+import { Badge, Flex, Skeleton, Text, TextField } from "@radix-ui/themes";
+import { MagnifyingGlassIcon, ChevronDownIcon, ChevronUpIcon, PlusIcon } from "@radix-ui/react-icons";
+import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import { Virtuoso } from "react-virtuoso";
 import { useAppDispatch } from "../../../../hooks";
 import { push } from "../../../Pages/pagesSlice";
@@ -13,19 +14,35 @@ import styles from "./TasksSection.module.css";
 
 type TasksSectionProps = {
   breakpoint: DashboardBreakpoint;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 };
 
 function formatTaskTime(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60_000);
   const diffHr = Math.floor(diffMs / 3_600_000);
   const diffDay = Math.floor(diffMs / 86_400_000);
 
-  if (diffHr < 1) return "just now";
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
   if (diffHr < 24) return `${diffHr}h ago`;
   if (diffDay < 7) return `${diffDay}d ago`;
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function getDateGroup(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const todayUTC = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  const dateUTC = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDay = Math.floor((todayUTC - dateUTC) / 86_400_000);
+
+  if (diffDay === 0) return "Today";
+  if (diffDay === 1) return "Yesterday";
+  return "Earlier";
 }
 
 function getStatusColor(status: string): "blue" | "purple" | "amber" | "green" | "red" | "gray" {
@@ -39,12 +56,46 @@ function getStatusColor(status: string): "blue" | "purple" | "amber" | "green" |
   }
 }
 
+const GROUP_ORDER = ["Today", "Yesterday", "Earlier"] as const;
+
+type FlatItem =
+  | { type: "header"; label: string }
+  | { type: "task"; task: TaskMeta };
+
+function buildFlatList(tasks: TaskMeta[]): FlatItem[] {
+  const groups = new Map<string, TaskMeta[]>();
+  for (const label of GROUP_ORDER) groups.set(label, []);
+
+  for (const task of tasks) {
+    const group = getDateGroup(task.updated_at);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)!.push(task);
+  }
+
+  const items: FlatItem[] = [];
+  for (const [label, groupTasks] of groups) {
+    if (groupTasks.length > 0) {
+      items.push({ type: "header", label });
+      for (const task of groupTasks) {
+        items.push({ type: "task", task });
+      }
+    }
+  }
+  return items;
+}
+
 export const TasksSection: React.FC<TasksSectionProps> = ({
   breakpoint,
+  collapsed,
+  onToggleCollapsed,
 }) => {
   const dispatch = useAppDispatch();
   const { data: tasks, isLoading, isError } = useListTasksQuery(undefined);
   const [createTask, { isLoading: isCreatingTask }] = useCreateTaskMutation();
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const deferredQuery = useDeferredValue(searchQuery);
+
   const sortedTasks = useMemo(() => {
     if (!tasks) return [];
     const priority = new Map([
@@ -57,6 +108,16 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
       return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
     });
   }, [tasks]);
+
+  const filteredTasks = useMemo(() => {
+    if (!deferredQuery.trim()) return sortedTasks;
+    const q = deferredQuery.toLowerCase();
+    return sortedTasks.filter((t) =>
+      t.name.toLowerCase().includes(q) || t.status.toLowerCase().includes(q),
+    );
+  }, [sortedTasks, deferredQuery]);
+
+  const flatItems = useMemo(() => buildFlatList(filteredTasks), [filteredTasks]);
 
   const handleTaskClick = useCallback(
     (task: TaskMeta) => {
@@ -76,132 +137,71 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
       });
   }, [createTask, dispatch]);
 
+  const activeCount = filteredTasks.filter((t) => t.status === "active" || t.status === "planning").length;
+
+  const renderHeader = (children?: React.ReactNode) => (
+    <div className={styles.header}>
+      <button
+        type="button"
+        className={styles.headerToggle}
+        onClick={onToggleCollapsed}
+        aria-expanded={!collapsed}
+      >
+        <Text size="1" weight="bold" color="gray" className={styles.label}>
+          TASKS
+        </Text>
+        <Flex align="center" gap="1">
+          {activeCount > 0 && (
+            <Text size="1" color="gray">{activeCount} active</Text>
+          )}
+          <Text size="1" color="gray">
+            {filteredTasks.length} total
+          </Text>
+          {collapsed ? (
+            <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
+          ) : (
+            <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
+          )}
+        </Flex>
+      </button>
+      {children}
+    </div>
+  );
+
   if (isLoading) {
     return (
-      <div className={styles.section}>
-        <div className={styles.header}>
-          <Text size="1" weight="bold" color="gray" className={styles.label}>TASKS</Text>
-        </div>
-        <Flex direction="column" gap="1">
-          {Array.from({ length: 3 }, (_, i) => (
-            <Skeleton key={i} height="28px" />
-          ))}
-        </Flex>
+      <div className={styles.section} data-collapsed={collapsed || undefined}>
+        {renderHeader()}
+        <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
+          <Flex direction="column" gap="1" p="1">
+            {Array.from({ length: 3 }, (_, i) => (
+              <Flex key={i} align="center" gap="2" py="1" px="2">
+                <Skeleton><div style={{ width: 8, height: 8, borderRadius: "50%" }} /></Skeleton>
+                <Skeleton><Text size="2" style={{ width: `${120 + (i % 3) * 40}px` }}>&nbsp;</Text></Skeleton>
+                <div style={{ flex: 1 }} />
+                <Skeleton><Text size="1" style={{ width: 40 }}>&nbsp;</Text></Skeleton>
+              </Flex>
+            ))}
+          </Flex>
+        </CollapsePanel>
       </div>
     );
   }
 
   if (isError) {
     return (
-      <div className={styles.section}>
-        <div className={styles.header}>
-          <Text size="1" weight="bold" color="gray" className={styles.label}>TASKS</Text>
-        </div>
-        <Text size="1" color="red">Failed to load tasks</Text>
+      <div className={styles.section} data-collapsed={collapsed || undefined}>
+        {renderHeader()}
+        <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
+          <Text size="1" color="red">Failed to load tasks</Text>
+        </CollapsePanel>
       </div>
     );
   }
-
-  if (sortedTasks.length === 0) {
-    return (
-      <div className={styles.section}>
-        <div className={styles.header}>
-          <Text size="1" weight="bold" color="gray" className={styles.label}>TASKS</Text>
-          <button
-            type="button"
-            className={styles.newTaskButton}
-            onClick={handleNewTask}
-            disabled={isCreatingTask}
-          >
-            <PlusIcon width={12} height={12} />
-            <Text size="1">New Task</Text>
-          </button>
-        </div>
-        <Text size="1" color="gray" style={{ padding: "var(--space-2)", textAlign: "center" }}>
-          No tasks yet
-        </Text>
-      </div>
-    );
-  }
-
-  const useVirtualization = sortedTasks.length > 20;
-
-  const renderTaskItem = (task: TaskMeta) => {
-    const progress = task.cards_total > 0
-      ? Math.min(100, Math.max(0, Math.round((task.cards_done / task.cards_total) * 100)))
-      : 0;
-    return (
-      <div
-        key={task.id}
-        role="button"
-        tabIndex={0}
-        className={styles.taskItem}
-        onClick={() => handleTaskClick(task)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            handleTaskClick(task);
-          }
-        }}
-      >
-        <div className={styles.taskLeft}>
-          <StatusDot state={getTaskStatusDotState(task)} size="small" />
-          <Text size="2" truncate className={styles.taskName}>
-            {task.name}
-          </Text>
-        </div>
-        <div className={styles.taskRight}>
-          {task.cards_total > 0 && (
-            <Flex align="center" gap="1">
-              <div className={styles.progressBar}>
-                <div
-                  className={styles.progressFill}
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-              <Text size="1" color="gray">
-                {task.cards_done}/{task.cards_total}
-              </Text>
-            </Flex>
-          )}
-          {breakpoint !== "narrow" && task.agents_active > 0 && (
-            <Text size="1" color="gray">
-              {task.agents_active} agent{task.agents_active !== 1 ? "s" : ""}
-            </Text>
-          )}
-          {breakpoint !== "narrow" && task.cards_failed > 0 && (
-            <Text size="1" color="red">
-              {task.cards_failed} failed
-            </Text>
-          )}
-          {breakpoint === "wide" && task.base_branch && (
-            <Text size="1" color="gray" truncate style={{ maxWidth: 80 }}>
-              {task.base_branch}
-            </Text>
-          )}
-          <Badge size="1" variant="soft" color={getStatusColor(task.status)}>
-            {task.status}
-          </Badge>
-          <Text size="1" color="gray" className={styles.taskTime}>
-            {formatTaskTime(task.updated_at)}
-          </Text>
-          <ChevronRightIcon width={12} height={12} color="var(--gray-8)" className={styles.taskChevron} />
-        </div>
-      </div>
-    );
-  };
 
   return (
-    <div className={styles.section}>
-      <div className={styles.header}>
-        <Flex align="center" gap="2">
-          <Text size="1" weight="bold" color="gray" className={styles.label}>
-            TASKS ({sortedTasks.length})
-          </Text>
-          <Text size="1" color="gray">
-            {sortedTasks.filter((t) => t.status === "active" || t.status === "planning").length} active
-          </Text>
-        </Flex>
+    <div className={styles.section} data-collapsed={collapsed || undefined}>
+      {renderHeader(
         <button
           type="button"
           className={styles.newTaskButton}
@@ -211,20 +211,89 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
           <PlusIcon width={12} height={12} />
           <Text size="1">New Task</Text>
         </button>
-      </div>
-      <div className={styles.list}>
-        {useVirtualization ? (
-          <Virtuoso
-            data={sortedTasks}
-            overscan={100}
-            className={styles.virtuosoList}
-            itemContent={(_index, task) => renderTaskItem(task)}
-          />
-        ) : (
-          sortedTasks.map((task) => renderTaskItem(task))
-        )}
-      </div>
+      )}
+      <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
+        <div className={styles.controls}>
+          <TextField.Root
+            size="1"
+            placeholder="Search..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          >
+            <TextField.Slot>
+              <MagnifyingGlassIcon width={12} height={12} />
+            </TextField.Slot>
+          </TextField.Root>
+        </div>
 
+        <div className={styles.list}>
+          <Virtuoso
+            data={flatItems}
+            overscan={200}
+            className={styles.virtuosoList}
+            itemContent={(_index, item) => {
+              if (item.type === "header") {
+                return (
+                  <div className={styles.groupLabel}>
+                    <Text size="1" color="gray" className={styles.groupLabelText}>
+                      {item.label}
+                    </Text>
+                    <div className={styles.groupDivider} />
+                  </div>
+                );
+              }
+              const { task } = item;
+              return (
+                <div
+                  role="button"
+                  tabIndex={0}
+                  className={styles.taskItem}
+                  onClick={() => handleTaskClick(task)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      handleTaskClick(task);
+                    }
+                  }}
+                >
+                  <div className={styles.taskLeft}>
+                    <span className={styles.indent} />
+                    <StatusDot state={getTaskStatusDotState(task)} size="small" />
+                    <Text size="2" truncate className={styles.taskName}>
+                      {task.name}
+                    </Text>
+                  </div>
+                  <div className={styles.taskRight}>
+                    {task.cards_total > 0 && (
+                      <Text size="1" color="gray">
+                        {task.cards_done}/{task.cards_total}
+                      </Text>
+                    )}
+                    {breakpoint !== "narrow" && task.cards_failed > 0 && (
+                      <Text size="1" color="red">
+                        {task.cards_failed} failed
+                      </Text>
+                    )}
+                    {breakpoint !== "narrow" && (
+                      <Badge size="1" variant="soft" color={getStatusColor(task.status)}>
+                        {task.status}
+                      </Badge>
+                    )}
+                    <Text size="1" color="gray" className={styles.taskTime}>
+                      {formatTaskTime(task.updated_at)}
+                    </Text>
+                  </div>
+                </div>
+              );
+            }}
+          />
+          {!isLoading && filteredTasks.length === 0 && (
+            <Text size="2" color="gray" style={{ padding: "var(--space-4)", textAlign: "center" }}>
+              {searchQuery ? "No matching tasks" : "No tasks yet — start a new one!"}
+            </Text>
+          )}
+        </div>
+      </CollapsePanel>
     </div>
   );
 };

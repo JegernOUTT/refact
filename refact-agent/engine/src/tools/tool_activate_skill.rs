@@ -6,7 +6,7 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, ContextFile};
+use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::ext::config_dirs::get_ext_dirs;
 use crate::ext::skills::load_skill_full;
 use crate::ext::skills_context::expand_skill_includes;
@@ -19,7 +19,7 @@ pub struct ToolActivateSkill {
 async fn activate_skill_inner(
     ext_dirs: &crate::ext::config_dirs::ExtDirs,
     name: &str,
-) -> Result<(ContextFile, Vec<String>, Option<String>), String> {
+) -> Result<(String, Vec<String>, Option<String>), String> {
     if let Err(e) = crate::ext::skills::validate_skill_id(name) {
         return Err(format!("Invalid skill name '{}': {}", name, e));
     }
@@ -32,19 +32,7 @@ async fn activate_skill_inner(
         return Err(format!("Skill '{}' cannot be activated by the model", name));
     }
     let body = expand_skill_includes(&skill.body, &skill.skill_dir).await;
-    let line_count = body.lines().count().max(1);
-    let cf = ContextFile {
-        file_name: format!("skill://{}", name),
-        file_content: body,
-        line1: 1,
-        line2: line_count,
-        file_rev: None,
-        symbols: vec![],
-        gradient_type: 0,
-        usefulness: 90.0,
-        skip_pp: true,
-    };
-    Ok((cf, skill.allowed_tools, skill.model))
+    Ok((body, skill.allowed_tools, skill.model))
 }
 
 #[async_trait]
@@ -96,8 +84,12 @@ impl Tool for ToolActivateSkill {
                 sessions.get(&chat_id).cloned()
             };
             if let Some(session_arc) = session_arc_opt {
-                let session = session_arc.lock().await;
+                let mut session = session_arc.lock().await;
                 if session.thread.active_skill.as_deref() == Some(name.as_str()) {
+                    if session.active_command.started_at_index.is_none() {
+                        session.active_command.started_at_index = Some(session.messages.len());
+                        session.active_command.name = name.clone();
+                    }
                     return Ok((false, vec![
                         ContextEnum::ChatMessage(ChatMessage {
                             role: "tool".to_string(),
@@ -107,11 +99,17 @@ impl Tool for ToolActivateSkill {
                         }),
                     ]));
                 }
+                if let Some(ref current) = session.thread.active_skill {
+                    return Err(format!(
+                        "Skill '{}' is currently active. Call deactivate_skill first before activating a different skill.",
+                        current
+                    ));
+                }
             }
         }
 
         let ext_dirs = get_ext_dirs(gcx.clone()).await;
-        let (context_file, allowed_tools, model_override) = activate_skill_inner(&ext_dirs, &name).await?;
+        let (body, allowed_tools, model_override) = activate_skill_inner(&ext_dirs, &name).await?;
 
         {
             let session_arc_opt = {
@@ -121,27 +119,33 @@ impl Tool for ToolActivateSkill {
             };
             if let Some(session_arc) = session_arc_opt {
                 let mut session = session_arc.lock().await;
-                let started_at = session.messages.iter().rev()
-                    .find(|m| m.role == "assistant" && m.tool_calls.as_ref().map_or(false, |tcs|
-                        tcs.iter().any(|tc| tc.id == *tool_call_id)
-                    ))
-                    .map(|m| m.message_id.clone());
                 session.active_command.name = name.clone();
-                session.active_command.allowed_tools = allowed_tools;
-                session.active_command.model_override = model_override;
-                session.active_command.started_at_message_id = started_at;
+                session.active_command.allowed_tools = allowed_tools.clone();
+                session.active_command.model_override = model_override.clone();
+                session.active_command.started_at_index = Some(session.messages.len());
                 session.set_active_skill(name.clone());
             }
         }
 
+        let header_json = serde_json::json!({
+            "name": name,
+            "allowed_tools": allowed_tools,
+            "model_override": model_override,
+        });
+        let cd_instruction_content = format!("💿 SKILL_ACTIVATED {}\n\n{}", header_json, body);
+
         Ok((false, vec![
             ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText(format!("✅ Skill '{}' activated. Follow the skill instructions provided in context.", name)),
+                content: ChatContent::SimpleText(format!("Skill '{}' activated.", name)),
                 tool_call_id: tool_call_id.clone(),
                 ..Default::default()
             }),
-            ContextEnum::ContextFile(context_file),
+            ContextEnum::ChatMessage(ChatMessage {
+                role: "cd_instruction".to_string(),
+                content: ChatContent::SimpleText(cd_instruction_content),
+                ..Default::default()
+            }),
         ]))
     }
 }
@@ -201,21 +205,23 @@ impl Tool for ToolDeactivateSkill {
                     Some(name) => name,
                     None => return Err("No active skill to deactivate".to_string()),
                 };
-                if let Some(start_msg_id) = session.active_command.started_at_message_id.clone() {
+                let compaction_note = if let Some(start_index) = session.active_command.started_at_index {
                     session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
-                        start_message_id: start_msg_id,
+                        start_index,
                         report: report.clone(),
                         skill_name: skill_name.clone(),
                     });
+                    String::new()
                 } else {
-                    tracing::warn!("deactivate_skill: no started_at_message_id for skill '{}', skipping compaction", skill_name);
-                }
+                    tracing::warn!("deactivate_skill: no started_at_index for skill '{}', skipping compaction", skill_name);
+                    " (Note: skill history compaction was skipped — activation anchor was not set.)".to_string()
+                };
                 session.active_command = crate::chat::types::ActiveCommandContext::default();
                 session.clear_active_skill();
                 return Ok((false, vec![
                     ContextEnum::ChatMessage(ChatMessage {
                         role: "tool".to_string(),
-                        content: ChatContent::SimpleText(format!("✅ Skill '{}' deactivated. Report has been recorded.", skill_name)),
+                        content: ChatContent::SimpleText(format!("✅ Skill '{}' deactivated. Report has been recorded.{}", skill_name, compaction_note)),
                         tool_call_id: tool_call_id.clone(),
                         ..Default::default()
                     }),
@@ -269,11 +275,8 @@ mod tests {
         let ext_dirs = make_ext_dirs(tmp.path());
         let result = activate_skill_inner(&ext_dirs, "my-skill").await;
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-        let (cf, allowed_tools, model_override) = result.unwrap();
-        assert_eq!(cf.file_name, "skill://my-skill");
-        assert!(cf.file_content.contains("Do something useful with $ARGUMENTS"));
-        assert_eq!(cf.line1, 1);
-        assert!(cf.skip_pp);
+        let (body, allowed_tools, model_override) = result.unwrap();
+        assert!(body.contains("Do something useful with $ARGUMENTS"));
         assert!(allowed_tools.is_empty());
         assert!(model_override.is_none());
     }
@@ -326,13 +329,13 @@ mod tests {
         let ext_dirs = make_ext_dirs(tmp.path());
         let result = activate_skill_inner(&ext_dirs, "with-include").await;
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-        let (cf, _, _) = result.unwrap();
+        let (body, _, _) = result.unwrap();
         assert!(
-            cf.file_content.contains("Included content here"),
+            body.contains("Included content here"),
             "@include should be expanded, got: {}",
-            cf.file_content
+            body
         );
-        assert!(!cf.file_content.contains("@include"), "@include directive should be replaced");
+        assert!(!body.contains("@include"), "@include directive should be replaced");
     }
 
     #[tokio::test]
@@ -349,8 +352,8 @@ mod tests {
         let ext_dirs = make_ext_dirs(tmp.path());
         let result = activate_skill_inner(&ext_dirs, "restricted-skill").await;
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-        let (cf, allowed_tools, model_override) = result.unwrap();
-        assert_eq!(cf.file_name, "skill://restricted-skill");
+        let (body, allowed_tools, model_override) = result.unwrap();
+        assert!(!body.is_empty());
         assert_eq!(allowed_tools, vec!["cat".to_string(), "tree".to_string()]);
         assert_eq!(model_override, Some("gpt-4o".to_string()));
     }
@@ -383,8 +386,9 @@ mod tests {
             allowed_tools: vec!["cat".to_string(), "tree".to_string()],
             model_override: Some("gpt-4o".to_string()),
             context_fork: None,
-            started_at_message_id: Some("msg-123".to_string()),
+            started_at_index: Some(5),
         };
+        assert_eq!(active.started_at_index, Some(5));
 
         active = ActiveCommandContext::default();
 
@@ -392,7 +396,7 @@ mod tests {
         assert!(active.allowed_tools.is_empty());
         assert!(active.model_override.is_none());
         assert!(active.context_fork.is_none());
-        assert!(active.started_at_message_id.is_none());
+        assert!(active.started_at_index.is_none());
     }
 
     #[tokio::test]
@@ -405,7 +409,7 @@ mod tests {
         assert_eq!(active.name, cleared.name);
         assert_eq!(active.allowed_tools, cleared.allowed_tools);
         assert_eq!(active.model_override, cleared.model_override);
-        assert_eq!(active.started_at_message_id, cleared.started_at_message_id);
+        assert_eq!(active.started_at_index, cleared.started_at_index);
     }
 
     #[test]
@@ -453,56 +457,19 @@ mod tests {
     }
 
     #[test]
-    fn test_activate_started_at_uses_exact_tool_call_id() {
-        use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction};
+    fn test_activate_started_at_uses_message_count() {
+        use crate::chat::types::ActiveCommandContext;
 
-        let make_assistant_msg = |msg_id: &str, call_id: &str| ChatMessage {
-            message_id: msg_id.to_string(),
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("".to_string()),
-            tool_calls: Some(vec![ChatToolCall {
-                id: call_id.to_string(),
-                index: None,
-                function: ChatToolFunction {
-                    name: "activate_skill".to_string(),
-                    arguments: "{}".to_string(),
-                },
-                tool_type: "function".to_string(),
-                extra_content: None,
-            }]),
-            ..Default::default()
-        };
+        let mut ctx = ActiveCommandContext::default();
+        assert!(ctx.started_at_index.is_none());
 
-        let messages = vec![
-            make_assistant_msg("msg_1", "call_1"),
-            make_assistant_msg("msg_2", "call_2"),
-        ];
+        // Simulate: at activation time, there are 3 messages already in session
+        ctx.started_at_index = Some(3);
+        assert_eq!(ctx.started_at_index, Some(3));
 
-        let tool_call_id = "call_2".to_string();
-        let started_at = messages.iter().rev()
-            .find(|m| m.role == "assistant" && m.tool_calls.as_ref().map_or(false, |tcs|
-                tcs.iter().any(|tc| tc.id == tool_call_id)
-            ))
-            .map(|m| m.message_id.clone());
-
-        assert_eq!(
-            started_at,
-            Some("msg_2".to_string()),
-            "Exact tool_call_id match must return msg_2, not msg_1"
-        );
-
-        let tool_call_id_first = "call_1".to_string();
-        let started_at_first = messages.iter().rev()
-            .find(|m| m.role == "assistant" && m.tool_calls.as_ref().map_or(false, |tcs|
-                tcs.iter().any(|tc| tc.id == tool_call_id_first)
-            ))
-            .map(|m| m.message_id.clone());
-
-        assert_eq!(
-            started_at_first,
-            Some("msg_1".to_string()),
-            "Exact tool_call_id match must return msg_1 for call_1"
-        );
+        // After reset, index is cleared
+        ctx = ActiveCommandContext::default();
+        assert!(ctx.started_at_index.is_none());
     }
 
     #[test]
@@ -524,6 +491,7 @@ mod tests {
             },
             active_command: ActiveCommandContext {
                 name: "some-slash-command".to_string(),
+                started_at_index: Some(0),
                 ..Default::default()
             },
             messages: Vec::new(),

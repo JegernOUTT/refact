@@ -3,7 +3,18 @@
   flex-direction: column;
   gap: var(--space-2);
   min-height: 0;
+  flex: 1;
   overflow: hidden;
+}
+
+.section[data-collapsed] {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.bodyPanel {
+  flex: 1;
+  min-height: 0;
 }
 
 .header {
@@ -12,6 +23,22 @@
   justify-content: space-between;
   gap: var(--space-2);
   flex-shrink: 0;
+}
+
+.headerToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1) 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.headerToggle:hover {
+  opacity: 0.8;
 }
 
 .label {
@@ -49,20 +76,47 @@
   cursor: not-allowed;
 }
 
+.controls {
+  display: flex;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+  flex-shrink: 0;
+}
+
 .list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
   min-height: 0;
   flex: 1;
-  overflow-y: auto;
+  overflow: hidden;
   overflow-x: hidden;
-  composes: scrollbarThin from "../../../../components/shared/scrollbar.module.css";
 }
 
 .virtuosoList {
   composes: scrollbarThin from "../../../../components/shared/scrollbar.module.css";
   flex: 1;
+}
+
+.groupLabel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  flex-shrink: 0;
+}
+
+.groupLabelText {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.groupDivider {
+  flex: 1;
+  height: 1px;
+  background: var(--gray-a4);
 }
 
 .taskItem {
@@ -97,7 +151,12 @@
   min-width: 0;
   flex: 1;
   overflow: hidden;
-  padding-left: 16px;
+}
+
+.indent {
+  display: inline-block;
+  width: 16px;
+  flex-shrink: 0;
 }
 
 .taskName {
@@ -120,26 +179,3 @@
   text-align: right;
   flex-shrink: 0;
 }
-
-.taskChevron {
-  flex-shrink: 0;
-  opacity: 0.5;
-}
-
-.progressBar {
-  width: 48px;
-  height: 3px;
-  background: var(--gray-a4);
-  border-radius: 2px;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.progressFill {
-  height: 100%;
-  border-radius: 2px;
-  background: var(--green-9);
-  transition: width var(--motion-slow) ease;
-}
-
-

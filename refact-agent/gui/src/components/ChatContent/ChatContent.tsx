@@ -47,6 +47,7 @@ import { GroupedDiffs } from "./DiffContent";
 import { popBackTo } from "../../features/Pages/pagesSlice";
 import { ChatLinks, UncommittedChangesWarning } from "../ChatLinks";
 import { PlaceHolderText } from "./PlaceHolderText";
+import { SkillActivatedCard } from "./SkillActivatedCard";
 import { QueuedMessage } from "./QueuedMessage";
 import { selectSseStatusForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
@@ -322,6 +323,17 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         case "system":
           return <SystemPrompt content={item.content} />;
 
+        case "skill_activated":
+          return (
+            <SkillActivatedCard
+              key={item.key}
+              name={item.name}
+              body={item.body}
+              allowedTools={item.allowedTools}
+              modelOverride={item.modelOverride}
+            />
+          );
+
         default:
           return null;
       }
@@ -495,13 +507,50 @@ type DisplayItemPlainText = {
   content: string;
 };
 
+type DisplayItemSkillActivated = {
+  type: "skill_activated";
+  key: string;
+  name: string;
+  body: string;
+  allowedTools: string[];
+  modelOverride: string | null;
+};
+
 type DisplayItem =
   | DisplayItemAssistant
   | DisplayItemUser
   | DisplayItemContextFiles
   | DisplayItemDiffGroup
   | DisplayItemSystem
-  | DisplayItemPlainText;
+  | DisplayItemPlainText
+  | DisplayItemSkillActivated;
+
+function tryParseSkillActivated(
+  content: string,
+): Omit<DisplayItemSkillActivated, "type" | "key"> | null {
+  const prefix = "💿 SKILL_ACTIVATED ";
+  const firstNewline = content.indexOf("\n");
+  const headerLine =
+    firstNewline === -1 ? content : content.slice(0, firstNewline);
+  if (!headerLine.startsWith(prefix)) return null;
+  try {
+    const meta = JSON.parse(headerLine.slice(prefix.length)) as {
+      name?: string;
+      allowed_tools?: string[];
+      model_override?: string | null;
+    };
+    const body =
+      firstNewline === -1 ? "" : content.slice(firstNewline + 1).trimStart();
+    return {
+      name: meta.name ?? "",
+      body,
+      allowedTools: meta.allowed_tools ?? [],
+      modelOverride: meta.model_override ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function buildDisplayItems(
   messages: ChatMessages,
@@ -540,13 +589,21 @@ function buildDisplayItems(
     }
 
     if (head.role === "assistant") {
+      const toolCalls = "tool_calls" in head ? (head.tool_calls ?? []) : [];
+      const isOnlyActivateSkill =
+        toolCalls.length > 0 &&
+        toolCalls.every((tc) => tc.function.name === "activate_skill") &&
+        !("content" in head && head.content && String(head.content).trim());
+      if (isOnlyActivateSkill) {
+        continue;
+      }
+
       const key = getMessageKey(head, i);
       const contextFilesAfter: DisplayItemContextFiles[] = [];
       const diffMessagesAfter: DiffMessage[] = [];
       const contextFilesByToolId: Record<string, ChatContextFile[]> = {};
       const diffsByToolId: Record<string, DiffChunk[]> = {};
 
-      const toolCalls = head.tool_calls ?? [];
       const eligibleToolCalls = toolCalls.filter(
         (tc) => tc.id && tc.function.name && READ_TOOLS.has(tc.function.name),
       );
@@ -669,6 +726,18 @@ function buildDisplayItems(
         message: head,
         isLastUser: i === lastUserIdx,
       });
+      continue;
+    }
+
+    if (head.role === "cd_instruction" && typeof head.content === "string") {
+      const parsed = tryParseSkillActivated(head.content);
+      if (parsed) {
+        items.push({
+          type: "skill_activated",
+          key: getMessageKey(head, i),
+          ...parsed,
+        });
+      }
       continue;
     }
 

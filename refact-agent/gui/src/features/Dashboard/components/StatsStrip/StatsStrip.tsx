@@ -2,8 +2,15 @@ import React, { useMemo } from "react";
 import { Badge, Flex, HoverCard, Skeleton, Text } from "@radix-ui/themes";
 import { useGetStatsSummaryQuery } from "../../../../services/refact/stats";
 import { useGetConfiguredProvidersQuery } from "../../../../hooks";
+import {
+  useGetClaudeCodeUsageQuery,
+  useGetOpenAICodexUsageQuery,
+} from "../../../../services/refact/providers";
 import { integrationsApi } from "../../../../services/refact/integrations";
 import { useGetKnowledgeGraphQuery } from "../../../../services/refact/knowledgeGraphApi";
+import { useGetCapsQuery } from "../../../../services/refact/caps";
+import { useAppDispatch } from "../../../../hooks";
+import { push } from "../../../Pages/pagesSlice";
 import { SparklineChart } from "./SparklineChart";
 import { TokenDonut } from "./TokenDonut";
 import { ModelBars } from "./ModelBars";
@@ -50,6 +57,188 @@ function HoverStat({ label, children }: { label: string; children: React.ReactNo
         {children}
       </HoverCard.Content>
     </HoverCard.Root>
+  );
+}
+
+function formatResetAt(resetAt: string | null | undefined): string | null {
+  if (!resetAt) return null;
+  const d = new Date(resetAt);
+  if (isNaN(d.getTime())) return null;
+  return `Resets ${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function UsageBar({ pct }: { pct: number }) {
+  const clamped = Math.max(0, Math.min(pct, 100));
+  const color = clamped >= 90 ? "var(--red-9)" : clamped >= 70 ? "var(--orange-9)" : "var(--green-9)";
+  return (
+    <div style={{ height: "3px", width: "100%", borderRadius: "2px", background: "var(--gray-a4)", overflow: "hidden", marginTop: "3px" }}>
+      <div style={{ height: "100%", width: `${clamped}%`, borderRadius: "2px", background: color, transition: "width 0.3s ease" }} />
+    </div>
+  );
+}
+
+function WindowRow({ label, pct, resetAt, limitReached }: { label: string; pct: number; resetAt?: string | null; limitReached?: boolean }) {
+  const clamped = Math.max(0, Math.min(pct, 100));
+  const reset = formatResetAt(resetAt);
+  return (
+    <div style={{ marginBottom: "6px" }}>
+      <Flex justify="between" align="center">
+        <Flex align="center" gap="1">
+          <Text size="1" color="gray">{label}</Text>
+          {limitReached && <Badge color="red" size="1">Limit</Badge>}
+        </Flex>
+        <Text size="1" color="gray">{Math.round(clamped)}%{reset ? ` · ${reset}` : ""}</Text>
+      </Flex>
+      <UsageBar pct={clamped} />
+    </div>
+  );
+}
+
+function ModelRow({ label, model, explanation }: { label: string; model: string; explanation: string }) {
+  const shortName = model.split("/").pop() ?? model;
+  return (
+    <HoverCard.Root openDelay={300} closeDelay={100}>
+      <HoverCard.Trigger>
+        <Flex align="center" gap="2" style={{ cursor: "help" }}>
+          <Text size="1" color="gray" style={{ minWidth: 70, flexShrink: 0 }}>{label}</Text>
+          <Text size="1" weight="medium" truncate>{shortName}</Text>
+        </Flex>
+      </HoverCard.Trigger>
+      <HoverCard.Content size="1" side="top" align="center" className={styles.hoverContent} avoidCollisions>
+        <Flex direction="column" gap="1">
+          <Text size="2" weight="bold">{label}</Text>
+          <Text size="1" color="gray">{explanation}</Text>
+          <Text size="1">Current: {model}</Text>
+        </Flex>
+      </HoverCard.Content>
+    </HoverCard.Root>
+  );
+}
+
+function DefaultModelsCard() {
+  const dispatch = useAppDispatch();
+  const { data: caps, isLoading } = useGetCapsQuery(undefined);
+
+  return (
+    <div className={styles.card}>
+      <Flex justify="between" align="center" className={styles.cardTitle}>
+        <Text size="1" weight="bold" color="gray">DEFAULT MODELS</Text>
+        <button
+          type="button"
+          className={styles.configureButton}
+          onClick={() => dispatch(push({ name: "default models" }))}
+        >
+          <Text size="1">Configure</Text>
+        </button>
+      </Flex>
+
+      {isLoading || !caps ? (
+        <Flex direction="column" gap="2">
+          <Skeleton height="16px" />
+          <Skeleton height="16px" />
+        </Flex>
+      ) : (
+        <div className={styles.cardSection}>
+          {caps.chat_default_model && (
+            <ModelRow label="Chat" model={caps.chat_default_model} explanation="Primary model for chat conversations and agent tasks." />
+          )}
+          {caps.chat_thinking_model && caps.chat_thinking_model !== caps.chat_default_model && (
+            <ModelRow label="Thinking" model={caps.chat_thinking_model} explanation="Model with extended reasoning for complex tasks." />
+          )}
+          {caps.chat_light_model && caps.chat_light_model !== caps.chat_default_model && (
+            <ModelRow label="Light" model={caps.chat_light_model} explanation="Faster, cheaper model for simple tasks." />
+          )}
+          {caps.completion_default_model && (
+            <ModelRow label="Completion" model={caps.completion_default_model} explanation="Model for inline code completion." />
+          )}
+          <Text size="1" color="gray">
+            {Object.keys(caps.chat_models).length} chat + {Object.keys(caps.completion_models).length} completion available
+          </Text>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProviderQuotaCard() {
+  const { data: claudeUsage } = useGetClaudeCodeUsageQuery(undefined, { pollingInterval: 5 * 60_000 });
+  const { data: codexUsage } = useGetOpenAICodexUsageQuery(undefined, { pollingInterval: 5 * 60_000 });
+
+  const hasClaudeData = !!(claudeUsage?.data && (claudeUsage.data.five_hour || claudeUsage.data.seven_day));
+  const hasCodexData = !!(codexUsage?.data?.rate_limit);
+
+  if (!hasClaudeData && !hasCodexData) return null;
+
+  return (
+    <div className={styles.card}>
+      <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>PROVIDER QUOTAS</Text>
+
+      {hasClaudeData && claudeUsage?.data && (
+        <div className={styles.cardSection}>
+          <Text size="1" weight="medium" mb="1" as="p">Claude Code</Text>
+          {claudeUsage.data.five_hour && (
+            <WindowRow
+              label="Session (5h)"
+              pct={claudeUsage.data.five_hour.percent_used}
+              resetAt={claudeUsage.data.five_hour.resets_at}
+            />
+          )}
+          {claudeUsage.data.seven_day && (
+            <WindowRow
+              label="Weekly"
+              pct={claudeUsage.data.seven_day.percent_used}
+              resetAt={claudeUsage.data.seven_day.resets_at}
+            />
+          )}
+          {claudeUsage.data.extra_usage && (
+            <Text size="1" color="gray">
+              Extra: {claudeUsage.data.extra_usage.is_enabled ? "on" : "off"} · ${claudeUsage.data.extra_usage.used_credits.toFixed(2)} spent
+              {typeof claudeUsage.data.extra_usage.monthly_limit === "number"
+                ? ` / $${claudeUsage.data.extra_usage.monthly_limit.toFixed(0)}`
+                : ""}
+            </Text>
+          )}
+        </div>
+      )}
+
+      {hasClaudeData && hasCodexData && <div className={styles.cardDivider} />}
+
+      {hasCodexData && codexUsage?.data && (
+        <div className={styles.cardSection}>
+          <Flex align="center" gap="2" mb="1">
+            <Text size="1" weight="medium">OpenAI Codex</Text>
+            {codexUsage.data.plan_type && <Badge color="blue" size="1">{codexUsage.data.plan_type}</Badge>}
+          </Flex>
+          {codexUsage.data.rate_limit?.primary_window && (
+            <WindowRow
+              label="Session (5h)"
+              pct={codexUsage.data.rate_limit.primary_window.used_percent}
+              resetAt={codexUsage.data.rate_limit.primary_window.reset_at}
+              limitReached={codexUsage.data.rate_limit.limit_reached}
+            />
+          )}
+          {codexUsage.data.rate_limit?.secondary_window && (
+            <WindowRow
+              label="Weekly"
+              pct={codexUsage.data.rate_limit.secondary_window.used_percent}
+              resetAt={codexUsage.data.rate_limit.secondary_window.reset_at}
+            />
+          )}
+          {codexUsage.data.code_review_rate_limit?.primary_window && (
+            <WindowRow
+              label="Code review"
+              pct={codexUsage.data.code_review_rate_limit.primary_window.used_percent}
+              limitReached={codexUsage.data.code_review_rate_limit.limit_reached}
+            />
+          )}
+          {codexUsage.data.credits && (
+            <Text size="1" color="gray">
+              Credits: {codexUsage.data.credits.unlimited ? "unlimited" : codexUsage.data.credits.has_credits ? `${codexUsage.data.credits.balance} remaining` : "none"}
+            </Text>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -160,6 +349,8 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
 
   return (
     <div className={styles.statsGrid} data-breakpoint={breakpoint}>
+      <DefaultModelsCard />
+      <ProviderQuotaCard />
       {/* Card 1: 7-Day Activity */}
       <div className={styles.card}>
         <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>7-DAY ACTIVITY</Text>

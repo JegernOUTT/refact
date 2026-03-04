@@ -41,6 +41,34 @@ pub struct OpenAICodexProvider {
     pub oauth_tokens: OAuthTokens,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexUsageWindow {
+    pub used_percent: f64,
+    pub reset_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexRateLimit {
+    pub limit_reached: bool,
+    pub primary_window: Option<OpenAICodexUsageWindow>,
+    pub secondary_window: Option<OpenAICodexUsageWindow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexCredits {
+    pub balance: f64,
+    pub unlimited: bool,
+    pub has_credits: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexUsage {
+    pub plan_type: Option<String>,
+    pub rate_limit: Option<OpenAICodexRateLimit>,
+    pub code_review_rate_limit: Option<OpenAICodexRateLimit>,
+    pub credits: Option<OpenAICodexCredits>,
+}
+
 impl OpenAICodexProvider {
     fn needs_refresh_on_start(expires_at: i64) -> bool {
         const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000;
@@ -178,6 +206,89 @@ impl OpenAICodexProvider {
         }
 
         (AuthSource::None, CodexAuth::None)
+    }
+
+    fn resolve_wham_token(&self) -> Result<String, String> {
+        // The wham/usage endpoint uses the ChatGPT OAuth access token
+        if self.oauth_tokens.has_valid_access_token() {
+            return Ok(self.oauth_tokens.access_token.clone());
+        }
+        if let Ok(cli_tokens) = crate::providers::openai_codex_oauth::read_codex_cli_credentials() {
+            if !cli_tokens.access_token.is_empty() {
+                return Ok(cli_tokens.access_token);
+            }
+        }
+        Err("No ChatGPT OAuth access token available for usage API".to_string())
+    }
+
+    pub async fn fetch_usage(&self, http_client: &reqwest::Client) -> Result<OpenAICodexUsage, String> {
+        let token = self.resolve_wham_token()?;
+
+        let resp = http_client
+            .get("https://chatgpt.com/backend-api/wham/usage")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let truncated: String = body.chars().take(512).collect();
+            return Err(format!("Usage API returned {}: {}", status, truncated));
+        }
+
+        let root: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse usage response: {}", e))?;
+
+        let data = root.get("data").unwrap_or(&root);
+
+        fn as_f64_loose(v: &serde_json::Value) -> Option<f64> {
+            v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+        }
+
+        let parse_window = |obj: &serde_json::Value| -> Option<OpenAICodexUsageWindow> {
+            let used_percent = obj.get("used_percent").and_then(as_f64_loose)?;
+            let reset_at = obj.get("reset_at").and_then(|v| {
+                if let Some(ts) = v.as_i64() {
+                    use std::time::{Duration, UNIX_EPOCH};
+                    let dt: chrono::DateTime<chrono::Utc> = (UNIX_EPOCH + Duration::from_secs(ts as u64)).into();
+                    Some(dt.to_rfc3339())
+                } else {
+                    v.as_str().map(|s| s.to_string())
+                }
+            });
+            Some(OpenAICodexUsageWindow { used_percent, reset_at })
+        };
+
+        let parse_rate_limit = |rl: &serde_json::Value| -> OpenAICodexRateLimit {
+            OpenAICodexRateLimit {
+                limit_reached: rl.get("limit_reached").and_then(|v| v.as_bool()).unwrap_or(false),
+                primary_window: rl.get("primary_window").and_then(|w| parse_window(w)),
+                secondary_window: rl.get("secondary_window").and_then(|w| parse_window(w)),
+            }
+        };
+
+        let plan_type = data.get("plan_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        let rate_limit = data.get("rate_limit").map(|rl| parse_rate_limit(rl));
+
+        let code_review_rate_limit = data.get("code_review_rate_limit").map(|rl| parse_rate_limit(rl));
+
+        let credits = data.get("credits").map(|c| {
+            let balance = c.get("balance")
+                .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                .or_else(|| as_f64_loose(c.get("balance").unwrap_or(&serde_json::Value::Null)))
+                .unwrap_or(0.0);
+            OpenAICodexCredits {
+                balance,
+                unlimited: c.get("unlimited").and_then(|v| v.as_bool()).unwrap_or(false),
+                has_credits: c.get("has_credits").and_then(|v| v.as_bool()).unwrap_or(false),
+            }
+        });
+
+        Ok(OpenAICodexUsage { plan_type, rate_limit, code_review_rate_limit, credits })
     }
 
     fn diagnose_auth_status(&self) -> String {

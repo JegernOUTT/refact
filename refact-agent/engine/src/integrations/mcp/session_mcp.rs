@@ -9,7 +9,7 @@ use rmcp::{RoleClient, service::RunningService};
 use rmcp::transport::auth::AuthorizationManager;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{Tool as McpTool, Resource as McpResource, Prompt as McpPrompt, ServerInfo, ClientInfo, ClientCapabilities};
-use rmcp::service::{Peer, RequestContext};
+use rmcp::service::{Peer, RequestContext, NotificationContext};
 use tokio::time::{timeout, sleep, Duration};
 use serde::{Deserialize, Serialize};
 
@@ -97,28 +97,17 @@ pub fn redact_sensitive_json(value: &serde_json::Value) -> serde_json::Value {
 }
 
 impl ClientHandler for McpClientHandler {
-    fn get_peer(&self) -> Option<Peer<RoleClient>> {
-        self.peer_arc.try_lock().ok().and_then(|g| g.clone())
-    }
-
-    fn set_peer(&mut self, peer: Peer<RoleClient>) {
-        if let Ok(mut g) = self.peer_arc.try_lock() {
-            *g = Some(peer);
-        }
-    }
-
     fn get_info(&self) -> ClientInfo {
-        ClientInfo {
-            capabilities: ClientCapabilities::builder().enable_sampling().build(),
-            ..ClientInfo::default()
-        }
+        let mut info = ClientInfo::default();
+        info.capabilities = ClientCapabilities::builder().enable_sampling().build();
+        info
     }
 
     fn create_message(
         &self,
-        params: rmcp::model::CreateMessageRequestParam,
+        params: rmcp::model::CreateMessageRequestParams,
         _context: RequestContext<RoleClient>,
-    ) -> impl Future<Output = Result<rmcp::model::CreateMessageResult, rmcp::Error>> + Send + '_ {
+    ) -> impl Future<Output = Result<rmcp::model::CreateMessageResult, rmcp::ErrorData>> + Send + '_ {
         let gcx_weak = self.gcx.clone();
         let debug_name = self.debug_name.clone();
         async move {
@@ -126,7 +115,7 @@ impl ClientHandler for McpClientHandler {
         }
     }
 
-    fn on_tool_list_changed(&self) -> impl Future<Output = ()> + Send + '_ {
+    fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) -> impl Future<Output = ()> + Send + '_ {
         let peer_arc = self.peer_arc.clone();
         let session_arc = self.session_arc.clone();
         let logs = self.logs.clone();
@@ -208,7 +197,7 @@ impl ClientHandler for McpClientHandler {
         }
     }
 
-    fn on_resource_list_changed(&self) -> impl Future<Output = ()> + Send + '_ {
+    fn on_resource_list_changed(&self, _context: NotificationContext<RoleClient>) -> impl Future<Output = ()> + Send + '_ {
         let peer_arc = self.peer_arc.clone();
         let session_arc = self.session_arc.clone();
         let logs = self.logs.clone();
@@ -293,7 +282,7 @@ impl ClientHandler for McpClientHandler {
         }
     }
 
-    fn on_prompt_list_changed(&self) -> impl Future<Output = ()> + Send + '_ {
+    fn on_prompt_list_changed(&self, _context: NotificationContext<RoleClient>) -> impl Future<Output = ()> + Send + '_ {
         let peer_arc = self.peer_arc.clone();
         let session_arc = self.session_arc.clone();
         let logs = self.logs.clone();
@@ -556,7 +545,7 @@ mod tests {
         };
         assert_eq!(handler.debug_name, "test");
         assert_eq!(handler.request_timeout, 30);
-        assert!(handler.get_peer().is_none());
+        assert!(handler.peer_arc.try_lock().ok().and_then(|g| g.clone()).is_none());
     }
 
     #[test]

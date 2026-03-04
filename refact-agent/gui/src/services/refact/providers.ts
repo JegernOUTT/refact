@@ -126,6 +126,58 @@ export type AvailableModelsResponse = {
   error?: string | null;
 };
 
+export type ClaudeCodeUsageWindow = {
+  percent_used: number;
+  resets_at?: string | null;
+};
+
+export type ClaudeCodeExtraUsage = {
+  is_enabled: boolean;
+  used_credits: number;
+  monthly_limit?: number | null;
+  utilization?: number | null;
+};
+
+export type ClaudeCodeUsageData = {
+  five_hour?: ClaudeCodeUsageWindow | null;
+  seven_day?: ClaudeCodeUsageWindow | null;
+  extra_usage?: ClaudeCodeExtraUsage | null;
+};
+
+export type ClaudeCodeUsageResponse = {
+  data?: ClaudeCodeUsageData | null;
+  error?: string | null;
+};
+
+export type OpenAICodexUsageWindow = {
+  used_percent: number;
+  reset_at?: string | null;
+};
+
+export type OpenAICodexRateLimit = {
+  limit_reached: boolean;
+  primary_window?: OpenAICodexUsageWindow | null;
+  secondary_window?: OpenAICodexUsageWindow | null;
+};
+
+export type OpenAICodexCredits = {
+  balance: number;
+  unlimited: boolean;
+  has_credits: boolean;
+};
+
+export type OpenAICodexUsageData = {
+  plan_type?: string | null;
+  rate_limit?: OpenAICodexRateLimit | null;
+  code_review_rate_limit?: OpenAICodexRateLimit | null;
+  credits?: OpenAICodexCredits | null;
+};
+
+export type OpenAICodexUsageResponse = {
+  data?: OpenAICodexUsageData | null;
+  error?: string | null;
+};
+
 export type OpenRouterAccountInfoResponse = {
   data: {
     key_name?: string | null;
@@ -500,6 +552,72 @@ export const providersApi = createApi({
         }
 
         return { data: result.data as OpenRouterHealthResponse };
+      },
+    }),
+
+    getClaudeCodeUsage: builder.query<ClaudeCodeUsageResponse, undefined>({
+      queryFn: async (_args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}/v1/claude-code/usage`;
+
+        const result = await baseQuery({
+          ...extraOptions,
+          method: "GET",
+          url,
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        if (!isUsageResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: "Invalid response from /v1/claude-code/usage",
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data as ClaudeCodeUsageResponse };
+      },
+    }),
+
+    getOpenAICodexUsage: builder.query<OpenAICodexUsageResponse, undefined>({
+      queryFn: async (_args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}/v1/openai-codex/usage`;
+
+        const result = await baseQuery({
+          ...extraOptions,
+          method: "GET",
+          url,
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        if (!isUsageResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: "Invalid response from /v1/openai-codex/usage",
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data as OpenAICodexUsageResponse };
       },
     }),
 
@@ -1005,6 +1123,12 @@ function isOpenRouterModelEndpointsResponse(
   return true;
 }
 
+function isUsageResponse(data: unknown): data is ClaudeCodeUsageResponse {
+  if (typeof data !== "object" || data === null) return false;
+  // Must have at least one of `data` or `error` key
+  return hasProperty(data, "data") || hasProperty(data, "error");
+}
+
 function isModelTypeDefaults(data: unknown): data is ModelTypeDefaults {
   if (typeof data !== "object" || data === null) return false;
   return true;
@@ -1036,6 +1160,8 @@ export const {
   useGetOpenRouterModelEndpointsQuery,
   useGetOpenRouterAccountInfoQuery,
   useGetOpenRouterHealthQuery,
+  useGetClaudeCodeUsageQuery,
+  useGetOpenAICodexUsageQuery,
   useToggleModelMutation,
   useSetModelProviderMutation,
   useAddCustomModelMutation,

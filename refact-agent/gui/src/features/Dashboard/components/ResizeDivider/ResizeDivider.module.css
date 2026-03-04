@@ -1,0 +1,43 @@
+.divider {
+  flex-shrink: 0;
+  height: 9px;
+  cursor: row-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 calc(-1 * var(--space-3));
+  padding: 0 var(--space-3);
+  position: relative;
+  z-index: 1;
+}
+
+.divider::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--accent-a3);
+  opacity: 0;
+  transition: opacity var(--motion-fast, 100ms) ease;
+}
+
+.divider:hover::before,
+.divider[data-dragging]::before {
+  opacity: 1;
+}
+
+.handle {
+  width: 28px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--gray-a5);
+  transition: background var(--motion-fast, 100ms) ease,
+              width var(--motion-fast, 100ms) ease;
+  position: relative;
+  z-index: 1;
+}
+
+.divider:hover .handle,
+.divider[data-dragging] .handle {
+  background: var(--accent-9);
+  width: 40px;
+}

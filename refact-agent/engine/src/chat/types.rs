@@ -676,12 +676,12 @@ pub struct ActiveCommandContext {
     pub allowed_tools: Vec<String>,
     pub model_override: Option<String>,
     pub context_fork: Option<String>,
-    pub started_at_message_id: Option<String>,
+    pub started_at_index: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PendingSkillDeactivation {
-    pub start_message_id: String,
+    pub start_index: usize,
     pub report: String,
     pub skill_name: String,
 }

@@ -32,6 +32,9 @@ import { SourceSettings } from "./SourceSettings";
 import styles from "./MCPMarketplace.module.css";
 import type { Config } from "../Config/configSlice";
 import { Spinner } from "../../components/Spinner";
+import { useAppDispatch } from "../../hooks";
+import { integrationsApi } from "../../services/refact/integrations";
+import { change } from "../Pages/pagesSlice";
 
 const PAGE_SIZE = 20;
 
@@ -45,6 +48,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   host,
   backFromMarketplace,
 }) => {
+  const dispatch = useAppDispatch();
   const [search, setSearch] = useState("");
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
@@ -81,6 +85,19 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     [installedData],
   );
 
+  const installedConfigPaths = useMemo(
+    () =>
+      new Map(
+        (installedData?.installed ?? []).map((s) => [s.id, s.config_path]),
+      ),
+    [installedData],
+  );
+
+  const handleConfigure = (configPath: string) => {
+    dispatch(integrationsApi.util.invalidateTags(["INTEGRATIONS"]));
+    dispatch(change({ name: "integrations page", integrationPath: configPath }));
+  };
+
   const allTags = useMemo(() => {
     const tagSet = new Set<string>();
     (marketplaceData?.servers ?? []).forEach((s) =>
@@ -111,10 +128,17 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   const handleInstall = async (server: MCPServer) => {
     setInstallingId(server.id);
     try {
-      await installServer({
+      const result = await installServer({
         server_id: server.id,
         source_id: server.source_id,
-      });
+      }).unwrap();
+      dispatch(integrationsApi.util.invalidateTags(["INTEGRATIONS"]));
+      dispatch(
+        change({
+          name: "integrations page",
+          integrationPath: result.config_path,
+        }),
+      );
     } finally {
       setInstallingId(null);
     }
@@ -253,9 +277,11 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
                   key={`${server.source_id}:${server.id}`}
                   server={server}
                   isInstalled={installedIds.has(server.id)}
+                  installedConfigPath={installedConfigPaths.get(server.id)}
                   isInstalling={installingId === server.id}
                   onInstall={(s) => void handleInstall(s)}
                   onViewDetail={(s) => setSelectedServer(s)}
+                  onConfigure={handleConfigure}
                   sourceLabel={sourceMap.get(server.source_id)}
                 />
               ))}

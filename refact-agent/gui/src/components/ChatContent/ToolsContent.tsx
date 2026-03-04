@@ -642,6 +642,17 @@ function processToolCalls(
     );
   }
 
+  if (head.function.name === "activate_skill") {
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      processed,
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
   if (head.function.name === "web") {
     const elem = (
       <WebTool

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use tokio::time::{timeout, Duration};
-use rmcp::model::{Resource as McpResource, ReadResourceRequestParam, ResourceContents};
+use rmcp::model::{Resource as McpResource, ReadResourceRequestParams, ResourceContents};
 use rmcp::service::Peer;
 use rmcp::RoleClient;
 
@@ -85,7 +85,7 @@ pub async fn index_mcp_resources(
             continue;
         }
 
-        let param = ReadResourceRequestParam { uri: resource.uri.clone() };
+        let param = ReadResourceRequestParams::new(resource.uri.clone());
         let result = match timeout(
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
             peer.read_resource(param),
@@ -107,7 +107,7 @@ pub async fn index_mcp_resources(
 
         for content in result.contents {
             match content {
-                ResourceContents::TextResourceContents { uri, mime_type, text } => {
+                ResourceContents::TextResourceContents { uri, mime_type, text, .. } => {
                     if !is_text_mime(&mime_type) || text.len() > MAX_RESOURCE_SIZE_BYTES {
                         continue;
                     }

@@ -63,6 +63,28 @@
   flex-shrink: 0;
 }
 
+.configureButton {
+  display: flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-2);
+  border: 1px solid var(--gray-a5);
+  background: transparent;
+  cursor: pointer;
+  color: var(--gray-11);
+  transition: background var(--motion-fast) ease;
+  flex-shrink: 0;
+}
+
+.configureButton:hover {
+  background: var(--gray-a3);
+}
+
+.configureButton:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: 1px;
+}
+
 .hoverTrigger {
   cursor: help;
   border-bottom: 1px dotted var(--gray-8);

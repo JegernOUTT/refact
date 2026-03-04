@@ -9,11 +9,17 @@ import { useProviderForm } from "./useProviderForm";
 import type {
   ProviderListItem,
   ProviderStatus,
+  ClaudeCodeUsageWindow,
+  OpenAICodexUsageWindow,
 } from "../../../services/refact";
 
 import styles from "./ProviderForm.module.css";
 import { ProviderModelsList } from "./ProviderModelsList/ProviderModelsList";
-import { useGetOpenRouterHealthQuery } from "../../../services/refact";
+import {
+  useGetOpenRouterHealthQuery,
+  useGetClaudeCodeUsageQuery,
+  useGetOpenAICodexUsageQuery,
+} from "../../../services/refact";
 
 const SETTINGS_HIDDEN_PROVIDERS = ["refact", "refact_self_hosted"];
 
@@ -26,26 +32,60 @@ export type { ProviderListItem };
 const StatusBadge: React.FC<{ status: ProviderStatus }> = ({ status }) => {
   switch (status) {
     case "active":
-      return (
-        <Badge color="green" size="1">
-          Active
-        </Badge>
-      );
+      return <Badge color="green" size="1">Active</Badge>;
     case "configured":
-      return (
-        <Badge color="orange" size="1">
-          Configured
-        </Badge>
-      );
+      return <Badge color="orange" size="1">Configured</Badge>;
     case "not_configured":
-      return (
-        <Badge color="gray" size="1">
-          Not configured
-        </Badge>
-      );
+      return <Badge color="gray" size="1">Not configured</Badge>;
     default:
       return null;
   }
+};
+
+const UsageBar: React.FC<{ pct: number }> = ({ pct }) => {
+  const color = pct >= 90 ? "var(--red-9)" : pct >= 70 ? "var(--orange-9)" : "var(--green-9)";
+  return (
+    <div style={{ height: "4px", width: "100%", borderRadius: "2px", background: "var(--gray-a4)", overflow: "hidden" }}>
+      <div style={{ height: "100%", width: `${pct}%`, borderRadius: "2px", background: color, transition: "width 0.3s ease" }} />
+    </div>
+  );
+};
+
+const ClaudeWindowRow: React.FC<{ label: string; w: ClaudeCodeUsageWindow }> = ({ label, w }) => {
+  const pct = Math.max(0, Math.min(w.percent_used, 100));
+  const d = w.resets_at ? new Date(w.resets_at) : null;
+  const resetText = d && !isNaN(d.getTime())
+    ? `Resets ${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
+    : null;
+  return (
+    <Flex direction="column" gap="1">
+      <Flex justify="between">
+        <Text size="1" color="gray">{label}</Text>
+        <Text size="1" color="gray">{Math.round(pct)}% used{resetText ? ` · ${resetText}` : ""}</Text>
+      </Flex>
+      <UsageBar pct={pct} />
+    </Flex>
+  );
+};
+
+const CodexWindowRow: React.FC<{ label: string; w: OpenAICodexUsageWindow; limitReached?: boolean }> = ({ label, w, limitReached }) => {
+  const pct = Math.max(0, Math.min(w.used_percent, 100));
+  const d = w.reset_at ? new Date(w.reset_at) : null;
+  const resetText = d && !isNaN(d.getTime())
+    ? `Resets ${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
+    : null;
+  return (
+    <Flex direction="column" gap="1">
+      <Flex justify="between" align="center">
+        <Flex align="center" gap="1">
+          <Text size="1" color="gray">{label}</Text>
+          {limitReached && <Badge color="red" size="1">Limit reached</Badge>}
+        </Flex>
+        <Text size="1" color="gray">{Math.round(pct)}% used{resetText ? ` · ${resetText}` : ""}</Text>
+      </Flex>
+      <UsageBar pct={pct} />
+    </Flex>
+  );
 };
 
 export const ProviderForm: React.FC<ProviderFormProps> = ({
@@ -53,6 +93,14 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
 }) => {
   const { data: openRouterHealth } = useGetOpenRouterHealthQuery(undefined, {
     skip: currentProvider.name !== "openrouter",
+  });
+  const { data: claudeUsage, isError: claudeUsageError } = useGetClaudeCodeUsageQuery(undefined, {
+    skip: currentProvider.name !== "claude_code",
+    pollingInterval: 60_000,
+  });
+  const { data: codexUsage, isError: codexUsageError } = useGetOpenAICodexUsageQuery(undefined, {
+    skip: currentProvider.name !== "openai_codex",
+    pollingInterval: 60_000,
   });
   const {
     areShowingExtraFields,
@@ -93,6 +141,85 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
           </Text>
         )}
       </Flex>
+
+      {claudeUsage?.data && !claudeUsage.error && (
+        <Flex direction="column" gap="2">
+          <Text size="2" weight="medium">Usage</Text>
+          {claudeUsage.data.five_hour && (
+            <ClaudeWindowRow label="Session (5 hour)" w={claudeUsage.data.five_hour} />
+          )}
+          {claudeUsage.data.seven_day && (
+            <ClaudeWindowRow label="Weekly" w={claudeUsage.data.seven_day} />
+          )}
+          {claudeUsage.data.extra_usage && (
+            <Flex direction="column" gap="1">
+              <Flex justify="between">
+                <Text size="1" color="gray">Extra usage</Text>
+                <Text size="1" color="gray">
+                  {claudeUsage.data.extra_usage.is_enabled ? "enabled" : "disabled"}
+                  {" · "}${claudeUsage.data.extra_usage.used_credits.toFixed(2)} spent
+                  {typeof claudeUsage.data.extra_usage.monthly_limit === "number"
+                    ? ` / $${claudeUsage.data.extra_usage.monthly_limit.toFixed(0)} limit`
+                    : " / unlimited"}
+                </Text>
+              </Flex>
+              {typeof claudeUsage.data.extra_usage.utilization === "number" && (
+                <UsageBar pct={Math.max(0, Math.min(claudeUsage.data.extra_usage.utilization, 100))} />
+              )}
+            </Flex>
+          )}
+        </Flex>
+      )}
+      {(claudeUsage?.error || claudeUsageError) && (
+        <Text size="1" color="gray">Usage: {claudeUsage?.error ?? "Failed to load"}</Text>
+      )}
+
+      {codexUsage?.data && !codexUsage.error && (
+        <Flex direction="column" gap="2">
+          <Flex align="center" gap="2">
+            <Text size="2" weight="medium">Usage</Text>
+            {codexUsage.data.plan_type && (
+              <Badge color="blue" size="1">{codexUsage.data.plan_type}</Badge>
+            )}
+          </Flex>
+          {codexUsage.data.rate_limit && (
+            <>
+              {codexUsage.data.rate_limit.primary_window && (
+                <CodexWindowRow
+                  label="Session (5 hour)"
+                  w={codexUsage.data.rate_limit.primary_window}
+                  limitReached={codexUsage.data.rate_limit.limit_reached}
+                />
+              )}
+              {codexUsage.data.rate_limit.secondary_window && (
+                <CodexWindowRow
+                  label="Weekly"
+                  w={codexUsage.data.rate_limit.secondary_window}
+                />
+              )}
+            </>
+          )}
+          {codexUsage.data.code_review_rate_limit?.primary_window && (
+            <CodexWindowRow
+              label="Code review (weekly)"
+              w={codexUsage.data.code_review_rate_limit.primary_window}
+              limitReached={codexUsage.data.code_review_rate_limit.limit_reached}
+            />
+          )}
+          {codexUsage.data.credits && (
+            <Text size="1" color="gray">
+              Credits: {codexUsage.data.credits.unlimited
+                ? "unlimited"
+                : codexUsage.data.credits.has_credits
+                  ? `${codexUsage.data.credits.balance} remaining`
+                  : "none"}
+            </Text>
+          )}
+        </Flex>
+      )}
+      {(codexUsage?.error || codexUsageError) && (
+        <Text size="1" color="gray">Usage: {codexUsage?.error ?? "Failed to load"}</Text>
+      )}
 
       {!hideSettings && (
         <Flex direction="column" width="100%" gap="3">

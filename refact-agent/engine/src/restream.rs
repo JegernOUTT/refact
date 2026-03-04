@@ -5,8 +5,7 @@ use tokio::sync::mpsc;
 use async_stream::stream;
 use futures::StreamExt;
 use hyper::{Body, Response, StatusCode};
-use reqwest_eventsource::Event;
-use reqwest_eventsource::Error as REError;
+use eventsource_stream::Eventsource;
 use serde_json::{json, Value};
 use tracing::info;
 use uuid;
@@ -385,8 +384,8 @@ pub async fn scratchpad_interaction_stream(
                     meta
                 ).await
             };
-            let mut event_source = match event_source_maybe {
-                Ok(event_source) => event_source,
+            let response = match event_source_maybe {
+                Ok(resp) => resp,
                 Err(e) => {
                     let e_str = format!("forward_to_endpoint: {:?}", e);
                     tele_storage.write().unwrap().tele_net.push(telemetry_structs::TelemetryNetwork::new(
@@ -401,6 +400,7 @@ pub async fn scratchpad_interaction_stream(
                     return;
                 }
             };
+            let mut event_stream = response.bytes_stream().eventsource();
             let mut was_correct_output_even_if_error = false;
             let mut last_finish_reason = FinishReason::None;
             let stream_started_at = Instant::now();
@@ -415,19 +415,17 @@ pub async fn scratchpad_interaction_stream(
                             let err_str = "LLM stream timeout";
                             tracing::error!("{}", err_str);
                             yield Result::<_, String>::Ok(format!("data: {}\n\n", serde_json::to_string(&json!({"detail": err_str})).unwrap()));
-                            event_source.close();
                             return;
                         }
                         if last_event_at.elapsed() > STREAM_IDLE_TIMEOUT {
                             let err_str = "LLM stream stalled";
                             tracing::error!("{}", err_str);
                             yield Result::<_, String>::Ok(format!("data: {}\n\n", serde_json::to_string(&json!({"detail": err_str})).unwrap()));
-                            event_source.close();
                             return;
                         }
                         continue;
                     }
-                    maybe_event = event_source.next() => {
+                    maybe_event = event_stream.next() => {
                         match maybe_event {
                             Some(e) => e,
                             None => break,
@@ -437,8 +435,7 @@ pub async fn scratchpad_interaction_stream(
                 last_event_at = Instant::now();
 
                 match event {
-                    Ok(Event::Open) => {},
-                    Ok(Event::Message(message)) => {
+                    Ok(message) => {
                         // info!("Message: {:#?}", message);
                         if message.data.starts_with("[DONE]") {
                             break;
@@ -470,28 +467,13 @@ pub async fn scratchpad_interaction_stream(
                                 break;
                             }
                         }
-
                     },
                     Err(err) => {
                         if was_correct_output_even_if_error {
                             // "restream error: Stream ended"
                             break;
                         }
-                        let problem_str = match err {
-                            REError::InvalidStatusCode(err, resp) => {
-                                let text = resp.text().await.unwrap();
-                                let mut res = format!("{} with details = {:?}", err, text);
-                                if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                                    if let Some(detail) = value.get("detail") {
-                                        res = format!("{}: {}", err, detail);
-                                    }
-                                }
-                                res
-                            }
-                            _ => {
-                                format!("{}", err)
-                            }
-                        };
+                        let problem_str = format!("{}", err);
                         tracing::error!("restream error: {}\n", problem_str);
                         {
                             tele_storage.write().unwrap().tele_net.push(telemetry_structs::TelemetryNetwork::new(
@@ -502,7 +484,6 @@ pub async fn scratchpad_interaction_stream(
                             ));
                         }
                         yield Result::<_, String>::Ok(format!("data: {}\n\n", serde_json::to_string(&json!({"detail": problem_str})).unwrap()));
-                        event_source.close();
                         return;
                     },
                 }

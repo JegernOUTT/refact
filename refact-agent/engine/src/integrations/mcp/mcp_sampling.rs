@@ -1,24 +1,28 @@
 use std::sync::Weak;
 use tokio::sync::RwLock as ARwLock;
 use rmcp::model::{
-    CreateMessageRequestParam, CreateMessageResult, Role, SamplingMessage, RawContent,
-    AnnotateAble,
+    CreateMessageRequestParams, CreateMessageResult, Role, SamplingMessage,
+    SamplingContent, SamplingMessageContent,
 };
-use rmcp::Error as McpError;
+use rmcp::ErrorData as McpError;
 
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
 use crate::subchat::run_subchat_once;
 
+fn content_to_text(c: &SamplingMessageContent) -> String {
+    match c {
+        SamplingMessageContent::Text(t) => t.text.clone(),
+        SamplingMessageContent::Image(_) => "[image content not supported]".to_string(),
+        SamplingMessageContent::Audio(_) => "[audio content not supported]".to_string(),
+        SamplingMessageContent::ToolResult(_) | SamplingMessageContent::ToolUse(_) => "[tool content not supported]".to_string(),
+    }
+}
+
 fn sampling_message_to_chat_message(msg: &SamplingMessage) -> ChatMessage {
-    let text = match &msg.content.raw {
-        RawContent::Text(t) => t.text.clone(),
-        RawContent::Image(_) => "[image content not supported]".to_string(),
-        RawContent::Resource(r) => match &r.resource {
-            rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
-            rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => uri.clone(),
-        },
-        RawContent::Audio(_) => "[audio content not supported]".to_string(),
+    let text = match &msg.content {
+        SamplingContent::Single(c) => content_to_text(c),
+        SamplingContent::Multiple(cs) => cs.iter().map(content_to_text).collect::<Vec<_>>().join("\n"),
     };
     let role = match msg.role {
         Role::User => "user",
@@ -33,7 +37,7 @@ fn sampling_message_to_chat_message(msg: &SamplingMessage) -> ChatMessage {
 
 pub async fn mcp_sampling_create_message(
     gcx_weak: Weak<ARwLock<GlobalContext>>,
-    params: CreateMessageRequestParam,
+    params: CreateMessageRequestParams,
     debug_name: &str,
 ) -> Result<CreateMessageResult, McpError> {
     let gcx = gcx_weak.upgrade().ok_or_else(|| {
@@ -90,31 +94,18 @@ pub async fn mcp_sampling_create_message(
         response_text.len()
     );
 
-    Ok(CreateMessageResult {
-        model: "refact".to_string(),
-        stop_reason: Some(CreateMessageResult::STOP_REASON_END_TURN.to_string()),
-        message: SamplingMessage {
-            role: Role::Assistant,
-            content: RawContent::text(response_text).no_annotation(),
-        },
-    })
+    let message = SamplingMessage::assistant_text(response_text);
+    Ok(CreateMessageResult::new(message, "refact".to_string())
+        .with_stop_reason(CreateMessageResult::STOP_REASON_END_TURN))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::{RawTextContent};
-
-    fn make_text_content(text: &str) -> rmcp::model::Content {
-        RawContent::Text(RawTextContent { text: text.to_string() }).no_annotation()
-    }
 
     #[test]
     fn test_sampling_message_to_chat_message_user() {
-        let msg = SamplingMessage {
-            role: Role::User,
-            content: make_text_content("hello"),
-        };
+        let msg = SamplingMessage::user_text("hello");
         let chat_msg = sampling_message_to_chat_message(&msg);
         assert_eq!(chat_msg.role, "user");
         assert_eq!(chat_msg.content.content_text_only(), "hello");
@@ -122,10 +113,7 @@ mod tests {
 
     #[test]
     fn test_sampling_message_to_chat_message_assistant() {
-        let msg = SamplingMessage {
-            role: Role::Assistant,
-            content: make_text_content("response"),
-        };
+        let msg = SamplingMessage::assistant_text("response");
         let chat_msg = sampling_message_to_chat_message(&msg);
         assert_eq!(chat_msg.role, "assistant");
         assert_eq!(chat_msg.content.content_text_only(), "response");

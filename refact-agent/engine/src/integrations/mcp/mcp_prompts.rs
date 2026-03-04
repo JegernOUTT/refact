@@ -145,9 +145,6 @@ fn build_args_map(prompt: &rmcp::model::Prompt, args_str: &str) -> HashMap<Strin
             }
         }
     }
-    if positional.len() > prompt.arguments.as_ref().map_or(0, |a| a.len()) && !args_str.is_empty() {
-        map.insert("$ARGUMENTS".to_string(), args_str.to_string());
-    }
     map
 }
 
@@ -196,24 +193,26 @@ pub async fn execute_mcp_prompt(
             parsed
                 .args_map
                 .into_iter()
-                .filter(|(k, _)| k != "$ARGUMENTS")
                 .map(|(k, v)| (k, serde_json::Value::String(v)))
                 .collect(),
         )
     };
 
-    let params = rmcp::model::GetPromptRequestParam {
-        name: parsed.prompt_name,
-        arguments: args_obj,
+    let params = if let Some(args) = args_obj {
+        rmcp::model::GetPromptRequestParams::new(parsed.prompt_name).with_arguments(args)
+    } else {
+        rmcp::model::GetPromptRequestParams::new(parsed.prompt_name)
     };
 
-    let client_locked = client_arc.lock().await;
-    let client = match &*client_locked {
-        Some(c) => c,
-        None => return Err("MCP client disconnected".to_string()),
-    };
+    let peer = {
+        let client_locked = client_arc.lock().await;
+        match &*client_locked {
+            Some(c) => c.peer().clone(),
+            None => return Err("MCP client disconnected".to_string()),
+        }
+    }; // lock released before the network call
 
-    let result = match timeout(Duration::from_secs(request_timeout), client.get_prompt(params)).await {
+    let result = match timeout(Duration::from_secs(request_timeout), peer.get_prompt(params)).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return Err(format!("get_prompt failed: {:?}", e)),
         Err(_) => return Err(format!("get_prompt timed out after {}s", request_timeout)),
@@ -234,6 +233,7 @@ fn format_prompt_result(result: rmcp::model::GetPromptResult) -> String {
                     rmcp::model::ResourceContents::BlobResourceContents { .. } => "[blob resource]".to_string(),
                 }
             }
+            rmcp::model::PromptMessageContent::ResourceLink { .. } => "[resource link]".to_string(),
         };
         match msg.role {
             rmcp::model::PromptMessageRole::User => parts.push(text),
@@ -265,14 +265,14 @@ mod tests {
 
     #[test]
     fn test_build_args_map_positional() {
-        let prompt = rmcp::model::Prompt {
-            name: "test".to_string(),
-            description: None,
-            arguments: Some(vec![
-                rmcp::model::PromptArgument { name: "arg1".to_string(), description: None, required: Some(true) },
-                rmcp::model::PromptArgument { name: "arg2".to_string(), description: None, required: Some(false) },
+        let prompt = rmcp::model::Prompt::new(
+            "test",
+            None::<String>,
+            Some(vec![
+                rmcp::model::PromptArgument::new("arg1").with_required(true),
+                rmcp::model::PromptArgument::new("arg2").with_required(false),
             ]),
-        };
+        );
         let map = build_args_map(&prompt, "value1 value2");
         assert_eq!(map.get("arg1"), Some(&"value1".to_string()));
         assert_eq!(map.get("arg2"), Some(&"value2".to_string()));
@@ -280,24 +280,20 @@ mod tests {
 
     #[test]
     fn test_build_argument_hint_required_optional() {
-        let prompt = rmcp::model::Prompt {
-            name: "test".to_string(),
-            description: None,
-            arguments: Some(vec![
-                rmcp::model::PromptArgument { name: "req".to_string(), description: None, required: Some(true) },
-                rmcp::model::PromptArgument { name: "opt".to_string(), description: None, required: Some(false) },
+        let prompt = rmcp::model::Prompt::new(
+            "test",
+            None::<String>,
+            Some(vec![
+                rmcp::model::PromptArgument::new("req").with_required(true),
+                rmcp::model::PromptArgument::new("opt").with_required(false),
             ]),
-        };
+        );
         assert_eq!(build_argument_hint(&prompt), "<req> [opt]");
     }
 
     #[test]
     fn test_build_argument_hint_no_args() {
-        let prompt = rmcp::model::Prompt {
-            name: "test".to_string(),
-            description: None,
-            arguments: None,
-        };
+        let prompt = rmcp::model::Prompt::new("test", None::<String>, None);
         assert_eq!(build_argument_hint(&prompt), "");
     }
 }

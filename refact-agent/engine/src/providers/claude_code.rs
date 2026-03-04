@@ -253,6 +253,81 @@ impl ClaudeCodeProvider {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeUsageWindow {
+    pub percent_used: f64,
+    pub resets_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeExtraUsage {
+    pub is_enabled: bool,
+    pub used_credits: f64,
+    pub monthly_limit: Option<f64>,
+    pub utilization: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeUsage {
+    pub five_hour: Option<ClaudeCodeUsageWindow>,
+    pub seven_day: Option<ClaudeCodeUsageWindow>,
+    pub extra_usage: Option<ClaudeCodeExtraUsage>,
+}
+
+impl ClaudeCodeProvider {
+    pub async fn fetch_usage(&self, http_client: &reqwest::Client) -> Result<ClaudeCodeUsage, String> {
+        let token = self.resolve_auth()?;
+
+        let resp = http_client
+            .get("https://api.anthropic.com/api/oauth/usage")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let truncated: String = body.chars().take(512).collect();
+            return Err(format!("Usage API returned {}: {}", status, truncated));
+        }
+
+        let root: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse usage response: {}", e))?;
+
+        let data = root.get("data").unwrap_or(&root);
+
+        fn as_f64_loose(v: &serde_json::Value) -> Option<f64> {
+            v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+        }
+
+        let parse_window = |key: &str| -> Option<ClaudeCodeUsageWindow> {
+            let w = data.get(key)?;
+            let percent_used = w.get("utilization").and_then(as_f64_loose)
+                .or_else(|| w.get("percent_used").and_then(as_f64_loose))?;
+            let resets_at = w.get("resets_at")
+                .or_else(|| w.get("reset_at"))
+                .and_then(|v| v.as_str()).map(|s| s.to_string());
+            Some(ClaudeCodeUsageWindow { percent_used, resets_at })
+        };
+
+        let extra_usage = data.get("extra_usage").and_then(|e| {
+            let used_credits = e.get("used_credits").and_then(as_f64_loose).unwrap_or(0.0);
+            let is_enabled = e.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let monthly_limit = e.get("monthly_limit").and_then(as_f64_loose);
+            let utilization = e.get("utilization").and_then(as_f64_loose);
+            Some(ClaudeCodeExtraUsage { is_enabled, used_credits, monthly_limit, utilization })
+        });
+
+        Ok(ClaudeCodeUsage {
+            five_hour: parse_window("five_hour"),
+            seven_day: parse_window("seven_day"),
+            extra_usage,
+        })
+    }
+}
+
 #[async_trait]
 impl ProviderTrait for ClaudeCodeProvider {
     fn name(&self) -> &'static str {

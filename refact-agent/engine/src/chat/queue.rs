@@ -458,17 +458,25 @@ pub async fn process_command_queue(
                                 allowed_tools: expanded.allowed_tools,
                                 model_override: expanded.model_override,
                                 context_fork: expanded.context_fork,
-                                started_at_message_id: None,
+                                started_at_index: None,
                             };
                         }
                         Ok(None) => {
+                            // No slash command — only reset active_command when no skill is
+                            // active. While a skill is active, active_command carries the
+                            // compaction anchor (started_at_index) and must not be wiped on
+                            // every normal user message.
                             let mut session = session_arc.lock().await;
-                            session.active_command = ActiveCommandContext::default();
+                            if session.thread.active_skill.is_none() {
+                                session.active_command = ActiveCommandContext::default();
+                            }
                         }
                         Err(e) => {
                             warn!("slash command expansion error: {}", e);
                             let mut session = session_arc.lock().await;
-                            session.active_command = ActiveCommandContext::default();
+                            if session.thread.active_skill.is_none() {
+                                session.active_command = ActiveCommandContext::default();
+                            }
                         }
                     }
                 }
@@ -621,29 +629,25 @@ pub async fn process_command_queue(
                         session.add_message(ctx_msg);
                     }
 
-                    let skill_start_message_id = if let Some(skill_msg) = skill_context_msg {
-                        let id = skill_msg.message_id.clone();
+                    // Set compaction anchor for slash-command skill activation before any skill
+                    // messages are added, so deactivate_skill can truncate back to this point.
+                    if skill_activation_name.is_some() && session.active_command.started_at_index.is_none() {
+                        session.active_command.started_at_index = Some(session.messages.len());
+                    }
+
+                    if let Some(skill_msg) = skill_context_msg {
                         session.add_message(skill_msg);
-                        Some(id)
-                    } else {
-                        None
-                    };
+                    }
 
                     let parsed_content = parse_content_with_attachments(&content, &attachments);
-                    let user_message_id = Uuid::new_v4().to_string();
                     let user_message = ChatMessage {
-                        message_id: user_message_id.clone(),
+                        message_id: Uuid::new_v4().to_string(),
                         role: "user".to_string(),
                         content: parsed_content,
                         checkpoints,
                         ..Default::default()
                     };
                     session.add_message(user_message);
-
-                    // Track skill activation start for deactivation compaction
-                    if !session.active_command.name.is_empty() && session.active_command.started_at_message_id.is_none() {
-                        session.active_command.started_at_message_id = skill_start_message_id.or(Some(user_message_id));
-                    }
 
                     if let Some(ref skill_name) = skill_activation_name {
                         session.set_active_skill(skill_name.clone());

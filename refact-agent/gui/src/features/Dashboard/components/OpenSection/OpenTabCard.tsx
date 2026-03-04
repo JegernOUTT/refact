@@ -24,6 +24,9 @@ export const OpenTabCard: React.FC<OpenTabCardProps> = ({
   const statusState = getStatusFromSessionState(tab.session_state);
   const isActive = statusState === "in_progress";
 
+  const showDotTrail = breakpoint !== "narrow";
+  const showTodos = breakpoint === "wide";
+
   return (
     <button
       type="button"
@@ -47,10 +50,10 @@ export const OpenTabCard: React.FC<OpenTabCardProps> = ({
           </Badge>
         )}
       </div>
-      {tab.treeNode && tab.treeNode.children.length > 0 && (
+      {showDotTrail && tab.treeNode && tab.treeNode.children.length > 0 && (
         <DotTrail node={tab.treeNode} breakpoint={breakpoint} />
       )}
-      {tab.todos.length > 0 && (
+      {showTodos && tab.todos.length > 0 && (
         <TodoProgress todos={tab.todos} breakpoint={breakpoint} />
       )}
     </button>

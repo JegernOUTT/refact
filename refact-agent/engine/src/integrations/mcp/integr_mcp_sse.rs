@@ -5,14 +5,14 @@ use async_trait::async_trait;
 use tokio::sync::RwLock as ARwLock;
 use tokio::sync::Mutex as AMutex;
 use tokio::time::Duration;
+use rmcp::transport::streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpClientTransport};
 use rmcp::transport::common::client_side_sse::ExponentialBackoff;
-use rmcp::transport::sse_client::{SseClientTransport, SseClientConfig};
 use rmcp::serve_client;
 use serde::{Deserialize, Serialize};
 
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationCommon;
-use super::session_mcp::{McpClientHandler, McpRunningService, add_log_entry};
+use super::session_mcp::{McpClientHandler, McpRunningService};
 use super::integr_mcp_common::{
     CommonMCPSettings, MCPTransportInitializer,
     build_reqwest_client_for_mcp, build_auth_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
@@ -58,9 +58,9 @@ impl MCPTransportInitializer for IntegrationMCPSse {
         session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
         handler: McpClientHandler,
     ) -> Option<McpRunningService> {
-        let client_config = SseClientConfig {
-            sse_endpoint: Arc::<str>::from(self.cfg.mcp_url.trim()),
-            retry_policy: Arc::new(ExponentialBackoff {
+        let config = StreamableHttpClientTransportConfig {
+            uri: Arc::<str>::from(self.cfg.mcp_url.trim()),
+            retry_config: Arc::new(ExponentialBackoff {
                 max_times: Some(3),
                 base_duration: Duration::from_millis(500),
             }),
@@ -77,15 +77,7 @@ impl MCPTransportInitializer for IntegrationMCPSse {
                 &debug_name,
                 session,
             ).await?;
-            let transport = match SseClientTransport::start_with_client(auth_client, client_config).await {
-                Ok(t) => t,
-                Err(e) => {
-                    let msg = format!("Failed to init SSE transport: {}", e);
-                    tracing::error!("{msg} for {debug_name}");
-                    add_log_entry(logs, msg).await;
-                    return None;
-                }
-            };
+            let transport = StreamableHttpClientTransport::with_client(auth_client, config);
             serve_client_with_timeout(
                 serve_client(handler, transport),
                 init_timeout,
@@ -102,15 +94,7 @@ impl MCPTransportInitializer for IntegrationMCPSse {
                 logs.clone(),
                 &debug_name,
             ).await?;
-            let transport = match SseClientTransport::start_with_client(client, client_config).await {
-                Ok(t) => t,
-                Err(e) => {
-                    let msg = format!("Failed to init SSE transport: {}", e);
-                    tracing::error!("{msg} for {debug_name}");
-                    add_log_entry(logs, msg).await;
-                    return None;
-                }
-            };
+            let transport = StreamableHttpClientTransport::with_client(client, config);
             serve_client_with_timeout(
                 serve_client(handler, transport),
                 init_timeout,

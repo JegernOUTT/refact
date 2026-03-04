@@ -60,8 +60,7 @@ process-wrap = { version = "8.0.2", features = ["tokio1"] }
 rand = "0.8.5"
 rayon = "1.8.0"
 regex = "1.9.5"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-webpki-roots", "charset", "http2"] }
-reqwest-eventsource = "0.6.0"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
 eventsource-stream = "0.2"
 resvg = "0.44.0"
 ropey = "1.6"
@@ -112,8 +111,8 @@ petgraph = "0.6"
 zerocopy = "0.8.14"
 
 # There you can use a local copy
-# rmcp = { path = "../../../rust-sdk/crates/rmcp/", "features" = ["client", "transport-child-process", "transport-sse"] }
-rmcp = { git = "https://github.com/smallcloudai/rust-sdk", branch = "main", features = ["client", "transport-child-process", "transport-sse-client", "transport-streamable-http-client", "reqwest", "auth"] }
+# rmcp = { path = "../../../rust-sdk/crates/rmcp/", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 oauth2 = "5.0"
 thiserror = "2.0.12"
 dirs = "5.0"

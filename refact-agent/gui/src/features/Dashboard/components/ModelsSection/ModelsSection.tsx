@@ -1,5 +1,7 @@
 import React from "react";
 import { Flex, HoverCard, Skeleton, Text } from "@radix-ui/themes";
+import { ChevronDownIcon, ChevronUpIcon } from "@radix-ui/react-icons";
+import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import { useGetCapsQuery } from "../../../../services/refact/caps";
 import { useAppDispatch } from "../../../../hooks";
 import { push } from "../../../Pages/pagesSlice";
@@ -8,6 +10,8 @@ import styles from "./ModelsSection.module.css";
 
 type ModelsSectionProps = {
   breakpoint: DashboardBreakpoint;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 };
 
 function ModelRow({ label, model, explanation }: {
@@ -35,14 +39,22 @@ function ModelRow({ label, model, explanation }: {
   );
 }
 
-export const ModelsSection: React.FC<ModelsSectionProps> = ({ breakpoint }) => {
+export const ModelsSection: React.FC<ModelsSectionProps> = ({ breakpoint, collapsed, onToggleCollapsed }) => {
   const dispatch = useAppDispatch();
   const { data: caps, isLoading, isError } = useGetCapsQuery(undefined);
 
   if (isLoading) {
     return (
       <div className={styles.section}>
-        <Skeleton height="24px" />
+        <div className={styles.header}>
+          <button type="button" className={styles.headerToggle} onClick={onToggleCollapsed} aria-expanded={!collapsed}>
+            <Text size="1" weight="bold" color="gray" className={styles.label}>DEFAULT MODELS</Text>
+            {collapsed ? <ChevronDownIcon width={12} height={12} color="var(--gray-9)" /> : <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />}
+          </button>
+        </div>
+        <CollapsePanel collapsed={collapsed}>
+          <Skeleton height="24px" />
+        </CollapsePanel>
       </div>
     );
   }
@@ -55,9 +67,21 @@ export const ModelsSection: React.FC<ModelsSectionProps> = ({ breakpoint }) => {
   return (
     <div className={styles.section}>
       <div className={styles.header}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          DEFAULT MODELS
-        </Text>
+        <button
+          type="button"
+          className={styles.headerToggle}
+          onClick={onToggleCollapsed}
+          aria-expanded={!collapsed}
+        >
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            DEFAULT MODELS
+          </Text>
+          {collapsed ? (
+            <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
+          ) : (
+            <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
+          )}
+        </button>
         <button
           type="button"
           className={styles.configureButton}
@@ -66,39 +90,41 @@ export const ModelsSection: React.FC<ModelsSectionProps> = ({ breakpoint }) => {
           <Text size="1">Configure</Text>
         </button>
       </div>
-      <div className={styles.models} data-breakpoint={breakpoint}>
-        {caps.chat_default_model && (
-          <ModelRow
-            label="Chat"
-            model={caps.chat_default_model}
-            explanation="Primary model for chat conversations and agent tasks. Used for most interactions."
-          />
-        )}
-        {caps.chat_thinking_model && caps.chat_thinking_model !== caps.chat_default_model && (
-          <ModelRow
-            label="Thinking"
-            model={caps.chat_thinking_model}
-            explanation="Model with extended reasoning for complex tasks. Uses thinking/reasoning tokens for step-by-step problem solving."
-          />
-        )}
-        {caps.chat_light_model && caps.chat_light_model !== caps.chat_default_model && (
-          <ModelRow
-            label="Light"
-            model={caps.chat_light_model}
-            explanation="Faster, cheaper model for simple tasks like title generation, quick lookups, and subagent calls."
-          />
-        )}
-        {caps.completion_default_model && (
-          <ModelRow
-            label="Completion"
-            model={caps.completion_default_model}
-            explanation="Model for inline code completion (autocomplete). Optimized for fill-in-the-middle predictions."
-          />
-        )}
-      </div>
-      <Text size="1" color="gray" className={styles.modelCount}>
-        {chatModelCount} chat + {completionModelCount} completion models available
-      </Text>
+      <CollapsePanel collapsed={collapsed}>
+        <div className={styles.models} data-breakpoint={breakpoint}>
+          {caps.chat_default_model && (
+            <ModelRow
+              label="Chat"
+              model={caps.chat_default_model}
+              explanation="Primary model for chat conversations and agent tasks. Used for most interactions."
+            />
+          )}
+          {caps.chat_thinking_model && caps.chat_thinking_model !== caps.chat_default_model && (
+            <ModelRow
+              label="Thinking"
+              model={caps.chat_thinking_model}
+              explanation="Model with extended reasoning for complex tasks. Uses thinking/reasoning tokens for step-by-step problem solving."
+            />
+          )}
+          {caps.chat_light_model && caps.chat_light_model !== caps.chat_default_model && (
+            <ModelRow
+              label="Light"
+              model={caps.chat_light_model}
+              explanation="Faster, cheaper model for simple tasks like title generation, quick lookups, and subagent calls."
+            />
+          )}
+          {caps.completion_default_model && (
+            <ModelRow
+              label="Completion"
+              model={caps.completion_default_model}
+              explanation="Model for inline code completion (autocomplete). Optimized for fill-in-the-middle predictions."
+            />
+          )}
+        </div>
+        <Text size="1" color="gray" className={styles.modelCount}>
+          {chatModelCount} chat + {completionModelCount} completion models available
+        </Text>
+      </CollapsePanel>
     </div>
   );
 };

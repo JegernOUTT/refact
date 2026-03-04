@@ -7,8 +7,8 @@ use tokio::sync::Mutex as AMutex;
 use tracing::warn;
 use uuid::Uuid;
 
-use oauth2::{StandardTokenResponse, EmptyExtraTokenFields, basic::BasicTokenType, TokenResponse};
-use rmcp::transport::auth::{OAuthState, AuthorizationManager};
+use oauth2::{StandardTokenResponse, basic::BasicTokenType, TokenResponse};
+use rmcp::transport::auth::{OAuthState, AuthorizationManager, VendorExtraTokenFields};
 use crate::integrations::sessions::IntegrationSession;
 
 fn deserialize_scopes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
@@ -185,9 +185,11 @@ impl MCPTokenManager {
         {
             let cache = self.token_cache.lock().await;
             if let Some(state) = cache.as_ref() {
+                // When expires_at is None (server omitted expires_in), treat as expired so
+                // we always fetch a fresh token rather than caching indefinitely.
                 let still_valid = state
                     .expires_at
-                    .map_or(true, |exp| exp > Instant::now() + Duration::from_secs(30));
+                    .map_or(false, |exp| exp > Instant::now() + Duration::from_secs(30));
                 if still_valid {
                     return Ok(state.access_token.clone());
                 }
@@ -201,7 +203,10 @@ impl MCPTokenManager {
             return Err("oauth2_client_id is empty".to_string());
         }
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
         let mut params = vec![
             ("grant_type", "client_credentials".to_string()),
             ("client_id", self.settings.oauth2_client_id.clone()),
@@ -263,7 +268,7 @@ impl MCPTokenManager {
 
 fn reconstruct_token_response(
     tokens: &MCPOAuthTokens,
-) -> Result<StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>, String> {
+) -> Result<StandardTokenResponse<VendorExtraTokenFields, BasicTokenType>, String> {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -322,7 +327,7 @@ pub fn needs_refresh(tokens: &MCPOAuthTokens) -> bool {
 fn tokens_from_response(
     client_id: String,
     old_refresh_token: &str,
-    response: &StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
+    response: &StandardTokenResponse<VendorExtraTokenFields, BasicTokenType>,
     old_scopes: &[String],
 ) -> MCPOAuthTokens {
     let access_token = response.access_token().secret().to_string();
@@ -371,7 +376,8 @@ pub async fn mcp_oauth_refresh_task(
 
         let auth_manager_arc = match auth_manager_arc {
             Some(am) => am,
-            None => return,
+            // auth_manager not yet set (session still starting up); wait for next cycle
+            None => continue,
         };
 
         let tokens = match load_tokens_from_config(&config_path).await {
@@ -382,7 +388,9 @@ pub async fn mcp_oauth_refresh_task(
                 if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
                     mcp_session.auth_status = MCPAuthStatus::NeedsLogin;
                 }
-                return;
+                // No tokens on disk — user must re-authenticate; keep looping in case
+                // tokens appear later (e.g., user completes OAuth flow in another tab).
+                continue;
             }
         };
 
@@ -424,7 +432,9 @@ pub async fn mcp_oauth_refresh_task(
                 if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
                     mcp_session.auth_status = MCPAuthStatus::NeedsReauth;
                 }
-                return;
+                // Keep looping — this may be a transient network error; next cycle will retry.
+                // If the refresh token itself is invalid the server will keep returning errors,
+                // but auth_status=NeedsReauth surfaces the problem to the user.
             }
         }
     }
@@ -476,7 +486,7 @@ impl MCPOAuthSessionManager {
         let mut state = OAuthState::new(mcp_url, None)
             .await
             .map_err(|e| format!("create OAuth state: {}", e))?;
-        state.start_authorization(scopes, redirect_uri)
+        state.start_authorization(scopes, redirect_uri, None)
             .await
             .map_err(|e| format!("start OAuth authorization: {}", e))?;
         let auth_url = state.get_authorization_url()
@@ -504,7 +514,7 @@ impl MCPOAuthSessionManager {
         };
 
         let mut oauth_state = oauth_state_arc.lock().await;
-        oauth_state.handle_callback(code)
+        oauth_state.handle_callback(code, &state_param)
             .await
             .map_err(|e| format!("OAuth callback: {}", e))?;
         let (client_id, creds_opt) = oauth_state.get_credentials()

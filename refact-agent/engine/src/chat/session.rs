@@ -66,9 +66,13 @@ impl ChatSession {
     pub fn new_with_trajectory(
         chat_id: String,
         messages: Vec<ChatMessage>,
-        thread: ThreadParams,
+        mut thread: ThreadParams,
         created_at: String,
     ) -> Self {
+        // active_skill is runtime state — if the server restarted mid-skill, the compaction
+        // anchor (started_at_index) is lost. Clear it so the session starts cleanly rather
+        // than leaving the user locked into a ghost skill that can never be deactivated.
+        thread.active_skill = None;
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
             chat_id,
@@ -273,20 +277,20 @@ impl ChatSession {
     pub fn perform_skill_deactivation_cleanup(&mut self) {
         let Some(pending) = self.pending_skill_deactivation.take() else { return };
 
-        let start_idx = match self.messages.iter().position(|m| m.message_id == pending.start_message_id) {
-            Some(idx) => idx,
-            None => {
-                warn!("Skill deactivation cleanup: start message {} not found, skipping compaction", pending.start_message_id);
-                return;
-            }
-        };
+        if pending.start_index > self.messages.len() {
+            warn!(
+                "Skill deactivation cleanup: start_index {} is beyond messages.len() {} for skill '{}', skipping compaction",
+                pending.start_index, self.messages.len(), pending.skill_name
+            );
+            return;
+        }
 
-        info!("Skill deactivation cleanup: compacting messages from index {} for skill '{}'", start_idx, pending.skill_name);
-        self.truncate_messages(start_idx);
+        info!("Skill deactivation cleanup: compacting messages from index {} for skill '{}'", pending.start_index, pending.skill_name);
+        self.truncate_messages(pending.start_index);
 
         let report_content = format!("## Skill Report: {}\n\n{}", pending.skill_name, pending.report);
         let report_message = ChatMessage {
-            role: "assistant".to_string(),
+            role: "plain_text".to_string(),
             content: ChatContent::SimpleText(report_content),
             ..Default::default()
         };
@@ -1759,7 +1763,7 @@ mod tests {
             allowed_tools: vec!["cat".to_string()],
             model_override: Some("gpt-4".to_string()),
             context_fork: Some("subagent".to_string()),
-            started_at_message_id: None,
+            started_at_index: None,
         };
         assert_eq!(session.active_command.context_fork, Some("subagent".to_string()));
         assert_eq!(session.active_command.name, "my-agent");
@@ -1799,5 +1803,100 @@ mod tests {
         assert!(session.trajectory_dirty);
         session.clear_active_skill();
         assert!(session.thread.active_skill.is_none());
+    }
+
+    fn make_user_message(text: &str) -> ChatMessage {
+        ChatMessage {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            role: "user".to_string(),
+            content: crate::call_validation::ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_skill_deactivation_cleanup_compacts_messages() {
+        let mut session = make_session();
+
+        // Add 2 pre-skill messages
+        session.add_message(make_user_message("pre-skill message 1"));
+        session.add_message(make_user_message("pre-skill message 2"));
+        let anchor = session.messages.len(); // = 2
+
+        // Add skill-run messages that should be removed
+        session.add_message(make_user_message("skill run message A"));
+        session.add_message(make_user_message("skill run message B"));
+        session.add_message(make_user_message("skill run message C"));
+        assert_eq!(session.messages.len(), 5);
+
+        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
+            start_index: anchor,
+            skill_name: "my-skill".to_string(),
+            report: "Did useful things.".to_string(),
+        });
+
+        session.perform_skill_deactivation_cleanup();
+
+        // 2 pre-skill messages + 1 report = 3 total
+        assert_eq!(session.messages.len(), 3, "Expected 2 pre-skill + 1 report");
+        let last = session.messages.last().unwrap();
+        assert_eq!(last.role, "plain_text");
+        if let crate::call_validation::ChatContent::SimpleText(ref text) = last.content {
+            assert!(text.contains("## Skill Report: my-skill"), "Report header missing: {}", text);
+            assert!(text.contains("Did useful things."), "Report body missing: {}", text);
+        } else {
+            panic!("Expected SimpleText content in report message");
+        }
+        // pending is consumed
+        assert!(session.pending_skill_deactivation.is_none());
+    }
+
+    #[test]
+    fn test_skill_deactivation_cleanup_noop_when_no_pending() {
+        let mut session = make_session();
+        session.add_message(make_user_message("msg1"));
+        session.add_message(make_user_message("msg2"));
+
+        session.perform_skill_deactivation_cleanup();
+        // Nothing changed
+        assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn test_skill_deactivation_cleanup_rejects_out_of_range_index() {
+        let mut session = make_session();
+        session.add_message(make_user_message("only message"));
+        assert_eq!(session.messages.len(), 1);
+
+        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
+            start_index: 99, // beyond messages.len()
+            skill_name: "bad-skill".to_string(),
+            report: "report".to_string(),
+        });
+
+        session.perform_skill_deactivation_cleanup();
+
+        // No truncation, no report added — skipped with warning
+        assert_eq!(session.messages.len(), 1, "Messages must not be modified on bad index");
+        assert!(session.pending_skill_deactivation.is_none(), "pending must be consumed even on skip");
+    }
+
+    #[test]
+    fn test_new_with_trajectory_clears_active_skill() {
+        let thread = ThreadParams {
+            id: "t1".into(),
+            active_skill: Some("leftover-skill".to_string()),
+            ..Default::default()
+        };
+        let session = ChatSession::new_with_trajectory(
+            "t1".into(),
+            vec![],
+            thread,
+            "2024-01-01T00:00:00Z".into(),
+        );
+        assert!(
+            session.thread.active_skill.is_none(),
+            "active_skill must be cleared on restore: compaction anchor is lost after restart"
+        );
     }
 }

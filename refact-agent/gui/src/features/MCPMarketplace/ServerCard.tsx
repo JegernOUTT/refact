@@ -3,6 +3,7 @@ import { Badge, Box, Button, Flex, Text } from "@radix-ui/themes";
 import {
   CheckIcon,
   ExternalLinkIcon,
+  GearIcon,
   StarFilledIcon,
 } from "@radix-ui/react-icons";
 import type { MCPServer } from "../../services/refact/mcpMarketplace";
@@ -11,8 +12,10 @@ import styles from "./MCPMarketplace.module.css";
 type ServerCardProps = {
   server: MCPServer;
   isInstalled: boolean;
+  installedConfigPath?: string;
   onInstall: (server: MCPServer) => void;
   onViewDetail: (server: MCPServer) => void;
+  onConfigure?: (configPath: string) => void;
   isInstalling: boolean;
   sourceLabel?: string;
 };
@@ -20,8 +23,10 @@ type ServerCardProps = {
 export const ServerCard: React.FC<ServerCardProps> = ({
   server,
   isInstalled,
+  installedConfigPath,
   onInstall,
   onViewDetail,
+  onConfigure,
   isInstalling,
   sourceLabel,
 }) => {
@@ -97,12 +102,24 @@ export const ServerCard: React.FC<ServerCardProps> = ({
         </Flex>
         <Flex gap="2" mt="2" align="center">
           {isInstalled ? (
-            <Flex align="center" gap="1" style={{ flex: 1 }}>
-              <CheckIcon color="var(--green-9)" />
-              <Text size="1" color="green">
-                Installed
-              </Text>
-            </Flex>
+            <>
+              <Flex align="center" gap="1" style={{ flex: 1 }}>
+                <CheckIcon color="var(--green-9)" />
+                <Text size="1" color="green">
+                  Installed
+                </Text>
+              </Flex>
+              {installedConfigPath && onConfigure && (
+                <Button
+                  size="1"
+                  variant="ghost"
+                  onClick={() => onConfigure(installedConfigPath)}
+                >
+                  <GearIcon />
+                  <Text size="1">Configure</Text>
+                </Button>
+              )}
+            </>
           ) : (
             <Button
               size="1"

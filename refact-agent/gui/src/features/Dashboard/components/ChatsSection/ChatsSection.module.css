@@ -7,6 +7,17 @@
   overflow: hidden;
 }
 
+.section[data-collapsed] {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+/* bodyPanel: the CollapsePanel that wraps controls + list */
+.bodyPanel {
+  flex: 1;
+  min-height: 0;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -68,26 +79,6 @@
   flex-shrink: 0;
 }
 
-.legend {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-1) var(--space-2);
-  flex-shrink: 0;
-}
-
-.legendItem {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.legendDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
 
 .list {
   display: flex;

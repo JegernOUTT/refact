@@ -35,6 +35,8 @@ use crate::providers::registry::{
 use crate::providers::traits::{AvailableModel, CustomModelConfig, ModelSource, ProviderModel, ProviderRuntime};
 use super::openrouter::OpenRouterProvider;
 use super::google_gemini::GoogleGeminiProvider;
+use super::claude_code::ClaudeCodeProvider;
+use super::openai_codex::OpenAICodexProvider;
 
 #[derive(Serialize)]
 struct ProviderListItem {
@@ -1688,6 +1690,78 @@ pub async fn handle_openai_codex_auth_callback(
         "#4ade80",
         "You can close this window and return to the application.",
     )
+}
+
+/// GET /v1/claude-code/usage
+pub async fn handle_v1_claude_code_usage(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<Response<Body>, ScratchError> {
+    let (provider, http_client) = {
+        let gcx_locked = gcx.read().await;
+        let registry = gcx_locked.providers.read().await;
+        let provider = registry
+            .get("claude_code")
+            .map(|p| p.clone_box())
+            .or_else(|| create_provider("claude_code"))
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::NOT_FOUND,
+                    "Claude Code provider is not available".to_string(),
+                )
+            })?;
+        (provider, gcx_locked.http_client.clone())
+    };
+
+    let Some(claude_code) = provider.as_any().downcast_ref::<ClaudeCodeProvider>() else {
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to resolve Claude Code provider type".to_string(),
+        ));
+    };
+
+    match claude_code.fetch_usage(&http_client).await {
+        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
+        Err(e) => json_response(
+            StatusCode::OK,
+            &json!({"error": e}),
+        ),
+    }
+}
+
+/// GET /v1/openai-codex/usage
+pub async fn handle_v1_openai_codex_usage(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<Response<Body>, ScratchError> {
+    let (provider, http_client) = {
+        let gcx_locked = gcx.read().await;
+        let registry = gcx_locked.providers.read().await;
+        let provider = registry
+            .get("openai_codex")
+            .map(|p| p.clone_box())
+            .or_else(|| create_provider("openai_codex"))
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::NOT_FOUND,
+                    "OpenAI Codex provider is not available".to_string(),
+                )
+            })?;
+        (provider, gcx_locked.http_client.clone())
+    };
+
+    let Some(codex) = provider.as_any().downcast_ref::<OpenAICodexProvider>() else {
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to resolve OpenAI Codex provider type".to_string(),
+        ));
+    };
+
+    match codex.fetch_usage(&http_client).await {
+        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
+        Err(e) => json_response(
+            StatusCode::OK,
+            &json!({"error": e}),
+        ),
+    }
 }
 
 async fn save_provider_oauth_tokens(
