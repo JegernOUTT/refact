@@ -233,6 +233,15 @@ pub async fn handle_sidebar_subscribe(
                 _ = heartbeat.tick() => {
                     yield Ok::<_, std::convert::Infallible>(": hb\n\n".to_string());
                 }
+
+                _ = async {
+                    let shutdown_flag = gcx_for_stream.read().await.shutdown_flag.clone();
+                    while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                } => {
+                    break;
+                }
             }
         }
     };

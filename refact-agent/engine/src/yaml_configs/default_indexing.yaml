@@ -37,5 +37,6 @@ blocklist:
   - "*/_trajectories/*"
   - "*/.gradle/*"
 
-additional_indexing_dirs:
- - "~/my_favorite_library/"
+additional_indexing_dirs: []
+# additional_indexing_dirs:
+#  - "~/path/to/external/library/"

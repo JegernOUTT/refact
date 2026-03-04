@@ -9,7 +9,18 @@ const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000; // 5 minutes before expiry
 
 pub async fn oauth_token_refresh_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(REFRESH_CHECK_INTERVAL_SECS)).await;
+        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(REFRESH_CHECK_INTERVAL_SECS)) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("OAuth token refresh: shutdown detected, stopping");
+                return;
+            }
+        }
         let _ = try_refresh_all_providers(&gcx).await;
     }
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect } from "react";
 import { HoverCard, Flex, Text, Badge } from "@radix-ui/themes";
 import {
   useGetClaudeCodeUsageQuery,
@@ -7,8 +7,6 @@ import {
   type OpenAICodexUsageWindow,
   type OpenAICodexRateLimit,
 } from "../../services/refact/providers";
-import { useAppSelector } from "../../hooks";
-import { selectIsStreaming, selectIsWaiting } from "../../features/Chat";
 import styles from "./UsageCounter.module.css";
 
 const CircularUsage: React.FC<{ pct: number; size?: number; strokeWidth?: number }> = ({
@@ -117,26 +115,18 @@ const ProviderIndicator: React.FC<{
 );
 
 export const ProviderUsageIndicator: React.FC = () => {
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const wasActiveRef = useRef(false);
-
   const { data: claudeUsage, refetch: refetchClaude } = useGetClaudeCodeUsageQuery(undefined, {
-    pollingInterval: 5 * 60_000,
+    pollingInterval: 30_000,
   });
 
   const { data: codexUsage, refetch: refetchCodex } = useGetOpenAICodexUsageQuery(undefined, {
-    pollingInterval: 5 * 60_000,
+    pollingInterval: 30_000,
   });
 
   useEffect(() => {
-    const isActive = isStreaming || isWaiting;
-    if (wasActiveRef.current && !isActive) {
-      void refetchClaude();
-      void refetchCodex();
-    }
-    wasActiveRef.current = isActive;
-  }, [isStreaming, isWaiting, refetchClaude, refetchCodex]);
+    void refetchClaude();
+    void refetchCodex();
+  }, [refetchClaude, refetchCodex]);
 
   const hasClaudeData = !!(claudeUsage?.data && (claudeUsage.data.five_hour || claudeUsage.data.seven_day));
   const hasCodexData = !!(codexUsage?.data?.rate_limit);

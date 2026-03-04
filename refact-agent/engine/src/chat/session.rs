@@ -812,7 +812,18 @@ pub fn start_session_cleanup_task(gcx: Arc<ARwLock<GlobalContext>>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(session_cleanup_interval());
         loop {
-            interval.tick().await;
+            let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = async {
+                    while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    }
+                } => {
+                    tracing::info!("Session cleanup: shutdown detected, stopping");
+                    return;
+                }
+            }
 
             let sessions = {
                 let gcx_locked = gcx.read().await;

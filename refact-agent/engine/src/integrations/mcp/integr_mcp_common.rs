@@ -134,10 +134,16 @@ pub async fn mcp_integr_tools(
     let mut result: Vec<Box<dyn crate::tools::tools_description::Tool + Send>> = vec![];
     {
         let mut session_locked = session.lock().await;
-        let session_downcasted: &mut SessionMCP = session_locked
+        let session_downcasted: &mut SessionMCP = match session_locked
             .as_any_mut()
             .downcast_mut::<SessionMCP>()
-            .unwrap();
+        {
+            Some(s) => s,
+            None => {
+                tracing::error!("Session for {:?} is not a SessionMCP, strange (3)", session_key);
+                return vec![];
+            }
+        };
         if session_downcasted.mcp_client.is_none() {
             tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
             return vec![];
@@ -228,7 +234,13 @@ pub(crate) async fn build_auth_client_for_mcp(
             add_log_entry(logs, msg).await;
             {
                 let mut session_locked = session.lock().await;
-                let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    Some(s) => s,
+                    None => {
+                        tracing::error!("Session for {debug_name} is not a SessionMCP, cannot set auth status");
+                        return None;
+                    }
+                };
                 mcp_session.connection_status = MCPConnectionStatus::NeedsAuth;
                 mcp_session.auth_status = MCPAuthStatus::NeedsLogin;
             }
@@ -277,7 +289,13 @@ pub(crate) async fn build_auth_client_for_mcp(
     let auth_manager_arc = auth_client.auth_manager.clone();
     {
         let mut session_locked = session.lock().await;
-        let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+        let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+            Some(s) => s,
+            None => {
+                tracing::error!("Session for {debug_name} is not a SessionMCP, cannot set auth manager");
+                return None;
+            }
+        };
         mcp_session.auth_manager = Some(auth_manager_arc);
         mcp_session.auth_status = MCPAuthStatus::Authenticated;
     }
@@ -425,10 +443,16 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
     {
         let mut session_locked = session_arc.lock().await;
-        let session_downcasted = session_locked
+        let session_downcasted = match session_locked
             .as_any_mut()
             .downcast_mut::<SessionMCP>()
-            .unwrap();
+        {
+            Some(s) => s,
+            None => {
+                tracing::error!("Session for {:?} is not a SessionMCP, cannot setup MCP", config_path);
+                return;
+            }
+        };
 
         // If it's same config, and there is an mcp client, or startup task is running, skip
         if new_cfg_value == session_downcasted.launched_cfg {
@@ -448,10 +472,16 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
         let startup_task_join_handle = tokio::spawn(async move {
             let (mcp_client, logs, debug_name, stderr_file) = {
                 let mut session_locked = session_arc_clone.lock().await;
-                let mcp_session = session_locked
+                let mcp_session = match session_locked
                     .as_any_mut()
                     .downcast_mut::<SessionMCP>()
-                    .unwrap();
+                {
+                    Some(s) => s,
+                    None => {
+                        tracing::error!("Session is not a SessionMCP, cannot start MCP client");
+                        return;
+                    }
+                };
                 mcp_session.stderr_cursor = Arc::new(AMutex::new(0));
                 mcp_session.launched_cfg = new_cfg_value.clone();
                 mcp_session.connection_status = MCPConnectionStatus::Connecting;
@@ -514,7 +544,10 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 Some(client) => client,
                 None => {
                     let mut session_locked = session_arc_clone.lock().await;
-                    let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                        Some(s) => s,
+                        None => return,
+                    };
                     if !matches!(mcp_session.connection_status, MCPConnectionStatus::NeedsAuth) {
                         mcp_session.connection_status = MCPConnectionStatus::Failed {
                             message: "Transport initialization failed".to_string(),
@@ -540,7 +573,10 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     )
                     .await;
                     let mut session_locked = session_arc_clone.lock().await;
-                    let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                        Some(s) => s,
+                        None => return,
+                    };
                     mcp_session.connection_status = MCPConnectionStatus::Failed {
                         message: format!("Failed to list tools: {:?}", tools_error),
                     };
@@ -553,7 +589,10 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     )
                     .await;
                     let mut session_locked = session_arc_clone.lock().await;
-                    let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                        Some(s) => s,
+                        None => return,
+                    };
                     mcp_session.connection_status = MCPConnectionStatus::Failed {
                         message: "List tools timed out".to_string(),
                     };
@@ -602,10 +641,16 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
             let client_arc = {
                 let mut session_locked = session_arc_clone.lock().await;
-                let session_downcasted = session_locked
+                let session_downcasted = match session_locked
                     .as_any_mut()
                     .downcast_mut::<SessionMCP>()
-                    .unwrap();
+                {
+                    Some(s) => s,
+                    None => {
+                        tracing::error!("Session is not a SessionMCP, cannot store connected MCP client");
+                        return;
+                    }
+                };
 
                 let arc = Arc::new(AMutex::new(Some(client)));
                 session_downcasted.mcp_client = Some(arc.clone());
@@ -652,7 +697,10 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 ));
                 let health_abort = health_task.abort_handle();
                 let mut session_locked = session_arc_clone.lock().await;
-                let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    Some(s) => s,
+                    None => return,
+                };
                 if let Some(old) = mcp_session.health_task_handle.replace(health_abort) {
                     old.abort();
                 }
@@ -660,7 +708,10 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
             {
                 let mut session_locked = session_arc_clone.lock().await;
-                let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    Some(s) => s,
+                    None => return,
+                };
                 if mcp_session.auth_manager.is_some() {
                     let refresh_task = tokio::spawn(mcp_oauth_refresh_task(
                         session_arc_clone.clone(),
@@ -696,7 +747,21 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
     let backoff_delays: Vec<u64> = vec![1, 2, 4, 8, 16, 30, 60];
 
     loop {
-        tokio::time::sleep(Duration::from_secs(health_check_interval)).await;
+        let shutdown_flag = match gcx_weak.upgrade() {
+            Some(gcx) => gcx.read().await.shutdown_flag.clone(),
+            None => return,
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(health_check_interval)) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("MCP health monitor: shutdown detected, stopping for {}", debug_name);
+                return;
+            }
+        }
 
         let peer_opt = {
             let client_locked = client_arc.lock().await;
@@ -739,7 +804,10 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
 
             if !reconnected {
                 let mut session_locked = session_arc.lock().await;
-                let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    Some(s) => s,
+                    None => return,
+                };
                 mcp_session.connection_status = MCPConnectionStatus::Failed {
                     message: "Max reconnect attempts reached".to_string(),
                 };
@@ -765,11 +833,23 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
     let max_attempts = reconnect_max_attempts.min(backoff_delays.len() as u64) as usize;
 
     for attempt in 0..max_attempts {
+        let shutdown_flag = match gcx_weak.upgrade() {
+            Some(gcx) => gcx.read().await.shutdown_flag.clone(),
+            None => return false,
+        };
+        if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("MCP reconnect: shutdown detected, aborting reconnect for {}", debug_name);
+            return false;
+        }
+
         let delay = backoff_delays[attempt];
 
         {
             let mut session_locked = session_arc.lock().await;
-            let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+            let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                Some(s) => s,
+                None => continue,
+            };
             mcp_session.connection_status = MCPConnectionStatus::Reconnecting { attempt: attempt as u32 };
         }
 
@@ -777,7 +857,17 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
         tracing::info!("{}", msg);
         add_log_entry(logs.clone(), msg).await;
 
-        tokio::time::sleep(Duration::from_secs(delay)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("MCP reconnect: shutdown detected during backoff, aborting for {}", debug_name);
+                return false;
+            }
+        }
 
         let peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>> = Arc::new(AMutex::new(None));
         let handler = McpClientHandler {
@@ -837,7 +927,10 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
         }
         let metrics_arc = {
             let mut session_locked = session_arc.lock().await;
-            let mcp_session = session_locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+            let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                Some(s) => s,
+                None => return false,
+            };
             mcp_session.mcp_tools = tools;
             mcp_session.connection_status = MCPConnectionStatus::Connected;
             mcp_session.last_successful_connection = Some(Instant::now());

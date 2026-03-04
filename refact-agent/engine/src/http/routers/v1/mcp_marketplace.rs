@@ -39,6 +39,11 @@ pub struct InstallRecipe {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Env keys whose values should be appended as positional CLI arguments to `command`.
+    /// The env values are still written to the generated YAML `env:` section (for UI prompting),
+    /// but are also appended in order as extra positional args at the end of the command string.
+    #[serde(default)]
+    pub args_from_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +187,7 @@ async fn fetch_smithery_servers(
                 url: None,
                 env: HashMap::new(),
                 headers: HashMap::new(),
+                args_from_env: vec![],
             },
             confirmation_default: vec!["*".to_string()],
         }
@@ -247,6 +253,7 @@ async fn fetch_smithery_detail(http_client: &reqwest::Client, qualified_name: &s
             url: deployment_url,
             env: HashMap::new(),
             headers: HashMap::new(),
+            args_from_env: vec![],
         },
         confirmation_default: vec!["*".to_string()],
     })
@@ -367,6 +374,7 @@ async fn fetch_official_registry_servers(
                     url: install_url,
                     env: HashMap::new(),
                     headers: HashMap::new(),
+                    args_from_env: vec![],
                 },
                 confirmation_default: vec!["**".to_string()],
             }
@@ -817,7 +825,19 @@ fn build_integration_yaml(server: &MarketplaceServer, env: &HashMap<String, Stri
         }
         _ => {
             if let Some(ref cmd) = server.install_recipe.command {
-                map.insert(serde_yaml::Value::String("command".to_string()), serde_yaml::Value::String(cmd.clone()));
+                let full_cmd = if server.install_recipe.args_from_env.is_empty() {
+                    cmd.clone()
+                } else {
+                    let extra: Vec<&str> = server.install_recipe.args_from_env.iter()
+                        .filter_map(|k| env.get(k).map(|v| v.as_str()))
+                        .collect();
+                    if extra.is_empty() {
+                        cmd.clone()
+                    } else {
+                        format!("{} {}", cmd, extra.join(" "))
+                    }
+                };
+                map.insert(serde_yaml::Value::String("command".to_string()), serde_yaml::Value::String(full_cmd));
             }
             let env_map: serde_yaml::Mapping = env.iter()
                 .map(|(k, v)| (serde_yaml::Value::String(k.clone()), serde_yaml::Value::String(v.clone())))

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex as AMutex;
 use tokio::time::sleep;
@@ -43,6 +44,7 @@ impl Default for VecDbInitConfig {
 pub enum VecDbInitError {
     InitializationError(String),
     TestSearchError(String),
+    ShutdownRequested,
 }
 
 impl std::fmt::Display for VecDbInitError {
@@ -50,6 +52,7 @@ impl std::fmt::Display for VecDbInitError {
         match self {
             VecDbInitError::InitializationError(msg) => write!(f, "Initialization error: {}", msg),
             VecDbInitError::TestSearchError(msg) => write!(f, "Test search error: {}", msg),
+            VecDbInitError::ShutdownRequested => write!(f, "shutdown requested"),
         }
     }
 }
@@ -60,11 +63,16 @@ pub async fn init_vecdb_fail_safe(
     cmdline: CommandLine,
     constants: VecdbConstants,
     init_config: VecDbInitConfig,
+    shutdown_flag: Arc<AtomicBool>,
 ) -> Result<VecDb, VecDbInitError> {
     let mut attempt: usize = 0;
     let mut delay = Duration::from_millis(init_config.initial_delay_ms);
 
     loop {
+        if shutdown_flag.load(Ordering::Relaxed) {
+            return Err(VecDbInitError::ShutdownRequested);
+        }
+
         attempt += 1;
         info!(
             "VecDb init attempt {}/{}",
@@ -111,14 +119,20 @@ pub async fn init_vecdb_fail_safe(
                         "VecDb initialization attempt {} failed with error: {}. Retrying in {:?}...",
                         attempt, err, delay
                     );
-                    sleep(delay).await;
-
-                    let new_delay_ms =
-                        (delay.as_millis() as f64 * init_config.backoff_factor) as u64;
-                    delay = Duration::from_millis(new_delay_ms.min(init_config.max_delay_ms));
                 }
             }
         }
+
+        let flag = shutdown_flag.clone();
+        tokio::select! {
+            _ = sleep(delay) => {}
+            _ = async move { while !flag.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(50)).await; } } => {
+                return Err(VecDbInitError::ShutdownRequested);
+            }
+        }
+
+        let new_delay_ms = (delay.as_millis() as f64 * init_config.backoff_factor) as u64;
+        delay = Duration::from_millis(new_delay_ms.min(init_config.max_delay_ms));
     }
 }
 
@@ -138,9 +152,9 @@ pub async fn initialize_vecdb_with_context(
     constants: VecdbConstants,
     init_config: Option<VecDbInitConfig>,
 ) -> Result<(), VecDbInitError> {
-    let (legacy_cache_dir, cmdline) = {
+    let (legacy_cache_dir, cmdline, shutdown_flag) = {
         let gcx_locked = gcx.read().await;
-        (gcx_locked.cache_dir.clone(), gcx_locked.cmdline.clone())
+        (gcx_locked.cache_dir.clone(), gcx_locked.cmdline.clone(), gcx_locked.shutdown_flag.clone())
     };
 
     let vecdb_dir = if !cmdline.vecdb_force_path.is_empty() {
@@ -158,6 +172,7 @@ pub async fn initialize_vecdb_with_context(
         cmdline.clone(),
         constants,
         config,
+        shutdown_flag,
     )
     .await?;
 

@@ -396,17 +396,17 @@ pub async fn load_caps_value_from_url(
     let http_client = gcx.read().await.http_client.clone();
     let mut headers = reqwest::header::HeaderMap::new();
 
+    let user_agent = reqwest::header::HeaderValue::from_str(&format!(
+        "refact-lsp {}",
+        crate::version::build::PKG_VERSION
+    ))
+    .map_err(|e| format!("Invalid user agent format: {}", e))?;
+    headers.insert(reqwest::header::USER_AGENT, user_agent);
+
     if !cmdline.api_key.is_empty() {
         let auth_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", cmdline.api_key))
             .map_err(|e| format!("Invalid API key format: {}", e))?;
         headers.insert(reqwest::header::AUTHORIZATION, auth_value);
-
-        let user_agent = reqwest::header::HeaderValue::from_str(&format!(
-            "refact-lsp {}",
-            crate::version::build::PKG_VERSION
-        ))
-        .map_err(|e| format!("Invalid user agent format: {}", e))?;
-        headers.insert(reqwest::header::USER_AGENT, user_agent);
     }
 
     let mut last_status = 0;
@@ -1012,12 +1012,7 @@ pub async fn load_caps(
         let gcx_locked = gcx.read().await;
         let registry = gcx_locked.providers.read().await;
         for p in &mut providers {
-            if registry.get(&p.name).is_some() && !p.chat_models.is_empty() {
-                info!(
-                    "Clearing {} legacy chat models for provider '{}' — handled by new provider system",
-                    p.chat_models.len(),
-                    p.name
-                );
+            if registry.get(&p.name).is_some() {
                 p.chat_models.clear();
             }
         }
@@ -1152,8 +1147,13 @@ pub fn relative_to_full_url(caps_url: &str, maybe_relative_url: &str) -> Result<
     } else {
         let base_url =
             Url::parse(caps_url).map_err(|_| format!("failed to parse caps url: {}", caps_url))?;
+        let normalized = if maybe_relative_url.starts_with('/') {
+            maybe_relative_url.to_string()
+        } else {
+            format!("/{}", maybe_relative_url)
+        };
         let joined_url = base_url
-            .join(maybe_relative_url)
+            .join(&normalized)
             .map_err(|_| format!("failed to join url: {}", maybe_relative_url))?;
         Ok(joined_url.to_string())
     }

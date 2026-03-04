@@ -143,6 +143,9 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
 
     let mut background_tasks = BackgroundTasksHolder::new(vec![]);
     loop {
+        if gcx.read().await.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         let (need_reload, consts) = do_i_need_to_reload_vecdb(gcx.clone()).await;
         if need_reload {
             background_tasks.abort().await;
@@ -150,7 +153,6 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
         if need_reload && consts.is_some() {
             background_tasks = BackgroundTasksHolder::new(vec![]);
 
-            // Use the fail-safe initialization with retries
             let init_config = crate::vecdb::vdb_init::VecDbInitConfig {
                 max_attempts: 5,
                 initial_delay_ms: 10,
@@ -169,15 +171,21 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
                     gcx.write().await.vec_db_error = "".to_string();
                     info!("vecdb: initialization successful");
                 }
+                Err(crate::vecdb::vdb_init::VecDbInitError::ShutdownRequested) => break,
                 Err(err) => {
                     let err_msg = err.to_string();
                     gcx.write().await.vec_db_error = err_msg.clone();
                     error!("vecdb init failed: {}", err_msg);
-                    // gcx.vec_db stays None, the rest of the system continues working
                 }
             }
         }
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {}
+            _ = async move { while !shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) { tokio::time::sleep(tokio::time::Duration::from_millis(50)).await; } } => {
+                break;
+            }
+        }
     }
 }
 

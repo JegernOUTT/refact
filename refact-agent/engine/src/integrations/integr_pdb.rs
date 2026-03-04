@@ -168,18 +168,26 @@ impl Tool for ToolPdb {
                 .clone()
         };
 
+        if matches!(command_args[0].as_str(), "kill" | "q" | "quit") {
+            let mut gcx_locked = gcx.write().await;
+            let should_remove = gcx_locked
+                .integration_sessions
+                .get(&session_hashmap_key)
+                .map(|current| Arc::ptr_eq(current, &command_session))
+                .unwrap_or(false);
+            if should_remove {
+                gcx_locked.integration_sessions.remove(&session_hashmap_key);
+            }
+            return Ok(tool_answer("Pdb session has been killed".to_string(), tool_call_id));
+        }
+
         let mut command_session_locked = command_session.lock().await;
         let mut pdb_session = command_session_locked
             .as_any_mut()
             .downcast_mut::<PdbSession>()
             .ok_or("Failed to downcast to PdbSession")?;
 
-        let output = match command_args[0].as_str() {
-            "kill" | "q" | "quit" => {
-                let mut gcx_locked = gcx.write().await;
-                gcx_locked.integration_sessions.remove(&session_hashmap_key);
-                "Pdb session has been killed".to_string()
-            }
+        let output_result = match command_args[0].as_str() {
             "wait" => {
                 if command_args.len() < 2 {
                     return Err("Argument `n_seconds` in `wait n_seconds` is missing".to_string());
@@ -194,7 +202,7 @@ impl Tool for ToolPdb {
                     gcx.clone(),
                     timeout_seconds,
                 )
-                .await?
+                .await
             }
             _ => {
                 interact_with_pdb(
@@ -204,7 +212,26 @@ impl Tool for ToolPdb {
                     gcx.clone(),
                     10,
                 )
-                .await?
+                .await
+            }
+        };
+
+        let output = match output_result {
+            Ok(output) => output,
+            Err(err) => {
+                if err.starts_with("Pdb process exited with status:") {
+                    drop(command_session_locked);
+                    let mut gcx_locked = gcx.write().await;
+                    let should_remove = gcx_locked
+                        .integration_sessions
+                        .get(&session_hashmap_key)
+                        .map(|current| Arc::ptr_eq(current, &command_session))
+                        .unwrap_or(false);
+                    if should_remove {
+                        gcx_locked.integration_sessions.remove(&session_hashmap_key);
+                    }
+                }
+                return Err(err);
             }
         };
         Ok(tool_answer(output, tool_call_id))
@@ -447,8 +474,8 @@ async fn interact_with_pdb(
 async fn send_command_and_get_output_and_error(
     pdb_session: &mut PdbSession,
     input_command: &str,
-    session_hashmap_key: &str,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    _session_hashmap_key: &str,
+    _gcx: Arc<ARwLock<GlobalContext>>,
     timeout_ms: u64,
     ask_for_continuation_if_timeout: bool,
 ) -> Result<(String, String), String> {
@@ -465,10 +492,6 @@ async fn send_command_and_get_output_and_error(
 
     let exit_status = pdb_session.process.try_wait().map_err(|e| e.to_string())?;
     if let Some(exit_status) = exit_status {
-        gcx.write()
-            .await
-            .integration_sessions
-            .remove(session_hashmap_key);
         return Err(format!("Pdb process exited with status: {:?}", exit_status));
     }
 

@@ -355,7 +355,18 @@ pub async fn start_agent_monitor(gcx: Arc<ARwLock<GlobalContext>>) {
     tracing::info!("Starting task agent monitor");
 
     loop {
-        sleep(MONITOR_INTERVAL).await;
+        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        tokio::select! {
+            _ = sleep(MONITOR_INTERVAL) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("Task agent monitor: shutdown detected, stopping");
+                return;
+            }
+        }
 
         if let Err(e) = check_for_stuck_agents(gcx.clone()).await {
             tracing::error!("Agent monitor error: {}", e);

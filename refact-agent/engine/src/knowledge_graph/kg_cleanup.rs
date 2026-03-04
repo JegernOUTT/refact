@@ -62,7 +62,18 @@ pub async fn knowledge_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>)
             save_cleanup_state(gcx.clone(), &new_state).await;
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(24 * 60 * 60)).await;
+        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(24 * 60 * 60)) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("Knowledge cleanup: shutdown detected, stopping");
+                return;
+            }
+        }
     }
 }
 

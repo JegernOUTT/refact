@@ -524,6 +524,15 @@ pub async fn handle_tasks_subscribe(
                     let json = serde_json::to_string(&envelope).unwrap_or_default();
                     yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
                 }
+
+                _ = async {
+                    let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+                    while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                } => {
+                    break;
+                }
             }
         }
     };

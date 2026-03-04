@@ -351,10 +351,16 @@ async fn setup_chrome_session(
             return Ok(setup_log);
         } else {
             setup_log.push("Chrome session is disconnected. Trying to reconnect.".to_string());
-            gcx.write()
-                .await
+            drop(session_locked);
+            let mut gcx_locked = gcx.write().await;
+            let should_remove = gcx_locked
                 .integration_sessions
-                .remove(session_hashmap_key);
+                .get(session_hashmap_key)
+                .map(|current| Arc::ptr_eq(current, &session))
+                .unwrap_or(false);
+            if should_remove {
+                gcx_locked.integration_sessions.remove(session_hashmap_key);
+            }
         }
     }
 

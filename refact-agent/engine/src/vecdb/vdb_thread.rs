@@ -186,8 +186,13 @@ async fn vectorize_thread(
         )
     };
 
+    let shutdown_flag = gcx.read().await.shutdown_flag.clone();
     let mut last_updated: HashMap<String, SystemTime> = HashMap::new();
     loop {
+        if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("VecDB thread: shutdown detected, stopping");
+            return;
+        }
         let mut work_on_one: Option<MessageToVecdbThread> = None;
         let current_time = SystemTime::now();
         let mut vstatus_changed = false;

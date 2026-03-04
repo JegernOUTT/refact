@@ -22,7 +22,18 @@ const SUBAGENT_ID: &str = "memo_extraction";
 
 pub async fn trajectory_memos_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS)) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("Trajectory memos: shutdown detected, stopping");
+                return;
+            }
+        }
 
         if let Err(e) = process_abandoned_trajectories(gcx.clone()).await {
             warn!("trajectory_memos: error processing trajectories: {}", e);

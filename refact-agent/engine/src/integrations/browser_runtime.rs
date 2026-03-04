@@ -712,7 +712,18 @@ pub async fn find_runtime_by_chat_id(
 
 pub async fn browser_monitor_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("Browser monitor: shutdown detected, stopping");
+                return;
+            }
+        }
 
         let runtime_ids: Vec<String> = {
             let gcx_locked = gcx.read().await;

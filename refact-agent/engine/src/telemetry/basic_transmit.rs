@@ -170,25 +170,35 @@ pub async fn basic_telemetry_send(
 
 pub async fn telemetry_background_task(global_context: Arc<ARwLock<GlobalContext>>) -> () {
     loop {
+        let shutdown_flag = global_context.read().await.shutdown_flag.clone();
+        if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("Telemetry: shutdown detected, stopping");
+            return;
+        }
+
         match try_load_caps_quickly_if_not_present(global_context.clone(), 0).await {
             Ok(caps) => {
                 basic_telemetry_compress(global_context.clone()).await;
                 basic_telemetry_send(global_context.clone(), caps.clone()).await;
-                tokio::time::sleep(tokio::time::Duration::from_secs(
-                    TELEMETRY_TRANSMIT_EACH_N_SECONDS,
-                ))
-                .await;
             }
             Err(e) => {
                 error!(
                     "telemetry send failed: no caps, trying again in {}, error: {}",
                     TELEMETRY_TRANSMIT_EACH_N_SECONDS, e
                 );
-                tokio::time::sleep(tokio::time::Duration::from_secs(
-                    TELEMETRY_TRANSMIT_EACH_N_SECONDS,
-                ))
-                .await;
             }
         };
+
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(TELEMETRY_TRANSMIT_EACH_N_SECONDS)) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("Telemetry: shutdown detected, stopping");
+                return;
+            }
+        }
     }
 }

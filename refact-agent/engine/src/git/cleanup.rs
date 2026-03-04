@@ -16,8 +16,19 @@ const CLEANUP_INTERVAL_DURATION: Duration = Duration::from_secs(SECONDS_PER_DAY)
 
 pub async fn git_shadow_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     loop {
+        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
         // wait 2 mins before cleanup; lower priority than other startup tasks
-        tokio::time::sleep(tokio::time::Duration::from_secs(2 * 60)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(2 * 60)) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("Git shadow cleanup: shutdown detected, stopping");
+                return;
+            }
+        }
 
         let cache_dir = {
             let gcx_locked = gcx.read().await;
@@ -60,7 +71,17 @@ pub async fn git_shadow_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>
         // If disk space becomes a concern, consider using `git gc` externally or implementing
         // proper reachability-based pruning.
 
-        tokio::time::sleep(CLEANUP_INTERVAL_DURATION).await;
+        tokio::select! {
+            _ = tokio::time::sleep(CLEANUP_INTERVAL_DURATION) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                tracing::info!("Git shadow cleanup: shutdown detected, stopping");
+                return;
+            }
+        }
     }
 }
 

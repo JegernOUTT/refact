@@ -1216,14 +1216,13 @@ mod tests {
             "metadata": {"pricing": {}, "features": []}
         });
 
-        let caps_url = "https://inference.smallcloud.ai/coding_assistant_caps.json";
+        let caps_url = "https://inference.smallcloud.ai/v1/model-catalog";
         let converted = crate::caps::caps::convert_self_hosted_caps_if_needed(
             nested_json, caps_url, "test-key"
         ).unwrap();
 
         let obj = converted.as_object().unwrap();
 
-        // Embedding endpoint must be resolved
         assert_eq!(
             obj.get("embedding_endpoint").and_then(|v| v.as_str()),
             Some("https://inference.smallcloud.ai/v1/embeddings"),
@@ -1385,7 +1384,7 @@ mod tests {
             "metadata": {"pricing": {}, "features": []}
         });
 
-        let caps_url = "https://inference.smallcloud.ai/coding_assistant_caps.json";
+        let caps_url = "https://inference.smallcloud.ai/v1/model-catalog";
         let converted = crate::caps::caps::convert_self_hosted_caps_if_needed(
             nested_json, caps_url, "test-key"
         ).unwrap();

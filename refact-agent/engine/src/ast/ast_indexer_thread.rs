@@ -46,8 +46,16 @@ async fn ast_indexer_thread(
         )
     };
     let ast_max_files = ast_index.ast_max_files; // cannot change
+    let shutdown_flag = match gcx_weak.upgrade() {
+        Some(gcx) => gcx.read().await.shutdown_flag.clone(),
+        None => return,
+    };
 
     loop {
+        if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            info!("AST indexer: shutdown detected, stopping");
+            return;
+        }
         let (cpath, left_todo_count) = {
             let mut ast_service_locked = ast_service.lock().await;
             let mut cpath;
@@ -305,12 +313,17 @@ async fn ast_indexer_thread(
             reported_connect_stats = true;
         }
 
-        tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            ast_sleeping_point.notified(),
-        )
-        .await
-        .ok();
+        tokio::select! {
+            _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), ast_sleeping_point.notified()) => {}
+            _ = async {
+                while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                info!("AST indexer: shutdown detected, stopping");
+                return;
+            }
+        }
     }
 }
 
