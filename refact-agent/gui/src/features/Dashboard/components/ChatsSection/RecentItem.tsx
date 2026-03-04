@@ -320,9 +320,9 @@ export const RecentItem: React.FC<RecentItemProps> = ({
               ? <ChevronDownIcon width={12} height={12} />
               : <ChevronRightIcon width={12} height={12} />}
           </button>
-        ) : depth > 0 ? (
+        ) : (
           <span className={styles.treeIndent} />
-        ) : null}
+        )}
         <StatusDot state={statusState} size="small" />
         {relation && (
           <Tooltip content={relation.label}>

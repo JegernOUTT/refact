@@ -8,7 +8,6 @@ import {
   ChatHistoryItem,
   deleteChatById,
   HistoryTreeNode,
-  updateChatTitleById,
 } from "../../../History/historySlice";
 import { newChatAction, restoreChat } from "../../../Chat/Thread";
 import { push } from "../../../Pages/pagesSlice";
@@ -158,13 +157,6 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
     [dispatch],
   );
 
-  const handleRename = useCallback(
-    (id: string, newTitle: string) => {
-      dispatch(updateChatTitleById({ chatId: id, newTitle }));
-    },
-    [dispatch],
-  );
-
   const handleNewChat = useCallback(() => {
     dispatch(newChatAction());
     dispatch(push({ name: "chat" }));
@@ -276,7 +268,6 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
                   onClick={() => handleItemClick(item.node)}
                   onDotClick={handleDotClick}
                   onDelete={handleDelete}
-                  onRename={handleRename}
                 />
               );
             }}

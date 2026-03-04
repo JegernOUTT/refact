@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Badge, Flex, IconButton, Skeleton, Text, Tooltip } from "@radix-ui/themes";
+import { Badge, Flex, Skeleton, Text } from "@radix-ui/themes";
 import { ChevronDownIcon, ChevronUpIcon, ChevronRightIcon, PlusIcon } from "@radix-ui/react-icons";
 import { Virtuoso } from "react-virtuoso";
 import { useAppDispatch } from "../../../../hooks";
@@ -115,18 +115,15 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
       <div className={styles.section}>
         <div className={styles.header}>
           <Text size="1" weight="bold" color="gray" className={styles.label}>TASKS</Text>
-          <Tooltip content="New Task">
-            <IconButton
-              size="1"
-              variant="ghost"
-              color="gray"
-              onClick={handleNewTask}
-              disabled={isCreatingTask}
-              aria-label="New Task"
-            >
-              <PlusIcon width={14} height={14} />
-            </IconButton>
-          </Tooltip>
+          <button
+            type="button"
+            className={styles.newTaskButton}
+            onClick={handleNewTask}
+            disabled={isCreatingTask}
+          >
+            <PlusIcon width={12} height={12} />
+            <Text size="1">New Task</Text>
+          </button>
         </div>
         <Text size="1" color="gray" style={{ padding: "var(--space-2)", textAlign: "center" }}>
           No tasks yet
@@ -218,18 +215,15 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
             )}
           </Flex>
         </button>
-        <Tooltip content="New Task">
-          <IconButton
-            size="1"
-            variant="ghost"
-            color="gray"
-            onClick={handleNewTask}
-            disabled={isCreatingTask}
-            aria-label="New Task"
-          >
-            <PlusIcon width={14} height={14} />
-          </IconButton>
-        </Tooltip>
+        <button
+          type="button"
+          className={styles.newTaskButton}
+          onClick={handleNewTask}
+          disabled={isCreatingTask}
+        >
+          <PlusIcon width={12} height={12} />
+          <Text size="1">New Task</Text>
+        </button>
       </div>
       <div className={styles.list}>
         {useVirtualization ? (

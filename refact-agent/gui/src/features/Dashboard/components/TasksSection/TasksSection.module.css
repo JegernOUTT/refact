@@ -40,6 +40,36 @@
   letter-spacing: 0.05em;
 }
 
+.newTaskButton {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-2);
+  border: 1px solid var(--gray-a5);
+  background: transparent;
+  cursor: pointer;
+  color: var(--gray-11);
+  font-size: var(--font-size-1);
+  transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+  flex-shrink: 0;
+}
+
+.newTaskButton:hover {
+  background: var(--gray-a3);
+  border-color: var(--gray-a7);
+}
+
+.newTaskButton:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: 1px;
+}
+
+.newTaskButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .list {
   display: flex;
   flex-direction: column;
