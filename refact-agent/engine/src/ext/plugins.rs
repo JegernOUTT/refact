@@ -192,7 +192,10 @@ async fn copy_dir_recursive(src: &Path, dst: &Path, size_acc: &mut u64) -> Resul
 }
 
 fn is_local_source(source: &str) -> bool {
-    source.starts_with('/') || source.starts_with("./") || source.starts_with("../")
+    source.starts_with('/')
+        || source.starts_with("./")
+        || source.starts_with("../")
+        || std::path::Path::new(source).is_absolute()
 }
 
 async fn fetch_marketplace_to_cache(

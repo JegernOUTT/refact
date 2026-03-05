@@ -564,6 +564,7 @@ mod tests {
         assert!(index.is_none());
     }
 
+    #[cfg(not(windows))] // Windows has case-insensitive filesystem; SKILL.md == skill.md there
     #[tokio::test]
     async fn test_load_skill_case_sensitive_skill_md() {
         let tmp = tempfile::tempdir().unwrap();

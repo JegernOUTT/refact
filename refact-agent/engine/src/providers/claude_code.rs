@@ -125,30 +125,37 @@ impl ClaudeCodeProvider {
             }
         }
 
-        if let Ok(output) = std::process::Command::new("which").arg("claude").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
+        if let Ok(path) = which::which("claude") {
+            return Some(path.to_string_lossy().to_string());
+        }
+
+        #[cfg(unix)]
+        {
+            let candidates = [
+                "/usr/local/bin/claude",
+                "/opt/homebrew/bin/claude",
+            ];
+            for c in &candidates {
+                if std::path::Path::new(c).exists() {
+                    return Some(c.to_string());
+                }
+            }
+            if let Some(home) = home::home_dir() {
+                let local = home.join(".local/bin/claude");
+                if local.exists() {
+                    return Some(local.to_string_lossy().to_string());
                 }
             }
         }
 
-        let candidates = [
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-        ];
-        for c in &candidates {
-            if std::path::Path::new(c).exists() {
-                return Some(c.to_string());
-            }
-        }
+        #[cfg(windows)]
         if let Some(home) = home::home_dir() {
-            let local = home.join(".local/bin/claude");
-            if local.exists() {
-                return Some(local.to_string_lossy().to_string());
+            let candidate = home.join("AppData").join("Local").join("Programs").join("claude").join("claude.exe");
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().to_string());
             }
         }
+
         None
     }
 

@@ -185,7 +185,11 @@ mod tests {
     #[test]
     fn test_resolve_command_finds_binary_in_extra_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let bin_path = tmp.path().join("my_fake_tool_xyz");
+        #[cfg(windows)]
+        let bin_name = "my_fake_tool_xyz.exe";
+        #[cfg(not(windows))]
+        let bin_name = "my_fake_tool_xyz";
+        let bin_path = tmp.path().join(bin_name);
         std::fs::write(&bin_path, "#!/bin/sh\necho hi").unwrap();
         make_executable(&bin_path);
 
@@ -237,7 +241,11 @@ mod tests {
     #[test]
     fn test_resolve_with_config_env_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let bin_path = tmp.path().join("config_path_tool");
+        #[cfg(windows)]
+        let bin_name = "config_path_tool.exe";
+        #[cfg(not(windows))]
+        let bin_name = "config_path_tool";
+        let bin_path = tmp.path().join(bin_name);
         std::fs::write(&bin_path, "#!/bin/sh\necho hi").unwrap();
         make_executable(&bin_path);
 
