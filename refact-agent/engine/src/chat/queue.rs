@@ -459,6 +459,7 @@ pub async fn process_command_queue(
                                 model_override: expanded.model_override,
                                 context_fork: expanded.context_fork,
                                 started_at_index: None,
+                                activation_tool_call_id: None,
                             };
                         }
                         Ok(None) => {

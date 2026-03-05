@@ -677,6 +677,7 @@ pub struct ActiveCommandContext {
     pub model_override: Option<String>,
     pub context_fork: Option<String>,
     pub started_at_index: Option<usize>,
+    pub activation_tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -684,6 +685,7 @@ pub struct PendingSkillDeactivation {
     pub start_index: usize,
     pub report: String,
     pub skill_name: String,
+    pub activation_tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

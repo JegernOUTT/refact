@@ -17,6 +17,6 @@
   background-color: var(--gray-a3);
 }
 
-.item.selected {
+.selected {
   background-color: var(--accent-a4);
 }

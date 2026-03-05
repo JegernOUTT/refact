@@ -13,21 +13,9 @@ const AnnotationBadges: React.FC<{
   if (!annotations) return null;
   return (
     <Flex gap="1" wrap="wrap">
-      {annotations.readOnlyHint && (
-        <Badge size="1" color="blue">
-          🔒 readOnly
-        </Badge>
-      )}
-      {annotations.destructiveHint && (
-        <Badge size="1" color="red">
-          ⚠️ destructive
-        </Badge>
-      )}
-      {annotations.idempotentHint && (
-        <Badge size="1" color="green">
-          🔄 idempotent
-        </Badge>
-      )}
+      {annotations.readOnlyHint && <Badge size="1">🔒 readOnly</Badge>}
+      {annotations.destructiveHint && <Badge size="1">⚠️ destructive</Badge>}
+      {annotations.idempotentHint && <Badge size="1">🔄 idempotent</Badge>}
     </Flex>
   );
 };
@@ -62,7 +50,7 @@ const MCPToolRow: React.FC<{ tool: MCPToolInfo }> = ({ tool }) => {
             onClick={() => setExpanded(!expanded)}
             type="button"
           >
-            <Text size="1" color="blue">
+            <Text size="1" color="gray">
               {expanded ? "Hide schema" : "Show schema"}
             </Text>
           </button>

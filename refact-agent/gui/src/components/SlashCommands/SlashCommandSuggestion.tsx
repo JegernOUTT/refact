@@ -21,12 +21,7 @@ export const SlashCommandSuggestion: React.FC<SlashCommandSuggestionProps> = ({
         {detail.description}
       </Text>
     )}
-    <Badge
-      size="1"
-      variant="soft"
-      color={detail?.kind === "skill" ? "indigo" : "gray"}
-      className={styles.badge}
-    >
+    <Badge size="1" variant="soft" className={styles.badge}>
       {detail?.kind === "skill" ? "skill" : "cmd"}
     </Badge>
   </Flex>

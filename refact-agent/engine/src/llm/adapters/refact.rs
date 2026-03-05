@@ -11,6 +11,7 @@ const PROTECTED_FIELDS: &[&str] = &[
     "model", "messages", "stream", "tools", "tool_choice", "stream_options",
     "max_completion_tokens", "temperature", "frequency_penalty", "stop", "n",
     "reasoning_effort", "thinking", "meta", "parallel_tool_calls", "n_ctx",
+    "cache_control",
 ];
 
 pub struct RefactAdapter;
@@ -47,7 +48,13 @@ impl LlmWireAdapter for RefactAdapter {
         // Some backends (notably Vertex/Gemini) treat cache controls as CachedContent and reject
         // requests that also include system instruction / tools / tool_config.
         let is_anthropic_target = reasoning_type.is_some_and(|rt| rt.starts_with("anthropic"));
-        if is_anthropic_target && matches!(req.cache_control, CacheControl::Ephemeral) {
+        let use_top_level_cache_control = is_anthropic_target
+            && matches!(req.cache_control, CacheControl::Ephemeral)
+            && supports_top_level_cache_control(reasoning_type, &settings.endpoint);
+        if is_anthropic_target
+            && matches!(req.cache_control, CacheControl::Ephemeral)
+            && !supports_top_level_cache_control(reasoning_type, &settings.endpoint)
+        {
             inject_cache_control(&mut messages);
         }
 
@@ -56,6 +63,10 @@ impl LlmWireAdapter for RefactAdapter {
             "messages": messages,
             "stream": req.stream,
         });
+
+        if use_top_level_cache_control && supports_top_level_cache_control(reasoning_type, &settings.endpoint) {
+            body["cache_control"] = json!({"type": "ephemeral", "ttl": "1h"});
+        }
 
         if let Some(n_ctx) = req.params.n_ctx {
             body["n_ctx"] = json!(n_ctx);
@@ -486,6 +497,18 @@ fn convert_messages_to_refact(messages: &[crate::call_validation::ChatMessage], 
         .collect()
 }
 
+
+fn supports_top_level_cache_control(reasoning_type: Option<&str>, endpoint: &str) -> bool {
+    let is_anthropic_reasoning =
+        matches!(reasoning_type, Some("anthropic_budget") | Some("anthropic_effort"));
+    let endpoint_lc = endpoint.to_ascii_lowercase();
+    let is_openrouter = endpoint_lc.contains("openrouter.ai");
+
+    // OpenRouter supports top-level automatic caching for Anthropic models.
+    // Keep explicit block-level markers for other Anthropic-compatible backends.
+    is_anthropic_reasoning && is_openrouter
+}
+
 /// Injects `cache_control` breakpoints into OpenAI-format messages for LiteLLM prompt caching.
 ///
 /// Strategy:
@@ -645,8 +668,10 @@ mod tests {
         }
     }
 
-    fn anthropic_target_settings() -> AdapterSettings {
+    fn anthropic_openrouter_settings() -> AdapterSettings {
         AdapterSettings {
+            endpoint: "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            model_name: "anthropic/claude-sonnet-4.6".to_string(),
             supports_reasoning: true,
             reasoning_type: Some("anthropic_budget".to_string()),
             ..default_settings()
@@ -1383,25 +1408,23 @@ mod tests {
             ChatMessage::new("user".to_string(), "How are you?".to_string()),
         ]).with_cache_control(CacheControl::Ephemeral);
 
-        let http = adapter.build_http(&req, &anthropic_target_settings()).unwrap();
+        let http = adapter.build_http(&req, &anthropic_openrouter_settings()).unwrap();
 
-        // No top-level cache_control field
-        assert!(http.body.get("cache_control").is_none(),
-            "cache_control should be in messages, not top-level");
+        assert_eq!(http.body["cache_control"]["type"], "ephemeral");
+        assert_eq!(http.body["cache_control"]["ttl"], "1h");
 
         let messages = http.body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 4);
 
-        // System message: no cache_control injected
+        // With automatic caching, message content remains unchanged (no block-level markers).
         let sys = &messages[0];
         assert!(sys["content"].is_string());
-
-        // Non-system slice is [1,2,3] => len=3
-        // quarter=0, middle=1, last2=1, last=2 => selected positions {0,1,2}
-        // => all 3 non-system messages should be converted to blocks and have cache_control.
-        for idx in 1..=3 {
-            let content = messages[idx]["content"].as_array().unwrap();
-            assert!(content.last().unwrap().get("cache_control").is_some());
+        for msg in messages {
+            if let Some(content) = msg["content"].as_array() {
+                for block in content {
+                    assert!(block.get("cache_control").is_none());
+                }
+            }
         }
     }
 
@@ -1412,12 +1435,12 @@ mod tests {
             ChatMessage::new("user".to_string(), "Hi".to_string()),
         ]).with_cache_control(CacheControl::Ephemeral);
 
-        let http = adapter.build_http(&req, &anthropic_target_settings()).unwrap();
+        let http = adapter.build_http(&req, &anthropic_openrouter_settings()).unwrap();
 
         let messages = http.body["messages"].as_array().unwrap();
-        // Single non-system message: first == last, should get cache_control once
-        let content = messages[0]["content"].as_array().unwrap();
-        assert!(content[0].get("cache_control").is_some());
+        assert_eq!(http.body["cache_control"]["type"], "ephemeral");
+        let content = messages[0]["content"].as_str();
+        assert!(content.is_some());
     }
 
     #[test]
@@ -1476,16 +1499,14 @@ mod tests {
             multimodal_msg,
         ]).with_cache_control(CacheControl::Ephemeral);
 
-        let http = adapter.build_http(&req, &anthropic_target_settings()).unwrap();
+        let http = adapter.build_http(&req, &anthropic_openrouter_settings()).unwrap();
 
         let messages = http.body["messages"].as_array().unwrap();
         let content = messages[0]["content"].as_array().unwrap();
-        // cache_control should be on the last block (image)
-        assert!(content.last().unwrap().get("cache_control").is_some(),
-            "cache_control should be on last content block");
-        // First block should NOT have cache_control
-        assert!(content[0].get("cache_control").is_none(),
-            "Only last block should have cache_control");
+        // Non-OpenRouter Anthropic-compatible target keeps explicit block-level markers.
+        assert!(http.body.get("cache_control").is_none());
+        assert!(content.last().unwrap().get("cache_control").is_some());
+        assert!(content[0].get("cache_control").is_none());
     }
 
     #[test]

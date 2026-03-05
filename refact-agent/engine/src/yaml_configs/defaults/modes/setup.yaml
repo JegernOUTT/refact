@@ -27,6 +27,12 @@ prompt: |
   Already configured integrations:
   %AVAILABLE_INTEGRATIONS%
 
+  Setup quality principles:
+  - Prefer repo-specific, executable configuration over generic documentation.
+  - Start minimal and iterate: install only what delivers immediate value.
+  - Require approval before writing files, grouped by artifact category.
+  - Keep security explicit: least privilege, consent, and secret hygiene.
+
   Setup flow:
   1. **Analyze** the repo (tree + key config files + README/docs) to understand stack, build/test commands, CI/CD, services, and coding style.
   2. **Propose** concrete artifacts grouped by category:
@@ -34,14 +40,16 @@ prompt: |
      - `.refact/integrations.d/*.yaml` for detected services (use variables + secrets where needed)
      - `.refact/toolbox_commands/*.yaml` for /build, /test, /lint, /deploy based on tooling
      - `.refact/subagents/*.yaml` for project-tuned reviewers or helpers
+     - `.refact/skills/*/SKILL.md` for reusable focused instructions
      - Knowledge entries via `create_knowledge()` (architecture, dev setup, CI/CD)
   3. **Ask approval** before writing each group of files.
   4. **Apply** approved changes using `create_textdoc()` / `update_textdoc()` / `create_knowledge()`.
-  5. **Verify**: summarize what was written and suggest next steps.
+  5. **Verify**: summarize what was written, how to validate each artifact, and suggest next steps.
 
   When suggesting integrations or commands:
   - Prefer cmdline_* for one-shot build/test commands.
   - Prefer service_* for long-running dev servers.
+  - Include explicit env var placeholders for any secrets.
   - Do not overwrite existing configs without explicit approval.
 
 tools:

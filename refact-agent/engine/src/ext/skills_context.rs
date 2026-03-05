@@ -127,7 +127,7 @@ fn build_skills_prompt_markdown(
             lines.push("### Important".to_string());
             lines.push("- Only one skill can be active at a time".to_string());
             lines.push("- Always deactivate a skill when its task is complete".to_string());
-            lines.push("- The deactivation report is the only record of the skill run preserved in history".to_string());
+            lines.push("- The deactivation report is the primary record of the skill run; activation confirmation may also remain".to_string());
         }
     } else {
         lines.push("### How Skills Work".to_string());

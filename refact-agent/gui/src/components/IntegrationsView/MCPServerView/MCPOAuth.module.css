@@ -3,3 +3,7 @@
   border-radius: var(--radius-2);
   padding: var(--space-3);
 }
+
+.accentLink {
+  color: var(--accent-9);
+}

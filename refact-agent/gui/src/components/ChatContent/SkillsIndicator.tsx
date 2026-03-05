@@ -48,7 +48,7 @@ export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
           <Text size="1" color="gray">
             Active skill:
           </Text>
-          <Badge size="1" color="blue" variant="solid">
+          <Badge size="1" variant="solid">
             {activeSkill}
           </Badge>
           {skillsAvailable > 0 && (

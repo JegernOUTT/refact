@@ -12,7 +12,15 @@ const DEFAULT_THINKING_BUDGET: usize = 8192;
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 const EFFORT: &str = "effort-2025-11-24";
 
-const PROTECTED_FIELDS: &[&str] = &["model", "messages", "stream", "system", "tools", "tool_choice"];
+const PROTECTED_FIELDS: &[&str] = &[
+    "model",
+    "messages",
+    "stream",
+    "system",
+    "tools",
+    "tool_choice",
+    "cache_control",
+];
 
 pub struct AnthropicAdapter;
 
@@ -45,7 +53,7 @@ impl LlmWireAdapter for AnthropicAdapter {
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
 
-        let (system, messages) = convert_to_anthropic(&req.messages, req.cache_control);
+        let (system, messages) = convert_to_anthropic(&req.messages);
 
         let mut body = json!({
             "model": settings.model_name,
@@ -100,6 +108,10 @@ impl LlmWireAdapter for AnthropicAdapter {
                     "name": "web_search"
                 }]);
             }
+        }
+
+        if matches!(req.cache_control, CacheControl::Ephemeral) {
+            body["cache_control"] = json!({"type": "ephemeral", "ttl": "1h"});
         }
 
         if settings.supports_reasoning {
@@ -392,10 +404,7 @@ impl LlmWireAdapter for AnthropicAdapter {
     }
 }
 
-fn convert_to_anthropic(
-    messages: &[crate::call_validation::ChatMessage],
-    cache: CacheControl,
-) -> (Option<Value>, Vec<Value>) {
+fn convert_to_anthropic(messages: &[crate::call_validation::ChatMessage]) -> (Option<Value>, Vec<Value>) {
     let mut system_text = None;
     let mut result: Vec<Value> = Vec::new();
     let mut pending_tool_results: Vec<Value> = Vec::new();
@@ -621,46 +630,7 @@ fn convert_to_anthropic(
     // Claude prompt caching breakpoints are handled on messages (not system).
     let system = system_text.map(|text| json!(text));
 
-    // Apply cache breakpoints for prefix-based caching.
-    // Strategy: 4 message breakpoints, recomputed every request:
-    //   - last 2 messages
-    //   - middle message
-    //   - 1/4 point message
-    // (No system cache_control.)
-    if cache == CacheControl::Ephemeral && !result.is_empty() {
-        let len = result.len();
-
-        let quarter = len / 4;
-        let middle = len / 2;
-        let last = len - 1;
-        let last2 = len.saturating_sub(2);
-
-        let mut breakpoint_indices = vec![quarter, middle, last2, last];
-        breakpoint_indices.sort_unstable();
-        breakpoint_indices.dedup();
-        breakpoint_indices.truncate(4);
-
-        for idx in breakpoint_indices {
-            add_cache_control_to_last_block(&mut result[idx]);
-        }
-    }
-
     (system, result)
-}
-
-/// Adds `cache_control` to the last content block of an Anthropic message.
-/// Each message has a "content" array of blocks; the breakpoint goes on the last one.
-fn add_cache_control_to_last_block(message: &mut Value) {
-    let cc = json!({"type": "ephemeral", "ttl": "1h"});
-    if let Some(content) = message.get_mut("content") {
-        if let Some(arr) = content.as_array_mut() {
-            if let Some(last_block) = arr.last_mut() {
-                if let Some(obj) = last_block.as_object_mut() {
-                    obj.insert("cache_control".to_string(), cc);
-                }
-            }
-        }
-    }
 }
 
 fn flush_tool_results(result: &mut Vec<Value>, pending: &mut Vec<Value>) {
@@ -819,6 +789,20 @@ mod tests {
     }
 
     #[test]
+    fn test_top_level_cache_control_ephemeral() {
+        let adapter = AnthropicAdapter;
+        let req = LlmRequest::new(
+            "claude".to_string(),
+            vec![ChatMessage::new("user".to_string(), "test".to_string())],
+        )
+        .with_cache_control(CacheControl::Ephemeral);
+
+        let http = adapter.build_http(&req, &settings()).unwrap();
+        assert_eq!(http.body["cache_control"]["type"], "ephemeral");
+        assert_eq!(http.body["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
     fn test_no_beta_header_when_reasoning_not_supported() {
         use crate::llm::params::ReasoningIntent;
 
@@ -841,22 +825,22 @@ mod tests {
             ChatMessage::new("system".to_string(), "Be helpful".to_string()),
             ChatMessage::new("user".to_string(), "Hi".to_string()),
         ];
-        let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (system, msgs) = convert_to_anthropic(&messages);
         assert_eq!(system, Some(json!("Be helpful")));
         assert_eq!(msgs.len(), 1);
     }
 
     #[test]
-    fn test_system_with_cache_control() {
+    fn test_system_no_block_level_cache_control() {
         let messages = vec![
             ChatMessage::new("system".to_string(), "Be helpful".to_string()),
             ChatMessage::new("user".to_string(), "Hi".to_string()),
         ];
-        let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+        let (system, msgs) = convert_to_anthropic(&messages);
         assert_eq!(system, Some(json!("Be helpful")));
         assert_eq!(msgs.len(), 1);
-        // Single message should get a cache breakpoint
-        assert!(msgs[0]["content"][0].get("cache_control").is_some());
+        // Block-level cache_control is no longer injected by the adapter
+        assert!(msgs[0]["content"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -1018,7 +1002,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "user");
@@ -1065,7 +1049,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "now fix it".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         // Should be 3 messages: user, assistant, user(tool_result + text)
         // NOT 4: user, assistant, user(tool_result), user(text)
@@ -1109,7 +1093,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         assert_eq!(msgs.len(), 3);
         let tool_result = &msgs[2]["content"][0];
@@ -1211,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_breakpoints_on_messages() {
+    fn test_no_block_level_cache_breakpoints_on_messages() {
         // After linearization: user, assistant+tool_use, tool_result, user
         use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
 
@@ -1242,7 +1226,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Thanks, now explain".to_string()),
         ];
 
-        let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+        let (system, msgs) = convert_to_anthropic(&messages);
 
         // System should be plain text (no cache_control)
         assert_eq!(system, Some(json!("Be helpful")));
@@ -1251,9 +1235,9 @@ mod tests {
         // Tool result is merged into the following user message (no consecutive user blocks)
         assert_eq!(msgs.len(), 3);
 
-        // With 3 messages, quarter=0, middle=1, last2=1, last=2 => all messages get breakpoints.
+        // No block-level cache_control in message content
         for i in 0..msgs.len() {
-            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some());
+            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_none());
         }
 
         // Verify the merged user message contains both tool_result and text
@@ -1265,32 +1249,29 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_breakpoints_single_message() {
+    fn test_no_block_level_cache_breakpoints_single_message() {
         let messages = vec![
             ChatMessage::new("user".to_string(), "Hello".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         assert_eq!(msgs.len(), 1);
-        // Single message gets breakpoint at [-1]
-        assert!(msgs[0]["content"][0].get("cache_control").is_some());
-        assert_eq!(msgs[0]["content"][0]["cache_control"]["ttl"], "1h");
+        assert!(msgs[0]["content"][0].get("cache_control").is_none());
     }
 
     #[test]
-    fn test_cache_breakpoints_two_messages() {
+    fn test_no_block_level_cache_breakpoints_two_messages() {
         let messages = vec![
             ChatMessage::new("user".to_string(), "Hello".to_string()),
             ChatMessage::new("assistant".to_string(), "Hi there".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         assert_eq!(msgs.len(), 2);
-        // Two messages: [0] (always) and [-1] get breakpoints
-        assert!(msgs[0]["content"][0].get("cache_control").is_some());
-        assert!(msgs[1]["content"][0].get("cache_control").is_some());
+        assert!(msgs[0]["content"][0].get("cache_control").is_none());
+        assert!(msgs[1]["content"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -1302,7 +1283,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Thanks".to_string()),
         ];
 
-        let (system, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (system, msgs) = convert_to_anthropic(&messages);
 
         // System should be plain text, no cache_control
         assert_eq!(system, Some(json!("Be helpful")));
@@ -1319,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_breakpoint_on_tool_use_last_block() {
+    fn test_no_block_level_cache_breakpoint_on_tool_use_last_block() {
         use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
 
         let messages = vec![
@@ -1347,14 +1328,14 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         // [0]=user, [1]=assistant(text+tool_use), [2]=tool_result(user)
         assert_eq!(msgs.len(), 3);
 
-        // With 3 messages, quarter=0, middle=1, last2=1, last=2 => all messages get breakpoints.
+        // No block-level cache_control in message content
         for i in 0..msgs.len() {
-            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some());
+            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_none());
         }
     }
 
@@ -1375,7 +1356,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Explain more".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         assert_eq!(msgs.len(), 3);
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -1421,7 +1402,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         // assistant content: [thinking, (empty text removed), tool_use]
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -1454,7 +1435,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let content = msgs[1]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "thinking");
@@ -1486,7 +1467,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "And the sky?".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         assert_eq!(msgs.len(), 3);
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -1511,7 +1492,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let content = msgs[0]["content"].as_array().unwrap();
         assert!(content[0].get("citations").is_none(),
@@ -1530,7 +1511,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let content = msgs[1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
@@ -1538,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn test_thinking_blocks_cache_breakpoint_on_last_block() {
+    fn test_thinking_blocks_no_block_level_cache_breakpoint_on_last_block() {
         use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
 
         // Simulate call 2: user + assistant(thinking+tool_use) + tool_result
@@ -1572,11 +1553,11 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Ephemeral);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
-        // With 3 messages, quarter=0, middle=1, last2=1, last=2 => all messages get breakpoints.
+        // No block-level cache_control in message content
         for i in 0..msgs.len() {
-            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_some());
+            assert!(msgs[i]["content"].as_array().unwrap().last().unwrap().get("cache_control").is_none());
         }
     }
 
@@ -1615,7 +1596,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Tell me more".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
         // Find the text block (may not be at index 0 due to interleaved server content blocks)
@@ -1664,7 +1645,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "And tomorrow?".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
         // Should contain: text block (with citations), server_tool_use, web_search_tool_result
@@ -1757,7 +1738,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Follow up".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
         let thinking_blocks: Vec<_> = assistant_content.iter()
@@ -1786,7 +1767,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let assistant_content = msgs[0]["content"].as_array().unwrap();
         let thinking_blocks: Vec<_> = assistant_content.iter()
@@ -1814,7 +1795,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let assistant_content = msgs[0]["content"].as_array().unwrap();
         let thinking_blocks: Vec<_> = assistant_content.iter()
@@ -1852,7 +1833,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         // msgs[0] = user, msgs[1] = assistant
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -1911,7 +1892,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Tell me more".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
         // Verify interleaved order: thinking(0), server_tool_use(1), web_search_result(2), thinking(3), text(4)
@@ -1975,7 +1956,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Tell me more".to_string()),
         ];
         
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
         
         // Verify both blocks are preserved in the re-processed message
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -2024,7 +2005,7 @@ mod tests {
             assistant_msg,
         ];
         
-        let (_, msgs) = convert_to_anthropic(&messages, CacheControl::Off);
+        let (_, msgs) = convert_to_anthropic(&messages);
         
         // Verify orphaned server_tool_use is filtered out
         let assistant_content = msgs[1]["content"].as_array().unwrap();

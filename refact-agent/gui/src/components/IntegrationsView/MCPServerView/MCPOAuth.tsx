@@ -109,16 +109,25 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
   if (isLoading) return null;
   if (!status || status.auth_type !== "oauth2_pkce") return null;
 
+  const expiresAtMs = Number.isFinite(status.expires_at)
+    ? status.expires_at
+    : typeof status.expires_at === "string"
+      ? Date.parse(status.expires_at)
+      : null;
+  const isExpired =
+    expiresAtMs != null && expiresAtMs !== 0 && expiresAtMs < Date.now();
+  const expiryDate =
+    expiresAtMs != null && !Number.isNaN(expiresAtMs)
+      ? new Date(expiresAtMs)
+      : null;
+
   if (status.authenticated) {
-    const expiryDate = status.expires_at ? new Date(status.expires_at) : null;
     return (
       <div className={styles.container}>
         <Flex direction="column" gap="2">
           <Flex align="center" justify="between">
             <Flex align="center" gap="2">
-              <Badge color="green" aria-label="Authenticated">
-                Authenticated
-              </Badge>
+              <Badge aria-label="Authenticated">Authenticated</Badge>
               {expiryDate && (
                 <Text size="1" color="gray">
                   Expires: {expiryDate.toLocaleString()}
@@ -191,11 +200,11 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
               Browser didn&apos;t open?{" "}
               <a
                 href="#"
+                className={styles.accentLink}
                 onClick={(e) => {
                   e.preventDefault();
                   openUrl(authorizeUrl);
                 }}
-                style={{ color: "var(--accent-9)" }}
               >
                 Click here
               </a>
@@ -211,18 +220,15 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
     );
   }
 
-  const expiresAt = status.expires_at;
-  const isExpired = expiresAt !== 0 && expiresAt < Date.now();
-
   return (
     <div className={styles.container}>
       <Flex direction="column" gap="2">
         <Flex align="center" justify="between">
           <Flex align="center" gap="2">
             {isExpired ? (
-              <Badge color="yellow">Session expired</Badge>
+              <Badge>Session expired</Badge>
             ) : (
-              <Badge color="gray">Not authenticated</Badge>
+              <Badge>Not authenticated</Badge>
             )}
           </Flex>
           <Button
@@ -235,7 +241,7 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
           </Button>
         </Flex>
         {isExpired && (
-          <Text size="1" color="yellow">
+          <Text size="1" color="gray">
             Session expired, please re-login
           </Text>
         )}

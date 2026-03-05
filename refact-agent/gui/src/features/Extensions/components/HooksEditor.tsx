@@ -57,7 +57,7 @@ const HookRow: React.FC<HookRowProps> = ({
   return (
     <Flex direction="column" gap="2" className={styles.hookRow}>
       <Flex gap="2" align="center" wrap="wrap">
-        <Badge size="1" color="indigo" variant="soft">
+        <Badge size="1" variant="soft">
           {hook.event}
         </Badge>
         {hook.matcher && (

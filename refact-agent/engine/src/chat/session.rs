@@ -285,10 +285,32 @@ impl ChatSession {
             return;
         }
 
-        info!("Skill deactivation cleanup: compacting messages from index {} for skill '{}'", pending.start_index, pending.skill_name);
-        self.truncate_messages(pending.start_index);
+        let mut compaction_start = pending.start_index;
+        if let Some(ref activation_tool_call_id) = pending.activation_tool_call_id {
+            if self.messages.get(compaction_start).map_or(false, |msg| {
+                msg.role == "tool" && msg.tool_call_id == *activation_tool_call_id
+            }) {
+                compaction_start = compaction_start.saturating_add(1);
+            }
+        }
 
-        let report_content = format!("## Skill Report: {}\n\n{}", pending.skill_name, pending.report);
+        if compaction_start > self.messages.len() {
+            warn!(
+                "Skill deactivation cleanup: compaction_start {} is beyond messages.len() {} for skill '{}', skipping compaction",
+                compaction_start, self.messages.len(), pending.skill_name
+            );
+            return;
+        }
+
+        info!("Skill deactivation cleanup: compacting messages from index {} for skill '{}'", compaction_start, pending.skill_name);
+        self.truncate_messages(compaction_start);
+
+        let report_content = format!(
+            "## Skill Report: {}\n\n✅ Skill '{}' executed successfully.\n\nHere is the compactified result. The full skill conversation was compactified and removed from the thread.\n\n{}",
+            pending.skill_name,
+            pending.skill_name,
+            pending.report
+        );
         let report_message = ChatMessage {
             role: "plain_text".to_string(),
             content: ChatContent::SimpleText(report_content),
@@ -1775,6 +1797,7 @@ mod tests {
             model_override: Some("gpt-4".to_string()),
             context_fork: Some("subagent".to_string()),
             started_at_index: None,
+            activation_tool_call_id: None,
         };
         assert_eq!(session.active_command.context_fork, Some("subagent".to_string()));
         assert_eq!(session.active_command.name, "my-agent");
@@ -1844,6 +1867,7 @@ mod tests {
             start_index: anchor,
             skill_name: "my-skill".to_string(),
             report: "Did useful things.".to_string(),
+            activation_tool_call_id: None,
         });
 
         session.perform_skill_deactivation_cleanup();
@@ -1854,6 +1878,7 @@ mod tests {
         assert_eq!(last.role, "plain_text");
         if let crate::call_validation::ChatContent::SimpleText(ref text) = last.content {
             assert!(text.contains("## Skill Report: my-skill"), "Report header missing: {}", text);
+            assert!(text.contains("Skill 'my-skill' executed successfully"), "Report preface missing: {}", text);
             assert!(text.contains("Did useful things."), "Report body missing: {}", text);
         } else {
             panic!("Expected SimpleText content in report message");
@@ -1874,6 +1899,117 @@ mod tests {
     }
 
     #[test]
+    fn test_skill_deactivation_keeps_activation_tool_message() {
+        let mut session = make_session();
+
+        session.add_message(make_user_message("pre-skill"));
+        let anchor = session.messages.len();
+
+        let tool_message = ChatMessage {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText("Skill activated".to_string()),
+            tool_call_id: "call_activate_skill".to_string(),
+            tool_failed: Some(false),
+            ..Default::default()
+        };
+        session.add_message(tool_message);
+
+        session.add_message(ChatMessage {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            role: "context_file".to_string(),
+            content: ChatContent::SimpleText("Skill body".to_string()),
+            ..Default::default()
+        });
+        session.add_message(make_user_message("skill run"));
+
+        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
+            start_index: anchor,
+            skill_name: "tool-skill".to_string(),
+            report: "Wrapped up".to_string(),
+            activation_tool_call_id: Some("call_activate_skill".to_string()),
+        });
+
+        session.perform_skill_deactivation_cleanup();
+
+        assert_eq!(session.messages.len(), 3, "Expected pre-skill + tool + report");
+        assert_eq!(session.messages[1].role, "tool", "Activation tool message must remain");
+        assert_eq!(session.messages[1].tool_call_id, "call_activate_skill");
+        assert_eq!(session.messages.last().unwrap().role, "plain_text");
+    }
+
+    #[test]
+    fn test_skill_deactivation_skips_exact_activation_tool_call_id() {
+        let mut session = make_session();
+
+        session.add_message(make_user_message("pre-skill"));
+        let anchor = session.messages.len();
+
+        let unrelated_tool = ChatMessage {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText("Unrelated tool".to_string()),
+            tool_call_id: "call_other_tool".to_string(),
+            tool_failed: Some(false),
+            ..Default::default()
+        };
+        session.add_message(unrelated_tool);
+
+        let activation_tool = ChatMessage {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText("Skill activated".to_string()),
+            tool_call_id: "call_activate_skill".to_string(),
+            tool_failed: Some(false),
+            ..Default::default()
+        };
+        session.add_message(activation_tool);
+
+        session.add_message(ChatMessage {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            role: "cd_instruction".to_string(),
+            content: ChatContent::SimpleText("Skill body".to_string()),
+            ..Default::default()
+        });
+        session.add_message(make_user_message("skill run"));
+
+        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
+            start_index: anchor,
+            skill_name: "tool-skill".to_string(),
+            report: "Wrapped up".to_string(),
+            activation_tool_call_id: Some("call_activate_skill".to_string()),
+        });
+
+        session.perform_skill_deactivation_cleanup();
+
+        assert_eq!(session.messages.len(), 3, "Expected pre-skill + activation tool + report");
+        assert_eq!(session.messages[1].tool_call_id, "call_activate_skill");
+    }
+
+    #[test]
+    fn test_skill_deactivation_without_anchor_still_records_report() {
+        let mut session = make_session();
+        session.add_message(make_user_message("pre-skill"));
+
+        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
+            start_index: session.messages.len(),
+            skill_name: "no-anchor".to_string(),
+            report: "All done".to_string(),
+            activation_tool_call_id: None,
+        });
+
+        session.perform_skill_deactivation_cleanup();
+
+        assert_eq!(session.messages.len(), 2, "Expected pre-skill + report");
+        let last = session.messages.last().unwrap();
+        assert_eq!(last.role, "plain_text");
+        if let crate::call_validation::ChatContent::SimpleText(ref text) = last.content {
+            assert!(text.contains("## Skill Report: no-anchor"));
+            assert!(text.contains("All done"));
+        }
+    }
+
+    #[test]
     fn test_skill_deactivation_cleanup_rejects_out_of_range_index() {
         let mut session = make_session();
         session.add_message(make_user_message("only message"));
@@ -1883,6 +2019,7 @@ mod tests {
             start_index: 99, // beyond messages.len()
             skill_name: "bad-skill".to_string(),
             report: "report".to_string(),
+            activation_tool_call_id: None,
         });
 
         session.perform_skill_deactivation_cleanup();

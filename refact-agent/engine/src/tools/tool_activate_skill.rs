@@ -123,12 +123,13 @@ impl Tool for ToolActivateSkill {
                 session.active_command.allowed_tools = allowed_tools.clone();
                 session.active_command.model_override = model_override.clone();
                 session.active_command.started_at_index = Some(session.messages.len());
+                session.active_command.activation_tool_call_id = Some(tool_call_id.clone());
                 session.set_active_skill(name.clone());
             }
         }
 
         let header_json = serde_json::json!({
-            "name": name,
+            "name": name.clone(),
             "allowed_tools": allowed_tools,
             "model_override": model_override,
         });
@@ -205,15 +206,19 @@ impl Tool for ToolDeactivateSkill {
                     Some(name) => name,
                     None => return Err("No active skill to deactivate".to_string()),
                 };
-                let compaction_note = if let Some(start_index) = session.active_command.started_at_index {
-                    session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
-                        start_index,
-                        report: report.clone(),
-                        skill_name: skill_name.clone(),
-                    });
+                let start_index = session.active_command
+                    .started_at_index
+                    .unwrap_or(session.messages.len());
+                session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
+                    start_index,
+                    report: report.clone(),
+                    skill_name: skill_name.clone(),
+                    activation_tool_call_id: session.active_command.activation_tool_call_id.clone(),
+                });
+                let compaction_note = if session.active_command.started_at_index.is_some() {
                     String::new()
                 } else {
-                    tracing::warn!("deactivate_skill: no started_at_index for skill '{}', skipping compaction", skill_name);
+                    tracing::warn!("deactivate_skill: no started_at_index for skill '{}', reporting without compaction", skill_name);
                     " (Note: skill history compaction was skipped — activation anchor was not set.)".to_string()
                 };
                 session.active_command = crate::chat::types::ActiveCommandContext::default();
@@ -387,6 +392,7 @@ mod tests {
             model_override: Some("gpt-4o".to_string()),
             context_fork: None,
             started_at_index: Some(5),
+            activation_tool_call_id: None,
         };
         assert_eq!(active.started_at_index, Some(5));
 
@@ -492,6 +498,7 @@ mod tests {
             active_command: ActiveCommandContext {
                 name: "some-slash-command".to_string(),
                 started_at_index: Some(0),
+                activation_tool_call_id: None,
                 ..Default::default()
             },
             messages: Vec::new(),

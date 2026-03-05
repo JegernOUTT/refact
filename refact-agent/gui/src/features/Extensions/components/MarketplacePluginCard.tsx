@@ -69,12 +69,11 @@ export const MarketplacePluginCard: React.FC<MarketplacePluginCardProps> = ({
           <div className={styles.actions}>
             {isInstalled ? (
               <Flex gap="2" align="center">
-                <Text size="1" color="green" weight="medium">
+                <Text size="1" weight="medium">
                   Installed ✓
                 </Text>
                 <Button
                   size="1"
-                  color="red"
                   variant="soft"
                   onClick={handleUninstall}
                   disabled={uninstalling}
@@ -83,12 +82,7 @@ export const MarketplacePluginCard: React.FC<MarketplacePluginCardProps> = ({
                 </Button>
               </Flex>
             ) : (
-              <Button
-                size="1"
-                color="green"
-                onClick={handleInstall}
-                disabled={installing}
-              >
+              <Button size="1" onClick={handleInstall} disabled={installing}>
                 {installing ? <Spinner size="1" /> : "Install"}
               </Button>
             )}
@@ -106,12 +100,12 @@ export const MarketplacePluginCard: React.FC<MarketplacePluginCardProps> = ({
             {plugin.marketplace}
           </Badge>
           {plugin.version && (
-            <Badge size="1" color="blue" variant="soft">
+            <Badge size="1" variant="soft">
               {plugin.version}
             </Badge>
           )}
           {plugin.tags?.map((tag) => (
-            <Badge key={tag} size="1" color="green" variant="soft">
+            <Badge key={tag} size="1" variant="soft">
               {tag}
             </Badge>
           ))}

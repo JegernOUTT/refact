@@ -17,12 +17,6 @@ type ExtItemListProps = {
   onDelete: (name: string, scope: "global" | "local" | "plugin") => void;
 };
 
-const SCOPE_COLORS = {
-  global: "blue",
-  local: "green",
-  plugin: "purple",
-} as const;
-
 const SCOPE_LABELS = {
   global: "Global",
   local: "Local",
@@ -83,7 +77,7 @@ export const ExtItemList: React.FC<ExtItemListProps> = ({
             </Text>
           </Flex>
           <Flex gap="1" align="center" style={{ flexShrink: 0 }}>
-            <Badge size="1" color={SCOPE_COLORS[item.scope]} variant="soft">
+            <Badge size="1" variant="soft">
               {SCOPE_LABELS[item.scope]}
             </Badge>
             {!item.read_only && (

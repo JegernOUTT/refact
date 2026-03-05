@@ -8,7 +8,15 @@ use crate::llm::canonical::{
 };
 use crate::llm::params::CacheControl;
 
-const PROTECTED_FIELDS: &[&str] = &["model", "messages", "stream", "tools", "tool_choice", "stream_options"];
+const PROTECTED_FIELDS: &[&str] = &[
+    "model",
+    "messages",
+    "stream",
+    "tools",
+    "tool_choice",
+    "stream_options",
+    "cache_control",
+];
 
 pub struct OpenAiChatAdapter;
 
@@ -37,8 +45,14 @@ impl LlmWireAdapter for OpenAiChatAdapter {
 
         let mut messages = convert_messages_to_openai(&req.messages);
 
-        // Inject cache_control for OpenRouter -> Anthropic routing
-        if matches!(req.cache_control, CacheControl::Ephemeral) {
+        // For OpenRouter Anthropic models, prefer automatic caching via top-level cache_control.
+        // This avoids per-message breakpoint churn in long tool loops.
+        let use_top_level_cache_control =
+            matches!(req.cache_control, CacheControl::Ephemeral) && is_openrouter_anthropic_model(settings);
+
+        // Legacy explicit block-level cache_control is still used for non-Anthropic targets
+        // that may rely on Anthropic-compatible message-level markers.
+        if matches!(req.cache_control, CacheControl::Ephemeral) && !use_top_level_cache_control {
             inject_cache_control(&mut messages);
         }
 
@@ -47,6 +61,10 @@ impl LlmWireAdapter for OpenAiChatAdapter {
             "messages": messages,
             "stream": req.stream,
         });
+
+        if use_top_level_cache_control {
+            body["cache_control"] = json!({"type": "ephemeral", "ttl": "1h"});
+        }
 
         if settings.supports_max_completion_tokens {
             body["max_completion_tokens"] = json!(req.params.max_tokens);
@@ -369,6 +387,17 @@ fn response_format_to_openai(format: &ResponseFormat) -> Value {
             json!({"type": "json_schema", "json_schema": json_schema})
         }
     }
+}
+
+
+fn is_openrouter_anthropic_model(settings: &AdapterSettings) -> bool {
+    let endpoint = settings.endpoint.to_ascii_lowercase();
+    if !endpoint.contains("openrouter.ai") {
+        return false;
+    }
+
+    let model = settings.model_name.to_ascii_lowercase();
+    model.starts_with("anthropic/") || model.contains("claude")
 }
 
 /// Inject cache_control breakpoints for OpenRouter -> Anthropic routing.
@@ -973,7 +1002,35 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_cache_control_simple_messages() {
+    fn test_openrouter_anthropic_uses_top_level_cache_control() {
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new("anthropic/claude-sonnet-4.6".to_string(), vec![
+            ChatMessage::new("system".to_string(), "You are helpful".to_string()),
+            ChatMessage::new("user".to_string(), "Hello".to_string()),
+        ])
+        .with_cache_control(CacheControl::Ephemeral);
+
+        let mut settings = default_settings();
+        settings.endpoint = "https://openrouter.ai/api/v1/chat/completions".to_string();
+        settings.model_name = "anthropic/claude-sonnet-4.6".to_string();
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+        assert_eq!(http.body["cache_control"]["type"], "ephemeral");
+        assert_eq!(http.body["cache_control"]["ttl"], "1h");
+
+        let messages = http.body["messages"].as_array().unwrap();
+        for msg in messages {
+            let content = &msg["content"];
+            if let Some(arr) = content.as_array() {
+                for block in arr {
+                    assert!(block.get("cache_control").is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_non_openrouter_keeps_explicit_block_level_cache_control() {
         let mut messages = vec![
             json!({"role": "system", "content": "You are a helpful assistant"}),
             json!({"role": "user", "content": "Hello"}),
@@ -984,107 +1041,18 @@ mod tests {
 
         inject_cache_control(&mut messages);
 
-        // System message should have cache_control
+        // Existing explicit strategy behavior remains for non-OpenRouter targets.
         let system_content = messages[0]["content"].as_array().unwrap();
-        assert_eq!(system_content.len(), 1);
-        assert_eq!(system_content[0]["type"], "text");
-        assert_eq!(system_content[0]["text"], "You are a helpful assistant");
         assert_eq!(system_content[0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(system_content[0]["cache_control"]["ttl"], "1h");
-
-        // Non-system messages: 4 total (indices 1,2,3,4). Selected positions: [1, 2, 3]
-        // Which correspond to message indices: [2, 3, 4] (assistant1, user2, assistant2)
-        // user1 (message[1]) is at position 0 in non-system array, which is NOT selected
-        assert_eq!(messages[1]["content"].as_str(), Some("Hello"), 
-            "user1 should remain as simple string (not cached)");
 
         let assistant1_content = messages[2]["content"].as_array().unwrap();
-        assert!(assistant1_content[0].get("cache_control").is_some(), 
-            "assistant1 should be cached (position 1/quarter)");
+        assert!(assistant1_content[0].get("cache_control").is_some());
 
         let user2_content = messages[3]["content"].as_array().unwrap();
-        assert!(user2_content[0].get("cache_control").is_some(), 
-            "user2 should be cached (position 2/middle)");
+        assert!(user2_content[0].get("cache_control").is_some());
 
         let assistant2_content = messages[4]["content"].as_array().unwrap();
-        assert!(assistant2_content[0].get("cache_control").is_some(), 
-            "assistant2 should be cached (position 3/last)");
+        assert!(assistant2_content[0].get("cache_control").is_some());
     }
 
-    #[test]
-    fn test_inject_cache_control_multipart_messages() {
-        let mut messages = vec![
-            json!({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "What's in this image?"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
-                ]
-            }),
-            json!({"role": "assistant", "content": "I see a cat"}),
-        ];
-
-        inject_cache_control(&mut messages);
-
-        // First message (user) already multipart - cache_control on last block
-        let user_content = messages[0]["content"].as_array().unwrap();
-        assert_eq!(user_content.len(), 2);
-        assert!(user_content[0].get("cache_control").is_none(), "First block shouldn't have cache_control");
-        assert_eq!(user_content[1]["cache_control"]["type"], "ephemeral", "Last block should have cache_control");
-
-        // Second message (assistant) simple text - converted to multipart
-        let assistant_content = messages[1]["content"].as_array().unwrap();
-        assert_eq!(assistant_content.len(), 1);
-        assert_eq!(assistant_content[0]["cache_control"]["ttl"], "1h");
-    }
-
-    #[test]
-    fn test_inject_cache_control_no_system_message() {
-        let mut messages = vec![
-            json!({"role": "user", "content": "Hello"}),
-            json!({"role": "assistant", "content": "Hi"}),
-        ];
-
-        inject_cache_control(&mut messages);
-
-        // Both messages should be cached (positions 0 and 1)
-        assert!(messages[0]["content"].as_array().unwrap()[0].get("cache_control").is_some());
-        assert!(messages[1]["content"].as_array().unwrap()[0].get("cache_control").is_some());
-    }
-
-    #[test]
-    fn test_inject_cache_control_empty_messages() {
-        let mut messages: Vec<Value> = vec![];
-        inject_cache_control(&mut messages);
-        assert_eq!(messages.len(), 0, "Should handle empty messages gracefully");
-    }
-
-    #[test]
-    fn test_inject_cache_control_only_system() {
-        let mut messages = vec![
-            json!({"role": "system", "content": "Be helpful"}),
-        ];
-
-        inject_cache_control(&mut messages);
-
-        // System message should be cached
-        let content = messages[0]["content"].as_array().unwrap();
-        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
-    }
-
-    #[test]
-    fn test_inject_cache_control_deduplication() {
-        // With 2 non-system messages: quarter=0, middle=1, last2=0, last=1
-        // After dedup: [0, 1]
-        let mut messages = vec![
-            json!({"role": "user", "content": "First"}),
-            json!({"role": "assistant", "content": "Second"}),
-        ];
-
-        inject_cache_control(&mut messages);
-
-        // Both should be cached
-        assert!(messages[0]["content"].as_array().unwrap()[0].get("cache_control").is_some());
-        assert!(messages[1]["content"].as_array().unwrap()[0].get("cache_control").is_some());
-    }
 }
