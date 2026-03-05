@@ -31,7 +31,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && vite build -c vite.node.config.ts",
+    "build": "NODE_OPTIONS=--max-old-space-size=8192 tsc && NODE_OPTIONS=--max-old-space-size=8192 vite build && NODE_OPTIONS=--max-old-space-size=8192 vite build -c vite.node.config.ts",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "test": "vitest --exclude 'src/__tests__/integration/**'",

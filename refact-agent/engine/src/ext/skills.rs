@@ -8,6 +8,19 @@ use crate::ext::yaml_util::{yaml_bool, yaml_str, yaml_str_list};
 
 const MAX_FILE_SIZE: u64 = 100 * 1024;
 
+async fn skill_md_exists_case_sensitive(skill_dir: &Path) -> bool {
+    let mut read_dir = match tokio::fs::read_dir(skill_dir).await {
+        Ok(rd) => rd,
+        Err(_) => return false,
+    };
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        if entry.file_name() == "SKILL.md" {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn validate_skill_id(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("skill name cannot be empty".to_string());
@@ -50,10 +63,10 @@ async fn load_skill_from_dir(
     skill_dir: &Path,
     source: CommandSource,
 ) -> Option<SkillFull> {
-    let skill_md = skill_dir.join("SKILL.md");
-    if !skill_md.exists() {
+    if !skill_md_exists_case_sensitive(skill_dir).await {
         return None;
     }
+    let skill_md = skill_dir.join("SKILL.md");
     let metadata = tokio::fs::metadata(&skill_md).await.ok()?;
     if metadata.len() > MAX_FILE_SIZE {
         tracing::warn!("Skipping SKILL.md > 100KB: {:?}", skill_md);
@@ -111,10 +124,10 @@ async fn load_skill_from_dir(
 const SKILL_INDEX_READ_BYTES: usize = 4096;
 
 async fn load_skill_index_only(skill_dir: &Path, source: CommandSource) -> Option<SkillIndex> {
-    let skill_md = skill_dir.join("SKILL.md");
-    if !skill_md.exists() {
+    if !skill_md_exists_case_sensitive(skill_dir).await {
         return None;
     }
+    let skill_md = skill_dir.join("SKILL.md");
     let mut file = match tokio::fs::File::open(&skill_md).await {
         Ok(f) => f,
         Err(_) => return None,
