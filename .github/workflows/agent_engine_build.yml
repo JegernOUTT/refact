@@ -99,6 +99,15 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: brew install llvm
 
+      - name: Add swap space (Linux cross-compilation needs extra RAM for LTO)
+        if: matrix.cross
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: setup cross-rs
         if: matrix.cross
         run: |
@@ -134,6 +143,9 @@ jobs:
           
       - name: build linux-like artifacts
         if: matrix.cross
+        env:
+          # Limit parallel codegen/link jobs to reduce peak RAM (LTO + whisper-rs is very memory-hungry)
+          CARGO_BUILD_JOBS: 2
         run: |
           CROSS_NO_WARNINGS=0 cross test --release --target ${{ matrix.target }} || exit 1
           CROSS_NO_WARNINGS=0 cross build --release --target ${{ matrix.target }} || exit 1
