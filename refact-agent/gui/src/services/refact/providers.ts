@@ -563,15 +563,19 @@ export const providersApi = createApi({
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10_000);
-        const result = await baseQuery({
-          ...extraOptions,
-          method: "GET",
-          url,
-          credentials: "same-origin",
-          redirect: "follow",
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            ...extraOptions,
+            method: "GET",
+            url,
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         if (result.error) {
           return { error: result.error };
@@ -600,15 +604,19 @@ export const providersApi = createApi({
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10_000);
-        const result = await baseQuery({
-          ...extraOptions,
-          method: "GET",
-          url,
-          credentials: "same-origin",
-          redirect: "follow",
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            ...extraOptions,
+            method: "GET",
+            url,
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         if (result.error) {
           return { error: result.error };

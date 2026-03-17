@@ -202,25 +202,24 @@ const ProviderIndicator: React.FC<{
 );
 
 export const ProviderUsageIndicator: React.FC = () => {
-  const { data: claudeUsage, refetch: refetchClaude } =
-    useGetClaudeCodeUsageQuery(undefined, {
-      pollingInterval: 30_000,
-    });
+  const { data: claudeUsage } = useGetClaudeCodeUsageQuery(undefined, {
+    pollingInterval: 30_000,
+  });
 
-  const { data: codexUsage, refetch: refetchCodex } =
-    useGetOpenAICodexUsageQuery(undefined, {
-      pollingInterval: 30_000,
-    });
-
-  useEffect(() => {
-    void refetchClaude();
-    void refetchCodex();
-  }, [refetchClaude, refetchCodex]);
+  const { data: codexUsage } = useGetOpenAICodexUsageQuery(undefined, {
+    pollingInterval: 30_000,
+  });
 
   const lastClaudeRef = useRef(claudeUsage);
   const lastCodexRef = useRef(codexUsage);
-  if (claudeUsage !== undefined) lastClaudeRef.current = claudeUsage;
-  if (codexUsage !== undefined) lastCodexRef.current = codexUsage;
+
+  useEffect(() => {
+    if (claudeUsage !== undefined) lastClaudeRef.current = claudeUsage;
+  }, [claudeUsage]);
+
+  useEffect(() => {
+    if (codexUsage !== undefined) lastCodexRef.current = codexUsage;
+  }, [codexUsage]);
 
   const stickyClaudeUsage = lastClaudeRef.current;
   const stickyCodexUsage = lastCodexRef.current;

@@ -343,7 +343,7 @@ pub fn aggregate_summary(events: &[LlmCallEvent], from: Option<&str>, to: Option
         }
         day_acc.total_duration_ms += event.duration_ms;
 
-        let mode_acc = by_mode_map.entry(event.mode.clone()).or_insert_with(|| ModeAcc {
+        let mode_acc = by_mode_map.entry(event.mode.to_lowercase()).or_insert_with(|| ModeAcc {
             total_calls: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
