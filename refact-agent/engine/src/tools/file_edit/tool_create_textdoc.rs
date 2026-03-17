@@ -57,7 +57,7 @@ pub async fn tool_create_text_doc_exec(
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
     let (path, content, _) = parse_args(gcx.clone(), args, code_workdir).await?;
     await_ast_indexing(gcx.clone()).await?;
-    let (before, after) = write_file(gcx.clone(), &path, &content, dry).await?;
+    let (before, after) = write_file(gcx.clone(), &path, &content, dry, None).await?;
     sync_documents_ast(gcx.clone(), &path).await?;
     let chunks = convert_edit_to_diffchunks(path.clone(), &before, &after)?;
     let summary = if before.is_empty() {

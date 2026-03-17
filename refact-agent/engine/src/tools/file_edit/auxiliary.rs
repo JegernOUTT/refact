@@ -17,17 +17,17 @@ use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 
-fn resolve_path_with_workdir(path: &PathBuf, code_workdir: &Option<PathBuf>) -> PathBuf {
+fn resolve_path_with_workdir(path: &PathBuf, code_workdir: &Option<PathBuf>) -> Result<PathBuf, String> {
     let Some(workdir) = code_workdir else {
-        return path.clone();
+        return Ok(path.clone());
     };
 
     if !path.is_absolute() {
-        return workdir.join(path);
+        return Ok(workdir.join(path));
     }
 
-    if path.starts_with(&workdir) {
-        return path.clone();
+    if path.starts_with(workdir) {
+        return Ok(path.clone());
     }
 
     if let Some(workspace_root) = workdir
@@ -39,16 +39,15 @@ fn resolve_path_with_workdir(path: &PathBuf, code_workdir: &Option<PathBuf>) -> 
     {
         if path.starts_with(&workspace_root) {
             if let Ok(relative) = path.strip_prefix(&workspace_root) {
-                return workdir.join(relative);
+                return Ok(workdir.join(relative));
             }
         }
     }
 
-    warn!(
-        "Cannot properly resolve {:?} to worktree, using filename only",
-        path
-    );
-    workdir.join(path.file_name().unwrap_or_default())
+    Err(format!(
+        "⚠️ Cannot resolve {:?} into worktree {:?}. 💡 Use a path inside the worktree",
+        path, workdir
+    ))
 }
 
 pub async fn parse_path_for_update(
@@ -70,7 +69,7 @@ pub async fn parse_path_for_update(
     .await
     .map(|f| canonicalize_normalized_path(PathBuf::from(f)))?;
 
-    let resolved_path = resolve_path_with_workdir(&path, code_workdir);
+    let resolved_path = resolve_path_with_workdir(&path, code_workdir)?;
 
     if check_file_privacy(
         privacy_settings,
@@ -138,7 +137,7 @@ pub async fn parse_path_for_create(
         path
     };
 
-    let resolved_path = resolve_path_with_workdir(&path, code_workdir);
+    let resolved_path = resolve_path_with_workdir(&path, code_workdir)?;
 
     if check_file_privacy(
         privacy_settings,
@@ -329,6 +328,7 @@ pub async fn write_file(
     path: &PathBuf,
     file_text: &String,
     dry: bool,
+    expected_preimage: Option<&str>,
 ) -> Result<(String, String), String> {
     use crate::tools::file_edit::undo_history::record_before_edit;
 
@@ -352,6 +352,15 @@ pub async fn write_file(
     } else {
         "".to_string()
     };
+
+    if let Some(expected) = expected_preimage {
+        if normalize_line_endings(&before_text) != normalize_line_endings(expected) {
+            return Err(format!(
+                "⚠️ {:?} was modified since last read. 💡 Use cat() to re-read the file and retry",
+                path
+            ));
+        }
+    }
 
     if !dry {
         record_before_edit(path, &before_text);
@@ -386,6 +395,9 @@ pub async fn str_replace(
 
     let normalized_content = normalize_line_endings(&file_content);
     let normalized_old_str = strip_line_number_prefixes(&normalize_line_endings(old_str));
+    if normalized_old_str.is_empty() {
+        return Err("⚠️ old_str is empty after stripping line-number prefixes. 💡 Provide actual source content, not just line numbers".to_string());
+    }
 
     let occurrences = normalized_content.matches(&normalized_old_str).count();
     if occurrences == 0 {
@@ -413,23 +425,33 @@ pub async fn str_replace(
         normalized_content.replacen(&normalized_old_str, &normalized_new_str, 1)
     };
     let new_file_content = restore_line_endings(&new_content, has_crlf);
-    write_file(gcx.clone(), path, &new_file_content, dry).await?;
+    write_file(gcx.clone(), path, &new_file_content, dry, Some(&file_content)).await?;
     Ok((file_content, new_file_content))
 }
 
 fn strip_line_number_prefixes(s: &str) -> String {
     let re = regex::Regex::new(r"(?m)^\d+[\t|:]\s?").unwrap();
+    // Only strip when every non-empty line starts with a numeric prefix — i.e. the string looks
+    // like numbered tool output ("123: code"), not real source content that happens to start with
+    // digits (ports, YAML keys, bit-patterns, etc.)
+    let non_empty_lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    if non_empty_lines.is_empty() || !non_empty_lines.iter().all(|l| re.is_match(l)) {
+        return s.to_string();
+    }
     re.replace_all(s, "").to_string()
 }
 
 fn find_match_lines(content: &str, pattern: &str) -> Vec<usize> {
+    if pattern.is_empty() {
+        return Vec::new();
+    }
     let mut lines = Vec::new();
     let mut pos = 0;
     while let Some(idx) = content[pos..].find(pattern) {
         let abs_idx = pos + idx;
         let line_num = content[..abs_idx].lines().count() + 1;
         lines.push(line_num);
-        pos = abs_idx + 1;
+        pos = abs_idx + pattern.len();
     }
     lines
 }
@@ -481,7 +503,7 @@ pub async fn str_replace_anchored(
     };
 
     let new_file_content = restore_line_endings(&result, has_crlf);
-    write_file(gcx.clone(), path, &new_file_content, dry).await?;
+    write_file(gcx.clone(), path, &new_file_content, dry, Some(&file_content)).await?;
     Ok((file_content, new_file_content))
 }
 
@@ -643,7 +665,8 @@ pub fn parse_line_ranges(ranges_str: &str, total_lines: usize) -> Result<Vec<Lin
                 part, range.end, range.start
             ));
         }
-        if range.start > total_lines {
+        // Allow start==1 for empty files so callers can populate them via update_textdoc_by_lines
+        if range.start > total_lines && !(total_lines == 0 && range.start == 1) {
             return Err(format!(
                 "⚠️ Line {} beyond EOF ({} lines). 💡 Use cat() to check file length",
                 range.start, total_lines
@@ -693,14 +716,14 @@ pub async fn str_replace_lines(
 
     if ranges.len() == 1 {
         let range = &ranges[0];
-        if range.end > total_lines {
+        if range.end > total_lines && !(total_lines == 0 && range.start == 1) {
             return Err(format!(
                 "⚠️ Range end {} exceeds file length ({} lines). 💡 Use cat() to check file, or ':' for end",
                 range.end, total_lines
             ));
         }
         let start_idx = range.start - 1;
-        let end_idx = range.end;
+        let end_idx = range.end.min(total_lines);
         let new_lines: Vec<String> = normalized_new_content
             .lines()
             .map(|s| s.to_string())
@@ -747,7 +770,7 @@ pub async fn str_replace_lines(
         restore_line_endings(&new_content_joined, has_crlf)
     };
 
-    write_file(gcx.clone(), path, &new_file_content, dry).await?;
+    write_file(gcx.clone(), path, &new_file_content, dry, Some(&file_content)).await?;
     Ok((file_content, new_file_content))
 }
 
@@ -758,6 +781,7 @@ pub async fn str_replace_regex(
     replacement: &String,
     multiple: bool,
     expected_matches: Option<usize>,
+    literal_replacement: bool,
     dry: bool,
 ) -> Result<(String, String), String> {
     let file_content = get_file_text_from_memory_or_disk(gcx.clone(), path).await?;
@@ -793,7 +817,14 @@ pub async fn str_replace_regex(
         ));
     }
 
-    let new_content = if multiple {
+    let new_content = if literal_replacement {
+        let rep = regex::NoExpand(normalized_replacement.as_str());
+        if multiple {
+            pattern.replace_all(&normalized_content, rep).to_string()
+        } else {
+            pattern.replace(&normalized_content, rep).to_string()
+        }
+    } else if multiple {
         pattern
             .replace_all(&normalized_content, normalized_replacement.as_str())
             .to_string()
@@ -803,7 +834,7 @@ pub async fn str_replace_regex(
             .to_string()
     };
     let new_file_content = restore_line_endings(&new_content, has_crlf);
-    write_file(gcx.clone(), path, &new_file_content, dry).await?;
+    write_file(gcx.clone(), path, &new_file_content, dry, Some(&file_content)).await?;
     Ok((file_content, new_file_content))
 }
 
@@ -962,5 +993,101 @@ mod tests {
         assert!(summary.contains("3"));
         assert!(summary.contains("5"));
         assert!(summary.contains("+2"));
+    }
+
+    // --- strip_line_number_prefixes: conservative mode ---
+
+    #[test]
+    fn test_strip_prefixes_all_numbered_strips() {
+        assert_eq!(strip_line_number_prefixes("1: foo\n2: bar"), "foo\nbar");
+        assert_eq!(strip_line_number_prefixes("1\tfoo\n2\tbar"), "foo\nbar");
+        assert_eq!(strip_line_number_prefixes("10|foo\n20|bar"), "foo\nbar");
+    }
+
+    #[test]
+    fn test_strip_prefixes_mixed_does_not_strip() {
+        // Not all lines numbered → preserve as-is to avoid corrupting real content
+        let s = "8080: service-a\nsome-other-line";
+        assert_eq!(strip_line_number_prefixes(s), s);
+    }
+
+    #[test]
+    fn test_strip_prefixes_real_code_preserved() {
+        // Leading whitespace prevents match of ^\d+ so line is preserved
+        let s = "    8080: \"http\"\n    9090: \"grpc\"";
+        assert_eq!(strip_line_number_prefixes(s), s);
+    }
+
+    #[test]
+    fn test_strip_prefixes_empty_string() {
+        assert_eq!(strip_line_number_prefixes(""), "");
+    }
+
+    // --- find_match_lines: empty pattern guard + advance-by-len ---
+
+    #[test]
+    fn test_find_match_lines_empty_pattern_returns_empty() {
+        let lines = find_match_lines("some content", "");
+        assert_eq!(lines, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn test_find_match_lines_advances_by_pattern_len() {
+        // Advancing by pattern.len() (not 1) prevents double-counting
+        let content = "abcabc";
+        let lines = find_match_lines(content, "abc");
+        assert_eq!(lines.len(), 2);
+        // Single-char repeated pattern on multiple lines
+        let content2 = "a\na\na";
+        let lines2 = find_match_lines(content2, "a");
+        assert_eq!(lines2, vec![1, 2, 3]);
+    }
+
+    // --- parse_line_ranges: empty-file support ---
+
+    #[test]
+    fn test_parse_line_ranges_empty_file_start1() {
+        let ranges = parse_line_ranges("1:1", 0).unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start, 1);
+    }
+
+    #[test]
+    fn test_parse_line_ranges_empty_file_start2_fails() {
+        assert!(parse_line_ranges("2:2", 0).is_err());
+    }
+
+    // --- resolve_path_with_workdir: hard error, no silent fallback ---
+
+    #[test]
+    fn test_resolve_path_workdir_none_returns_path() {
+        let p = PathBuf::from("/absolute/path/file.rs");
+        assert_eq!(resolve_path_with_workdir(&p, &None).unwrap(), p);
+    }
+
+    #[test]
+    fn test_resolve_path_workdir_absolute_inside_workdir() {
+        let workdir = PathBuf::from("/project/worktree");
+        let path = PathBuf::from("/project/worktree/src/file.rs");
+        assert_eq!(resolve_path_with_workdir(&path, &Some(workdir)).unwrap(), path);
+    }
+
+    #[test]
+    fn test_resolve_path_workdir_relative_joined() {
+        let workdir = PathBuf::from("/project/worktree");
+        let path = PathBuf::from("src/file.rs");
+        assert_eq!(
+            resolve_path_with_workdir(&path, &Some(workdir)).unwrap(),
+            PathBuf::from("/project/worktree/src/file.rs")
+        );
+    }
+
+    #[test]
+    fn test_resolve_path_workdir_unresolvable_returns_error() {
+        let workdir = PathBuf::from("/project/worktree");
+        let path = PathBuf::from("/completely/different/tree/file.rs");
+        let result = resolve_path_with_workdir(&path, &Some(workdir));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot resolve"));
     }
 }

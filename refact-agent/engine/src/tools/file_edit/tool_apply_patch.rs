@@ -166,7 +166,7 @@ pub async fn tool_apply_patch_exec(
                 if dry {
                     overlay.insert(full_path.clone(), OverlayState::Present(contents.clone()));
                 } else {
-                    write_file(gcx.clone(), &full_path, &contents, false).await?;
+                    write_file(gcx.clone(), &full_path, &contents, false, None).await?;
                     sync_documents_ast(gcx.clone(), &full_path).await?;
                 }
 
@@ -264,7 +264,7 @@ pub async fn tool_apply_patch_exec(
                         overlay.insert(full_path.clone(), OverlayState::Deleted);
                         overlay.insert(dest_path.clone(), OverlayState::Present(new_file_content.clone()));
                     } else {
-                        write_file(gcx.clone(), &dest_path, &new_file_content, false).await?;
+                        write_file(gcx.clone(), &dest_path, &new_file_content, false, None).await?;
                         undo_history::record_before_edit(&full_path, &file_content);
                         tokio::fs::remove_file(&full_path).await.map_err(|e| format!("Failed to remove: {}", e))?;
                         gcx.write().await.documents_state.memory_document_map.remove(&full_path);
@@ -294,7 +294,7 @@ pub async fn tool_apply_patch_exec(
                     if dry {
                         overlay.insert(full_path.clone(), OverlayState::Present(new_file_content.clone()));
                     } else {
-                        write_file(gcx.clone(), &full_path, &new_file_content, false).await?;
+                        write_file(gcx.clone(), &full_path, &new_file_content, false, None).await?;
                         sync_documents_ast(gcx.clone(), &full_path).await?;
                     }
 

@@ -16,6 +16,7 @@ import {
   switchToThread,
   selectCurrentThreadId,
   ideToolRequired,
+  setIsWaitingForResponse,
   saveTitle,
   setBoostReasoning,
   setIncludeProjectInfo,
@@ -56,6 +57,11 @@ import { telemetryApi } from "../services/refact/telemetry";
 import { tasksApi } from "../services/refact/tasks";
 import { closeTask } from "../features/Tasks/tasksSlice";
 import { closeThread } from "../features/Chat/Thread";
+import {
+  createChatWithId,
+  requestSseRefresh,
+} from "../features/Chat/Thread/actions";
+import { push } from "../features/Pages/pagesSlice";
 import { CONFIG_PATH_URL, FULL_PATH_URL } from "../services/refact/consts";
 import {
   ideToolCallResponse,
@@ -576,9 +582,18 @@ interface AskQuestionsContent {
   questions: { id: string; type: string; text: string; options?: string[] }[];
 }
 
+interface HandoffToModeContent {
+  type: "handoff_to_mode";
+  new_chat_id: string;
+  target_mode?: string;
+  reason?: string;
+  messages_count?: number;
+}
+
 type ToolMessageContent =
   | TaskDoneContent
   | AskQuestionsContent
+  | HandoffToModeContent
   | { type: string };
 
 function isTaskDoneContent(
@@ -595,6 +610,16 @@ function isAskQuestionsContent(
     "questions" in content &&
     Array.isArray(content.questions)
   );
+}
+
+function isHandoffToModeContent(
+  content: ToolMessageContent,
+): content is HandoffToModeContent {
+  if (content.type !== "handoff_to_mode" || !("new_chat_id" in content)) {
+    return false;
+  }
+  const id = content.new_chat_id;
+  return typeof id === "string" && id.length > 0;
 }
 
 let cachedPostMessage: ((message: Record<string, unknown>) => void) | null =
@@ -661,6 +686,90 @@ startListening({
           questions: content.questions,
         }),
       );
+    }
+  },
+});
+
+// Track processed handoff tool_call_ids to avoid re-triggering on SSE reconnects.
+// Bounded to prevent unbounded growth in long sessions.
+const MAX_PROCESSED_HANDOFFS = 1000;
+const processedHandoffIds = new Set<string>();
+
+startListening({
+  actionCreator: applyChatEvent,
+  effect: async (action, listenerApi) => {
+    const event = action.payload;
+    if (event.type !== "message_added") return;
+
+    const msg = event.message;
+    if (!isToolMessage(msg)) return;
+    if (typeof msg.content !== "string") return;
+
+    const toolCallId = msg.tool_call_id;
+    if (processedHandoffIds.has(toolCallId)) return;
+
+    const parsed = safeParseJson(msg.content);
+    if (!parsed || typeof parsed !== "object") return;
+
+    const content = parsed as ToolMessageContent;
+    if (!isHandoffToModeContent(content)) return;
+
+    const { new_chat_id } = content;
+    const state = listenerApi.getState();
+
+    // Only auto-switch when the source chat is the one currently visible.
+    // Background tasks should not steal focus unexpectedly.
+    const currentId = selectCurrentThreadId(state);
+    if (event.chat_id !== currentId) return;
+
+    const port = state.config.lspPort;
+    const apiKey = state.config.apiKey;
+
+    // Preserve task/browser metadata from the source thread so the new chat
+    // inherits the correct context (planner, task agent, browser session, etc.)
+    const sourceRuntime = state.chat.threads[event.chat_id];
+    const isTaskChat = sourceRuntime?.thread.is_task_chat ?? false;
+    const taskMeta = sourceRuntime?.thread.task_meta;
+
+    listenerApi.dispatch(
+      createChatWithId({
+        id: new_chat_id,
+        isTaskChat,
+        taskMeta,
+      }),
+    );
+    // Ensure the tab is open and switched to (handles both new and cached threads)
+    listenerApi.dispatch(switchToThread({ id: new_chat_id }));
+    listenerApi.dispatch(requestSseRefresh({ chatId: new_chat_id }));
+    // Optimistically mark as waiting so the UI shows a generating state
+    // immediately before the first SSE event arrives
+    listenerApi.dispatch(setIsWaitingForResponse({ id: new_chat_id, value: true }));
+    listenerApi.dispatch(push({ name: "chat" }));
+
+    if (port) {
+      const { regenerate } = await import("../services/refact/chatCommands");
+      try {
+        await regenerate(new_chat_id, port, apiKey ?? undefined);
+        // Mark as processed only after successful start so SSE reconnects
+        // can retry if regenerate failed on the first attempt
+        if (processedHandoffIds.size >= MAX_PROCESSED_HANDOFFS) {
+          const firstKey = processedHandoffIds.values().next().value;
+          if (firstKey !== undefined) processedHandoffIds.delete(firstKey);
+        }
+        processedHandoffIds.add(toolCallId);
+      } catch {
+        // Regenerate failed — revert the waiting state and leave the id
+        // unprocessed so a reconnect can retry
+        listenerApi.dispatch(setIsWaitingForResponse({ id: new_chat_id, value: false }));
+      }
+    } else {
+      // No port means we can't regenerate, but still mark processed to
+      // avoid a tight retry loop
+      if (processedHandoffIds.size >= MAX_PROCESSED_HANDOFFS) {
+        const firstKey = processedHandoffIds.values().next().value;
+        if (firstKey !== undefined) processedHandoffIds.delete(firstKey);
+      }
+      processedHandoffIds.add(toolCallId);
     }
   },
 });

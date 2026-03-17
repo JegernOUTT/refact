@@ -4,8 +4,8 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::load_privacy_if_needed;
 use crate::tools::file_edit::auxiliary::{
-    await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary, parse_bool_arg,
-    parse_path_for_update, parse_string_arg, str_replace_regex, sync_documents_ast,
+    await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary, normalize_line_endings,
+    parse_bool_arg, parse_path_for_update, parse_string_arg, str_replace_regex, sync_documents_ast,
 };
 use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
 use async_trait::async_trait;
@@ -28,6 +28,7 @@ struct Args {
     replacement: String,
     multiple: bool,
     expected_matches: Option<usize>,
+    literal: bool,
 }
 
 async fn parse_args(
@@ -39,11 +40,13 @@ async fn parse_args(
     let path = parse_path_for_update(gcx, args, privacy, code_workdir).await?;
     let pattern_str = parse_string_arg(args, "pattern", "Provide pattern to match")?;
     let literal = parse_bool_arg(args, "literal", true)?;
+    // Normalize CRLF in the pattern so it matches LF-normalized file content
+    let pattern_str_normalized = normalize_line_endings(&pattern_str);
     let pattern = if literal {
-        Regex::new(&regex::escape(&pattern_str))
+        Regex::new(&regex::escape(&pattern_str_normalized))
             .map_err(|e| format!("⚠️ Pattern too complex: {}. 💡 Use shorter pattern", e))?
     } else {
-        Regex::new(&pattern_str).map_err(|e| {
+        Regex::new(&pattern_str_normalized).map_err(|e| {
             format!(
                 "⚠️ Invalid regex: {}. 💡 Check syntax, or set literal:true",
                 e
@@ -63,6 +66,7 @@ async fn parse_args(
         replacement,
         multiple,
         expected_matches,
+        literal,
     })
 }
 
@@ -81,6 +85,7 @@ pub async fn tool_update_text_doc_regex_exec(
         &a.replacement,
         a.multiple,
         a.expected_matches,
+        a.literal,
         dry,
     )
     .await?;
