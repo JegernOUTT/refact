@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import { HoverCard, Flex, Text, Badge } from "@radix-ui/themes";
 import {
   useGetClaudeCodeUsageQuery,
@@ -217,27 +217,37 @@ export const ProviderUsageIndicator: React.FC = () => {
     void refetchCodex();
   }, [refetchClaude, refetchCodex]);
 
+  const lastClaudeRef = useRef(claudeUsage);
+  const lastCodexRef = useRef(codexUsage);
+  if (claudeUsage !== undefined) lastClaudeRef.current = claudeUsage;
+  if (codexUsage !== undefined) lastCodexRef.current = codexUsage;
+
+  const stickyClaudeUsage = lastClaudeRef.current;
+  const stickyCodexUsage = lastCodexRef.current;
+
   const hasClaudeData = !!(
-    claudeUsage?.data &&
-    (claudeUsage.data.five_hour ?? claudeUsage.data.seven_day)
+    stickyClaudeUsage?.data &&
+    (stickyClaudeUsage.data.five_hour ?? stickyClaudeUsage.data.seven_day)
   );
-  const hasCodexData = !!codexUsage?.data?.rate_limit;
+  const hasCodexData = !!stickyCodexUsage?.data?.rate_limit;
 
   if (!hasClaudeData && !hasCodexData) return null;
 
+  const claudeData = stickyClaudeUsage?.data;
+  const codexData = stickyCodexUsage?.data;
+
   let claudePct = 0;
-  if (hasClaudeData && claudeUsage.data) {
-    const d = claudeUsage.data;
+  if (hasClaudeData && claudeData) {
     const candidates = [
-      d.five_hour?.percent_used,
-      d.seven_day?.percent_used,
+      claudeData.five_hour?.percent_used,
+      claudeData.seven_day?.percent_used,
     ].filter((v): v is number => v != null);
     if (candidates.length > 0) claudePct = Math.max(...candidates);
   }
 
   let codexPct = 0;
-  if (hasCodexData && codexUsage.data?.rate_limit) {
-    const rl = codexUsage.data.rate_limit;
+  if (hasCodexData && codexData?.rate_limit) {
+    const rl = codexData.rate_limit;
     const candidates = [
       rl.primary_window?.used_percent,
       rl.secondary_window?.used_percent,
@@ -247,37 +257,32 @@ export const ProviderUsageIndicator: React.FC = () => {
 
   return (
     <Flex align="center" gap="2">
-      {hasClaudeData && claudeUsage.data && (
+      {hasClaudeData && claudeData && (
         <ProviderIndicator label="Claude" pct={claudePct}>
           <Flex direction="column" gap="3">
             <Text size="2" weight="medium">
               Claude Code quota
             </Text>
-            {claudeUsage.data.five_hour && (
+            {claudeData.five_hour && (
               <ClaudeWindowRow
                 label="Session (5 hour)"
-                w={claudeUsage.data.five_hour}
+                w={claudeData.five_hour}
               />
             )}
-            {claudeUsage.data.seven_day && (
-              <ClaudeWindowRow label="Weekly" w={claudeUsage.data.seven_day} />
+            {claudeData.seven_day && (
+              <ClaudeWindowRow label="Weekly" w={claudeData.seven_day} />
             )}
-            {claudeUsage.data.extra_usage && (
+            {claudeData.extra_usage && (
               <Flex justify="between" align="center">
                 <Text size="1" color="gray">
                   Extra usage
                 </Text>
                 <Text size="1" color="gray">
-                  {claudeUsage.data.extra_usage.is_enabled
-                    ? "enabled"
-                    : "disabled"}
-                  {" · "}${claudeUsage.data.extra_usage.used_credits.toFixed(2)}{" "}
+                  {claudeData.extra_usage.is_enabled ? "enabled" : "disabled"}
+                  {" · "}${claudeData.extra_usage.used_credits.toFixed(2)}{" "}
                   spent
-                  {typeof claudeUsage.data.extra_usage.monthly_limit ===
-                  "number"
-                    ? ` / $${claudeUsage.data.extra_usage.monthly_limit.toFixed(
-                        0,
-                      )} limit`
+                  {typeof claudeData.extra_usage.monthly_limit === "number"
+                    ? ` / $${claudeData.extra_usage.monthly_limit.toFixed(0)} limit`
                     : " / unlimited"}
                 </Text>
               </Flex>
@@ -286,45 +291,43 @@ export const ProviderUsageIndicator: React.FC = () => {
         </ProviderIndicator>
       )}
 
-      {hasCodexData && codexUsage.data && (
+      {hasCodexData && codexData && (
         <ProviderIndicator label="Codex" pct={codexPct}>
           <Flex direction="column" gap="3">
             <Flex align="center" gap="2">
               <Text size="2" weight="medium">
                 OpenAI Codex quota
               </Text>
-              {codexUsage.data.plan_type && (
+              {codexData.plan_type && (
                 <Badge color="blue" size="1">
-                  {codexUsage.data.plan_type}
+                  {codexData.plan_type}
                 </Badge>
               )}
             </Flex>
-            {codexUsage.data.rate_limit && (
+            {codexData.rate_limit && (
               <RateLimitSection
-                rl={codexUsage.data.rate_limit}
+                rl={codexData.rate_limit}
                 primaryLabel="Session (5 hour)"
                 secondaryLabel="Weekly"
               />
             )}
-            {codexUsage.data.code_review_rate_limit?.primary_window && (
+            {codexData.code_review_rate_limit?.primary_window && (
               <CodexWindowRow
                 label="Code review (weekly)"
-                w={codexUsage.data.code_review_rate_limit.primary_window}
-                limitReached={
-                  codexUsage.data.code_review_rate_limit.limit_reached
-                }
+                w={codexData.code_review_rate_limit.primary_window}
+                limitReached={codexData.code_review_rate_limit.limit_reached}
               />
             )}
-            {codexUsage.data.credits && (
+            {codexData.credits && (
               <Flex justify="between" align="center">
                 <Text size="1" color="gray">
                   Credits
                 </Text>
                 <Text size="1" color="gray">
-                  {codexUsage.data.credits.unlimited
+                  {codexData.credits.unlimited
                     ? "unlimited"
-                    : codexUsage.data.credits.has_credits
-                      ? `${codexUsage.data.credits.balance} remaining`
+                    : codexData.credits.has_credits
+                      ? `${codexData.credits.balance} remaining`
                       : "none"}
                 </Text>
               </Flex>

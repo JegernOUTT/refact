@@ -1,4 +1,4 @@
-schema_version: 12
+schema_version: 13
 id: task_planner
 title: Task Planner
 description: Task board management mode

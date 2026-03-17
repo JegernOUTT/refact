@@ -10,7 +10,9 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
     ChatContent, ChatMessage, ChatMeta, ChatUsage, SamplingParameters, is_agentic_mode_id,
 };
-use crate::stats::event::{LlmCallEvent, split_model_provider, sum_metering_coins};
+use crate::stats::event::{
+    LlmCallEvent, canonicalize_mode_for_stats, split_model_provider, sum_metering_coins,
+};
 use crate::chat::tool_call_recovery;
 use crate::global_context::GlobalContext;
 use crate::llm::LlmRequest;
@@ -811,6 +813,7 @@ async fn run_streaming_generation(
             tm.and_then(|t| t.card_id.clone()),
         )
     };
+    let mode_for_stats = canonicalize_mode_for_stats(&mode);
 
     const TEMPERATURE_BUMP: f32 = 0.1;
     const MAX_RETRY_TEMPERATURE: f32 = 0.5;
@@ -1089,7 +1092,7 @@ async fn run_streaming_generation(
                     duration_ms,
                     chat_id: chat_id.clone(),
                     root_chat_id: root_chat_id.clone(),
-                    mode: mode.clone(),
+                    mode: mode_for_stats.clone(),
                     task_id: task_id.clone(),
                     task_role: task_role.clone(),
                     agent_id: agent_id.clone(),
@@ -1141,7 +1144,7 @@ async fn run_streaming_generation(
                 duration_ms,
                 chat_id: chat_id.clone(),
                 root_chat_id: root_chat_id.clone(),
-                mode: mode.clone(),
+                mode: mode_for_stats.clone(),
                 task_id: task_id.clone(),
                 task_role: task_role.clone(),
                 agent_id: agent_id.clone(),
@@ -1280,7 +1283,7 @@ async fn run_streaming_generation(
             duration_ms,
             chat_id: chat_id.clone(),
             root_chat_id: root_chat_id.clone(),
-            mode: mode.clone(),
+            mode: mode_for_stats.clone(),
             task_id: task_id.clone(),
             task_role: task_role.clone(),
             agent_id: agent_id.clone(),

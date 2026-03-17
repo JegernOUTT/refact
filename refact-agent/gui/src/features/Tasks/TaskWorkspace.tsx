@@ -30,6 +30,7 @@ import {
   BoardCard,
 } from "../../services/refact/tasks";
 import { ModelPickerPopover } from "../../components/ChatForm/ModelPickerPopover";
+import { Markdown } from "../../components/Markdown";
 import styles from "./Tasks.module.css";
 import { Chat } from "../Chat";
 import { selectConfig } from "../Config/configSlice";
@@ -84,6 +85,13 @@ function formatPlannerDate(dateStr: string): string {
   }
 }
 
+function formatAgentChatTitle(
+  cardId: string | undefined,
+  cardTitle: string,
+): string {
+  return cardId ? `Agent: ${cardId} ${cardTitle}` : `Agent: ${cardTitle}`;
+}
+
 const PlannerItem: React.FC<PlannerItemProps> = ({
   planner,
   isSelected,
@@ -101,11 +109,12 @@ const PlannerItem: React.FC<PlannerItemProps> = ({
 
   return (
     <Box
-      className={styles.panelItem}
+      className={`${styles.panelItem} ${
+        isSelected ? styles.panelItemSelected : ""
+      }`}
       onClick={onSelect}
-      style={{ background: isSelected ? "var(--accent-4)" : undefined }}
     >
-      <Flex align="center" gap="1">
+      <Flex align="center" gap="1" className={styles.panelItemLead}>
         {isActive && (
           <Badge size="1" color="green" radius="full">
             ●
@@ -115,17 +124,11 @@ const PlannerItem: React.FC<PlannerItemProps> = ({
           📋
         </Badge>
       </Flex>
-      <Text
-        size="1"
-        style={{
-          flex: 1,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {displayTitle}
-      </Text>
+      <Box className={styles.panelItemContent}>
+        <Text size="1" className={styles.panelItemTitle}>
+          {displayTitle}
+        </Text>
+      </Box>
       <Button
         size="1"
         variant="ghost"
@@ -228,16 +231,24 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
     return (
       <Box
         key={card.id}
-        className={styles.panelItem}
+        className={`${styles.panelItem} ${
+          isActive ? styles.panelItemSelected : ""
+        }`}
         onClick={() =>
           card.agent_chat_id && onSelectAgent(card.id, card.agent_chat_id)
         }
-        style={{ background: isActive ? "var(--accent-4)" : undefined }}
       >
-        <AgentStatusDot status={status} size="medium" />
-        <Text size="1" style={{ flex: 1 }}>
-          {card.title}
-        </Text>
+        <div className={styles.panelItemLead}>
+          <AgentStatusDot status={status} size="medium" />
+        </div>
+        <Flex align="center" gap="1" className={styles.panelItemContent}>
+          <Badge size="1" color="gray" variant="soft">
+            {card.id}
+          </Badge>
+          <Text size="1" className={styles.panelItemTitle}>
+            {card.title}
+          </Text>
+        </Flex>
       </Box>
     );
   };
@@ -288,15 +299,25 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
 interface CardDetailProps {
   card: BoardCard;
   onClose: () => void;
+  onInternalLink?: (url: string) => boolean;
 }
 
-const CardDetail: React.FC<CardDetailProps> = ({ card, onClose }) => {
+const CardDetail: React.FC<CardDetailProps> = ({
+  card,
+  onClose,
+  onInternalLink,
+}) => {
   return (
     <Box className={styles.cardDetailOverlay} onClick={onClose}>
       <Card className={styles.cardDetail} onClick={(e) => e.stopPropagation()}>
         <Flex direction="column" gap="3">
           <Flex justify="between" align="center">
-            <Heading size="3">{card.title}</Heading>
+            <Heading size="3" className={styles.cardDetailTitle}>
+              <Badge size="1" color="gray" variant="soft" mr="2">
+                {card.id}
+              </Badge>
+              {card.title}
+            </Heading>
             <Badge
               color={
                 card.column === "done"
@@ -330,16 +351,23 @@ const CardDetail: React.FC<CardDetailProps> = ({ card, onClose }) => {
               <Text size="2" weight="medium" color="gray">
                 Instructions
               </Text>
-              <Box
-                p="2"
-                mt="1"
-                style={{
-                  background: "var(--gray-2)",
-                  borderRadius: "var(--radius-2)",
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                <Text size="2">{card.instructions}</Text>
+              <Box className={styles.cardDetailSection}>
+                {onInternalLink ? (
+                  <InternalLinkProvider
+                    onInternalLink={(url) => {
+                      onClose();
+                      return onInternalLink(url);
+                    }}
+                  >
+                    <Markdown canHaveInteractiveElements={false}>
+                      {card.instructions}
+                    </Markdown>
+                  </InternalLinkProvider>
+                ) : (
+                  <Markdown canHaveInteractiveElements={false}>
+                    {card.instructions}
+                  </Markdown>
+                )}
               </Box>
             </Box>
           )}
@@ -350,15 +378,12 @@ const CardDetail: React.FC<CardDetailProps> = ({ card, onClose }) => {
                 Final Report
               </Text>
               <Box
-                p="2"
-                mt="1"
-                style={{
-                  background: "var(--green-2)",
-                  borderRadius: "var(--radius-2)",
-                  whiteSpace: "pre-wrap",
-                }}
+                className={styles.cardDetailSection}
+                style={{ background: "var(--green-2)" }}
               >
-                <Text size="2">{card.final_report}</Text>
+                <Markdown canHaveInteractiveElements={false}>
+                  {card.final_report}
+                </Markdown>
               </Box>
             </Box>
           )}
@@ -621,7 +646,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       dispatch(
         createChatWithId({
           id: chatId,
-          title: `Agent: ${cardTitle}`,
+          title: formatAgentChatTitle(cardId, cardTitle),
           isTaskChat: true,
           mode: "TASK_AGENT",
           taskMeta: { task_id: taskId, role: "agents", card_id: cardId },
@@ -664,7 +689,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         dispatch(
           createChatWithId({
             id: chatId,
-            title: `Agent: ${cardTitle}`,
+            title: formatAgentChatTitle(cardId, cardTitle),
             isTaskChat: true,
             mode: "TASK_AGENT",
             taskMeta: { task_id: taskId, role: "agents", card_id: cardId },
@@ -705,9 +730,10 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     ? "No chat selected"
     : activeChat.type === "planner"
       ? `Planner`
-      : `Agent: ${
-          board.cards.find((c) => c.id === activeChat.cardId)?.title ?? ""
-        }`;
+      : formatAgentChatTitle(
+          activeChat.cardId,
+          board.cards.find((c) => c.id === activeChat.cardId)?.title ?? "",
+        );
 
   const branchDisplay =
     activeChat?.type === "agent"
@@ -811,7 +837,11 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       </Box>
 
       {selectedCard && (
-        <CardDetail card={selectedCard} onClose={() => setSelectedCard(null)} />
+        <CardDetail
+          card={selectedCard}
+          onClose={() => setSelectedCard(null)}
+          onInternalLink={handleInternalLink}
+        />
       )}
 
       {notification && (

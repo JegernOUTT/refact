@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: configurator
 title: Configurator
 description: Integration configuration wizard

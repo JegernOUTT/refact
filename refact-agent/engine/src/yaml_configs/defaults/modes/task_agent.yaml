@@ -1,4 +1,4 @@
-schema_version: 9
+schema_version: 10
 id: task_agent
 title: Task Agent
 description: Execute single task card

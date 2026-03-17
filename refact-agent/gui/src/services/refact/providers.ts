@@ -561,13 +561,17 @@ export const providersApi = createApi({
         const port = state.config.lspPort as unknown as number;
         const url = `http://127.0.0.1:${port}/v1/claude-code/usage`;
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10_000);
         const result = await baseQuery({
           ...extraOptions,
           method: "GET",
           url,
           credentials: "same-origin",
           redirect: "follow",
+          signal: controller.signal,
         });
+        clearTimeout(timeoutId);
 
         if (result.error) {
           return { error: result.error };
@@ -594,13 +598,17 @@ export const providersApi = createApi({
         const port = state.config.lspPort as unknown as number;
         const url = `http://127.0.0.1:${port}/v1/openai-codex/usage`;
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10_000);
         const result = await baseQuery({
           ...extraOptions,
           method: "GET",
           url,
           credentials: "same-origin",
           redirect: "follow",
+          signal: controller.signal,
         });
+        clearTimeout(timeoutId);
 
         if (result.error) {
           return { error: result.error };

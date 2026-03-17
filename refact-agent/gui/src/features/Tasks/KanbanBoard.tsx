@@ -47,17 +47,25 @@ const KanbanCard: React.FC<KanbanCardProps> = ({ card, onClick }) => {
       onClick={handleClick}
       style={{ cursor: onClick ? "pointer" : "default" }}
     >
-      <Flex direction="column" gap="1">
-        <Flex justify="between" align="start">
-          <Text size="2" weight="medium" style={{ flex: 1 }}>
-            {card.title}
-          </Text>
+      <Flex direction="column" gap="2">
+        <Flex
+          justify="between"
+          align="center"
+          className={styles.kanbanCardTopRow}
+        >
+          <Badge size="1" color="gray" variant="soft">
+            {card.id}
+          </Badge>
           <Badge color={getPriorityColor(card.priority)} size="1">
             {card.priority}
           </Badge>
         </Flex>
 
-        <Flex gap="1" wrap="wrap">
+        <Text size="2" weight="medium" className={styles.kanbanCardTitle}>
+          {card.title}
+        </Text>
+
+        <Flex gap="1" wrap="wrap" className={styles.kanbanCardBadges}>
           {hasAgent && (
             <Tooltip content={`Agent: ${card.assignee}`}>
               <Badge size="1" color="blue" variant="soft">

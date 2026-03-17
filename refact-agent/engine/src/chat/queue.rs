@@ -164,8 +164,9 @@ pub fn apply_setparams_patch(
         }
     }
     if let Some(mode) = patch.get("mode").and_then(|v| v.as_str()) {
-        if thread.mode != mode {
-            thread.mode = mode.to_string();
+        let normalized_mode = crate::yaml_configs::customization_registry::map_legacy_mode_to_id(mode);
+        if thread.mode != normalized_mode {
+            thread.mode = normalized_mode.to_string();
             changed = true;
         }
     }
@@ -351,6 +352,9 @@ pub fn apply_setparams_patch(
         obj.remove("type");
         obj.remove("chat_id");
         obj.remove("seq");
+        if patch.get("mode").and_then(|v| v.as_str()).is_some() {
+            obj.insert("mode".to_string(), serde_json::json!(thread.mode));
+        }
     }
 
     (changed, sanitized_patch)
@@ -1378,7 +1382,7 @@ mod tests {
         let patch = json!({"mode": "NO_TOOLS"});
         let (changed, _) = apply_setparams_patch(&mut thread, &patch);
         assert!(changed);
-        assert_eq!(thread.mode, "NO_TOOLS");
+        assert_eq!(thread.mode, "explore");
     }
 
     #[test]
@@ -1457,8 +1461,17 @@ mod tests {
         let (changed, _) = apply_setparams_patch(&mut thread, &patch);
         assert!(changed);
         assert_eq!(thread.model, "claude-3");
-        assert_eq!(thread.mode, "EXPLORE");
+        assert_eq!(thread.mode, "explore");
         assert_eq!(thread.boost_reasoning, Some(true));
+    }
+
+    #[test]
+    fn test_apply_setparams_mode_canonicalizes_task_agent() {
+        let mut thread = ThreadParams::default();
+        let patch = json!({"mode": "TASK_AGENT"});
+        let (changed, _) = apply_setparams_patch(&mut thread, &patch);
+        assert!(changed);
+        assert_eq!(thread.mode, "task_agent");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-schema_version: 11
+schema_version: 12
 id: review
 title: Review
 description: Autonomous code review with correctness validation

@@ -24,7 +24,9 @@ use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
 use crate::chat::types::ThreadParams;
 use crate::chat::trajectories::save_trajectory_as;
 use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
-use crate::stats::event::{LlmCallEvent, split_model_provider, sum_metering_coins};
+use crate::stats::event::{
+    LlmCallEvent, canonicalize_mode_for_stats, split_model_provider, sum_metering_coins,
+};
 
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
@@ -284,6 +286,64 @@ pub struct SubchatResult {
     pub chat_id: Option<String>,
 }
 
+fn scale_subchat_budget(value: usize, new_n_ctx: usize, old_n_ctx: usize) -> usize {
+    if value == 0 || old_n_ctx == 0 || new_n_ctx >= old_n_ctx {
+        return value;
+    }
+
+    (((value as u128) * (new_n_ctx as u128)) / (old_n_ctx as u128)) as usize
+}
+
+fn normalize_subchat_params_for_model(
+    tool_name: &str,
+    params: &mut SubchatParameters,
+    model_rec: &crate::caps::ChatModelRecord,
+) {
+    let requested_n_ctx = params.subchat_n_ctx;
+    let requested_max_new_tokens = params.subchat_max_new_tokens;
+    let requested_tokens_for_rag = params.subchat_tokens_for_rag;
+
+    if model_rec.base.n_ctx > 0 && params.subchat_n_ctx > model_rec.base.n_ctx {
+        params.subchat_n_ctx = model_rec.base.n_ctx;
+
+        if requested_tokens_for_rag > 0 {
+            params.subchat_max_new_tokens =
+                scale_subchat_budget(requested_max_new_tokens, params.subchat_n_ctx, requested_n_ctx)
+                    .max(1);
+            params.subchat_tokens_for_rag =
+                scale_subchat_budget(requested_tokens_for_rag, params.subchat_n_ctx, requested_n_ctx);
+        }
+
+        info!(
+            "normalized subchat '{}' budget for model '{}' from n_ctx={} to n_ctx={}, max_new_tokens={}, tokens_for_rag={}",
+            tool_name,
+            model_rec.base.id,
+            requested_n_ctx,
+            params.subchat_n_ctx,
+            params.subchat_max_new_tokens,
+            params.subchat_tokens_for_rag,
+        );
+    }
+
+    if let Some(max_output_tokens) = model_rec.max_output_tokens.filter(|v| *v > 0) {
+        if params.subchat_max_new_tokens > max_output_tokens {
+            params.subchat_max_new_tokens = max_output_tokens;
+        }
+    }
+
+    if params.subchat_n_ctx > 1 {
+        params.subchat_max_new_tokens = params.subchat_max_new_tokens.min(params.subchat_n_ctx - 1);
+    }
+
+    let available_for_rag = params
+        .subchat_n_ctx
+        .saturating_sub(params.subchat_max_new_tokens)
+        .saturating_sub(1);
+    if params.subchat_tokens_for_rag > available_for_rag {
+        params.subchat_tokens_for_rag = available_for_rag;
+    }
+}
+
 pub async fn resolve_subchat_params(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_name: &str,
@@ -319,7 +379,7 @@ pub async fn resolve_subchat_params(
         None => None,
     };
 
-    let params = SubchatParameters {
+    let mut params = SubchatParameters {
         subchat_model_type: model_type,
         subchat_model: subchat.model.clone().unwrap_or_default(),
         subchat_n_ctx: subchat.n_ctx.unwrap_or(0),
@@ -341,6 +401,13 @@ pub async fn resolve_subchat_params(
             tool_name
         ));
     }
+
+    let model = resolve_subchat_model(gcx.clone(), &params).await?;
+    let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|e| format!("failed to load caps: {:?}", e))?;
+    let model_rec = resolve_chat_model(caps, &model)?;
+    normalize_subchat_params_for_model(tool_name, &mut params, &model_rec);
 
     Ok(params)
 }
@@ -1105,6 +1172,7 @@ async fn subchat_stream(
 
     let messages_count = messages.len();
     let tools_count = tools.len();
+    let mode_for_stats = canonicalize_mode_for_stats(mode_id);
 
     let (stats_chat_id, stats_root_chat_id, stats_task_id, stats_task_role, stats_agent_id, stats_card_id) = {
         let ccx_locked = ccx.lock().await;
@@ -1178,7 +1246,7 @@ async fn subchat_stream(
                 duration_ms,
                 chat_id: stats_chat_id,
                 root_chat_id: Some(stats_root_chat_id),
-                mode: mode_id.to_string(),
+                mode: mode_for_stats.clone(),
                 task_id: stats_task_id,
                 task_role: stats_task_role,
                 agent_id: stats_agent_id,
@@ -1219,7 +1287,7 @@ async fn subchat_stream(
                 duration_ms,
                 chat_id: stats_chat_id,
                 root_chat_id: Some(stats_root_chat_id),
-                mode: mode_id.to_string(),
+                mode: mode_for_stats.clone(),
                 task_id: stats_task_id,
                 task_role: stats_task_role,
                 agent_id: stats_agent_id,
@@ -1418,8 +1486,14 @@ async fn subchat_single_internal(
 #[cfg(test)]
 mod aggregate_metering_tests {
     use super::aggregate_metering_from_messages;
+    use super::resolve_subchat_params;
     use crate::call_validation::{ChatMessage, ChatContent};
+    use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
+    use crate::global_context::tests::make_test_gcx;
+    use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
     use serde_json::json;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn assistant_msg_with_metering(extra: serde_json::Map<String, serde_json::Value>) -> ChatMessage {
         ChatMessage {
@@ -1536,6 +1610,52 @@ mod aggregate_metering_tests {
         let result = aggregate_metering_from_messages(&messages);
         assert_eq!(result.get("metering_balance").unwrap().as_f64().unwrap(), 50000.0);
         assert_eq!(result.get("metering_coins_prompt").unwrap().as_f64().unwrap(), 15.0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_subchat_params_normalizes_code_review_for_smaller_model() {
+        let gcx = make_test_gcx().await;
+        let config_dir = gcx.read().await.config_dir.clone();
+        global_configs_try_create_all(&config_dir).await.unwrap();
+
+        let thinking_model_id = "claude_code/claude-opus-4-6".to_string();
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            thinking_model_id.clone(),
+            Arc::new(ChatModelRecord {
+                base: BaseModelRecord {
+                    id: thinking_model_id.clone(),
+                    name: thinking_model_id.clone(),
+                    n_ctx: 200_000,
+                    ..Default::default()
+                },
+                max_output_tokens: Some(128_000),
+                ..Default::default()
+            }),
+        );
+        caps.defaults.chat_default_model = thinking_model_id.clone();
+        caps.defaults.chat_light_model = thinking_model_id.clone();
+        caps.defaults.chat_thinking_model = thinking_model_id;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_add(60);
+        let mut gcx_locked = gcx.write().await;
+        gcx_locked.caps = Some(Arc::new(caps));
+        gcx_locked.caps_last_attempted_ts = now;
+        drop(gcx_locked);
+
+        let params = resolve_subchat_params(gcx, "code_review").await.unwrap();
+        let extra_budget = (params.subchat_n_ctx as f32 * 0.06) as usize;
+
+        assert_eq!(params.subchat_n_ctx, 200_000);
+        assert!(
+            params.subchat_max_new_tokens + params.subchat_tokens_for_rag + extra_budget
+                < params.subchat_n_ctx,
+            "normalized code_review budget must fit the clamped model context window"
+        );
     }
 }
 

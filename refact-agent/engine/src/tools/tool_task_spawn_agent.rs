@@ -382,7 +382,7 @@ impl Tool for ToolTaskSpawnAgent {
                 id: agent_chat_id.clone(),
                 title: format!("Agent: {}", card_title),
                 model: model.clone(),
-                mode: "TASK_AGENT".to_string(),
+                mode: "task_agent".to_string(),
                 tool_use: "agent".to_string(),
                 boost_reasoning: Some(false),
                 context_tokens_cap: None,

@@ -56,6 +56,10 @@ pub fn split_model_provider(model_id: &str) -> (String, String) {
     }
 }
 
+pub fn canonicalize_mode_for_stats(mode: &str) -> String {
+    crate::call_validation::canonical_mode_id(mode).unwrap_or_else(|_| mode.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +131,12 @@ mod tests {
         let json = r#"{"id":"test","ts_start":"2026-01-01T00:00:00Z","ts_end":"2026-01-01T00:00:01Z","duration_ms":1000,"chat_id":"chat-1","root_chat_id":null,"mode":"agent","task_id":null,"task_role":null,"agent_id":null,"card_id":null,"model_id":"anthropic/claude-3","provider":"anthropic","model":"claude-3","messages_count":1,"tools_count":0,"max_tokens":4096,"temperature":null,"success":true,"error_message":null,"finish_reason":"stop","attempt_n":1,"retry_reason":null,"prompt_tokens":100,"completion_tokens":50,"cache_read_tokens":null,"cache_creation_tokens":null,"total_tokens":150,"cost_usd":0.001}"#;
         let event: LlmCallEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.cost_coins, None);
+    }
+
+    #[test]
+    fn test_canonicalize_mode_for_stats_normalizes_legacy_modes() {
+        assert_eq!(canonicalize_mode_for_stats("TASK_AGENT"), "task_agent");
+        assert_eq!(canonicalize_mode_for_stats("NO_TOOLS"), "explore");
+        assert_eq!(canonicalize_mode_for_stats("plan"), "plan");
     }
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-use crate::stats::event::LlmCallEvent;
+use crate::stats::event::{LlmCallEvent, canonicalize_mode_for_stats};
 
 #[allow(dead_code)]
 pub fn read_all_stats_events(stats_dir: &Path) -> Vec<LlmCallEvent> {
@@ -41,7 +41,8 @@ pub fn read_stats_events_filtered(
                 continue;
             }
             match serde_json::from_str::<LlmCallEvent>(line) {
-                Ok(event) => {
+                Ok(mut event) => {
+                    event.mode = canonicalize_mode_for_stats(&event.mode);
                     if let Some(from) = from {
                         if event.ts_start.get(..10).unwrap_or("") < from.get(..10).unwrap_or("") {
                             continue;
@@ -721,5 +722,19 @@ mod tests {
         let day2 = summary.by_day.iter().find(|d| d.date == "2026-02-03").unwrap();
         assert_eq!(day2.total_cache_read_tokens, 0);
         assert_eq!(day2.total_cache_creation_tokens, 300);
+    }
+
+    #[test]
+    fn test_summary_normalizes_legacy_mode_names() {
+        let mut uppercase = make_event(1, true);
+        uppercase.mode = "TASK_AGENT".to_string();
+        let mut lowercase = make_event(2, true);
+        lowercase.mode = "task_agent".to_string();
+
+        let summary = aggregate_summary(&[uppercase, lowercase], None, None);
+
+        assert_eq!(summary.by_mode.len(), 1);
+        assert_eq!(summary.by_mode[0].mode, "task_agent");
+        assert_eq!(summary.by_mode[0].total_calls, 2);
     }
 }
