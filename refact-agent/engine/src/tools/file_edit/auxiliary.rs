@@ -22,7 +22,7 @@ fn resolve_path_with_workdir(path: &PathBuf, code_workdir: &Option<PathBuf>) -> 
         return Ok(path.clone());
     };
 
-    if !path.is_absolute() {
+    if !path.has_root() {
         return Ok(workdir.join(path));
     }
 
