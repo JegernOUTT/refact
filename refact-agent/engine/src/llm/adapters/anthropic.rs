@@ -35,6 +35,7 @@ impl LlmWireAdapter for AnthropicAdapter {
         let is_cc = claude_code_compat::is_claude_code_oauth(&settings.auth_token);
         if is_cc {
             claude_code_compat::apply_oauth_headers(&mut headers, &settings.auth_token)?;
+            claude_code_compat::apply_stainless_headers(&mut headers)?;
         } else if !settings.api_key.is_empty() {
             headers.insert(
                 "x-api-key",
@@ -52,7 +53,12 @@ impl LlmWireAdapter for AnthropicAdapter {
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
 
-        let (system, messages) = convert_to_anthropic(&req.messages);
+        let context_sanitizer: Option<Box<dyn Fn(&str) -> String>> = if is_cc {
+            Some(Box::new(|text: &str| claude_code_compat::sanitize_system_text(text)))
+        } else {
+            None
+        };
+        let (system, messages) = convert_to_anthropic(&req.messages, context_sanitizer.as_deref());
 
         let mut body = json!({
             "model": settings.model_name,
@@ -63,7 +69,8 @@ impl LlmWireAdapter for AnthropicAdapter {
 
         if let Some(sys) = system {
             if is_cc {
-                body["system"] = claude_code_compat::prepend_system(sys);
+                let sanitized = claude_code_compat::sanitize_system_for_cc(sys);
+                body["system"] = claude_code_compat::prepend_system(sanitized);
             } else {
                 body["system"] = sys;
             }
@@ -84,7 +91,9 @@ impl LlmWireAdapter for AnthropicAdapter {
                 if !tools.is_empty() {
                     let mut converted_tools = convert_tools_to_anthropic(tools);
                     if is_cc {
-                        claude_code_compat::prefix_tool_names(&mut converted_tools, claude_code_compat::MCP_TOOL_PREFIX);
+                        claude_code_compat::apply_cc_tool_names(&mut converted_tools);
+                        claude_code_compat::strip_tool_descriptions(&mut converted_tools);
+                        claude_code_compat::inject_cc_tool_stubs(&mut converted_tools);
                     }
                     // Add Anthropic's server-side web_search tool if enabled
                     if settings.supports_web_search {
@@ -97,7 +106,16 @@ impl LlmWireAdapter for AnthropicAdapter {
                     }
                     body["tools"] = converted_tools;
                     if let Some(choice) = &req.tool_choice {
-                        body["tool_choice"] = tool_choice_to_anthropic(choice);
+                        let mut tc = tool_choice_to_anthropic(choice);
+                        if is_cc {
+                            if let Some(name) = tc.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()) {
+                                if !name.starts_with(claude_code_compat::MCP_TOOL_PREFIX) {
+                                    let renamed = claude_code_compat::cc_rename_base_tool(&name);
+                                    tc["name"] = json!(format!("{}{}", claude_code_compat::MCP_TOOL_PREFIX, renamed));
+                                }
+                            }
+                        }
+                        body["tool_choice"] = tc;
                     }
                 }
             } else if settings.supports_web_search {
@@ -151,17 +169,25 @@ impl LlmWireAdapter for AnthropicAdapter {
             body.as_object_mut().map(|obj| obj.remove("temperature"));
         }
 
+        if is_cc {
+            claude_code_compat::inject_billing_block(&mut body);
+            claude_code_compat::inject_metadata(&mut body);
+        }
         {
-            let mut betas = Vec::new();
+            let mut betas: Vec<&str> = Vec::new();
             if body.get("thinking").and_then(|t| t.get("type")).and_then(|t| t.as_str()) == Some("enabled") {
-                betas.push(INTERLEAVED_THINKING_BETA);
-                betas.push(EFFORT);
-            }
-            if is_cc {
-                betas.push(claude_code_compat::OAUTH_BETA_FLAG);
                 if !betas.contains(&INTERLEAVED_THINKING_BETA) {
                     betas.push(INTERLEAVED_THINKING_BETA);
+                }
+                if !betas.contains(&EFFORT) {
                     betas.push(EFFORT);
+                }
+            }
+            if is_cc {
+                for &beta in claude_code_compat::CC_OAUTH_BETAS {
+                    if !betas.contains(&beta) {
+                        betas.push(beta);
+                    }
                 }
             }
             if !betas.is_empty() {
@@ -211,7 +237,7 @@ impl LlmWireAdapter for AnthropicAdapter {
 
         if is_cc {
             if let Some(msgs) = body.get_mut("messages") {
-                claude_code_compat::prefix_tool_use_in_messages(msgs, claude_code_compat::MCP_TOOL_PREFIX);
+                claude_code_compat::apply_cc_tool_use_in_messages(msgs);
             }
         }
 
@@ -402,7 +428,10 @@ impl LlmWireAdapter for AnthropicAdapter {
     }
 }
 
-fn convert_to_anthropic(messages: &[crate::call_validation::ChatMessage]) -> (Option<Value>, Vec<Value>) {
+fn convert_to_anthropic(
+    messages: &[crate::call_validation::ChatMessage],
+    context_sanitizer: Option<&dyn Fn(&str) -> String>,
+) -> (Option<Value>, Vec<Value>) {
     use super::render_extra::{is_context_role, render_context_message};
 
     let mut system_text = None;
@@ -418,7 +447,11 @@ fn convert_to_anthropic(messages: &[crate::call_validation::ChatMessage]) -> (Op
                 system_text = Some(msg.content.content_text_only());
             }
             role if is_context_role(role) => {
-                let Some(text) = render_context_message(msg) else { continue };
+                let Some(raw_text) = render_context_message(msg) else { continue };
+                let text = match context_sanitizer {
+                    Some(f) => f(&raw_text),
+                    None => raw_text,
+                };
                 if !pending_tool_results.is_empty() {
                     // Inside a tool-results group: add as a plain text content block
                     // so it is delivered in the same user turn as the tool outputs.
@@ -883,7 +916,7 @@ mod tests {
             ChatMessage::new("system".to_string(), "Be helpful".to_string()),
             ChatMessage::new("user".to_string(), "Hi".to_string()),
         ];
-        let (system, msgs) = convert_to_anthropic(&messages);
+        let (system, msgs) = convert_to_anthropic(&messages, None);
         assert_eq!(system, Some(json!("Be helpful")));
         assert_eq!(msgs.len(), 1);
     }
@@ -894,7 +927,7 @@ mod tests {
             ChatMessage::new("system".to_string(), "Be helpful".to_string()),
             ChatMessage::new("user".to_string(), "Hi".to_string()),
         ];
-        let (system, msgs) = convert_to_anthropic(&messages);
+        let (system, msgs) = convert_to_anthropic(&messages, None);
         assert_eq!(system, Some(json!("Be helpful")));
         assert_eq!(msgs.len(), 1);
         // Block-level cache_control is no longer injected by the adapter
@@ -1060,7 +1093,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "user");
@@ -1107,7 +1140,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "now fix it".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         // Should be 3 messages: user, assistant, user(tool_result + text)
         // NOT 4: user, assistant, user(tool_result), user(text)
@@ -1151,7 +1184,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         assert_eq!(msgs.len(), 3);
         let tool_result = &msgs[2]["content"][0];
@@ -1284,7 +1317,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Thanks, now explain".to_string()),
         ];
 
-        let (system, msgs) = convert_to_anthropic(&messages);
+        let (system, msgs) = convert_to_anthropic(&messages, None);
 
         // System should be plain text (no cache_control)
         assert_eq!(system, Some(json!("Be helpful")));
@@ -1312,7 +1345,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Hello".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0]["content"][0].get("cache_control").is_none());
@@ -1325,7 +1358,7 @@ mod tests {
             ChatMessage::new("assistant".to_string(), "Hi there".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0]["content"][0].get("cache_control").is_none());
@@ -1341,7 +1374,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Thanks".to_string()),
         ];
 
-        let (system, msgs) = convert_to_anthropic(&messages);
+        let (system, msgs) = convert_to_anthropic(&messages, None);
 
         // System should be plain text, no cache_control
         assert_eq!(system, Some(json!("Be helpful")));
@@ -1386,7 +1419,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         // [0]=user, [1]=assistant(text+tool_use), [2]=tool_result(user)
         assert_eq!(msgs.len(), 3);
@@ -1414,7 +1447,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Explain more".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         assert_eq!(msgs.len(), 3);
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -1460,7 +1493,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         // assistant content: [thinking, (empty text removed), tool_use]
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -1493,7 +1526,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let content = msgs[1]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "thinking");
@@ -1525,7 +1558,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "And the sky?".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         assert_eq!(msgs.len(), 3);
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -1550,7 +1583,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let content = msgs[0]["content"].as_array().unwrap();
         assert!(content[0].get("citations").is_none(),
@@ -1569,7 +1602,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let content = msgs[1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
@@ -1611,7 +1644,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         // No block-level cache_control in message content
         for i in 0..msgs.len() {
@@ -1654,7 +1687,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Tell me more".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
         // Find the text block (may not be at index 0 due to interleaved server content blocks)
@@ -1703,7 +1736,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "And tomorrow?".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
         // Should contain: text block (with citations), server_tool_use, web_search_tool_result
@@ -1796,7 +1829,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Follow up".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
         let thinking_blocks: Vec<_> = assistant_content.iter()
@@ -1825,7 +1858,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let assistant_content = msgs[0]["content"].as_array().unwrap();
         let thinking_blocks: Vec<_> = assistant_content.iter()
@@ -1853,7 +1886,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let assistant_content = msgs[0]["content"].as_array().unwrap();
         let thinking_blocks: Vec<_> = assistant_content.iter()
@@ -1891,7 +1924,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         // msgs[0] = user, msgs[1] = assistant
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -1950,7 +1983,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Tell me more".to_string()),
         ];
 
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
 
         let assistant_content = msgs[1]["content"].as_array().unwrap();
         // Verify interleaved order: thinking(0), server_tool_use(1), web_search_result(2), thinking(3), text(4)
@@ -2014,7 +2047,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "Tell me more".to_string()),
         ];
         
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
         
         // Verify both blocks are preserved in the re-processed message
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -2063,7 +2096,7 @@ mod tests {
             assistant_msg,
         ];
         
-        let (_, msgs) = convert_to_anthropic(&messages);
+        let (_, msgs) = convert_to_anthropic(&messages, None);
         
         // Verify orphaned server_tool_use is filtered out
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -2110,5 +2143,55 @@ mod tests {
         assert_eq!(input_schema["required"], json!(["query"]));
 
         assert!(tool.get("parameters").is_none(), "parameters field should not be present");
+    }
+
+    #[test]
+    fn test_context_file_sanitized_in_cc_mode() {
+        use crate::call_validation::{ChatContent, ContextFile};
+        use super::claude_code_compat;
+
+        // Simulate an AGENTS.md context file injection
+        let agents_md_content = "# Refact Agent Engine\nBinary: `refact-lsp` — AI coding agent.\nConfig: `.refact/integrations/*.yaml`.";
+        let messages = vec![
+            ChatMessage {
+                role: "context_file".to_string(),
+                content: ChatContent::ContextFiles(vec![ContextFile {
+                    file_name: "AGENTS.md".to_string(),
+                    file_content: agents_md_content.to_string(),
+                    line1: 1,
+                    line2: 3,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "What tools do I have?".to_string()),
+        ];
+
+        // Non-CC mode: content passes through unsanitized
+        let (_, msgs_plain) = convert_to_anthropic(&messages, None);
+        let user_content = msgs_plain[0]["content"].as_array().unwrap();
+        let has_context = user_content.iter().any(|b| {
+            b.get("text").and_then(|t| t.as_str()).map_or(false, |t| t.contains("refact-lsp"))
+        });
+        assert!(has_context, "Non-CC mode should pass context files through unchanged");
+
+        // CC mode: identifying strings are sanitized
+        let sanitizer: Box<dyn Fn(&str) -> String> =
+            Box::new(|text: &str| claude_code_compat::sanitize_system_text(text));
+        let (_, msgs_cc) = convert_to_anthropic(&messages, Some(sanitizer.as_ref()));
+        let user_content_cc = msgs_cc[0]["content"].as_array().unwrap();
+        let has_refact_lsp = user_content_cc.iter().any(|b| {
+            b.get("text").and_then(|t| t.as_str()).map_or(false, |t| t.contains("refact-lsp"))
+        });
+        assert!(!has_refact_lsp, "CC mode should sanitize refact-lsp from context files");
+        let has_refact_dir = user_content_cc.iter().any(|b| {
+            b.get("text").and_then(|t| t.as_str()).map_or(false, |t| t.contains(".refact/"))
+        });
+        assert!(!has_refact_dir, "CC mode should sanitize .refact/ from context files");
+        // Content should still be present (just sanitized)
+        let has_content = user_content_cc.iter().any(|b| {
+            b.get("text").and_then(|t| t.as_str()).map_or(false, |t| t.contains("AGENTS.md"))
+        });
+        assert!(has_content, "CC mode sanitization should preserve file header");
     }
 }

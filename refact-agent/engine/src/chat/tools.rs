@@ -1087,8 +1087,12 @@ async fn instantiate_tool_for_call(
 ) -> Option<Box<dyn crate::tools::tools_description::Tool + Send>> {
     let raw_tools = crate::tools::tools_list::get_tools_for_mode(gcx, mode_id, model_id).await;
     let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
+    // Resolve CC-mode name (strips mcp_ prefix + reverses CC_TOOL_RENAMES) so that
+    // "mcp_plan" dispatches to "strategic_planning", "mcp_cat" dispatches to "cat", etc.
+    let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
     for tool in tools {
-        if tool.tool_description().name == tool_name {
+        let name = tool.tool_description().name;
+        if name == tool_name || name == resolved.as_str() {
             return Some(tool);
         }
     }
@@ -1208,7 +1212,10 @@ async fn execute_single_tool(
             }
         }
     } else {
-        let tool_arc = match serial_registry.get(&tool_call.function.name) {
+        let resolved_name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&tool_call.function.name);
+        let tool_arc = match serial_registry.get(&tool_call.function.name)
+            .or_else(|| serial_registry.get(resolved_name.as_str()))
+        {
             Some(t) => t.clone(),
             None => {
                 return (

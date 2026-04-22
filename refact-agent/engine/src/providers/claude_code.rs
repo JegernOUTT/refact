@@ -614,13 +614,14 @@ pub async fn fetch_claude_code_model_ids(
         return vec![];
     }
 
+    let betas = crate::llm::adapters::claude_code_compat::CC_OAUTH_BETAS.join(",");
     let request = http_client
         .get(ANTHROPIC_MODELS_URL)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("content-type", "application/json")
         .header("Authorization", format!("Bearer {}", auth_token))
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .header("user-agent", "claude-cli/2.1.2 (external, cli)");
+        .header("anthropic-beta", betas)
+        .header("user-agent", crate::llm::adapters::claude_code_compat::USER_AGENT);
 
     match request.send().await {
         Ok(response) => {
