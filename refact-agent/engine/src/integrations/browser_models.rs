@@ -1,61 +1,34 @@
-/// Typed browser action models for the unified browser automation system.
-///
-/// These types define the request/response contract for browser actions.
-/// Used by browser_controller, integr_chrome, and v1_browser endpoints.
-
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Locator
-// ---------------------------------------------------------------------------
-
-/// Strategy for finding an element on the page.
-///
-/// CSS-convertible strategies (css, id, name, test_id, placeholder, autocomplete,
-/// role without name) can use native `find_element`. Others require JS evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum LocatorStrategy {
-    /// Raw CSS selector.
     Css { value: String },
-    /// Element ID (`#id`).
     Id { value: String },
-    /// Element name attribute (`[name="value"]`).
     Name { value: String },
-    /// `data-testid` attribute.
     TestId { value: String },
-    /// Placeholder attribute.
     Placeholder { value: String },
-    /// Autocomplete attribute.
     Autocomplete { value: String },
-    /// Find by visible text content (requires JS).
     Text {
         value: String,
-        /// If true, require exact text match; otherwise substring.
         #[serde(default)]
         exact: bool,
     },
-    /// Find by associated `<label>` text (requires JS).
     Label { value: String },
-    /// Find by ARIA role and optional accessible name.
     Role {
         role: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    /// XPath expression (requires JS).
     Xpath { value: String },
 }
 
-/// Element locator with optional targeting helpers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BrowserLocator {
     #[serde(flatten)]
     pub strategy: LocatorStrategy,
-    /// Select the Nth match (0-based). `None` means first match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nth: Option<usize>,
-    /// Scope the search within a parent matched by this CSS selector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub within: Option<String>,
 }
@@ -127,17 +100,11 @@ impl BrowserLocator {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tab target
-// ---------------------------------------------------------------------------
 
-/// Which tab to target for an action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TabTarget {
-    /// The currently active/focused tab.
     Active,
-    /// A specific browser tab by its runtime tab id / CDP target id.
     Id { id: String },
 }
 
@@ -147,24 +114,15 @@ impl Default for TabTarget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Action steps
-// ---------------------------------------------------------------------------
 
-/// A single browser operation step.
-///
-/// Steps are executed sequentially. Execution stops on the first failure
-/// unless the step is explicitly non-fatal (e.g. `ClickIfExists`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BrowserStep {
-    // -- Navigation --
     Navigate { url: String },
     Reload,
     GoBack,
     GoForward,
 
-    // -- Tab management --
     OpenTab {
         #[serde(default)]
         device: Option<String>,
@@ -173,7 +131,6 @@ pub enum BrowserStep {
     SwitchTab { tab: TabTarget },
     ListTabs,
 
-    // -- Interaction --
     Click { locator: BrowserLocator },
     ClickIfExists { locator: BrowserLocator },
     Hover { locator: BrowserLocator },
@@ -186,7 +143,6 @@ pub enum BrowserStep {
         modifiers: Vec<String>,
     },
 
-    // -- Text/form --
     Fill {
         locator: BrowserLocator,
         text: String,
@@ -207,7 +163,6 @@ pub enum BrowserStep {
     Check { locator: BrowserLocator },
     Uncheck { locator: BrowserLocator },
 
-    // -- Waits --
     WaitForSelector {
         locator: BrowserLocator,
         #[serde(default)]
@@ -243,7 +198,6 @@ pub enum BrowserStep {
     },
     WaitSeconds { seconds: f64 },
 
-    // -- Extraction --
     GetText { locator: BrowserLocator },
     GetHtml { locator: BrowserLocator },
     GetAttribute {
@@ -266,7 +220,6 @@ pub enum BrowserStep {
     Screenshot,
     ScreenshotElement { locator: BrowserLocator },
 
-    // -- Evaluation --
     Eval { expression: String },
     Styles {
         locator: BrowserLocator,
@@ -274,10 +227,8 @@ pub enum BrowserStep {
         property_filter: Option<String>,
     },
 
-    // -- Debugging --
     TabLog,
 
-    // -- Environment helpers --
     DismissOverlays,
     HighlightElement { locator: BrowserLocator },
 }
@@ -286,16 +237,11 @@ fn default_true() -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// Session policy
-// ---------------------------------------------------------------------------
 
-/// Browser session policy.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionPolicy {
-    /// Use shared visible BrowserRuntime (default).
     SharedDefault,
 }
 
@@ -305,11 +251,7 @@ impl Default for SessionPolicy {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Request
-// ---------------------------------------------------------------------------
 
-/// Full browser action request containing session policy, target tab, and steps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserActionRequest {
     #[serde(default)]
@@ -319,11 +261,7 @@ pub struct BrowserActionRequest {
     pub steps: Vec<BrowserStep>,
 }
 
-// ---------------------------------------------------------------------------
-// Results
-// ---------------------------------------------------------------------------
 
-/// Detected field kind for form interactions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldKind {
@@ -345,23 +283,16 @@ pub enum FieldKind {
     Unknown,
 }
 
-/// Which fill strategy was used.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FillStrategy {
-    /// Focus → selectAll → delete → type_str
     NativeTyping,
-    /// Set element.value + dispatch input/change events
     DomValueSetter,
-    /// Use HTMLInputElement.prototype.value.set (for React/Vue)
     NativePrototypeSetter,
-    /// Focus editor → selectAll → insertText
     ContentEditablePath,
-    /// Click element center → type
     ClickAndType,
 }
 
-/// Result of a single step execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
     pub step_index: usize,
@@ -416,7 +347,6 @@ impl StepResult {
     }
 }
 
-/// Full execution report for a browser action request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
     pub ok: bool,
@@ -427,11 +357,7 @@ pub struct ExecutionReport {
     pub title: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Element info (returned by locator resolution)
-// ---------------------------------------------------------------------------
 
-/// Information about a resolved DOM element.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElementInfo {
     pub tag: String,
@@ -460,7 +386,6 @@ pub struct ElementInfo {
     pub field_kind: FieldKind,
 }
 
-/// Bounding box of an element.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElementBBox {
     pub x: f64,
@@ -469,7 +394,6 @@ pub struct ElementBBox {
     pub height: f64,
 }
 
-/// Information about a browser tab.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TabInfo {
@@ -480,15 +404,11 @@ pub struct TabInfo {
     pub is_active: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ---- Locator serde ----
 
     #[test]
     fn test_locator_css_serde() {
@@ -611,7 +531,6 @@ mod tests {
         assert!(json.get("within").is_none());
     }
 
-    // ---- Tab target serde ----
 
     #[test]
     fn test_tab_target_active_serde() {
@@ -628,7 +547,6 @@ mod tests {
         assert_eq!(json["id"], "main");
     }
 
-    // ---- Step serde ----
 
     #[test]
     fn test_step_navigate_serde() {
@@ -768,7 +686,6 @@ mod tests {
         }
     }
 
-    // ---- Full request serde ----
 
     #[test]
     fn test_full_request_serde() {
@@ -797,7 +714,6 @@ mod tests {
         assert_eq!(req.target, TabTarget::Active);
     }
 
-    // ---- StepResult ----
 
     #[test]
     fn test_step_result_success() {
@@ -821,7 +737,6 @@ mod tests {
         assert!(r.data.is_some());
     }
 
-    // ---- FieldKind ----
 
     #[test]
     fn test_field_kind_serde() {
@@ -840,7 +755,6 @@ mod tests {
         }
     }
 
-    // ---- FillStrategy ----
 
     #[test]
     fn test_fill_strategy_serde() {
@@ -858,7 +772,6 @@ mod tests {
         }
     }
 
-    // ---- ExecutionReport ----
 
     #[test]
     fn test_execution_report_serde() {
@@ -878,7 +791,6 @@ mod tests {
         assert!(parsed.ok);
     }
 
-    // ---- ElementInfo ----
 
     #[test]
     fn test_element_info_parse_from_js_json() {
@@ -907,7 +819,6 @@ mod tests {
         assert_eq!(info.field_kind, FieldKind::TextInput);
     }
 
-    // ---- TabInfo ----
 
     #[test]
     fn test_tab_info_serde() {

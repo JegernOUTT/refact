@@ -531,19 +531,12 @@ pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests — including regression cases from the real failure corpus
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ---- eval: spaces, operators, quotes ----
-
     #[test]
     fn test_eval_with_logical_operators() {
-        // Real failure: "Missing one or several arguments `tab_id`, `expression`"
         let action = parse_command(
             "eval 1 document.querySelector('button') && document.querySelector('button').textContent",
         )
@@ -560,7 +553,6 @@ mod tests {
 
     #[test]
     fn test_eval_preserves_quotes() {
-        // Quotes are valid JS — parser must not strip them
         let action =
             parse_command(r#"eval 1 "document.querySelectorAll('button').length""#).unwrap();
         match action {
@@ -587,7 +579,6 @@ mod tests {
 
     #[test]
     fn test_eval_unquoted_typeof() {
-        // Real failure: shell_words split "typeof" "document" as two args
         let action = parse_command("eval 1 typeof document").unwrap();
         match action {
             BrowserAction::Eval { expression, .. } => {
@@ -599,7 +590,6 @@ mod tests {
 
     #[test]
     fn test_eval_window_scroll() {
-        // Real failure: "Missing one or several arguments"
         let action =
             parse_command("eval 1 window.scrollTo(0, document.body.scrollHeight)").unwrap();
         match action {
@@ -633,11 +623,8 @@ mod tests {
         }
     }
 
-    // ---- click_at_element: complex selectors ----
-
     #[test]
     fn test_click_complex_css_selector_with_commas() {
-        // Real failure: shell_words split on commas
         let action = parse_command(
             r#"click_at_element 1 button[data-testid="accept-all-cookies"], [id*="accept"], .accept-all"#,
         )
@@ -653,7 +640,6 @@ mod tests {
 
     #[test]
     fn test_click_id_selector_with_hash() {
-        // Real failure: "#onetrust-accept-btn-handler" was split
         let action =
             parse_command("click_at_element 1 #onetrust-accept-btn-handler").unwrap();
         match action {
@@ -666,7 +652,6 @@ mod tests {
 
     #[test]
     fn test_click_nth_child_selector() {
-        // Real failure: shell_words split on spaces in "tr:nth-child(1) td:nth-child(3)"
         let action =
             parse_command("click_at_element 2 tr:nth-child(1) td:nth-child(3)").unwrap();
         match action {
@@ -677,11 +662,8 @@ mod tests {
         }
     }
 
-    // ---- html: ID and complex selectors ----
-
     #[test]
     fn test_html_id_selector() {
-        // Real failure: "#loginForm" was split
         let action = parse_command("html 1 #loginForm").unwrap();
         match action {
             BrowserAction::Html { selector, .. } => {
@@ -702,11 +684,8 @@ mod tests {
         }
     }
 
-    // ---- scroll_to ----
-
     #[test]
     fn test_scroll_to_id_selector() {
-        // Real failure: "#email" was split
         let action = parse_command("scroll_to 1 #email").unwrap();
         match action {
             BrowserAction::ScrollTo { selector, .. } => {
@@ -718,7 +697,6 @@ mod tests {
 
     #[test]
     fn test_scroll_to_complex_selector() {
-        // Real failure: commas in selector list
         let action = parse_command(
             r#"scroll_to 1 a[href*="register"], a[href*="signup"], a[href*="create"]"#,
         )
@@ -731,11 +709,8 @@ mod tests {
         }
     }
 
-    // ---- type_text_at: text with spaces ----
-
     #[test]
     fn test_type_text_with_spaces() {
-        // Real failure: "Pearson Test Institute" split into multiple args
         let action = parse_command("type_text_at 1 Pearson Test Institute").unwrap();
         match action {
             BrowserAction::TypeText { text, .. } => {
@@ -744,8 +719,6 @@ mod tests {
             _ => panic!("Expected TypeText"),
         }
     }
-
-    // ---- styles: selector + filter ----
 
     #[test]
     fn test_styles_with_filter_separator() {
@@ -782,7 +755,6 @@ mod tests {
 
     #[test]
     fn test_styles_descendant_selector_no_ambiguity() {
-        // Previously misinterpreted: last token was taken as filter
         let action =
             parse_command("styles 1 tr:nth-child(1) td:nth-child(3)").unwrap();
         match action {
@@ -815,11 +787,8 @@ mod tests {
         }
     }
 
-    // ---- press_key: key normalization ----
-
     #[test]
     fn test_press_key_return_normalized_to_enter() {
-        // Real failure: "Key not found: Return"
         let action = parse_command("press_key 1 Return").unwrap();
         match action {
             BrowserAction::PressKey { key, .. } => {
@@ -852,8 +821,6 @@ mod tests {
         }
     }
 
-    // ---- wait_for ----
-
     #[test]
     fn test_wait_for_valid() {
         let action = parse_command("wait_for 1 3").unwrap();
@@ -871,8 +838,6 @@ mod tests {
         assert!(parse_command("wait_for 1 20").is_err());
     }
 
-    // ---- navigate_to ----
-
     #[test]
     fn test_navigate_url_with_query_params() {
         let action =
@@ -885,8 +850,6 @@ mod tests {
         }
     }
 
-    // ---- blank lines, comments ----
-
     #[test]
     fn test_blank_lines_and_comments_skipped() {
         let results =
@@ -895,16 +858,12 @@ mod tests {
         assert!(results.iter().all(|r| r.is_ok()));
     }
 
-    // ---- unknown command ----
-
     #[test]
     fn test_unknown_command_clear_error() {
         let err = parse_command("foobar 1").unwrap_err();
         assert!(err.contains("Unknown command"));
         assert!(err.contains("foobar"));
     }
-
-    // ---- helpers ----
 
     #[test]
     fn test_rest_after_tokens() {
@@ -922,8 +881,8 @@ mod tests {
         assert_eq!(normalize_key_name("Esc"), "Escape");
         assert_eq!(normalize_key_name("Del"), "Delete");
         assert_eq!(normalize_key_name("Up"), "ArrowUp");
-        assert_eq!(normalize_key_name("Enter"), "Enter"); // pass-through
-        assert_eq!(normalize_key_name("Tab"), "Tab"); // pass-through
+        assert_eq!(normalize_key_name("Enter"), "Enter");
+        assert_eq!(normalize_key_name("Tab"), "Tab");
     }
 
     #[test]
@@ -943,8 +902,6 @@ mod tests {
             _ => panic!("Expected ClickAtPoint"),
         }
     }
-
-    // ---- wait_for_selector ----
 
     #[test]
     fn test_wait_for_selector_id() {
@@ -978,8 +935,6 @@ mod tests {
         assert!(err.contains("missing"));
     }
 
-    // ---- wait_for_navigation ----
-
     #[test]
     fn test_wait_for_navigation() {
         let action = parse_command("wait_for_navigation 1").unwrap();
@@ -997,15 +952,11 @@ mod tests {
         assert!(err.contains("missing"));
     }
 
-    // ---- list_tabs ----
-
     #[test]
     fn test_list_tabs() {
         let action = parse_command("list_tabs").unwrap();
         assert!(matches!(action, BrowserAction::ListTabs));
     }
-
-    // ---- close_tab ----
 
     #[test]
     fn test_close_tab() {
@@ -1022,8 +973,6 @@ mod tests {
         assert!(err.contains("missing"));
     }
 
-    // ---- new commands in multi-command context ----
-
     #[test]
     fn test_parse_commands_with_new_commands() {
         let input = "open_tab 1 desktop\nnavigate_to 1 https://example.com\nwait_for_selector 1 #content\nscreenshot 1\nclose_tab 1";
@@ -1039,8 +988,6 @@ mod tests {
         assert_eq!(results.len(), 3);
         assert!(matches!(results[1].as_ref().unwrap(), BrowserAction::ListTabs));
     }
-
-    // ---- heredoc ----
 
     #[test]
     fn test_heredoc_eval_multiline() {
@@ -1088,7 +1035,6 @@ mod tests {
 
     #[test]
     fn test_heredoc_not_triggered_by_js_shift() {
-        // `x << 5` should NOT trigger heredoc (marker too short / not uppercase)
         let action = parse_command("eval 1 x << 5").unwrap();
         match action {
             BrowserAction::Eval { expression, .. } => {
@@ -1108,8 +1054,6 @@ mod tests {
             _ => panic!("Expected Eval"),
         }
     }
-
-    // ---- extra arguments rejected ----
 
     #[test]
     fn test_screenshot_rejects_extra_args() {
@@ -1141,8 +1085,6 @@ mod tests {
         assert!(parse_command("wait_for_navigation 1 please").is_err());
     }
 
-    // ---- detect_heredoc unit tests ----
-
     #[test]
     fn test_detect_heredoc_basic() {
         assert_eq!(detect_heredoc("eval 1 <<EOF"), Some(("eval 1", "EOF")));
@@ -1163,8 +1105,6 @@ mod tests {
         assert_eq!(detect_heredoc("eval 1 <<eof"), None);
     }
 
-    // ---- get_tab_id ----
-
     #[test]
     fn test_get_tab_id_navigate() {
         let action = parse_command("navigate_to 1 https://example.com").unwrap();
@@ -1182,8 +1122,6 @@ mod tests {
         let action = parse_command("screenshot 5").unwrap();
         assert_eq!(get_tab_id(&action), Some("5"));
     }
-
-    // ---- to_browser_steps: convertible actions ----
 
     #[test]
     fn test_convert_navigate() {
@@ -1311,8 +1249,6 @@ mod tests {
         assert!(matches!(&steps[0], BrowserStep::WaitForNavigation { .. }));
     }
 
-    // ---- to_browser_steps: non-convertible actions ----
-
     #[test]
     fn test_convert_open_tab_returns_none() {
         let action = parse_command("open_tab 1 desktop").unwrap();
@@ -1357,8 +1293,6 @@ mod tests {
         }
     }
 
-    // ---- conversion preserves complex selectors ----
-
     #[test]
     fn test_convert_click_preserves_complex_selector() {
         let action = parse_command(
@@ -1391,8 +1325,6 @@ mod tests {
             _ => panic!("Expected WaitForSelector"),
         }
     }
-
-    // ---- fill_field tests ----
 
     #[test]
     fn test_parse_fill_field_simple() {

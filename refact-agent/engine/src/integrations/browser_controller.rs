@@ -1,16 +1,3 @@
-/// Browser step execution controller for the unified browser automation system.
-///
-/// Executes typed `BrowserStep` actions against a `headless_chrome::Tab` using
-/// the locator system from `browser_locators`. Provides:
-/// - Element resolution via typed locators (CSS, text, label, role, etc.)
-/// - Multi-strategy field filling with verification
-/// - Smart polling waits (selector, URL, text, element hidden/stable)
-/// - Structured execution reports with diagnostics
-///
-/// # Blocking I/O
-/// All step execution is synchronous because `headless_chrome` uses blocking I/O.
-/// Callers in async context should be aware that these calls block the current thread.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,25 +13,13 @@ use crate::integrations::browser_locators::{
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Default timeout for wait operations (ms).
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 
-/// Interval between poll attempts in wait operations (ms).
 const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
 
-/// Max screenshot dimension before resizing (used by integration layer).
 #[allow(dead_code)]
 const SCREENSHOT_MAX_DIM: u32 = 800;
 
-// ---------------------------------------------------------------------------
-// Tab resolution
-// ---------------------------------------------------------------------------
-
-/// Resolve a tab from a `BrowserRuntime` based on the target specification.
 #[allow(dead_code)]
 pub fn resolve_tab(
     runtime: &BrowserRuntime,
@@ -68,11 +43,6 @@ pub fn resolve_tab(
     }
 }
 
-// ---------------------------------------------------------------------------
-// JS evaluation helpers
-// ---------------------------------------------------------------------------
-
-/// Evaluate JavaScript and return the raw `serde_json::Value`.
 fn eval_js_value(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     let remote = tab
         .evaluate(js, false)
@@ -82,7 +52,6 @@ fn eval_js_value(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
         .ok_or_else(|| "JS evaluation returned no value".to_string())
 }
 
-/// Evaluate JS that returns `JSON.stringify(...)` and parse the inner JSON.
 fn eval_js_json(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     let val = eval_js_value(tab, js)?;
     match val.as_str() {
@@ -93,7 +62,6 @@ fn eval_js_json(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     }
 }
 
-/// Evaluate JS expecting `{ok: true, ...}` and return the result or error.
 fn eval_js_ok(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     let result = eval_js_json(tab, js)?;
     if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
@@ -102,14 +70,6 @@ fn eval_js_ok(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     Ok(result)
 }
 
-// ---------------------------------------------------------------------------
-// Element resolution
-// ---------------------------------------------------------------------------
-
-/// Resolve an element using the locator system.
-///
-/// Executes the locator JS (which stores the element on `window.__refact_resolved_el`)
-/// and returns structured `ElementInfo` for the matched element.
 fn resolve_element(tab: &Tab, locator: &BrowserLocator) -> Result<ElementInfo, String> {
     let js = generate_resolve_js(locator);
     let val = eval_js_value(tab, &js)?;
@@ -121,7 +81,6 @@ fn resolve_element(tab: &Tab, locator: &BrowserLocator) -> Result<ElementInfo, S
     parse_element_info(&json_str)
 }
 
-/// Resolve element and validate it is interactable (visible + enabled).
 fn resolve_interactable(
     tab: &Tab,
     locator: &BrowserLocator,
@@ -136,14 +95,6 @@ fn resolve_interactable(
     Ok(info)
 }
 
-// ---------------------------------------------------------------------------
-// Main execution
-// ---------------------------------------------------------------------------
-
-/// Execute a sequence of browser steps against a tab.
-///
-/// Stops on the first failure (except `ClickIfExists` which is non-fatal).
-/// Returns a structured `ExecutionReport` with results for each executed step.
 pub fn execute_steps(tab: &Tab, steps: &[BrowserStep]) -> ExecutionReport {
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
 
@@ -158,7 +109,6 @@ pub fn execute_steps(tab: &Tab, steps: &[BrowserStep]) -> ExecutionReport {
             results.push(result);
             break;
         }
-        // Re-inject inspector JS after navigation steps (new document wipes globals)
         if result.ok && is_navigation_step(step) {
             let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
         }
@@ -288,14 +238,10 @@ pub async fn execute_request_with_runtime(
     })
 }
 
-/// Execute steps with access to `BrowserRuntime` for tab management.
-/// Supports `OpenTab`, `CloseTab`, `SwitchTab`, and `ListTabs` in addition
-/// to all regular steps.
 pub fn execute_steps_with_runtime(
     runtime: &mut BrowserRuntime,
     steps: &[BrowserStep],
 ) -> ExecutionReport {
-    // Allow OpenTab as first step even when no active tab exists (zero-tab recovery)
     let mut current_tab: Option<Arc<Tab>> = runtime.get_active_tab();
     if let Some(ref tab) = current_tab {
         let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
@@ -311,7 +257,6 @@ pub fn execute_steps_with_runtime(
                     Ok(new_tab) => {
                         let device_label = device.as_deref().unwrap_or("desktop");
                         let target_id = new_tab.get_target_id().to_string();
-                        // Apply device metrics (default desktop: 800x600)
                         let (w, h, mobile) = match device.as_deref() {
                             Some("mobile") => (400, 800, true),
                             Some("tablet") => (600, 800, true),
@@ -431,7 +376,6 @@ pub fn execute_steps_with_runtime(
     }
 }
 
-/// Returns true for steps that cause a page navigation (new document load).
 fn is_navigation_step(step: &BrowserStep) -> bool {
     matches!(
         step,
@@ -442,19 +386,13 @@ fn is_navigation_step(step: &BrowserStep) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Step dispatch
-// ---------------------------------------------------------------------------
-
 fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize) -> StepResult {
     match step {
-        // Navigation
         BrowserStep::Navigate { url } => step_navigate(tab, idx, url),
         BrowserStep::Reload => step_nav_js(tab, idx, "location.reload()", "Reloaded page"),
         BrowserStep::GoBack => step_nav_js(tab, idx, "history.back()", "Navigated back"),
         BrowserStep::GoForward => step_nav_js(tab, idx, "history.forward()", "Navigated forward"),
 
-        // Tab management — handled by execute_steps_with_runtime; stub here for tab-only callers
         BrowserStep::OpenTab { .. }
         | BrowserStep::CloseTab
         | BrowserStep::SwitchTab { .. }
@@ -464,7 +402,6 @@ fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize) -> StepResult 
             "Use execute_steps_with_runtime() for tab management",
         ),
 
-        // Interaction
         BrowserStep::Click { locator } => step_locator_action(tab, idx, locator, "click"),
         BrowserStep::ClickIfExists { locator } => step_click_if_exists(tab, idx, locator),
         BrowserStep::Hover { locator } => step_locator_action(tab, idx, locator, "hover"),
@@ -473,7 +410,6 @@ fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize) -> StepResult 
         BrowserStep::ScrollTo { locator } => step_locator_action(tab, idx, locator, "scroll_to"),
         BrowserStep::PressKey { key, modifiers } => step_press_key(tab, idx, key, modifiers),
 
-        // Form
         BrowserStep::Fill { locator, text, clear_first, verify } => {
             step_fill(tab, idx, locator, text, *clear_first, *verify)
         }
@@ -482,7 +418,6 @@ fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize) -> StepResult 
         BrowserStep::Check { locator } => step_check_uncheck(tab, idx, locator, true),
         BrowserStep::Uncheck { locator } => step_check_uncheck(tab, idx, locator, false),
 
-        // Waits
         BrowserStep::WaitForSelector { locator, timeout_ms } => {
             step_wait_for_selector(tab, idx, locator, timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS))
         }
@@ -506,7 +441,6 @@ fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize) -> StepResult 
         }
         BrowserStep::WaitSeconds { seconds } => step_wait_seconds(idx, *seconds),
 
-        // Extraction
         BrowserStep::GetText { locator } => step_get_text(tab, idx, locator),
         BrowserStep::GetHtml { locator } => step_get_html(tab, idx, locator),
         BrowserStep::GetAttribute { locator, attribute } => {
@@ -523,24 +457,17 @@ fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize) -> StepResult 
         BrowserStep::Screenshot => step_screenshot(tab, idx),
         BrowserStep::ScreenshotElement { locator } => step_screenshot_element(tab, idx, locator),
 
-        // Evaluation
         BrowserStep::Eval { expression } => step_eval(tab, idx, expression),
         BrowserStep::Styles { locator, property_filter } => {
             step_styles(tab, idx, locator, property_filter.as_deref())
         }
 
-        // Debugging
         BrowserStep::TabLog => step_tab_log(tab, idx),
 
-        // Environment
         BrowserStep::DismissOverlays => step_dismiss_overlays(tab, idx),
         BrowserStep::HighlightElement { locator } => step_highlight_element(tab, idx, locator),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Navigation steps
-// ---------------------------------------------------------------------------
 
 fn step_navigate(tab: &Tab, idx: usize, url: &str) -> StepResult {
     match tab.navigate_to(url) {
@@ -555,7 +482,6 @@ fn step_navigate(tab: &Tab, idx: usize, url: &str) -> StepResult {
 fn step_nav_js(tab: &Tab, idx: usize, js: &str, success_msg: &str) -> StepResult {
     match tab.evaluate(js, false) {
         Ok(_) => {
-            // Wait for the navigation/reload to complete
             let _ = tab.wait_until_navigated();
             StepResult::success(idx, success_msg.to_string())
         }
@@ -563,11 +489,6 @@ fn step_nav_js(tab: &Tab, idx: usize, js: &str, success_msg: &str) -> StepResult
     }
 }
 
-// ---------------------------------------------------------------------------
-// Interaction steps
-// ---------------------------------------------------------------------------
-
-/// Generic locator-based interaction: resolve element, then run action JS.
 fn step_locator_action(
     tab: &Tab,
     idx: usize,
@@ -637,10 +558,6 @@ fn step_press_key(tab: &Tab, idx: usize, key: &str, modifiers: &[String]) -> Ste
         Err(e) => StepResult::failure(idx, format!("Press key {}", key), e.to_string()),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Form steps — Fill engine
-// ---------------------------------------------------------------------------
 
 fn step_fill(
     tab: &Tab,
@@ -834,11 +751,6 @@ fn step_check_uncheck(tab: &Tab, idx: usize, locator: &BrowserLocator, check: bo
     }
 }
 
-// ---------------------------------------------------------------------------
-// Wait steps
-// ---------------------------------------------------------------------------
-
-/// Poll a JS boolean condition until true or timeout.
 fn poll_condition(
     tab: &Tab,
     js_condition: &str,
@@ -864,7 +776,6 @@ fn step_wait_for_selector(
     locator: &BrowserLocator,
     timeout_ms: u64,
 ) -> StepResult {
-    // Use CSS fast-path only when nth is not set (CSS can't express nth reliably)
     let js = match (to_css_selector(locator), locator.nth) {
         (Some(css), None) => browser_locators::js_check_selector_present(&css),
         _ => {
@@ -899,7 +810,6 @@ fn step_wait_for_navigation(tab: &Tab, idx: usize, timeout_ms: u64) -> StepResul
     match poll_condition(tab, &js, timeout_ms, DEFAULT_POLL_INTERVAL_MS) {
         Ok(()) => StepResult::success(idx, format!("Navigation detected from {}", start_url)),
         Err(_) => {
-            // Also succeed if the page loaded without URL change (e.g., hash nav)
             match tab.evaluate("document.readyState", false) {
                 Ok(r) if r.value.as_ref().and_then(|v| v.as_str()) == Some("complete") => {
                     StepResult::success(idx, "Page load complete".to_string())
@@ -961,7 +871,6 @@ fn step_wait_for_element_stable(
     locator: &BrowserLocator,
     timeout_ms: u64,
 ) -> StepResult {
-    // Check that element bbox doesn't change between two consecutive polls.
     let find_fragment = generate_find_fragment_js(locator);
     let bbox_js = format!(
         r#"(function() {{
@@ -1000,10 +909,6 @@ fn step_wait_seconds(idx: usize, seconds: f64) -> StepResult {
     std::thread::sleep(Duration::from_millis(ms));
     StepResult::success(idx, format!("Waited {:.1}s", seconds))
 }
-
-// ---------------------------------------------------------------------------
-// Extraction steps
-// ---------------------------------------------------------------------------
 
 fn step_get_text(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
     match resolve_element(tab, locator) {
@@ -1069,7 +974,6 @@ fn step_extract_links(
             return StepResult::failure(idx, "Extract links: resolution failed", e);
         }
     } else {
-        // Clear resolved element so js_extract_links uses document scope
         let _ = tab.evaluate("window.__refact_resolved_el = null", false);
     }
     let effective_limit = limit.unwrap_or(50);
@@ -1201,10 +1105,6 @@ fn step_screenshot_element(tab: &Tab, idx: usize, locator: &BrowserLocator) -> S
     }
 }
 
-// ---------------------------------------------------------------------------
-// Evaluation steps
-// ---------------------------------------------------------------------------
-
 fn step_eval(tab: &Tab, idx: usize, expression: &str) -> StepResult {
     match tab.evaluate(expression, false) {
         Ok(remote) => {
@@ -1260,12 +1160,7 @@ fn step_styles(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Debugging & environment steps
-// ---------------------------------------------------------------------------
-
 fn step_tab_log(tab: &Tab, idx: usize) -> StepResult {
-    // Best-effort: return recent console output via JS
     let js = r#"(function() {
   if (!window.__refact_console_log) return JSON.stringify({ok: true, entries: []});
   return JSON.stringify({ok: true, entries: window.__refact_console_log.slice(-50)});
@@ -1306,11 +1201,6 @@ fn step_highlight_element(tab: &Tab, idx: usize, locator: &BrowserLocator) -> St
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fill JS generators (multi-strategy)
-// ---------------------------------------------------------------------------
-
-/// Choose fill strategies ordered by likelihood of success for the field kind.
 pub fn choose_fill_strategies(field_kind: &FieldKind) -> Vec<FillStrategy> {
     match field_kind {
         FieldKind::ContentEditable => vec![
@@ -1322,8 +1212,8 @@ pub fn choose_fill_strategies(field_kind: &FieldKind) -> Vec<FillStrategy> {
             FillStrategy::NativePrototypeSetter,
             FillStrategy::NativeTyping,
         ],
-        FieldKind::Select => vec![], // Use select_option
-        FieldKind::Checkbox | FieldKind::Radio => vec![], // Use check/uncheck
+        FieldKind::Select => vec![],
+        FieldKind::Checkbox | FieldKind::Radio => vec![],
         FieldKind::FileInput | FieldKind::HiddenInput => vec![],
         _ => vec![
             FillStrategy::DomValueSetter,
@@ -1334,7 +1224,6 @@ pub fn choose_fill_strategies(field_kind: &FieldKind) -> Vec<FillStrategy> {
     }
 }
 
-/// Generate JS for a specific fill strategy.
 fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> String {
     let text_lit = js_string_literal(text);
 
@@ -1460,7 +1349,6 @@ fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> S
     }
 }
 
-/// Generate JS to clear a field.
 fn generate_clear_js(field_kind: &FieldKind) -> String {
     match field_kind {
         FieldKind::ContentEditable => r#"(function() {
@@ -1486,7 +1374,6 @@ fn generate_clear_js(field_kind: &FieldKind) -> String {
     }
 }
 
-/// Verify the current field value matches the expected text.
 fn verify_field_value(tab: &Tab, expected: &str, field_kind: &FieldKind) -> Result<bool, String> {
     let js = match field_kind {
         FieldKind::ContentEditable => format!(
@@ -1498,7 +1385,6 @@ fn verify_field_value(tab: &Tab, expected: &str, field_kind: &FieldKind) -> Resu
 }})()"#,
         ),
         FieldKind::PasswordInput => {
-            // Can't read back password values reliably; check length instead
             format!(
                 r#"(function() {{
   var el = window.__refact_resolved_el;
@@ -1540,11 +1426,6 @@ fn verify_field_value(tab: &Tab, expected: &str, field_kind: &FieldKind) -> Resu
     }
 }
 
-// ---------------------------------------------------------------------------
-// Locator description (for human-readable messages)
-// ---------------------------------------------------------------------------
-
-/// Create a short human-readable description of a locator.
 pub fn describe_locator(locator: &BrowserLocator) -> String {
     match &locator.strategy {
         LocatorStrategy::Css { value } => format!("css={}", value),
@@ -1569,15 +1450,9 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- Fill strategy selection ----
 
     #[test]
     fn test_strategies_text_input() {
@@ -1643,8 +1518,6 @@ mod tests {
         assert_eq!(strategies.len(), 4);
     }
 
-    // ---- Fill JS generation ----
-
     #[test]
     fn test_generate_fill_dom_setter_contains_value_assignment() {
         let js = generate_fill_js(&FillStrategy::DomValueSetter, "hello", true);
@@ -1700,8 +1573,6 @@ mod tests {
         assert!(js.contains("it\\'s"));
     }
 
-    // ---- Clear JS generation ----
-
     #[test]
     fn test_generate_clear_input() {
         let js = generate_clear_js(&FieldKind::TextInput);
@@ -1716,8 +1587,6 @@ mod tests {
         assert!(js.contains("delete"));
         assert!(js.contains("innerText"));
     }
-
-    // ---- Locator description ----
 
     #[test]
     fn test_describe_locator_css() {
@@ -1805,8 +1674,6 @@ mod tests {
         assert_eq!(describe_locator(&loc), "xpath=//button");
     }
 
-    // ---- JS generation sanity checks ----
-
     #[test]
     fn test_fill_js_all_strategies_produce_iife() {
         let strategies = vec![
@@ -1837,17 +1704,13 @@ mod tests {
         }
     }
 
-    // ---- Select / Check JS ----
-
     #[test]
     fn test_select_option_js_contains_option_search() {
-        // Verify the pattern used in step_select_option
         let value = "Option A";
         let js_val = js_string_literal(value);
         assert_eq!(js_val, "'Option A'");
     }
 
-    // ---- Strategies cover all input types ----
 
     #[test]
     fn test_all_text_like_inputs_have_strategies() {

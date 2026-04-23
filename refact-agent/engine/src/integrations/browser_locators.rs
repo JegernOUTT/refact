@@ -1,21 +1,7 @@
-/// Element locator resolution for the unified browser automation system.
-///
-/// Converts `BrowserLocator` to either CSS selectors (for native find_element)
-/// or JavaScript code (for text/label/role/xpath strategies). Also provides
-/// element inspection, field kind detection, and JS helpers for interactions.
-
 use crate::integrations::browser_models::{
     BrowserLocator, ElementInfo, FieldKind, LocatorStrategy,
 };
 
-// ---------------------------------------------------------------------------
-// CSS selector conversion
-// ---------------------------------------------------------------------------
-
-/// Try to convert a locator to a plain CSS selector string.
-///
-/// Returns `None` for strategies that require JS evaluation:
-/// text, label, role-with-name, xpath.
 pub fn to_css_selector(locator: &BrowserLocator) -> Option<String> {
     let base = match &locator.strategy {
         LocatorStrategy::Css { value } => value.clone(),
@@ -25,7 +11,6 @@ pub fn to_css_selector(locator: &BrowserLocator) -> Option<String> {
         LocatorStrategy::Placeholder { value } => format!("[placeholder={}]", css_escape_attr_value(value)),
         LocatorStrategy::Autocomplete { value } => format!("[autocomplete={}]", css_escape_attr_value(value)),
         LocatorStrategy::Role { role, name: None } => format!("[role={}]", css_escape_attr_value(role)),
-        // These require JS evaluation:
         LocatorStrategy::Text { .. } => return None,
         LocatorStrategy::Label { .. } => return None,
         LocatorStrategy::Role { name: Some(_), .. } => return None,
@@ -39,14 +24,12 @@ pub fn to_css_selector(locator: &BrowserLocator) -> Option<String> {
     }
 }
 
-/// Escape a string for use as a CSS identifier (e.g., in `#id`).
 fn css_escape_ident(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 8);
     for (i, ch) in s.chars().enumerate() {
         if ch == '\0' {
             result.push_str("\\fffd ");
         } else if i == 0 && ch.is_ascii_digit() {
-            // Leading digit must be escaped in CSS identifiers
             result.push('\\');
             result.push(ch);
         } else if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
@@ -59,7 +42,6 @@ fn css_escape_ident(s: &str) -> String {
     result
 }
 
-/// Escape a string for use as a CSS attribute value, wrapped in quotes.
 fn css_escape_attr_value(s: &str) -> String {
     let escaped = s
         .replace('\\', "\\\\")
@@ -68,15 +50,7 @@ fn css_escape_attr_value(s: &str) -> String {
     format!("\"{}\"", escaped)
 }
 
-// ---------------------------------------------------------------------------
-// JavaScript generation for locator resolution
-// ---------------------------------------------------------------------------
 
-/// Generate JavaScript that finds element(s) matching the locator,
-/// stores the target element on `window.__refact_resolved_el`,
-/// and returns JSON with element info.
-///
-/// The returned JS is an IIFE that evaluates to a JSON string.
 pub fn generate_resolve_js(locator: &BrowserLocator) -> String {
     let find_code = generate_find_js(&locator.strategy);
     let scope_code = match &locator.within {
@@ -111,12 +85,6 @@ pub fn generate_resolve_js(locator: &BrowserLocator) -> String {
     )
 }
 
-/// Generate the JS fragment that sets up `scope` and populates `var elements = [...]`.
-///
-/// Unlike `generate_resolve_js()` this is NOT an IIFE — it's a raw code block
-/// intended to be embedded inside a caller-provided function body.
-/// Used by wait conditions that need to check element presence without
-/// the full inspect+resolve overhead.
 pub fn generate_find_fragment_js(locator: &BrowserLocator) -> String {
     let find_code = generate_find_js(&locator.strategy);
     let scope_code = match &locator.within {
@@ -137,7 +105,6 @@ pub fn generate_find_fragment_js(locator: &BrowserLocator) -> String {
     format!("{scope_code}\n  {find_code}\n  {nth_code}")
 }
 
-/// Generate the JS fragment that populates `var elements = [...]`.
 fn generate_find_js(strategy: &LocatorStrategy) -> String {
     match strategy {
         LocatorStrategy::Css { value } => {
@@ -189,7 +156,6 @@ fn generate_find_js(strategy: &LocatorStrategy) -> String {
             )
         }
         LocatorStrategy::Label { value } => {
-            // Find labels containing the text, then resolve their target elements
             format!(
                 "var labelText = {};\n\
                  var labels = Array.from(scope.querySelectorAll('label'));\n\
@@ -246,8 +212,6 @@ fn generate_find_js(strategy: &LocatorStrategy) -> String {
     }
 }
 
-/// JavaScript for element inspection. Must be injected once before resolve calls.
-/// Defines `window.__refact_inspect_element(el, count)`.
 pub const INSPECT_ELEMENT_JS: &str = r#"
 if (!window.__refact_inspect_element) {
   window.__refact_inspect_element = function(el, count) {
@@ -291,11 +255,7 @@ if (!window.__refact_inspect_element) {
 }
 "#;
 
-// ---------------------------------------------------------------------------
-// Element info parsing
-// ---------------------------------------------------------------------------
 
-/// Parse the JSON result from the resolve JS into an `ElementInfo`.
 pub fn parse_element_info(json_str: &str) -> Result<ElementInfo, String> {
     let value: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| format!("Invalid JSON from browser: {}", e))?;
@@ -307,12 +267,7 @@ pub fn parse_element_info(json_str: &str) -> Result<ElementInfo, String> {
     serde_json::from_value(value).map_err(|e| format!("Failed to parse ElementInfo: {}", e))
 }
 
-// ---------------------------------------------------------------------------
-// Field kind detection
-// ---------------------------------------------------------------------------
 
-/// Detect the field kind from raw element attributes.
-/// Used as a fallback when the JS-side detection is not available.
 #[allow(dead_code)]
 pub fn detect_field_kind(tag: &str, input_type: Option<&str>, content_editable: bool) -> FieldKind {
     let tag_lower = tag.to_lowercase();
@@ -343,11 +298,7 @@ pub fn detect_field_kind(tag: &str, input_type: Option<&str>, content_editable: 
     }
 }
 
-// ---------------------------------------------------------------------------
-// JS interaction helpers
-// ---------------------------------------------------------------------------
 
-/// Generate JS to click the previously resolved element.
 pub fn js_click_element() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -358,7 +309,6 @@ pub fn js_click_element() -> &'static str {
 })()"#
 }
 
-/// Generate JS to hover over the previously resolved element.
 pub fn js_hover_element() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -370,7 +320,6 @@ pub fn js_hover_element() -> &'static str {
 })()"#
 }
 
-/// Generate JS to focus the previously resolved element.
 pub fn js_focus_element() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -381,7 +330,6 @@ pub fn js_focus_element() -> &'static str {
 })()"#
 }
 
-/// Generate JS to blur (unfocus) the previously resolved element.
 pub fn js_blur_element() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -391,7 +339,6 @@ pub fn js_blur_element() -> &'static str {
 })()"#
 }
 
-/// Generate JS to scroll the previously resolved element into view.
 pub fn js_scroll_to_element() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -401,7 +348,6 @@ pub fn js_scroll_to_element() -> &'static str {
 })()"#
 }
 
-/// Generate JS to get the text content of the resolved element.
 pub fn js_get_text() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -410,7 +356,6 @@ pub fn js_get_text() -> &'static str {
 })()"#
 }
 
-/// Generate JS to get outer HTML of the resolved element (budget-limited).
 pub fn js_get_html() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -421,7 +366,6 @@ pub fn js_get_html() -> &'static str {
 })()"#
 }
 
-/// Generate JS to get a specific attribute of the resolved element.
 pub fn js_get_attribute(attribute: &str) -> String {
     format!(
         r#"(function() {{
@@ -434,7 +378,6 @@ pub fn js_get_attribute(attribute: &str) -> String {
     )
 }
 
-/// Generate JS to extract links from the page or a scope.
 pub fn js_extract_links(limit: usize) -> String {
     format!(
         r#"(function() {{
@@ -448,7 +391,6 @@ pub fn js_extract_links(limit: usize) -> String {
     )
 }
 
-/// Generate JS to extract a table into rows of cells.
 pub fn js_extract_table() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -465,7 +407,6 @@ pub fn js_extract_table() -> &'static str {
 })()"#
 }
 
-/// Generate JS to highlight an element with a red outline.
 pub fn js_highlight_element() -> &'static str {
     r#"(function() {
   var el = window.__refact_resolved_el;
@@ -477,11 +418,9 @@ pub fn js_highlight_element() -> &'static str {
 })()"#
 }
 
-/// Generate JS to dismiss common overlays (cookie banners, modals, etc.).
 pub fn js_dismiss_overlays() -> &'static str {
     r#"(function() {
   var dismissed = 0;
-  // Common cookie/consent button selectors
   var selectors = [
     '[id*="cookie"] button[id*="accept"]',
     '[id*="cookie"] button[id*="agree"]',
@@ -495,7 +434,6 @@ pub fn js_dismiss_overlays() -> &'static str {
     '.cc-btn.cc-dismiss',
     '[data-testid*="cookie"] button',
     '[data-testid*="accept"]',
-    // Generic close/dismiss
     'dialog[open] button[aria-label="Close"]',
     'dialog[open] button[aria-label="Dismiss"]',
     '[role="dialog"] button[aria-label="Close"]',
@@ -510,7 +448,6 @@ pub fn js_dismiss_overlays() -> &'static str {
       }
     } catch(e) {}
   });
-  // Try to remove fixed/sticky overlays that cover the viewport
   var overlays = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
   overlays.forEach(function(el) {
     var rect = el.getBoundingClientRect();
@@ -526,7 +463,6 @@ pub fn js_dismiss_overlays() -> &'static str {
 })()"#
 }
 
-/// Generate JS for checking the `wait_for_text` condition.
 pub fn js_check_text_present(text: &str) -> String {
     format!(
         r#"(function() {{
@@ -537,7 +473,6 @@ pub fn js_check_text_present(text: &str) -> String {
     )
 }
 
-/// Generate JS for checking if an element matching a CSS selector exists.
 pub fn js_check_selector_present(css: &str) -> String {
     format!(
         r#"(function() {{
@@ -547,7 +482,6 @@ pub fn js_check_selector_present(css: &str) -> String {
     )
 }
 
-/// Generate JS for checking if an element is hidden/removed.
 pub fn js_check_element_hidden(css: &str) -> String {
     format!(
         r#"(function() {{
@@ -560,12 +494,7 @@ pub fn js_check_element_hidden(css: &str) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Real-site reliability helpers
-// ---------------------------------------------------------------------------
 
-/// Generate JS to detect if the page appears to be blocked (403, captcha, bot-check).
-/// Returns `{blocked: bool, reason: string}`.
 #[allow(dead_code)]
 pub fn js_detect_blocked_page() -> &'static str {
     r#"(function() {
@@ -585,8 +514,6 @@ pub fn js_detect_blocked_page() -> &'static str {
 })()"#
 }
 
-/// Generate JS to detect CAPTCHA elements on the page.
-/// Returns `{captcha: bool, type: string}`.
 #[allow(dead_code)]
 pub fn js_detect_captcha() -> &'static str {
     r#"(function() {
@@ -600,9 +527,6 @@ pub fn js_detect_captcha() -> &'static str {
 })()"#
 }
 
-/// Generate JS to detect and extract the main search input on a page.
-/// Useful for Google, Bing, DuckDuckGo and similar search engines.
-/// Returns `{found: bool, selector: string, name: string}`.
 #[allow(dead_code)]
 pub fn js_find_search_input() -> &'static str {
     r#"(function() {
@@ -627,11 +551,7 @@ pub fn js_find_search_input() -> &'static str {
 })()"#
 }
 
-// ---------------------------------------------------------------------------
-// JS string escaping
-// ---------------------------------------------------------------------------
 
-/// Produce a JavaScript string literal (single-quoted) with proper escaping.
 pub fn js_string_literal(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 8);
     result.push('\'');
@@ -650,15 +570,11 @@ pub fn js_string_literal(s: &str) -> String {
     result
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ---- CSS selector conversion ----
 
     #[test]
     fn test_css_from_css_locator() {
@@ -761,7 +677,6 @@ mod tests {
         assert_eq!(css, "#search-form [name=\"q\"]");
     }
 
-    // ---- CSS escaping ----
 
     #[test]
     fn test_css_escape_ident_simple() {
@@ -788,7 +703,6 @@ mod tests {
         assert_eq!(css_escape_attr_value("it's \"here\""), "\"it's \\\"here\\\"\"");
     }
 
-    // ---- JS string literal ----
 
     #[test]
     fn test_js_string_literal_simple() {
@@ -817,7 +731,6 @@ mod tests {
         assert_eq!(lit, "'button[data-testid=\\'submit\\'], .form-submit'");
     }
 
-    // ---- JS generation ----
 
     #[test]
     fn test_generate_resolve_js_css() {
@@ -905,7 +818,6 @@ mod tests {
         assert!(js.contains("Search"));
     }
 
-    // ---- Element info parsing ----
 
     #[test]
     fn test_parse_element_info_success() {
@@ -941,7 +853,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ---- Field kind detection ----
 
     #[test]
     fn test_detect_field_kind_text_input() {
@@ -993,7 +904,6 @@ mod tests {
         assert_eq!(detect_field_kind("span", None, false), FieldKind::Unknown);
     }
 
-    // ---- JS interaction helpers ----
 
     #[test]
     fn test_js_click_element_valid_js() {
@@ -1038,7 +948,6 @@ mod tests {
         assert!(js.contains("href"));
     }
 
-    // ---- Real-site reliability helpers ----
 
     #[test]
     fn test_js_detect_blocked_page_valid_js() {
