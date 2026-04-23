@@ -1,4 +1,4 @@
-schema_version: 13
+schema_version: 14
 id: setup_subagents
 title: Setup Subagents
 description: Guided setup for project-specific subagents
@@ -32,6 +32,21 @@ prompt: |
   A great subagent owns a **narrow, well-defined responsibility** with an explicit tool allowlist,
   and returns structured, predictable output the caller can act on.
 
+  ## Subagent Reality in Refact
+
+  - Subagents live in `.refact/subagents/*.yaml`
+  - Prefer project-local `.refact/subagents/` over global defaults unless the user explicitly wants machine-wide behavior
+  - Use real existing examples before writing. Do **not** invent subagent fields from memory or from other tools' formats.
+  - For simple custom subagents, use `messages.system_prompt` and optionally `messages.user_template`
+  - For more advanced multi-phase patterns, inspect existing examples that use `prompts`, `gather_files`, or tool schemas before copying the pattern
+
+  Important schema reminders:
+  - use `tools:` — not `allowed_tools:`
+  - use `messages:` or `prompts:` — not a single top-level `prompt:` field
+  - if `expose_as_tool: true`, include a `tool:` block describing parameters and behavior
+
+  If you want a direct user-facing config subagent tool, start with a **lightweight helper** and inspect shipped examples first.
+
   ## When to create a subagent vs a skill
 
   | Use a **subagent** when | Use a **skill** when |
@@ -48,49 +63,105 @@ prompt: |
   - **Explicit success criteria**: the prompt defines what "done" looks like
   - **Explicit failure behavior**: what to report when blocked or when nothing is found
   - **Bounded context**: `max_steps` and context mode prevent runaway subchats
+  - **Routing-friendly description**: the description should tell the orchestrator exactly when to call it
+
+  Use a subagent when a side task would otherwise **flood the parent context** or needs its own focused tool budget.
 
   ## Workflow
 
   ### 1. Discover — find delegation bottlenecks
   - `cat()` AGENTS.md and any existing subagents in `.refact/subagents/`
+  - inspect shipped subagent examples before inventing new schema patterns
   - `search_trajectories()` — look for past sessions where the orchestrator spent many steps on a repetitive pattern (lots of search calls, repeated code analysis, same review checklist every PR)
+  - `knowledge()` — check whether repeated investigation or review patterns are already recorded
   - `ask_questions()` to ask: "What parts of agent sessions feel slow or repetitive?"
 
+  Before proposing a new subagent, check whether the same id already exists in project-local or user/global scope.
+
   ### 2. Research — find subagent patterns for this stack
-  - `web_search()` or `knowledge()` for examples of subagents for this tech stack
-  - Think about what the main agent mode delegates most: search, review, synthesis, test execution?
+  - `web_search()` only when the pattern is unfamiliar; prefer repo-local examples first
+  - Think about what the main agent mode delegates most: search, review, synthesis, focused comparison, impact analysis?
+  - If the job is really always-on guidance or reusable knowledge, recommend AGENTS or skills instead of a subagent
 
   ### 3. Propose — compact catalog with rationale
   For each candidate subagent, show before writing:
   - **id** and **title** (e.g., `code-reviewer`, `dep-checker`)
   - **description** — one line that tells the orchestrator when to call this subagent
   - **expose_as_tool** — true/false and why
+  - **has_code** — whether this is code-aware / code-oriented
+  - **tool schema** — if exposed as a tool, what arguments it accepts
   - **Tool allowlist** — list every tool with justification for each
   - **`max_steps`** — how many steps before the subagent should give up and report
-  - **Context mode** — what context it needs (workspace info, git info, etc.)
+  - **Subchat config** — context mode, model type, and why
   - **Expected output format** — what the subagent must return (markdown report, JSON, bullet list)
   - **Failure behavior** — what it says when blocked or empty-handed
+  - **Example invocation** — how the parent agent would call it
 
   Use `ask_questions()` to get approval before writing.
 
   ### 4. Write — create subagent config files
   Path: `.refact/subagents/<id>.yaml`
 
-  Key fields:
+  For simple custom subagents, choose the right pattern.
+
+  **Internal-only subagent:**
   ```yaml
+  schema_version: 2
   id: <subagent-id>
   title: <Human Readable Title>
   description: <one-line, used by orchestrator to decide when to call this>
-  expose_as_tool: true/false
-  tools:
-    - <only what's needed>
+  expose_as_tool: false
+  has_code: false
   subchat:
+    context_mode: bare
+    stateful: false
     max_steps: <N>
-  prompt: |
-    Your specific instructions...
-    Success criteria: ...
-    Failure behavior: ...
+    model_type: light
+  messages:
+    system_prompt: |
+      Your specific instructions...
+      Success criteria: ...
+      Failure behavior: ...
+  tools:
+    - <only what is needed>
   ```
+
+  **Exposed-as-tool subagent:**
+  ```yaml
+  schema_version: 2
+  id: <subagent-id>
+  title: <Human Readable Title>
+  description: <one-line, used by orchestrator to decide when to call this>
+  expose_as_tool: true
+  has_code: false
+  tool:
+    description: <required because expose_as_tool is true>
+    agentic: true
+    parameters:
+      - name: query
+        type: string
+        description: What to investigate
+    required:
+      - query
+  subchat:
+    context_mode: bare
+    stateful: false
+    max_steps: <N>
+    model_type: light
+  messages:
+    system_prompt: |
+      Your specific instructions...
+      Success criteria: ...
+      Failure behavior: ...
+    user_template: |
+      Investigate: {{query}}
+  tools:
+    - <only what is needed>
+  ```
+
+  Only add detailed subchat budgets such as `n_ctx`, `max_new_tokens`, or special reasoning settings when you have a clear reason or are intentionally mirroring a nearby built-in example.
+
+  If you need a more advanced multi-phase design, inspect existing built-in examples that use `prompts` and `gather_files` before writing.
 
   Never give a subagent edit or shell-like tools unless explicitly justified and approved.
   Never overwrite existing subagents without explicit user confirmation.
@@ -104,9 +175,12 @@ prompt: |
 
   - **No overlapping responsibilities**: two subagents should never do the same thing
   - **No write tools by default**: analysis/review agents use search + cat only
-  - **Explicit prompts**: each subagent's prompt must be self-contained — it won't inherit any other context
+  - **Explicit prompts**: write each subagent prompt to be self-contained; do not rely on incidental parent context
   - **Return format matters**: if the orchestrator needs structured output, say so explicitly in the prompt
   - **Cap max_steps conservatively**: a subagent that never terminates is worse than one that terminates early
+  - **Descriptions are routing keys**: write them so the parent agent knows exactly when to use the subagent
+  - **Prefer read-only tools**: editing, shell, or network-side-effect tools need explicit justification
+  - **Use the real schema**: do not invent `prompt:` or `allowed_tools:` fields
 
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
@@ -154,7 +228,7 @@ tool_confirm:
     - match: "get_trajectory_context"
       action: auto
     - match: "subagent"
-      action: auto
+      action: ask
     - match: "tasks_set"
       action: auto
     - match: "task_done"

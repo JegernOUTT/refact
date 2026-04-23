@@ -199,6 +199,7 @@ use crate::http::routers::v1::v1_browser::{
     handle_browser_status,
     handle_browser_annotate_start, handle_browser_annotate_result,
     handle_browser_annotate_clear,
+    handle_browser_action,
 };
 
 pub fn make_v1_router() -> Router {
@@ -435,6 +436,7 @@ pub fn make_v1_router() -> Router {
         .route("/browser/annotate/start", post(handle_browser_annotate_start))
         .route("/browser/annotate/result", post(handle_browser_annotate_result))
         .route("/browser/annotate/clear", post(handle_browser_annotate_clear))
+        .route("/browser/action", post(handle_browser_action))
         .route("/stats/llm/summary", get(handle_v1_stats_llm_summary))
         .route("/stats/llm/events", get(handle_v1_stats_llm_events))
         .route("/ext/registry", get(handle_v1_ext_registry))

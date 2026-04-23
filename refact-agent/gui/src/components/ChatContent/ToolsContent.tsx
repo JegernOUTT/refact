@@ -69,6 +69,7 @@ import {
   OpenAIRefusalTool,
   OpenAIMcpCallTool,
   OpenAIMcpListToolsTool,
+  CompressReportTool,
 } from "./ToolCard";
 
 const CC_TOOL_RENAMES: Partial<Record<string, string>> = {
@@ -944,6 +945,27 @@ function processToolCalls(
         );
     }
 
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+    );
+  }
+
+  if (
+    headName === "compress_chat_probe" ||
+    headName === "compress_chat_apply"
+  ) {
+    const elem = (
+      <CompressReportTool
+        key={`compress-tool-${processed.length}`}
+        toolCall={head}
+        toolType={headName}
+      />
+    );
     return processToolCalls(
       tail,
       toolResults,

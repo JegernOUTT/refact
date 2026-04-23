@@ -1,7 +1,8 @@
 import React, { useMemo } from "react";
 import { ReaderIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
-import { StreamingToolCard } from "./StreamingToolCard";
+import { ReportToolCard } from "./ReportToolCard";
+
 interface ResearchArgs {
   research_query?: string;
 }
@@ -23,10 +24,10 @@ export const ResearchTool: React.FC<ResearchToolProps> = ({ toolCall }) => {
   const summary = query ? `Research "${query}"` : "Research";
 
   return (
-    <StreamingToolCard
+    <ReportToolCard
       toolCall={toolCall}
       icon={<ReaderIcon />}
-      summary={summary}
+      defaultSummary={summary}
     />
   );
 };

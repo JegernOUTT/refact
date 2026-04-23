@@ -1,12 +1,18 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useState } from "react";
 import { HoverCard, Flex, Text, Badge } from "@radix-ui/themes";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  type ClaudeCodeUsageResponse,
   type ClaudeCodeUsageWindow,
+  type OpenAICodexUsageResponse,
   type OpenAICodexUsageWindow,
   type OpenAICodexRateLimit,
 } from "../../services/refact/providers";
+
+// Module-level cache: survives component unmounts (page navigation, chat switching)
+let lastKnownClaudeUsage: ClaudeCodeUsageResponse | undefined;
+let lastKnownCodexUsage: OpenAICodexUsageResponse | undefined;
 import styles from "./UsageCounter.module.css";
 
 const CircularUsage: React.FC<{
@@ -117,7 +123,9 @@ const CodexWindowRow: React.FC<{
   label: string;
   w: OpenAICodexUsageWindow;
   limitReached?: boolean;
-}> = ({ label, w, limitReached }) => (
+}> = ({ label, w, limitReached }) => {
+  const resetText = formatResetAt(w.reset_at);
+  return (
   <Flex direction="column" gap="1">
     <Flex justify="between" align="center">
       <Flex align="center" gap="1">
@@ -132,7 +140,7 @@ const CodexWindowRow: React.FC<{
       </Flex>
       <Text size="1" color="gray">
         {Math.round(Math.max(0, Math.min(w.used_percent, 100)))}% used
-        {formatResetAt(w.reset_at) ? ` · ${formatResetAt(w.reset_at)}` : ""}
+        {resetText ? ` · ${resetText}` : ""}
       </Text>
     </Flex>
     <div
@@ -160,7 +168,8 @@ const CodexWindowRow: React.FC<{
       />
     </div>
   </Flex>
-);
+  );
+};
 
 const RateLimitSection: React.FC<{
   rl: OpenAICodexRateLimit;
@@ -210,19 +219,32 @@ export const ProviderUsageIndicator: React.FC = () => {
     pollingInterval: 30_000,
   });
 
-  const lastClaudeRef = useRef(claudeUsage);
-  const lastCodexRef = useRef(codexUsage);
+  // Local render-trigger: module-level cache doesn't cause re-renders on its own
+  const [, forceUpdate] = useState(0);
+
+  const hasLiveClaudeData = !!(
+    claudeUsage?.data &&
+    (claudeUsage.data.five_hour ?? claudeUsage.data.seven_day)
+  );
+  const hasLiveCodexData = !!codexUsage?.data?.rate_limit;
 
   useEffect(() => {
-    if (claudeUsage !== undefined) lastClaudeRef.current = claudeUsage;
-  }, [claudeUsage]);
+    if (hasLiveClaudeData) {
+      lastKnownClaudeUsage = claudeUsage;
+      forceUpdate((n) => n + 1);
+    }
+  }, [hasLiveClaudeData, claudeUsage]);
 
   useEffect(() => {
-    if (codexUsage !== undefined) lastCodexRef.current = codexUsage;
-  }, [codexUsage]);
+    if (hasLiveCodexData) {
+      lastKnownCodexUsage = codexUsage;
+      forceUpdate((n) => n + 1);
+    }
+  }, [hasLiveCodexData, codexUsage]);
 
-  const stickyClaudeUsage = lastClaudeRef.current;
-  const stickyCodexUsage = lastCodexRef.current;
+  // Prefer live data; fall back to module-level cache (survives unmount/remount)
+  const stickyClaudeUsage = hasLiveClaudeData ? claudeUsage : lastKnownClaudeUsage;
+  const stickyCodexUsage = hasLiveCodexData ? codexUsage : lastKnownCodexUsage;
 
   const hasClaudeData = !!(
     stickyClaudeUsage?.data &&

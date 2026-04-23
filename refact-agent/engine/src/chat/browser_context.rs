@@ -92,8 +92,14 @@ fn format_action(action: &RecorderEvent) -> String {
             let label = if text.is_empty() { selector.clone() } else { format!("{} \"{}\"", selector, text) };
             format!("[{}] click → {} (x:{}, y:{})", format_timestamp(*timestamp), label, *x as i32, *y as i32)
         }
-        RecorderEvent::Input { selector, value, timestamp, .. } => {
-            format!("[{}] input → {} \"{}\"", format_timestamp(*timestamp), selector, value)
+        RecorderEvent::Input { selector, value, timestamp, tag, input_type, placeholder, .. } => {
+            let field_desc = match (tag.as_deref(), input_type.as_deref(), placeholder.as_deref()) {
+                (Some(t), Some(it), Some(ph)) => format!("<{}[type={}] placeholder=\"{}\">", t, it, ph),
+                (Some(t), Some(it), None) => format!("<{}[type={}]>", t, it),
+                (Some(t), None, Some(ph)) => format!("<{} placeholder=\"{}\">", t, ph),
+                _ => selector.clone(),
+            };
+            format!("[{}] input → {} \"{}\"", format_timestamp(*timestamp), field_desc, value)
         }
         RecorderEvent::Keypress { key, modifiers, timestamp } => {
             let mods = if modifiers.is_empty() { String::new() } else { format!("{}+", modifiers.join("+")) };
@@ -292,6 +298,8 @@ mod tests {
                     value: "user@example.com".to_string(),
                     masked: false,
                     timestamp: 45250000.0,
+                    tag: None, input_type: None, field_name: None,
+                    placeholder: None, aria_label: None, role: None,
                 },
             ],
             console: vec![
@@ -540,6 +548,8 @@ mod tests {
             value: large_text.clone(),
             masked: false,
             timestamp: i as f64 * 1000.0,
+            tag: None, input_type: None, field_name: None,
+            placeholder: None, aria_label: None, role: None,
         }).collect();
 
         let size = compute_context_size(&actions, &[], &[], &[]);

@@ -1,5 +1,7 @@
 import { describe, test, expect } from "vitest";
 import type {
+  BrowserActionRequest,
+  BrowserActionResponse,
   BrowserStartResponse,
   BrowserStopResponse,
   BrowserScreenshotResponse,
@@ -162,15 +164,19 @@ describe("Browser API contract tests", () => {
     const connected: BrowserStatusResponse = {
       runtime_id: "rt-1",
       connected: true,
+      active_tab: "tab-1",
       url: "https://example.com",
       title: "Example",
       tab_urls: ["https://example.com"],
+      tabs: [{ tab_id: "tab-1", url: "https://example.com", title: "Example" }],
       idle_seconds: 30,
       idle_timeout: 300,
     };
     expect(connected.runtime_id).toBe("rt-1");
     expect(connected.connected).toBe(true);
+    expect(connected.active_tab).toBe("tab-1");
     expect(connected.tab_urls).toHaveLength(1);
+    expect(connected.tabs).toHaveLength(1);
 
     const disconnected: BrowserStatusResponse = {
       runtime_id: null,
@@ -207,6 +213,53 @@ describe("Browser API contract tests", () => {
     expect(entry.source).toBe("user");
     expect(entry.type).toBe("click");
     expect(entry.summary).toBe("Clicked button");
+  });
+
+  test("BrowserActionRequest matches typed action endpoint", () => {
+    const request: BrowserActionRequest = {
+      chat_id: "chat-1",
+      session: "shared_default",
+      target: { type: "active" },
+      steps: [
+        { action: "navigate", url: "https://example.com" },
+        {
+          action: "fill",
+          locator: { by: "css", value: "input[name=q]" },
+          text: "refact browser",
+        },
+      ],
+    };
+    expect(request.chat_id).toBe("chat-1");
+    expect(request.steps).toHaveLength(2);
+    expect(request.target?.type).toBe("active");
+  });
+
+  test("BrowserActionResponse matches typed action endpoint", () => {
+    const response: BrowserActionResponse = {
+      ok: true,
+      steps: [
+        {
+          step_index: 0,
+          ok: true,
+          summary: "Navigated to https://example.com",
+          retries: 0,
+        },
+        {
+          step_index: 1,
+          ok: true,
+          summary: "Filled <input> with 14 chars",
+          field_kind: "text_input",
+          fill_strategy: "dom_value_setter",
+          verified: true,
+          retries: 1,
+        },
+      ],
+      url: "https://example.com",
+      title: "Example",
+    };
+    expect(response.ok).toBe(true);
+    expect(response.steps[1].fill_strategy).toBe("dom_value_setter");
+    expect(response.steps[1].verified).toBe(true);
   });
 
   test("BrowserFrame diff_boxes use width/height", () => {

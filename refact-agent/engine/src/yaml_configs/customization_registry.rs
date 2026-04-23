@@ -534,6 +534,39 @@ pub fn map_legacy_mode_to_id(mode_str: &str) -> &str {
 mod tests {
     use super::*;
 
+    fn runtime_required_subagent_ids() -> Vec<&'static str> {
+        vec![
+            "subagent",
+            "subagent_with_editing",
+            "code_review",
+            "code_review_gather_files",
+            "strategic_planning",
+            "strategic_planning_gather_files",
+            "deep_research",
+            "commit_message",
+            "title_generation",
+            "kg_enrich",
+            "kg_deprecate",
+            "code_edit",
+            "compress_trajectory",
+            "follow_up",
+            "mode_transition",
+            "memo_extraction",
+        ]
+    }
+
+    fn read_default_mode_file(filename: &str) -> String {
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("yaml_configs")
+                .join("defaults")
+                .join("modes")
+                .join(filename),
+        )
+        .unwrap_or_default()
+    }
+
     #[test]
     fn test_model_matches_pattern_exact() {
         assert!(model_matches_pattern("gpt-4o", "gpt-4o"));
@@ -627,28 +660,8 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_required_subagents() {
+    fn test_registry_has_runtime_required_subagents() {
         use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
-
-        let required_subagents = vec![
-            "subagent",
-            "subagent_with_editing",
-            "code_review",
-            "code_review_gather_files",
-            "strategic_planning",
-            "strategic_planning_gather_files",
-            "deep_research",
-            "commit_message",
-            "title_generation",
-            "kg_enrich",
-            "kg_deprecate",
-            "code_edit",
-            "compress_trajectory",
-            "follow_up",
-            "http_subchat",
-            "http_subchat_single",
-            "memo_extraction",
-        ];
 
         let temp_dir = tempfile::tempdir().unwrap();
         let config_dir = temp_dir.path();
@@ -658,9 +671,9 @@ mod tests {
             let _ = global_configs_try_create_all(config_dir).await;
             let registry = load_registry_from_dir(config_dir).await;
 
-            for id in &required_subagents {
+            for id in runtime_required_subagent_ids() {
                 assert!(
-                    registry.subagents.contains_key(*id),
+                    registry.subagents.contains_key(id),
                     "Missing required subagent: {}. Available: {:?}",
                     id,
                     registry.subagents.keys().collect::<Vec<_>>()
@@ -670,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_subagents_have_valid_subchat_params() {
+    fn test_registry_subagents_have_valid_optional_subchat_params() {
         use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -682,16 +695,16 @@ mod tests {
             let registry = load_registry_from_dir(config_dir).await;
 
             for (id, config) in &registry.subagents {
-                assert!(
-                    config.subchat.n_ctx.unwrap_or(0) > 0,
-                    "Subagent '{}' has invalid n_ctx",
-                    id
-                );
-                assert!(
-                    config.subchat.max_new_tokens.unwrap_or(0) > 0,
-                    "Subagent '{}' has invalid max_new_tokens",
-                    id
-                );
+                if let Some(n_ctx) = config.subchat.n_ctx {
+                    assert!(n_ctx > 0, "Subagent '{}' has invalid n_ctx", id);
+                }
+                if let Some(max_new_tokens) = config.subchat.max_new_tokens {
+                    assert!(
+                        max_new_tokens > 0,
+                        "Subagent '{}' has invalid max_new_tokens",
+                        id
+                    );
+                }
                 if let Some(ref model_type) = config.subchat.model_type {
                     let valid = model_type.eq_ignore_ascii_case("light")
                         || model_type.eq_ignore_ascii_case("default")
@@ -715,6 +728,72 @@ mod tests {
                     );
                 }
             }
+        });
+    }
+
+    #[test]
+    fn test_setup_mode_stays_read_only_by_default() {
+        let content = read_default_mode_file("setup.yaml");
+
+        assert!(content.contains("allow_integrations: false"));
+        assert!(content.contains("allow_mcp: false"));
+        assert!(content.contains("allow_subagents: false"));
+        assert!(!content.contains("\n  - rm\n"));
+        assert!(!content.contains("\n  - mv\n"));
+    }
+
+    #[test]
+    fn test_setup_mcp_prompt_prefers_safe_examples() {
+        let content = read_default_mode_file("setup_mcp.yaml");
+
+        assert!(content.contains("HTTP over deprecated SSE") || content.contains("prefer HTTP over deprecated SSE"));
+        assert!(!content.contains("@latest"));
+        assert!(content.contains("@modelcontextprotocol/server-github@<version>"));
+    }
+
+    #[test]
+    fn test_setup_skills_prompt_documents_supported_skill_fields() {
+        let content = read_default_mode_file("setup_skills.yaml");
+
+        for key in [
+            "argument-hint",
+            "allowed-tools",
+            "user-invocable",
+            "disable-model-invocation",
+            "@include <relative-file>",
+        ] {
+            assert!(content.contains(key), "setup_skills.yaml should mention '{}': {}", key, content);
+        }
+    }
+
+    #[test]
+    fn test_registry_has_no_mode_config_errors() {
+        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = global_configs_try_create_all(config_dir).await;
+            let registry = load_registry_from_dir(config_dir).await;
+
+            let mode_errors: Vec<_> = registry
+                .errors
+                .iter()
+                .filter(|e| {
+                    Path::new(&e.file_path)
+                        .components()
+                        .any(|c| c == std::path::Component::Normal("modes".as_ref()))
+                })
+                .map(|e| format!("{}: {}", e.file_path, e.error))
+                .collect();
+
+            assert!(
+                mode_errors.is_empty(),
+                "Default mode configs should parse without errors. Found: {:?}",
+                mode_errors
+            );
         });
     }
 }

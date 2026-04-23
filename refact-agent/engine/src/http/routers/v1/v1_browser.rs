@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use base64::Engine;
 
-use crate::chat::types::{ChatEvent, TimelineEntry};
+use crate::chat::types::{BrowserTabInfo, ChatEvent, TimelineEntry};
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::integrations::browser_runtime::{
@@ -14,6 +14,8 @@ use crate::integrations::browser_runtime::{
     register_browser_runtime, remove_browser_runtime, find_runtime_by_chat_id, setup_recording_for_runtime,
 };
 use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry, NetworkEntry};
+use crate::integrations::browser_models::BrowserActionRequest;
+use crate::integrations::browser_controller;
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> {
     Response::builder()
@@ -105,7 +107,80 @@ pub async fn handle_browser_start(
         ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
     })?;
 
-    if let Some((rid, _)) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await {
+    if let Some((rid, runtime_arc)) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await {
+        let (is_headless, profile_dir, chrome_path, window_bounds, idle_timeout, mask_passwords) = {
+            let rt = runtime_arc.lock().await;
+            (
+                rt.headless,
+                rt.profile_dir.clone(),
+                rt.chrome_path.clone(),
+                rt.window_bounds.clone(),
+                rt.idle_timeout,
+                rt.mask_passwords(),
+            )
+        };
+        if is_headless {
+            drop(runtime_arc);
+            let removed = remove_browser_runtime(gcx.clone(), &rid).await;
+            drop(removed);
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+            let runtime = BrowserRuntime::launch(
+                profile_dir,
+                window_bounds,
+                chrome_path,
+                Some(idle_timeout),
+                mask_passwords,
+                false,
+            ).map_err(|e| {
+                ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to relaunch browser in visible mode: {}", e))
+            })?;
+
+            let mut rt = runtime;
+            rt.reattach(&post.chat_id);
+            let runtime_id = register_browser_runtime(gcx.clone(), rt).await;
+
+            if let Some(runtime_arc) = gcx.read().await.browser_runtimes.get(&runtime_id).cloned() {
+                let mut rt = runtime_arc.lock().await;
+                if let Err(e) = setup_recording_for_runtime(&mut rt) {
+                    tracing::warn!("Browser recording setup failed after headless→headful relaunch (non-fatal): {}", e);
+                }
+                rt.frame_emitter_active = true;
+            }
+
+            tokio::spawn(browser_frame_emission_task(
+                gcx.clone(),
+                post.chat_id.clone(),
+                runtime_id.clone(),
+            ));
+
+            return Ok(json_response(StatusCode::OK, serde_json::json!({
+                "runtime_id": runtime_id,
+                "status": "started"
+            })));
+        }
+
+        let should_spawn_emitter = {
+            let mut rt = runtime_arc.lock().await;
+            if rt.recording_tab_target_id.is_none() {
+                if let Err(e) = setup_recording_for_runtime(&mut rt) {
+                    tracing::warn!("Browser recording setup on attach failed (non-fatal): {}", e);
+                }
+            }
+            if !rt.frame_emitter_active {
+                rt.frame_emitter_active = true;
+                true
+            } else {
+                false
+            }
+        };
+        if should_spawn_emitter {
+            tokio::spawn(browser_frame_emission_task(
+                gcx.clone(),
+                post.chat_id.clone(),
+                rid.clone(),
+            ));
+        }
         return Ok(json_response(StatusCode::OK, serde_json::json!({
             "runtime_id": rid,
             "status": "already_running"
@@ -121,6 +196,7 @@ pub async fn handle_browser_start(
         None,
         None,
         true,
+        false,
     ).map_err(|e| {
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to launch browser: {}", e))
     })?;
@@ -134,6 +210,7 @@ pub async fn handle_browser_start(
         if let Err(e) = setup_recording_for_runtime(&mut rt) {
             tracing::warn!("Browser recording setup failed (non-fatal): {}", e);
         }
+        rt.frame_emitter_active = true;
     }
 
     tokio::spawn(browser_frame_emission_task(
@@ -162,9 +239,6 @@ pub async fn handle_browser_stop(
 
     remove_browser_runtime(gcx.clone(), &rid).await;
 
-    // Give the frame emission task time to notice the runtime is gone and release its Arc,
-    // so Chrome fully exits before the caller can start a new session with the same profile dir.
-    // Task polls every 500ms; allow up to ~800ms for in-progress screenshot + sleep + exit.
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
     Ok(json_response(StatusCode::OK, serde_json::json!({
@@ -852,28 +926,52 @@ pub async fn handle_browser_eval(
         ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
     })?;
 
-    let rt = runtime_arc.lock().await;
-
-    let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
-    })?;
-
-    let result = tab.evaluate(&post.expression, false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Eval failed: {}", e))
-    })?;
-
-    let result_str = match result.value {
-        Some(val) => {
-            if let Some(s) = val.as_str() {
-                s.to_string()
-            } else {
-                serde_json::to_string(&val).unwrap_or_default()
-            }
-        }
-        None => "undefined".to_string(),
+    let tab = {
+        let rt = runtime_arc.lock().await;
+        rt.get_active_tab().ok_or_else(|| {
+            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        })?
     };
 
+    let steps = vec![crate::integrations::browser_models::BrowserStep::Eval {
+        expression: post.expression.clone(),
+    }];
+    let report = tokio::task::block_in_place(|| browser_controller::execute_steps(&*tab, &steps));
+
+    // Push agent timeline entry
+    {
+        let mut rt = runtime_arc.lock().await;
+        rt.touch();
+        for sr in &report.steps {
+            let action_type = if sr.ok { "eval" } else { "error" };
+            rt.push_agent_action(action_type, &sr.summary);
+        }
+    }
+
+    let first_step = report.steps.first();
+    if !report.ok {
+        let error_msg = first_step
+            .and_then(|sr| sr.error.as_ref())
+            .cloned()
+            .unwrap_or_else(|| "Eval failed".to_string());
+        return Ok(json_response(StatusCode::OK, serde_json::json!({
+            "ok": false,
+            "error": error_msg,
+            "result": serde_json::Value::Null,
+        })));
+    }
+
+    let result_str = first_step
+        .and_then(|sr| sr.data.as_ref())
+        .and_then(|d| d.get("value"))
+        .map(|v| {
+            if let Some(s) = v.as_str() { s.to_string() }
+            else { serde_json::to_string(v).unwrap_or_default() }
+        })
+        .unwrap_or_else(|| "undefined".to_string());
+
     Ok(json_response(StatusCode::OK, serde_json::json!({
+        "ok": true,
         "result": result_str
     })))
 }
@@ -897,17 +995,19 @@ pub async fn handle_browser_inject_css(
     })?;
 
     let style_id = post.id.unwrap_or_else(|| format!("refact-css-{}", uuid::Uuid::new_v4()));
+    let id_json = serde_json::to_string(&style_id).unwrap_or_else(|_| "\"\"".to_string());
     let css_json = serde_json::to_string(&post.css).unwrap_or_else(|_| "\"\"".to_string());
     let js = format!(
         r#"(function() {{
-            var existing = document.getElementById('{id}');
+            var id = {id};
+            var existing = document.getElementById(id);
             if (existing) existing.remove();
             var style = document.createElement('style');
-            style.id = '{id}';
+            style.id = id;
             style.textContent = {css};
             document.head.appendChild(style);
         }})()"#,
-        id = style_id,
+        id = id_json,
         css = css_json,
     );
 
@@ -938,9 +1038,10 @@ pub async fn handle_browser_remove_css(
         ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
     })?;
 
+    let id_json = serde_json::to_string(&post.style_id).unwrap_or_else(|_| "\"\"".to_string());
     let js = format!(
-        r#"(function() {{ var el = document.getElementById('{}'); if (el) el.remove(); }})()"#,
-        post.style_id
+        r#"(function() {{ var el = document.getElementById({id}); if (el) el.remove(); }})()"#,
+        id = id_json,
     );
 
     tab.evaluate(&js, false).map_err(|e| {
@@ -964,26 +1065,49 @@ pub async fn handle_browser_dom_snapshot(
         ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
     })?;
 
-    let rt = runtime_arc.lock().await;
-
-    let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
-    })?;
-
-    let escaped_selector = post.selector.replace('\\', "\\\\").replace('\'', "\\'");
-    let js = format!(
-        "(function() {{ var el = document.querySelector('{}'); return el ? el.outerHTML : null; }})()",
-        escaped_selector
-    );
-
-    let result = tab.evaluate(&js, false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("DOM query failed: {}", e))
-    })?;
-
-    let html = match result.value {
-        Some(val) => val.as_str().unwrap_or("").to_string(),
-        None => String::new(),
+    let tab = {
+        let rt = runtime_arc.lock().await;
+        rt.get_active_tab().ok_or_else(|| {
+            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        })?
     };
+
+    let steps = vec![crate::integrations::browser_models::BrowserStep::DomSnapshot {
+        selector: post.selector.clone(),
+        max_chars: post.max_chars,
+    }];
+    let report = tokio::task::block_in_place(|| browser_controller::execute_steps(&*tab, &steps));
+
+    // Push agent timeline entry
+    {
+        let mut rt = runtime_arc.lock().await;
+        rt.touch();
+        for sr in &report.steps {
+            let action_type = if sr.ok { "dom_snapshot" } else { "error" };
+            rt.push_agent_action(action_type, &sr.summary);
+        }
+    }
+
+    let first_step = report.steps.first();
+    if !report.ok {
+        let error_msg = first_step
+            .and_then(|sr| sr.error.as_ref())
+            .cloned()
+            .unwrap_or_else(|| "DOM snapshot failed".to_string());
+        return Ok(json_response(StatusCode::OK, serde_json::json!({
+            "ok": false,
+            "error": error_msg,
+            "html": "",
+            "truncated": false,
+        })));
+    }
+
+    let html = first_step
+        .and_then(|sr| sr.data.as_ref())
+        .and_then(|d| d.get("html"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let max_chars = post.max_chars.unwrap_or(50000);
     let char_count = html.chars().count();
@@ -991,6 +1115,7 @@ pub async fn handle_browser_dom_snapshot(
     let html_out: String = if truncated { html.chars().take(max_chars).collect() } else { html };
 
     Ok(json_response(StatusCode::OK, serde_json::json!({
+        "ok": true,
         "html": html_out,
         "truncated": truncated
     })))
@@ -1171,9 +1296,8 @@ pub async fn handle_browser_status(
     match find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await {
         Some((rid, runtime_arc)) => {
             let rt = runtime_arc.lock().await;
-            let tab_urls: Vec<String> = rt.browser.get_tabs().lock()
-                .map(|tabs| tabs.iter().map(|t| t.get_url()).collect())
-                .unwrap_or_default();
+            let tab_infos = rt.list_tab_infos();
+            let tab_urls: Vec<String> = tab_infos.iter().map(|t| t.url.clone()).collect();
             let (url, title) = match rt.get_active_tab() {
                 Some(tab) => (tab.get_url(), tab.get_title().unwrap_or_default()),
                 None => (String::new(), String::new()),
@@ -1182,9 +1306,15 @@ pub async fn handle_browser_status(
             Ok(json_response(StatusCode::OK, serde_json::json!({
                 "runtime_id": rid,
                 "connected": rt.is_connected,
+                "active_tab": rt.active_tab_target_id().map(|s| s.to_string()),
                 "url": url,
                 "title": title,
                 "tab_urls": tab_urls,
+                "tabs": tab_infos.iter().map(|t| serde_json::json!({
+                    "tab_id": t.tab_id,
+                    "url": t.url,
+                    "title": t.title,
+                })).collect::<Vec<_>>(),
                 "idle_seconds": rt.last_activity.elapsed().as_secs(),
                 "idle_timeout": rt.idle_timeout.as_secs()
             })))
@@ -1196,6 +1326,32 @@ pub async fn handle_browser_status(
             })))
         }
     }
+}
+
+pub async fn handle_browser_action(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    #[derive(Deserialize)]
+    struct ActionBody {
+        chat_id: String,
+        #[serde(flatten)]
+        request: BrowserActionRequest,
+    }
+
+    let post: ActionBody = serde_json::from_slice(&body_bytes).map_err(|e| {
+        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+    })?;
+
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
+        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
+    })?;
+    let report = browser_controller::execute_request_with_runtime(runtime_arc, post.request)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+
+    let report_json = serde_json::to_value(&report).unwrap_or_default();
+    Ok(json_response(StatusCode::OK, report_json))
 }
 
 fn format_ts(ts_ms: f64) -> String {
@@ -1297,11 +1453,11 @@ async fn browser_frame_emission_task(
     runtime_id: String,
 ) {
     let sessions = gcx.read().await.chat_sessions.clone();
+    let mut last_status_json: Option<String> = None;
 
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // Exit if the runtime has been removed
         let runtime_arc = {
             let gcx_locked = gcx.read().await;
             gcx_locked.browser_runtimes.get(&runtime_id).cloned()
@@ -1311,13 +1467,23 @@ async fn browser_frame_emission_task(
             None => break,
         };
 
-        // Drain raw recorder/console/network events into typed buffers, collect timeline + toolbar
         let (toolbar_actions, timeline_entries, actions_len, console_len, network_len, mutation_len) = {
             let mut rt = runtime_arc.lock().await;
             rt.drain_raw_events();
             let toolbar_actions = rt.drain_toolbar_actions();
             let (new_actions, new_console, new_network) = rt.flush_timeline_events();
-            let timeline_entries = recorder_events_to_timeline(&new_actions, &new_console, &new_network);
+            let agent_actions = rt.drain_agent_actions();
+            let mut timeline_entries = recorder_events_to_timeline(&new_actions, &new_console, &new_network);
+            for aa in &agent_actions {
+                timeline_entries.push(TimelineEntry {
+                    timestamp: format_ts(aa.timestamp_ms),
+                    source: "agent".to_string(),
+                    entry_type: aa.action_type.clone(),
+                    summary: aa.summary.clone(),
+                    details: None,
+                });
+            }
+            timeline_entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
             (
                 toolbar_actions,
                 timeline_entries,
@@ -1328,7 +1494,6 @@ async fn browser_frame_emission_task(
             )
         };
 
-        // Ensure scripts/bindings stay installed after user navigations.
         let (tab_for_injection, mask_passwords, raw_events_buf) = {
             let rt = runtime_arc.lock().await;
             (
@@ -1341,26 +1506,23 @@ async fn browser_frame_emission_task(
             ensure_injection_into_tab(&tab, mask_passwords, raw_events_buf);
         }
 
-        // Close extra tabs to enforce single-tab experience.
-        // Chrome may open NTP asynchronously after Browser::new() returns,
-        // and the close loop in setup_recording_for_runtime can miss it.
-        // This periodic cleanup ensures any late-arriving tabs get closed.
         {
             let rt = runtime_arc.lock().await;
-            if let Some(ref recording_id) = rt.recording_tab_target_id {
-                let all_tabs: Vec<Arc<headless_chrome::Tab>> = rt.browser.get_tabs()
-                    .lock()
-                    .map(|tabs| tabs.iter().cloned().collect())
-                    .unwrap_or_default();
-                for tab in all_tabs {
-                    if tab.get_target_id() != recording_id {
+            let all_tabs: Vec<Arc<headless_chrome::Tab>> = rt.browser.get_tabs()
+                .lock()
+                .map(|tabs| tabs.iter().cloned().collect())
+                .unwrap_or_default();
+            for tab in all_tabs {
+                let url = tab.get_url();
+                if url.starts_with("chrome://") || url == "about:blank" {
+                    let is_active = rt.active_tab_target_id().map(|id| id == tab.get_target_id()).unwrap_or(false);
+                    if !is_active && rt.recording_tab_target_id.as_deref() != Some(tab.get_target_id()) {
                         let _ = tab.close(false);
                     }
                 }
             }
         }
 
-        // Best-effort: update in-page toolbar counters if overlay exists.
         let tab_for_counts = {
             let rt = runtime_arc.lock().await;
             rt.get_active_tab()
@@ -1373,7 +1535,6 @@ async fn browser_frame_emission_task(
             let _ = tab.evaluate(&js, false);
         }
 
-        // Emit toolbar actions and timeline events
         if !toolbar_actions.is_empty() || !timeline_entries.is_empty() {
             let session_arc = {
                 let sessions_locked = sessions.read().await;
@@ -1390,7 +1551,46 @@ async fn browser_frame_emission_task(
             }
         }
 
-        // Take a screenshot (release the runtime lock first)
+        let status_event = {
+            let rt = runtime_arc.lock().await;
+            let tab_infos = rt
+                .list_tab_infos()
+                .into_iter()
+                .map(|t| BrowserTabInfo {
+                    tab_id: t.tab_id,
+                    url: t.url,
+                    title: t.title,
+                })
+                .collect::<Vec<_>>();
+            let (url, title) = match rt.get_active_tab() {
+                Some(tab) => (
+                    Some(tab.get_url()).filter(|s| !s.is_empty()),
+                    Some(tab.get_title().unwrap_or_default()).filter(|s| !s.is_empty()),
+                ),
+                None => (None, None),
+            };
+            ChatEvent::BrowserStatus {
+                runtime_id: runtime_id.clone(),
+                connected: rt.is_connected,
+                active_tab: rt.active_tab_target_id().map(|s| s.to_string()),
+                url,
+                title,
+                tabs: tab_infos,
+            }
+        };
+        let status_json = serde_json::to_string(&status_event).ok();
+        if status_json != last_status_json {
+            last_status_json = status_json;
+            let session_arc = {
+                let sessions_locked = sessions.read().await;
+                sessions_locked.get(&chat_id).cloned()
+            };
+            if let Some(session_arc) = session_arc {
+                let mut session = session_arc.lock().await;
+                session.emit(status_event);
+            }
+        }
+
         let tab = {
             let rt = runtime_arc.lock().await;
             rt.get_active_tab()
@@ -1421,7 +1621,6 @@ async fn browser_frame_emission_task(
 
         let new_hash = compute_frame_hash(&raw_data);
 
-        // Only emit if the frame actually changed (with rate limiting and hash threshold)
         {
             let rt = runtime_arc.lock().await;
             if !rt.should_emit_frame(new_hash) {
@@ -1461,6 +1660,11 @@ async fn browser_frame_emission_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::Extension;
+    use hyper::body::to_bytes;
+    use tower::ServiceExt;
 
     #[test]
     fn test_handoff_body_deserialize() {
@@ -1516,5 +1720,61 @@ mod tests {
         img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg).unwrap();
         let result = resize_screenshot(&buf, 800, "image/jpeg").unwrap();
         assert!(!result.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn test_browser_action_route_rejects_invalid_json() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let router = crate::http::routers::make_refact_http_server().layer(Extension(gcx));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/browser/action")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{not valid json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let detail = payload["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("JSON problem"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn test_browser_action_route_returns_not_found_without_runtime() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let router = crate::http::routers::make_refact_http_server().layer(Extension(gcx));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/browser/action")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "chat_id": "missing-chat",
+                            "steps": [{"action": "screenshot"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let detail = payload["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("No browser runtime for chat_id=missing-chat"));
     }
 }

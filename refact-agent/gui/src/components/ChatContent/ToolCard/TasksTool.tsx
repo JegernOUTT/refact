@@ -62,7 +62,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
   const tasks = useMemo((): Task[] => {
     try {
       const args = JSON.parse(toolCall.function.arguments) as TasksSetArgs;
-      return args.tasks ?? [];
+      return Array.isArray(args.tasks) ? args.tasks : [];
     } catch {
       return [];
     }

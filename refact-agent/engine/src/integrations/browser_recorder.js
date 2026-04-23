@@ -5,12 +5,16 @@
 
     var MASK_PASSWORDS = __REFACT_MASK_PASSWORDS__;
 
+    function cssEscape(str) {
+        return str.replace(/[\\"']/g, '\\$&').replace(/[\x00-\x1f]/g, '');
+    }
+
     function getSelector(el) {
         if (!el || !el.tagName) return '';
-        if (el.id) return '#' + el.id;
-        if (el.name) return el.tagName.toLowerCase() + '[name="' + el.name + '"]';
+        if (el.id) return '#' + cssEscape(el.id);
+        if (el.name) return el.tagName.toLowerCase() + '[name="' + cssEscape(el.name) + '"]';
         if (el.className && typeof el.className === 'string') {
-            var cls = el.className.trim().split(/\s+/).slice(0, 2).join('.');
+            var cls = el.className.trim().split(/\s+/).slice(0, 2).map(cssEscape).join('.');
             if (cls) return el.tagName.toLowerCase() + '.' + cls;
         }
         return el.tagName.toLowerCase();
@@ -56,13 +60,22 @@
     document.addEventListener('input', function(e) {
         var el = e.target;
         var masked = MASK_PASSWORDS && isPasswordField(el);
-        send({
+        var data = {
             type: 'input',
             selector: getSelector(el),
             value: masked ? '*'.repeat((el.value || '').length) : (el.value || ''),
             masked: masked,
             timestamp: getTimestamp()
-        });
+        };
+        if (el.tagName) data.tag = el.tagName.toLowerCase();
+        if (el.type) data.input_type = el.type;
+        if (el.name) data.field_name = el.name;
+        if (el.placeholder) data.placeholder = el.placeholder;
+        var ariaLabel = el.getAttribute && el.getAttribute('aria-label');
+        if (ariaLabel) data.aria_label = ariaLabel;
+        var role = el.getAttribute && el.getAttribute('role');
+        if (role) data.role = role;
+        send(data);
     }, true);
 
     document.addEventListener('keydown', function(e) {

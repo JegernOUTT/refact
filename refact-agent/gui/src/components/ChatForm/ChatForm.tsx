@@ -434,34 +434,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [disableMicrophone]);
 
-  if (globalError) {
-    return (
-      <Flex direction="column" mt="2" gap="2">
-        <ErrorCallout onClick={onClearError} timeout={null}>
-          {globalError}
-        </ErrorCallout>
-      </Flex>
-    );
-  }
-
-  if (chatError) {
-    return (
-      <Flex direction="column" mt="2" gap="2">
-        <ErrorCallout onClick={onClearError} timeout={null}>
-          {chatError}
-        </ErrorCallout>
-      </Flex>
-    );
-  }
-
-  if (information) {
-    return (
-      <InformationCallout mt="2" onClick={onClearInformation} timeout={2000}>
-        {information}
-      </InformationCallout>
-    );
-  }
-
   if (pauseReasonsWithPause.pause) {
     return (
       <ToolConfirmation pauseReasons={pauseReasonsWithPause.pause_reasons} />
@@ -470,6 +442,25 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   return (
     <Box style={{ flexShrink: 0, position: "relative" }}>
+      {globalError && (
+        <Flex direction="column" mt="2" mb="2" gap="2">
+          <ErrorCallout onClick={onClearError} timeout={null}>
+            {globalError}
+          </ErrorCallout>
+        </Flex>
+      )}
+      {!globalError && chatError && (
+        <Flex direction="column" mt="2" mb="2" gap="2">
+          <ErrorCallout onClick={onClearError} timeout={null}>
+            {chatError}
+          </ErrorCallout>
+        </Flex>
+      )}
+      {!globalError && !chatError && information && (
+        <InformationCallout mt="2" mb="2" onClick={onClearInformation} timeout={2000}>
+          {information}
+        </InformationCallout>
+      )}
       {globalErrorType === "balance" && (
         <BallanceCallOut
           mt="0"

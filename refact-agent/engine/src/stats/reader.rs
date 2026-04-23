@@ -14,6 +14,27 @@ pub fn read_stats_events_filtered(
     from: Option<&str>,
     to: Option<&str>,
 ) -> Vec<LlmCallEvent> {
+    read_stats_events_from_dirs(&[stats_dir.to_path_buf()], from, to)
+}
+
+pub fn read_stats_events_from_dirs(
+    stats_dirs: &[PathBuf],
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Vec<LlmCallEvent> {
+    let mut all_events = Vec::new();
+    for stats_dir in stats_dirs {
+        all_events.extend(read_stats_events_from_single_dir(stats_dir, from, to));
+    }
+    all_events.sort_by(|a, b| a.ts_start.cmp(&b.ts_start).then_with(|| a.id.cmp(&b.id)));
+    all_events
+}
+
+fn read_stats_events_from_single_dir(
+    stats_dir: &Path,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Vec<LlmCallEvent> {
     let mut files: Vec<PathBuf> = match std::fs::read_dir(stats_dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
@@ -622,6 +643,40 @@ mod tests {
         writeln!(file, "{}", line).unwrap();
         let events = read_stats_events_filtered(dir.path(), None, Some("2026-02-05"));
         assert_eq!(events.len(), 1, "event at 23:59:59 on to-date should be included");
+    }
+
+    #[test]
+    fn test_read_stats_events_from_dirs_merges_workspace_and_config_dirs() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+
+        let workspace_file = workspace_dir.path().join("00000001.jsonl");
+        let config_file = config_dir.path().join("00000001.jsonl");
+
+        let mut workspace_event = make_event(1, true);
+        workspace_event.id = "workspace-event".to_string();
+        workspace_event.chat_id = "workspace-chat".to_string();
+        workspace_event.ts_start = "2026-02-02T00:00:00Z".to_string();
+
+        let mut config_event = make_event(2, true);
+        config_event.id = "config-event".to_string();
+        config_event.chat_id = "config-chat".to_string();
+        config_event.ts_start = "2026-02-03T00:00:00Z".to_string();
+
+        std::fs::write(&workspace_file, format!("{}\n", serde_json::to_string(&workspace_event).unwrap()))
+            .unwrap();
+        std::fs::write(&config_file, format!("{}\n", serde_json::to_string(&config_event).unwrap()))
+            .unwrap();
+
+        let events = read_stats_events_from_dirs(
+            &[workspace_dir.path().to_path_buf(), config_dir.path().to_path_buf()],
+            None,
+            None,
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].chat_id, "workspace-chat");
+        assert_eq!(events[1].chat_id, "config-chat");
     }
 
     #[test]

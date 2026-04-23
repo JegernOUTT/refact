@@ -1,6 +1,7 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
 import {
+  BROWSER_ACTION,
   BROWSER_START,
   BROWSER_STOP,
   BROWSER_SCREENSHOT,
@@ -171,11 +172,58 @@ export type BrowserStatusRequest = {
 export type BrowserStatusResponse = {
   runtime_id: string | null;
   connected: boolean;
+  active_tab?: string | null;
   url?: string;
   title?: string;
   tab_urls?: string[];
+  tabs?: { tab_id: string; url: string; title: string }[];
   idle_seconds?: number;
   idle_timeout?: number;
+};
+
+export type BrowserLocator = {
+  by: string;
+  value?: string;
+  exact?: boolean;
+  role?: string;
+  name?: string;
+  nth?: number;
+  within?: string;
+};
+
+export type BrowserTabTarget =
+  | { type: "active" }
+  | { type: "id"; id: string };
+
+export type BrowserStep = {
+  action: string;
+  [key: string]: unknown;
+};
+
+export type BrowserActionRequest = {
+  chat_id: string;
+  session?: "shared_default";
+  target?: BrowserTabTarget;
+  steps: BrowserStep[];
+};
+
+export type BrowserExecutionStep = {
+  step_index: number;
+  ok: boolean;
+  summary: string;
+  error?: string | null;
+  data?: Record<string, unknown> | null;
+  field_kind?: string | null;
+  fill_strategy?: string | null;
+  verified?: boolean | null;
+  retries: number;
+};
+
+export type BrowserActionResponse = {
+  ok: boolean;
+  steps: BrowserExecutionStep[];
+  url?: string | null;
+  title?: string | null;
 };
 
 export const browserApi = createApi({
@@ -435,6 +483,21 @@ export const browserApi = createApi({
         });
         if (response.error) return { error: response.error };
         return { data: response.data as BrowserContextEstimateResponse };
+      },
+    }),
+    browserAction: builder.mutation<BrowserActionResponse, BrowserActionRequest>({
+      async queryFn(args, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort as unknown as number;
+        const url = `http://127.0.0.1:${port}${BROWSER_ACTION}`;
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: args,
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as BrowserActionResponse };
       },
     }),
   }),

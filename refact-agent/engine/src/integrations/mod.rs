@@ -7,6 +7,10 @@
 // use crate::tools::tools_description::Tool;
 // use crate::yaml_configs::create_configs::{integrations_enabled_cfg, read_yaml_into_value};
 
+pub mod browser_actions;
+pub mod browser_controller;
+pub mod browser_locators;
+pub mod browser_models;
 pub mod browser_runtime;
 pub mod browser_types;
 pub mod integr_abstract;

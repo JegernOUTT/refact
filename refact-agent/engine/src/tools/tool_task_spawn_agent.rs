@@ -63,41 +63,71 @@ async fn resolve_agent_model(
     )
 }
 
-async fn setup_agent_worktree(
+struct PreparedWorktree {
+    branch_name: String,
+    worktree_name: String,
+    worktree_path: std::path::PathBuf,
+    git_dir: std::path::PathBuf,
+    base_branch: Option<String>,
+    spawned_with_dirty_tree: bool,
+    branch_was_created: bool,
+}
+
+impl PreparedWorktree {
+    fn cleanup_sync(&self) {
+        if let Ok(repo) = git2::Repository::open(&self.git_dir) {
+            operations::remove_worktree(&repo, &self.worktree_name, &self.worktree_path);
+            if self.branch_was_created {
+                operations::delete_branch_if_exists(&repo, &self.branch_name);
+            }
+        } else {
+            tracing::warn!(
+                "cleanup: could not open repo at {} to remove worktree '{}'",
+                self.git_dir.display(),
+                self.worktree_name
+            );
+        }
+    }
+}
+
+async fn prepare_agent_worktree(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,
     agent_id: &str,
     card_id: &str,
-) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+) -> Result<Option<PreparedWorktree>, String> {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
-    let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
-
-    let repo = match git2::Repository::open(workspace_root) {
-        Ok(r) => r,
-        Err(_) => {
-            tracing::warn!("Workspace is not a git repository, skipping worktree creation");
-            return Ok((None, None, None));
+    let workspace_root = match project_dirs.first() {
+        Some(p) => p.clone(),
+        None => {
+            tracing::warn!("No workspace folder found, agent will work without an isolated worktree");
+            return Ok(None);
         }
     };
 
-    if operations::has_uncommitted_changes(&repo)? {
-        return Err("Please commit or stash changes before spawning agents".to_string());
-    }
+    let repo = match git2::Repository::discover(&workspace_root) {
+        Ok(r) => r,
+        Err(_) => {
+            tracing::warn!(
+                "Workspace is not a git repository — agent will work in the main workspace without isolation"
+            );
+            return Ok(None);
+        }
+    };
 
-    let mut task_meta = storage::load_task_meta(gcx.clone(), task_id).await?;
+    let spawned_with_dirty_tree = operations::has_uncommitted_changes(&repo).unwrap_or(false);
+    if spawned_with_dirty_tree {
+        tracing::warn!(
+            "Spawning agent from HEAD — local uncommitted changes are excluded from the agent's worktree"
+        );
+    }
 
     let base_commit = operations::get_head_commit(&repo)?;
+    let base_branch = operations::get_current_branch(&repo).ok();
+    let git_dir = repo.path().to_path_buf();
 
-    if task_meta.base_branch.is_none() {
-        let base_branch = operations::get_current_branch(&repo)?;
-        task_meta.base_branch = Some(base_branch);
-        storage::save_task_meta(gcx.clone(), task_id, &task_meta).await?;
-    }
     let agent_id_short = &agent_id[..agent_id.len().min(8)];
-    let branch_name = format!(
-        "refact/task/{}/card/{}/{}",
-        task_id, card_id, agent_id_short
-    );
+    let branch_name = format!("refact/task/{}/card/{}/{}", task_id, card_id, agent_id_short);
     let worktree_name = format!("{}-{}-{}", task_id, card_id, agent_id_short);
     let cache_dir = gcx.read().await.cache_dir.clone();
     let worktree_path = cache_dir
@@ -109,37 +139,18 @@ async fn setup_agent_worktree(
         .await
         .map_err(|e| format!("Failed to create worktree parent dir: {}", e))?;
 
-    operations::create_worktree(
-        &repo,
-        &worktree_path,
-        &worktree_name,
-        &branch_name,
-        &base_commit,
-    )?;
+    let branch_was_created =
+        operations::create_worktree(&repo, &worktree_path, &worktree_name, &branch_name, &base_commit)?;
 
-    let card_id_owned = card_id.to_string();
-    let branch_name_clone = branch_name.clone();
-    let worktree_name_clone = worktree_name.clone();
-    let worktree_path_str = worktree_path.to_string_lossy().to_string();
-    let worktree_path_clone = worktree_path_str.clone();
-
-    storage::update_board_atomic(gcx.clone(), task_id, move |board| {
-        if let Some(card) = board.get_card_mut(&card_id_owned) {
-            card.agent_branch = Some(branch_name_clone.clone());
-            card.agent_worktree = Some(worktree_path_clone.clone());
-            card.agent_worktree_name = Some(worktree_name_clone.clone());
-        }
-        Ok(())
-    })
-    .await?;
-
-    crate::files_in_workspace::add_folder(gcx.clone(), &worktree_path).await;
-
-    Ok((
-        Some(branch_name),
-        Some(worktree_path_str),
-        Some(worktree_name),
-    ))
+    Ok(Some(PreparedWorktree {
+        branch_name,
+        worktree_name,
+        worktree_path,
+        git_dir,
+        base_branch,
+        spawned_with_dirty_tree,
+        branch_was_created,
+    }))
 }
 
 fn parse_rfc3339_to_utc(ts: &str) -> Option<DateTime<Utc>> {
@@ -241,44 +252,74 @@ impl Tool for ToolTaskSpawnAgent {
         let gcx = ccx.lock().await.global_context.clone();
         let current_model = ccx.lock().await.current_model.clone();
 
-        let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
-        if let Some(workspace_root) = project_dirs.first() {
-            if let Ok(repo) = git2::Repository::open(workspace_root) {
-                if operations::has_uncommitted_changes(&repo)? {
-                    return Err(
-                        "Cannot spawn agent: Please commit or stash changes before spawning agents"
-                            .to_string(),
-                    );
-                }
-            }
-        }
-
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
         let task_default_model = task_meta.default_agent_model.as_deref();
 
         let model = resolve_agent_model(gcx.clone(), task_default_model, &current_model).await?;
 
+        fn validate_id(id: &str, name: &str) -> Result<(), String> {
+            if id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                Ok(())
+            } else {
+                Err(format!("{} '{}' contains invalid characters (only alphanumeric, '-', '_' allowed)", name, id))
+            }
+        }
+        validate_id(&task_id, "task_id")?;
+        validate_id(card_id, "card_id")?;
+
+        let board = storage::load_board(gcx.clone(), &task_id).await?;
+        let card = board.get_card(card_id)
+            .ok_or_else(|| format!("Card {} not found", card_id))?;
+        if card.column == "done" {
+            return Err(format!("Card {} is already done", card_id));
+        }
+        if card.column == "failed" {
+            return Err(format!("Card {} has failed. Reset it first if you want to retry.", card_id));
+        }
+        if card.column != "planned" && card.column != "doing" {
+            return Err(format!("Card {} is in column '{}', expected 'planned' or 'doing'", card_id, card.column));
+        }
+        if card.column == "doing" && card.agent_chat_id.is_some() {
+            return Err(format!(
+                "Card {} already has an active agent ({}). Use task_check_agents to monitor it, or move the card back to 'planned' to respawn.",
+                card_id, card.agent_chat_id.as_ref().unwrap()
+            ));
+        }
+
         let agent_id = Uuid::new_v4().to_string();
         let agent_chat_id = format!("agent-{}-{}", card_id, &agent_id[..8]);
 
-        let (card_title, card_instructions, dependency_context) = {
-            let card_id_owned = card_id.to_string();
-            let agent_id_clone = agent_id.clone();
-            let agent_chat_id_clone = agent_chat_id.clone();
+        let prepared_worktree =
+            prepare_agent_worktree(gcx.clone(), &task_id, &agent_id, card_id).await?;
 
-            let (board, starting_new_run) = storage::update_board_atomic(
-                gcx.clone(),
-                &task_id,
-                move |board| {
-                    let agents_active_before = board
-                        .cards
-                        .iter()
-                        .filter(|c| c.column == "doing" && c.assignee.is_some())
-                        .count();
+        let dirty_tree_warning = prepared_worktree
+            .as_ref()
+            .map(|w| w.spawned_with_dirty_tree)
+            .unwrap_or(false);
 
-                    let card = board
-                        .get_card_mut(&card_id_owned)
-                        .ok_or(format!("Card {} not found", card_id_owned))?;
+        let card_id_owned = card_id.to_string();
+        let agent_id_clone = agent_id.clone();
+        let agent_chat_id_clone = agent_chat_id.clone();
+        let worktree_branch = prepared_worktree.as_ref().map(|w| w.branch_name.clone());
+        let worktree_path_str = prepared_worktree
+            .as_ref()
+            .map(|w| w.worktree_path.to_string_lossy().to_string());
+        let worktree_name = prepared_worktree.as_ref().map(|w| w.worktree_name.clone());
+        let base_branch_from_prep = prepared_worktree.as_ref().and_then(|w| w.base_branch.clone());
+
+        let (board, commit_info) = storage::update_board_atomic(
+            gcx.clone(),
+            &task_id,
+            move |board| {
+                let agents_active_before = board
+                    .cards
+                    .iter()
+                    .filter(|c| c.column == "doing" && c.assignee.is_some())
+                    .count();
+
+                let card = board
+                    .get_card_mut(&card_id_owned)
+                    .ok_or(format!("Card {} not found", card_id_owned))?;
 
                 if card.column == "done" {
                     return Err(format!("Card {} is already done", card_id_owned));
@@ -297,75 +338,100 @@ impl Tool for ToolTaskSpawnAgent {
                     ));
                 }
 
+                let original_card = card.clone();
+
                 card.assignee = Some(agent_id_clone.clone());
                 card.agent_chat_id = Some(agent_chat_id_clone.clone());
                 card.started_at = Some(Utc::now().to_rfc3339());
                 if card.column == "planned" {
                     card.column = "doing".to_string();
                 }
+                card.agent_branch = worktree_branch.clone();
+                card.agent_worktree = worktree_path_str.clone();
+                card.agent_worktree_name = worktree_name.clone();
                 card.status_updates.push(StatusUpdate {
                     timestamp: Utc::now().to_rfc3339(),
                     message: "Agent started working on card".to_string(),
                 });
-                    Ok(agents_active_before == 0)
-                },
-            )
-            .await?;
 
-            storage::update_task_stats(gcx.clone(), &task_id).await?;
-
-            // Track the start of an "agent run" so the planner summary after all
-            // agents finish can include only cards completed since that run began.
-            if starting_new_run {
-                if let Ok(mut meta) = storage::load_task_meta(gcx.clone(), &task_id).await {
-                    meta.last_agents_summary_at = Some(Utc::now().to_rfc3339());
-                    let _ = storage::save_task_meta(gcx.clone(), &task_id, &meta).await;
-                }
-            } else if let Ok(mut meta) = storage::load_task_meta(gcx.clone(), &task_id).await {
-                // If this task predates the marker, initialize it.
-                if meta.last_agents_summary_at.is_none() {
-                    let earliest = board
-                        .cards
-                        .iter()
-                        .filter(|c| c.column == "doing" && c.assignee.is_some())
-                        .filter_map(|c| c.started_at.as_deref())
-                        .filter_map(parse_rfc3339_to_utc)
-                        .min();
-                    meta.last_agents_summary_at = Some(
-                        earliest.unwrap_or_else(Utc::now).to_rfc3339(),
-                    );
-                    let _ = storage::save_task_meta(gcx.clone(), &task_id, &meta).await;
-                }
+                Ok(Some((original_card, agents_active_before == 0)))
+            },
+        )
+        .await
+        .map_err(|e| {
+            if let Some(ref pw) = prepared_worktree {
+                pw.cleanup_sync();
             }
+            e
+        })?;
 
-            let card = board.get_card(card_id).unwrap();
-            let dep_context = board
-                .get_dependency_reports(card_id)
-                .into_iter()
-                .map(|(title, report)| format!("### {}\n{}", title, report))
-                .collect::<Vec<_>>()
-                .join("\n\n");
+        let (original_card, starting_new_run) = commit_info.unwrap();
 
-            let (_agent_branch, _agent_worktree, _agent_worktree_name) =
-                match setup_agent_worktree(gcx.clone(), &task_id, &agent_id, card_id).await {
-                    Ok(result) => result,
-                    Err(e)
-                        if e.contains("not a git repository")
-                            || e.contains("No workspace folder") =>
-                    {
-                        tracing::warn!(
-                            "Workspace is not a git repo, agent will work in main directory: {}",
-                            e
-                        );
-                        (None, None, None)
+        async fn rollback(
+            gcx: Arc<ARwLock<GlobalContext>>,
+            task_id: &str,
+            original_card: crate::tasks::types::BoardCard,
+            guard_chat_id: String,
+            prepared_worktree: &Option<PreparedWorktree>,
+        ) {
+            let card_id_rb = original_card.id.clone();
+            let _ = storage::update_board_atomic(gcx, task_id, move |board| {
+                if let Some(card) = board.get_card_mut(&card_id_rb) {
+                    if card.agent_chat_id.as_deref() == Some(&guard_chat_id) {
+                        *card = original_card.clone();
                     }
-                    Err(e) => {
-                        return Err(format!("Cannot spawn agent: {}", e));
-                    }
-                };
+                }
+                Ok(Some(()))
+            }).await;
+            if let Some(pw) = prepared_worktree {
+                pw.cleanup_sync();
+            }
+        }
 
-            (card.title.clone(), card.instructions.clone(), dep_context)
+        if let Err(e) = storage::update_task_stats(gcx.clone(), &task_id).await {
+            rollback(gcx.clone(), &task_id, original_card, agent_chat_id.clone(), &prepared_worktree).await;
+            return Err(e);
+        }
+
+        let mut meta = match storage::load_task_meta(gcx.clone(), &task_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                rollback(gcx.clone(), &task_id, original_card, agent_chat_id.clone(), &prepared_worktree).await;
+                return Err(e);
+            }
         };
+        if meta.base_branch.is_none() {
+            meta.base_branch = base_branch_from_prep;
+        }
+        if starting_new_run {
+            meta.last_agents_summary_at = Some(Utc::now().to_rfc3339());
+        } else if meta.last_agents_summary_at.is_none() {
+            let earliest = board
+                .cards
+                .iter()
+                .filter(|c| c.column == "doing" && c.assignee.is_some())
+                .filter_map(|c| c.started_at.as_deref())
+                .filter_map(parse_rfc3339_to_utc)
+                .min();
+            meta.last_agents_summary_at = Some(earliest.unwrap_or_else(Utc::now).to_rfc3339());
+        }
+        if let Err(e) = storage::save_task_meta(gcx.clone(), &task_id, &meta).await {
+            rollback(gcx.clone(), &task_id, original_card, agent_chat_id.clone(), &prepared_worktree).await;
+            return Err(e);
+        }
+
+        if let Some(ref pw) = prepared_worktree {
+            crate::files_in_workspace::add_folder(gcx.clone(), &pw.worktree_path).await;
+        }
+
+        let card_title = board.get_card(card_id).map(|c| c.title.clone()).unwrap_or_default();
+        let card_instructions = board.get_card(card_id).map(|c| c.instructions.clone()).unwrap_or_default();
+        let dependency_context = board
+            .get_dependency_reports(card_id)
+            .into_iter()
+            .map(|(title, report)| format!("### {}\n{}", title, report))
+            .collect::<Vec<_>>()
+            .join("\n\n");
 
         let sessions = {
             let gcx_locked = gcx.read().await;
@@ -464,6 +530,14 @@ impl Tool for ToolTaskSpawnAgent {
             model
         );
 
+        let dirty_note = if dirty_tree_warning {
+            "\n\n⚠️ Note: agent works from HEAD. Your uncommitted local changes are not included in the agent's worktree."
+        } else if prepared_worktree.is_none() {
+            "\n\n⚠️ Note: workspace is not a git repository — agent is working directly in the main workspace without isolation."
+        } else {
+            ""
+        };
+
         let result_message = format!(
             r#"# Agent Spawned: {}
 
@@ -474,8 +548,8 @@ impl Tool for ToolTaskSpawnAgent {
 
 📎 [View Agent Chat](refact://chat/{})
 
-The agent will call `task_agent_finish()` when done. Use `task_check_agents` to monitor progress."#,
-            card_title, card_id, agent_id, model, agent_chat_id
+The agent will call `task_agent_finish()` when done. Use `task_check_agents` to monitor progress.{}"#,
+            card_title, card_id, agent_id, model, agent_chat_id, dirty_note
         );
 
         Ok((

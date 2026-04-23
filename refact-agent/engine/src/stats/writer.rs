@@ -12,6 +12,13 @@ const MAX_FILE_SIZE: u64 = 1024 * 1024;
 const BATCH_SIZE: usize = 32;
 const BATCH_TIMEOUT_MS: u64 = 100;
 
+struct StatsFileState {
+    stats_dir: PathBuf,
+    seq: u32,
+    file: fs::File,
+    current_size: u64,
+}
+
 async fn find_current_sequence(stats_dir: &PathBuf) -> u32 {
     let mut max_seq: u32 = 0;
     let mut rd = match fs::read_dir(stats_dir).await {
@@ -41,31 +48,60 @@ async fn get_initial_file_size(path: &PathBuf) -> u64 {
     fs::metadata(path).await.map(|m| m.len()).unwrap_or(0)
 }
 
-pub async fn stats_writer_task(
+async fn resolve_stats_dir_for_write(
     gcx: Arc<ARwLock<GlobalContext>>,
-    mut receiver: tokio::sync::mpsc::Receiver<LlmCallEvent>,
-) {
-    let stats_dir = crate::stats::get_stats_dir(gcx.clone()).await;
+) -> PathBuf {
+    crate::stats::get_stats_dir(gcx).await
+}
+
+async fn open_stats_file_state(stats_dir: PathBuf) -> Option<StatsFileState> {
     if let Err(e) = fs::create_dir_all(&stats_dir).await {
         warn!("stats: failed to create stats dir {:?}: {}", stats_dir, e);
-        return;
+        return None;
     }
-    info!("stats: writing to {:?}", stats_dir);
 
     let mut seq = find_current_sequence(&stats_dir).await;
     if seq == 0 {
         seq = 1;
     }
 
-    let mut current_path = seq_filename(&stats_dir, seq);
-    let mut file = match open_append(&current_path).await {
-        Ok(f) => f,
+    let current_path = seq_filename(&stats_dir, seq);
+    let file = match open_append(&current_path).await {
+        Ok(file) => file,
         Err(e) => {
             warn!("stats: failed to open {:?}: {}", current_path, e);
-            return;
+            return None;
         }
     };
-    let mut current_size = get_initial_file_size(&current_path).await;
+    let current_size = get_initial_file_size(&current_path).await;
+
+    info!("stats: writing to {:?}", stats_dir);
+    Some(StatsFileState {
+        stats_dir,
+        seq,
+        file,
+        current_size,
+    })
+}
+
+async fn rotate_stats_file(state: &mut StatsFileState) -> std::io::Result<()> {
+    state.file.flush().await?;
+
+    let next_seq = state.seq + 1;
+    let next_path = seq_filename(&state.stats_dir, next_seq);
+    let next_file = open_append(&next_path).await?;
+
+    state.seq = next_seq;
+    state.file = next_file;
+    state.current_size = 0;
+    Ok(())
+}
+
+pub async fn stats_writer_task(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    mut receiver: tokio::sync::mpsc::Receiver<LlmCallEvent>,
+) {
+    let mut state: Option<StatsFileState> = None;
 
     loop {
         let mut batch = Vec::with_capacity(BATCH_SIZE);
@@ -89,6 +125,37 @@ pub async fn stats_writer_task(
             Err(_) => continue,
         }
 
+        let desired_stats_dir = resolve_stats_dir_for_write(
+            gcx.clone(),
+        )
+        .await;
+
+        let should_open_stats_file = state
+            .as_ref()
+            .map(|current| current.stats_dir != desired_stats_dir)
+            .unwrap_or(true);
+        if should_open_stats_file {
+            if let Some(new_state) = open_stats_file_state(desired_stats_dir.clone()).await {
+                let previous_state = std::mem::replace(&mut state, Some(new_state));
+                if let Some(mut previous_state) = previous_state {
+                    if previous_state.stats_dir != desired_stats_dir {
+                        info!(
+                            "stats: switching from {:?} to {:?}",
+                            previous_state.stats_dir,
+                            desired_stats_dir
+                        );
+                    }
+                    if let Err(e) = previous_state.file.flush().await {
+                        warn!("stats: flush failed while switching dirs: {}", e);
+                    }
+                }
+            }
+        }
+
+        let Some(state) = state.as_mut() else {
+            continue;
+        };
+
         for event in batch {
             let line = match serde_json::to_string(&event) {
                 Ok(s) => s,
@@ -101,29 +168,21 @@ pub async fn stats_writer_task(
             let bytes = format!("{}\n", line);
             let byte_len = bytes.len() as u64;
 
-            if current_size + byte_len > MAX_FILE_SIZE {
-                let _ = file.flush().await;
-                drop(file);
-                seq += 1;
-                current_path = seq_filename(&stats_dir, seq);
-                file = match open_append(&current_path).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        warn!("stats: failed to open new file {:?}: {}", current_path, e);
-                        return;
-                    }
-                };
-                current_size = 0;
+            if state.current_size + byte_len > MAX_FILE_SIZE {
+                if let Err(e) = rotate_stats_file(state).await {
+                    warn!("stats: failed to rotate file in {:?}: {}", state.stats_dir, e);
+                    break;
+                }
             }
 
-            if let Err(e) = file.write_all(bytes.as_bytes()).await {
+            if let Err(e) = state.file.write_all(bytes.as_bytes()).await {
                 warn!("stats: write failed: {}", e);
                 continue;
             }
-            current_size += byte_len;
+            state.current_size += byte_len;
         }
 
-        if let Err(e) = file.flush().await {
+        if let Err(e) = state.file.flush().await {
             warn!("stats: flush failed: {}", e);
         }
     }
@@ -140,6 +199,7 @@ async fn open_append(path: &PathBuf) -> std::io::Result<fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::global_context::tests::make_test_gcx;
     use crate::stats::event::LlmCallEvent;
     use tokio::io::AsyncReadExt;
 
@@ -271,5 +331,39 @@ mod tests {
         let contents = fs::read_to_string(&file2_path).await.unwrap();
         let parsed: LlmCallEvent = serde_json::from_str(contents.trim()).unwrap();
         assert_eq!(parsed.chat_id, "chat-42");
+    }
+
+    #[tokio::test]
+    async fn test_writer_uses_workspace_dir_when_workspace_appears_after_startup() {
+        let gcx = make_test_gcx().await;
+        let config_stats_dir = gcx.read().await.config_dir.join("stats");
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_stats_dir = workspace.path().join(".refact").join("stats");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<LlmCallEvent>(1000);
+        let handle = tokio::spawn(stats_writer_task(gcx.clone(), rx));
+
+        {
+            let gcx_locked = gcx.write().await;
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() =
+                vec![workspace.path().to_path_buf()];
+        }
+
+        tx.send(make_event(7)).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let workspace_file_path = seq_filename(&workspace_stats_dir, 1);
+        assert!(workspace_file_path.exists(), "workspace stats file should exist");
+
+        let config_file_path = seq_filename(&config_stats_dir, 1);
+        assert!(
+            !config_file_path.exists(),
+            "config stats file should not be created when workspace becomes available before the first event"
+        );
+
+        let contents = fs::read_to_string(&workspace_file_path).await.unwrap();
+        let parsed: LlmCallEvent = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(parsed.chat_id, "chat-7");
     }
 }

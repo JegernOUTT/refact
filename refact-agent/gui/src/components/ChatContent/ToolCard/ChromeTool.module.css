@@ -13,3 +13,13 @@
   max-height: 300px;
   overflow-y: auto;
 }
+
+.section {
+  padding-top: var(--space-2);
+}
+
+.sectionLabel {
+  color: var(--gray-11);
+  font-size: 11px;
+  margin-bottom: var(--space-1);
+}

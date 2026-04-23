@@ -6,32 +6,143 @@ import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
 import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
 import { ToolCall } from "../../../services/refact/types";
+import type {
+  BrowserActionRequest,
+  BrowserActionResponse,
+  BrowserExecutionStep,
+} from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
 import styles from "./ChromeTool.module.css";
 
 interface ChromeArgs {
   commands?: string;
+  request?: Omit<BrowserActionRequest, "chat_id">;
+}
+
+interface CommandStats {
+  url: string | null;
+  screenshotCount: number;
+  actionCounts: Partial<Record<string, number>>;
+  totalActions: number;
+}
+
+const ACTION_LABELS: Partial<Record<string, string>> = {
+  navigate_to: "navigate",
+  click_at_element: "click",
+  fill_field: "fill",
+  type_text_at: "type",
+  press_key: "key",
+  screenshot: "screenshot",
+  eval: "eval",
+  scroll_to: "scroll",
+  html: "inspect",
+  styles: "styles",
+  wait_for: "wait",
+  wait_for_selector: "wait",
+  wait_for_navigation: "wait",
+  tab_log: "log",
+  open_tab: "tab",
+  close_tab: "tab",
+  list_tabs: "tabs",
+  reload: "reload",
+};
+
+function parseCommandStats(commands: string): CommandStats {
+  const lines = commands.split("\n").filter((l) => {
+    const t = l.trim();
+    return t && !t.startsWith("//") && !t.startsWith("#");
+  });
+
+  let url: string | null = null;
+  let screenshotCount = 0;
+  const actionCounts: Partial<Record<string, number>> = {};
+
+  for (const line of lines) {
+    const parts = line.trim().split(/\s+/);
+    const cmd = parts[0];
+    if (!cmd) continue;
+
+    const label = ACTION_LABELS[cmd] ?? cmd;
+    actionCounts[label] = (actionCounts[label] ?? 0) + 1;
+
+    if (cmd === "navigate_to" && parts.length >= 3 && !url) {
+      url = parts.slice(2).join(" ");
+    }
+    if (cmd === "screenshot") {
+      screenshotCount++;
+    }
+  }
+
+  return {
+    url,
+    screenshotCount,
+    actionCounts,
+    totalActions: lines.length,
+  };
+}
+
+function formatUrl(url: string): string {
+  return url.replace(/^file:\/\//, "");
 }
 
 interface ChromeToolProps {
   toolCall: ToolCall;
 }
 
-function extractFirstNavigateUrl(commands: string): string | null {
-  for (const line of commands.split("\n")) {
-    const parts = line.trim().split(/\s+/);
-    if (parts[0] === "navigate_to" && parts.length >= 3) {
-      return parts[2];
-    }
-  }
-  return null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function countScreenshots(commands: string): number {
-  return commands
-    .split("\n")
-    .filter((line) => line.trim().startsWith("screenshot ")).length;
+function isBrowserActionResponse(value: unknown): value is BrowserActionResponse {
+  return (
+    isRecord(value) &&
+    typeof value.ok === "boolean" &&
+    Array.isArray(value.steps)
+  );
+}
+
+function summarizeStep(step: BrowserExecutionStep): string {
+  if (step.ok) return step.summary;
+  return step.error ? `${step.summary}: ${step.error}` : step.summary;
+}
+
+function prettifyActionName(action: string): string {
+  return action
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function describeTypedStep(step: Record<string, unknown>): string {
+  const action = typeof step.action === "string" ? step.action : "step";
+
+  if (action === "navigate" && typeof step.url === "string") {
+    return `Navigate ${formatUrl(step.url)}`;
+  }
+  if (action === "fill" && isRecord(step.locator)) {
+    const locator = step.locator;
+    const by = typeof locator.by === "string" ? locator.by : "locator";
+    const value =
+      typeof locator.value === "string"
+        ? locator.value
+        : typeof locator.role === "string"
+          ? locator.role
+          : "element";
+    return `Fill ${by}=${value}`;
+  }
+  if ((action === "click" || action === "scroll_to") && isRecord(step.locator)) {
+    const locator = step.locator;
+    const by = typeof locator.by === "string" ? locator.by : "locator";
+    const value =
+      typeof locator.value === "string"
+        ? locator.value
+        : typeof locator.role === "string"
+          ? locator.role
+          : "element";
+    return `${prettifyActionName(action)} ${by}=${value}`;
+  }
+  return prettifyActionName(action);
 }
 
 export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
@@ -88,35 +199,106 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     return { textLog: textParts || null, images: imageParts };
   }, [maybeResult]);
 
+  const typedResult = useMemo<BrowserActionResponse | null>(() => {
+    if (!textLog) return null;
+    try {
+      const parsed = JSON.parse(textLog) as unknown;
+      return isBrowserActionResponse(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }, [textLog]);
+
+  const typedArgs = useMemo(() => {
+    return args.request ?? null;
+  }, [args.request]);
+
+  const stats = useMemo(
+    () => parseCommandStats(args.commands ?? ""),
+    [args.commands],
+  );
+
   const summary = useMemo(() => {
-    const cmdStr = args.commands ?? "";
-    const url = extractFirstNavigateUrl(cmdStr);
-    const screenshotCount = countScreenshots(cmdStr);
-
-    const urlLabel = url ? (
-      <span className={styles.url}>{url.replace(/^file:\/\//, "")}</span>
-    ) : null;
-
-    const screenshotLabel =
-      screenshotCount > 0 ? (
-        <span className={styles.meta}>
-          {screenshotCount} screenshot{screenshotCount !== 1 ? "s" : ""}
-        </span>
-      ) : null;
-
-    if (urlLabel && screenshotLabel) {
+    if (typedArgs) {
+      const stepDescriptions = typedArgs.steps
+        .slice(0, 3)
+        .filter(isRecord)
+        .map(describeTypedStep);
+      const moreCount = typedArgs.steps.length - stepDescriptions.length;
       return (
         <>
-          Browser {urlLabel} · {screenshotLabel}
+          Browser action
+          {stepDescriptions.length > 0 ? ` · ${stepDescriptions.join(", ")}` : ""}
+          {moreCount > 0 ? ` · +${moreCount} more` : ""}
         </>
       );
     }
-    if (urlLabel) return <>Browser {urlLabel}</>;
-    if (screenshotLabel) return <>Browser · {screenshotLabel}</>;
-    return <>Browser commands</>;
-  }, [args]);
+
+    const effectiveScreenshots = maybeResult
+      ? images.length
+      : stats.screenshotCount;
+    const urlLabel = stats.url ? (
+      <span className={styles.url}>{formatUrl(stats.url)}</span>
+    ) : null;
+
+    const parts: React.ReactNode[] = [];
+    if (urlLabel) parts.push(urlLabel);
+
+    const actionEntries: [string, number][] = [];
+    for (const [key, count] of Object.entries(stats.actionCounts)) {
+      if (key !== "screenshot" && count != null) {
+        actionEntries.push([key, count]);
+      }
+    }
+    if (actionEntries.length > 0) {
+      const actionSummary = actionEntries
+        .map(([key, count]) => (count > 1 ? `${count} ${key}` : key))
+        .join(", ");
+      parts.push(<span className={styles.meta}>{actionSummary}</span>);
+    }
+
+    if (effectiveScreenshots > 0) {
+      parts.push(
+        <span className={styles.meta}>
+          {effectiveScreenshots} screenshot
+          {effectiveScreenshots !== 1 ? "s" : ""}
+        </span>,
+      );
+    }
+
+    if (parts.length === 0) {
+      return <>Browser commands</>;
+    }
+
+    return (
+      <>
+        Browser{" "}
+        {parts.map((part, i) => (
+          <React.Fragment key={i}>
+            {i > 0 ? " · " : ""}
+            {part}
+          </React.Fragment>
+        ))}
+      </>
+    );
+  }, [typedArgs, stats, maybeResult, images]);
 
   const icon = images.length > 0 ? <ImageIcon /> : <DesktopIcon />;
+
+  const typedStepsBlock = useMemo(() => {
+    if (!typedArgs) return null;
+    return JSON.stringify(typedArgs, null, 2);
+  }, [typedArgs]);
+
+  const typedResultsBlock = useMemo(() => {
+    if (!typedResult) return null;
+    return typedResult.steps.map(summarizeStep).join("\n");
+  }, [typedResult]);
+
+  const typedDiagnosticsBlock = useMemo(() => {
+    if (!typedResult) return null;
+    return JSON.stringify(typedResult, null, 2);
+  }, [typedResult]);
 
   return (
     <ToolCard
@@ -127,6 +309,13 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       onToggle={handleToggle}
       toolCall={toolCall}
     >
+      {typedStepsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Request</Box>
+          <ShikiCodeBlock showLineNumbers={false}>{typedStepsBlock}</ShikiCodeBlock>
+        </Box>
+      )}
+
       {images.length > 0 && (
         <Flex py="2" gap="2" wrap="wrap">
           {images.map((url, idx) => (
@@ -134,7 +323,28 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           ))}
         </Flex>
       )}
-      {textLog && (
+
+      {typedResultsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Results</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>{typedResultsBlock}</ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedDiagnosticsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Execution Report</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedDiagnosticsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {!typedResult && textLog && (
         <Box className={styles.logContent}>
           <ShikiCodeBlock showLineNumbers={false}>{textLog}</ShikiCodeBlock>
         </Box>

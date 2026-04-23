@@ -1,7 +1,7 @@
 import React from "react";
 import { TargetIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
-import { StreamingToolCard } from "./StreamingToolCard";
+import { ReportToolCard } from "./ReportToolCard";
 
 interface PlanningToolProps {
   toolCall: ToolCall;
@@ -9,10 +9,10 @@ interface PlanningToolProps {
 
 export const PlanningTool: React.FC<PlanningToolProps> = ({ toolCall }) => {
   return (
-    <StreamingToolCard
+    <ReportToolCard
       toolCall={toolCall}
       icon={<TargetIcon />}
-      summary="Plan solution"
+      defaultSummary="Plan solution"
     />
   );
 };

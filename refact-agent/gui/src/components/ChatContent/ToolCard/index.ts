@@ -28,6 +28,8 @@ export { OpenAIRefusalTool } from "./OpenAIRefusalTool";
 export { OpenAIMcpCallTool } from "./OpenAIMcpCallTool";
 export { OpenAIMcpListToolsTool } from "./OpenAIMcpListToolsTool";
 export { TaskDoneTool } from "./TaskDoneTool";
+export { CompressReportTool } from "./CompressReportTool";
+export { ReportToolCard } from "./ReportToolCard";
 export { AskQuestionsTool } from "./AskQuestionsTool";
 export { ChromeTool } from "./ChromeTool";
 export { useAutoExpandCollapse } from "./useAutoExpandCollapse";

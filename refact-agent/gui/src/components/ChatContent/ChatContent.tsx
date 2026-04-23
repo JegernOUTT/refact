@@ -48,6 +48,8 @@ import { popBackTo } from "../../features/Pages/pagesSlice";
 import { ChatLinks, UncommittedChangesWarning } from "../ChatLinks";
 import { PlaceHolderText } from "./PlaceHolderText";
 import { SkillActivatedCard } from "./SkillActivatedCard";
+import { SkillReportCard } from "./SkillReportCard";
+import { isSkillReportContent, parseSkillReport } from "./skillReportUtils";
 import { QueuedMessage } from "./QueuedMessage";
 import { selectSseStatusForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
@@ -334,6 +336,16 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             />
           );
 
+        case "skill_report":
+          return (
+            <SkillReportCard
+              key={item.key}
+              skillName={item.skillName}
+              report={item.report}
+              storeKey={`sr:${item.key}`}
+            />
+          );
+
         default:
           return null;
       }
@@ -535,6 +547,13 @@ type DisplayItemSkillActivated = {
   modelOverride: string | null;
 };
 
+type DisplayItemSkillReport = {
+  type: "skill_report";
+  key: string;
+  skillName: string;
+  report: string;
+};
+
 type DisplayItem =
   | DisplayItemAssistant
   | DisplayItemUser
@@ -542,7 +561,8 @@ type DisplayItem =
   | DisplayItemDiffGroup
   | DisplayItemSystem
   | DisplayItemPlainText
-  | DisplayItemSkillActivated;
+  | DisplayItemSkillActivated
+  | DisplayItemSkillReport;
 
 function tryParseSkillActivated(
   content: string,
@@ -599,6 +619,21 @@ function buildDisplayItems(
     if (isToolMessage(head)) continue;
 
     if (head.role === "plain_text") {
+      if (
+        typeof head.content === "string" &&
+        isSkillReportContent(head.content)
+      ) {
+        const parsed = parseSkillReport(head.content);
+        if (parsed) {
+          items.push({
+            type: "skill_report",
+            key: getMessageKey(head, i),
+            skillName: parsed.skillName,
+            report: parsed.report,
+          });
+          continue;
+        }
+      }
       items.push({
         type: "plain_text",
         key: getMessageKey(head, i),

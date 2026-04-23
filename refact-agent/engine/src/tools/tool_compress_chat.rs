@@ -11,11 +11,12 @@ use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::trajectories::maybe_save_trajectory;
 use crate::chat::history_limit::compress_duplicate_context_files;
 use crate::chat::history_limit::remove_invalid_tool_calls_and_tool_calls_results;
+use crate::chat::trajectory_ops::TOOLS_TO_PRESERVE;
 use crate::chat::types::SessionState;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{
-    json_schema_from_params, MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource,
+    json_schema_from_params, Tool, ToolDesc, ToolSource,
     ToolSourceType,
 };
 
@@ -23,12 +24,6 @@ const TOOL_OUTPUT_TRUNCATE_LIMIT: usize = 200;
 const MAX_PER_MESSAGE_ENTRIES: usize = 200;
 const MAX_CONTEXT_ENTRIES: usize = 200;
 const MAX_TOOL_OUTPUT_ENTRIES: usize = 200;
-const TOOLS_TO_PRESERVE: &[&str] = &[
-    "deep_research",
-    "subagent",
-    "strategic_planning",
-    "code_review",
-];
 
 fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
@@ -111,7 +106,7 @@ impl Tool for ToolCompressChatProbe {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Analyze the current chat and report token distribution plus potential compression gains. Approval required.".to_string(),
+            description: "Analyze the current chat and report token distribution plus potential compression gains.".to_string(),
             input_schema: json_schema_from_params(&[], &[]),
             output_schema: None,
             annotations: None,
@@ -293,8 +288,9 @@ impl Tool for ToolCompressChatProbe {
         }
 
         let mut project_info_tokens = 0usize;
-        for msg in &messages {
-            if msg.role == "system" {
+        let first_system_idx = messages.iter().position(|m| m.role == "system");
+        for (idx, msg) in messages.iter().enumerate() {
+            if msg.role == "system" && Some(idx) != first_system_idx {
                 let text = msg.content.content_text_only().to_lowercase();
                 if text.contains("project") || text.contains("workspace") {
                     project_info_tokens += approx_tokens_for_message(msg);
@@ -339,35 +335,8 @@ impl Tool for ToolCompressChatProbe {
         ))
     }
 
-    async fn command_to_match_against_confirm_deny(
-        &self,
-        _ccx: Arc<AMutex<AtCommandsContext>>,
-        _args: &HashMap<String, Value>,
-    ) -> Result<String, String> {
-        Ok("compress_chat_probe".to_string())
-    }
-
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
-        Some(IntegrationConfirmation {
-            ask_user: vec!["*".to_string()],
-            deny: vec![],
-        })
-    }
-
-    async fn match_against_confirm_deny(
-        &self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        args: &HashMap<String, Value>,
-    ) -> Result<MatchConfirmDeny, String> {
-        let command_to_match = self
-            .command_to_match_against_confirm_deny(ccx.clone(), args)
-            .await
-            .map_err(|e| format!("Error getting tool command to match: {}", e))?;
-        Ok(MatchConfirmDeny {
-            result: MatchConfirmDenyResult::CONFIRMATION,
-            command: command_to_match,
-            rule: "default".to_string(),
-        })
+        None
     }
 }
 
@@ -427,7 +396,7 @@ impl Tool for ToolCompressChatApply {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Apply selective compression to the current chat using explicit drop/truncate lists. Approval required.".to_string(),
+            description: "Apply selective compression to the current chat using explicit drop/truncate lists.".to_string(),
             input_schema,
             output_schema: None,
             annotations: None,
@@ -514,19 +483,25 @@ impl Tool for ToolCompressChatApply {
         let mut project_info_dropped = 0usize;
         let mut dedup_count = 0usize;
 
-        // Drop project info system messages
         if drop_project_information {
+            let first_system_idx = head_messages.iter().position(|m| m.role == "system");
+            let mut idx = 0usize;
             head_messages.retain(|msg| {
-                if msg.role != "system" {
-                    return true;
-                }
-                let text = msg.content.content_text_only().to_lowercase();
-                if text.contains("project") || text.contains("workspace") {
-                    project_info_dropped += 1;
-                    false
-                } else {
+                let keep = if msg.role != "system" {
                     true
-                }
+                } else if Some(idx) == first_system_idx {
+                    true
+                } else {
+                    let text = msg.content.content_text_only().to_lowercase();
+                    if text.contains("project") || text.contains("workspace") {
+                        project_info_dropped += 1;
+                        false
+                    } else {
+                        true
+                    }
+                };
+                idx += 1;
+                keep
             });
         }
 
@@ -647,6 +622,15 @@ impl Tool for ToolCompressChatApply {
         let after_tokens = head_messages.iter().map(approx_tokens_for_message).sum::<usize>();
         let after_count = head_messages.len();
 
+        if head_messages.first().map(|m| m.role.as_str()).unwrap_or("") != "system"
+            && head_messages.first().map(|m| m.role.as_str()).unwrap_or("") != "user"
+        {
+            return Err(format!(
+                "compress_chat_apply would produce an invalid chat history: first message has role '{}', expected 'system' or 'user'. Compression aborted.",
+                head_messages.first().map(|m| m.role.as_str()).unwrap_or("(empty)")
+            ));
+        }
+
         {
             let mut session = session_arc.lock().await;
             session.messages = head_messages;
@@ -685,40 +669,8 @@ impl Tool for ToolCompressChatApply {
         ))
     }
 
-    async fn command_to_match_against_confirm_deny(
-        &self,
-        _ccx: Arc<AMutex<AtCommandsContext>>,
-        args: &HashMap<String, Value>,
-    ) -> Result<String, String> {
-        let drops = parse_string_list(args, "drop_context_files");
-        let drops_summary = if drops.is_empty() {
-            "none".to_string()
-        } else {
-            format!("{} file(s)", drops.len())
-        };
-        Ok(format!("compress_chat_apply ({})", drops_summary))
-    }
 
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
-        Some(IntegrationConfirmation {
-            ask_user: vec!["*".to_string()],
-            deny: vec![],
-        })
-    }
-
-    async fn match_against_confirm_deny(
-        &self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        args: &HashMap<String, Value>,
-    ) -> Result<MatchConfirmDeny, String> {
-        let command_to_match = self
-            .command_to_match_against_confirm_deny(ccx.clone(), args)
-            .await
-            .map_err(|e| format!("Error getting tool command to match: {}", e))?;
-        Ok(MatchConfirmDeny {
-            result: MatchConfirmDenyResult::CONFIRMATION,
-            command: command_to_match,
-            rule: "default".to_string(),
-        })
+        None
     }
 }

@@ -457,7 +457,7 @@ pub fn create_worktree(
     worktree_name: &str,
     branch_name: &str,
     base_commit: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let commit_oid =
         git2::Oid::from_str(base_commit).map_err(|e| format!("Invalid commit OID: {}", e))?;
     let commit = repo
@@ -465,12 +465,16 @@ pub fn create_worktree(
         .map_err_with_prefix("Failed to find commit:")?;
 
     let ref_name = format!("refs/heads/{}", branch_name);
-    let branch_ref = match repo.find_reference(&ref_name) {
-        Ok(r) => r,
-        Err(_) => repo
-            .branch(branch_name, &commit, false)
-            .map_err_with_prefix("Failed to create branch:")?
-            .into_reference(),
+    let (branch_ref, branch_was_created) = match repo.find_reference(&ref_name) {
+        Ok(r) => (r, false),
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {
+            let r = repo
+                .branch(branch_name, &commit, false)
+                .map_err_with_prefix("Failed to create branch:")?
+                .into_reference();
+            (r, true)
+        }
+        Err(e) => return Err(format!("Failed to look up branch ref '{}': {}", ref_name, e)),
     };
 
     let mut worktree_opts = git2::WorktreeAddOptions::new();
@@ -479,5 +483,42 @@ pub fn create_worktree(
     repo.worktree(worktree_name, worktree_path, Some(&mut worktree_opts))
         .map_err_with_prefix("Failed to create worktree:")?;
 
-    Ok(())
+    Ok(branch_was_created)
+}
+
+pub fn remove_worktree(repo: &Repository, worktree_name: &str, worktree_path: &Path) {
+    match repo.find_worktree(worktree_name) {
+        Ok(wt) => {
+            let mut prune_opts = git2::WorktreePruneOptions::new();
+            prune_opts.valid(true);
+            prune_opts.locked(true);
+            prune_opts.working_tree(true);
+            if let Err(e) = wt.prune(Some(&mut prune_opts)) {
+                tracing::warn!("Failed to prune worktree '{}': {}", worktree_name, e);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Could not find worktree '{}' to remove: {}", worktree_name, e);
+        }
+    }
+    if worktree_path.exists() {
+        if let Err(e) = std::fs::remove_dir_all(worktree_path) {
+            tracing::warn!(
+                "Failed to remove worktree directory '{}': {}",
+                worktree_path.display(),
+                e
+            );
+        }
+    }
+}
+
+pub fn delete_branch_if_exists(repo: &Repository, branch_name: &str) {
+    match repo.find_branch(branch_name, git2::BranchType::Local) {
+        Ok(mut branch) => {
+            if let Err(e) = branch.delete() {
+                tracing::warn!("Failed to delete branch '{}': {}", branch_name, e);
+            }
+        }
+        Err(_) => {}
+    }
 }

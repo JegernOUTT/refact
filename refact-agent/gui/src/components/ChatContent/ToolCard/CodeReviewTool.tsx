@@ -1,7 +1,7 @@
 import React from "react";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
-import { StreamingToolCard } from "./StreamingToolCard";
+import { ReportToolCard } from "./ReportToolCard";
 
 interface CodeReviewToolProps {
   toolCall: ToolCall;
@@ -9,10 +9,10 @@ interface CodeReviewToolProps {
 
 export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
   return (
-    <StreamingToolCard
+    <ReportToolCard
       toolCall={toolCall}
       icon={<MagnifyingGlassIcon />}
-      summary="Review code"
+      defaultSummary="Review code"
     />
   );
 };

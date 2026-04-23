@@ -29,14 +29,14 @@ export const MiniDonut: React.FC<MiniDonutProps> = ({
 
   return (
     <svg width={size} height={size} aria-label="Distribution">
-      {segments.map((seg) => {
+      {segments.map((seg, i) => {
         if (seg.value <= 0) return null;
         const fraction = seg.value / total;
         const offset = accumulated * circumference;
         accumulated += fraction;
         return (
           <circle
-            key={seg.label}
+            key={`${seg.label}-${i}`}
             cx={cx}
             cy={cy}
             r={radius}

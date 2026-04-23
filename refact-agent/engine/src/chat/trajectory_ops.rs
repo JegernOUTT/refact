@@ -133,10 +133,16 @@ pub struct TransformStats {
     pub tool_messages_modified: usize,
 }
 
-const TOOLS_TO_PRESERVE: &[&str] = &["deep_research", "subagent", "strategic_planning", "code_review"];
+pub const TOOLS_TO_PRESERVE: &[&str] = &["deep_research", "subagent", "strategic_planning", "code_review"];
 
 fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
+}
+
+fn is_memory_path(path: &str) -> bool {
+    path.contains("/.refact/knowledge/")
+        || path.contains("/.refact/trajectories/")
+        || path.contains("/.refact/tasks/")
 }
 
 pub fn approx_token_count(messages: &[ChatMessage]) -> usize {
@@ -163,15 +169,14 @@ pub fn compress_in_place(
     let mut tool_modified = 0;
 
     if opts.drop_all_context {
-        let mut i = 0;
-        while i < messages.len() {
-            if messages[i].role == "context_file" {
-                messages.remove(i);
+        messages.retain(|m| {
+            if m.role == "context_file" {
                 context_modified += 1;
+                false
             } else {
-                i += 1;
+                true
             }
-        }
+        });
     } else if opts.dedup_and_compress_context {
         let result = super::history_limit::compress_duplicate_context_files(messages);
         if let Ok((count, _)) = result {
@@ -180,33 +185,53 @@ pub fn compress_in_place(
     }
 
     if opts.drop_all_memories {
-        let mut i = 0;
-        while i < messages.len() {
-            if messages[i].role == "context_file" {
-                let content_text = messages[i].content.content_text_only().to_lowercase();
-                if content_text.contains("memory") || content_text.contains("knowledge") {
-                    messages.remove(i);
-                    context_modified += 1;
-                    continue;
+        for msg in messages.iter_mut() {
+            if msg.role != "context_file" {
+                continue;
+            }
+            if let ChatContent::ContextFiles(files) = &msg.content {
+                let remaining: Vec<_> = files
+                    .iter()
+                    .filter(|cf| !is_memory_path(&cf.file_name))
+                    .cloned()
+                    .collect();
+                if remaining.len() < files.len() {
+                    context_modified += files.len() - remaining.len();
+                    msg.content = ChatContent::ContextFiles(remaining);
                 }
             }
-            i += 1;
         }
+        messages.retain(|m| {
+            if m.role != "context_file" {
+                return true;
+            }
+            match &m.content {
+                ChatContent::ContextFiles(files) => !files.is_empty(),
+                _ => true,
+            }
+        });
     }
 
     if opts.drop_project_information {
-        let mut i = 0;
-        while i < messages.len() {
-            if messages[i].role == "system" {
-                let content_text = messages[i].content.content_text_only().to_lowercase();
-                if content_text.contains("project") || content_text.contains("workspace") {
-                    messages.remove(i);
+        let first_system_idx = messages.iter().position(|m| m.role == "system");
+        let mut idx = 0usize;
+        messages.retain(|msg| {
+            let keep = if msg.role != "system" {
+                true
+            } else if Some(idx) == first_system_idx {
+                true
+            } else {
+                let text = msg.content.content_text_only().to_lowercase();
+                if text.contains("project") || text.contains("workspace") {
                     context_modified += 1;
-                    continue;
+                    false
+                } else {
+                    true
                 }
-            }
-            i += 1;
-        }
+            };
+            idx += 1;
+            keep
+        });
     }
 
     if opts.compress_non_agentic_tools {
@@ -244,9 +269,9 @@ pub fn compress_in_place(
         }
     }
 
-    let after_tokens = approx_token_count(messages);
+    let after_tokens_pre = approx_token_count(messages);
     let reduction_percent = if before_tokens > 0 {
-        ((before_tokens.saturating_sub(after_tokens)) * 100) / before_tokens
+        ((before_tokens.saturating_sub(after_tokens_pre)) * 100) / before_tokens
     } else {
         0
     };
@@ -258,13 +283,14 @@ pub fn compress_in_place(
             context_modified,
             tool_modified,
             before_tokens,
-            after_tokens,
+            after_tokens_pre,
             reduction_percent
         )),
         ..Default::default()
     };
     messages.push(instruction);
 
+    let after_tokens = approx_token_count(messages);
     Ok(TransformStats {
         before_message_count: before_count,
         after_message_count: messages.len(),
@@ -448,11 +474,21 @@ pub async fn handoff_select(
     let mut summary_msg: Option<ChatMessage> = None;
 
     if opts.llm_summary_for_excluded && generate_summary {
-        let all_conversation = sanitize_messages_for_new_thread(messages);
+        let selected_ids: std::collections::HashSet<&str> = conversation
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect();
+        let excluded: Vec<ChatMessage> = messages
+            .iter()
+            .skip(system_prefix_len)
+            .filter(|m| !selected_ids.contains(m.message_id.as_str()))
+            .cloned()
+            .collect();
+        let excluded_sanitized = sanitize_messages_for_new_thread(&excluded);
 
-        if !all_conversation.is_empty() {
+        if !excluded_sanitized.is_empty() {
             let summary =
-                crate::agentic::compress_trajectory::compress_trajectory(gcx, &all_conversation)
+                crate::agentic::compress_trajectory::compress_trajectory(gcx, &excluded_sanitized)
                     .await
                     .map_err(|e| format!("Failed to generate summary: {}", e))?;
             summary_msg = Some(ChatMessage {
@@ -720,11 +756,45 @@ mod tests {
 
     #[test]
     fn test_drop_all_memories() {
+        use crate::call_validation::ContextFile;
+
+        fn make_multi_context_file_msg(files: Vec<(&str, &str)>) -> ChatMessage {
+            ChatMessage {
+                role: "context_file".to_string(),
+                content: ChatContent::ContextFiles(
+                    files
+                        .into_iter()
+                        .map(|(name, content)| ContextFile {
+                            file_name: name.to_string(),
+                            file_content: content.to_string(),
+                            line1: 1,
+                            line2: 1,
+                            file_rev: None,
+                            symbols: vec![],
+                            gradient_type: -1,
+                            usefulness: 0.0,
+                            skip_pp: false,
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }
+        }
+
         let mut messages = vec![
             make_user_msg("hello"),
-            make_context_file_msg("memory.md", "some memory content"),
-            make_context_file_msg("knowledge.txt", "some knowledge"),
-            make_context_file_msg("regular.rs", "fn main() {}"),
+            // Pure memory message — should be removed entirely
+            make_context_file_msg(
+                "/home/user/.refact/knowledge/2026-01-01_mem.md",
+                "some memory",
+            ),
+            // Mixed message: one memory file + one source file
+            make_multi_context_file_msg(vec![
+                ("/home/user/.refact/knowledge/other.md", "knowledge"),
+                ("regular.rs", "fn main() {}"),
+            ]),
+            // Pure source file — must be preserved
+            make_context_file_msg("src/lib.rs", "pub fn foo() {}"),
             make_assistant_msg("response"),
         ];
         let opts = CompressOptions {
@@ -732,13 +802,32 @@ mod tests {
             ..Default::default()
         };
         let stats = compress_in_place(&mut messages, &opts).unwrap();
+
+        // 1 file dropped from pure-memory message + 1 file from the mixed message
         assert_eq!(stats.context_messages_modified, 2);
+
+        // Pure-memory message is gone
+        assert!(!messages.iter().any(|m| {
+            if let ChatContent::ContextFiles(files) = &m.content {
+                files.iter().any(|f| f.file_name.contains(".refact/knowledge/2026"))
+            } else {
+                false
+            }
+        }));
+
+        // regular.rs survives (was bundled with a memory file)
         assert!(messages.iter().any(|m| {
             if let ChatContent::ContextFiles(files) = &m.content {
-                files
-                    .first()
-                    .map(|f| f.file_name == "regular.rs")
-                    .unwrap_or(false)
+                files.iter().any(|f| f.file_name == "regular.rs")
+            } else {
+                false
+            }
+        }));
+
+        // src/lib.rs survives
+        assert!(messages.iter().any(|m| {
+            if let ChatContent::ContextFiles(files) = &m.content {
+                files.iter().any(|f| f.file_name == "src/lib.rs")
             } else {
                 false
             }
@@ -747,7 +836,17 @@ mod tests {
 
     #[test]
     fn test_drop_project_information() {
+        // The first system message is the main agent prompt and must never be dropped,
+        // even if it contains "project" or "workspace". Secondary system messages that
+        // contain those words should be removed.
         let mut messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: ChatContent::SimpleText(
+                    "You are an agent. Workspace: /home/user/project".to_string(),
+                ),
+                ..Default::default()
+            },
             ChatMessage {
                 role: "system".to_string(),
                 content: ChatContent::SimpleText("Project structure: ...".to_string()),
@@ -765,7 +864,16 @@ mod tests {
             ..Default::default()
         };
         let stats = compress_in_place(&mut messages, &opts).unwrap();
+
+        // Only the second system message ("Project structure") should be dropped
         assert_eq!(stats.context_messages_modified, 1);
+
+        // First system message (the main prompt) must survive even though it contains "project"/"workspace"
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "system" && m.content.content_text_only().contains("Workspace")));
+
+        // Third system message (no project/workspace) must also survive
         assert!(messages
             .iter()
             .any(|m| m.role == "system" && m.content.content_text_only().contains("assistant")));
