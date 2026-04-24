@@ -589,6 +589,7 @@ available:
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
             support_metadata: false,
+            supports_cache_control: true,
             chat_models: Vec::new(),
             completion_models: Vec::new(),
             embedding_model: None,

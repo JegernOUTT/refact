@@ -255,6 +255,7 @@ export const selectToolResultById = createSelector(
           tool_call_id: m.tool_call_id,
           content: m.content,
           tool_failed: m.tool_failed,
+          extra: m.extra,
         } as ToolResult;
       }
     }
@@ -271,6 +272,7 @@ export const selectManyToolResultsByIds = (ids: string[]) =>
             tool_call_id: msg.tool_call_id,
             content: msg.content,
             tool_failed: msg.tool_failed,
+            extra: msg.extra,
           }) as ToolResult,
       ),
   );

@@ -4,12 +4,43 @@
   color: var(--accent-11);
 }
 
+.inlineCode {
+  font-family: var(--code-font-family);
+  color: var(--gray-12);
+}
+
 .query {
   color: var(--accent-11);
+}
+
+.resultList {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: var(--space-1);
+  border-radius: var(--radius-2);
+  border: 1px solid var(--gray-a4);
+}
+
+.resultItem {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--gray-a4);
+}
+
+.resultItem:last-child {
+  border-bottom: none;
 }
 
 .resultContent {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 300px;
   overflow-y: auto;
+}
+
+.markdownContent {
+  width: 100%;
+}
+
+.markdownContent :global(p) {
+  white-space: pre-wrap;
 }

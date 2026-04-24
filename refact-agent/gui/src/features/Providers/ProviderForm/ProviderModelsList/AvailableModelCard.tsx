@@ -1,4 +1,11 @@
-import { type FC, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type FC,
+  type MouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import classNames from "classnames";
 import {
   Badge,
@@ -10,7 +17,7 @@ import {
   Text,
   Tooltip,
 } from "@radix-ui/themes";
-import { TrashIcon } from "@radix-ui/react-icons";
+import { Pencil1Icon, TrashIcon } from "@radix-ui/react-icons";
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 
 import type { AvailableModel } from "../../../../services/refact";
@@ -27,6 +34,7 @@ export type AvailableModelCardProps = {
   model: AvailableModel;
   providerName: string;
   isReadonlyProvider: boolean;
+  onEditCustomModel?: (model: AvailableModel) => void;
 };
 
 /**
@@ -36,6 +44,7 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
   model,
   providerName,
   isReadonlyProvider,
+  onEditCustomModel,
 }) => {
   const [toggleModel, { isLoading: isToggling }] = useToggleModelMutation();
   const [setModelProvider, { isLoading: isSettingProvider }] =
@@ -125,6 +134,14 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
       console.error("Failed to remove custom model:", e);
     }
   }, [removeCustomModel, providerName, model.id, model.is_custom]);
+
+  const handleEdit = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      onEditCustomModel?.(model);
+    },
+    [model, onEditCustomModel],
+  );
 
   const handleProviderSelect = useCallback(
     async (provider: string) => {
@@ -459,6 +476,19 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
         </Flex>
 
         <Flex align="center" gap="2">
+          {model.is_custom && !isReadonlyProvider && (
+            <Tooltip content="Edit custom model">
+              <IconButton
+                size="1"
+                variant="ghost"
+                color="gray"
+                onClick={handleEdit}
+                disabled={isLoading}
+              >
+                <Pencil1Icon />
+              </IconButton>
+            </Tooltip>
+          )}
           {model.is_custom && !isReadonlyProvider && (
             <Tooltip content="Remove custom model">
               <IconButton

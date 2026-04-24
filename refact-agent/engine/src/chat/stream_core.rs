@@ -280,6 +280,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         support_metadata: params.model_rec.support_metadata,
         eof_is_done: params.model_rec.eof_is_done,
         supports_web_search: params.model_rec.supports_web_search,
+        supports_cache_control: params.model_rec.supports_cache_control,
     };
 
     let http_parts = adapter.build_http(&params.llm_request, &adapter_settings)

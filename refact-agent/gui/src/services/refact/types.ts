@@ -73,6 +73,7 @@ export interface BaseToolResult {
   content: ToolContent;
   compression_strength?: CompressionStrength;
   tool_failed?: boolean;
+  extra?: Record<string, unknown>;
 }
 
 export interface SingleModelToolResult extends BaseToolResult {
@@ -195,6 +196,7 @@ export interface ToolMessage extends BaseMessage {
   tool_call_id: string;
   tool_failed?: boolean;
   compression_strength?: CompressionStrength;
+  extra?: Record<string, unknown>;
 }
 
 export type DiffChunk = {

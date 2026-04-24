@@ -253,7 +253,13 @@ pub async fn watcher_init(gcx: Arc<ARwLock<GlobalContext>>) {
             }
         });
     };
-    let mut watcher = RecommendedWatcher::new(event_callback, Config::default()).unwrap();
+    let mut watcher = match RecommendedWatcher::new(event_callback, Config::default()) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("Failed to create file watcher (file watching disabled): {e}");
+            return;
+        }
+    };
 
     let workspace_folders: Arc<StdMutex<Vec<PathBuf>>> =
         gcx.read().await.documents_state.workspace_folders.clone();

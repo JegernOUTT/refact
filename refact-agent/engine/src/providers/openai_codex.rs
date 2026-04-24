@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -13,6 +13,27 @@ use crate::providers::traits::{
     AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
     merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
 };
+
+/// Generic GPT-5 model IDs without a "codex" suffix that are included by this provider.
+/// Explicit allowlist avoids accidentally pulling in unrelated variants like "-pro" or "-reasoning".
+const GENERIC_GPT5_ALLOWLIST: &[&str] = &[
+    "gpt-5.2",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+];
+
+fn is_codex_model(id: &str) -> bool {
+    let lower = id.to_lowercase();
+    if lower.contains("codex") {
+        return true;
+    }
+    GENERIC_GPT5_ALLOWLIST.iter().any(|&allowed| lower == allowed)
+}
+
+fn is_codex_model_conservative(id: &str) -> bool {
+    id.to_lowercase().contains("codex")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum AuthSource {
@@ -154,13 +175,7 @@ impl OpenAICodexProvider {
         Ok(())
     }
 
-    /// Returns the credential to use for api.openai.com endpoints.
-    ///
-    /// IMPORTANT: Codex/ChatGPT OAuth produces an OAuth access token, but the OpenAI Platform
-    /// API requires an API key with `api.responses.write` scope. Codex CLI obtains that API key
-    /// via OAuth token-exchange and stores it as OPENAI_API_KEY.
     fn resolve_auth(&self) -> (AuthSource, CodexAuth) {
-        // Prefer API key obtained via token-exchange in our OAuth flow.
         if !self.oauth_tokens.openai_api_key.is_empty() {
             return (
                 AuthSource::InAppOAuth,
@@ -170,8 +185,6 @@ impl OpenAICodexProvider {
             );
         }
 
-        // If we have a ChatGPT OAuth access token + chatgpt_account_id, we can use
-        // ChatGPT backend endpoint (Codex-style) without an OpenAI Platform org.
         if self.oauth_tokens.has_valid_access_token() && !self.oauth_tokens.chatgpt_account_id.is_empty() {
             return (
                 AuthSource::InAppOAuth,
@@ -182,7 +195,6 @@ impl OpenAICodexProvider {
             );
         }
 
-        // Fall back to Codex CLI credentials: prefer OPENAI_API_KEY if present.
         if let Ok(cli_tokens) = crate::providers::openai_codex_oauth::read_codex_cli_credentials() {
             if !cli_tokens.openai_api_key.is_empty() {
                 return (
@@ -194,7 +206,6 @@ impl OpenAICodexProvider {
             }
         }
 
-        // Last resort: OAuth access token only (usually not enough).
         if self.oauth_tokens.has_valid_access_token() {
             return (
                 AuthSource::InAppOAuth,
@@ -209,7 +220,6 @@ impl OpenAICodexProvider {
     }
 
     fn resolve_wham_token(&self) -> Result<String, String> {
-        // The wham/usage endpoint uses the ChatGPT OAuth access token
         if self.oauth_tokens.has_valid_access_token() {
             return Ok(self.oauth_tokens.access_token.clone());
         }
@@ -271,9 +281,7 @@ impl OpenAICodexProvider {
         };
 
         let plan_type = data.get("plan_type").and_then(|v| v.as_str()).map(|s| s.to_string());
-
         let rate_limit = data.get("rate_limit").map(|rl| parse_rate_limit(rl));
-
         let code_review_rate_limit = data.get("code_review_rate_limit").map(|rl| parse_rate_limit(rl));
 
         let credits = data.get("credits").map(|c| {
@@ -301,7 +309,6 @@ impl OpenAICodexProvider {
                 if self.oauth_tokens.api_key_exchange_error.is_empty() {
                     return "Connected (ChatGPT backend)".to_string();
                 }
-                // Keep details in `api_key_exchange_error`; show a short user-friendly status.
                 return "Connected (ChatGPT backend). Platform API key not available for this account.".to_string();
             }
             return "OAuth login incomplete: missing chatgpt_account_id".to_string();
@@ -314,6 +321,170 @@ impl OpenAICodexProvider {
             return "OK (Codex CLI session)".to_string();
         }
         "No credentials found".to_string()
+    }
+
+    async fn fetch_models_from_api(
+        &self,
+        http_client: &reqwest::Client,
+        model_caps: &HashMap<String, ModelCapabilities>,
+        api_key: &str,
+    ) -> Vec<AvailableModel> {
+        const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
+
+        let response = match http_client
+            .get(OPENAI_MODELS_URL)
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"))
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!("OpenAI Codex: failed to reach /v1/models (network error): {}, using hardcoded list", e);
+                return self.fetch_models_from_hardcoded_list(model_caps);
+            }
+        };
+
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            tracing::warn!("OpenAI Codex: /v1/models returned {} — API key invalid or revoked; returning custom models only", status);
+            return self.get_custom_models_only();
+        }
+
+        if !status.is_success() {
+            tracing::warn!("OpenAI Codex: /v1/models returned {} (transient), using hardcoded list", status);
+            return self.fetch_models_from_hardcoded_list(model_caps);
+        }
+
+        let json: serde_json::Value = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("OpenAI Codex: failed to parse /v1/models response: {}, using hardcoded list", e);
+                return self.fetch_models_from_hardcoded_list(model_caps);
+            }
+        };
+
+        let data_array = match json.get("data").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => {
+                tracing::warn!("OpenAI Codex: /v1/models response missing or non-array 'data' field, using hardcoded list");
+                return self.fetch_models_from_hardcoded_list(model_caps);
+            }
+        };
+
+        let enabled_set: HashSet<&str> = self.enabled_models.iter().map(|s| s.as_str()).collect();
+        let mut models_map: HashMap<String, AvailableModel> = HashMap::new();
+
+        for model in data_array {
+            let id = match model.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            if !is_codex_model(&id) {
+                continue;
+            }
+            let enabled = enabled_set.contains(id.as_str());
+            let pricing = self.model_pricing(id.as_str());
+            if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, &id) {
+                models_map.insert(id.clone(), AvailableModel::from_caps(&id, &caps.caps, enabled, pricing));
+            } else {
+                models_map.insert(id.clone(), self.default_codex_model(id, enabled, pricing));
+            }
+        }
+
+        for (name, caps) in model_caps {
+            if is_codex_model_conservative(name) && !models_map.contains_key(name) {
+                let enabled = enabled_set.contains(name.as_str());
+                let pricing = self.model_pricing(name);
+                models_map.insert(name.clone(), AvailableModel::from_caps(name, caps, enabled, pricing));
+            }
+        }
+
+        tracing::info!("OpenAI Codex: {} models available (from /v1/models API)", models_map.len());
+
+        let mut models: Vec<AvailableModel> = models_map.into_values().collect();
+        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
+
+    fn fetch_models_from_hardcoded_list(&self, model_caps: &HashMap<String, ModelCapabilities>) -> Vec<AvailableModel> {
+        let (_, auth) = self.resolve_auth();
+        let (caps_filter, base_ids): (fn(&str) -> bool, &[&str]) = match auth {
+            CodexAuth::ChatGptBackendOAuth { .. } => (
+                is_codex_model_conservative,
+                &[
+                    "gpt-5.3-codex",
+                    "gpt-5.3-codex-spark",
+                    "gpt-5.2-codex",
+                    "gpt-5.1-codex-max",
+                    "gpt-5.1-codex-mini",
+                ],
+            ),
+            _ => (
+                is_codex_model,
+                &[
+                    "gpt-5.5",
+                    "gpt-5.4",
+                    "gpt-5.4-mini",
+                    "gpt-5.3-codex",
+                    "gpt-5.3-codex-spark",
+                    "gpt-5.2-codex",
+                    "gpt-5.1-codex-max",
+                    "gpt-5.1-codex-mini",
+                ],
+            ),
+        };
+
+        let mut seen: HashSet<String> = base_ids.iter().map(|s| s.to_string()).collect();
+        let mut codex_model_ids: Vec<String> = base_ids.iter().map(|s| s.to_string()).collect();
+        for model_id in model_caps.keys() {
+            if caps_filter(model_id) && seen.insert(model_id.clone()) {
+                codex_model_ids.push(model_id.clone());
+            }
+        }
+
+        tracing::info!("OpenAI Codex: {} models available (hardcoded + caps-discovered)", codex_model_ids.len());
+
+        let enabled_set: HashSet<&str> = self.enabled_models.iter().map(|s| s.as_str()).collect();
+        let mut models: Vec<AvailableModel> = Vec::new();
+
+        for model_id in &codex_model_ids {
+            let enabled = enabled_set.contains(model_id.as_str());
+            let pricing = self.model_pricing(model_id);
+
+            if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, model_id) {
+                models.push(AvailableModel::from_caps(model_id, &caps.caps, enabled, pricing));
+            } else {
+                tracing::debug!("OpenAI Codex: no model_caps match for '{}', using defaults", model_id);
+                models.push(self.default_codex_model(model_id.clone(), enabled, pricing));
+            }
+        }
+
+        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
+
+    fn default_codex_model(&self, id: String, enabled: bool, pricing: Option<ModelPricing>) -> AvailableModel {
+        AvailableModel {
+            id,
+            display_name: None,
+            n_ctx: 200_000,
+            supports_tools: true,
+            supports_multimodality: true,
+            reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
+            supports_thinking_budget: false,
+            supports_adaptive_thinking_budget: false,
+            tokenizer: None,
+            enabled,
+            is_custom: false,
+            pricing,
+            available_providers: Vec::new(),
+            selected_provider: None,
+            max_output_tokens: None,
+            provider_variants: Vec::new(),
+        }
     }
 }
 
@@ -344,7 +515,11 @@ impl ProviderTrait for OpenAICodexProvider {
     }
 
     fn model_filter_regex(&self) -> Option<&'static str> {
-        Some(r"^(gpt-.*codex|codex-)")
+        // Conservative regex covering only codex-named models.
+        // Generic GPT-5 allowlist entries (GENERIC_GPT5_ALLOWLIST) are applied at runtime
+        // via is_codex_model() in fetch_available_models(); they are intentionally omitted here
+        // to avoid false positives in shared caps-based code paths.
+        Some(r"(?i)^gpt.*codex")
     }
 
     fn provider_schema(&self) -> &'static str {
@@ -398,8 +573,6 @@ available:
         let (chat_endpoint, api_key) = match auth {
             CodexAuth::PlatformApiKey { api_key } => ("https://api.openai.com/v1/responses".to_string(), api_key),
             CodexAuth::ChatGptBackendOAuth { access_token, chatgpt_account_id, .. } => {
-                // OpenCode/Codex-style endpoint: ChatGPT backend
-                // Requires store:false (set in adapter by endpoint), and special headers.
                 if !chatgpt_account_id.is_empty() {
                     extra_headers.insert("chatgpt-account-id".to_string(), chatgpt_account_id);
                 }
@@ -430,6 +603,7 @@ available:
             tokenizer_api_key: String::new(),
             extra_headers,
             support_metadata: false,
+            supports_cache_control: true,
             chat_models: Vec::new(),
             completion_models: Vec::new(),
             embedding_model: None,
@@ -450,7 +624,11 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::ModelCaps
+        let (_, auth) = self.resolve_auth();
+        match auth {
+            CodexAuth::PlatformApiKey { ref api_key } if !api_key.is_empty() => ModelSource::Api,
+            _ => ModelSource::ModelCaps,
+        }
     }
 
     fn enabled_models(&self) -> &[String] {
@@ -463,76 +641,22 @@ available:
 
     async fn fetch_available_models(
         &self,
-        _http_client: &reqwest::Client,
+        http_client: &reqwest::Client,
         model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
         let (_, auth) = self.resolve_auth();
-        let has_auth = match auth {
-            CodexAuth::PlatformApiKey { ref api_key } => !api_key.is_empty(),
-            CodexAuth::ChatGptBackendOAuth { ref access_token, .. } => !access_token.is_empty(),
-            CodexAuth::None => false,
-        };
-        if !has_auth {
-            tracing::warn!("OpenAI Codex: no auth");
-            return self.get_custom_models_only();
-        }
-
-        let mut codex_model_ids: Vec<String> = vec![
-            "gpt-5.3-codex".to_string(),
-            "gpt-5.2-codex".to_string(),
-            "gpt-5.1-codex-max".to_string(),
-            "gpt-5.2".to_string(),
-            "gpt-5.1-codex-mini".to_string(),
-        ];
-
-        let codex_pattern = regex::Regex::new(r"(?i)^gpt.*codex").expect("valid static regex");
-        for model_id in model_caps.keys() {
-            if codex_pattern.is_match(model_id) && !codex_model_ids.contains(model_id) {
-                codex_model_ids.push(model_id.clone());
+        match auth {
+            CodexAuth::None => {
+                tracing::warn!("OpenAI Codex: no auth");
+                return self.get_custom_models_only();
             }
-        }
-
-        tracing::info!("OpenAI Codex: {} models available (hardcoded + discovered)", codex_model_ids.len());
-
-        let enabled_set: std::collections::HashSet<_> =
-            self.enabled_models.iter().map(|s| s.as_str()).collect();
-
-        let mut models: Vec<AvailableModel> = Vec::new();
-
-        for model_id in &codex_model_ids {
-            let enabled = enabled_set.contains(model_id.as_str());
-            let pricing = self.model_pricing(model_id);
-
-            if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, model_id) {
-                let model = AvailableModel::from_caps(model_id, &caps.caps, enabled, pricing);
-                models.push(model);
-            } else {
-                tracing::debug!("OpenAI Codex: no model_caps match for '{}', using defaults", model_id);
-                models.push(AvailableModel {
-                    id: model_id.to_string(),
-                    display_name: None,
-                    n_ctx: 200_000,
-                    supports_tools: true,
-                    supports_multimodality: true,
-                    reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
-                    supports_thinking_budget: false,
-                    supports_adaptive_thinking_budget: false,
-                    tokenizer: None,
-                    enabled,
-                    is_custom: false,
-                    pricing,
-                    available_providers: Vec::new(),
-                    selected_provider: None,
-                    max_output_tokens: None,
-                    provider_variants: Vec::new(),
-                });
+            CodexAuth::PlatformApiKey { ref api_key } if !api_key.is_empty() => {
+                return self.fetch_models_from_api(http_client, model_caps, api_key).await;
             }
+            _ => {}
         }
 
-        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
-
-        models.sort_by(|a, b| a.id.cmp(&b.id));
-        models
+        self.fetch_models_from_hardcoded_list(model_caps)
     }
 
     fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
@@ -588,5 +712,201 @@ available:
 
         self.oauth_tokens = refreshed;
         self.save_oauth_tokens_config(config_dir).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::caps::model_caps::ModelCapabilities;
+    use crate::providers::traits::{AvailableModel, CustomModelConfig, ModelSource, ProviderTrait};
+    use crate::providers::openai_codex_oauth::OAuthTokens;
+    use super::OpenAICodexProvider;
+
+    fn provider_with_api_key(api_key: &str) -> OpenAICodexProvider {
+        OpenAICodexProvider {
+            oauth_tokens: OAuthTokens {
+                openai_api_key: api_key.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn provider_with_oauth(access_token: &str, chatgpt_account_id: &str) -> OpenAICodexProvider {
+        OpenAICodexProvider {
+            oauth_tokens: OAuthTokens {
+                access_token: access_token.to_string(),
+                chatgpt_account_id: chatgpt_account_id.to_string(),
+                expires_at: i64::MAX,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn empty_caps() -> HashMap<String, ModelCapabilities> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn model_source_api_when_platform_key_present() {
+        let p = provider_with_api_key("sk-test");
+        assert_eq!(p.model_source(), ModelSource::Api);
+    }
+
+    #[test]
+    fn model_source_model_caps_when_oauth_only() {
+        let p = provider_with_oauth("tok", "acct-123");
+        assert_eq!(p.model_source(), ModelSource::ModelCaps);
+    }
+
+    #[test]
+    fn model_source_model_caps_when_no_auth() {
+        let p = OpenAICodexProvider::default();
+        assert_eq!(p.model_source(), ModelSource::ModelCaps);
+    }
+
+    #[test]
+    fn is_codex_model_matches_codex_named_models() {
+        assert!(super::is_codex_model("gpt-5.3-codex"));
+        assert!(super::is_codex_model("gpt-5.2-codex"));
+        assert!(super::is_codex_model("gpt-5.1-codex-max"));
+        assert!(super::is_codex_model("gpt-5.1-codex-mini"));
+        assert!(super::is_codex_model("GPT-5.3-CODEX"), "must be case-insensitive");
+        assert!(super::is_codex_model("gpt-5-codex"));
+        assert!(super::is_codex_model("gpt-5.3-codex-spark"));
+    }
+
+    #[test]
+    fn is_codex_model_matches_explicit_allowlist_variants() {
+        assert!(super::is_codex_model("gpt-5.2"), "gpt-5.2 is in allowlist");
+        assert!(super::is_codex_model("gpt-5.4"), "gpt-5.4 is in allowlist");
+        assert!(super::is_codex_model("gpt-5.4-mini"), "gpt-5.4-mini is in allowlist");
+        assert!(super::is_codex_model("gpt-5.5"), "gpt-5.5 is in allowlist");
+    }
+
+    #[test]
+    fn is_codex_model_excludes_non_allowlist_generic_gpt5() {
+        assert!(!super::is_codex_model("gpt-5.3"), "gpt-5.3 not in allowlist");
+        assert!(!super::is_codex_model("gpt-5.6"), "gpt-5.6 not in allowlist");
+        assert!(!super::is_codex_model("gpt-5.1"), "gpt-5.1 not in allowlist");
+    }
+
+    #[test]
+    fn is_codex_model_excludes_non_codex() {
+        assert!(!super::is_codex_model("gpt-4o"));
+        assert!(!super::is_codex_model("gpt-4"));
+        assert!(!super::is_codex_model("gpt-3.5-turbo"));
+        assert!(!super::is_codex_model("gpt-5.2-pro"), "not in allowlist");
+        assert!(!super::is_codex_model("gpt-5.4-preview"), "not in allowlist");
+        assert!(!super::is_codex_model("gpt-5.4-reasoning"), "not in allowlist");
+    }
+
+    #[test]
+    fn model_filter_regex_matches_codex_named_only() {
+        let p = provider_with_api_key("sk-test");
+        let pattern = p.model_filter_regex().expect("filter regex must be set");
+        let re = regex::Regex::new(pattern).unwrap();
+
+        assert!(re.is_match("gpt-5.3-codex"));
+        assert!(re.is_match("GPT-5.3-CODEX"), "must be case-insensitive");
+        assert!(re.is_match("gpt-5.1-codex-max"));
+
+        assert!(!re.is_match("gpt-5.4"), "allowlist entry: not in conservative regex");
+        assert!(!re.is_match("gpt-5.5"), "allowlist entry: not in conservative regex");
+        assert!(!re.is_match("gpt-5.2"), "allowlist entry: not in conservative regex");
+        assert!(!re.is_match("gpt-4o"));
+        assert!(!re.is_match("gpt-4"));
+        assert!(!re.is_match("gpt-3.5-turbo"));
+        assert!(!re.is_match("gpt-5.1"));
+        assert!(!re.is_match("gpt-5.2-pro"));
+    }
+
+    #[tokio::test]
+    async fn no_auth_returns_empty_when_no_custom_models() {
+        let p = OpenAICodexProvider::default();
+        let client = reqwest::Client::new();
+        let models: Vec<AvailableModel> = p.fetch_available_models(&client, &empty_caps()).await;
+        assert!(models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oauth_path_only_shows_codex_named_models() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let client = reqwest::Client::new();
+        let models: Vec<AvailableModel> = p.fetch_available_models(&client, &empty_caps()).await;
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+
+        let conservative = regex::Regex::new(r"(?i)^gpt.*codex").unwrap();
+        for id in &ids {
+            assert!(conservative.is_match(id), "OAuth path returned non-codex model: '{}'", id);
+        }
+
+        assert!(!ids.contains(&"gpt-5.5"));
+        assert!(!ids.contains(&"gpt-5.4"));
+        assert!(!ids.contains(&"gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn auth_failure_returns_custom_models_only_not_hardcoded() {
+        let p = provider_with_api_key("sk-revoked");
+        let models: Vec<AvailableModel> = p.get_custom_models_only();
+        assert!(
+            models.is_empty(),
+            "auth failure with no custom models must return empty, got: {:?}",
+            models.iter().map(|m| &m.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_fallback_no_duplicates_when_caps_overlap() {
+        let mut caps: HashMap<String, ModelCapabilities> = HashMap::new();
+        caps.insert("gpt-5.3-codex".to_string(), ModelCapabilities::default());
+        caps.insert("gpt-5.2-codex".to_string(), ModelCapabilities::default());
+        caps.insert("gpt-5.6-codex".to_string(), ModelCapabilities::default());
+
+        let p = provider_with_oauth("tok", "acct");
+        let client = reqwest::Client::new();
+        let models: Vec<AvailableModel> = p.fetch_available_models(&client, &caps).await;
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+
+        for id in &ids {
+            let count = ids.iter().filter(|x| **x == *id).count();
+            assert_eq!(count, 1, "model '{}' appears {} times (must be 1)", id, count);
+        }
+        assert!(ids.contains(&"gpt-5.6-codex"));
+    }
+
+    #[tokio::test]
+    async fn oauth_fallback_models_are_sorted() {
+        let p = provider_with_oauth("tok", "acct");
+        let client = reqwest::Client::new();
+        let models: Vec<AvailableModel> = p.fetch_available_models(&client, &empty_caps()).await;
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
+    }
+
+    #[tokio::test]
+    async fn custom_models_appear_with_no_auth() {
+        let mut p = OpenAICodexProvider::default();
+        p.custom_models.insert("my-custom".to_string(), CustomModelConfig::default());
+        let client = reqwest::Client::new();
+        let models: Vec<AvailableModel> = p.fetch_available_models(&client, &empty_caps()).await;
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"my-custom"));
+    }
+
+    #[tokio::test]
+    async fn custom_models_appear_with_oauth() {
+        let mut p = provider_with_oauth("tok", "acct");
+        p.custom_models.insert("my-custom".to_string(), CustomModelConfig::default());
+        let client = reqwest::Client::new();
+        let models: Vec<AvailableModel> = p.fetch_available_models(&client, &empty_caps()).await;
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"my-custom"));
     }
 }

@@ -15,6 +15,7 @@ import type { ProviderListItem } from "../../../../services/refact";
 import {
   useGetAvailableModelsQuery,
   useGetOpenRouterAccountInfoQuery,
+  type AvailableModel,
 } from "../../../../services/refact";
 import { toPascalCase } from "../../../../utils/toPascalCase";
 
@@ -39,12 +40,30 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
   } = useGetAvailableModelsQuery({ providerName: provider.name });
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [editingModel, setEditingModel] = useState<
+    AvailableModel | undefined
+  >();
   const { data: openRouterAccount } = useGetOpenRouterAccountInfoQuery(
     undefined,
     {
       skip: provider.name !== "openrouter",
     },
   );
+
+  const handleOpenCreateModal = () => {
+    setEditingModel(undefined);
+    setIsAddModalOpen(true);
+  };
+
+  const handleOpenEditModal = (model: AvailableModel) => {
+    setEditingModel(model);
+    setIsAddModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setIsAddModalOpen(false);
+    setEditingModel(undefined);
+  };
 
   const filteredModels = useMemo(() => {
     if (!modelsData?.models) return [];
@@ -134,11 +153,7 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
         </Flex>
 
         {!provider.readonly && (
-          <Button
-            size="1"
-            variant="soft"
-            onClick={() => setIsAddModalOpen(true)}
-          >
+          <Button size="1" variant="soft" onClick={handleOpenCreateModal}>
             <PlusIcon /> Add Custom Model
           </Button>
         )}
@@ -197,6 +212,7 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
                       model={model}
                       providerName={provider.name}
                       isReadonlyProvider={provider.readonly}
+                      onEditCustomModel={handleOpenEditModal}
                     />
                   ))}
                 </Flex>
@@ -207,6 +223,7 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
                   model={model}
                   providerName={provider.name}
                   isReadonlyProvider={provider.readonly}
+                  onEditCustomModel={handleOpenEditModal}
                 />
               ))}
         </Flex>
@@ -215,7 +232,8 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
       <AddCustomModelModal
         providerName={provider.name}
         isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
+        onClose={handleCloseModal}
+        initialModel={editingModel}
       />
     </Flex>
   );

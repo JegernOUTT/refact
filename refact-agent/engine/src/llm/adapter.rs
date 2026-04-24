@@ -52,6 +52,7 @@ pub struct AdapterSettings {
     pub support_metadata: bool,
     pub eof_is_done: bool,
     pub supports_web_search: bool,
+    pub supports_cache_control: bool,
 }
 
 pub trait LlmWireAdapter: Send + Sync {

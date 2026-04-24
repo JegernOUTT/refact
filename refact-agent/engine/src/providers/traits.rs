@@ -194,6 +194,8 @@ pub struct ProviderModel {
     pub removable: bool,
 }
 
+fn default_true() -> bool { true }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderRuntime {
     pub name: String,
@@ -221,6 +223,10 @@ pub struct ProviderRuntime {
     #[allow(dead_code)]
     pub extra_headers: HashMap<String, String>,
     pub support_metadata: bool,
+    /// Whether this provider supports Anthropic-style prompt cache_control headers.
+    /// Set to false for providers like vLLM that reject unknown fields.
+    #[serde(default = "default_true")]
+    pub supports_cache_control: bool,
     pub chat_models: Vec<ProviderModel>,
     pub completion_models: Vec<ProviderModel>,
     pub embedding_model: Option<ProviderModel>,

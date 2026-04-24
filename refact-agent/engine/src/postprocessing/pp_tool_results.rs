@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextFile, PostprocessS
 use crate::files_correction::canonical_path;
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
+use crate::at_commands::at_web_search::{format_search_results, SearchResult};
 use crate::postprocessing::pp_context_files::postprocess_context_files;
 use crate::postprocessing::pp_plain_text::postprocess_plain_text;
 use crate::tokens::count_text_tokens_with_fallback;
@@ -69,6 +70,8 @@ pub async fn postprocess_tool_results(
         postprocess_plain_text(other_messages, tokenizer.clone(), text_budget, &None).await;
     result.extend(text_messages);
 
+    deduplicate_web_search_tool_results(&mut result, existing_messages);
+
     let code_budget = total_budget.saturating_sub(text_budget) + text_remaining;
 
     let (file_message, notes, _code_used) = if !context_files.is_empty() {
@@ -99,6 +102,146 @@ pub async fn postprocess_tool_results(
     }
 
     result
+}
+
+fn normalize_title_key(title: &str) -> String {
+    title
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_snippet_key(snippet: &str) -> String {
+    normalize_title_key(snippet)
+}
+
+fn canonicalize_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn deduplicate_search_results_for_postprocessing(results: Vec<SearchResult>) -> Vec<SearchResult> {
+    let mut deduped: Vec<SearchResult> = Vec::new();
+    let mut by_url: HashMap<String, usize> = HashMap::new();
+    let mut by_title_snippet: HashMap<(String, String), usize> = HashMap::new();
+
+    for mut result in results {
+        result.title = result.title.trim().to_string();
+        result.url = canonicalize_url(&result.url);
+        result.snippet = result.snippet.trim().to_string();
+
+        if result.title.is_empty() || result.url.is_empty() {
+            continue;
+        }
+
+        let url_key = result.url.clone();
+        if let Some(existing_idx) = by_url.get(&url_key).copied() {
+            let existing = &mut deduped[existing_idx];
+            if existing.snippet.is_empty() && !result.snippet.is_empty() {
+                existing.snippet = result.snippet.clone();
+            }
+            continue;
+        }
+
+        let key = (
+            normalize_title_key(&result.title),
+            normalize_snippet_key(&result.snippet),
+        );
+        if let Some(existing_idx) = by_title_snippet.get(&key).copied() {
+            let existing = &mut deduped[existing_idx];
+            if existing.snippet.is_empty() && !result.snippet.is_empty() {
+                existing.snippet = result.snippet.clone();
+            }
+            continue;
+        }
+
+        let idx = deduped.len();
+        by_url.insert(url_key, idx);
+        by_title_snippet.insert(key, idx);
+        deduped.push(result);
+    }
+
+    deduped
+}
+
+fn extract_search_results_from_extra(msg: &ChatMessage) -> Option<Vec<SearchResult>> {
+    let raw = msg.extra.get("search_results")?.as_array()?;
+    let mut parsed = Vec::new();
+
+    for item in raw {
+        let obj = item.as_object()?;
+        let title = obj.get("title")?.as_str()?.to_string();
+        let url = obj.get("url")?.as_str()?.to_string();
+        let snippet = obj
+            .get("snippet")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let source = obj
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        parsed.push(SearchResult {
+            title,
+            url,
+            snippet,
+            source,
+        });
+    }
+
+    Some(parsed)
+}
+
+fn is_web_search_tool_message(msg: &ChatMessage, existing_messages: &[ChatMessage]) -> bool {
+    if msg.role != "tool" || msg.tool_call_id.is_empty() {
+        return false;
+    }
+
+    existing_messages.iter().any(|existing| {
+        existing
+            .tool_calls
+            .as_ref()
+            .map(|calls| {
+                calls.iter().any(|call| {
+                    call.id == msg.tool_call_id && call.function.name == "web_search"
+                })
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn deduplicate_web_search_tool_results(result: &mut [ChatMessage], existing_messages: &[ChatMessage]) {
+    for msg in result.iter_mut() {
+        if !is_web_search_tool_message(msg, existing_messages) {
+            continue;
+        }
+
+        let Some(search_results) = extract_search_results_from_extra(msg) else {
+            continue;
+        };
+
+        let deduped = deduplicate_search_results_for_postprocessing(search_results);
+        if let Some(extra_results) = msg.extra.get_mut("search_results") {
+            *extra_results = serde_json::json!(deduped.clone());
+        }
+
+        if let ChatContent::SimpleText(text) = &mut msg.content {
+            let query = text
+                .strip_prefix("Web search results for \"")
+                .and_then(|rest| rest.split_once("\":\n\n"))
+                .map(|(q, _)| q.to_string())
+                .unwrap_or_else(|| "search".to_string());
+            *text = format_search_results(&query, &deduped);
+        }
+    }
 }
 
 fn deduplicate_and_merge_context_files(
@@ -748,6 +891,16 @@ mod tests {
         }
     }
 
+    fn make_web_search_tool_message(
+        content: &str,
+        tool_call_id: &str,
+        results: Vec<SearchResult>,
+    ) -> ChatMessage {
+        let mut msg = make_tool_message(content, tool_call_id);
+        msg.extra.insert("search_results".to_string(), serde_json::json!(results));
+        msg
+    }
+
     fn make_context_file_message(files: Vec<ContextFile>) -> ChatMessage {
         ChatMessage {
             role: "context_file".to_string(),
@@ -1031,6 +1184,45 @@ mod tests {
         ];
         let name = find_tool_name_for_context(&messages, 2);
         assert_eq!(name, "tree");
+    }
+
+    #[test]
+    fn test_deduplicate_web_search_tool_results_rewrites_extra_and_text() {
+        let assistant = make_assistant_with_tool_calls(vec!["web_search"]);
+        let mut tool_messages = vec![make_web_search_tool_message(
+            "Web search results for \"rust\":\n\n1. [Rust Book](https://doc.rust-lang.org/book/)\n   Official book\n\n2. [Rust Book](https://doc.rust-lang.org/book/)\n   Duplicate\n",
+            "call_0",
+            vec![
+                SearchResult {
+                    title: "Rust Book".to_string(),
+                    url: "https://doc.rust-lang.org/book/".to_string(),
+                    snippet: "Official book".to_string(),
+                    source: Some("searxng".to_string()),
+                },
+                SearchResult {
+                    title: "Rust Book".to_string(),
+                    url: "https://doc.rust-lang.org/book".to_string(),
+                    snippet: "".to_string(),
+                    source: Some("duckduckgo".to_string()),
+                },
+            ],
+        )];
+
+        deduplicate_web_search_tool_results(&mut tool_messages, &[assistant]);
+
+        let msg = &tool_messages[0];
+        let extra_results = msg
+            .extra
+            .get("search_results")
+            .and_then(|v| v.as_array())
+            .expect("search_results array");
+        assert_eq!(extra_results.len(), 1);
+
+        let ChatContent::SimpleText(text) = &msg.content else {
+            panic!("expected simple text");
+        };
+        assert!(text.contains("1. [Rust Book](https://doc.rust-lang.org/book)"));
+        assert!(!text.contains("2. [Rust Book]"));
     }
 
     #[test]

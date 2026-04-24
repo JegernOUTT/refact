@@ -974,7 +974,7 @@ pub async fn handle_v1_provider_add_custom_model(
         ));
     }
 
-    let (config_dir, had_existing) = {
+    let (config_dir, previous_config) = {
         let gcx_locked = gcx.read().await;
         let mut registry = gcx_locked.providers.write().await;
 
@@ -1000,16 +1000,18 @@ pub async fn handle_v1_provider_add_custom_model(
             ));
         }
 
-        let had_existing = provider.custom_models().contains_key(&request.id);
+        let previous_config = provider.custom_models().get(&request.id).cloned();
         provider.add_custom_model(request.id.clone(), request.config.clone());
-        (gcx_locked.config_dir.clone(), had_existing)
+        (gcx_locked.config_dir.clone(), previous_config)
     };
 
     if let Err(e) = patch_provider_model_config(gcx.clone(), &config_dir, &params.name).await {
         let gcx_locked = gcx.read().await;
         let mut registry = gcx_locked.providers.write().await;
         if let Some(provider) = registry.get_mut(&params.name) {
-            if !had_existing {
+            if let Some(previous) = previous_config {
+                provider.add_custom_model(request.id.clone(), previous);
+            } else {
                 provider.remove_custom_model(&request.id);
             }
         }

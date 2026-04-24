@@ -73,6 +73,11 @@ pub struct BaseModelRecord {
     #[serde(default)]
     pub supports_web_search: bool,
 
+    /// Whether this provider supports Anthropic-style prompt cache_control.
+    /// False for providers like vLLM that reject unknown message fields.
+    #[serde(default = "default_true")]
+    pub supports_cache_control: bool,
+
     // Fields used for Config/UI management
     #[serde(skip_deserializing)]
     pub removable: bool,
@@ -478,6 +483,7 @@ fn build_chat_model_record(
     runtime_tokenizer_api_key: &str,
     runtime_support_metadata: bool,
     runtime_extra_headers: &HashMap<String, String>,
+    runtime_supports_cache_control: bool,
 ) -> ChatModelRecord {
     let prefix = format!("{}/", provider_name);
     let model_id = if model.id.starts_with(&prefix) {
@@ -600,6 +606,10 @@ fn build_chat_model_record(
                 .as_ref()
                 .map(|r| r.caps.supports_web_search)
                 .unwrap_or(false),
+            supports_cache_control: resolved_caps
+                .as_ref()
+                .map(|r| r.caps.supports_cache_control)
+                .unwrap_or(runtime_supports_cache_control),
             removable: model.is_custom,
             user_configured: model.is_custom,
         },
@@ -688,6 +698,7 @@ pub async fn populate_chat_models_from_providers(
                 &runtime.tokenizer_api_key,
                 runtime.support_metadata,
                 &runtime.extra_headers,
+                runtime.supports_cache_control,
             );
 
             let model_id = chat_record.base.id.clone();
@@ -1298,6 +1309,7 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
     record.supports_agent = caps.supports_tools;
     record.supports_temperature = caps.supports_temperature;
     record.base.supports_web_search = caps.supports_web_search;
+    record.base.supports_cache_control = caps.supports_cache_control;
 }
 
 pub fn resolve_completion_model<'a>(

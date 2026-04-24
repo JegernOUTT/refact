@@ -89,6 +89,7 @@ export type AvailableModel = {
   reasoning_effort_options?: string[] | null;
   supports_thinking_budget?: boolean;
   supports_adaptive_thinking_budget?: boolean;
+  supports_cache_control?: boolean;
   tokenizer: string | null;
   enabled: boolean;
   is_custom: boolean;
@@ -205,6 +206,8 @@ export type OpenRouterModelEndpointsResponse = {
   available_providers: string[];
 };
 
+export type ModelPricing = NonNullable<AvailableModel["pricing"]>;
+
 export type ModelToggleRequest = {
   model_id: string;
   enabled: boolean;
@@ -222,7 +225,10 @@ export type CustomModelConfig = {
   reasoning_effort_options?: string[] | null;
   supports_thinking_budget?: boolean;
   supports_adaptive_thinking_budget?: boolean;
+  supports_cache_control?: boolean;
   tokenizer?: string | null;
+  pricing?: ModelPricing | null;
+  max_output_tokens?: number | null;
 };
 
 export type AddCustomModelRequest = {

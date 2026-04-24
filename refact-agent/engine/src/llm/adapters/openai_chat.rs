@@ -47,12 +47,17 @@ impl LlmWireAdapter for OpenAiChatAdapter {
 
         // For OpenRouter Anthropic models, prefer automatic caching via top-level cache_control.
         // This avoids per-message breakpoint churn in long tool loops.
-        let use_top_level_cache_control =
-            matches!(req.cache_control, CacheControl::Ephemeral) && is_openrouter_anthropic_model(settings);
+        let use_top_level_cache_control = matches!(req.cache_control, CacheControl::Ephemeral)
+            && settings.supports_cache_control
+            && is_openrouter_anthropic_model(settings);
 
         // Legacy explicit block-level cache_control is still used for non-Anthropic targets
         // that may rely on Anthropic-compatible message-level markers.
-        if matches!(req.cache_control, CacheControl::Ephemeral) && !use_top_level_cache_control {
+        // Skip entirely for providers like vLLM that reject unknown message fields.
+        if matches!(req.cache_control, CacheControl::Ephemeral)
+            && settings.supports_cache_control
+            && !use_top_level_cache_control
+        {
             inject_cache_control(&mut messages);
         }
 
@@ -610,6 +615,7 @@ mod tests {
             support_metadata: false,
             eof_is_done: false,
             supports_web_search: false,
+            supports_cache_control: true,
         }
     }
 

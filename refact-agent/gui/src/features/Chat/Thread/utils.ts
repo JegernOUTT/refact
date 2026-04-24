@@ -192,6 +192,7 @@ export function formatMessagesForLsp(messages: ChatMessages): LspChatMessage[] {
           role: "tool",
           content: message.content,
           tool_call_id: message.tool_call_id,
+          extra: message.extra,
         },
       ]);
     }

@@ -22,9 +22,15 @@ export type LspChatMessage =
       tool_calls?: ToolCall[];
       tool_call_id?: string;
       usage?: Usage | null;
+      extra?: Record<string, unknown>;
     }
   | UserMessage
-  | { role: "tool"; content: ToolResult["content"]; tool_call_id: string };
+  | {
+      role: "tool";
+      content: ToolResult["content"];
+      tool_call_id: string;
+      extra?: Record<string, unknown>;
+    };
 
 export function isLspChatMessage(json: unknown): json is LspChatMessage {
   if (!json) return false;

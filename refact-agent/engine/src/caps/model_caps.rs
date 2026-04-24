@@ -111,6 +111,8 @@ pub struct ModelCapabilities {
     pub default_max_tokens: Option<usize>,
     #[serde(default)]
     pub supports_web_search: bool,
+    #[serde(default = "default_true")]
+    pub supports_cache_control: bool,
 }
 
 fn default_true() -> bool {

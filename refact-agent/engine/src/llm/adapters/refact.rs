@@ -692,6 +692,7 @@ mod tests {
             support_metadata: true,
             eof_is_done: false,
             supports_web_search: false,
+            supports_cache_control: true,
         }
     }
 
