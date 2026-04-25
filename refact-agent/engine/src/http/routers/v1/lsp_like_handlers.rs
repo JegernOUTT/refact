@@ -45,7 +45,7 @@ pub async fn handle_v1_lsp_initialize(
             ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", x))
         })?;
         workspace_dirs.push(crate::files_correction::canonical_path(
-            &file_path.to_string_lossy(),
+            file_path.to_string_lossy().into_owned(),
         ));
     }
 
@@ -87,7 +87,7 @@ pub async fn handle_v1_lsp_did_change(
     let file_path = post.uri.to_file_path().map_err(|_| {
         ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", post.uri))
     })?;
-    let cpath = crate::files_correction::canonical_path(&file_path.to_string_lossy());
+    let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     files_in_workspace::on_did_change(global_context.clone(), &cpath, &post.text).await;
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -104,7 +104,7 @@ pub async fn handle_v1_set_active_document(
     let file_path = post.uri.to_file_path().map_err(|_| {
         ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", post.uri))
     })?;
-    let path = crate::files_correction::canonical_path(&file_path.to_string_lossy());
+    let path = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     tracing::info!(
         "ACTIVE_DOC {:?}",
         crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
@@ -129,7 +129,7 @@ pub async fn handle_v1_lsp_add_folder(
     let file_path = post.uri.to_file_path().map_err(|_| {
         ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", post.uri))
     })?;
-    let cpath = crate::files_correction::canonical_path(&file_path.to_string_lossy());
+    let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     files_in_workspace::add_folder(global_context.clone(), &cpath).await;
     if let Some(tx) = global_context.read().await.workspace_changed_tx.as_ref() {
         let _ = tx.send(());
@@ -149,7 +149,7 @@ pub async fn handle_v1_lsp_remove_folder(
     let file_path = post.uri.to_file_path().map_err(|_| {
         ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", post.uri))
     })?;
-    let cpath = crate::files_correction::canonical_path(&file_path.to_string_lossy());
+    let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     files_in_workspace::remove_folder(global_context.clone(), &cpath).await;
     if let Some(tx) = global_context.read().await.workspace_changed_tx.as_ref() {
         let _ = tx.send(());
