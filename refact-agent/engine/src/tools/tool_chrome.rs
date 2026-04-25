@@ -16,9 +16,7 @@ use crate::call_validation::{ChatContent, ChatMessage};
 use crate::scratchpads::multimodality::MultimodalElement;
 
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
-use crate::integrations::integr_abstract::{
-    IntegrationTrait, IntegrationCommon, IntegrationConfirmation,
-};
+
 use crate::integrations::browser_actions::{self, BrowserAction, DeviceType};
 use crate::integrations::browser_controller;
 use crate::integrations::browser_models::{BrowserActionRequest, ExecutionReport};
@@ -76,7 +74,6 @@ pub struct SettingsChrome {
 
 #[derive(Default)]
 pub struct ToolChrome {
-    pub common: IntegrationCommon,
     pub settings_chrome: SettingsChrome,
     pub supports_clicks: bool,
     pub config_path: String,
@@ -148,44 +145,6 @@ impl IntegrationSession for ChromeSession {
     }
 }
 
-#[async_trait]
-impl IntegrationTrait for ToolChrome {
-    async fn integr_settings_apply(
-        &mut self,
-        _gcx: Arc<ARwLock<GlobalContext>>,
-        config_path: String,
-        value: &serde_json::Value,
-    ) -> Result<(), serde_json::Error> {
-        self.settings_chrome = serde_json::from_value(value.clone())?;
-        self.common = serde_json::from_value(value.clone())?;
-        self.config_path = config_path;
-        Ok(())
-    }
-
-    fn integr_settings_as_json(&self) -> Value {
-        serde_json::to_value(&self.settings_chrome).unwrap()
-    }
-
-    fn integr_common(&self) -> IntegrationCommon {
-        self.common.clone()
-    }
-
-    async fn integr_tools(
-        &self,
-        _integr_name: &str,
-    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
-        vec![Box::new(ToolChrome {
-            common: self.common.clone(),
-            settings_chrome: self.settings_chrome.clone(),
-            supports_clicks: false,
-            config_path: self.config_path.clone(),
-        })]
-    }
-
-    fn integr_schema(&self) -> &str {
-        CHROME_INTEGRATION_SCHEMA
-    }
-}
 
 #[async_trait]
 impl Tool for ToolChrome {
@@ -374,7 +333,7 @@ impl Tool for ToolChrome {
             name: "chrome".to_string(),
             display_name: "Chrome".to_string(),
             source: ToolSource {
-                source_type: ToolSourceType::Integration,
+                source_type: ToolSourceType::Builtin,
                 config_path: self.config_path.clone(),
             },
             experimental: false,
@@ -474,10 +433,6 @@ impl Tool for ToolChrome {
             output_schema: None,
             annotations: None,
         }
-    }
-
-    fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
-        Some(self.integr_common().confirmation)
     }
 
     fn has_config_path(&self) -> Option<String> {
@@ -1352,73 +1307,3 @@ async fn chrome_command_exec(
     Ok((tool_log, multimodal_els))
 }
 
-const CHROME_INTEGRATION_SCHEMA: &str = r#"
-fields:
-  chrome_path:
-    f_type: string_long
-    f_desc: "Path to Google Chrome, Chromium or Edge binary. If empty, it searches for binary in your system"
-  idle_browser_timeout:
-    f_type: string_short
-    f_desc: "Idle timeout for the browser in seconds."
-    f_extra: true
-  headless:
-    f_type: string_short
-    f_desc: "Run Chrome in headless mode. When false (default), the browser window is visible."
-    f_default: "false"
-    f_extra: true
-  window_width:
-    f_type: string_short
-    f_desc: "Width of the browser window."
-    f_extra: true
-  window_height:
-    f_type: string_short
-    f_desc: "Height of the browser window."
-    f_extra: true
-  scale_factor:
-    f_type: string_short
-    f_desc: "Scale factor of the browser window."
-    f_extra: true
-  mobile_window_width:
-    f_type: string_short
-    f_desc: "Width of the browser window in mobile mode."
-    f_extra: true
-  mobile_window_height:
-    f_type: string_short
-    f_desc: "Height of the browser window in mobile mode."
-    f_extra: true
-  mobile_scale_factor:
-    f_type: string_short
-    f_desc: "Scale factor of the browser window in mobile mode."
-    f_extra: true
-  tablet_window_width:
-    f_type: string_short
-    f_desc: "Width of the browser window in tablet mode."
-    f_extra: true
-  tablet_window_height:
-    f_type: string_short
-    f_desc: "Height of the browser window in tablet mode."
-    f_extra: true
-  tablet_scale_factor:
-    f_type: string_short
-    f_desc: "Scale factor of the browser window in tablet mode."
-    f_extra: true
-available:
-  on_your_laptop_possible: true
-  when_isolated_possible: true
-confirmation:
-  not_applicable: true
-  ask_user_default: []
-  deny_default: []
-smartlinks:
-  - sl_label: "Test"
-    sl_chat:
-      - role: "user"
-        content: |
-          🔧 The chrome tool should be visible now. To test the tool, navigate to a website like https://example.com/ take a screenshot, and express happiness if it works. If it doesn't work or the tool isn't available, go through the usual plan in the system prompt.
-    sl_enable_only_with_tool: true
-  - sl_label: "Help me install Chrome for Testing"
-    sl_chat:
-      - role: "user"
-        content: |
-          🔧 Help the user to install Chrome for Testing using npm, once that is done rewrite the current config file %CURRENT_CONFIG% to use chrome_path to use it.
-"#;

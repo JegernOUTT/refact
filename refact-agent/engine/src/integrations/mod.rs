@@ -15,7 +15,6 @@ pub mod browser_runtime;
 pub mod browser_types;
 pub mod integr_abstract;
 pub mod integr_bitbucket;
-pub mod integr_chrome;
 pub mod integr_cmdline;
 pub mod integr_cmdline_service;
 pub mod integr_github;
@@ -48,9 +47,6 @@ pub fn integration_from_name(n: &str) -> Result<Box<dyn IntegrationTrait + Send 
             ..Default::default()
         }) as Box<dyn IntegrationTrait + Send + Sync>),
         "pdb" => Ok(Box::new(integr_pdb::ToolPdb {
-            ..Default::default()
-        }) as Box<dyn IntegrationTrait + Send + Sync>),
-        "chrome" => Ok(Box::new(integr_chrome::ToolChrome {
             ..Default::default()
         }) as Box<dyn IntegrationTrait + Send + Sync>),
         "postgres" => Ok(Box::new(integr_postgres::ToolPostgres {
@@ -100,7 +96,6 @@ pub fn integrations_list(_allow_experimental: bool) -> Vec<&'static str> {
         "gitlab",
         "bitbucket",
         "pdb",
-        "chrome",
         "postgres",
         "mysql",
         "cmdline_TEMPLATE",

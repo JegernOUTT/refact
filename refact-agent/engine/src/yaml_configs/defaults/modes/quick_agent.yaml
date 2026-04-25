@@ -1,4 +1,4 @@
-schema_version: 12
+schema_version: 13
 id: quick_agent
 title: Quick Agent
 description: Fast autonomous coding with minimal overhead
@@ -73,6 +73,7 @@ tools:
   - get_trajectory_context
   - web
   - web_search
+  - chrome
   - shell
   - create_textdoc
   - update_textdoc

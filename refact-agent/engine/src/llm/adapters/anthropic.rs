@@ -10,7 +10,6 @@ use super::claude_code_compat;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_THINKING_BUDGET: usize = 8192;
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
-const EFFORT: &str = "effort-2025-11-24";
 
 const PROTECTED_FIELDS: &[&str] = &[
     "model",
@@ -139,12 +138,12 @@ impl LlmWireAdapter for AnthropicAdapter {
             if is_effort_mode {
                 match &req.reasoning {
                     crate::llm::params::ReasoningIntent::BudgetTokens(_n) => {
-                        body["thinking"] = json!({"type": "adaptive"});
+                        body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
                         body["output_config"] = json!({"effort": "high"});
                     }
                     _ => {
                         if let Some(effort) = req.reasoning.to_anthropic_effort() {
-                            body["thinking"] = json!({"type": "adaptive"});
+                            body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
                             body["output_config"] = json!({"effort": effort});
                         }
                     }
@@ -189,11 +188,6 @@ impl LlmWireAdapter for AnthropicAdapter {
             if thinking_type == Some("enabled") {
                 if !betas.contains(&INTERLEAVED_THINKING_BETA) {
                     betas.push(INTERLEAVED_THINKING_BETA);
-                }
-            }
-            if matches!(thinking_type, Some("enabled") | Some("adaptive")) {
-                if !betas.contains(&EFFORT) {
-                    betas.push(EFFORT);
                 }
             }
             if is_cc {
@@ -2214,11 +2208,10 @@ mod tests {
         ).with_reasoning(ReasoningIntent::Medium);
         let http = adapter.build_http(&req, &effort_settings()).unwrap();
         assert_eq!(http.body["thinking"]["type"], "adaptive");
+        assert_eq!(http.body["thinking"]["display"], "summarized");
         assert!(http.body["thinking"].get("budget_tokens").is_none());
         assert_eq!(http.body["output_config"]["effort"], "medium");
-        let beta = http.headers.get("anthropic-beta").unwrap().to_str().unwrap();
-        assert!(beta.contains(EFFORT));
-        assert!(!beta.contains(INTERLEAVED_THINKING_BETA));
+        assert!(http.headers.get("anthropic-beta").is_none());
     }
 
     #[test]
@@ -2231,11 +2224,10 @@ mod tests {
         ).with_reasoning(ReasoningIntent::BudgetTokens(5000));
         let http = adapter.build_http(&req, &effort_settings()).unwrap();
         assert_eq!(http.body["thinking"]["type"], "adaptive");
+        assert_eq!(http.body["thinking"]["display"], "summarized");
         assert!(http.body["thinking"].get("budget_tokens").is_none());
         assert_eq!(http.body["output_config"]["effort"], "high");
-        let beta = http.headers.get("anthropic-beta").unwrap().to_str().unwrap();
-        assert!(beta.contains(EFFORT));
-        assert!(!beta.contains(INTERLEAVED_THINKING_BETA));
+        assert!(http.headers.get("anthropic-beta").is_none());
     }
 
     #[test]
@@ -2253,6 +2245,6 @@ mod tests {
         assert_eq!(http.body["thinking"]["type"], "enabled");
         let beta = http.headers.get("anthropic-beta").unwrap().to_str().unwrap();
         assert!(beta.contains(INTERLEAVED_THINKING_BETA));
-        assert!(beta.contains(EFFORT));
+        assert!(!beta.contains("effort-2025-11-24"));
     }
 }

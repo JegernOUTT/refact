@@ -1,4 +1,4 @@
-schema_version: 12
+schema_version: 13
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -101,6 +101,7 @@ tools:
   - get_trajectory_context
   - web
   - web_search
+  - chrome
   - shell
   - subagent
   - ask_questions

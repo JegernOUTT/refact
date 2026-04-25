@@ -55,13 +55,18 @@ import { setThemeMode, updateConfig } from "../features/Config/configSlice";
 import { nextTip } from "../features/TipOfTheDay";
 import { telemetryApi } from "../services/refact/telemetry";
 import { tasksApi } from "../services/refact/tasks";
-import { closeTask } from "../features/Tasks/tasksSlice";
+import {
+  closeTask,
+  openTask,
+  addPlannerChat,
+  setTaskActiveChat,
+} from "../features/Tasks/tasksSlice";
 import { closeThread } from "../features/Chat/Thread";
 import {
   createChatWithId,
   requestSseRefresh,
 } from "../features/Chat/Thread/actions";
-import { push } from "../features/Pages/pagesSlice";
+import { push, selectCurrentPage } from "../features/Pages/pagesSlice";
 import { CONFIG_PATH_URL, FULL_PATH_URL } from "../services/refact/consts";
 import {
   ideToolCallResponse,
@@ -713,6 +718,10 @@ startListening({
         id: new_chat_id,
         isTaskChat,
         taskMeta,
+        mode:
+          isTaskChat && taskMeta?.role === "planner"
+            ? "TASK_PLANNER"
+            : content.target_mode,
       }),
     );
     // Ensure the tab is open and switched to (handles both new and cached threads)
@@ -723,7 +732,45 @@ startListening({
     listenerApi.dispatch(
       setIsWaitingForResponse({ id: new_chat_id, value: true }),
     );
-    listenerApi.dispatch(push({ name: "chat" }));
+
+    if (isTaskChat && taskMeta?.role === "planner" && taskMeta.task_id) {
+      const taskId = taskMeta.task_id;
+      const now = new Date().toISOString();
+      // Ensure the task shell exists in tasksUI before registering the planner.
+      // openTask is a safe upsert: it only updates the name when a real name is
+      // provided and skips the update when the task already exists with a name.
+      const taskListResult =
+        tasksApi.endpoints.listTasks.select(undefined)(state);
+      const taskName =
+        taskListResult.data?.find((t) => t.id === taskId)?.name ?? "";
+      listenerApi.dispatch(openTask({ id: taskId, name: taskName }));
+      listenerApi.dispatch(
+        addPlannerChat({
+          taskId,
+          planner: {
+            id: new_chat_id,
+            title: "",
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      );
+      listenerApi.dispatch(
+        setTaskActiveChat({
+          taskId,
+          activeChat: { type: "planner", chatId: new_chat_id },
+        }),
+      );
+      const currentPage = selectCurrentPage(listenerApi.getState());
+      if (
+        currentPage?.name !== "task workspace" ||
+        currentPage.taskId !== taskId
+      ) {
+        listenerApi.dispatch(push({ name: "task workspace", taskId }));
+      }
+    } else {
+      listenerApi.dispatch(push({ name: "chat" }));
+    }
 
     if (port) {
       const { regenerate } = await import("../services/refact/chatCommands");

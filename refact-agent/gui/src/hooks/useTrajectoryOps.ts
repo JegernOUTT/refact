@@ -184,14 +184,22 @@ export function useTrajectoryOps() {
 
         dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
         setHandoffPreview(null);
-        await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+        try {
+          await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+        } catch {
+          // regenerate failure is non-critical; handoff was applied successfully
+        }
       } else {
         dispatch(closeThread({ id: oldChatId, force: true }));
         dispatch(createChatWithId({ id: result.new_chat_id }));
         dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
         dispatch(push({ name: "chat" }));
         setHandoffPreview(null);
-        await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+        try {
+          await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+        } catch {
+          // regenerate failure is non-critical; handoff was applied successfully
+        }
       }
 
       return true;

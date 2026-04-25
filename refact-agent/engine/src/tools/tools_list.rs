@@ -221,6 +221,10 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_web_search::ToolWebSearch {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_chrome::ToolChrome {
+            config_path: config_path.clone(),
+            ..Default::default()
+        }),
     ];
 
     let system_tools: Vec<Box<dyn Tool + Send>> = vec![

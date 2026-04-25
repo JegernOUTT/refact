@@ -14,7 +14,7 @@ use super::types::*;
 use super::browser_context;
 use super::content::parse_content_with_attachments;
 use super::generation::{start_generation, prepare_session_preamble_and_knowledge};
-use super::tools::execute_tools_with_session;
+use super::tools::{execute_tools_with_session, resolve_tool_call_aliases};
 use super::trajectories::maybe_save_trajectory;
 use crate::ext::slash_expand::expand_slash_command;
 use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
@@ -1149,7 +1149,15 @@ async fn handle_tool_decisions(
         }
     }
 
-    if !tool_calls_to_execute.is_empty() {
+    let had_tool_calls = !tool_calls_to_execute.is_empty();
+    if had_tool_calls {
+        let tool_calls_to_execute = resolve_tool_call_aliases(
+            gcx.clone(),
+            tool_calls_to_execute,
+            &thread.mode,
+            Some(&thread.model),
+        ).await;
+
         {
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::ExecutingTools, None);
@@ -1225,7 +1233,7 @@ async fn handle_tool_decisions(
             session.set_runtime_state(SessionState::Idle, None);
         }
         maybe_save_trajectory(gcx, session_arc).await;
-    } else if !tool_calls_to_execute.is_empty() {
+    } else if had_tool_calls {
         start_generation(gcx, session_arc).await;
     } else {
         {

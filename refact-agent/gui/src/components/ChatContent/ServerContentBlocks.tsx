@@ -97,6 +97,7 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
 
   const results = useMemo(() => {
     if (!group.result?.content) return [];
+    if (!Array.isArray(group.result.content)) return [];
     return group.result.content.slice(0, 50);
   }, [group.result]);
 

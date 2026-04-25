@@ -9,7 +9,7 @@ Integrations help you to manage the access of agent to the tools.
 
 The Agent currently supports the following integrations:
 
-- [Chrome](./integrations/chrome) - Browser automation and screenshot capabilities
+- [Chrome](./integrations/chrome) - Browser automation (built-in, no configuration needed)
 - [Shell](./integrations/shell) - Execute terminal commands with user confirmation
 - [Github](./integrations/github) - Interact with GitHub repositories
 - [Gitlab](./integrations/gitlab) - Manage GitLab repositories and issues

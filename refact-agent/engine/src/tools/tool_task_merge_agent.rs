@@ -295,6 +295,16 @@ Then call `task_merge_agent` again."#,
             return Err("Main workspace has uncommitted changes. Please commit or stash before merging.".to_string());
         }
 
+        // Generate commit message before acquiring the lock: git diff base...agent is read-only
+        // and produces the same content as git diff --cached after a squash merge.
+        let diff = run_git(&["diff", &format!("{}...{}", base_branch, agent_branch)]).unwrap_or_default();
+        let commit_msg = match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
+            gcx.clone(), &diff, &Some(card.title.clone())
+        ).await {
+            Ok(msg) if !msg.trim().is_empty() => msg,
+            _ => format!("Card {}: {}", card_id, card.title),
+        };
+
         let _guard = git_merge_lock().lock().await;
 
         run_git(&["checkout", base_branch])
@@ -303,12 +313,7 @@ Then call `task_merge_agent` again."#,
         let merge_result = if strategy == "squash" {
             run_git(&["merge", "--squash", agent_branch])
         } else {
-            run_git(&[
-                "merge",
-                agent_branch,
-                "-m",
-                &format!("Merge agent work from {}", agent_branch),
-            ])
+            run_git(&["merge", "--no-ff", agent_branch, "-m", &commit_msg])
         };
 
         if let Err(e) = merge_result {
@@ -388,11 +393,7 @@ Use `cat <file>` to see conflict markers in each file."#,
         }
 
         if strategy == "squash" {
-            let commit_result = run_git(&[
-                "commit",
-                "-m",
-                &format!("Squash merge agent work from {}", agent_branch),
-            ]);
+            let commit_result = run_git(&["commit", "-m", &commit_msg]);
             if let Err(e) = commit_result {
                 if !e.contains("nothing to commit") {
                     return Err(format!("Failed to commit squash merge: {}", e));

@@ -58,7 +58,7 @@ fn is_server_executed_tool(tool_call_id: &str) -> bool {
     tool_call_id.starts_with("srvtoolu_")
 }
 
-async fn resolve_tool_call_aliases(
+pub async fn resolve_tool_call_aliases(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_calls: Vec<ChatToolCall>,
     mode_id: &str,
@@ -1387,8 +1387,10 @@ async fn execute_tools_inner(
     let mut current_parallel_batch: Vec<(usize, ChatToolCall)> = Vec::new();
 
     for (idx, tool_call) in tool_calls.iter().enumerate() {
+        let resolved_name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&tool_call.function.name);
         let allow_parallel = tool_allow_parallel
             .get(&tool_call.function.name)
+            .or_else(|| tool_allow_parallel.get(resolved_name.as_str()))
             .copied()
             .unwrap_or(false);
 

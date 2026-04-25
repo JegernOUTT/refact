@@ -1,4 +1,4 @@
-schema_version: 11
+schema_version: 13
 id: openai_agent
 title: OpenAI Agent
 description: Optimized for GPT-4o/GPT-5 models using OpenAI Codex-style agentic workflow
@@ -51,6 +51,13 @@ override:
     - "Next, I'll patch the config and update the related tests."
     - "Config's looking tidy. Next up is patching helpers to keep things in sync."
     - "Finished poking at the DB gateway. I will now chase down error handling."
+
+    ## Memory & Past Conversations
+    You have access to persistent memory across sessions. User messages are automatically enriched with relevant
+    knowledge and past conversation excerpts (appearing as context files before the message). Additionally, you can
+    actively search using `knowledge(search_key)` for project insights, `search_trajectories(query)` to find relevant
+    past conversations, and `get_trajectory_context(trajectory_id, start, end)` to retrieve specific conversation history.
+    Use `create_knowledge(content)` to save important patterns or decisions for future reference.
 
     ## Task Execution
 
@@ -168,8 +175,29 @@ override:
 
     **For code review:** use `code_review()` after significant changes
 
+    **Task Progress Tracking:**
+    Use `tasks_set` to show progress on multi-step work. This displays a progress widget to the user.
+
+    - Use for complex multi-step tasks (3+ distinct steps) or when user provides multiple tasks
+    - Mark task "in_progress" BEFORE starting, "completed" AFTER finishing
+    - **Task states:** `pending`, `in_progress`, `completed`, `failed`
+    - Rules: mark complete IMMEDIATELY after finishing; only ONE task "in_progress" at a time
+
+    Example:
+    ```
+    tasks_set(tasks=[
+      {"id": "1", "content": "Analyze codebase structure", "status": "in_progress"},
+      {"id": "2", "content": "Implement fix", "status": "pending"}
+    ])
+    ```
+
     **Completing Tasks:**
     - `task_done(report, summary, files_changed)` - Mark task complete with detailed report. Saves to knowledge base automatically.
+
+    **Chat Management:**
+    - `compress_chat_probe()` - Analyze token usage when the chat grows large or token budget warnings appear.
+    - `compress_chat_apply(...)` - Apply selective compression. Requires user approval.
+    - `handoff_to_mode(target_mode, reason, ...)` - Transition to a different mode. Requires user approval.
 
     **Asking Questions - CRITICAL:**
     **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -194,6 +222,8 @@ override:
     %CD_INSTRUCTIONS%
     %SHELL_INSTRUCTIONS%
 
+    %COMPRESS_HANDOFF_INSTRUCTIONS%
+
     %RICH_CONTENT_INSTRUCTIONS%
 
     %SYSTEM_INFO%
@@ -214,6 +244,7 @@ override:
   tools_replace:
     - tree
     - cat
+    - add_workspace_folder
     - search_pattern
     - search_symbol_definition
     - search_semantic
@@ -233,8 +264,12 @@ override:
     - strategic_planning
     - code_review
     - deep_research
+    - tasks_set
     - task_done
     - ask_questions
+    - compress_chat_probe
+    - compress_chat_apply
+    - handoff_to_mode
 
   tool_confirm:
     rules:
@@ -248,9 +283,19 @@ override:
         action: auto
       - match: "web*"
         action: auto
+      - match: "activate_skill"
+        action: auto
+      - match: "deactivate_skill"
+        action: auto
       - match: "apply_patch"
         action: ask
+      - match: "tasks_set"
+        action: auto
       - match: "task_done"
         action: auto
       - match: "ask_questions"
         action: auto
+      - match: "compress_chat_*"
+        action: ask
+      - match: "handoff_to_mode"
+        action: ask

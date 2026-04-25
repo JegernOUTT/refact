@@ -1,4 +1,4 @@
-schema_version: 11
+schema_version: 12
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -83,6 +83,7 @@ tools:
   - knowledge
   - web
   - web_search
+  - chrome
   - subagent
   - ask_questions
   - handoff_to_mode

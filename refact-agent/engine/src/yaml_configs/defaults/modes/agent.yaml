@@ -1,4 +1,4 @@
-schema_version: 12
+schema_version: 13
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -221,6 +221,7 @@ tools:
   - get_trajectory_context
   - web
   - web_search
+  - chrome
   - shell
   - create_textdoc
   - update_textdoc
@@ -257,6 +258,8 @@ tool_confirm:
       action: auto
     - match: "web*"
       action: auto
+    - match: "chrome"
+      action: ask
     - match: "tasks_set"
       action: auto
     - match: "task_done"

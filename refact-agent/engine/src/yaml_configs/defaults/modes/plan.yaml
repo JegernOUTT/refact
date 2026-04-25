@@ -1,4 +1,4 @@
-schema_version: 12
+schema_version: 13
 id: plan
 title: Plan
 description: Design implementation plans through questions and strategic analysis
@@ -98,6 +98,7 @@ tools:
   - get_trajectory_context
   - web
   - web_search
+  - chrome
   - subagent
   - strategic_planning
   - ask_questions

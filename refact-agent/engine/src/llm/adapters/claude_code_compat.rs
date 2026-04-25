@@ -31,7 +31,6 @@ pub const CC_OAUTH_BETAS: &[&str] = &[
     "advanced-tool-use-2025-11-20",
     "context-management-2025-06-27",
     "prompt-caching-scope-2026-01-05",
-    "effort-2025-11-24",
     "fast-mode-2026-02-01",
 ];
 

@@ -27,6 +27,7 @@ mod tool_subagent;
 pub mod tool_config_subagent;
 mod tool_trajectory_context;
 mod tool_tree;
+mod tool_chrome;
 mod tool_web;
 mod tool_web_search;
 mod tool_compress_chat;

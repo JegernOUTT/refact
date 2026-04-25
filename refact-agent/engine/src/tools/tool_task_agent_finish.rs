@@ -5,9 +5,13 @@ use std::process::Command;
 use std::path::Path;
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
+use tokio::sync::RwLock as ARwLock;
 use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
+
+use crate::global_context::GlobalContext;
+use crate::agentic::generate_commit_message::generate_commit_message_by_diff;
 
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
@@ -39,7 +43,8 @@ async fn get_card_id(ccx: &Arc<AMutex<AtCommandsContext>>) -> Result<String, Str
         })
 }
 
-fn auto_commit_worktree(
+async fn auto_commit_worktree(
+    gcx: Arc<ARwLock<GlobalContext>>,
     worktree_path: &Path,
     card_id: &str,
     card_title: &str,
@@ -84,7 +89,18 @@ fn auto_commit_worktree(
         ));
     }
 
-    let commit_msg = format!("Card {}: {}", card_id, card_title);
+    let diff_output = Command::new("git")
+        .args(["diff", "--cached"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("Failed to get diff: {}", e))?;
+    let diff = String::from_utf8_lossy(&diff_output.stdout).to_string();
+
+    let commit_msg = match generate_commit_message_by_diff(gcx, &diff, &Some(card_title.to_string())).await {
+        Ok(msg) if !msg.trim().is_empty() => msg,
+        _ => format!("Card {}: {}", card_id, card_title),
+    };
+
     let commit_output = Command::new("git")
         .args([
             "-c",
@@ -180,7 +196,7 @@ impl Tool for ToolTaskAgentFinish {
         let commit_result = if success {
             if let Some(ref wt) = worktree_path {
                 let wt_path = Path::new(wt);
-                match auto_commit_worktree(wt_path, &card_id, &card_title_for_commit) {
+                match auto_commit_worktree(gcx.clone(), wt_path, &card_id, &card_title_for_commit).await {
                     Ok(hash) => hash,
                     Err(e) => {
                         return Err(format!(
