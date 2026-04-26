@@ -42,6 +42,11 @@ pub async fn bootstrap_buddy_storage(project_root: &Path) -> Result<(), String> 
         let state = default_buddy_state();
         atomic_write_json(&state_path, &state).await?;
     }
+    let settings_path = buddy_dir.join("settings.json");
+    if !settings_path.exists() {
+        let settings = super::settings::BuddySettings::default();
+        atomic_write_json(&settings_path, &settings).await?;
+    }
     let prompt_path = buddy_dir.join("main_prompt.md");
     if !prompt_path.exists() {
         fs::write(&prompt_path, DEFAULT_MAIN_PROMPT)

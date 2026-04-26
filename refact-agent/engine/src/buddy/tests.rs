@@ -6,7 +6,7 @@ use super::diagnostics::{classify_error, DiagnosticContext, DiagnosticSeverity};
 use super::issues::{check_issue_gate, check_manual_issue_gate, redact_diagnostic_text, sanitize_body, sanitize_title, IssueGate};
 use super::settings::{BuddySettings, MAX_PALETTE_INDEX};
 use super::state::{default_buddy_state, grant_xp};
-use super::types::BuddySuggestion;
+use super::types::{BuddySuggestion, BuddyState};
 
 fn make_service() -> BuddyService {
     let (tx, _rx) = broadcast::channel(16);
@@ -122,10 +122,10 @@ fn test_max_stage_behavior() {
 
 #[test]
 fn test_palette_clamped_on_load() {
-    let mut s = BuddySettings::default();
-    s.palette_index = 100;
-    s.palette_index = s.palette_index.min(MAX_PALETTE_INDEX);
-    assert_eq!(s.palette_index, MAX_PALETTE_INDEX);
+    let mut state = default_buddy_state();
+    state.identity.palette_index = 100;
+    state.identity.palette_index = state.identity.palette_index.min(MAX_PALETTE_INDEX);
+    assert_eq!(state.identity.palette_index, MAX_PALETTE_INDEX);
 }
 
 #[test]
@@ -135,6 +135,64 @@ fn test_palette_valid_range() {
     }
     assert!(MAX_PALETTE_INDEX > 0);
     assert!(10usize.min(MAX_PALETTE_INDEX) == MAX_PALETTE_INDEX);
+}
+
+#[test]
+fn test_palette_single_source() {
+    let settings = BuddySettings::default();
+    let json = serde_json::to_value(&settings).unwrap();
+    assert!(json.get("palette_index").is_none(), "palette_index must not be in BuddySettings");
+    let state = default_buddy_state();
+    assert!(state.identity.palette_index <= MAX_PALETTE_INDEX);
+}
+
+#[test]
+fn test_old_state_migration() {
+    let json = r#"{
+        "identity": {"name": "Pixel", "created_at": "2024-01-01T00:00:00Z", "palette_index": 2},
+        "progression": {"stage": 0, "stage_name": "Egg", "level": 1, "xp": 0, "xp_next": 100},
+        "skills": {"unlocked": [], "locked": []},
+        "workflow_summaries": [],
+        "semantic": {"mood": "Idle", "focus": "", "headline": "", "last_active": "2024-01-01T00:00:00Z"},
+        "recent_activities": [],
+        "suggestion_state": []
+    }"#;
+    let state: BuddyState = serde_json::from_str(json).expect("should parse old state without onboarding");
+    assert!(!state.onboarding.greeted);
+    assert!(!state.onboarding.tour_completed);
+    assert!(state.onboarding.first_launch_at.is_empty());
+}
+
+#[test]
+fn test_save_on_mutate_sets_dirty() {
+    let mut svc = make_service();
+    assert!(!svc.dirty);
+    svc.grant_xp(10);
+    assert!(svc.dirty);
+}
+
+#[tokio::test]
+async fn test_save_on_mutate_writes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+    let mut svc = make_service();
+    svc.grant_xp(25);
+    super::state::save_state(root, &svc.state).await.unwrap();
+    let loaded = super::state::load_state(root).await;
+    assert!(loaded.progression.xp > 0 || loaded.progression.level > 1);
+}
+
+#[tokio::test]
+async fn test_bootstrap_no_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+    let state1 = super::state::load_state(root).await;
+    let name1 = state1.identity.name.clone();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+    let state2 = super::state::load_state(root).await;
+    assert_eq!(name1, state2.identity.name, "bootstrap must not overwrite existing state.json");
 }
 
 #[test]

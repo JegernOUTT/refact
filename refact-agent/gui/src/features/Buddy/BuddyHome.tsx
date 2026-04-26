@@ -33,7 +33,7 @@ export const BuddyHome: React.FC = () => {
   });
   const setupNeeded = !setupData?.configured && !setupDismissed;
 
-  const paletteIndex = snapshot?.settings.palette_index ?? state.paletteIndex;
+  const paletteIndex = snapshot?.state.identity.palette_index ?? state.paletteIndex;
   const palette = PALETTES[paletteIndex] ?? PALETTES[0];
 
   const progression = snapshot?.state.progression;

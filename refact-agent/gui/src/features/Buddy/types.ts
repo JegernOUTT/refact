@@ -423,7 +423,6 @@ export interface BuddySettings {
   auto_diagnostics: boolean;
   auto_issue_creation: boolean;
   personality_prompt: string | null;
-  palette_index: number;
 }
 
 export interface BuddySnapshot {

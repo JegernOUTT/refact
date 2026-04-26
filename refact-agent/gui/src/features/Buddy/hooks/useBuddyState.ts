@@ -48,10 +48,10 @@ export function useBuddyState(
       kind: "patch",
       patch: {
         name: identity.name,
-        paletteIndex: reduxSnapshot.settings.palette_index,
+        paletteIndex: identity.palette_index,
       },
     });
-  }, [reduxSnapshot?.state.identity.name, reduxSnapshot?.settings.palette_index]);
+  }, [reduxSnapshot?.state.identity.name, reduxSnapshot?.state.identity.palette_index]);
 
   useEffect(() => {
     if (signalQueue.length === 0) return;

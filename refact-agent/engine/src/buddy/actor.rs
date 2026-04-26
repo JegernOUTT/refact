@@ -26,11 +26,12 @@ pub struct BuddyService {
     pub last_issue_at: Option<Instant>,
     pub recent_issue_errors: Vec<(String, chrono::DateTime<chrono::Utc>)>,
     pub runtime_queue: RuntimeQueue,
+    pub dirty: bool,
 }
 
 impl BuddyService {
     pub fn new(state: BuddyState, settings: BuddySettings, events_tx: broadcast::Sender<BuddyEvent>) -> Self {
-        Self { state, settings, events_tx, last_suggestion_at: None, recent_diagnostics: Vec::new(), last_issue_at: None, recent_issue_errors: Vec::new(), runtime_queue: RuntimeQueue::new() }
+        Self { state, settings, events_tx, last_suggestion_at: None, recent_diagnostics: Vec::new(), last_issue_at: None, recent_issue_errors: Vec::new(), runtime_queue: RuntimeQueue::new(), dirty: false }
     }
 
     pub fn snapshot(&self) -> BuddySnapshot {
@@ -64,11 +65,13 @@ impl BuddyService {
 
     pub fn add_activity(&mut self, activity: BuddyActivity) {
         super::state::add_activity(&mut self.state, activity.clone());
+        self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::ActivityAdded { activity });
     }
 
     pub fn grant_xp(&mut self, amount: u64) {
         super::state::grant_xp(&mut self.state, amount);
+        self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated { state: self.state.clone() });
     }
 
@@ -80,6 +83,7 @@ impl BuddyService {
         }
         self.state.suggestion_state.push(suggestion.clone());
         self.last_suggestion_at = Some(Instant::now());
+        self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::SuggestionAdded { suggestion });
     }
 
@@ -103,6 +107,7 @@ impl BuddyService {
         if let Some(s) = self.state.suggestion_state.iter_mut().find(|s| s.id == id) {
             s.dismissed = true;
         }
+        self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::SuggestionDismissed { suggestion_id: id.to_string() });
     }
 
@@ -123,6 +128,7 @@ impl BuddyService {
                 last_outcome: Some("success".to_string()),
             });
         }
+        self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated { state: self.state.clone() });
     }
 
@@ -141,6 +147,7 @@ impl BuddyService {
                 last_outcome: Some("failed".to_string()),
             });
         }
+        self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated { state: self.state.clone() });
     }
 
@@ -201,6 +208,7 @@ impl BuddyService {
             timestamp: Utc::now().to_rfc3339(),
             activity_type: "error".to_string(),
         });
+        self.dirty = true;
     }
 
     pub fn expire_suggestions(&mut self) {
@@ -230,6 +238,7 @@ impl BuddyService {
             }
         });
         if changed || self.state.suggestion_state.len() != before {
+            self.dirty = true;
             let _ = self.events_tx.send(BuddyEvent::StateUpdated { state: self.state.clone() });
         }
     }
@@ -297,15 +306,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     }
 
     let state = super::state::load_state(&project_root).await;
-    let settings_path = project_root.join(".refact/buddy/settings.json");
-    let settings = if tokio::fs::metadata(&settings_path).await.is_ok() {
-        super::settings::load_settings(&project_root).await
-    } else {
-        let mut s = BuddySettings::default();
-        s.palette_index = state.identity.palette_index;
-        super::settings::save_settings(&project_root, &s).await.ok();
-        s
-    };
+    let settings = super::settings::load_settings(&project_root).await;
 
     let events_tx = gcx.read().await.buddy_events_tx.clone().expect("buddy_events_tx must be set");
     let service = BuddyService::new(state, settings, events_tx);
@@ -351,17 +352,26 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                 svc.expire_suggestions();
             }
         }
-        if last_save.elapsed().as_secs() >= SAVE_INTERVAL_SECS {
-            let state_opt = {
-                let buddy = buddy_arc.lock().await;
-                buddy.as_ref().map(|s| s.state.clone())
-            };
-            if let Some(s) = state_opt {
-                if let Err(e) = super::state::save_state(&project_root, &s).await {
-                    warn!("buddy: failed to save state: {}", e);
+        let state_to_save = {
+            let mut buddy = buddy_arc.lock().await;
+            buddy.as_mut().and_then(|svc| {
+                if svc.dirty || last_save.elapsed().as_secs() >= SAVE_INTERVAL_SECS {
+                    svc.dirty = false;
+                    Some(svc.state.clone())
+                } else {
+                    None
                 }
+            })
+        };
+        if let Some(s) = state_to_save {
+            if let Err(e) = super::state::save_state(&project_root, &s).await {
+                warn!("buddy: failed to save state: {}", e);
+                if let Some(svc) = buddy_arc.lock().await.as_mut() {
+                    svc.dirty = true;
+                }
+            } else {
+                last_save = Instant::now();
             }
-            last_save = Instant::now();
         }
     }
 

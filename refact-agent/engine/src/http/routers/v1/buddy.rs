@@ -8,7 +8,7 @@ use tokio::sync::RwLock as ARwLock;
 
 use crate::buddy::diagnostics::DiagnosticContext;
 use crate::buddy::events::BuddyEvent;
-use crate::buddy::settings::BuddySettings;
+use crate::buddy::settings::MAX_PALETTE_INDEX;
 use crate::buddy::types::BuddyActivity;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
@@ -48,12 +48,23 @@ pub async fn handle_v1_buddy_settings_get(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BuddySettingsRequest {
+    pub enabled: Option<bool>,
+    pub auto_diagnostics: Option<bool>,
+    pub auto_issue_creation: Option<bool>,
+    pub personality_prompt: Option<String>,
+    pub palette_index: Option<usize>,
+}
+
 pub async fn handle_v1_buddy_settings_update(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
-    axum::Json(new_settings): axum::Json<BuddySettings>,
+    axum::Json(req): axum::Json<BuddySettingsRequest>,
 ) -> Result<StatusCode, ScratchError> {
-    if new_settings.palette_index > crate::buddy::settings::MAX_PALETTE_INDEX {
-        return Err(ScratchError::new(StatusCode::BAD_REQUEST, "palette_index must be 0-7".to_string()));
+    if let Some(pi) = req.palette_index {
+        if pi > MAX_PALETTE_INDEX {
+            return Err(ScratchError::new(StatusCode::BAD_REQUEST, "palette_index must be 0-7".to_string()));
+        }
     }
 
     let project_root = crate::files_correction::get_project_dirs(gcx.clone())
@@ -62,21 +73,27 @@ pub async fn handle_v1_buddy_settings_update(
         .next()
         .ok_or_else(|| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, "no project root".to_string()))?;
 
-    crate::buddy::settings::save_settings(&project_root, &new_settings)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
     let buddy_arc = gcx.read().await.buddy.clone();
     let events_tx = {
         let mut lock = buddy_arc.lock().await;
         if let Some(service) = lock.as_mut() {
-            service.settings = new_settings.clone();
-            Some(service.events_tx.clone())
+            if let Some(v) = req.enabled { service.settings.enabled = v; }
+            if let Some(v) = req.auto_diagnostics { service.settings.auto_diagnostics = v; }
+            if let Some(v) = req.auto_issue_creation { service.settings.auto_issue_creation = v; }
+            if req.personality_prompt.is_some() { service.settings.personality_prompt = req.personality_prompt.clone(); }
+            if let Some(pi) = req.palette_index {
+                service.state.identity.palette_index = pi;
+                service.dirty = true;
+            }
+            Some((service.settings.clone(), service.events_tx.clone()))
         } else {
             None
         }
     };
-    if let Some(tx) = events_tx {
+    if let Some((new_settings, tx)) = events_tx {
+        crate::buddy::settings::save_settings(&project_root, &new_settings)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let _ = tx.send(BuddyEvent::SettingsChanged { settings: new_settings });
     }
 

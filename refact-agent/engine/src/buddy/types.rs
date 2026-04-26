@@ -1,5 +1,13 @@
 use serde::{Serialize, Deserialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuddyOnboarding {
+    pub greeted: bool,
+    pub tour_completed: bool,
+    pub first_launch_at: String,
+    pub last_greeting_version: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuddyRuntimeEvent {
     pub id: String,
@@ -81,6 +89,8 @@ pub struct BuddyState {
     pub semantic: BuddySemanticSnapshot,
     pub recent_activities: Vec<BuddyActivity>,
     pub suggestion_state: Vec<BuddySuggestion>,
+    #[serde(default)]
+    pub onboarding: BuddyOnboarding,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

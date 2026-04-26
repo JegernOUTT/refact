@@ -30,7 +30,7 @@ export const BuddyPanel: React.FC = () => {
   const buddy = useBuddyState();
   const { state } = buddy;
 
-  const paletteIndex = snapshot?.settings.palette_index ?? state.paletteIndex;
+  const paletteIndex = snapshot?.state.identity.palette_index ?? state.paletteIndex;
   const palette = PALETTES[paletteIndex] ?? PALETTES[0];
 
   const progression = snapshot?.state.progression;
@@ -66,7 +66,8 @@ export const BuddyPanel: React.FC = () => {
     }
   }, [createConversation, dispatch]);
 
-  if (!enabled && snapshot !== null) return null;
+  if (snapshot === null) return null;
+  if (!enabled) return null;
 
   return (
     <div className={styles.block}>

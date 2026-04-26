@@ -5,7 +5,7 @@ use tokio::fs;
 use tracing::warn;
 
 use super::types::{
-    BuddyActivity, BuddyIdentity, BuddyProgression, BuddySemanticSnapshot,
+    BuddyActivity, BuddyIdentity, BuddyOnboarding, BuddyProgression, BuddySemanticSnapshot,
     BuddySkillLedger, BuddyState,
 };
 
@@ -46,10 +46,14 @@ pub fn default_buddy_state() -> BuddyState {
             mood: "Idle".to_string(),
             focus: "".to_string(),
             headline: "".to_string(),
-            last_active: now,
+            last_active: now.clone(),
         },
         recent_activities: vec![],
         suggestion_state: vec![],
+        onboarding: BuddyOnboarding {
+            first_launch_at: now.clone(),
+            ..Default::default()
+        },
     }
 }
 

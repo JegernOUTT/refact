@@ -8,6 +8,8 @@ import {
   dismissBuddySuggestion,
   addBuddyDiagnostic,
   setBuddyConversations,
+  selectBuddySnapshot,
+  selectIsBuddyEnabled,
 } from "../features/Buddy/buddySlice";
 import { PALETTES, STAGES } from "../features/Buddy/constants";
 import { buildColorMap } from "../features/Buddy/canvas/colorMap";
@@ -37,7 +39,7 @@ function makeState(): BuddyState {
 function makeSnapshot(overrides?: Partial<BuddySnapshot>): BuddySnapshot {
   return {
     state: makeState(),
-    settings: { enabled: true, auto_diagnostics: true, auto_issue_creation: false, personality_prompt: null, palette_index: 0 },
+    settings: { enabled: true, auto_diagnostics: true, auto_issue_creation: false, personality_prompt: null },
     enabled: true,
     ...overrides,
   };
@@ -213,5 +215,34 @@ describe("recent chats", () => {
     const state = reducer(undefined, setBuddyConversations([]));
     expect(state.conversations).toEqual([]);
     expect(state.conversations).toHaveLength(0);
+  });
+});
+
+describe("loading state and identity hydration", () => {
+  test("initial state has snapshot null — loading placeholder", () => {
+    const state = reducer(undefined, { type: "@@INIT" });
+    expect(selectBuddySnapshot.call(null, state)).toBeNull();
+    expect(selectIsBuddyEnabled.call(null, state)).toBe(false);
+  });
+
+  test("snapshot arrival sets correct identity", () => {
+    const snap = makeSnapshot();
+    snap.state.identity.name = "Byte";
+    snap.state.identity.palette_index = 3;
+    const state = reducer(undefined, setBuddySnapshot(snap));
+    const loaded = selectBuddySnapshot.call(null, state);
+    expect(loaded).not.toBeNull();
+    expect(loaded?.state.identity.name).toBe("Byte");
+    expect(loaded?.state.identity.palette_index).toBe(3);
+  });
+
+  test("palette comes from state.identity not settings", () => {
+    const snap = makeSnapshot();
+    snap.state.identity.palette_index = 5;
+    const state = reducer(undefined, setBuddySnapshot(snap));
+    const loaded = selectBuddySnapshot.call(null, state);
+    expect(loaded?.state.identity.palette_index).toBe(5);
+    const settingsJson = JSON.stringify(loaded?.settings ?? {});
+    expect(settingsJson).not.toContain("palette_index");
   });
 });
