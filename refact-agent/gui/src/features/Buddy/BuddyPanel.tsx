@@ -10,6 +10,7 @@ import {
   selectIsBuddyEnabled,
 } from "./buddySlice";
 import { PALETTES, STAGES } from "./constants";
+import { computeXpFill } from "./buddyUtils";
 import { useCreateBuddyConversationMutation } from "../../services/refact/buddy";
 import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
 import styles from "./BuddyPanel.module.css";
@@ -41,12 +42,10 @@ export const BuddyPanel: React.FC = () => {
   const xp = progression?.xp ?? state.progress.xp;
   const xpNext = progression?.xp_next ?? nextStage?.xpThreshold;
 
-  const xpFill = useMemo(() => {
-    const currentXp = progression?.xp ?? 0;
-    const nextXp = progression?.xp_next ?? 100;
-    if (nextXp <= 0) return 100;
-    return Math.min(100, Math.max(0, (currentXp / nextXp) * 100));
-  }, [progression]);
+  const xpFill = useMemo(
+    () => computeXpFill(progression?.xp ?? 0, progression?.xp_next ?? 100),
+    [progression],
+  );
 
   const name = identity?.name ?? state.name;
   const statusText = semantic?.headline ?? stage.tagline;
