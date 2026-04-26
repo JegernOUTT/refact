@@ -335,13 +335,14 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
     .await?;
 
     emit_task_event(
-        gcx,
+        gcx.clone(),
         TaskEvent::TaskCreated {
             task_id: task_id.clone(),
             meta: meta.clone(),
         },
     )
     .await;
+    crate::buddy::actor::buddy_report_bg(gcx, "task_created", "📋", &format!("Task created: {}", meta.name), &meta.name).await;
 
     Ok(meta)
 }

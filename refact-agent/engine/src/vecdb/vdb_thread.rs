@@ -315,6 +315,7 @@ async fn vectorize_thread(
                         // }
                         let _ = write!(std::io::stderr(), "VECDB COMPLETE\n");
                         info!("VECDB COMPLETE"); // you can see stderr "VECDB COMPLETE" sometimes faster vs logs
+                        crate::buddy::actor::buddy_report_bg(gcx.clone(), "vecdb_complete", "🔎", "VecDB indexing complete", "Vector embeddings built successfully").await;
                         vstatus_notify.notify_waiters();
                         {
                             let vstatus_locked = vstatus.lock().await;

@@ -311,6 +311,9 @@ async fn ast_indexer_thread(
             let _ = write!(std::io::stderr(), "{msg}");
             info!("{msg}"); // you can see stderr sometimes faster vs logs
             reported_connect_stats = true;
+            if let Some(gcx) = gcx_weak.upgrade() {
+                crate::buddy::actor::buddy_report_bg(gcx, "ast_complete", "🔍", "AST indexing complete", &msg).await;
+            }
         }
 
         tokio::select! {

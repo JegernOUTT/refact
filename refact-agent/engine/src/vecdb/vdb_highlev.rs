@@ -175,6 +175,7 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
                 Ok(_) => {
                     gcx.write().await.vec_db_error = "".to_string();
                     info!("vecdb: initialization successful");
+                    crate::buddy::actor::buddy_report_bg(gcx.clone(), "vecdb_ready", "🔎", "VecDB ready", "Vector database initialized").await;
                 }
                 Err(crate::vecdb::vdb_init::VecDbInitError::ShutdownRequested) => break,
                 Err(err) => {

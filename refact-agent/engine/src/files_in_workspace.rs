@@ -1148,4 +1148,5 @@ pub async fn files_in_workspace_init_task(gcx: Arc<ARwLock<GlobalContext>>) {
     enqueue_all_files_from_workspace_folders(gcx.clone(), true, false).await;
     enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), true, false).await;
     crate::git::checkpoints::enqueue_init_shadow_repos(gcx.clone()).await;
+    crate::buddy::actor::buddy_report_bg(gcx, "indexing", "📁", "Workspace indexed", "Workspace files scanned and queued for indexing").await;
 }
