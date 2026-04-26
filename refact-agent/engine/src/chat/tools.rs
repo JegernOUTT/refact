@@ -1718,8 +1718,30 @@ pub async fn execute_tools(
         }
     }
 
-    execute_tools_inner(
+    let gcx2 = gcx.clone();
+    let is_buddy = thread.buddy_meta.as_ref().map(|m| m.is_buddy_chat).unwrap_or(false);
+    let first_tool_name = tool_calls.first().map(|tc| tc.function.name.clone()).unwrap_or_default();
+
+    let (result_msgs, had_corrections) = execute_tools_inner(
         gcx, ccx, tool_calls, mode_id, model_id, budget, options, messages,
     )
-    .await
+    .await;
+
+    if !is_buddy && result_msgs.iter().any(|m| m.tool_failed == Some(true)) {
+        let buddy_arc = gcx2.read().await.buddy.clone();
+        let mut buddy = buddy_arc.lock().await;
+        if let Some(svc) = buddy.as_mut() {
+            let suggestion = crate::buddy::types::BuddySuggestion {
+                id: uuid::Uuid::new_v4().to_string(),
+                suggestion_type: "tool_failure".to_string(),
+                title: "I noticed a tool failure".to_string(),
+                description: format!("'{}' failed. Want me to help fix it?", first_tool_name),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                dismissed: false,
+            };
+            svc.maybe_add_suggestion(suggestion);
+        }
+    }
+
+    (result_msgs, had_corrections)
 }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 use chrono::Utc;
 use tokio::sync::{broadcast, RwLock as ARwLock};
 use tracing::{info, warn};
@@ -11,16 +12,19 @@ use super::snapshot::BuddySnapshot;
 use super::types::{BuddyActivity, BuddyState, BuddySuggestion};
 
 const SAVE_INTERVAL_SECS: u64 = 60;
+const SUGGESTION_RATE_LIMIT_SECS: u64 = 30;
+const SUGGESTION_EXPIRY_SECS: i64 = 300;
 
 pub struct BuddyService {
     pub state: BuddyState,
     pub settings: BuddySettings,
     pub events_tx: broadcast::Sender<BuddyEvent>,
+    pub last_suggestion_at: Option<Instant>,
 }
 
 impl BuddyService {
     pub fn new(state: BuddyState, settings: BuddySettings, events_tx: broadcast::Sender<BuddyEvent>) -> Self {
-        Self { state, settings, events_tx }
+        Self { state, settings, events_tx, last_suggestion_at: None }
     }
 
     pub fn snapshot(&self) -> BuddySnapshot {
@@ -43,7 +47,18 @@ impl BuddyService {
 
     pub fn add_suggestion(&mut self, suggestion: BuddySuggestion) {
         self.state.suggestion_state.push(suggestion.clone());
+        self.last_suggestion_at = Some(Instant::now());
         let _ = self.events_tx.send(BuddyEvent::SuggestionAdded { suggestion });
+    }
+
+    pub fn maybe_add_suggestion(&mut self, suggestion: BuddySuggestion) -> bool {
+        if let Some(last) = self.last_suggestion_at {
+            if last.elapsed().as_secs() < SUGGESTION_RATE_LIMIT_SECS {
+                return false;
+            }
+        }
+        self.add_suggestion(suggestion);
+        true
     }
 
     pub fn dismiss_suggestion(&mut self, id: &str) {
@@ -85,6 +100,26 @@ impl BuddyService {
                 run_count: 1,
                 last_outcome: Some("failed".to_string()),
             });
+        }
+    }
+
+    pub fn expire_suggestions(&mut self) {
+        let now = chrono::Utc::now();
+        let mut changed = false;
+        for s in self.state.suggestion_state.iter_mut() {
+            if s.dismissed {
+                continue;
+            }
+            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&s.created_at) {
+                let age = now.signed_duration_since(created).num_seconds();
+                if age > SUGGESTION_EXPIRY_SECS {
+                    s.dismissed = true;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let _ = self.events_tx.send(BuddyEvent::StateUpdated { state: self.state.clone() });
         }
     }
 }
@@ -143,13 +178,21 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     info!("buddy: service started for {:?}", project_root);
 
     let shutdown_flag = gcx.read().await.shutdown_flag.clone();
-    let mut last_save = std::time::Instant::now();
+    let mut last_save = Instant::now();
+    let mut expiry_tick: u64 = 0;
 
     loop {
         if shutdown_flag.load(Ordering::SeqCst) {
             break;
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        expiry_tick += 1;
+        if expiry_tick % 60 == 0 {
+            let mut buddy = buddy_arc.lock().await;
+            if let Some(svc) = buddy.as_mut() {
+                svc.expire_suggestions();
+            }
+        }
         if last_save.elapsed().as_secs() >= SAVE_INTERVAL_SECS {
             let state_opt = {
                 let buddy = buddy_arc.lock().await;
@@ -160,7 +203,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                     warn!("buddy: failed to save state: {}", e);
                 }
             }
-            last_save = std::time::Instant::now();
+            last_save = Instant::now();
         }
     }
 
