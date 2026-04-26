@@ -21,6 +21,8 @@ import type {
   BuddyEvent,
   IdleActionType,
   ToyType,
+  ToyDef,
+  SignalDef,
 } from "../types";
 
 function selectIdleAction(
@@ -107,7 +109,7 @@ function startToy(
   toyType: ToyType,
   emit: (e: BuddyEvent) => void,
 ): void {
-  const def = TOY_DEFS[toyType];
+  const def: ToyDef | undefined = TOY_DEFS[toyType];
   if (def === undefined) return;
   anim.toyActive = true;
   anim.toyType = toyType;
@@ -131,7 +133,7 @@ function stopToy(
 ): void {
   if (!anim.toyActive || !anim.toyType) return;
   const def = TOY_DEFS[anim.toyType];
-  if (def && def.energyRestore) {
+  if (def.energyRestore) {
     emit({
       type: "semantic_update",
       patch: {
@@ -243,7 +245,7 @@ export function triggerSignalAnimation(
   signalType: string,
   emit: (e: BuddyEvent) => void,
 ): void {
-  const def = SIGNALS[signalType];
+  const def: SignalDef | undefined = SIGNALS[signalType];
   if (def === undefined) return;
 
   if (def.isError) {
@@ -461,10 +463,8 @@ export function stepAnimFrame(
     !anim.quirkActive &&
     Math.random() < 0.004
   ) {
-    const quirkMap: Record<
-      number,
-      { type: string; duration: number; onStart?: () => void }[]
-    > = {
+    type StageQuirk = { type: string; duration: number; onStart?: () => void };
+    const quirkMap: Partial<Record<number, StageQuirk[]>> = {
       0: [{ type: "rock", duration: 1000 }],
       1: [{ type: "shell_fall", duration: 1500 }],
       2: [{ type: "phase", duration: 1500 }],
@@ -507,7 +507,7 @@ export function stepAnimFrame(
         },
       ],
     };
-    const quirks = (quirkMap[stage] as any[] | undefined) ?? [];
+    const quirks: StageQuirk[] = quirkMap[stage] ?? [];
     if (quirks.length > 0) {
       const q = quirks[Math.floor(Math.random() * quirks.length)];
       anim.quirkActive = true;

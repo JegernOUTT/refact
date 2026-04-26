@@ -1,8 +1,8 @@
-import React, { useCallback } from "react";
+import React from "react";
 import { BuddyCanvas } from "./BuddyCanvas";
 import { useBuddyState } from "./hooks/useBuddyState";
 import { PALETTES, STAGES, SKILLS } from "./constants";
-import type { SignalType } from "./types";
+import type { SignalType, Stage } from "./types";
 
 const SIGNAL_GROUPS: {
   label: string;
@@ -109,7 +109,7 @@ export function BuddyDemo(): React.ReactElement {
 
   const stage = STAGES[state.progress.stage] ?? STAGES[0];
   const palette = PALETTES[state.paletteIndex] ?? PALETTES[0];
-  const nextStage = STAGES[state.progress.stage + 1];
+  const nextStage: Stage | undefined = STAGES[state.progress.stage + 1];
   const xpFill =
     nextStage !== undefined
       ? ((state.progress.xp - stage.xpThreshold) /
@@ -117,9 +117,7 @@ export function BuddyDemo(): React.ReactElement {
         100
       : 100;
 
-  const handleEvent = useCallback(buddy.handleCanvasEvent, [
-    buddy.handleCanvasEvent,
-  ]);
+  const handleEvent = buddy.handleCanvasEvent;
 
   return (
     <div

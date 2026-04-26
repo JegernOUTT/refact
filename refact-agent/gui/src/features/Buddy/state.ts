@@ -1,5 +1,10 @@
 import { NAMES, PALETTES, SIGNALS, SKILLS, STAGES } from "./constants";
-import type { BuddySemanticState, BuddyAnimState, LogEntry } from "./types";
+import type {
+  BuddySemanticState,
+  BuddyAnimState,
+  LogEntry,
+  SignalDef,
+} from "./types";
 
 export function randomName(): string {
   return NAMES[Math.floor(Math.random() * NAMES.length)];
@@ -172,7 +177,7 @@ export function reduceSemanticState(
 ): BuddySemanticState {
   switch (action.kind) {
     case "signal": {
-      const def = SIGNALS[action.signalType];
+      const def: SignalDef | undefined = SIGNALS[action.signalType];
       if (def === undefined) return state;
 
       const xpGain = def.xp;
