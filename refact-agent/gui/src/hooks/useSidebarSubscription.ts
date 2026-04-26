@@ -23,6 +23,15 @@ import {
 } from "../features/Chat/Thread";
 import { tasksApi } from "../services/refact/tasks";
 import {
+  setBuddySnapshot,
+  updateBuddyState,
+  addBuddyActivity,
+  addBuddySuggestion,
+  dismissBuddySuggestion,
+  updateBuddySettings,
+} from "../features/Buddy/buddySlice";
+
+import {
   trajectoriesApi,
   chatThreadToTrajectoryData,
 } from "../services/refact/trajectories";
@@ -355,6 +364,34 @@ export function useSidebarSubscription() {
           () => event.tasks,
         ),
       );
+
+      if (event.buddy && "state" in event.buddy) {
+        dispatch(setBuddySnapshot(event.buddy));
+      }
+    },
+    [dispatch],
+  );
+
+  const processBuddyEvent = useCallback(
+    (event: SidebarEventEnvelope & { category: "buddy" }) => {
+      const { buddy_event } = event;
+      switch (buddy_event.event_type) {
+        case "StateUpdated":
+          dispatch(updateBuddyState(buddy_event.state));
+          break;
+        case "ActivityAdded":
+          dispatch(addBuddyActivity(buddy_event.activity));
+          break;
+        case "SuggestionAdded":
+          dispatch(addBuddySuggestion(buddy_event.suggestion));
+          break;
+        case "SuggestionDismissed":
+          dispatch(dismissBuddySuggestion(buddy_event.suggestion_id));
+          break;
+        case "SettingsChanged":
+          dispatch(updateBuddySettings(buddy_event.settings));
+          break;
+      }
     },
     [dispatch],
   );
@@ -462,6 +499,10 @@ export function useSidebarSubscription() {
         processTrajectoryEvent(
           envelope as SidebarEventEnvelope & { category: "trajectory" },
         );
+      } else if (envelope.category === "buddy") {
+        processBuddyEvent(
+          envelope as SidebarEventEnvelope & { category: "buddy" },
+        );
       } else {
         processTaskEvent(
           envelope as SidebarEventEnvelope & { category: "task" },
@@ -492,6 +533,7 @@ export function useSidebarSubscription() {
     processSnapshot,
     processTrajectoryEvent,
     processTaskEvent,
+    processBuddyEvent,
     scheduleReconnect,
   ]);
 

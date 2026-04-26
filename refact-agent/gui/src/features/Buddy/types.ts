@@ -357,3 +357,98 @@ export interface BuddyCanvasProps {
   className?: string;
   style?: React.CSSProperties;
 }
+
+export interface BuddyIdentity {
+  name: string;
+  created_at: string;
+  palette_index: number;
+}
+
+export interface BuddyProgression {
+  stage: number;
+  stage_name: string;
+  level: number;
+  xp: number;
+  xp_next: number;
+}
+
+export interface BuddySkillLedger {
+  unlocked: string[];
+  locked: string[];
+}
+
+export interface BuddyWorkflowSummary {
+  workflow_id: string;
+  last_run: string | null;
+  run_count: number;
+  last_outcome: string | null;
+}
+
+export interface BuddySemanticSnapshot {
+  mood: string;
+  focus: string;
+  headline: string;
+  last_active: string;
+}
+
+export interface BuddyActivityEntry {
+  icon: string;
+  title: string;
+  description: string;
+  timestamp: string;
+  activity_type: string;
+}
+
+export interface BuddySuggestion {
+  id: string;
+  suggestion_type: string;
+  title: string;
+  description: string;
+  created_at: string;
+  dismissed: boolean;
+}
+
+export interface BuddyState {
+  identity: BuddyIdentity;
+  progression: BuddyProgression;
+  skills: BuddySkillLedger;
+  workflow_summaries: BuddyWorkflowSummary[];
+  semantic: BuddySemanticSnapshot;
+  recent_activities: BuddyActivityEntry[];
+  suggestion_state: BuddySuggestion[];
+}
+
+export interface BuddySettings {
+  enabled: boolean;
+  auto_diagnostics: boolean;
+  auto_issue_creation: boolean;
+  personality_prompt: string | null;
+  palette_index: number;
+}
+
+export interface BuddySnapshot {
+  state: BuddyState;
+  settings: BuddySettings;
+  enabled: boolean;
+}
+
+export interface BuddyConversationMeta {
+  chat_id: string;
+  title: string;
+  created_at: string;
+  last_message_at: string | null;
+  message_count: number;
+}
+
+export interface BuddyThreadMeta {
+  is_buddy_chat: boolean;
+  buddy_chat_kind: string;
+  workflow_id: string | null;
+}
+
+export type BuddySSEEvent =
+  | { event_type: "StateUpdated"; state: BuddyState }
+  | { event_type: "ActivityAdded"; activity: BuddyActivityEntry }
+  | { event_type: "SuggestionAdded"; suggestion: BuddySuggestion }
+  | { event_type: "SuggestionDismissed"; suggestion_id: string }
+  | { event_type: "SettingsChanged"; settings: BuddySettings };

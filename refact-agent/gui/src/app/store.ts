@@ -72,6 +72,8 @@ import { mcpServerInfoApi } from "../services/refact/mcpServerInfo";
 import { mcpMarketplaceApi } from "../services/refact/mcpMarketplace";
 import { extensionsMarketplaceApi } from "../services/refact/extensionsMarketplace";
 import { memoryEnrichmentApi } from "../services/refact/memoryEnrichment";
+import { buddySlice } from "../features/Buddy/buddySlice";
+import { buddyApi } from "../services/refact/buddy";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -128,8 +130,10 @@ const rootReducer = combineSlices(
     [mcpMarketplaceApi.reducerPath]: mcpMarketplaceApi.reducer,
     [extensionsMarketplaceApi.reducerPath]: extensionsMarketplaceApi.reducer,
     [memoryEnrichmentApi.reducerPath]: memoryEnrichmentApi.reducer,
+    [buddyApi.reducerPath]: buddyApi.reducer,
   },
   historySlice,
+  buddySlice,
   errorSlice,
   informationSlice,
   pagesSlice,
@@ -227,6 +231,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           mcpMarketplaceApi.middleware,
           extensionsMarketplaceApi.middleware,
           memoryEnrichmentApi.middleware,
+          buddyApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(listenerMiddleware.middleware);
