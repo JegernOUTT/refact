@@ -28,7 +28,7 @@ export function renderFrame(
   ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
   ctx.imageSmoothingEnabled = false;
 
-  const stage = semantic.progress.stage;
+  const stage = Math.max(0, Math.min(6, semantic.progress.stage));
   const pal = PALETTES[semantic.paletteIndex] ?? PALETTES[0];
   const m = buildColorMap(semantic.paletteIndex);
   const [spriteW, spriteH] = STAGE_SIZES[stage] ?? [28, 18];

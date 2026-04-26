@@ -146,10 +146,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const coords = toCanvasCoords(e);
       if (!coords) return;
-      handlePet(animRef.current, coords.x, coords.y, (event) => {
-        emit(event);
-        emit({ type: "semantic_update", patch: {} });
-      });
+      handlePet(animRef.current, coords.x, coords.y, emit);
     },
     [toCanvasCoords, emit],
   );
