@@ -14,6 +14,11 @@ const BUDDY_NAMES: &[&str] = &[
     "Chip", "Flux", "Glow", "Dash", "Zen",
 ];
 
+const STAGE_THRESHOLDS: &[(u64, &str)] = &[
+    (0, "Egg"), (30, "Hatch"), (100, "Sprite"), (300, "Imp"),
+    (700, "Daemon"), (1500, "Sage"), (3000, "Archon"),
+];
+
 pub fn default_buddy_state() -> BuddyState {
     let now = Utc::now().to_rfc3339();
     let mut rng = rand::thread_rng();
@@ -26,8 +31,8 @@ pub fn default_buddy_state() -> BuddyState {
             palette_index,
         },
         progression: BuddyProgression {
-            stage: 1,
-            stage_name: "Sprite".to_string(),
+            stage: 0,
+            stage_name: "Egg".to_string(),
             level: 1,
             xp: 0,
             xp_next: 100,
@@ -48,11 +53,37 @@ pub fn default_buddy_state() -> BuddyState {
     }
 }
 
+fn compute_cumulative_xp(p: &BuddyProgression) -> u64 {
+    let mut total = p.xp;
+    for lvl in 1..p.level {
+        total += 100 * lvl as u64;
+    }
+    total
+}
+
+fn stage_for_cumulative(cumulative: u64) -> (u32, &'static str) {
+    let mut stage = 0u32;
+    let mut name = "Egg";
+    for (i, (threshold, stage_name)) in STAGE_THRESHOLDS.iter().enumerate() {
+        if cumulative >= *threshold {
+            stage = i as u32;
+            name = stage_name;
+        }
+    }
+    (stage, name)
+}
+
 pub async fn load_state(project_root: &Path) -> BuddyState {
     let path = project_root.join(".refact/buddy/state.json");
     match fs::read_to_string(&path).await {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(s) => s,
+        Ok(content) => match serde_json::from_str::<BuddyState>(&content) {
+            Ok(mut s) => {
+                let cumulative = compute_cumulative_xp(&s.progression);
+                let (stage, name) = stage_for_cumulative(cumulative);
+                s.progression.stage = stage;
+                s.progression.stage_name = name.to_string();
+                s
+            }
             Err(e) => {
                 warn!("Failed to parse buddy state: {}, using defaults", e);
                 default_buddy_state()
@@ -79,4 +110,8 @@ pub fn grant_xp(state: &mut BuddyState, amount: u64) {
         state.progression.level += 1;
         state.progression.xp_next = 100 * state.progression.level as u64;
     }
+    let cumulative = compute_cumulative_xp(&state.progression);
+    let (stage, name) = stage_for_cumulative(cumulative);
+    state.progression.stage = stage;
+    state.progression.stage_name = name.to_string();
 }

@@ -44,10 +44,11 @@ export const BuddyHome: React.FC = () => {
   const xp = progression?.xp ?? state.progress.xp;
   const xpNext = progression?.xp_next ?? nextStage?.xpThreshold;
   const xpFill = useMemo(() => {
-    if (!xpNext) return 100;
-    const base = stage.xpThreshold ?? 0;
-    return Math.min(100, ((xp - base) / (xpNext - base)) * 100);
-  }, [xp, xpNext, stage.xpThreshold]);
+    const currentXp = progression?.xp ?? 0;
+    const nextXp = progression?.xp_next ?? 100;
+    if (nextXp <= 0) return 100;
+    return Math.min(100, Math.max(0, (currentXp / nextXp) * 100));
+  }, [progression]);
 
   const name = identity?.name ?? state.name;
   const statusText = semantic?.headline ?? "";
