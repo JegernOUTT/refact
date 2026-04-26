@@ -1,0 +1,34 @@
+.toolbar {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: var(--color-panel-solid);
+  border-radius: var(--radius-2);
+  padding: var(--space-1) var(--space-2);
+  box-shadow: var(--shadow-3);
+}
+
+.item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--gray-10);
+  font-size: var(--font-size-1);
+  opacity: 0.5;
+  transition: opacity 0.15s ease;
+  padding: var(--space-1) 0;
+}
+
+.item:hover {
+  opacity: 1;
+}
+
+.item svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}

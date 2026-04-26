@@ -49,11 +49,18 @@ pub async fn handle_v1_customization(
 
     if let Some(reg) = registry {
         for (id, mode) in &reg.modes {
-            system_prompts.insert(id.clone(), SystemPromptCompat {
-                text: mode.prompt.clone(),
-                description: mode.description.clone(),
-                show: if mode.specific { "never".to_string() } else { "always".to_string() },
-            });
+            system_prompts.insert(
+                id.clone(),
+                SystemPromptCompat {
+                    text: mode.prompt.clone(),
+                    description: mode.description.clone(),
+                    show: if mode.specific {
+                        "never".to_string()
+                    } else {
+                        "always".to_string()
+                    },
+                },
+            );
         }
 
         for (id, cmd) in &reg.toolbox_commands {
@@ -64,7 +71,9 @@ pub async fn handle_v1_customization(
             code_lens.insert(id.clone(), serde_json::to_value(lens).unwrap_or_default());
         }
 
-        error_log = reg.errors.iter()
+        error_log = reg
+            .errors
+            .iter()
             .map(|e| format!("{}: {}", e.file_path, e.error))
             .collect();
     }

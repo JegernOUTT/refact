@@ -22,7 +22,9 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{
     IntegrationCommon, IntegrationConfirmation, IntegrationTrait,
 };
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::integrations::process_io_utils::{
     first_n_chars, last_n_chars, last_n_lines, write_to_stdin_and_flush,
     blocking_read_until_token_or_timeout,
@@ -178,7 +180,10 @@ impl Tool for ToolPdb {
             if should_remove {
                 gcx_locked.integration_sessions.remove(&session_hashmap_key);
             }
-            return Ok(tool_answer("Pdb session has been killed".to_string(), tool_call_id));
+            return Ok(tool_answer(
+                "Pdb session has been killed".to_string(),
+                tool_call_id,
+            ));
         }
 
         let mut command_session_locked = command_session.lock().await;

@@ -7,7 +7,10 @@ use crate::tools::file_edit::auxiliary::{
     convert_edit_to_diffchunks, parse_path_for_update, sync_documents_ast,
 };
 use crate::tools::file_edit::undo_history::{get_undo_history, UndoEntry};
-use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
+    json_schema_from_params,
+};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -227,7 +230,13 @@ impl Tool for ToolUndoTextDoc {
             allow_parallel: false,
             description: "Undo recent file edits from this session. Reverts to previous version."
                 .to_string(),
-            input_schema: json_schema_from_params(&[("path", "string", "Absolute path to the file to undo."), ("steps", "integer", "Number of edits to undo (default: 1).")], &["path"]),
+            input_schema: json_schema_from_params(
+                &[
+                    ("path", "string", "Absolute path to the file to undo."),
+                    ("steps", "integer", "Number of edits to undo (default: 1)."),
+                ],
+                &["path"],
+            ),
             output_schema: None,
             annotations: None,
         }

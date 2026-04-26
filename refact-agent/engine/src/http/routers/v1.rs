@@ -49,12 +49,10 @@ use crate::providers::http::{
     handle_v1_provider_available_models, handle_v1_provider_model_toggle,
     handle_v1_provider_model_provider_update, handle_v1_openrouter_model_endpoints,
     handle_v1_provider_add_custom_model, handle_v1_provider_remove_custom_model,
-    handle_v1_provider_remove_custom_model_post,
-    handle_v1_defaults_get, handle_v1_defaults_update, handle_v1_models,
-    handle_v1_provider_oauth_start, handle_v1_provider_oauth_exchange,
+    handle_v1_provider_remove_custom_model_post, handle_v1_defaults_get, handle_v1_defaults_update,
+    handle_v1_models, handle_v1_provider_oauth_start, handle_v1_provider_oauth_exchange,
     handle_v1_provider_oauth_logout, handle_v1_provider_oauth_callback,
-    handle_v1_openrouter_account_info, handle_v1_openrouter_health,
-    handle_v1_google_gemini_health,
+    handle_v1_openrouter_account_info, handle_v1_openrouter_health, handle_v1_google_gemini_health,
     handle_v1_claude_code_usage, handle_v1_openai_codex_usage,
 };
 
@@ -93,20 +91,25 @@ use crate::http::routers::v1::trajectory_ops::{
     handle_mode_transition_apply,
 };
 use crate::http::routers::v1::project_configs::{
-    handle_v1_project_configs_get, handle_v1_project_configs_rescan, handle_v1_project_configs_bootstrap,
+    handle_v1_project_configs_get, handle_v1_project_configs_rescan,
+    handle_v1_project_configs_bootstrap,
 };
 
 mod ast;
 pub mod at_commands;
-pub mod ext_management;
 pub mod at_tools;
 pub mod caps;
 pub mod chat_based_handlers;
+mod chat_modes;
 pub mod code_completion;
 mod code_edit;
 pub mod code_lens;
+mod commands_marketplace;
 pub mod customization;
+mod customization_editor;
 mod dashboard;
+pub mod ext_management;
+mod ext_marketplace_sources;
 mod file_edit_tools;
 mod git;
 pub mod graceful_shutdown;
@@ -116,65 +119,79 @@ mod knowledge_graph;
 pub mod knowledge_ops;
 pub mod links;
 pub mod lsp_like_handlers;
+mod mcp_config_sharing;
+mod mcp_marketplace;
+mod mcp_marketplace_sources;
+mod mcp_oauth;
+mod mcp_server_info;
+mod plugins;
+mod project_configs;
+pub mod project_information;
+mod setup_status;
 pub mod sidebar;
+mod skills_marketplace;
+mod skills_status;
 pub mod snippet_accepted;
+mod stats;
 pub mod status;
+mod subagents_marketplace;
 pub mod sync_files;
 pub mod system_prompt;
 pub mod tasks;
 pub mod telemetry_chat;
 pub mod telemetry_network;
 mod trajectory_ops;
+mod v1_browser;
 mod v1_integrations;
 pub mod vecdb;
 pub mod voice;
 mod workspace;
-mod project_configs;
-mod chat_modes;
-mod customization_editor;
-mod mcp_marketplace;
-mod mcp_marketplace_sources;
-mod mcp_config_sharing;
-mod mcp_oauth;
-pub mod project_information;
-mod v1_browser;
-mod stats;
-mod plugins;
-mod skills_status;
-mod mcp_server_info;
-mod setup_status;
 
 use crate::http::routers::v1::ext_management::{
-    handle_v1_ext_registry,
-    handle_v1_ext_skill_get, handle_v1_ext_skill_put, handle_v1_ext_skill_post, handle_v1_ext_skill_delete,
-    handle_v1_ext_command_get, handle_v1_ext_command_put, handle_v1_ext_command_post, handle_v1_ext_command_delete,
+    handle_v1_ext_registry, handle_v1_ext_skill_get, handle_v1_ext_skill_put,
+    handle_v1_ext_skill_post, handle_v1_ext_skill_delete, handle_v1_ext_command_get,
+    handle_v1_ext_command_put, handle_v1_ext_command_post, handle_v1_ext_command_delete,
     handle_v1_ext_hooks_get, handle_v1_ext_hooks_put, handle_v1_ext_hooks_delete_by_index,
 };
 use crate::http::routers::v1::chat_modes::handle_v1_chat_modes;
 use crate::http::routers::v1::customization_editor::{
-    handle_v1_customization_registry, handle_v1_customization_get,
-    handle_v1_customization_save, handle_v1_customization_create,
-    handle_v1_customization_delete,
+    handle_v1_customization_registry, handle_v1_customization_get, handle_v1_customization_save,
+    handle_v1_customization_create, handle_v1_customization_delete,
 };
 use crate::http::routers::v1::project_information::{
     handle_v1_project_information_get, handle_v1_project_information_save,
     handle_v1_project_information_preview,
 };
-use crate::http::routers::v1::stats::{
-    handle_v1_stats_llm_summary, handle_v1_stats_llm_events,
-};
+use crate::http::routers::v1::stats::{handle_v1_stats_llm_summary, handle_v1_stats_llm_events};
 use crate::http::routers::v1::plugins::{
     handle_list_marketplaces, handle_add_marketplace, handle_delete_marketplace,
-    handle_list_marketplace_plugins, handle_install_plugin,
-    handle_list_installed, handle_uninstall_plugin,
+    handle_list_marketplace_plugins, handle_install_plugin, handle_list_installed,
+    handle_uninstall_plugin,
+};
+use crate::http::routers::v1::ext_marketplace_sources::{
+    handle_v1_ext_marketplace_sources_get, handle_v1_ext_marketplace_sources_post,
+    handle_v1_ext_marketplace_sources_delete, handle_v1_ext_marketplace_sources_configure,
+    handle_v1_ext_marketplace_sources_refresh,
+};
+use crate::http::routers::v1::skills_marketplace::{
+    handle_v1_skills_marketplace_get, handle_v1_skills_marketplace_install,
+};
+use crate::http::routers::v1::commands_marketplace::{
+    handle_v1_commands_marketplace_get, handle_v1_commands_marketplace_install,
+};
+use crate::http::routers::v1::subagents_marketplace::{
+    handle_v1_subagents_marketplace_get, handle_v1_subagents_marketplace_install,
 };
 use crate::http::routers::v1::skills_status::handle_v1_skills_status;
-use crate::http::routers::v1::mcp_server_info::{handle_v1_mcp_server_info, handle_v1_mcp_server_reconnect};
+use crate::http::routers::v1::knowledge_enrichment::handle_v1_memory_enrichment_preview;
+use crate::http::routers::v1::mcp_server_info::{
+    handle_v1_mcp_server_info, handle_v1_mcp_server_reconnect,
+};
 use crate::http::routers::v1::setup_status::handle_v1_setup_status;
 
 use crate::http::routers::v1::mcp_marketplace::{
-    handle_v1_mcp_marketplace_get, handle_v1_mcp_marketplace_install, handle_v1_mcp_marketplace_installed,
-    handle_v1_mcp_auto_name,
+    handle_v1_mcp_marketplace_get, handle_v1_mcp_marketplace_install,
+    handle_v1_mcp_marketplace_installed, handle_v1_mcp_auto_name,
 };
 use crate::http::routers::v1::mcp_marketplace_sources::{
     handle_v1_mcp_marketplace_sources_get, handle_v1_mcp_marketplace_sources_post,
@@ -184,22 +201,16 @@ use crate::http::routers::v1::mcp_config_sharing::{
     handle_v1_mcp_export, handle_v1_mcp_import, handle_v1_mcp_project_config,
 };
 use crate::http::routers::v1::mcp_oauth::{
-    handle_v1_mcp_oauth_start, handle_v1_mcp_oauth_exchange,
-    handle_v1_mcp_oauth_callback, handle_v1_mcp_oauth_logout, handle_v1_mcp_oauth_status,
-    handle_v1_mcp_oauth_cancel,
+    handle_v1_mcp_oauth_start, handle_v1_mcp_oauth_exchange, handle_v1_mcp_oauth_callback,
+    handle_v1_mcp_oauth_logout, handle_v1_mcp_oauth_status, handle_v1_mcp_oauth_cancel,
 };
 use crate::http::routers::v1::v1_browser::{
-    handle_browser_start, handle_browser_stop, handle_browser_screenshot,
-    handle_browser_context, handle_browser_context_commit,
-    handle_browser_element_pick, handle_browser_element_pick_result,
-    handle_browser_curl, handle_browser_eval,
-    handle_browser_inject_css, handle_browser_remove_css,
-    handle_browser_dom_snapshot, handle_browser_accessibility,
-    handle_browser_record_animation, handle_browser_handoff,
-    handle_browser_status,
-    handle_browser_annotate_start, handle_browser_annotate_result,
-    handle_browser_annotate_clear,
-    handle_browser_action,
+    handle_browser_start, handle_browser_stop, handle_browser_screenshot, handle_browser_context,
+    handle_browser_context_commit, handle_browser_element_pick, handle_browser_element_pick_result,
+    handle_browser_curl, handle_browser_eval, handle_browser_inject_css, handle_browser_remove_css,
+    handle_browser_dom_snapshot, handle_browser_accessibility, handle_browser_record_animation,
+    handle_browser_handoff, handle_browser_status, handle_browser_annotate_start,
+    handle_browser_annotate_result, handle_browser_annotate_clear, handle_browser_action,
 };
 
 pub fn make_v1_router() -> Router {
@@ -236,14 +247,29 @@ pub fn make_v1_router() -> Router {
         .route("/config-path", get(handle_v1_config_path))
         .route("/customization", get(handle_v1_customization))
         .route("/project-configs", get(handle_v1_project_configs_get))
-        .route("/project-configs/rescan", post(handle_v1_project_configs_rescan))
-        .route("/project-configs/bootstrap", post(handle_v1_project_configs_bootstrap))
+        .route(
+            "/project-configs/rescan",
+            post(handle_v1_project_configs_rescan),
+        )
+        .route(
+            "/project-configs/bootstrap",
+            post(handle_v1_project_configs_bootstrap),
+        )
         .route("/chat-modes", get(handle_v1_chat_modes))
-        .route("/customization/registry", get(handle_v1_customization_registry))
+        .route(
+            "/customization/registry",
+            get(handle_v1_customization_registry),
+        )
         .route("/customization/:kind/:id", get(handle_v1_customization_get))
-        .route("/customization/:kind/:id", put(handle_v1_customization_save))
+        .route(
+            "/customization/:kind/:id",
+            put(handle_v1_customization_save),
+        )
         .route("/customization/:kind", post(handle_v1_customization_create))
-        .route("/customization/:kind/:id", delete(handle_v1_customization_delete))
+        .route(
+            "/customization/:kind/:id",
+            delete(handle_v1_customization_delete),
+        )
         .route(
             "/sync-files-extract-tar",
             post(handle_v1_sync_files_extract_tar),
@@ -289,21 +315,54 @@ pub fn make_v1_router() -> Router {
         .route("/providers/:name", delete(handle_v1_provider_delete))
         .route("/providers/:name/schema", get(handle_v1_provider_schema))
         .route("/providers/:name/models", get(handle_v1_provider_models))
-        .route("/providers/:name/available-models", get(handle_v1_provider_available_models))
+        .route(
+            "/providers/:name/available-models",
+            get(handle_v1_provider_available_models),
+        )
         .route(
             "/providers/:name/models/:model_id/endpoints",
             get(handle_v1_openrouter_model_endpoints),
         )
-        .route("/providers/:name/models/toggle", post(handle_v1_provider_model_toggle))
-        .route("/providers/:name/models/provider", post(handle_v1_provider_model_provider_update))
-        .route("/providers/:name/custom-models", post(handle_v1_provider_add_custom_model))
-        .route("/providers/:name/custom-models", delete(handle_v1_provider_remove_custom_model))
-        .route("/providers/:name/custom-models/remove", post(handle_v1_provider_remove_custom_model_post))
-        .route("/openrouter/account-info", get(handle_v1_openrouter_account_info))
-        .route("/providers/:name/oauth/start", post(handle_v1_provider_oauth_start))
-        .route("/providers/:name/oauth/exchange", post(handle_v1_provider_oauth_exchange))
-        .route("/providers/:name/oauth/logout", post(handle_v1_provider_oauth_logout))
-        .route("/providers/:name/oauth/callback", get(handle_v1_provider_oauth_callback))
+        .route(
+            "/providers/:name/models/toggle",
+            post(handle_v1_provider_model_toggle),
+        )
+        .route(
+            "/providers/:name/models/provider",
+            post(handle_v1_provider_model_provider_update),
+        )
+        .route(
+            "/providers/:name/custom-models",
+            post(handle_v1_provider_add_custom_model),
+        )
+        .route(
+            "/providers/:name/custom-models",
+            delete(handle_v1_provider_remove_custom_model),
+        )
+        .route(
+            "/providers/:name/custom-models/remove",
+            post(handle_v1_provider_remove_custom_model_post),
+        )
+        .route(
+            "/openrouter/account-info",
+            get(handle_v1_openrouter_account_info),
+        )
+        .route(
+            "/providers/:name/oauth/start",
+            post(handle_v1_provider_oauth_start),
+        )
+        .route(
+            "/providers/:name/oauth/exchange",
+            post(handle_v1_provider_oauth_exchange),
+        )
+        .route(
+            "/providers/:name/oauth/logout",
+            post(handle_v1_provider_oauth_logout),
+        )
+        .route(
+            "/providers/:name/oauth/callback",
+            get(handle_v1_provider_oauth_callback),
+        )
         .route("/defaults", get(handle_v1_defaults_get))
         .route("/defaults", post(handle_v1_defaults_update))
         .route("/openrouter/health", get(handle_v1_openrouter_health))
@@ -350,7 +409,14 @@ pub fn make_v1_router() -> Router {
         .route("/trajectories/:id", delete(handle_v1_trajectories_delete))
         .route("/chats/subscribe", get(handle_v1_chat_subscribe))
         .route("/chats/:chat_id/commands", post(handle_v1_chat_command))
-        .route("/chats/:chat_id/skills-status", get(handle_v1_skills_status))
+        .route(
+            "/chats/:chat_id/skills-status",
+            get(handle_v1_skills_status),
+        )
+        .route(
+            "/chats/:chat_id/memory-enrichment/preview",
+            post(handle_v1_memory_enrichment_preview),
+        )
         .route(
             "/chats/:chat_id/queue/:client_request_id",
             delete(handle_v1_chat_cancel_queued),
@@ -413,29 +479,56 @@ pub fn make_v1_router() -> Router {
             "/chats/:chat_id/trajectory/mode-transition/apply",
             post(handle_mode_transition_apply),
         )
-        .route("/project-information", get(handle_v1_project_information_get))
-        .route("/project-information", post(handle_v1_project_information_save))
-        .route("/project-information/preview", post(handle_v1_project_information_preview))
+        .route(
+            "/project-information",
+            get(handle_v1_project_information_get),
+        )
+        .route(
+            "/project-information",
+            post(handle_v1_project_information_save),
+        )
+        .route(
+            "/project-information/preview",
+            post(handle_v1_project_information_preview),
+        )
         .route("/setup/status", get(handle_v1_setup_status))
         .route("/browser/start", post(handle_browser_start))
         .route("/browser/stop", post(handle_browser_stop))
         .route("/browser/screenshot", post(handle_browser_screenshot))
         .route("/browser/context", post(handle_browser_context))
-        .route("/browser/context/commit", post(handle_browser_context_commit))
+        .route(
+            "/browser/context/commit",
+            post(handle_browser_context_commit),
+        )
         .route("/browser/element-pick", post(handle_browser_element_pick))
-        .route("/browser/element-pick/result", post(handle_browser_element_pick_result))
+        .route(
+            "/browser/element-pick/result",
+            post(handle_browser_element_pick_result),
+        )
         .route("/browser/curl", post(handle_browser_curl))
         .route("/browser/eval", post(handle_browser_eval))
         .route("/browser/inject-css", post(handle_browser_inject_css))
         .route("/browser/remove-css", post(handle_browser_remove_css))
         .route("/browser/dom-snapshot", post(handle_browser_dom_snapshot))
         .route("/browser/accessibility", post(handle_browser_accessibility))
-        .route("/browser/record-animation", post(handle_browser_record_animation))
+        .route(
+            "/browser/record-animation",
+            post(handle_browser_record_animation),
+        )
         .route("/browser/handoff", post(handle_browser_handoff))
         .route("/browser/status", post(handle_browser_status))
-        .route("/browser/annotate/start", post(handle_browser_annotate_start))
-        .route("/browser/annotate/result", post(handle_browser_annotate_result))
-        .route("/browser/annotate/clear", post(handle_browser_annotate_clear))
+        .route(
+            "/browser/annotate/start",
+            post(handle_browser_annotate_start),
+        )
+        .route(
+            "/browser/annotate/result",
+            post(handle_browser_annotate_result),
+        )
+        .route(
+            "/browser/annotate/clear",
+            post(handle_browser_annotate_clear),
+        )
         .route("/browser/action", post(handle_browser_action))
         .route("/stats/llm/summary", get(handle_v1_stats_llm_summary))
         .route("/stats/llm/events", get(handle_v1_stats_llm_events))
@@ -450,24 +543,164 @@ pub fn make_v1_router() -> Router {
         .route("/ext/commands/:name", delete(handle_v1_ext_command_delete))
         .route("/ext/hooks", get(handle_v1_ext_hooks_get))
         .route("/ext/hooks", put(handle_v1_ext_hooks_put))
-        .route("/ext/hooks/:index", delete(handle_v1_ext_hooks_delete_by_index))
+        .route(
+            "/ext/hooks/:index",
+            delete(handle_v1_ext_hooks_delete_by_index),
+        )
+        .route(
+            "/ext/marketplace/sources",
+            get(handle_v1_ext_marketplace_sources_get),
+        )
+        .route(
+            "/ext/marketplace/sources",
+            post(handle_v1_ext_marketplace_sources_post),
+        )
+        .route(
+            "/ext/marketplace/sources/:id",
+            delete(handle_v1_ext_marketplace_sources_delete),
+        )
+        .route(
+            "/ext/marketplace/sources/:id/configure",
+            post(handle_v1_ext_marketplace_sources_configure),
+        )
+        .route(
+            "/ext/marketplace/sources/:id/refresh",
+            post(handle_v1_ext_marketplace_sources_refresh),
+        )
+        .route(
+            "/skills_marketplace/sources",
+            get(handle_v1_ext_marketplace_sources_get),
+        )
+        .route(
+            "/skills_marketplace/sources",
+            post(handle_v1_ext_marketplace_sources_post),
+        )
+        .route(
+            "/skills_marketplace/sources/:id",
+            delete(handle_v1_ext_marketplace_sources_delete),
+        )
+        .route(
+            "/skills_marketplace/sources/:id/configure",
+            post(handle_v1_ext_marketplace_sources_configure),
+        )
+        .route(
+            "/commands_marketplace/sources",
+            get(handle_v1_ext_marketplace_sources_get),
+        )
+        .route(
+            "/commands_marketplace/sources",
+            post(handle_v1_ext_marketplace_sources_post),
+        )
+        .route(
+            "/commands_marketplace/sources/:id",
+            delete(handle_v1_ext_marketplace_sources_delete),
+        )
+        .route(
+            "/commands_marketplace/sources/:id/configure",
+            post(handle_v1_ext_marketplace_sources_configure),
+        )
+        .route(
+            "/subagents_marketplace/sources",
+            get(handle_v1_ext_marketplace_sources_get),
+        )
+        .route(
+            "/subagents_marketplace/sources",
+            post(handle_v1_ext_marketplace_sources_post),
+        )
+        .route(
+            "/subagents_marketplace/sources/:id",
+            delete(handle_v1_ext_marketplace_sources_delete),
+        )
+        .route(
+            "/subagents_marketplace/sources/:id/configure",
+            post(handle_v1_ext_marketplace_sources_configure),
+        )
+        .route("/skills/marketplace", get(handle_v1_skills_marketplace_get))
+        .route(
+            "/skills/marketplace/install",
+            post(handle_v1_skills_marketplace_install),
+        )
+        .route("/skills_marketplace", get(handle_v1_skills_marketplace_get))
+        .route(
+            "/skills_marketplace/install",
+            post(handle_v1_skills_marketplace_install),
+        )
+        .route(
+            "/commands/marketplace",
+            get(handle_v1_commands_marketplace_get),
+        )
+        .route(
+            "/commands/marketplace/install",
+            post(handle_v1_commands_marketplace_install),
+        )
+        .route(
+            "/commands_marketplace",
+            get(handle_v1_commands_marketplace_get),
+        )
+        .route(
+            "/commands_marketplace/install",
+            post(handle_v1_commands_marketplace_install),
+        )
+        .route(
+            "/subagents/marketplace",
+            get(handle_v1_subagents_marketplace_get),
+        )
+        .route(
+            "/subagents/marketplace/install",
+            post(handle_v1_subagents_marketplace_install),
+        )
+        .route(
+            "/subagents_marketplace",
+            get(handle_v1_subagents_marketplace_get),
+        )
+        .route(
+            "/subagents_marketplace/install",
+            post(handle_v1_subagents_marketplace_install),
+        )
         .route("/plugins/marketplaces", get(handle_list_marketplaces))
         .route("/plugins/marketplaces", post(handle_add_marketplace))
-        .route("/plugins/marketplaces/:name", delete(handle_delete_marketplace))
-        .route("/plugins/marketplace/:name/plugins", get(handle_list_marketplace_plugins))
+        .route(
+            "/plugins/marketplaces/:name",
+            delete(handle_delete_marketplace),
+        )
+        .route(
+            "/plugins/marketplace/:name/plugins",
+            get(handle_list_marketplace_plugins),
+        )
         .route("/plugins/install", post(handle_install_plugin))
         .route("/plugins/installed", get(handle_list_installed))
         .route("/plugins/installed/:name", delete(handle_uninstall_plugin))
         .route("/mcp-server-info", get(handle_v1_mcp_server_info))
-        .route("/mcp-server-reconnect", post(handle_v1_mcp_server_reconnect))
+        .route(
+            "/mcp-server-reconnect",
+            post(handle_v1_mcp_server_reconnect),
+        )
         .route("/mcp/marketplace", get(handle_v1_mcp_marketplace_get))
-        .route("/mcp/marketplace/install", post(handle_v1_mcp_marketplace_install))
-        .route("/mcp/marketplace/installed", get(handle_v1_mcp_marketplace_installed))
+        .route(
+            "/mcp/marketplace/install",
+            post(handle_v1_mcp_marketplace_install),
+        )
+        .route(
+            "/mcp/marketplace/installed",
+            get(handle_v1_mcp_marketplace_installed),
+        )
         .route("/mcp/auto-name", post(handle_v1_mcp_auto_name))
-        .route("/mcp/marketplace/sources", get(handle_v1_mcp_marketplace_sources_get))
-        .route("/mcp/marketplace/sources", post(handle_v1_mcp_marketplace_sources_post))
-        .route("/mcp/marketplace/sources/:id", delete(handle_v1_mcp_marketplace_sources_delete))
-        .route("/mcp/marketplace/sources/:id/configure", post(handle_v1_mcp_marketplace_sources_configure))
+        .route(
+            "/mcp/marketplace/sources",
+            get(handle_v1_mcp_marketplace_sources_get),
+        )
+        .route(
+            "/mcp/marketplace/sources",
+            post(handle_v1_mcp_marketplace_sources_post),
+        )
+        .route(
+            "/mcp/marketplace/sources/:id",
+            delete(handle_v1_mcp_marketplace_sources_delete),
+        )
+        .route(
+            "/mcp/marketplace/sources/:id/configure",
+            post(handle_v1_mcp_marketplace_sources_configure),
+        )
         .route("/mcp/export", post(handle_v1_mcp_export))
         .route("/mcp/import", post(handle_v1_mcp_import))
         .route("/mcp/project-config", get(handle_v1_mcp_project_config))
@@ -476,8 +709,7 @@ pub fn make_v1_router() -> Router {
         .route("/mcp/oauth/callback", get(handle_v1_mcp_oauth_callback))
         .route("/mcp/oauth/logout", post(handle_v1_mcp_oauth_logout))
         .route("/mcp/oauth/status", get(handle_v1_mcp_oauth_status))
-        .route("/mcp/oauth/cancel", post(handle_v1_mcp_oauth_cancel))
-        ;
+        .route("/mcp/oauth/cancel", post(handle_v1_mcp_oauth_cancel));
 
     builder.layer(axum::middleware::from_fn(telemetry_middleware))
 }

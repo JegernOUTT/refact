@@ -11,10 +11,13 @@ use tokio::sync::RwLock as ARwLock;
 use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
-use crate::yaml_configs::customization_registry::{load_merged_registry, load_registry_from_dir, invalidate_all_registry_caches, ConfigScope};
+use crate::yaml_configs::customization_registry::{
+    load_merged_registry, load_registry_from_dir, invalidate_all_registry_caches, ConfigScope,
+};
 use crate::yaml_configs::customization_types::*;
-use crate::yaml_configs::project_configs_bootstrap::{global_configs_try_create_all, project_configs_ensure_dirs};
-
+use crate::yaml_configs::project_configs_bootstrap::{
+    global_configs_try_create_all, project_configs_ensure_dirs,
+};
 
 fn json_error(status: StatusCode, msg: &str) -> Result<Response<Body>, ScratchError> {
     let body = serde_json::json!({"error": msg});
@@ -27,9 +30,16 @@ fn json_error(status: StatusCode, msg: &str) -> Result<Response<Body>, ScratchEr
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-fn json_response<T: Serialize>(status: StatusCode, data: &T) -> Result<Response<Body>, ScratchError> {
-    let body_str = serde_json::to_string(data)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e)))?;
+fn json_response<T: Serialize>(
+    status: StatusCode,
+    data: &T,
+) -> Result<Response<Body>, ScratchError> {
+    let body_str = serde_json::to_string(data).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization error: {}", e),
+        )
+    })?;
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
@@ -96,7 +106,9 @@ pub async fn handle_v1_customization_registry(
 
     let make_config_item = |id: &str, kind: &str, title: &str, specific: bool| -> ConfigItem {
         let global_path = config_dir.join(kind).join(format!("{}.yaml", id));
-        let local_path = local_refact_dir.as_ref().map(|d| d.join(kind).join(format!("{}.yaml", id)));
+        let local_path = local_refact_dir
+            .as_ref()
+            .map(|d| d.join(kind).join(format!("{}.yaml", id)));
         let global_exists = global_path.exists();
         let local_exists = local_path.as_ref().map(|p| p.exists()).unwrap_or(false);
         let effective_scope = if local_exists { "local" } else { "global" };
@@ -113,7 +125,9 @@ pub async fn handle_v1_customization_registry(
             specific,
             scope: effective_scope.to_string(),
             global_path: global_path.display().to_string(),
-            local_path: local_path.map(|p| p.display().to_string()).unwrap_or_default(),
+            local_path: local_path
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             global_exists,
             local_exists,
         }
@@ -146,19 +160,39 @@ pub async fn handle_v1_customization_registry(
 
     modes.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
 
-    let mut subagents: Vec<_> = registry.subagents.values().map(|s| {
-        make_config_item(&s.id, "subagents", if s.title.is_empty() { &s.id } else { &s.title }, s.specific)
-    }).collect();
+    let mut subagents: Vec<_> = registry
+        .subagents
+        .values()
+        .map(|s| {
+            make_config_item(
+                &s.id,
+                "subagents",
+                if s.title.is_empty() { &s.id } else { &s.title },
+                s.specific,
+            )
+        })
+        .collect();
     subagents.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
 
-    let mut toolbox_commands: Vec<_> = registry.toolbox_commands.values().map(|t| {
-        make_config_item(&t.id, "toolbox_commands", &t.id, false)
-    }).collect();
+    let mut toolbox_commands: Vec<_> = registry
+        .toolbox_commands
+        .values()
+        .map(|t| make_config_item(&t.id, "toolbox_commands", &t.id, false))
+        .collect();
     toolbox_commands.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let mut code_lens: Vec<_> = registry.code_lens.values().map(|c| {
-        make_config_item(&c.id, "code_lens", if c.label.is_empty() { &c.id } else { &c.label }, false)
-    }).collect();
+    let mut code_lens: Vec<_> = registry
+        .code_lens
+        .values()
+        .map(|c| {
+            make_config_item(
+                &c.id,
+                "code_lens",
+                if c.label.is_empty() { &c.id } else { &c.label },
+                false,
+            )
+        })
+        .collect();
     code_lens.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
 
     let response = RegistryResponse {
@@ -166,10 +200,14 @@ pub async fn handle_v1_customization_registry(
         subagents,
         toolbox_commands,
         code_lens,
-        errors: registry.errors.iter().map(|e| ErrorItem {
-            file_path: e.file_path.clone(),
-            error: e.error.clone(),
-        }).collect(),
+        errors: registry
+            .errors
+            .iter()
+            .map(|e| ErrorItem {
+                file_path: e.file_path.clone(),
+                error: e.error.clone(),
+            })
+            .collect(),
         has_project_root: project_root.is_some(),
     };
 
@@ -207,16 +245,16 @@ pub async fn handle_v1_customization_get(
     let project_root = dirs.first().cloned();
 
     let global_path = config_dir.join(&kind).join(format!("{}.yaml", id));
-    let local_path = project_root.as_ref().map(|p| p.join(".refact").join(&kind).join(format!("{}.yaml", id)));
+    let local_path = project_root
+        .as_ref()
+        .map(|p| p.join(".refact").join(&kind).join(format!("{}.yaml", id)));
 
     let (file_path, scope) = match query.scope.as_deref() {
         Some("global") => (global_path, ConfigScope::Global),
-        Some("local") => {
-            match local_path {
-                Some(p) => (p, ConfigScope::Local),
-                None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
-            }
-        }
+        Some("local") => match local_path {
+            Some(p) => (p, ConfigScope::Local),
+            None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
+        },
         _ => {
             if local_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
                 (local_path.unwrap(), ConfigScope::Local)
@@ -244,7 +282,11 @@ pub async fn handle_v1_customization_get(
         config,
         file_path: file_path.display().to_string(),
         raw_yaml,
-        scope: match scope { ConfigScope::Global => "global", ConfigScope::Local => "local" }.to_string(),
+        scope: match scope {
+            ConfigScope::Global => "global",
+            ConfigScope::Local => "local",
+        }
+        .to_string(),
     };
 
     json_response(StatusCode::OK, &response)
@@ -291,16 +333,16 @@ pub async fn handle_v1_customization_save(
     }
 
     let global_path = config_dir.join(&kind).join(format!("{}.yaml", id));
-    let local_path = project_root.as_ref().map(|p| p.join(".refact").join(&kind).join(format!("{}.yaml", id)));
+    let local_path = project_root
+        .as_ref()
+        .map(|p| p.join(".refact").join(&kind).join(format!("{}.yaml", id)));
 
     let (file_path, scope) = match request.scope.as_deref() {
         Some("global") => (global_path, ConfigScope::Global),
-        Some("local") => {
-            match local_path {
-                Some(p) => (p, ConfigScope::Local),
-                None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
-            }
-        }
+        Some("local") => match local_path {
+            Some(p) => (p, ConfigScope::Local),
+            None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
+        },
         _ => {
             if local_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
                 (local_path.unwrap(), ConfigScope::Local)
@@ -321,11 +363,19 @@ pub async fn handle_v1_customization_save(
 
     let yaml_str = match serde_yaml::to_string(&request.config) {
         Ok(s) => s,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("yaml serialize error: {}", e)),
+        Err(e) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                &format!("yaml serialize error: {}", e),
+            )
+        }
     };
 
     if let Err(e) = tokio::fs::write(&file_path, &yaml_str).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write error: {}", e),
+        );
     }
 
     invalidate_registry_cache(gcx.clone(), scope).await;
@@ -334,11 +384,19 @@ pub async fn handle_v1_customization_save(
     let response = SaveConfigResponse {
         ok: registry.errors.is_empty(),
         file_path: file_path.display().to_string(),
-        scope: match scope { ConfigScope::Global => "global", ConfigScope::Local => "local" }.to_string(),
-        errors: registry.errors.iter().map(|e| ErrorItem {
-            file_path: e.file_path.clone(),
-            error: e.error.clone(),
-        }).collect(),
+        scope: match scope {
+            ConfigScope::Global => "global",
+            ConfigScope::Local => "local",
+        }
+        .to_string(),
+        errors: registry
+            .errors
+            .iter()
+            .map(|e| ErrorItem {
+                file_path: e.file_path.clone(),
+                error: e.error.clone(),
+            })
+            .collect(),
     };
 
     json_response(StatusCode::OK, &response)
@@ -375,19 +433,31 @@ pub async fn handle_v1_customization_create(
     let project_root = dirs.first().cloned();
 
     let (file_path, scope) = match request.scope.as_deref() {
-        Some("global") => (config_dir.join(&kind).join(format!("{}.yaml", request.id)), ConfigScope::Global),
-        Some("local") => {
-            match &project_root {
-                Some(p) => (p.join(".refact").join(&kind).join(format!("{}.yaml", request.id)), ConfigScope::Local),
-                None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
-            }
-        }
-        _ => {
-            match &project_root {
-                Some(p) => (p.join(".refact").join(&kind).join(format!("{}.yaml", request.id)), ConfigScope::Local),
-                None => (config_dir.join(&kind).join(format!("{}.yaml", request.id)), ConfigScope::Global),
-            }
-        }
+        Some("global") => (
+            config_dir.join(&kind).join(format!("{}.yaml", request.id)),
+            ConfigScope::Global,
+        ),
+        Some("local") => match &project_root {
+            Some(p) => (
+                p.join(".refact")
+                    .join(&kind)
+                    .join(format!("{}.yaml", request.id)),
+                ConfigScope::Local,
+            ),
+            None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
+        },
+        _ => match &project_root {
+            Some(p) => (
+                p.join(".refact")
+                    .join(&kind)
+                    .join(format!("{}.yaml", request.id)),
+                ConfigScope::Local,
+            ),
+            None => (
+                config_dir.join(&kind).join(format!("{}.yaml", request.id)),
+                ConfigScope::Global,
+            ),
+        },
     };
 
     if let Err(e) = validate_config(&kind, &request.config, &request.id) {
@@ -400,18 +470,36 @@ pub async fn handle_v1_customization_create(
 
     let yaml_str = match serde_yaml::to_string(&request.config) {
         Ok(s) => s,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("yaml serialize error: {}", e)),
+        Err(e) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                &format!("yaml serialize error: {}", e),
+            )
+        }
     };
 
-    let mut file = match OpenOptions::new().write(true).create_new(true).open(&file_path).await {
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file_path)
+        .await
+    {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return json_error(StatusCode::CONFLICT, "config already exists");
         }
-        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e)),
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("write error: {}", e),
+            )
+        }
     };
     if let Err(e) = file.write_all(yaml_str.as_bytes()).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write error: {}", e),
+        );
     }
 
     invalidate_registry_cache(gcx.clone(), scope).await;
@@ -420,11 +508,19 @@ pub async fn handle_v1_customization_create(
     let response = SaveConfigResponse {
         ok: registry.errors.is_empty(),
         file_path: file_path.display().to_string(),
-        scope: match scope { ConfigScope::Global => "global", ConfigScope::Local => "local" }.to_string(),
-        errors: registry.errors.iter().map(|e| ErrorItem {
-            file_path: e.file_path.clone(),
-            error: e.error.clone(),
-        }).collect(),
+        scope: match scope {
+            ConfigScope::Global => "global",
+            ConfigScope::Local => "local",
+        }
+        .to_string(),
+        errors: registry
+            .errors
+            .iter()
+            .map(|e| ErrorItem {
+                file_path: e.file_path.clone(),
+                error: e.error.clone(),
+            })
+            .collect(),
     };
 
     json_response(StatusCode::CREATED, &response)
@@ -460,14 +556,23 @@ pub async fn handle_v1_customization_delete(
     let project_root = dirs.first().cloned();
 
     let (file_path, scope) = match query.scope.as_deref() {
-        Some("global") => (config_dir.join(&kind).join(format!("{}.yaml", id)), ConfigScope::Global),
-        Some("local") => {
-            match &project_root {
-                Some(p) => (p.join(".refact").join(&kind).join(format!("{}.yaml", id)), ConfigScope::Local),
-                None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
-            }
+        Some("global") => (
+            config_dir.join(&kind).join(format!("{}.yaml", id)),
+            ConfigScope::Global,
+        ),
+        Some("local") => match &project_root {
+            Some(p) => (
+                p.join(".refact").join(&kind).join(format!("{}.yaml", id)),
+                ConfigScope::Local,
+            ),
+            None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
+        },
+        _ => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "scope parameter required for delete",
+            )
         }
-        _ => return json_error(StatusCode::BAD_REQUEST, "scope parameter required for delete"),
     };
 
     if !file_path.exists() {
@@ -475,7 +580,10 @@ pub async fn handle_v1_customization_delete(
     }
 
     if let Err(e) = tokio::fs::remove_file(&file_path).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("delete error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("delete error: {}", e),
+        );
     }
 
     invalidate_registry_cache(gcx.clone(), scope).await;
@@ -483,11 +591,19 @@ pub async fn handle_v1_customization_delete(
 
     let response = DeleteConfigResponse {
         ok: true,
-        scope: match scope { ConfigScope::Global => "global", ConfigScope::Local => "local" }.to_string(),
-        errors: registry.errors.iter().map(|e| ErrorItem {
-            file_path: e.file_path.clone(),
-            error: e.error.clone(),
-        }).collect(),
+        scope: match scope {
+            ConfigScope::Global => "global",
+            ConfigScope::Local => "local",
+        }
+        .to_string(),
+        errors: registry
+            .errors
+            .iter()
+            .map(|e| ErrorItem {
+                file_path: e.file_path.clone(),
+                error: e.error.clone(),
+            })
+            .collect(),
     };
 
     json_response(StatusCode::OK, &response)
@@ -507,25 +623,41 @@ fn validate_id(id: &str) -> std::result::Result<(), String> {
     if id.contains('/') || id.contains('\\') || id.contains("..") {
         return Err("id contains invalid characters".to_string());
     }
-    if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
-        return Err("id must contain only lowercase letters, digits, underscore, or hyphen".to_string());
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err(
+            "id must contain only lowercase letters, digits, underscore, or hyphen".to_string(),
+        );
     }
     Ok(())
 }
 
 const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 100;
 
-fn validate_config(kind: &str, config: &serde_json::Value, expected_id: &str) -> std::result::Result<(), String> {
+fn validate_config(
+    kind: &str,
+    config: &serde_json::Value,
+    expected_id: &str,
+) -> std::result::Result<(), String> {
     let config_id = config.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if config_id != expected_id {
-        return Err(format!("config id '{}' does not match expected '{}'", config_id, expected_id));
+        return Err(format!(
+            "config id '{}' does not match expected '{}'",
+            config_id, expected_id
+        ));
     }
 
-    let schema_version = config.get("schema_version")
+    let schema_version = config
+        .get("schema_version")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| "missing or invalid schema_version field".to_string())?;
     if schema_version == 0 || schema_version > MAX_SUPPORTED_SCHEMA_VERSION as u64 {
-        return Err(format!("schema_version {} is not supported (must be 1..={})", schema_version, MAX_SUPPORTED_SCHEMA_VERSION));
+        return Err(format!(
+            "schema_version {} is not supported (must be 1..={})",
+            schema_version, MAX_SUPPORTED_SCHEMA_VERSION
+        ));
     }
 
     let json_str = serde_json::to_string(config).map_err(|e| e.to_string())?;

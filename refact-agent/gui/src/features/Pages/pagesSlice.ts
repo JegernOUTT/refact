@@ -70,12 +70,28 @@ export interface StatsDashboardPage {
 
 export interface ExtensionsPage {
   name: "extensions";
-  tab?: "skills" | "commands" | "hooks" | "marketplace";
+  tab?: "skills" | "commands" | "hooks";
   itemId?: string;
 }
 
 export interface MCPMarketplacePage {
   name: "mcp marketplace";
+}
+
+export interface SkillsMarketplacePage {
+  name: "skills marketplace";
+}
+
+export interface CommandsMarketplacePage {
+  name: "commands marketplace";
+}
+
+export interface SubagentsMarketplacePage {
+  name: "subagents marketplace";
+}
+
+export interface MarketplaceHubPage {
+  name: "marketplace hub";
 }
 
 export interface IntegrationsSetupPage {
@@ -105,7 +121,11 @@ export type Page =
   | DefaultModelsPage
   | StatsDashboardPage
   | ExtensionsPage
-  | MCPMarketplacePage;
+  | MCPMarketplacePage
+  | SkillsMarketplacePage
+  | CommandsMarketplacePage
+  | SubagentsMarketplacePage
+  | MarketplaceHubPage;
 
 export function isIntegrationSetupPage(
   page: Page,

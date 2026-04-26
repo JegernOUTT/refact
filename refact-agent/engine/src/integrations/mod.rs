@@ -26,10 +26,10 @@ pub mod mcp;
 
 pub mod config_chat;
 pub mod process_io_utils;
-pub mod setup_chat;
 pub mod running_integrations;
 pub mod sessions;
 pub mod setting_up_integrations;
+pub mod setup_chat;
 pub mod utils;
 pub mod yaml_schema;
 

@@ -28,7 +28,9 @@ use super::trajectories::{maybe_save_trajectory, check_external_reload_pending};
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
 use super::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
-use super::stream_core::{run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal};
+use super::stream_core::{
+    run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal,
+};
 use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
@@ -47,7 +49,14 @@ fn maybe_inject_token_budget_instruction(
     let last_has_tool_calls = session
         .messages
         .last()
-        .map(|msg| msg.role == "assistant" && msg.tool_calls.as_ref().map(|tcs| !tcs.is_empty()).unwrap_or(false))
+        .map(|msg| {
+            msg.role == "assistant"
+                && msg
+                    .tool_calls
+                    .as_ref()
+                    .map(|tcs| !tcs.is_empty())
+                    .unwrap_or(false)
+        })
         .unwrap_or(false);
     if last_has_tool_calls {
         return false;
@@ -78,9 +87,13 @@ fn maybe_inject_token_budget_instruction(
         return false;
     }
 
-    if session.messages.iter().rev().take(cadence).any(|msg| {
-        msg.role == "cd_instruction" && msg.tool_call_id == TOKEN_BUDGET_MARKER
-    }) {
+    if session
+        .messages
+        .iter()
+        .rev()
+        .take(cadence)
+        .any(|msg| msg.role == "cd_instruction" && msg.tool_call_id == TOKEN_BUDGET_MARKER)
+    {
         return false;
     }
 
@@ -107,8 +120,6 @@ fn maybe_inject_token_budget_instruction(
     session.add_message(message);
     true
 }
-
-
 
 fn build_mcp_index_message(index: &[(String, String)], total: usize) -> String {
     let mut lines = vec![
@@ -138,12 +149,21 @@ pub async fn prepare_session_preamble_and_knowledge(
 ) {
     let (thread, chat_id, has_system, has_project_context) = {
         let session = session_arc.lock().await;
-        let has_sys = session.messages.first().map(|m| m.role == "system").unwrap_or(false);
+        let has_sys = session
+            .messages
+            .first()
+            .map(|m| m.role == "system")
+            .unwrap_or(false);
         let has_proj = session.messages.iter().any(|m| {
             m.role == "context_file"
                 && m.tool_call_id == crate::chat::system_context::PROJECT_CONTEXT_MARKER
         });
-        (session.thread.clone(), session.chat_id.clone(), has_sys, has_proj)
+        (
+            session.thread.clone(),
+            session.chat_id.clone(),
+            has_sys,
+            has_proj,
+        )
     };
 
     let needs_preamble = !has_system || (!has_project_context && thread.include_project_info);
@@ -152,7 +172,9 @@ pub async fn prepare_session_preamble_and_knowledge(
     let mut mcp_for_index: Option<(Vec<(String, String)>, usize)> = None;
 
     if needs_preamble {
-        let caps = match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
+        let caps = match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+            .await
+        {
             Ok(caps) => caps,
             Err(e) => {
                 warn!("Failed to load caps for preamble: {}", e.message);
@@ -167,16 +189,24 @@ pub async fn prepare_session_preamble_and_knowledge(
             }
         };
 
-        let raw_tools =
-            crate::tools::tools_list::get_tools_for_mode(gcx.clone(), &thread.mode, Some(&model_rec.base.id))
-                .await;
-        let tools_for_mode =
-            crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools);
+        let raw_tools = crate::tools::tools_list::get_tools_for_mode(
+            gcx.clone(),
+            &thread.mode,
+            Some(&model_rec.base.id),
+        )
+        .await;
+        let tools_for_mode = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools);
         if tools_for_mode.mcp_lazy_mode {
-            mcp_for_index = Some((tools_for_mode.mcp_tool_index.clone(), tools_for_mode.mcp_total_count));
+            mcp_for_index = Some((
+                tools_for_mode.mcp_tool_index.clone(),
+                tools_for_mode.mcp_total_count,
+            ));
         }
-        let tool_names: std::collections::HashSet<String> =
-            tools_for_mode.tools.iter().map(|t| t.tool_description().name.clone()).collect();
+        let tool_names: std::collections::HashSet<String> = tools_for_mode
+            .tools
+            .iter()
+            .map(|t| t.tool_description().name.clone())
+            .collect();
 
         let meta = ChatMeta {
             chat_id: chat_id.clone(),
@@ -234,7 +264,11 @@ pub async fn prepare_session_preamble_and_knowledge(
                     continue;
                 }
                 if msg.role == "system"
-                    && session.messages.first().map(|m| m.role == "system").unwrap_or(false)
+                    && session
+                        .messages
+                        .first()
+                        .map(|m| m.role == "system")
+                        .unwrap_or(false)
                 {
                     continue;
                 }
@@ -274,9 +308,10 @@ pub async fn prepare_session_preamble_and_knowledge(
     if let Some((mcp_index, mcp_total)) = mcp_for_index {
         let already_has_index = {
             let session = session_arc.lock().await;
-            session.messages.iter().any(|m| {
-                m.role == "cd_instruction" && m.tool_call_id == MCP_LAZY_INDEX_MARKER
-            })
+            session
+                .messages
+                .iter()
+                .any(|m| m.role == "cd_instruction" && m.tool_call_id == MCP_LAZY_INDEX_MARKER)
         };
         if !already_has_index {
             let index_text = build_mcp_index_message(&mcp_index, mcp_total);
@@ -287,22 +322,46 @@ pub async fn prepare_session_preamble_and_knowledge(
                 .position(|m| m.role == "system")
                 .map(|i| i + 1)
                 .unwrap_or(0);
-            session.insert_message(insert_pos, ChatMessage {
-                role: "cd_instruction".to_string(),
-                tool_call_id: MCP_LAZY_INDEX_MARKER.to_string(),
-                content: ChatContent::SimpleText(index_text),
-                ..Default::default()
-            });
+            session.insert_message(
+                insert_pos,
+                ChatMessage {
+                    role: "cd_instruction".to_string(),
+                    tool_call_id: MCP_LAZY_INDEX_MARKER.to_string(),
+                    content: ChatContent::SimpleText(index_text),
+                    ..Default::default()
+                },
+            );
             info!("Injected MCP lazy index hint with {} tools", mcp_total);
         }
     }
 
-    // Knowledge enrichment for agentic mode
-    let last_is_user = {
-        let session = session_arc.lock().await;
-        session.messages.last().map(|m| m.role == "user").unwrap_or(false)
+    // Knowledge enrichment: first user message only, explicit flag, no manual context present.
+    let (last_is_user, auto_enrichment_enabled, user_count, has_manual_enrichment, suppress_flag) = {
+        let mut session = session_arc.lock().await;
+        let last_user = session
+            .messages
+            .last()
+            .map(|m| m.role == "user")
+            .unwrap_or(false);
+        let auto = session.thread.auto_enrichment_enabled.unwrap_or(false);
+        let count = session.messages.iter().filter(|m| m.role == "user").count();
+        let manual = session
+            .messages
+            .iter()
+            .any(|m| m.role == "context_file" && m.tool_call_id == "manual_memory_enrichment");
+        let suppress = session.suppress_auto_enrichment_for_next_turn;
+        if suppress {
+            session.suppress_auto_enrichment_for_next_turn = false;
+        }
+        (last_user, auto, count, manual, suppress)
     };
-    if is_agentic_mode_id(&thread.mode) && last_is_user {
+    if is_agentic_mode_id(&thread.mode)
+        && last_is_user
+        && auto_enrichment_enabled
+        && user_count == 1
+        && !has_manual_enrichment
+        && !suppress_flag
+    {
         let mut messages = {
             let session = session_arc.lock().await;
             session.messages.clone()
@@ -322,7 +381,7 @@ pub async fn prepare_session_preamble_and_knowledge(
                         .unwrap_or(0);
                     session.insert_message(session_last_user_idx, enriched_msg.clone());
                     info!(
-                        "Saved knowledge enrichment context_file to session at index {}",
+                        "Saved auto knowledge enrichment context_file to session at index {}",
                         session_last_user_idx
                     );
                 }
@@ -331,13 +390,12 @@ pub async fn prepare_session_preamble_and_knowledge(
     }
 }
 
-pub fn save_rag_results_to_session(
-    session: &mut ChatSession,
-    rag_results: &[serde_json::Value],
-) {
+pub fn save_rag_results_to_session(session: &mut ChatSession, rag_results: &[serde_json::Value]) {
     let last_user_idx = session.messages.iter().rposition(|m| m.role == "user");
     if let Some(insert_idx) = last_user_idx {
-        let existing_content: std::collections::HashSet<String> = session.messages.iter()
+        let existing_content: std::collections::HashSet<String> = session
+            .messages
+            .iter()
             .filter(|m| m.role == "context_file" || m.role == "plain_text")
             .map(|m| m.content.content_text_only())
             .collect();
@@ -405,13 +463,11 @@ async fn run_fork_subchat(
     )
     .await?;
 
-    let messages = vec![
-        ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText(user_content.to_string()),
-            ..Default::default()
-        },
-    ];
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: ChatContent::SimpleText(user_content.to_string()),
+        ..Default::default()
+    }];
 
     let result = run_subchat(gcx, messages, config).await?;
 
@@ -429,10 +485,7 @@ pub fn start_generation(
         loop {
             let (mut thread, chat_id) = {
                 let session = session_arc.lock().await;
-                (
-                    session.thread.clone(),
-                    session.chat_id.clone(),
-                )
+                (session.thread.clone(), session.chat_id.clone())
             };
             {
                 let session = session_arc.lock().await;
@@ -451,7 +504,10 @@ pub fn start_generation(
             if let Some(agent_name) = fork_agent_name {
                 let user_content_opt = {
                     let session = session_arc.lock().await;
-                    session.messages.iter().rev()
+                    session
+                        .messages
+                        .iter()
+                        .rev()
                         .find(|m| m.role == "user")
                         .map(|m| m.content.content_text_only())
                 };
@@ -462,19 +518,17 @@ pub fn start_generation(
                 let user_content = match user_content_opt {
                     Some(c) => c,
                     None => {
-                        warn!("Fork skill '{}' skipped: no user message found in session {}", agent_name, chat_id);
+                        warn!(
+                            "Fork skill '{}' skipped: no user message found in session {}",
+                            agent_name, chat_id
+                        );
                         continue;
                     }
                 };
 
-                let fork_result = run_fork_subchat(
-                    gcx.clone(),
-                    &agent_name,
-                    &user_content,
-                    &thread,
-                    &chat_id,
-                )
-                .await;
+                let fork_result =
+                    run_fork_subchat(gcx.clone(), &agent_name, &user_content, &thread, &chat_id)
+                        .await;
 
                 match fork_result {
                     Ok(assistant_content) => {
@@ -490,7 +544,10 @@ pub fn start_generation(
                         break;
                     }
                     Err(e) => {
-                        warn!("Fork skill subchat failed ({}), falling back to normal generation", e);
+                        warn!(
+                            "Fork skill subchat failed ({}), falling back to normal generation",
+                            e
+                        );
                         continue;
                     }
                 }
@@ -565,7 +622,9 @@ pub fn start_generation(
             };
 
             let effective_n_ctx = {
-                let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await;
+                let caps =
+                    crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+                        .await;
                 let model_rec = match caps {
                     Ok(caps) => crate::caps::resolve_chat_model(caps, &model_id).ok(),
                     Err(_) => None,
@@ -594,7 +653,9 @@ pub fn start_generation(
 
             maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
 
-            match process_tool_calls_once(gcx.clone(), session_arc.clone(), &mode_id, model_id_opt).await {
+            match process_tool_calls_once(gcx.clone(), session_arc.clone(), &mode_id, model_id_opt)
+                .await
+            {
                 ToolStepOutcome::NoToolCalls => {
                     if inject_priority_messages_if_any(gcx.clone(), session_arc.clone()).await {
                         continue;
@@ -655,18 +716,26 @@ pub async fn run_llm_generation(
         .map_err(|e| e.message)?;
     let model_rec = crate::caps::resolve_chat_model(caps.clone(), &thread.model)?;
 
-    let raw_tools_for_gen =
-        crate::tools::tools_list::get_tools_for_mode(gcx.clone(), &thread.mode, Some(&model_rec.base.id))
-            .await;
-    let tools_for_gen =
-        crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools_for_gen);
+    let raw_tools_for_gen = crate::tools::tools_list::get_tools_for_mode(
+        gcx.clone(),
+        &thread.mode,
+        Some(&model_rec.base.id),
+    )
+    .await;
+    let tools_for_gen = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools_for_gen);
     let mcp_lazy_active = tools_for_gen.mcp_lazy_mode;
-    let tools: Vec<crate::tools::tools_description::ToolDesc> = tools_for_gen.tools
+    let tools: Vec<crate::tools::tools_description::ToolDesc> = tools_for_gen
+        .tools
         .into_iter()
         .map(|tool| tool.tool_description())
         .collect();
 
-    info!("session generation: model={}, tools count = {} (mcp_lazy={})", model_rec.base.id, tools.len(), mcp_lazy_active);
+    info!(
+        "session generation: model={}, tools count = {} (mcp_lazy={})",
+        model_rec.base.id,
+        tools.len(),
+        mcp_lazy_active
+    );
 
     let model_n_ctx = if model_rec.base.n_ctx > 0 {
         model_rec.base.n_ctx
@@ -701,36 +770,41 @@ pub async fn run_llm_generation(
         &caps.defaults.chat_thinking_model,
     );
     let mut parameters = SamplingParameters {
-        temperature: thread.temperature
-            .or(model_type_defaults.temperature),
+        temperature: thread.temperature.or(model_type_defaults.temperature),
         frequency_penalty: thread.frequency_penalty,
-        max_new_tokens: thread.max_tokens
+        max_new_tokens: thread
+            .max_tokens
             .or(model_type_defaults.max_new_tokens)
             .unwrap_or(0),
-        boost_reasoning: thread.boost_reasoning
+        boost_reasoning: thread
+            .boost_reasoning
             .unwrap_or_else(|| model_type_defaults.boost_reasoning.unwrap_or(false)),
-        reasoning_effort: thread.reasoning_effort.as_ref().and_then(|s| {
-            match s.as_str() {
+        reasoning_effort: thread
+            .reasoning_effort
+            .as_ref()
+            .and_then(|s| match s.as_str() {
                 "low" => Some(crate::call_validation::ReasoningEffort::Low),
                 "medium" => Some(crate::call_validation::ReasoningEffort::Medium),
                 "high" => Some(crate::call_validation::ReasoningEffort::High),
                 "xhigh" => Some(crate::call_validation::ReasoningEffort::XHigh),
                 "max" => Some(crate::call_validation::ReasoningEffort::Max),
                 _ => None,
-            }
-        }).or_else(|| {
-            model_type_defaults.reasoning_effort.as_ref().and_then(|s| {
-                match s.as_str() {
-                    "low" => Some(crate::call_validation::ReasoningEffort::Low),
-                    "medium" => Some(crate::call_validation::ReasoningEffort::Medium),
-                    "high" => Some(crate::call_validation::ReasoningEffort::High),
-                    "xhigh" => Some(crate::call_validation::ReasoningEffort::XHigh),
-                    "max" => Some(crate::call_validation::ReasoningEffort::Max),
-                    _ => None,
-                }
             })
-        }),
-        thinking_budget: thread.thinking_budget
+            .or_else(|| {
+                model_type_defaults
+                    .reasoning_effort
+                    .as_ref()
+                    .and_then(|s| match s.as_str() {
+                        "low" => Some(crate::call_validation::ReasoningEffort::Low),
+                        "medium" => Some(crate::call_validation::ReasoningEffort::Medium),
+                        "high" => Some(crate::call_validation::ReasoningEffort::High),
+                        "xhigh" => Some(crate::call_validation::ReasoningEffort::XHigh),
+                        "max" => Some(crate::call_validation::ReasoningEffort::Max),
+                        _ => None,
+                    })
+            }),
+        thinking_budget: thread
+            .thinking_budget
             .or(model_type_defaults.thinking_budget),
         ..Default::default()
     };
@@ -797,7 +871,11 @@ async fn run_streaming_generation(
     model_rec: &crate::caps::ChatModelRecord,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    info!("session generation: model={}, messages={}", llm_request.model_id, llm_request.messages.len());
+    info!(
+        "session generation: model={}, messages={}",
+        llm_request.model_id,
+        llm_request.messages.len()
+    );
     let (chat_id, root_chat_id, mode, task_id, task_role, agent_id, card_id) = {
         let session = session_arc.lock().await;
         let tm = session.thread.task_meta.as_ref();
@@ -849,7 +927,8 @@ async fn run_streaming_generation(
         }
 
         const EMITTER_QUEUE_CAPACITY: usize = 256;
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<CollectorEventPayload>(EMITTER_QUEUE_CAPACITY);
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<CollectorEventPayload>(EMITTER_QUEUE_CAPACITY);
         let overflow_usage = Arc::new(std::sync::Mutex::new(None::<ChatUsage>));
         let overflow_ops = Arc::new(std::sync::Mutex::new(Vec::<DeltaOp>::new()));
 
@@ -876,7 +955,10 @@ async fn run_streaming_generation(
 
             fn on_usage(&mut self, usage: &ChatUsage) {
                 let usage_clone = usage.clone();
-                match self.tx.try_send(CollectorEventPayload::Usage(usage_clone.clone())) {
+                match self
+                    .tx
+                    .try_send(CollectorEventPayload::Usage(usage_clone.clone()))
+                {
                     Ok(()) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_event)) => {
                         if let Ok(mut guard) = self.overflow_usage.lock() {
@@ -923,14 +1005,18 @@ async fn run_streaming_generation(
                 for op in ops {
                     match op {
                         DeltaOp::AppendContent { text } => {
-                            if let Some(DeltaOp::AppendContent { text: ref mut prev }) = out.last_mut() {
+                            if let Some(DeltaOp::AppendContent { text: ref mut prev }) =
+                                out.last_mut()
+                            {
                                 prev.push_str(&text);
                             } else {
                                 out.push(DeltaOp::AppendContent { text });
                             }
                         }
                         DeltaOp::AppendReasoning { text } => {
-                            if let Some(DeltaOp::AppendReasoning { text: ref mut prev }) = out.last_mut() {
+                            if let Some(DeltaOp::AppendReasoning { text: ref mut prev }) =
+                                out.last_mut()
+                            {
                                 prev.push_str(&text);
                             } else {
                                 out.push(DeltaOp::AppendReasoning { text });
@@ -1072,7 +1158,13 @@ async fn run_streaming_generation(
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();
 
-        let (model_id_for_stats, messages_count, tools_count, temperature_for_stats, max_tokens_for_stats) = (
+        let (
+            model_id_for_stats,
+            messages_count,
+            tools_count,
+            temperature_for_stats,
+            max_tokens_for_stats,
+        ) = (
             llm_request.model_id.clone(),
             llm_request.messages.len(),
             llm_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
@@ -1131,7 +1223,10 @@ async fn run_streaming_generation(
         if is_result_empty(&result) {
             let (draft_usage, draft_coins) = {
                 let session = session_arc.lock().await;
-                let coins = session.draft_message.as_ref().and_then(|m| sum_metering_coins(&m.extra));
+                let coins = session
+                    .draft_message
+                    .as_ref()
+                    .and_then(|m| sum_metering_coins(&m.extra));
                 (session.draft_usage.clone(), coins)
             };
             let (provider, model) = split_model_provider(&model_id_for_stats);
@@ -1160,11 +1255,17 @@ async fn run_streaming_generation(
                 attempt_n: attempt,
                 retry_reason: Some("empty_response".to_string()),
                 prompt_tokens: draft_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-                completion_tokens: draft_usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                completion_tokens: draft_usage
+                    .as_ref()
+                    .map(|u| u.completion_tokens)
+                    .unwrap_or(0),
                 cache_read_tokens: draft_usage.as_ref().and_then(|u| u.cache_read_tokens),
                 cache_creation_tokens: draft_usage.as_ref().and_then(|u| u.cache_creation_tokens),
                 total_tokens: draft_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
-                cost_usd: draft_usage.as_ref().and_then(|u| u.metering_usd.as_ref()).map(|m| m.total_usd),
+                cost_usd: draft_usage
+                    .as_ref()
+                    .and_then(|u| u.metering_usd.as_ref())
+                    .map(|m| m.total_usd),
                 cost_coins: draft_coins,
             };
             if let Some(sender) = &gcx.read().await.llm_stats_sender {
@@ -1179,7 +1280,8 @@ async fn run_streaming_generation(
                 } else {
                     format!("{:.1}", TEMPERATURE_BUMP * (attempt - 2) as f32)
                 };
-                let next_temp = (TEMPERATURE_BUMP * (attempt - 1) as f32).min(MAX_RETRY_TEMPERATURE);
+                let next_temp =
+                    (TEMPERATURE_BUMP * (attempt - 1) as f32).min(MAX_RETRY_TEMPERATURE);
                 warn!(
                     "Empty assistant response at T={}, retrying with T={:.1} (attempt {}/{})",
                     current_temp_display, next_temp, attempt, max_attempts
@@ -1249,24 +1351,33 @@ async fn run_streaming_generation(
                     recovered_calls.len(),
                     source
                 );
-                result.extra.insert(
-                    "_tool_call_recovery_source".to_string(),
-                    json!(source),
-                );
+                result
+                    .extra
+                    .insert("_tool_call_recovery_source".to_string(), json!(source));
                 result.content = cleaned_content;
                 result.tool_calls_raw = recovered_calls;
             }
         }
 
         if !result.tool_calls_raw.is_empty() {
-            let parsed: Vec<_> = result.tool_calls_raw.iter().filter_map(|tc| normalize_tool_call(tc)).collect();
+            let parsed: Vec<_> = result
+                .tool_calls_raw
+                .iter()
+                .filter_map(|tc| normalize_tool_call(tc))
+                .collect();
             if parsed.is_empty() {
                 let has_content = !result.content.trim().is_empty()
                     || !result.reasoning.trim().is_empty()
                     || !result.server_content_blocks.is_empty()
                     || !result.citations.is_empty();
-                let names: Vec<_> = result.tool_calls_raw.iter()
-                    .filter_map(|tc| tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+                let names: Vec<_> = result
+                    .tool_calls_raw
+                    .iter()
+                    .filter_map(|tc| {
+                        tc.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                    })
                     .collect();
                 tracing::warn!(
                     "All {} tool calls unparsable, names={:?}",
@@ -1279,9 +1390,15 @@ async fn run_streaming_generation(
                 // Has useful content — discard unparsable tool calls and continue
                 result.tool_calls_raw.clear();
             } else if parsed.len() < result.tool_calls_raw.len() {
-                let dropped_names: Vec<_> = result.tool_calls_raw.iter()
+                let dropped_names: Vec<_> = result
+                    .tool_calls_raw
+                    .iter()
                     .filter(|tc| normalize_tool_call(tc).is_none())
-                    .filter_map(|tc| tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+                    .filter_map(|tc| {
+                        tc.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                    })
                     .collect();
                 tracing::warn!(
                     "Dropped {}/{} tool calls during normalization, names={:?}",
@@ -1296,7 +1413,10 @@ async fn run_streaming_generation(
 
         let (draft_usage_for_success, success_coins) = {
             let session = session_arc.lock().await;
-            let coins = session.draft_message.as_ref().and_then(|m| sum_metering_coins(&m.extra));
+            let coins = session
+                .draft_message
+                .as_ref()
+                .and_then(|m| sum_metering_coins(&m.extra));
             (session.draft_usage.clone(), coins)
         };
         let usage_for_event = result.usage.as_ref().or(draft_usage_for_success.as_ref());
@@ -1405,7 +1525,9 @@ async fn run_streaming_generation(
         // otherwise prepare_chat_passthrough activates tail-only mode and the server
         // receives function_call_output without matching function_call items.
         let is_chatgpt_backend = model_rec.base.endpoint.contains("chatgpt.com/backend-api");
-        if model_rec.base.wire_format == crate::llm::WireFormat::OpenaiResponses && !is_chatgpt_backend {
+        if model_rec.base.wire_format == crate::llm::WireFormat::OpenaiResponses
+            && !is_chatgpt_backend
+        {
             if let Some(resp_id) = session
                 .draft_message
                 .as_ref()
@@ -1716,8 +1838,14 @@ mod tests {
             break;
         }
 
-        assert!(reached_normal_generation, "Normal generation path must be reached after fork error");
-        assert_eq!(loop_count, 2, "Loop must iterate twice: fork error then normal generation");
+        assert!(
+            reached_normal_generation,
+            "Normal generation path must be reached after fork error"
+        );
+        assert_eq!(
+            loop_count, 2,
+            "Loop must iterate twice: fork error then normal generation"
+        );
     }
 
     #[test]

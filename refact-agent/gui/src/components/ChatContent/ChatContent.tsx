@@ -63,6 +63,7 @@ import { VirtualizedChatList } from "./VirtualizedChatList";
 import { useCollapsibleState } from "./useCollapsibleState";
 import { useCollapsibleStoreProvider } from "./useCollapsibleStoreProvider";
 import { CollapsibleStoreProvider } from "./useStoredOpen";
+import { SelectionToolbar } from "./SelectionToolbar";
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -239,7 +240,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         <Container>
           <UncommittedChangesWarning />
         </Container>
-        <Container pt="4" pb="8">
+        <Flex justify="center" pt="4" pb="8">
           {!isWaitingForConfirmation && (
             <LogoAnimation
               size="8"
@@ -247,7 +248,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               isWaiting={isWaiting}
             />
           )}
-        </Container>
+        </Flex>
       </>
     ),
     [isStreaming, isWaiting, isWaitingForConfirmation],
@@ -387,6 +388,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
   return (
     <CollapsibleStoreProvider value={collapsibleStore}>
+      <SelectionToolbar />
       <Box
         style={{ flexGrow: 1, height: "100%", position: "relative" }}
         data-element="ChatContent"

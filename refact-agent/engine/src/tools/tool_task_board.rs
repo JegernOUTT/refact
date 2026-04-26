@@ -8,7 +8,9 @@ use chrono::Utc;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::tasks::storage;
 use crate::tasks::types::BoardCard;
 use crate::tasks::events::{TaskEvent, emit_task_event};
@@ -39,7 +41,11 @@ async fn get_task_id(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
 ) -> Result<String, String> {
-    if let Some(id) = args.get("task_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(id) = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         return Ok(id.to_string());
     }
     let ccx_lock = ccx.lock().await;
@@ -89,7 +95,10 @@ impl Tool for ToolTaskBoardGet {
         let task_id = get_task_id(&ccx, args).await?;
         let gcx = ccx.lock().await.global_context.clone();
         let board = storage::load_board(gcx, &task_id).await?;
-        let card_id = args.get("card_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+        let card_id = args
+            .get("card_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
 
         let result = if let Some(cid) = card_id {
             let card = board
@@ -223,11 +232,15 @@ impl Tool for ToolTaskBoardCreateCard {
         board.rev += 1;
 
         storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(gcx.clone(), TaskEvent::BoardChanged {
-            task_id: task_id.to_string(),
-            rev: board.rev,
-            board: board.clone(),
-        }).await;
+        emit_task_event(
+            gcx.clone(),
+            TaskEvent::BoardChanged {
+                task_id: task_id.to_string(),
+                rev: board.rev,
+                board: board.clone(),
+            },
+        )
+        .await;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!("Created card {} in Planned column", card_id);
@@ -321,11 +334,15 @@ impl Tool for ToolTaskBoardUpdateCard {
 
         board.rev += 1;
         storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(gcx, TaskEvent::BoardChanged {
-            task_id: task_id.to_string(),
-            rev: board.rev,
-            board: board.clone(),
-        }).await;
+        emit_task_event(
+            gcx,
+            TaskEvent::BoardChanged {
+                task_id: task_id.to_string(),
+                rev: board.rev,
+                board: board.clone(),
+            },
+        )
+        .await;
 
         let result = format!("Updated card {}", card_id);
         Ok((
@@ -352,7 +369,20 @@ impl Tool for ToolTaskBoardUpdateCard {
             experimental: false,
             allow_parallel: false,
             description: "Update an existing card's fields.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID to update"), ("title", "string", "New title"), ("priority", "string", "New priority"), ("instructions", "string", "New instructions"), ("depends_on", "string", "Comma-separated list of new dependencies (e.g., \"T-1, T-2\")")], &["card_id"]),
+            input_schema: json_schema_from_params(
+                &[
+                    ("card_id", "string", "Card ID to update"),
+                    ("title", "string", "New title"),
+                    ("priority", "string", "New priority"),
+                    ("instructions", "string", "New instructions"),
+                    (
+                        "depends_on",
+                        "string",
+                        "Comma-separated list of new dependencies (e.g., \"T-1, T-2\")",
+                    ),
+                ],
+                &["card_id"],
+            ),
             output_schema: None,
             annotations: None,
         }
@@ -427,11 +457,15 @@ impl Tool for ToolTaskBoardMoveCard {
         board.rev += 1;
 
         storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(gcx.clone(), TaskEvent::BoardChanged {
-            task_id: task_id.to_string(),
-            rev: board.rev,
-            board: board.clone(),
-        }).await;
+        emit_task_event(
+            gcx.clone(),
+            TaskEvent::BoardChanged {
+                task_id: task_id.to_string(),
+                rev: board.rev,
+                board: board.clone(),
+            },
+        )
+        .await;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!("Moved card {} from {} to {}", card_id, old_column, column);
@@ -459,7 +493,17 @@ impl Tool for ToolTaskBoardMoveCard {
             experimental: false,
             allow_parallel: false,
             description: "Move a card to a different column.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID to move"), ("column", "string", "Target column: planned, doing, done, or failed")], &["card_id", "column"]),
+            input_schema: json_schema_from_params(
+                &[
+                    ("card_id", "string", "Card ID to move"),
+                    (
+                        "column",
+                        "string",
+                        "Target column: planned, doing, done, or failed",
+                    ),
+                ],
+                &["card_id", "column"],
+            ),
             output_schema: None,
             annotations: None,
         }
@@ -515,11 +559,15 @@ impl Tool for ToolTaskBoardDeleteCard {
         board.rev += 1;
 
         storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(gcx.clone(), TaskEvent::BoardChanged {
-            task_id: task_id.to_string(),
-            rev: board.rev,
-            board: board.clone(),
-        }).await;
+        emit_task_event(
+            gcx.clone(),
+            TaskEvent::BoardChanged {
+                task_id: task_id.to_string(),
+                rev: board.rev,
+                board: board.clone(),
+            },
+        )
+        .await;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!("Deleted card {}", card_id);
@@ -547,7 +595,10 @@ impl Tool for ToolTaskBoardDeleteCard {
             experimental: false,
             allow_parallel: false,
             description: "Delete a card from the board.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID to delete")], &["card_id"]),
+            input_schema: json_schema_from_params(
+                &[("card_id", "string", "Card ID to delete")],
+                &["card_id"],
+            ),
             output_schema: None,
             annotations: None,
         }

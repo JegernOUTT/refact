@@ -7,7 +7,9 @@ use tokio::fs;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::files_correction::get_project_dirs;
 
 pub struct ToolTrajectoryContext {
@@ -29,7 +31,23 @@ impl Tool for ToolTrajectoryContext {
             description:
                 "Get more context from a specific trajectory around given message indices."
                     .to_string(),
-            input_schema: json_schema_from_params(&[("trajectory_id", "string", "The trajectory ID to retrieve context from."), ("message_start", "string", "Starting message index."), ("message_end", "string", "Ending message index."), ("expand_by", "string", "Number of messages to include before/after (default: 3).")], &["trajectory_id", "message_start", "message_end"]),
+            input_schema: json_schema_from_params(
+                &[
+                    (
+                        "trajectory_id",
+                        "string",
+                        "The trajectory ID to retrieve context from.",
+                    ),
+                    ("message_start", "string", "Starting message index."),
+                    ("message_end", "string", "Ending message index."),
+                    (
+                        "expand_by",
+                        "string",
+                        "Number of messages to include before/after (default: 3).",
+                    ),
+                ],
+                &["trajectory_id", "message_start", "message_end"],
+            ),
             output_schema: None,
             annotations: None,
         }

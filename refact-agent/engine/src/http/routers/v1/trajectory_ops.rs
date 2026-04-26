@@ -12,9 +12,7 @@ use crate::chat::trajectory_ops::{
     sanitize_messages_for_new_thread,
 };
 use crate::integrations::browser_runtime::find_runtime_by_chat_id;
-use crate::agentic::mode_transition::{
-    analyze_mode_transition, assemble_new_chat,
-};
+use crate::agentic::mode_transition::{analyze_mode_transition, assemble_new_chat};
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::trajectories::TrajectorySnapshot;
@@ -63,7 +61,6 @@ pub struct ModeTransitionApplyRequest {
     pub target_mode: String,
     #[serde(default)]
     pub target_mode_description: String,
-
 }
 
 #[derive(Serialize)]
@@ -101,7 +98,10 @@ fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
 fn describe_handoff_actions(opts: &HandoffOptions) -> Vec<String> {
     let mut actions = Vec::new();
     if opts.include_all_user_assistant_only {
-        actions.push("Include all user and assistant messages only (strip system, tools, context)".to_string());
+        actions.push(
+            "Include all user and assistant messages only (strip system, tools, context)"
+                .to_string(),
+        );
     }
     if opts.include_last_user_plus {
         actions.push("Include last user message and all following".to_string());
@@ -219,15 +219,9 @@ pub async fn handle_handoff_preview(
         session.messages.clone()
     };
 
-    let (_, stats, _) = handoff_select(
-        &messages,
-        &req.options,
-        gcx.clone(),
-        false,
-        &chat_id,
-    )
-    .await
-    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (_, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), false, &chat_id)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = HandoffPreviewResponse {
         stats,
@@ -293,7 +287,10 @@ pub async fn handle_handoff_apply(
         task_meta,
         parent_id: Some(chat_id.clone()),
         link_type: Some("handoff".to_string()),
-        root_chat_id: thread.root_chat_id.clone().or_else(|| Some(chat_id.clone())),
+        root_chat_id: thread
+            .root_chat_id
+            .clone()
+            .or_else(|| Some(chat_id.clone())),
         reasoning_effort: thread.reasoning_effort.clone(),
         thinking_budget: thread.thinking_budget,
         temperature: thread.temperature,
@@ -302,6 +299,7 @@ pub async fn handle_handoff_apply(
         parallel_tool_calls: thread.parallel_tool_calls,
         previous_response_id: None,
         active_skill: None,
+        auto_enrichment_enabled: thread.auto_enrichment_enabled,
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "handoff")
@@ -321,7 +319,11 @@ pub async fn handle_handoff_apply(
         None
     };
 
-    let response = HandoffApplyResponse { new_chat_id, stats, browser_runtime_id };
+    let response = HandoffApplyResponse {
+        new_chat_id,
+        stats,
+        browser_runtime_id,
+    };
 
     let body = serde_json::to_vec(&response)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -374,7 +376,8 @@ async fn save_trajectory_snapshot_with_parent(
     }
 
     let file_path = if let Some(ref task_meta) = snapshot.task_meta {
-        let task_dir = crate::tasks::storage::find_task_dir(gcx.clone(), &task_meta.task_id).await?;
+        let task_dir =
+            crate::tasks::storage::find_task_dir(gcx.clone(), &task_meta.task_id).await?;
         let traj_dir = crate::tasks::storage::get_task_trajectory_dir(
             &task_dir,
             &task_meta.role,
@@ -483,7 +486,10 @@ pub async fn handle_mode_transition_apply(
         task_meta,
         parent_id: Some(chat_id.clone()),
         link_type: Some("mode_transition".to_string()),
-        root_chat_id: thread.root_chat_id.clone().or_else(|| Some(chat_id.clone())),
+        root_chat_id: thread
+            .root_chat_id
+            .clone()
+            .or_else(|| Some(chat_id.clone())),
         reasoning_effort: thread.reasoning_effort.clone(),
         thinking_budget: thread.thinking_budget,
         temperature: thread.temperature,
@@ -492,6 +498,7 @@ pub async fn handle_mode_transition_apply(
         parallel_tool_calls: thread.parallel_tool_calls,
         previous_response_id: None,
         active_skill: None,
+        auto_enrichment_enabled: thread.auto_enrichment_enabled,
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "mode_transition")

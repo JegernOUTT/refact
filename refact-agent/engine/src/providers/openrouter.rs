@@ -10,7 +10,8 @@ use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
 use crate::providers::traits::{
     AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    ProviderVariant, merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    ProviderVariant, merge_custom_models, parse_enabled_models, parse_custom_models,
+    set_model_enabled_impl,
 };
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
@@ -81,18 +82,25 @@ impl OpenRouterProvider {
             .get("supported_parameters")
             .and_then(|v| v.as_array())
             .and_then(|params| {
-                if params
-                    .iter()
-                    .any(|p| p.as_str() == Some("reasoning") || p.as_str() == Some("reasoning_effort"))
-                {
-                    Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()])
+                if params.iter().any(|p| {
+                    p.as_str() == Some("reasoning") || p.as_str() == Some("reasoning_effort")
+                }) {
+                    Some(vec![
+                        "low".to_string(),
+                        "medium".to_string(),
+                        "high".to_string(),
+                    ])
                 } else {
                     None
                 }
             })
     }
 
-    fn parse_openrouter_model(model: &serde_json::Value, enabled: bool, selected_provider: Option<String>) -> Option<AvailableModel> {
+    fn parse_openrouter_model(
+        model: &serde_json::Value,
+        enabled: bool,
+        selected_provider: Option<String>,
+    ) -> Option<AvailableModel> {
         let id = model.get("id")?.as_str()?.to_string();
         let mut available_providers: Vec<String> = Vec::new();
         let mut provider_variants_map: HashMap<String, ProviderVariant> = HashMap::new();
@@ -134,18 +142,35 @@ impl OpenRouterProvider {
                     .to_string();
 
                 if !variant_id.is_empty() {
-                    provider_variants_map.insert(variant_id.clone(), ProviderVariant {
-                        id: variant_id,
-                        name: ep.get("provider_name").and_then(|v| v.as_str()).map(|v| v.to_string()),
-                        tag: ep.get("tag").and_then(|v| v.as_str()).map(|v| v.to_string()),
-                        context_length: ep.get("context_length").and_then(|v| v.as_u64()).map(|v| v as usize),
-                        max_output_tokens: ep.get("max_completion_tokens").and_then(|v| v.as_u64()).map(|v| v as usize),
-                        pricing,
-                        latency_last_30m: ep.get("latency_last_30m").and_then(|v| v.as_f64()),
-                        throughput_last_30m: ep.get("throughput_last_30m").and_then(|v| v.as_f64()),
-                        uptime_last_30m: ep.get("uptime_last_30m").and_then(|v| v.as_f64()),
-                        supported_parameters,
-                    });
+                    provider_variants_map.insert(
+                        variant_id.clone(),
+                        ProviderVariant {
+                            id: variant_id,
+                            name: ep
+                                .get("provider_name")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string()),
+                            tag: ep
+                                .get("tag")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string()),
+                            context_length: ep
+                                .get("context_length")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as usize),
+                            max_output_tokens: ep
+                                .get("max_completion_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as usize),
+                            pricing,
+                            latency_last_30m: ep.get("latency_last_30m").and_then(|v| v.as_f64()),
+                            throughput_last_30m: ep
+                                .get("throughput_last_30m")
+                                .and_then(|v| v.as_f64()),
+                            uptime_last_30m: ep.get("uptime_last_30m").and_then(|v| v.as_f64()),
+                            supported_parameters,
+                        },
+                    );
                 }
             }
 
@@ -159,7 +184,8 @@ impl OpenRouterProvider {
                 .and_then(|provider| {
                     endpoints.iter().find(|ep| {
                         ep.get("tag").and_then(|v| v.as_str()) == Some(provider.as_str())
-                            || ep.get("provider_name").and_then(|v| v.as_str()) == Some(provider.as_str())
+                            || ep.get("provider_name").and_then(|v| v.as_str())
+                                == Some(provider.as_str())
                     })
                 })
                 .or_else(|| endpoints.first());
@@ -180,7 +206,10 @@ impl OpenRouterProvider {
                     .and_then(|v| v.as_array())
                     .map(|params| {
                         params.iter().any(|p| {
-                            matches!(p.as_str(), Some("tools") | Some("tool_choice") | Some("functions"))
+                            matches!(
+                                p.as_str(),
+                                Some("tools") | Some("tool_choice") | Some("functions")
+                            )
                         })
                     })
                     .unwrap_or(false);
@@ -188,14 +217,19 @@ impl OpenRouterProvider {
                 supports_multimodality = ep
                     .get("supported_parameters")
                     .and_then(|v| v.as_array())
-                    .map(|params| params.iter().any(|p| matches!(p.as_str(), Some("vision") | Some("image") | Some("images"))))
+                    .map(|params| {
+                        params.iter().any(|p| {
+                            matches!(p.as_str(), Some("vision") | Some("image") | Some("images"))
+                        })
+                    })
                     .unwrap_or(false);
 
                 reasoning_effort_options = Self::parse_reasoning_effort_options(ep);
             }
         }
 
-        let mut provider_variants: Vec<ProviderVariant> = provider_variants_map.into_values().collect();
+        let mut provider_variants: Vec<ProviderVariant> =
+            provider_variants_map.into_values().collect();
         available_providers.sort();
         provider_variants.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -205,7 +239,12 @@ impl OpenRouterProvider {
             .and_then(|tp| tp.get("context_length"))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
-            .or_else(|| model.get("context_length").and_then(|v| v.as_u64()).map(|v| v as usize));
+            .or_else(|| {
+                model
+                    .get("context_length")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+            });
         let fallback_max_output = model
             .get("top_provider")
             .and_then(|tp| tp.get("max_completion_tokens"))
@@ -220,7 +259,10 @@ impl OpenRouterProvider {
 
         Some(AvailableModel {
             id,
-            display_name: model.get("name").and_then(|v| v.as_str()).map(|v| v.to_string()),
+            display_name: model
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
             n_ctx: selected_n_ctx.or(fallback_n_ctx).unwrap_or(128_000),
             supports_tools,
             supports_parallel_tools: supports_tools,
@@ -336,9 +378,7 @@ impl OpenRouterProvider {
                     .map(|v| v as usize),
                 pricing,
                 latency_last_30m: ep.get("latency_last_30m").and_then(|v| v.as_f64()),
-                throughput_last_30m: ep
-                    .get("throughput_last_30m")
-                    .and_then(|v| v.as_f64()),
+                throughput_last_30m: ep.get("throughput_last_30m").and_then(|v| v.as_f64()),
                 uptime_last_30m: ep.get("uptime_last_30m").and_then(|v| v.as_f64()),
                 supported_parameters,
             });
@@ -369,9 +409,7 @@ impl OpenRouterProvider {
 
         let url = format!(
             "{}/{}/{}/endpoints",
-            OPENROUTER_MODEL_ENDPOINTS_URL,
-            author,
-            slug
+            OPENROUTER_MODEL_ENDPOINTS_URL, author, slug
         );
 
         let response = http_client
@@ -402,7 +440,10 @@ impl OpenRouterProvider {
         Ok(Self::openrouter_variants_from_endpoints(endpoints))
     }
 
-    pub async fn fetch_account_info(&self, http_client: &reqwest::Client) -> Result<OpenRouterAccountInfo, String> {
+    pub async fn fetch_account_info(
+        &self,
+        http_client: &reqwest::Client,
+    ) -> Result<OpenRouterAccountInfo, String> {
         let api_key = resolve_env_var(&self.api_key, "", "openrouter api_key");
         if api_key.is_empty() {
             return Err("OpenRouter API key is not configured".to_string());
@@ -417,7 +458,10 @@ impl OpenRouterProvider {
             .await
             .map_err(|e| format!("OpenRouter credits request failed: {e}"))?;
         if !credits_resp.status().is_success() {
-            return Err(format!("OpenRouter credits returned status {}", credits_resp.status()));
+            return Err(format!(
+                "OpenRouter credits returned status {}",
+                credits_resp.status()
+            ));
         }
         let credits_json: serde_json::Value = credits_resp
             .json()
@@ -427,11 +471,15 @@ impl OpenRouterProvider {
         let key_data = key_json.get("data");
         let credits_data = credits_json.get("data");
 
-        let key_limit = key_data.and_then(|d| d.get("limit")).and_then(|v| v.as_f64());
+        let key_limit = key_data
+            .and_then(|d| d.get("limit"))
+            .and_then(|v| v.as_f64());
         let key_remaining = key_data
             .and_then(|d| d.get("limit_remaining"))
             .and_then(|v| v.as_f64());
-        let key_usage = key_data.and_then(|d| d.get("usage")).and_then(|v| v.as_f64());
+        let key_usage = key_data
+            .and_then(|d| d.get("usage"))
+            .and_then(|v| v.as_f64());
 
         let credits_total = credits_data
             .and_then(|d| d.get("total_credits"))
@@ -466,7 +514,10 @@ impl OpenRouterProvider {
         })
     }
 
-    pub async fn check_api_key_health(&self, http_client: &reqwest::Client) -> Result<OpenRouterHealthInfo, String> {
+    pub async fn check_api_key_health(
+        &self,
+        http_client: &reqwest::Client,
+    ) -> Result<OpenRouterHealthInfo, String> {
         let api_key = resolve_env_var(&self.api_key, "", "openrouter api_key");
         if api_key.is_empty() {
             return Err("OpenRouter API key is not configured".to_string());
@@ -486,7 +537,10 @@ impl OpenRouterProvider {
                 .and_then(|d| d.get("label"))
                 .and_then(|v| v.as_str())
                 .map(|v| v.to_string()),
-            rate_limit: key_json.get("data").and_then(|d| d.get("rate_limit")).cloned(),
+            rate_limit: key_json
+                .get("data")
+                .and_then(|d| d.get("rate_limit"))
+                .cloned(),
         })
     }
 }
@@ -518,7 +572,7 @@ impl ProviderTrait for OpenRouterProvider {
     }
 
     fn model_filter_regex(&self) -> Option<&'static str> {
-        None  // OpenRouter has many models, use API instead
+        None // OpenRouter has many models, use API instead
     }
 
     fn provider_schema(&self) -> &'static str {
@@ -556,7 +610,8 @@ available:
             for (k, v) in selected {
                 if let (Some(model), Some(provider)) = (k.as_str(), v.as_str()) {
                     if !provider.is_empty() {
-                        self.selected_providers.insert(model.to_string(), provider.to_string());
+                        self.selected_providers
+                            .insert(model.to_string(), provider.to_string());
                     }
                 }
             }
@@ -604,7 +659,7 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::Api  // OpenRouter has an API for models
+        ModelSource::Api // OpenRouter has an API for models
     }
 
     fn enabled_models(&self) -> &[String] {
@@ -625,7 +680,8 @@ available:
 
     fn set_selected_provider(&mut self, model_id: &str, provider: Option<String>) {
         if let Some(provider_name) = provider.filter(|p| !p.is_empty()) {
-            self.selected_providers.insert(model_id.to_string(), provider_name);
+            self.selected_providers
+                .insert(model_id.to_string(), provider_name);
         } else {
             self.selected_providers.remove(model_id);
         }
@@ -640,7 +696,9 @@ available:
     }
 
     fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
-        self.custom_models.get(model_id).and_then(|c| c.pricing.clone())
+        self.custom_models
+            .get(model_id)
+            .and_then(|c| c.pricing.clone())
     }
 
     async fn fetch_available_models(
@@ -667,7 +725,10 @@ available:
         };
 
         if !response.status().is_success() {
-            tracing::warn!("OpenRouter: models endpoint returned status {}", response.status());
+            tracing::warn!(
+                "OpenRouter: models endpoint returned status {}",
+                response.status()
+            );
             return self.get_custom_models_only();
         }
 

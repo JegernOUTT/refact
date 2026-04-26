@@ -437,12 +437,10 @@ impl<'de> Deserialize<'de> for ChatMessage {
             usage,
             checkpoints,
             thinking_blocks,
-            citations,            
+            citations,
             server_content_blocks,
             extra,
             output_filter: None,
         })
     }
 }
-
-

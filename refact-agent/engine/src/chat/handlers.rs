@@ -12,7 +12,7 @@ use crate::global_context::GlobalContext;
 
 use super::types::*;
 use super::session::get_or_create_session_with_trajectory;
-use super::content::validate_content_with_attachments;
+use super::content::{validate_content_with_attachments, validate_context_files};
 use super::queue::process_command_queue;
 use super::trajectory_ops::sanitize_messages_for_model_switch;
 use super::trajectories::validate_trajectory_id;
@@ -49,8 +49,15 @@ pub async fn handle_v1_chat_subscribe(
     let initial_json = match serde_json::to_string(&initial_envelope) {
         Ok(j) => j,
         Err(e) => {
-            tracing::error!("Failed to serialize initial SSE snapshot for {}: {}", chat_id, e);
-            return Err(ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "snapshot serialization failed".to_string()));
+            tracing::error!(
+                "Failed to serialize initial SSE snapshot for {}: {}",
+                chat_id,
+                e
+            );
+            return Err(ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "snapshot serialization failed".to_string(),
+            ));
         }
     };
 
@@ -68,14 +75,8 @@ pub async fn handle_v1_chat_subscribe(
             tokio::select! {
                 result = rx.recv() => {
                     match result {
-                        Ok(envelope) => {
-                            match serde_json::to_string(&envelope) {
-                                Ok(json) => yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json)),
-                                Err(e) => {
-                                    tracing::error!("Failed to serialize SSE event for {}: {}", chat_id_for_stream, e);
-                                    break;
-                                }
-                            }
+                        Ok(json) => {
+                            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::info!("SSE subscriber lagged, skipped {} events, sending fresh snapshot", skipped);
@@ -184,8 +185,14 @@ pub async fn handle_v1_chat_command(
 
         let mode_changed = session.thread.mode != old_mode;
         if mode_changed {
-            let model_id = if session.thread.model.is_empty() { None } else { Some(session.thread.model.as_str()) };
-            if let Some(mode_config) = get_mode_config(gcx.clone(), &session.thread.mode, model_id).await {
+            let model_id = if session.thread.model.is_empty() {
+                None
+            } else {
+                Some(session.thread.model.as_str())
+            };
+            if let Some(mode_config) =
+                get_mode_config(gcx.clone(), &session.thread.mode, model_id).await
+            {
                 let defaults = &mode_config.thread_defaults;
                 if let Some(v) = defaults.include_project_info {
                     if session.thread.include_project_info != v {
@@ -236,10 +243,22 @@ pub async fn handle_v1_chat_command(
             obj.remove("is_title_generated");
             if mode_changed {
                 obj.insert("mode".to_string(), serde_json::json!(session.thread.mode));
-                obj.insert("include_project_info".to_string(), serde_json::json!(session.thread.include_project_info));
-                obj.insert("checkpoints_enabled".to_string(), serde_json::json!(session.thread.checkpoints_enabled));
-                obj.insert("auto_approve_editing_tools".to_string(), serde_json::json!(session.thread.auto_approve_editing_tools));
-                obj.insert("auto_approve_dangerous_commands".to_string(), serde_json::json!(session.thread.auto_approve_dangerous_commands));
+                obj.insert(
+                    "include_project_info".to_string(),
+                    serde_json::json!(session.thread.include_project_info),
+                );
+                obj.insert(
+                    "checkpoints_enabled".to_string(),
+                    serde_json::json!(session.thread.checkpoints_enabled),
+                );
+                obj.insert(
+                    "auto_approve_editing_tools".to_string(),
+                    serde_json::json!(session.thread.auto_approve_editing_tools),
+                );
+                obj.insert(
+                    "auto_approve_dangerous_commands".to_string(),
+                    serde_json::json!(session.thread.auto_approve_dangerous_commands),
+                );
             }
         }
         session.emit(ChatEvent::ThreadUpdated {
@@ -290,7 +309,11 @@ pub async fn handle_v1_chat_command(
         ChatCommand::UserMessage {
             content,
             attachments,
-        } => validate_content_with_attachments(content, attachments).err(),
+            context_files,
+            suppress_auto_enrichment: _,
+        } => validate_content_with_attachments(content, attachments)
+            .err()
+            .or_else(|| validate_context_files(context_files).err()),
         ChatCommand::RetryFromIndex {
             content,
             attachments,
@@ -313,7 +336,8 @@ pub async fn handle_v1_chat_command(
         let body = serde_json::to_string(&serde_json::json!({
             "status": "invalid_content",
             "error": error
-        })).unwrap_or_else(|_| r#"{"status":"invalid_content"}"#.to_string());
+        }))
+        .unwrap_or_else(|_| r#"{"status":"invalid_content"}"#.to_string());
         return Ok(Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .header("Content-Type", "application/json")

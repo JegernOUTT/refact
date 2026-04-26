@@ -334,11 +334,7 @@ pub fn parse_words_from_line(line: &String) -> Vec<(String, usize, usize)> {
     for m in word_regex.find_iter(line) {
         let trimmed = trim_punctuation(m.as_str());
         if !trimmed.is_empty() {
-            results.push((
-                trimmed.to_string(),
-                m.start(),
-                m.start() + trimmed.len(),
-            ));
+            results.push((trimmed.to_string(), m.start(), m.start() + trimmed.len()));
         }
     }
     results
@@ -378,8 +374,14 @@ mod tests {
         let line = (0..1000).map(|i| format!("word{} ", i)).collect::<String>();
         let parsed_words = parse_words_from_line(&line);
 
-        assert!(parsed_words.len() < 2000, "Performance regression: too many tokens for long input");
-        assert!(parsed_words.iter().all(|(w, _, _)| !w.is_empty()), "No empty tokens");
+        assert!(
+            parsed_words.len() < 2000,
+            "Performance regression: too many tokens for long input"
+        );
+        assert!(
+            parsed_words.iter().all(|(w, _, _)| !w.is_empty()),
+            "No empty tokens"
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ import {
 import type { TrajectoryMeta } from "../services/refact/trajectories";
 import {
   hydrateHistoryFromMeta,
+  replaceSnapshotHistory,
   deleteChatById,
   updateChatMetaById,
   setHistoryLoading,
@@ -343,7 +344,7 @@ export function useSidebarSubscription() {
         tasks_failed: t.tasks_failed,
       }));
 
-      dispatch(hydrateHistoryFromMeta(trajectoryItems));
+      dispatch(replaceSnapshotHistory(trajectoryItems));
       dispatch(setHistoryLoadError(null));
       dispatch(setHistoryLoading(false));
 

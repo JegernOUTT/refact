@@ -8,8 +8,14 @@ import {
   selectThreadImages,
   selectSendImmediately,
   selectMessages,
+  selectManualPreviewItems,
+  selectManualPreviewRan,
 } from "../features/Chat/Thread/selectors";
-import { resetThreadImages, setSendImmediately } from "../features/Chat/Thread";
+import {
+  resetThreadImages,
+  setSendImmediately,
+  clearManualPreviewItems,
+} from "../features/Chat/Thread";
 import { buildThreadParamsPatch } from "../features/Chat/Thread/actions";
 import {
   sendUserMessage,
@@ -71,6 +77,8 @@ export function useChatActions() {
   const attachedImages = useAppSelector(selectThreadImages);
   const sendImmediately = useAppSelector(selectSendImmediately);
   const messages = useAppSelector(selectMessages);
+  const manualPreviewItems = useAppSelector(selectManualPreviewItems);
+  const manualPreviewRan = useAppSelector(selectManualPreviewRan);
 
   /**
    * Build message content with attached images if any.
@@ -123,6 +131,11 @@ export function useChatActions() {
         }
       }
 
+      const contextFiles =
+        manualPreviewItems.length > 0
+          ? manualPreviewItems.map((item) => item.context_file)
+          : undefined;
+
       const shouldPrioritize = priority ?? sendImmediately;
       await sendUserMessage(
         chatId,
@@ -130,7 +143,12 @@ export function useChatActions() {
         port,
         apiKey ?? undefined,
         shouldPrioritize,
+        contextFiles,
+        manualPreviewRan,
       );
+
+      dispatch(clearManualPreviewItems({ chatId }));
+
       dispatch(resetThreadImages({ id: chatId }));
       dispatch(setSendImmediately(false));
     },
@@ -143,6 +161,8 @@ export function useChatActions() {
       sendImmediately,
       messages,
       thread,
+      manualPreviewItems,
+      manualPreviewRan,
     ],
   );
 

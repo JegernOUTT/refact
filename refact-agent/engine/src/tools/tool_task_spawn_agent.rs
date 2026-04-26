@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::tasks::storage;
@@ -100,7 +102,9 @@ async fn prepare_agent_worktree(
     let workspace_root = match project_dirs.first() {
         Some(p) => p.clone(),
         None => {
-            tracing::warn!("No workspace folder found, agent will work without an isolated worktree");
+            tracing::warn!(
+                "No workspace folder found, agent will work without an isolated worktree"
+            );
             return Ok(None);
         }
     };
@@ -127,7 +131,10 @@ async fn prepare_agent_worktree(
     let git_dir = repo.path().to_path_buf();
 
     let agent_id_short = &agent_id[..agent_id.len().min(8)];
-    let branch_name = format!("refact/task/{}/card/{}/{}", task_id, card_id, agent_id_short);
+    let branch_name = format!(
+        "refact/task/{}/card/{}/{}",
+        task_id, card_id, agent_id_short
+    );
     let worktree_name = format!("{}-{}-{}", task_id, card_id, agent_id_short);
     let cache_dir = gcx.read().await.cache_dir.clone();
     let worktree_path = cache_dir
@@ -139,8 +146,13 @@ async fn prepare_agent_worktree(
         .await
         .map_err(|e| format!("Failed to create worktree parent dir: {}", e))?;
 
-    let branch_was_created =
-        operations::create_worktree(&repo, &worktree_path, &worktree_name, &branch_name, &base_commit)?;
+    let branch_was_created = operations::create_worktree(
+        &repo,
+        &worktree_path,
+        &worktree_name,
+        &branch_name,
+        &base_commit,
+    )?;
 
     Ok(Some(PreparedWorktree {
         branch_name,
@@ -258,26 +270,39 @@ impl Tool for ToolTaskSpawnAgent {
         let model = resolve_agent_model(gcx.clone(), task_default_model, &current_model).await?;
 
         fn validate_id(id: &str, name: &str) -> Result<(), String> {
-            if id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            if id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
                 Ok(())
             } else {
-                Err(format!("{} '{}' contains invalid characters (only alphanumeric, '-', '_' allowed)", name, id))
+                Err(format!(
+                    "{} '{}' contains invalid characters (only alphanumeric, '-', '_' allowed)",
+                    name, id
+                ))
             }
         }
         validate_id(&task_id, "task_id")?;
         validate_id(card_id, "card_id")?;
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
-        let card = board.get_card(card_id)
+        let card = board
+            .get_card(card_id)
             .ok_or_else(|| format!("Card {} not found", card_id))?;
         if card.column == "done" {
             return Err(format!("Card {} is already done", card_id));
         }
         if card.column == "failed" {
-            return Err(format!("Card {} has failed. Reset it first if you want to retry.", card_id));
+            return Err(format!(
+                "Card {} has failed. Reset it first if you want to retry.",
+                card_id
+            ));
         }
         if card.column != "planned" && card.column != "doing" {
-            return Err(format!("Card {} is in column '{}', expected 'planned' or 'doing'", card_id, card.column));
+            return Err(format!(
+                "Card {} is in column '{}', expected 'planned' or 'doing'",
+                card_id, card.column
+            ));
         }
         if card.column == "doing" && card.agent_chat_id.is_some() {
             return Err(format!(
@@ -305,7 +330,9 @@ impl Tool for ToolTaskSpawnAgent {
             .as_ref()
             .map(|w| w.worktree_path.to_string_lossy().to_string());
         let worktree_name = prepared_worktree.as_ref().map(|w| w.worktree_name.clone());
-        let base_branch_from_prep = prepared_worktree.as_ref().and_then(|w| w.base_branch.clone());
+        let base_branch_from_prep = prepared_worktree
+            .as_ref()
+            .and_then(|w| w.base_branch.clone());
 
         let (board, commit_info) = storage::update_board_atomic(
             gcx.clone(),
@@ -382,21 +409,36 @@ impl Tool for ToolTaskSpawnAgent {
                     }
                 }
                 Ok(Some(()))
-            }).await;
+            })
+            .await;
             if let Some(pw) = prepared_worktree {
                 pw.cleanup_sync();
             }
         }
 
         if let Err(e) = storage::update_task_stats(gcx.clone(), &task_id).await {
-            rollback(gcx.clone(), &task_id, original_card, agent_chat_id.clone(), &prepared_worktree).await;
+            rollback(
+                gcx.clone(),
+                &task_id,
+                original_card,
+                agent_chat_id.clone(),
+                &prepared_worktree,
+            )
+            .await;
             return Err(e);
         }
 
         let mut meta = match storage::load_task_meta(gcx.clone(), &task_id).await {
             Ok(m) => m,
             Err(e) => {
-                rollback(gcx.clone(), &task_id, original_card, agent_chat_id.clone(), &prepared_worktree).await;
+                rollback(
+                    gcx.clone(),
+                    &task_id,
+                    original_card,
+                    agent_chat_id.clone(),
+                    &prepared_worktree,
+                )
+                .await;
                 return Err(e);
             }
         };
@@ -416,7 +458,14 @@ impl Tool for ToolTaskSpawnAgent {
             meta.last_agents_summary_at = Some(earliest.unwrap_or_else(Utc::now).to_rfc3339());
         }
         if let Err(e) = storage::save_task_meta(gcx.clone(), &task_id, &meta).await {
-            rollback(gcx.clone(), &task_id, original_card, agent_chat_id.clone(), &prepared_worktree).await;
+            rollback(
+                gcx.clone(),
+                &task_id,
+                original_card,
+                agent_chat_id.clone(),
+                &prepared_worktree,
+            )
+            .await;
             return Err(e);
         }
 
@@ -424,8 +473,14 @@ impl Tool for ToolTaskSpawnAgent {
             crate::files_in_workspace::add_folder(gcx.clone(), &pw.worktree_path).await;
         }
 
-        let card_title = board.get_card(card_id).map(|c| c.title.clone()).unwrap_or_default();
-        let card_instructions = board.get_card(card_id).map(|c| c.instructions.clone()).unwrap_or_default();
+        let card_title = board
+            .get_card(card_id)
+            .map(|c| c.title.clone())
+            .unwrap_or_default();
+        let card_instructions = board
+            .get_card(card_id)
+            .map(|c| c.instructions.clone())
+            .unwrap_or_default();
         let dependency_context = board
             .get_dependency_reports(card_id)
             .into_iter()
@@ -475,6 +530,7 @@ impl Tool for ToolTaskSpawnAgent {
                 previous_response_id: None,
                 browser_meta: None,
                 active_skill: None,
+                auto_enrichment_enabled: None,
             };
 
             let user_prompt = build_agent_prompt(

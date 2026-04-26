@@ -5,10 +5,13 @@ import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { useAttachedFiles } from "./useCheckBoxes";
 import { ChatContextFile } from "../../services/refact";
 import styles from "./UnifiedAttachmentsTray.module.css";
+import type { ManualPreviewItem } from "../../features/Chat/Thread/types";
 
 type UnifiedAttachmentsTrayProps = {
   attachedFiles: ReturnType<typeof useAttachedFiles>;
   previewFiles?: (ChatContextFile | string)[];
+  manualPreviewItems?: ManualPreviewItem[];
+  onRemoveManualPreviewItem?: (index: number) => void;
   onOpenFile?: (file: {
     file_path: string;
     line?: number;
@@ -18,6 +21,21 @@ type UnifiedAttachmentsTrayProps = {
 function getFilename(path: string): string {
   const parts = path.split(/[/\\]/);
   return parts[parts.length - 1] || path;
+}
+
+function normalizePath(path: string): string {
+  return path
+    .trim()
+    .replace(/:\d+(-\d+)?$/, "")
+    .replace(/\\/g, "/");
+}
+
+function samePath(left: string, right: string): boolean {
+  const a = normalizePath(left);
+  const b = normalizePath(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
 }
 
 function formatLineRange(
@@ -35,9 +53,17 @@ function normalizeLine(line: number | null | undefined): number | undefined {
   return typeof line === "number" && line > 0 ? line : undefined;
 }
 
+const KIND_ICON: Record<string, string> = {
+  memory: "🧠",
+  trajectory: "📋",
+  file: "📄",
+};
+
 export const UnifiedAttachmentsTray: React.FC<UnifiedAttachmentsTrayProps> = ({
   attachedFiles,
   previewFiles,
+  manualPreviewItems,
+  onRemoveManualPreviewItem,
   onOpenFile,
 }) => {
   const { images, removeImage, textFiles, removeTextFile } =
@@ -45,8 +71,22 @@ export const UnifiedAttachmentsTray: React.FC<UnifiedAttachmentsTrayProps> = ({
 
   const items = useMemo(() => {
     const result: AttachmentTileProps[] = [];
-    // Track added file paths to avoid duplicates between attachedFiles and previewFiles
-    const addedFilePaths = new Set<string>();
+    const addedFilePaths: string[] = [];
+
+    manualPreviewItems?.forEach((item, index) => {
+      const icon = KIND_ICON[item.kind];
+      result.push({
+        kind: "file",
+        id: `manual-preview-${item.context_file.file_name}-${index}`,
+        name: `${icon} ${item.label}`,
+        subtitle: item.kind,
+        copyText: item.context_file.file_name,
+        onRemove: onRemoveManualPreviewItem
+          ? () => onRemoveManualPreviewItem(index)
+          : undefined,
+      });
+      addedFilePaths.push(item.context_file.file_name);
+    });
 
     images.forEach((image, index) => {
       if (typeof image.content === "string") {
@@ -72,8 +112,7 @@ export const UnifiedAttachmentsTray: React.FC<UnifiedAttachmentsTrayProps> = ({
 
     attachedFiles.files.forEach((file, index) => {
       const lineRange = formatLineRange(file.line1, file.line2);
-      // Strip line range suffix (e.g. "/path/file.py:10-20" → "/path/file.py") before dedup
-      addedFilePaths.add(file.path.replace(/:\d+(-\d+)?$/, ""));
+      addedFilePaths.push(file.path);
       result.push({
         kind: "file",
         id: `attached-${file.path}-${index}`,
@@ -102,10 +141,10 @@ export const UnifiedAttachmentsTray: React.FC<UnifiedAttachmentsTrayProps> = ({
             copyText: file,
           });
         } else {
-          // Skip if this file was already added from attachedFiles (normalize away line range suffix)
-          if (addedFilePaths.has(file.file_name.replace(/:\d+(-\d+)?$/, ""))) {
+          if (addedFilePaths.some((path) => samePath(path, file.file_name))) {
             return;
           }
+          addedFilePaths.push(file.file_name);
           const lineRange = formatLineRange(file.line1, file.line2);
           result.push({
             kind: "file",
@@ -131,6 +170,8 @@ export const UnifiedAttachmentsTray: React.FC<UnifiedAttachmentsTrayProps> = ({
     textFiles,
     attachedFiles,
     previewFiles,
+    manualPreviewItems,
+    onRemoveManualPreviewItem,
     removeImage,
     removeTextFile,
     onOpenFile,

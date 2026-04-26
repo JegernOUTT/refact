@@ -13,7 +13,13 @@ pub const MCP_PROMPT_PREFIX: &str = "mcp_";
 
 pub fn sanitize_name(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -25,19 +31,23 @@ pub fn server_name_from_session(session: &SessionMCP) -> String {
         }
     }
     let path = std::path::Path::new(&session.config_path);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("mcp");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mcp");
     sanitize_name(stem)
 }
 
 pub fn mcp_prompt_command_name(server_name: &str, prompt_name: &str) -> String {
-    format!("{}{}_{}", MCP_PROMPT_PREFIX, server_name, sanitize_name(prompt_name))
+    format!(
+        "{}{}_{}",
+        MCP_PROMPT_PREFIX,
+        server_name,
+        sanitize_name(prompt_name)
+    )
 }
 
 pub async fn mcp_prompts_as_slash_commands(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<SlashCommand> {
-    let sessions: Vec<Arc<tokio::sync::Mutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>> = {
+    let sessions: Vec<
+        Arc<tokio::sync::Mutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+    > = {
         let gcx_locked = gcx.read().await;
         gcx_locked.integration_sessions.values().cloned().collect()
     };
@@ -104,7 +114,10 @@ pub async fn parse_mcp_prompt_command(
     if !cmd_name.starts_with(MCP_PROMPT_PREFIX) {
         return None;
     }
-    let sessions: Vec<(String, Arc<tokio::sync::Mutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>)> = {
+    let sessions: Vec<(
+        String,
+        Arc<tokio::sync::Mutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+    )> = {
         let gcx_locked = gcx.read().await;
         gcx_locked
             .integration_sessions
@@ -169,7 +182,12 @@ pub async fn execute_mcp_prompt(
 
     let session_arc = match session_arc {
         Some(s) => s,
-        None => return Err(format!("MCP session not found: {}", parsed.server_config_path)),
+        None => {
+            return Err(format!(
+                "MCP session not found: {}",
+                parsed.server_config_path
+            ))
+        }
     };
 
     let client_arc = {
@@ -183,10 +201,16 @@ pub async fn execute_mcp_prompt(
 
     let client_arc = match client_arc {
         Some(c) => c,
-        None => return Err(format!("MCP client not connected: {}", parsed.server_config_path)),
+        None => {
+            return Err(format!(
+                "MCP client not connected: {}",
+                parsed.server_config_path
+            ))
+        }
     };
 
-    let args_obj: Option<serde_json::Map<String, serde_json::Value>> = if parsed.args_map.is_empty() {
+    let args_obj: Option<serde_json::Map<String, serde_json::Value>> = if parsed.args_map.is_empty()
+    {
         None
     } else {
         Some(
@@ -212,7 +236,12 @@ pub async fn execute_mcp_prompt(
         }
     }; // lock released before the network call
 
-    let result = match timeout(Duration::from_secs(request_timeout), peer.get_prompt(params)).await {
+    let result = match timeout(
+        Duration::from_secs(request_timeout),
+        peer.get_prompt(params),
+    )
+    .await
+    {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return Err(format!("get_prompt failed: {:?}", e)),
         Err(_) => return Err(format!("get_prompt timed out after {}s", request_timeout)),
@@ -227,12 +256,12 @@ fn format_prompt_result(result: rmcp::model::GetPromptResult) -> String {
         let text = match &msg.content {
             rmcp::model::PromptMessageContent::Text { text } => text.clone(),
             rmcp::model::PromptMessageContent::Image { .. } => "[image]".to_string(),
-            rmcp::model::PromptMessageContent::Resource { resource } => {
-                match &resource.resource {
-                    rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
-                    rmcp::model::ResourceContents::BlobResourceContents { .. } => "[blob resource]".to_string(),
+            rmcp::model::PromptMessageContent::Resource { resource } => match &resource.resource {
+                rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+                rmcp::model::ResourceContents::BlobResourceContents { .. } => {
+                    "[blob resource]".to_string()
                 }
-            }
+            },
             rmcp::model::PromptMessageContent::ResourceLink { .. } => "[resource link]".to_string(),
         };
         match msg.role {
@@ -259,8 +288,14 @@ mod tests {
 
     #[test]
     fn test_mcp_prompt_command_name() {
-        assert_eq!(mcp_prompt_command_name("myserver", "code_review"), "mcp_myserver_code_review");
-        assert_eq!(mcp_prompt_command_name("my_server", "review-code"), "mcp_my_server_review_code");
+        assert_eq!(
+            mcp_prompt_command_name("myserver", "code_review"),
+            "mcp_myserver_code_review"
+        );
+        assert_eq!(
+            mcp_prompt_command_name("my_server", "review-code"),
+            "mcp_my_server_review_code"
+        );
     }
 
     #[test]

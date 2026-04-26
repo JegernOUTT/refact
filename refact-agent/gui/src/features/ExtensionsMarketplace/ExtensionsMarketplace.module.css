@@ -1,0 +1,83 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-3);
+}
+
+.card {
+  border: 1px solid var(--gray-5);
+  border-radius: var(--radius-3);
+  padding: var(--space-3);
+  background: var(--color-panel-solid);
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+.card:hover {
+  border-color: var(--accent-8);
+}
+
+.description {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bodyPreview {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-style: italic;
+  opacity: 0.7;
+  font-size: 0.72rem;
+  flex: 1;
+}
+
+.sourceTab {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sourceTab:hover {
+  opacity: 0.8;
+}
+
+.sourceBadge {
+  font-size: var(--font-size-1);
+}
+
+.installScope {
+  padding-top: var(--space-1);
+}
+
+.sourceRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--gray-4);
+}
+
+.sourceRow:last-child {
+  border-bottom: none;
+}
+
+.sourceLabel {
+  flex: 1;
+  min-width: 0;
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid var(--gray-5);
+  margin: var(--space-3) 0;
+}
+
+.addSourceSection {
+  display: flex;
+  flex-direction: column;
+}

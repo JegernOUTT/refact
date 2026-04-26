@@ -164,11 +164,17 @@ fn normalize_tokenizer(tokenizer: &str) -> String {
 fn validate_model_caps(caps: &mut HashMap<String, ModelCapabilities>) {
     for (name, cap) in caps.iter_mut() {
         if cap.n_ctx > MAX_REASONABLE_N_CTX {
-            warn!("Model {} has unreasonable n_ctx {}, clamping to {}", name, cap.n_ctx, MAX_REASONABLE_N_CTX);
+            warn!(
+                "Model {} has unreasonable n_ctx {}, clamping to {}",
+                name, cap.n_ctx, MAX_REASONABLE_N_CTX
+            );
             cap.n_ctx = MAX_REASONABLE_N_CTX;
         }
         if cap.max_output_tokens > MAX_REASONABLE_OUTPUT_TOKENS {
-            warn!("Model {} has unreasonable max_output_tokens {}, clamping to {}", name, cap.max_output_tokens, MAX_REASONABLE_OUTPUT_TOKENS);
+            warn!(
+                "Model {} has unreasonable max_output_tokens {}, clamping to {}",
+                name, cap.max_output_tokens, MAX_REASONABLE_OUTPUT_TOKENS
+            );
             cap.max_output_tokens = MAX_REASONABLE_OUTPUT_TOKENS;
         }
         cap.tokenizer = normalize_tokenizer(&cap.tokenizer);
@@ -182,11 +188,17 @@ pub async fn load_cached_model_caps() -> Option<CachedModelCaps> {
         Ok(content) => match serde_json::from_str::<CachedModelCaps>(&content) {
             Ok(mut cached) => {
                 validate_model_caps(&mut cached.models);
-                info!("Loaded model capabilities from cache: {} models", cached.models.len());
+                info!(
+                    "Loaded model capabilities from cache: {} models",
+                    cached.models.len()
+                );
                 Some(cached)
             }
             Err(e) => {
-                warn!("Failed to parse cached model capabilities (treating as cache miss): {}", e);
+                warn!(
+                    "Failed to parse cached model capabilities (treating as cache miss): {}",
+                    e
+                );
                 None
             }
         },
@@ -202,15 +214,20 @@ pub async fn save_cached_model_caps(caps: &CachedModelCaps) -> Result<(), String
     let cache_path = get_cache_path();
 
     if let Some(parent) = cache_path.parent() {
-        tokio::fs::create_dir_all(parent).await
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|e| format!("Failed to create cache directory: {}", e))?;
     }
 
     let content = serde_json::to_string_pretty(caps)
         .map_err(|e| format!("Failed to serialize model capabilities: {}", e))?;
-    tokio::fs::write(&cache_path, content).await
+    tokio::fs::write(&cache_path, content)
+        .await
         .map_err(|e| format!("Failed to write model capabilities cache: {}", e))?;
-    info!("Saved model capabilities to cache: {}", cache_path.display());
+    info!(
+        "Saved model capabilities to cache: {}",
+        cache_path.display()
+    );
     Ok(())
 }
 
@@ -423,7 +440,9 @@ pub fn resolve_model_caps(
     // Phase 1: Exact case-sensitive match
     for name in &names_to_try {
         if let Some(model_caps) = caps.get(*name) {
-            let source = if canonical.is_finetune && (*name == &canonical.base_model || *name == &canonical.last_segment_base) {
+            let source = if canonical.is_finetune
+                && (*name == &canonical.base_model || *name == &canonical.last_segment_base)
+            {
                 ModelCapsSource::Finetune
             } else {
                 ModelCapsSource::Registry
@@ -437,13 +456,15 @@ pub fn resolve_model_caps(
     }
 
     // Phase 2: Normalized matching (case-insensitive + suffix stripping + dot→dash)
-    let normalized_names: Vec<String> = names_to_try.iter()
+    let normalized_names: Vec<String> = names_to_try
+        .iter()
         .map(|n| normalize_model_name_for_matching(n))
         .collect();
 
     // Deduplicate normalized names while preserving order
     let mut seen = std::collections::HashSet::new();
-    let unique_normalized: Vec<&String> = normalized_names.iter()
+    let unique_normalized: Vec<&String> = normalized_names
+        .iter()
         .filter(|n| seen.insert(n.as_str().to_string()))
         .collect();
 
@@ -481,7 +502,9 @@ pub fn resolve_model_caps(
                 let specificity = pattern_specificity(pattern);
                 if best_match.is_none() || specificity > best_match.unwrap().2 {
                     best_match = Some((pattern, model_caps, specificity));
-                } else if specificity == best_match.unwrap().2 && pattern.as_str() < best_match.unwrap().0 {
+                } else if specificity == best_match.unwrap().2
+                    && pattern.as_str() < best_match.unwrap().0
+                {
                     best_match = Some((pattern, model_caps, specificity));
                 }
             }
@@ -500,7 +523,9 @@ pub fn resolve_model_caps(
                     let specificity = pattern_specificity(&pattern_normalized);
                     if best_match.is_none() || specificity > best_match.unwrap().2 {
                         best_match = Some((pattern, model_caps, specificity));
-                    } else if specificity == best_match.unwrap().2 && pattern.as_str() < best_match.unwrap().0 {
+                    } else if specificity == best_match.unwrap().2
+                        && pattern.as_str() < best_match.unwrap().0
+                    {
                         best_match = Some((pattern, model_caps, specificity));
                     }
                 }
@@ -529,21 +554,27 @@ mod tests {
     #[test]
     fn test_model_capability_lookup() {
         let mut caps = HashMap::new();
-        caps.insert("gpt-4o".to_string(), ModelCapabilities {
-            n_ctx: 128000,
-            max_output_tokens: 16384,
-            supports_tools: true,
-            supports_vision: true,
-            ..Default::default()
-        });
-        caps.insert("claude-3-5-sonnet".to_string(), ModelCapabilities {
-            n_ctx: 200000,
-            max_output_tokens: 8192,
-            supports_tools: true,
-            supports_vision: true,
-            supports_pdf: true,
-            ..Default::default()
-        });
+        caps.insert(
+            "gpt-4o".to_string(),
+            ModelCapabilities {
+                n_ctx: 128000,
+                max_output_tokens: 16384,
+                supports_tools: true,
+                supports_vision: true,
+                ..Default::default()
+            },
+        );
+        caps.insert(
+            "claude-3-5-sonnet".to_string(),
+            ModelCapabilities {
+                n_ctx: 200000,
+                max_output_tokens: 8192,
+                supports_tools: true,
+                supports_vision: true,
+                supports_pdf: true,
+                ..Default::default()
+            },
+        );
 
         assert!(resolve_model_caps(&caps, "gpt-4o").is_some());
         assert!(resolve_model_caps(&caps, "openai/gpt-4o").is_some());
@@ -585,18 +616,24 @@ mod tests {
     #[test]
     fn test_pattern_matching() {
         let mut caps = HashMap::new();
-        caps.insert("claude-3-7-sonnet*".to_string(), ModelCapabilities {
-            n_ctx: 200000,
-            max_output_tokens: 16384,
-            supports_tools: true,
-            ..Default::default()
-        });
-        caps.insert("gpt-4*".to_string(), ModelCapabilities {
-            n_ctx: 128000,
-            max_output_tokens: 8192,
-            supports_tools: true,
-            ..Default::default()
-        });
+        caps.insert(
+            "claude-3-7-sonnet*".to_string(),
+            ModelCapabilities {
+                n_ctx: 200000,
+                max_output_tokens: 16384,
+                supports_tools: true,
+                ..Default::default()
+            },
+        );
+        caps.insert(
+            "gpt-4*".to_string(),
+            ModelCapabilities {
+                n_ctx: 128000,
+                max_output_tokens: 8192,
+                supports_tools: true,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "claude-3-7-sonnet-latest").unwrap();
         assert_eq!(resolved.matched_key, "claude-3-7-sonnet*");
@@ -609,11 +646,14 @@ mod tests {
     #[test]
     fn test_finetune_source() {
         let mut caps = HashMap::new();
-        caps.insert("gpt-4o".to_string(), ModelCapabilities {
-            n_ctx: 128000,
-            max_output_tokens: 16384,
-            ..Default::default()
-        });
+        caps.insert(
+            "gpt-4o".to_string(),
+            ModelCapabilities {
+                n_ctx: 128000,
+                max_output_tokens: 16384,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "gpt-4o:ft-abc123").unwrap();
         assert_eq!(resolved.source, ModelCapsSource::Finetune);
@@ -625,7 +665,11 @@ mod tests {
         let caps = ModelCapabilities {
             n_ctx: 128000,
             max_output_tokens: 16384,
-            reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
+            reasoning_effort_options: Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ]),
             supports_thinking_budget: true,
             supports_adaptive_thinking_budget: false,
             ..Default::default()
@@ -636,7 +680,14 @@ mod tests {
         assert!(json.contains("\"supports_adaptive_thinking_budget\":false"));
 
         let parsed: ModelCapabilities = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.reasoning_effort_options, Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]));
+        assert_eq!(
+            parsed.reasoning_effort_options,
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
+        );
         assert!(parsed.supports_thinking_budget);
         assert!(!parsed.supports_adaptive_thinking_budget);
     }
@@ -653,12 +704,15 @@ mod tests {
     #[test]
     fn test_multi_slash_openrouter_models() {
         let mut caps = HashMap::new();
-        caps.insert("claude-3.7-sonnet".to_string(), ModelCapabilities {
-            n_ctx: 200000,
-            max_output_tokens: 16384,
-            supports_tools: true,
-            ..Default::default()
-        });
+        caps.insert(
+            "claude-3.7-sonnet".to_string(),
+            ModelCapabilities {
+                n_ctx: 200000,
+                max_output_tokens: 16384,
+                supports_tools: true,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "openrouter/anthropic/claude-3.7-sonnet");
         assert!(resolved.is_some());
@@ -670,13 +724,16 @@ mod tests {
     #[test]
     fn test_gemini_models_prefix() {
         let mut caps = HashMap::new();
-        caps.insert("gemini-2.0-flash".to_string(), ModelCapabilities {
-            n_ctx: 1000000,
-            max_output_tokens: 8192,
-            supports_tools: true,
-            supports_vision: true,
-            ..Default::default()
-        });
+        caps.insert(
+            "gemini-2.0-flash".to_string(),
+            ModelCapabilities {
+                n_ctx: 1000000,
+                max_output_tokens: 8192,
+                supports_tools: true,
+                supports_vision: true,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "models/gemini-2.0-flash");
         assert!(resolved.is_some());
@@ -692,7 +749,11 @@ mod tests {
             supports_strict_tools: true,
             supports_vision: true,
             supports_max_completion_tokens: true,
-            reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
+            reasoning_effort_options: Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ]),
             supports_thinking_budget: true,
             supports_temperature: false,
             ..Default::default()
@@ -701,18 +762,28 @@ mod tests {
         assert!(caps.supports_strict_tools);
         assert!(caps.supports_max_completion_tokens);
         assert!(!caps.supports_temperature);
-        assert_eq!(caps.reasoning_effort_options, Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]));
+        assert_eq!(
+            caps.reasoning_effort_options,
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
+        );
         assert!(caps.supports_thinking_budget);
     }
 
     #[test]
     fn test_validation_clamps_values() {
         let mut caps = HashMap::new();
-        caps.insert("test-model".to_string(), ModelCapabilities {
-            n_ctx: 999_999_999,
-            max_output_tokens: 999_999_999,
-            ..Default::default()
-        });
+        caps.insert(
+            "test-model".to_string(),
+            ModelCapabilities {
+                n_ctx: 999_999_999,
+                max_output_tokens: 999_999_999,
+                ..Default::default()
+            },
+        );
 
         validate_model_caps(&mut caps);
 
@@ -724,18 +795,27 @@ mod tests {
     #[test]
     fn test_pattern_specificity_tiebreaking() {
         let mut caps = HashMap::new();
-        caps.insert("gpt-*".to_string(), ModelCapabilities {
-            n_ctx: 100000,
-            ..Default::default()
-        });
-        caps.insert("gpt-4*".to_string(), ModelCapabilities {
-            n_ctx: 128000,
-            ..Default::default()
-        });
-        caps.insert("gpt-4o*".to_string(), ModelCapabilities {
-            n_ctx: 200000,
-            ..Default::default()
-        });
+        caps.insert(
+            "gpt-*".to_string(),
+            ModelCapabilities {
+                n_ctx: 100000,
+                ..Default::default()
+            },
+        );
+        caps.insert(
+            "gpt-4*".to_string(),
+            ModelCapabilities {
+                n_ctx: 128000,
+                ..Default::default()
+            },
+        );
+        caps.insert(
+            "gpt-4o*".to_string(),
+            ModelCapabilities {
+                n_ctx: 200000,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "gpt-4o-mini").unwrap();
         assert_eq!(resolved.matched_key, "gpt-4o*");
@@ -745,14 +825,20 @@ mod tests {
     #[test]
     fn test_exact_match_over_pattern() {
         let mut caps = HashMap::new();
-        caps.insert("gpt-4o".to_string(), ModelCapabilities {
-            n_ctx: 128000,
-            ..Default::default()
-        });
-        caps.insert("gpt-4*".to_string(), ModelCapabilities {
-            n_ctx: 100000,
-            ..Default::default()
-        });
+        caps.insert(
+            "gpt-4o".to_string(),
+            ModelCapabilities {
+                n_ctx: 128000,
+                ..Default::default()
+            },
+        );
+        caps.insert(
+            "gpt-4*".to_string(),
+            ModelCapabilities {
+                n_ctx: 100000,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "gpt-4o").unwrap();
         assert_eq!(resolved.matched_key, "gpt-4o");
@@ -762,27 +848,51 @@ mod tests {
     #[test]
     fn test_normalize_tokenizer() {
         assert_eq!(normalize_tokenizer(""), "");
-        assert_eq!(normalize_tokenizer("hf://Xenova/claude-tokenizer"), "hf://Xenova/claude-tokenizer");
-        assert_eq!(normalize_tokenizer("http://example.com/tokenizer.json"), "http://example.com/tokenizer.json");
-        assert_eq!(normalize_tokenizer("https://example.com/tokenizer.json"), "https://example.com/tokenizer.json");
-        assert_eq!(normalize_tokenizer("file:///path/to/tokenizer.json"), "file:///path/to/tokenizer.json");
+        assert_eq!(
+            normalize_tokenizer("hf://Xenova/claude-tokenizer"),
+            "hf://Xenova/claude-tokenizer"
+        );
+        assert_eq!(
+            normalize_tokenizer("http://example.com/tokenizer.json"),
+            "http://example.com/tokenizer.json"
+        );
+        assert_eq!(
+            normalize_tokenizer("https://example.com/tokenizer.json"),
+            "https://example.com/tokenizer.json"
+        );
+        assert_eq!(
+            normalize_tokenizer("file:///path/to/tokenizer.json"),
+            "file:///path/to/tokenizer.json"
+        );
         assert_eq!(normalize_tokenizer("fake"), "fake");
         assert_eq!(normalize_tokenizer("fake-tokenizer"), "fake-tokenizer");
-        assert_eq!(normalize_tokenizer("Xenova/claude-tokenizer"), "hf://Xenova/claude-tokenizer");
-        assert_eq!(normalize_tokenizer("meta-llama/Llama-3.3-70B"), "hf://meta-llama/Llama-3.3-70B");
-        assert_eq!(normalize_tokenizer("deepseek-ai/DeepSeek-V3"), "hf://deepseek-ai/DeepSeek-V3");
+        assert_eq!(
+            normalize_tokenizer("Xenova/claude-tokenizer"),
+            "hf://Xenova/claude-tokenizer"
+        );
+        assert_eq!(
+            normalize_tokenizer("meta-llama/Llama-3.3-70B"),
+            "hf://meta-llama/Llama-3.3-70B"
+        );
+        assert_eq!(
+            normalize_tokenizer("deepseek-ai/DeepSeek-V3"),
+            "hf://deepseek-ai/DeepSeek-V3"
+        );
         assert_eq!(normalize_tokenizer("local-tokenizer"), "local-tokenizer");
     }
 
     #[test]
     fn test_validate_normalizes_tokenizer() {
         let mut caps = HashMap::new();
-        caps.insert("test-model".to_string(), ModelCapabilities {
-            n_ctx: 128000,
-            max_output_tokens: 16384,
-            tokenizer: "Xenova/claude-tokenizer".to_string(),
-            ..Default::default()
-        });
+        caps.insert(
+            "test-model".to_string(),
+            ModelCapabilities {
+                n_ctx: 128000,
+                max_output_tokens: 16384,
+                tokenizer: "Xenova/claude-tokenizer".to_string(),
+                ..Default::default()
+            },
+        );
 
         validate_model_caps(&mut caps);
 
@@ -792,24 +902,48 @@ mod tests {
 
     #[test]
     fn test_normalize_model_name_for_matching() {
-        assert_eq!(normalize_model_name_for_matching("claude-3-7-sonnet-latest"), "claude-3-7-sonnet");
-        assert_eq!(normalize_model_name_for_matching("gemini-3-pro-preview-cheap"), "gemini-3-pro");
-        assert_eq!(normalize_model_name_for_matching("o4-mini-deep-research"), "o4-mini");
-        assert_eq!(normalize_model_name_for_matching("claude-opus-4.6"), "claude-opus-4-6");
-        assert_eq!(normalize_model_name_for_matching("Kimi-K2-Instruct"), "kimi-k2-instruct");
-        assert_eq!(normalize_model_name_for_matching("MiniMax-M2.1"), "minimax-m2-1");
-        assert_eq!(normalize_model_name_for_matching("llama-3-70b-fp8"), "llama-3-70b");
+        assert_eq!(
+            normalize_model_name_for_matching("claude-3-7-sonnet-latest"),
+            "claude-3-7-sonnet"
+        );
+        assert_eq!(
+            normalize_model_name_for_matching("gemini-3-pro-preview-cheap"),
+            "gemini-3-pro"
+        );
+        assert_eq!(
+            normalize_model_name_for_matching("o4-mini-deep-research"),
+            "o4-mini"
+        );
+        assert_eq!(
+            normalize_model_name_for_matching("claude-opus-4.6"),
+            "claude-opus-4-6"
+        );
+        assert_eq!(
+            normalize_model_name_for_matching("Kimi-K2-Instruct"),
+            "kimi-k2-instruct"
+        );
+        assert_eq!(
+            normalize_model_name_for_matching("MiniMax-M2.1"),
+            "minimax-m2-1"
+        );
+        assert_eq!(
+            normalize_model_name_for_matching("llama-3-70b-fp8"),
+            "llama-3-70b"
+        );
         assert_eq!(normalize_model_name_for_matching("gpt-4o"), "gpt-4o");
     }
 
     #[test]
     fn test_case_insensitive_matching() {
         let mut caps = HashMap::new();
-        caps.insert("kimi-k2-instruct".to_string(), ModelCapabilities {
-            n_ctx: 131000,
-            max_output_tokens: 32768,
-            ..Default::default()
-        });
+        caps.insert(
+            "kimi-k2-instruct".to_string(),
+            ModelCapabilities {
+                n_ctx: 131000,
+                max_output_tokens: 32768,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "Kimi-K2-Instruct");
         assert!(resolved.is_some());
@@ -819,11 +953,14 @@ mod tests {
     #[test]
     fn test_suffix_stripping_latest() {
         let mut caps = HashMap::new();
-        caps.insert("claude-3-7-sonnet".to_string(), ModelCapabilities {
-            n_ctx: 200000,
-            max_output_tokens: 16384,
-            ..Default::default()
-        });
+        caps.insert(
+            "claude-3-7-sonnet".to_string(),
+            ModelCapabilities {
+                n_ctx: 200000,
+                max_output_tokens: 16384,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "claude-3-7-sonnet-latest");
         assert!(resolved.is_some());
@@ -833,11 +970,14 @@ mod tests {
     #[test]
     fn test_suffix_stripping_compound() {
         let mut caps = HashMap::new();
-        caps.insert("gemini-3-pro".to_string(), ModelCapabilities {
-            n_ctx: 1000000,
-            max_output_tokens: 64000,
-            ..Default::default()
-        });
+        caps.insert(
+            "gemini-3-pro".to_string(),
+            ModelCapabilities {
+                n_ctx: 1000000,
+                max_output_tokens: 64000,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "gemini-3-pro-preview-cheap");
         assert!(resolved.is_some());
@@ -847,11 +987,14 @@ mod tests {
     #[test]
     fn test_dot_to_dash_normalization() {
         let mut caps = HashMap::new();
-        caps.insert("claude-opus-4-6".to_string(), ModelCapabilities {
-            n_ctx: 200000,
-            max_output_tokens: 128000,
-            ..Default::default()
-        });
+        caps.insert(
+            "claude-opus-4-6".to_string(),
+            ModelCapabilities {
+                n_ctx: 200000,
+                max_output_tokens: 128000,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "claude-opus-4.6");
         assert!(resolved.is_some());
@@ -861,16 +1004,22 @@ mod tests {
     #[test]
     fn test_exact_match_preferred_over_normalized() {
         let mut caps = HashMap::new();
-        caps.insert("gpt-4o".to_string(), ModelCapabilities {
-            n_ctx: 128000,
-            max_output_tokens: 16384,
-            ..Default::default()
-        });
-        caps.insert("gpt-4o-latest".to_string(), ModelCapabilities {
-            n_ctx: 200000,
-            max_output_tokens: 32768,
-            ..Default::default()
-        });
+        caps.insert(
+            "gpt-4o".to_string(),
+            ModelCapabilities {
+                n_ctx: 128000,
+                max_output_tokens: 16384,
+                ..Default::default()
+            },
+        );
+        caps.insert(
+            "gpt-4o-latest".to_string(),
+            ModelCapabilities {
+                n_ctx: 200000,
+                max_output_tokens: 32768,
+                ..Default::default()
+            },
+        );
 
         // Exact match should win over suffix-stripped
         let resolved = resolve_model_caps(&caps, "gpt-4o-latest").unwrap();
@@ -881,11 +1030,14 @@ mod tests {
     #[test]
     fn test_fp_suffix_stripping() {
         let mut caps = HashMap::new();
-        caps.insert("llama-3-70b".to_string(), ModelCapabilities {
-            n_ctx: 128000,
-            max_output_tokens: 8192,
-            ..Default::default()
-        });
+        caps.insert(
+            "llama-3-70b".to_string(),
+            ModelCapabilities {
+                n_ctx: 128000,
+                max_output_tokens: 8192,
+                ..Default::default()
+            },
+        );
 
         let resolved = resolve_model_caps(&caps, "llama-3-70b-fp8");
         assert!(resolved.is_some());
@@ -895,11 +1047,14 @@ mod tests {
     #[test]
     fn test_provider_prefix_with_case_mismatch() {
         let mut caps = HashMap::new();
-        caps.insert("minimax-m2.1".to_string(), ModelCapabilities {
-            n_ctx: 196000,
-            max_output_tokens: 16384,
-            ..Default::default()
-        });
+        caps.insert(
+            "minimax-m2.1".to_string(),
+            ModelCapabilities {
+                n_ctx: 196000,
+                max_output_tokens: 16384,
+                ..Default::default()
+            },
+        );
 
         // Both "refact/MiniMax-M2.1" and "MiniMax-M2.1" should resolve
         let resolved = resolve_model_caps(&caps, "refact/MiniMax-M2.1");

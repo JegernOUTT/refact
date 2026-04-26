@@ -51,10 +51,14 @@ pub async fn load_code_subagent_config(
 ) -> Result<CodeSubagentConfig, String> {
     let mut config = CodeSubagentConfig::default();
 
-    let subagent_config = get_subagent_config(gcx.clone(), subagent_id, model_id).await
+    let subagent_config = get_subagent_config(gcx.clone(), subagent_id, model_id)
+        .await
         .ok_or_else(|| format!("subagent config '{}' not found", subagent_id))?;
 
-    config.gather_system_prompt = subagent_config.messages.system_prompt.clone()
+    config.gather_system_prompt = subagent_config
+        .messages
+        .system_prompt
+        .clone()
         .or_else(|| subagent_config.prompts.gather_system.clone());
     config.gather_retry_prompt = subagent_config.prompts.gather_retry.clone();
     config.solver_prompt = subagent_config.prompts.solver.clone();

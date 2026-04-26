@@ -48,9 +48,7 @@ async fn get_initial_file_size(path: &PathBuf) -> u64 {
     fs::metadata(path).await.map(|m| m.len()).unwrap_or(0)
 }
 
-async fn resolve_stats_dir_for_write(
-    gcx: Arc<ARwLock<GlobalContext>>,
-) -> PathBuf {
+async fn resolve_stats_dir_for_write(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
     crate::stats::get_stats_dir(gcx).await
 }
 
@@ -109,7 +107,8 @@ pub async fn stats_writer_task(
         let first = tokio::time::timeout(
             std::time::Duration::from_millis(BATCH_TIMEOUT_MS),
             receiver.recv(),
-        ).await;
+        )
+        .await;
 
         match first {
             Ok(Some(event)) => {
@@ -125,10 +124,7 @@ pub async fn stats_writer_task(
             Err(_) => continue,
         }
 
-        let desired_stats_dir = resolve_stats_dir_for_write(
-            gcx.clone(),
-        )
-        .await;
+        let desired_stats_dir = resolve_stats_dir_for_write(gcx.clone()).await;
 
         let should_open_stats_file = state
             .as_ref()
@@ -141,8 +137,7 @@ pub async fn stats_writer_task(
                     if previous_state.stats_dir != desired_stats_dir {
                         info!(
                             "stats: switching from {:?} to {:?}",
-                            previous_state.stats_dir,
-                            desired_stats_dir
+                            previous_state.stats_dir, desired_stats_dir
                         );
                     }
                     if let Err(e) = previous_state.file.flush().await {
@@ -170,7 +165,10 @@ pub async fn stats_writer_task(
 
             if state.current_size + byte_len > MAX_FILE_SIZE {
                 if let Err(e) = rotate_stats_file(state).await {
-                    warn!("stats: failed to rotate file in {:?}: {}", state.stats_dir, e);
+                    warn!(
+                        "stats: failed to rotate file in {:?}: {}",
+                        state.stats_dir, e
+                    );
                     break;
                 }
             }
@@ -248,14 +246,18 @@ mod tests {
         let stats_dir_clone = stats_dir.clone();
         let handle = tokio::spawn(async move {
             let mut seq = find_current_sequence(&stats_dir_clone).await;
-            if seq == 0 { seq = 1; }
+            if seq == 0 {
+                seq = 1;
+            }
             let path = seq_filename(&stats_dir_clone, seq);
             let mut file = open_append(&path).await.unwrap();
 
             let mut receiver = rx;
             while let Some(event) = receiver.recv().await {
                 let line = serde_json::to_string(&event).unwrap();
-                file.write_all(format!("{}\n", line).as_bytes()).await.unwrap();
+                file.write_all(format!("{}\n", line).as_bytes())
+                    .await
+                    .unwrap();
                 file.flush().await.unwrap();
             }
         });
@@ -269,7 +271,12 @@ mod tests {
         assert!(file_path.exists(), "stats file should exist");
 
         let mut contents = String::new();
-        fs::File::open(&file_path).await.unwrap().read_to_string(&mut contents).await.unwrap();
+        fs::File::open(&file_path)
+            .await
+            .unwrap()
+            .read_to_string(&mut contents)
+            .await
+            .unwrap();
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2, "should have 2 JSONL lines");
 
@@ -287,7 +294,10 @@ mod tests {
         fs::write(&file1_path, &large_content).await.unwrap();
 
         let initial_size = get_initial_file_size(&file1_path).await;
-        assert!(initial_size >= MAX_FILE_SIZE, "file should be at/above limit");
+        assert!(
+            initial_size >= MAX_FILE_SIZE,
+            "file should be at/above limit"
+        );
 
         let seq = find_current_sequence(&stats_dir).await;
         assert_eq!(seq, 1);
@@ -297,7 +307,9 @@ mod tests {
 
         let handle = tokio::spawn(async move {
             let mut current_seq = find_current_sequence(&stats_dir_clone).await;
-            if current_seq == 0 { current_seq = 1; }
+            if current_seq == 0 {
+                current_seq = 1;
+            }
             let mut current_path = seq_filename(&stats_dir_clone, current_seq);
             let mut file = open_append(&current_path).await.unwrap();
             let mut current_size = get_initial_file_size(&current_path).await;
@@ -326,7 +338,10 @@ mod tests {
         handle.await.unwrap();
 
         let file2_path = seq_filename(&stats_dir, 2);
-        assert!(file2_path.exists(), "rotated file 00000002.jsonl should exist");
+        assert!(
+            file2_path.exists(),
+            "rotated file 00000002.jsonl should exist"
+        );
 
         let contents = fs::read_to_string(&file2_path).await.unwrap();
         let parsed: LlmCallEvent = serde_json::from_str(contents.trim()).unwrap();
@@ -354,7 +369,10 @@ mod tests {
         handle.await.unwrap();
 
         let workspace_file_path = seq_filename(&workspace_stats_dir, 1);
-        assert!(workspace_file_path.exists(), "workspace stats file should exist");
+        assert!(
+            workspace_file_path.exists(),
+            "workspace stats file should exist"
+        );
 
         let config_file_path = seq_filename(&config_stats_dir, 1);
         assert!(

@@ -98,8 +98,13 @@ pub fn validate_task_id(task_id: &str) -> Result<(), String> {
     if task_id.len() > 128 {
         return Err("Task ID too long".into());
     }
-    if !task_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err("Task ID must contain only alphanumeric characters, hyphens, or underscores".into());
+    if !task_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(
+            "Task ID must contain only alphanumeric characters, hyphens, or underscores".into(),
+        );
     }
     Ok(())
 }
@@ -261,12 +266,10 @@ fn detect_git_branch_and_commit(workspace_root: &Path) -> (Option<String>, Optio
     };
 
     let commit = match repo.head() {
-        Ok(head) => {
-            match head.peel_to_commit() {
-                Ok(c) => Some(c.id().to_string()),
-                Err(_) => None,
-            }
-        }
+        Ok(head) => match head.peel_to_commit() {
+            Ok(c) => Some(c.id().to_string()),
+            Err(_) => None,
+        },
         Err(_) => None,
     };
 
@@ -289,7 +292,8 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
         .map_err(|e| e.to_string())?;
 
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
-    let (base_branch, base_commit) = project_dirs.first()
+    let (base_branch, base_commit) = project_dirs
+        .first()
         .map(|p| detect_git_branch_and_commit(p))
         .unwrap_or((None, None));
 

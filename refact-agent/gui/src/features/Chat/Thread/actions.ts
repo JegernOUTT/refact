@@ -60,6 +60,8 @@ function buildThreadParamsPatch(
     patch.thinking_budget = thread.thinking_budget;
   if ("parallel_tool_calls" in thread)
     patch.parallel_tool_calls = thread.parallel_tool_calls;
+  if ("auto_enrichment_enabled" in thread)
+    patch.auto_enrichment_enabled = thread.auto_enrichment_enabled;
   return patch;
 }
 
@@ -510,6 +512,28 @@ export const ideToolRequired = createAction<IdeToolRequiredPayload>(
 
 export const requestSseRefresh = createAction<{ chatId: string }>(
   "chatThread/requestSseRefresh",
+);
+
+export const setAutoEnrichmentEnabled = createAction<PayloadWithChatAndBoolean>(
+  "chatThread/setAutoEnrichmentEnabled",
+);
+
+export const markMemoryEnrichmentUserTouched = createAction<{ chatId: string }>(
+  "chatThread/markMemoryEnrichmentUserTouched",
+);
+
+export const setManualPreviewItems = createAction<{
+  chatId: string;
+  items: import("./types").ManualPreviewItem[];
+}>("chatThread/setManualPreviewItems");
+
+export const removeManualPreviewItem = createAction<{
+  chatId: string;
+  index: number;
+}>("chatThread/removeManualPreviewItem");
+
+export const clearManualPreviewItems = createAction<{ chatId: string }>(
+  "chatThread/clearManualPreviewItems",
 );
 
 export const clearSseRefreshRequest = createAction(

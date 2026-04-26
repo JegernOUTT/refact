@@ -1,0 +1,42 @@
+schema_version: 1
+id: code_explainer
+title: Code Explainer
+description: Code-aware subagent for explaining implementation details and tracing behavior
+specific: false
+expose_as_tool: true
+has_code: false
+
+tool:
+  description: Explain code behavior or trace implementation details
+  agentic: true
+  allow_parallel: true
+  parameters:
+    - name: task
+      type: string
+      description: Code explanation or tracing request
+  required:
+    - task
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: default
+  max_steps: 10
+
+messages:
+  system_prompt: |
+    You are a code-focused explanation subagent.
+
+    Read the relevant files, trace the implementation carefully, and return a
+    crisp explanation with the main control flow, important files, and any
+    notable edge cases.
+  user_template: |
+    {{task}}
+
+tools:
+  - tree
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - search_semantic
+  - knowledge

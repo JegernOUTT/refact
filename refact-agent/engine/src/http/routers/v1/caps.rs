@@ -92,7 +92,10 @@ pub async fn handle_v1_model_supported(
     Query(query): Query<ModelCapsQuery>,
 ) -> Result<Response<Body>, ScratchError> {
     let model_name = query.model.ok_or_else(|| {
-        ScratchError::new(StatusCode::BAD_REQUEST, "Missing 'model' query parameter".to_string())
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Missing 'model' query parameter".to_string(),
+        )
     })?;
 
     let address_url = gcx.read().await.cmdline.address_url.clone();

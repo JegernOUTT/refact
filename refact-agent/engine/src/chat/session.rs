@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -41,6 +41,7 @@ impl ChatSession {
             event_tx,
             trajectory_events_tx: None,
             recent_request_ids: VecDeque::with_capacity(limits().recent_request_ids_capacity),
+            recent_request_ids_set: HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -61,6 +62,7 @@ impl ChatSession {
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
             stop_hook_handle: None,
+            suppress_auto_enrichment_for_next_turn: false,
         }
     }
 
@@ -87,6 +89,7 @@ impl ChatSession {
             event_tx,
             trajectory_events_tx: None,
             recent_request_ids: VecDeque::with_capacity(limits().recent_request_ids_capacity),
+            recent_request_ids_set: HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -107,6 +110,7 @@ impl ChatSession {
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
             stop_hook_handle: None,
+            suppress_auto_enrichment_for_next_turn: false,
         }
     }
 
@@ -156,7 +160,12 @@ impl ChatSession {
             seq: self.event_seq,
             event,
         };
-        let _ = self.event_tx.send(envelope);
+        match serde_json::to_string(&envelope) {
+            Ok(json) => {
+                let _ = self.event_tx.send(Arc::new(json));
+            }
+            Err(e) => tracing::error!("Failed to serialize SSE event for {}: {}", self.chat_id, e),
+        }
     }
 
     pub fn snapshot(&self) -> ChatEvent {
@@ -177,13 +186,16 @@ impl ChatSession {
     }
 
     pub fn is_duplicate_request(&mut self, request_id: &str) -> bool {
-        if self.recent_request_ids.contains(&request_id.to_string()) {
+        if self.recent_request_ids_set.contains(request_id) {
             return true;
         }
-        if self.recent_request_ids.len() >= 100 {
-            self.recent_request_ids.pop_front();
+        if self.recent_request_ids.len() >= limits().recent_request_ids_capacity {
+            if let Some(evicted) = self.recent_request_ids.pop_front() {
+                self.recent_request_ids_set.remove(&evicted);
+            }
         }
         self.recent_request_ids.push_back(request_id.to_string());
+        self.recent_request_ids_set.insert(request_id.to_string());
         false
     }
 
@@ -204,7 +216,10 @@ impl ChatSession {
         }
         let insert_idx = index.min(self.messages.len());
         self.messages.insert(insert_idx, message.clone());
-        self.emit(ChatEvent::MessageAdded { message, index: insert_idx });
+        self.emit(ChatEvent::MessageAdded {
+            message,
+            index: insert_idx,
+        });
         self.increment_version();
         self.touch();
     }
@@ -236,7 +251,8 @@ impl ChatSession {
         {
             let msg = &self.messages[idx];
             let role = msg.role.clone();
-            let tool_call_ids: Vec<String> = msg.tool_calls
+            let tool_call_ids: Vec<String> = msg
+                .tool_calls
                 .as_ref()
                 .map(|tcs| tcs.iter().map(|tc| tc.id.clone()).collect())
                 .unwrap_or_default();
@@ -248,7 +264,8 @@ impl ChatSession {
             });
 
             if role == "assistant" && !tool_call_ids.is_empty() {
-                let tool_msg_ids: Vec<String> = self.messages
+                let tool_msg_ids: Vec<String> = self
+                    .messages
                     .iter()
                     .filter(|m| m.role == "tool" && tool_call_ids.contains(&m.tool_call_id))
                     .map(|m| m.message_id.clone())
@@ -280,7 +297,9 @@ impl ChatSession {
     }
 
     pub fn perform_skill_deactivation_cleanup(&mut self) {
-        let Some(pending) = self.pending_skill_deactivation.take() else { return };
+        let Some(pending) = self.pending_skill_deactivation.take() else {
+            return;
+        };
 
         if pending.start_index > self.messages.len() {
             warn!(
@@ -290,13 +309,17 @@ impl ChatSession {
             return;
         }
 
-        let activation_tool_message = pending.activation_tool_call_id.as_ref().and_then(|tool_id| {
-            self.messages
-                .iter()
-                .skip(pending.start_index)
-                .find(|msg| msg.role == "tool" && msg.tool_call_id == *tool_id)
-                .cloned()
-        });
+        let activation_tool_message =
+            pending
+                .activation_tool_call_id
+                .as_ref()
+                .and_then(|tool_id| {
+                    self.messages
+                        .iter()
+                        .skip(pending.start_index)
+                        .find(|msg| msg.role == "tool" && msg.tool_call_id == *tool_id)
+                        .cloned()
+                });
 
         if pending.start_index > self.messages.len() {
             warn!(
@@ -306,7 +329,10 @@ impl ChatSession {
             return;
         }
 
-        info!("Skill deactivation cleanup: compacting messages from index {} for skill '{}'", pending.start_index, pending.skill_name);
+        info!(
+            "Skill deactivation cleanup: compacting messages from index {} for skill '{}'",
+            pending.start_index, pending.skill_name
+        );
         self.truncate_messages(pending.start_index);
 
         if let Some(tool_message) = activation_tool_message {
@@ -373,7 +399,11 @@ impl ChatSession {
                 SessionState::Completed => "completed",
                 SessionState::Error => "error",
             };
-            let effective_root = self.thread.root_chat_id.clone().unwrap_or_else(|| self.chat_id.clone());
+            let effective_root = self
+                .thread
+                .root_chat_id
+                .clone()
+                .unwrap_or_else(|| self.chat_id.clone());
             let event = TrajectoryEvent {
                 event_type: "updated".to_string(),
                 id: self.chat_id.clone(),
@@ -421,7 +451,12 @@ impl ChatSession {
         });
     }
 
-    pub fn set_paused_with_reasons_and_auto_approved(&mut self, reasons: Vec<PauseReason>, auto_approved_ids: Vec<String>, message_index: Option<usize>) {
+    pub fn set_paused_with_reasons_and_auto_approved(
+        &mut self,
+        reasons: Vec<PauseReason>,
+        auto_approved_ids: Vec<String>,
+        message_index: Option<usize>,
+    ) {
         self.runtime.pause_reasons = reasons.clone();
         self.runtime.auto_approved_tool_ids = auto_approved_ids;
         self.runtime.accepted_tool_ids.clear();
@@ -604,7 +639,7 @@ impl ChatSession {
         self.draft_usage = None;
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<String>> {
         self.event_tx.subscribe()
     }
 
@@ -621,7 +656,11 @@ impl ChatSession {
             return;
         }
         if let Some(ref tx) = self.trajectory_events_tx {
-            let effective_root = self.thread.root_chat_id.clone().unwrap_or_else(|| self.chat_id.clone());
+            let effective_root = self
+                .thread
+                .root_chat_id
+                .clone()
+                .unwrap_or_else(|| self.chat_id.clone());
             let event = TrajectoryEvent {
                 event_type: "updated".to_string(),
                 id: self.chat_id.clone(),
@@ -732,7 +771,8 @@ pub async fn get_or_create_session_with_trajectory(
             &mut loaded.thread,
             loaded.auto_approve_editing_tools_present,
             loaded.auto_approve_dangerous_commands_present,
-        ).await;
+        )
+        .await;
         (
             ChatSession::new_with_trajectory(
                 chat_id.to_string(),
@@ -749,11 +789,14 @@ pub async fn get_or_create_session_with_trajectory(
     };
 
     if is_new {
+        session.thread.auto_enrichment_enabled = Some(true);
         if let Some(mode_config) = crate::yaml_configs::customization_registry::get_mode_config(
             gcx.clone(),
             &session.thread.mode,
             None,
-        ).await {
+        )
+        .await
+        {
             let defaults = &mode_config.thread_defaults;
             if let Some(v) = defaults.include_project_info {
                 session.thread.include_project_info = v;
@@ -780,9 +823,7 @@ pub async fn get_or_create_session_with_trajectory(
                 e.insert(arc.clone());
                 (arc, true)
             }
-            std::collections::hash_map::Entry::Occupied(e) => {
-                (e.get().clone(), false)
-            }
+            std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false),
         }
     };
 
@@ -818,10 +859,8 @@ pub async fn close_all_chat_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
         sessions_read.values().cloned().collect()
     };
     for session_arc in session_arcs {
-        let lock_result = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            session_arc.lock(),
-        ).await;
+        let lock_result =
+            tokio::time::timeout(std::time::Duration::from_millis(500), session_arc.lock()).await;
         match lock_result {
             Ok(mut session) => {
                 session.abort_stream();
@@ -831,8 +870,13 @@ pub async fn close_all_chat_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
             Err(_) => {
                 // Could not acquire lock within timeout — notify_waiters best-effort
                 // so the queue processor can eventually notice the shutdown flag.
-                warn!("close_all_chat_sessions: session lock timeout, notifying waiters without lock");
-                session_arc.try_lock().map(|s| s.queue_notify.notify_waiters()).ok();
+                warn!(
+                    "close_all_chat_sessions: session lock timeout, notifying waiters without lock"
+                );
+                session_arc
+                    .try_lock()
+                    .map(|s| s.queue_notify.notify_waiters())
+                    .ok();
             }
         }
     }
@@ -936,7 +980,7 @@ mod tests {
     /// triggering `RecvError::Lagged` quickly in tests without emitting
     /// thousands of events.
     fn make_session_with_capacity(capacity: usize) -> ChatSession {
-        let (event_tx, _) = broadcast::channel(capacity);
+        let (event_tx, _) = broadcast::channel::<Arc<String>>(capacity);
         let mut session = ChatSession::new("test-chat-small".to_string());
         session.event_tx = event_tx;
         session
@@ -993,7 +1037,8 @@ mod tests {
         let mut session = make_session();
         let mut rx = session.subscribe();
         session.emit(ChatEvent::PauseCleared {});
-        let envelope = rx.try_recv().unwrap();
+        let json = rx.try_recv().unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(envelope.chat_id, "test-chat");
         assert_eq!(envelope.seq, 1);
         assert!(matches!(envelope.event, ChatEvent::PauseCleared {}));
@@ -1292,9 +1337,11 @@ mod tests {
         session.finish_stream_with_error("error".into());
         assert!(session.messages.is_empty());
         let mut found_removed = false;
-        while let Ok(env) = rx.try_recv() {
-            if matches!(env.event, ChatEvent::MessageRemoved { .. }) {
-                found_removed = true;
+        while let Ok(json) = rx.try_recv() {
+            if let Ok(env) = serde_json::from_str::<EventEnvelope>(&json) {
+                if matches!(env.event, ChatEvent::MessageRemoved { .. }) {
+                    found_removed = true;
+                }
             }
         }
         assert!(found_removed);
@@ -1343,15 +1390,24 @@ mod tests {
             tool_call_id: "tc1".into(),
             integr_config_path: None,
         }];
-        session.set_paused_with_reasons_and_auto_approved(reasons.clone(), vec!["tc2".into()], Some(0));
+        session.set_paused_with_reasons_and_auto_approved(
+            reasons.clone(),
+            vec!["tc2".into()],
+            Some(0),
+        );
         assert_eq!(session.runtime.state, SessionState::Paused);
         assert_eq!(session.runtime.pause_reasons.len(), 1);
-        assert_eq!(session.runtime.auto_approved_tool_ids, vec!["tc2".to_string()]);
+        assert_eq!(
+            session.runtime.auto_approved_tool_ids,
+            vec!["tc2".to_string()]
+        );
         assert_eq!(session.runtime.paused_message_index, Some(0));
         let mut found_pause_required = false;
-        while let Ok(env) = rx.try_recv() {
-            if matches!(env.event, ChatEvent::PauseRequired { .. }) {
-                found_pause_required = true;
+        while let Ok(json) = rx.try_recv() {
+            if let Ok(env) = serde_json::from_str::<EventEnvelope>(&json) {
+                if matches!(env.event, ChatEvent::PauseRequired { .. }) {
+                    found_pause_required = true;
+                }
             }
         }
         assert!(found_pause_required);
@@ -1500,6 +1556,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("hello"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         session.command_queue.push_back(CommandRequest {
@@ -1552,6 +1610,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("test"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         let snap = session.snapshot();
@@ -1597,8 +1657,11 @@ mod tests {
         ]);
         session.finish_stream(Some("stop".to_string()));
 
-        assert_eq!(session.messages.len(), 1,
-            "Server-blocks-only assistant message should be preserved");
+        assert_eq!(
+            session.messages.len(),
+            1,
+            "Server-blocks-only assistant message should be preserved"
+        );
         assert_eq!(session.messages[0].server_content_blocks.len(), 2);
         assert_eq!(session.messages[0].role, "assistant");
     }
@@ -1610,8 +1673,11 @@ mod tests {
         // No deltas at all
         session.finish_stream(Some("stop".to_string()));
 
-        assert_eq!(session.messages.len(), 0,
-            "Truly empty assistant message should be discarded");
+        assert_eq!(
+            session.messages.len(),
+            0,
+            "Truly empty assistant message should be discarded"
+        );
     }
 
     /// Regression test: after a broadcast::Receiver lags, the handler must
@@ -1669,10 +1735,12 @@ mod tests {
         });
 
         // Step 6: the first event from fresh_rx must have seq == snapshot_seq + 1.
-        let envelope = fresh_rx
+        let json = fresh_rx
             .recv()
             .await
             .expect("fresh_rx should receive an event");
+
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
 
         assert_eq!(
             envelope.seq,
@@ -1697,7 +1765,11 @@ mod tests {
         for i in 0..MESSAGE_COUNT {
             session.add_message(ChatMessage {
                 message_id: format!("m{}", i),
-                role: if i % 2 == 0 { "user".to_string() } else { "assistant".to_string() },
+                role: if i % 2 == 0 {
+                    "user".to_string()
+                } else {
+                    "assistant".to_string()
+                },
                 content: ChatContent::SimpleText("x".repeat(MESSAGE_SIZE)),
                 ..Default::default()
             });
@@ -1807,7 +1879,10 @@ mod tests {
             started_at_index: None,
             activation_tool_call_id: None,
         };
-        assert_eq!(session.active_command.context_fork, Some("subagent".to_string()));
+        assert_eq!(
+            session.active_command.context_fork,
+            Some("subagent".to_string())
+        );
         assert_eq!(session.active_command.name, "my-agent");
         session.active_command = ActiveCommandContext::default();
         assert!(session.active_command.context_fork.is_none());
@@ -1885,9 +1960,21 @@ mod tests {
         let last = session.messages.last().unwrap();
         assert_eq!(last.role, "plain_text");
         if let crate::call_validation::ChatContent::SimpleText(ref text) = last.content {
-            assert!(text.contains("## Skill Report: my-skill"), "Report header missing: {}", text);
-            assert!(text.contains("Skill 'my-skill' executed successfully"), "Report preface missing: {}", text);
-            assert!(text.contains("Did useful things."), "Report body missing: {}", text);
+            assert!(
+                text.contains("## Skill Report: my-skill"),
+                "Report header missing: {}",
+                text
+            );
+            assert!(
+                text.contains("Skill 'my-skill' executed successfully"),
+                "Report preface missing: {}",
+                text
+            );
+            assert!(
+                text.contains("Did useful things."),
+                "Report body missing: {}",
+                text
+            );
         } else {
             panic!("Expected SimpleText content in report message");
         }
@@ -1940,8 +2027,15 @@ mod tests {
 
         session.perform_skill_deactivation_cleanup();
 
-        assert_eq!(session.messages.len(), 3, "Expected pre-skill + tool + report");
-        assert_eq!(session.messages[1].role, "tool", "Activation tool message must remain");
+        assert_eq!(
+            session.messages.len(),
+            3,
+            "Expected pre-skill + tool + report"
+        );
+        assert_eq!(
+            session.messages[1].role, "tool",
+            "Activation tool message must remain"
+        );
         assert_eq!(session.messages[1].tool_call_id, "call_activate_skill");
         assert_eq!(session.messages.last().unwrap().role, "plain_text");
     }
@@ -1990,7 +2084,11 @@ mod tests {
 
         session.perform_skill_deactivation_cleanup();
 
-        assert_eq!(session.messages.len(), 3, "Expected pre-skill + activation tool + report");
+        assert_eq!(
+            session.messages.len(),
+            3,
+            "Expected pre-skill + activation tool + report"
+        );
         assert_eq!(session.messages[1].tool_call_id, "call_activate_skill");
     }
 
@@ -2033,8 +2131,15 @@ mod tests {
         session.perform_skill_deactivation_cleanup();
 
         // No truncation, no report added — skipped with warning
-        assert_eq!(session.messages.len(), 1, "Messages must not be modified on bad index");
-        assert!(session.pending_skill_deactivation.is_none(), "pending must be consumed even on skip");
+        assert_eq!(
+            session.messages.len(),
+            1,
+            "Messages must not be modified on bad index"
+        );
+        assert!(
+            session.pending_skill_deactivation.is_none(),
+            "pending must be consumed even on skip"
+        );
     }
 
     #[test]
@@ -2053,6 +2158,53 @@ mod tests {
         assert!(
             session.thread.active_skill.is_none(),
             "active_skill must be cleared on restore: compaction anchor is lost after restart"
+        );
+    }
+
+    #[test]
+    fn test_emit_broadcast_is_valid_json() {
+        let mut session = make_session();
+        let mut rx = session.subscribe();
+        session.emit(ChatEvent::PauseCleared {});
+        let json = rx.try_recv().unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(envelope.chat_id, "test-chat");
+        assert_eq!(envelope.seq, 1);
+        assert!(matches!(envelope.event, ChatEvent::PauseCleared {}));
+    }
+
+    #[test]
+    fn test_emit_broadcast_multiple_subscribers_identical_payload() {
+        let mut session = make_session();
+        let mut rx1 = session.subscribe();
+        let mut rx2 = session.subscribe();
+        session.emit(ChatEvent::PauseCleared {});
+        let j1 = rx1.try_recv().unwrap();
+        let j2 = rx2.try_recv().unwrap();
+        assert_eq!(j1, j2);
+    }
+
+    #[test]
+    fn test_duplicate_request_hashset_stays_in_sync() {
+        let mut session = make_session();
+        assert!(!session.is_duplicate_request("req-x"));
+        assert!(session.recent_request_ids.contains(&"req-x".to_string()));
+        assert!(session.recent_request_ids_set.contains("req-x"));
+        assert!(session.is_duplicate_request("req-x"));
+    }
+
+    #[test]
+    fn test_duplicate_request_hashset_eviction_in_sync() {
+        let mut session = make_session();
+        for i in 0..100 {
+            session.is_duplicate_request(&format!("req-{}", i));
+        }
+        session.is_duplicate_request("req-100");
+        assert!(!session.recent_request_ids_set.contains("req-0"));
+        assert!(session.recent_request_ids_set.contains("req-100"));
+        assert_eq!(
+            session.recent_request_ids.len(),
+            session.recent_request_ids_set.len()
         );
     }
 }

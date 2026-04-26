@@ -37,11 +37,7 @@ fn responses_stateful_tail(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 }
 
 fn last_system_message(messages: &[ChatMessage]) -> Option<ChatMessage> {
-    messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "system")
-        .cloned()
+    messages.iter().rev().find(|m| m.role == "system").cloned()
 }
 
 pub struct PreparedChat {
@@ -174,10 +170,8 @@ pub async fn prepare_chat_passthrough(
             if last_msg.role == "assistant" {
                 if let Some(ref tool_calls) = last_msg.tool_calls {
                     // Verify these tool calls are pending (no tool results exist for them)
-                    let pending_call_ids: HashSet<String> = tool_calls
-                        .iter()
-                        .map(|tc| tc.id.clone())
-                        .collect();
+                    let pending_call_ids: HashSet<String> =
+                        tool_calls.iter().map(|tc| tc.id.clone()).collect();
                     let answered_call_ids: HashSet<String> = messages
                         .iter()
                         .filter(|m| m.role == "tool" || m.role == "diff")
@@ -190,7 +184,14 @@ pub async fn prepare_chat_passthrough(
                         .cloned()
                         .collect();
 
-                    if !unanswered_calls.is_empty() && pending_call_ids.len() == unanswered_calls.len() + answered_call_ids.iter().filter(|id| pending_call_ids.contains(*id)).count() {
+                    if !unanswered_calls.is_empty()
+                        && pending_call_ids.len()
+                            == unanswered_calls.len()
+                                + answered_call_ids
+                                    .iter()
+                                    .filter(|id| pending_call_ids.contains(*id))
+                                    .count()
+                    {
                         let mut prerun_thread = thread.clone();
                         prerun_thread.context_tokens_cap = Some(effective_n_ctx);
                         prerun_thread.model = model_id.to_string();
@@ -223,7 +224,10 @@ pub async fn prepare_chat_passthrough(
     let mut openai_tools: Vec<Value> = filtered_tools
         .iter()
         .map(|tool| {
-            let alias = alias_registry.get_alias(&tool.name).unwrap_or(&tool.name).to_string();
+            let alias = alias_registry
+                .get_alias(&tool.name)
+                .unwrap_or(&tool.name)
+                .to_string();
             let mut v = tool.clone().into_openai_style(strict_tools);
             if alias != tool.name {
                 if let Some(func) = v.get_mut("function") {
@@ -236,7 +240,9 @@ pub async fn prepare_chat_passthrough(
 
     // 6b. Enrich handoff_to_mode tool with dynamic mode list
     if options.supports_tools {
-        let handoff_alias = alias_registry.get_alias("handoff_to_mode").unwrap_or("handoff_to_mode");
+        let handoff_alias = alias_registry
+            .get_alias("handoff_to_mode")
+            .unwrap_or("handoff_to_mode");
         if let Some(idx) = openai_tools.iter().position(|t| {
             t.get("function")
                 .and_then(|f| f.get("name"))
@@ -244,7 +250,9 @@ pub async fn prepare_chat_passthrough(
                 .map(|n| n == handoff_alias)
                 .unwrap_or(false)
         }) {
-            if let Some(registry) = crate::yaml_configs::customization_registry::get_project_registry(gcx.clone()).await {
+            if let Some(registry) =
+                crate::yaml_configs::customization_registry::get_project_registry(gcx.clone()).await
+            {
                 let mut mode_lines = Vec::new();
                 let mut mode_ids = Vec::new();
                 let mut modes: Vec<_> = registry.modes.values().collect();
@@ -262,7 +270,11 @@ pub async fn prepare_chat_passthrough(
                     if desc.len() > 120 {
                         desc = format!("{}...", desc.chars().take(120).collect::<String>());
                     }
-                    mode_lines.push(format!("- {}: {}", mode.id, if desc.is_empty() { title } else { desc }));
+                    mode_lines.push(format!(
+                        "- {}: {}",
+                        mode.id,
+                        if desc.is_empty() { title } else { desc }
+                    ));
                     mode_ids.push(mode.id.clone());
                 }
                 let mode_list = mode_lines.join("\n");
@@ -275,10 +287,14 @@ pub async fn prepare_chat_passthrough(
                     if let Some(params) = func.get_mut("parameters") {
                         if let Some(props) = params.get_mut("properties") {
                             if let Some(target_mode) = props.get_mut("target_mode") {
-                                let desc = format!("Target mode ID. Available modes:\n{}", mode_list);
+                                let desc =
+                                    format!("Target mode ID. Available modes:\n{}", mode_list);
                                 target_mode["description"] = serde_json::Value::String(desc);
                                 target_mode["enum"] = serde_json::Value::Array(
-                                    mode_ids.into_iter().map(serde_json::Value::String).collect()
+                                    mode_ids
+                                        .into_iter()
+                                        .map(serde_json::Value::String)
+                                        .collect(),
                                 );
                             }
                         }
@@ -298,7 +314,10 @@ pub async fn prepare_chat_passthrough(
     // OpenAI Responses API stateful multi-turn: when we chain with previous_response_id,
     // we should send only the new tail items (tool outputs and/or new user message).
     if model_record.base.wire_format == WireFormat::OpenaiResponses
-        && thread.previous_response_id.as_ref().is_some_and(|s| !s.is_empty())
+        && thread
+            .previous_response_id
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
     {
         let tail = responses_stateful_tail(limited_adapted_msgs.clone());
         let mut stitched = Vec::new();
@@ -329,7 +348,7 @@ pub async fn prepare_chat_passthrough(
         ToolChoice::Function { name } => {
             let aliased_name = alias_registry.get_alias(name).unwrap_or(name).to_string();
             CanonicalToolChoice::Function { name: aliased_name }
-        },
+        }
     });
 
     let mut llm_request = LlmRequest::new(model_id.to_string(), limited_adapted_msgs.clone())
@@ -350,7 +369,9 @@ pub async fn prepare_chat_passthrough(
         llm_request = llm_request.with_meta(meta.clone());
     }
 
-    if model_record.base.id.starts_with("openrouter/") && !model_record.available_providers.is_empty() {
+    if model_record.base.id.starts_with("openrouter/")
+        && !model_record.available_providers.is_empty()
+    {
         if let Some(selected_provider) = model_record.selected_provider.as_ref() {
             let mut extra_body = llm_request.extra_body.unwrap_or_default();
             extra_body.insert(
@@ -375,7 +396,8 @@ fn adapt_sampling_for_reasoning_models(
     let user_set_max_tokens = sampling_parameters.max_new_tokens > 0;
 
     if !user_set_max_tokens {
-        sampling_parameters.max_new_tokens = model_record.default_max_tokens
+        sampling_parameters.max_new_tokens = model_record
+            .default_max_tokens
             .or(model_record.max_output_tokens)
             .unwrap_or(4096);
     }
@@ -532,7 +554,8 @@ mod tests {
         ChatModelRecord {
             base: Default::default(),
             default_temperature: Some(0.7),
-            reasoning_effort_options: effort_options.map(|opts| opts.into_iter().map(|s| s.to_string()).collect()),
+            reasoning_effort_options: effort_options
+                .map(|opts| opts.into_iter().map(|s| s.to_string()).collect()),
             ..Default::default()
         }
     }
@@ -551,7 +574,12 @@ mod tests {
             base: Default::default(),
             default_temperature: Some(0.7),
             supports_adaptive_thinking_budget: true,
-            reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string(), "max".to_string()]),
+            reasoning_effort_options: Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string(),
+            ]),
             ..Default::default()
         }
     }

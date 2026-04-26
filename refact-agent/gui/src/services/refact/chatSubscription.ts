@@ -37,8 +37,8 @@ export type ThreadParams = {
     card_id?: string;
   };
 
-  // OpenAI Responses API stateful multi-turn
   previous_response_id?: string;
+  auto_enrichment_enabled?: boolean | null;
 };
 
 export type PauseReason = {

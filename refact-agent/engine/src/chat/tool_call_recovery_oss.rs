@@ -59,7 +59,10 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-fn recover_function_style(content: &str, allowed: &HashSet<String>) -> Option<(String, Vec<Value>, &'static str)> {
+fn recover_function_style(
+    content: &str,
+    allowed: &HashSet<String>,
+) -> Option<(String, Vec<Value>, &'static str)> {
     // Collect all valid matches, then pick the one at the earliest position.
     // This avoids nondeterminism from HashSet iteration order when multiple
     // tools are in the allowed set.
@@ -112,7 +115,10 @@ fn recover_function_style(content: &str, allowed: &HashSet<String>) -> Option<(S
     best.map(|(_, clean, calls)| (clean, calls, "function_text_recovery"))
 }
 
-fn recover_fenced_json(content: &str, allowed: &HashSet<String>) -> Option<(String, Vec<Value>, &'static str)> {
+fn recover_fenced_json(
+    content: &str,
+    allowed: &HashSet<String>,
+) -> Option<(String, Vec<Value>, &'static str)> {
     let fence = content.find("```")?;
     let rest = &content[fence + 3..];
     let end = rest.find("```")?;
@@ -121,13 +127,15 @@ fn recover_fenced_json(content: &str, allowed: &HashSet<String>) -> Option<(Stri
     let candidate = &block[json_start..];
     let parsed: Value = serde_json::from_str(candidate).ok()?;
 
-    let name = parsed.get("tool")
+    let name = parsed
+        .get("tool")
         .or_else(|| parsed.get("name"))
         .and_then(|v| v.as_str())?;
     if !allowed.contains(name) {
         return None;
     }
-    let arguments = parsed.get("arguments")
+    let arguments = parsed
+        .get("arguments")
         .or_else(|| parsed.get("parameters"))
         .cloned()
         .unwrap_or_else(|| json!({}));
@@ -135,11 +143,20 @@ fn recover_fenced_json(content: &str, allowed: &HashSet<String>) -> Option<(Stri
         return None;
     }
     let arguments_str = serde_json::to_string(&arguments).ok()?;
-    let clean = format!("{}{}", &content[..fence], &rest[end + 3..]).trim().to_string();
-    Some((clean, vec![build_tool_call(name, &arguments_str)], "json_recovery"))
+    let clean = format!("{}{}", &content[..fence], &rest[end + 3..])
+        .trim()
+        .to_string();
+    Some((
+        clean,
+        vec![build_tool_call(name, &arguments_str)],
+        "json_recovery",
+    ))
 }
 
-fn recover_xml_tool(content: &str, allowed: &HashSet<String>) -> Option<(String, Vec<Value>, &'static str)> {
+fn recover_xml_tool(
+    content: &str,
+    allowed: &HashSet<String>,
+) -> Option<(String, Vec<Value>, &'static str)> {
     let tag_start = content.find("<tool")?;
     let tag_end = content[tag_start..].find('>')? + tag_start;
     let header = &content[tag_start..=tag_end];
@@ -156,7 +173,9 @@ fn recover_xml_tool(content: &str, allowed: &HashSet<String>) -> Option<(String,
     if !parsed.is_object() {
         return None;
     }
-    let clean = format!("{}{}", &content[..tag_start], &content[close + 7..]).trim().to_string();
+    let clean = format!("{}{}", &content[..tag_start], &content[close + 7..])
+        .trim()
+        .to_string();
     Some((clean, vec![build_tool_call(name, body)], "xml_recovery"))
 }
 
@@ -281,6 +300,9 @@ mod tests {
         let allowed = make_allowed(&["shell"]);
         let content = r#"shell({"command":"ls","workdir":"/tmp"})"#;
         let (clean, _, _) = recover_tool_calls_from_oss_text(content, &allowed).unwrap();
-        assert!(!clean.contains(')'), "clean content must not have stray closing paren");
+        assert!(
+            !clean.contains(')'),
+            "clean content must not have stray closing paren"
+        );
     }
 }

@@ -124,14 +124,17 @@ export async function sendUserMessage(
   port: number,
   apiKey?: string,
   priority?: boolean,
+  contextFiles?: unknown[],
+  suppressAutoEnrichment?: boolean,
 ): Promise<void> {
-  await sendChatCommand(
-    chatId,
-    port,
-    apiKey,
-    { type: "user_message", content },
-    priority,
-  );
+  const cmd: Record<string, unknown> = { type: "user_message", content };
+  if (contextFiles && contextFiles.length > 0) {
+    cmd.context_files = contextFiles;
+  }
+  if (suppressAutoEnrichment) {
+    cmd.suppress_auto_enrichment = true;
+  }
+  await sendChatCommand(chatId, port, apiKey, cmd as ChatCommandBase, priority);
 }
 
 export async function retryFromIndex(

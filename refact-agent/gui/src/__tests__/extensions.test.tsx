@@ -283,6 +283,7 @@ describe("Extensions", () => {
           ],
           slash_commands: [],
           hooks: [],
+          has_project_root: true,
         });
       }),
     );
@@ -309,5 +310,62 @@ describe("Extensions", () => {
     await waitFor(() => {
       expect(screen.queryByText("Confirm Delete")).toBeNull();
     });
+  });
+
+  it("opens dedicated skills marketplace from skills tab", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/ext/registry", () => {
+        return HttpResponse.json({
+          skills: [],
+          slash_commands: [],
+          hooks: [],
+          has_project_root: true,
+        });
+      }),
+    );
+
+    const { store } = render(
+      <Extensions
+        host="vscode"
+        tabbed={false}
+        backFromExtensions={() => undefined}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    const button = await screen.findByText("Browse Skills Marketplace");
+    fireEvent.click(button);
+
+    const pages = store.getState().pages;
+    expect(pages[pages.length - 1]).toEqual({ name: "skills marketplace" });
+  });
+
+  it("opens dedicated commands marketplace from commands tab", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/ext/registry", () => {
+        return HttpResponse.json({
+          skills: [],
+          slash_commands: [],
+          hooks: [],
+          has_project_root: true,
+        });
+      }),
+    );
+
+    const { store } = render(
+      <Extensions
+        host="vscode"
+        tabbed={false}
+        backFromExtensions={() => undefined}
+        initialTab="commands"
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    const button = await screen.findByText("Browse Commands Marketplace");
+    fireEvent.click(button);
+
+    const pages = store.getState().pages;
+    expect(pages[pages.length - 1]).toEqual({ name: "commands marketplace" });
   });
 });

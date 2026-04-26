@@ -130,10 +130,7 @@ pub fn apply_oauth_headers(headers: &mut HeaderMap, auth_token: &str) -> Result<
         HeaderValue::from_str(&format!("Bearer {}", auth_token))
             .map_err(|e| format!("invalid auth_token: {e}"))?,
     );
-    headers.insert(
-        "user-agent",
-        HeaderValue::from_static(USER_AGENT),
-    );
+    headers.insert("user-agent", HeaderValue::from_static(USER_AGENT));
     Ok(())
 }
 
@@ -204,32 +201,32 @@ pub fn build_oauth_url(endpoint: &str) -> String {
 /// ORDER: more specific names before shorter prefixes that would match them first.
 pub const CC_TOOL_RENAMES: &[(&str, &str)] = &[
     // File editing — specific variants before the base name
-    ("update_textdoc_by_lines",  "patch_ln"),
-    ("update_textdoc_anchored",  "patch_at"),
-    ("update_textdoc_regex",     "patch_re"),
-    ("update_textdoc",           "patch"),
-    ("create_textdoc",           "write"),
-    ("undo_textdoc",             "undo"),
+    ("update_textdoc_by_lines", "patch_ln"),
+    ("update_textdoc_anchored", "patch_at"),
+    ("update_textdoc_regex", "patch_re"),
+    ("update_textdoc", "patch"),
+    ("create_textdoc", "write"),
+    ("undo_textdoc", "undo"),
     // Orchestration
-    ("strategic_planning",       "plan"),
-    ("deep_research",            "research"),
-    ("code_review",              "review"),
-    ("subagent",                 "delegate"),
+    ("strategic_planning", "plan"),
+    ("deep_research", "research"),
+    ("code_review", "review"),
+    ("subagent", "delegate"),
     // Task management
-    ("tasks_set",                "set_tasks"),
-    ("task_done",                "finish"),
-    ("ask_questions",            "ask"),
+    ("tasks_set", "set_tasks"),
+    ("task_done", "finish"),
+    ("ask_questions", "ask"),
     // Context / compression
-    ("compress_chat_probe",      "ctx_probe"),
-    ("compress_chat_apply",      "ctx_apply"),
-    ("handoff_to_mode",          "switch_mode"),
+    ("compress_chat_probe", "ctx_probe"),
+    ("compress_chat_apply", "ctx_apply"),
+    ("handoff_to_mode", "switch_mode"),
     // Knowledge / memory
-    ("create_knowledge",         "save_knowledge"),
-    ("search_trajectories",      "hist_search"),
-    ("get_trajectory_context",   "hist_get"),
+    ("create_knowledge", "save_knowledge"),
+    ("search_trajectories", "hist_search"),
+    ("get_trajectory_context", "hist_get"),
     // Skills
-    ("activate_skill",           "load_skill"),
-    ("deactivate_skill",         "unload_skill"),
+    ("activate_skill", "load_skill"),
+    ("deactivate_skill", "unload_skill"),
 ];
 
 /// Rename a Refact base tool name to its CC-mode equivalent.
@@ -442,7 +439,11 @@ pub fn prepend_system(system: Value) -> Value {
 pub fn apply_cc_tool_names(tools: &mut Value) {
     if let Some(arr) = tools.as_array_mut() {
         for tool in arr {
-            if let Some(name) = tool.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()) {
+            if let Some(name) = tool
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string())
+            {
                 if name.starts_with(MCP_TOOL_PREFIX) {
                     continue; // already t_-prefixed — leave as-is
                 }
@@ -474,7 +475,11 @@ pub fn apply_cc_tool_use_in_messages(messages: &mut Value) {
                     if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
                         continue;
                     }
-                    let Some(name) = block.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()) else {
+                    let Some(name) = block
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                    else {
                         continue;
                     };
                     if name.starts_with(MCP_TOOL_PREFIX) {
@@ -707,16 +712,23 @@ mod tests {
         // Prefix is ONLY in block 0 — not also merged into block 1
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[0]["text"], SYSTEM_PREFIX);
-        assert_eq!(arr[1]["text"], "Be helpful",
-            "block 1 must not have the CC prefix prepended to it");
+        assert_eq!(
+            arr[1]["text"], "Be helpful",
+            "block 1 must not have the CC prefix prepended to it"
+        );
         assert_eq!(arr[2]["text"], "Also be brief");
         // Verify prefix doesn't appear in block 1
-        let full_text: String = arr.iter()
+        let full_text: String = arr
+            .iter()
             .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
             .collect::<Vec<_>>()
             .join("\n");
         let count = full_text.matches(SYSTEM_PREFIX).count();
-        assert_eq!(count, 1, "CC system prefix should appear exactly once, found {}", count);
+        assert_eq!(
+            count, 1,
+            "CC system prefix should appear exactly once, found {}",
+            count
+        );
     }
 
     #[test]
@@ -728,7 +740,10 @@ mod tests {
     #[test]
     fn test_build_oauth_url_with_existing_params() {
         let url = build_oauth_url("https://api.anthropic.com/v1/messages?foo=bar");
-        assert_eq!(url, "https://api.anthropic.com/v1/messages?foo=bar&beta=true");
+        assert_eq!(
+            url,
+            "https://api.anthropic.com/v1/messages?foo=bar&beta=true"
+        );
     }
 
     #[test]
@@ -743,11 +758,11 @@ mod tests {
         ]);
         apply_cc_tool_names(&mut tools);
         let arr = tools.as_array().unwrap();
-        assert_eq!(arr[0]["name"], "t_search");           // no rename entry → t_ prefix
-        assert_eq!(arr[1]["name"], "t_plan");             // renamed strategic_planning → t_plan
+        assert_eq!(arr[0]["name"], "t_search"); // no rename entry → t_ prefix
+        assert_eq!(arr[1]["name"], "t_plan"); // renamed strategic_planning → t_plan
         assert_eq!(arr[2]["name"], "t_already_prefixed"); // already t_-prefixed → untouched
-        assert_eq!(arr[3]["name"], "tool_search");        // mcp_ stripped → bare name
-        assert_eq!(arr[4]["name"], "github_create_issue");// mcp_ stripped → bare name
+        assert_eq!(arr[3]["name"], "tool_search"); // mcp_ stripped → bare name
+        assert_eq!(arr[4]["name"], "github_create_issue"); // mcp_ stripped → bare name
     }
 
     #[test]
@@ -766,10 +781,10 @@ mod tests {
         ]);
         apply_cc_tool_use_in_messages(&mut messages);
         let content = &messages[0]["content"];
-        assert_eq!(content[1]["name"], "t_search");  // prefix only (unprefixed → t_)
-        assert_eq!(content[2]["name"], "t_plan");    // rename + prefix
+        assert_eq!(content[1]["name"], "t_search"); // prefix only (unprefixed → t_)
+        assert_eq!(content[2]["name"], "t_plan"); // rename + prefix
         assert_eq!(content[3]["name"], "t_already"); // already t_-prefixed, no rename entry → unchanged
-        assert_eq!(content[4]["name"], "t_plan");    // old-style t_strategic_planning → t_plan
+        assert_eq!(content[4]["name"], "t_plan"); // old-style t_strategic_planning → t_plan
     }
 
     #[test]
@@ -777,7 +792,10 @@ mod tests {
         // t_-prefixed Refact builtins → original name
         assert_eq!(cc_resolve_tool_name("t_plan"), "strategic_planning");
         assert_eq!(cc_resolve_tool_name("t_patch_re"), "update_textdoc_regex");
-        assert_eq!(cc_resolve_tool_name("t_patch_ln"), "update_textdoc_by_lines");
+        assert_eq!(
+            cc_resolve_tool_name("t_patch_ln"),
+            "update_textdoc_by_lines"
+        );
         assert_eq!(cc_resolve_tool_name("t_delegate"), "subagent");
         assert_eq!(cc_resolve_tool_name("t_ctx_probe"), "compress_chat_probe");
         // Non-renamed builtins: just strip t_ prefix
@@ -785,7 +803,10 @@ mod tests {
         assert_eq!(cc_resolve_tool_name("t_tree"), "tree");
         // Bare names (real MCP tools with mcp_ stripped outbound) → re-add mcp_ for dispatch
         assert_eq!(cc_resolve_tool_name("tool_search"), "mcp_tool_search");
-        assert_eq!(cc_resolve_tool_name("github_create_issue"), "mcp_github_create_issue");
+        assert_eq!(
+            cc_resolve_tool_name("github_create_issue"),
+            "mcp_github_create_issue"
+        );
         // Bare builtin names (no t_ prefix, no mcp_ prefix) → re-add mcp_ as fallback
         // (dispatch will try original name first anyway, so this is a safety net)
         assert_eq!(cc_resolve_tool_name("cat"), "mcp_cat");
@@ -797,7 +818,10 @@ mod tests {
             {"role": "system", "content": "system stuff"},
             {"role": "user", "content": "hello world, this is a test message"},
         ]);
-        assert_eq!(extract_first_user_text(&messages), "hello world, this is a test message");
+        assert_eq!(
+            extract_first_user_text(&messages),
+            "hello world, this is a test message"
+        );
     }
 
     #[test]
@@ -807,7 +831,10 @@ mod tests {
                 {"type": "text", "text": "hello from array content"}
             ]}
         ]);
-        assert_eq!(extract_first_user_text(&messages), "hello from array content");
+        assert_eq!(
+            extract_first_user_text(&messages),
+            "hello from array content"
+        );
     }
 
     #[test]
@@ -853,7 +880,10 @@ mod tests {
         inject_billing_block(&mut body);
         let sys = body["system"].as_array().unwrap();
         assert_eq!(sys.len(), 2);
-        assert!(sys[0]["text"].as_str().unwrap().starts_with("x-anthropic-billing-header:"));
+        assert!(sys[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("x-anthropic-billing-header:"));
         assert_eq!(sys[1]["text"], "Be helpful.");
     }
 
@@ -865,7 +895,10 @@ mod tests {
         inject_billing_block(&mut body);
         let sys = body["system"].as_array().unwrap();
         assert_eq!(sys.len(), 1);
-        assert!(sys[0]["text"].as_str().unwrap().starts_with("x-anthropic-billing-header:"));
+        assert!(sys[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("x-anthropic-billing-header:"));
     }
 
     #[test]
@@ -885,8 +918,14 @@ mod tests {
         let text = out.as_str().unwrap();
         assert!(!text.contains("[mode3]"), "mode tag should be stripped");
         assert!(!text.contains("Refact"), "Refact brand should be stripped");
-        assert!(text.contains("You are Claude Code"), "CC identity should be present");
-        assert!(text.contains("Your job is to help"), "rest of prompt preserved");
+        assert!(
+            text.contains("You are Claude Code"),
+            "CC identity should be present"
+        );
+        assert!(
+            text.contains("Your job is to help"),
+            "rest of prompt preserved"
+        );
     }
 
     #[test]
@@ -912,8 +951,15 @@ mod tests {
         let sys = json!("Use Refactor to rename symbols. Refact Agent is the tool.");
         let out = sanitize_system_for_cc(sys);
         let text = out.as_str().unwrap();
-        assert!(text.contains("Refactor"), "Refactor should be preserved: {}", text);
-        assert!(!text.contains("Refact Agent"), "Refact Agent should be replaced");
+        assert!(
+            text.contains("Refactor"),
+            "Refactor should be preserved: {}",
+            text
+        );
+        assert!(
+            !text.contains("Refact Agent"),
+            "Refact Agent should be replaced"
+        );
     }
 
     #[test]
@@ -946,10 +992,15 @@ mod tests {
         let tool = &tools[0];
         assert!(tool.get("description").is_none());
         assert!(tool["input_schema"].get("description").is_none());
-        assert!(tool["input_schema"]["properties"]["paths"].get("description").is_none());
+        assert!(tool["input_schema"]["properties"]["paths"]
+            .get("description")
+            .is_none());
         // name and schema structure preserved
         assert_eq!(tool["name"], "t_cat");
-        assert_eq!(tool["input_schema"]["properties"]["paths"]["type"], "string");
+        assert_eq!(
+            tool["input_schema"]["properties"]["paths"]["type"],
+            "string"
+        );
     }
 
     #[test]
@@ -979,11 +1030,19 @@ mod tests {
         inject_cc_tool_stubs(&mut tools);
         let arr = tools.as_array().unwrap();
         // CC stubs at positions 0-4 have descriptions
-        assert!(arr[0].get("description").is_some(), "Glob stub should have description");
+        assert!(
+            arr[0].get("description").is_some(),
+            "Glob stub should have description"
+        );
         assert_eq!(arr[0]["name"], "Glob");
         // Original t_ tool at position 5 has no description
-        assert!(arr[5].get("description").is_none(), "t_cat should not have description");
-        assert!(arr[5]["input_schema"]["properties"]["paths"].get("description").is_none());
+        assert!(
+            arr[5].get("description").is_none(),
+            "t_cat should not have description"
+        );
+        assert!(arr[5]["input_schema"]["properties"]["paths"]
+            .get("description")
+            .is_none());
     }
 
     #[test]
@@ -1009,8 +1068,14 @@ mod tests {
         assert_eq!(cc_resolve_tool_name("t_write"), "create_textdoc");
         assert_eq!(cc_resolve_tool_name("t_patch"), "update_textdoc");
         assert_eq!(cc_resolve_tool_name("t_patch_re"), "update_textdoc_regex");
-        assert_eq!(cc_resolve_tool_name("t_patch_ln"), "update_textdoc_by_lines");
-        assert_eq!(cc_resolve_tool_name("t_patch_at"), "update_textdoc_anchored");
+        assert_eq!(
+            cc_resolve_tool_name("t_patch_ln"),
+            "update_textdoc_by_lines"
+        );
+        assert_eq!(
+            cc_resolve_tool_name("t_patch_at"),
+            "update_textdoc_anchored"
+        );
         assert_eq!(cc_resolve_tool_name("t_undo"), "undo_textdoc");
         assert_eq!(cc_resolve_tool_name("t_finish"), "task_done");
         assert_eq!(cc_resolve_tool_name("t_ask"), "ask_questions");
@@ -1030,8 +1095,14 @@ mod tests {
     #[test]
     fn test_cc_resolve_real_mcp_tools_re_add_mcp_prefix() {
         assert_eq!(cc_resolve_tool_name("tool_search"), "mcp_tool_search");
-        assert_eq!(cc_resolve_tool_name("github_create_issue"), "mcp_github_create_issue");
-        assert_eq!(cc_resolve_tool_name("github_create_pull_request"), "mcp_github_create_pull_request");
+        assert_eq!(
+            cc_resolve_tool_name("github_create_issue"),
+            "mcp_github_create_issue"
+        );
+        assert_eq!(
+            cc_resolve_tool_name("github_create_pull_request"),
+            "mcp_github_create_pull_request"
+        );
         assert_eq!(cc_resolve_tool_name("postgres_query"), "mcp_postgres_query");
     }
 

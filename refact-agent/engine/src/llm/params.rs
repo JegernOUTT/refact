@@ -126,7 +126,10 @@ mod tests {
         assert_eq!(ReasoningIntent::Off.to_anthropic_effort(), None);
         assert_eq!(ReasoningIntent::NoReasoning.to_anthropic_effort(), None);
         assert_eq!(ReasoningIntent::Low.to_anthropic_effort(), Some("low"));
-        assert_eq!(ReasoningIntent::Medium.to_anthropic_effort(), Some("medium"));
+        assert_eq!(
+            ReasoningIntent::Medium.to_anthropic_effort(),
+            Some("medium")
+        );
         assert_eq!(ReasoningIntent::High.to_anthropic_effort(), Some("high"));
         assert_eq!(ReasoningIntent::XHigh.to_anthropic_effort(), Some("xhigh"));
         assert_eq!(ReasoningIntent::Max.to_anthropic_effort(), Some("max"));

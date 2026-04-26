@@ -108,7 +108,10 @@ pub async fn stop_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
     let results = futures::future::join_all(futures).await;
     for result in results {
         if result.is_err() {
-            tracing::warn!("stop_sessions: a session did not stop within {:?}, continuing shutdown", STOP_SESSION_TIMEOUT);
+            tracing::warn!(
+                "stop_sessions: a session did not stop within {:?}, continuing shutdown",
+                STOP_SESSION_TIMEOUT
+            );
         }
     }
 }

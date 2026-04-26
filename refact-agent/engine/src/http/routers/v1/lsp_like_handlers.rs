@@ -67,7 +67,14 @@ pub async fn handle_v1_lsp_initialize(
         }
         n
     } else {
-        global_context.read().await.documents_state.workspace_files.lock().unwrap().len() as i32
+        global_context
+            .read()
+            .await
+            .documents_state
+            .workspace_files
+            .lock()
+            .unwrap()
+            .len() as i32
     };
 
     Ok(Response::builder()
@@ -85,7 +92,10 @@ pub async fn handle_v1_lsp_did_change(
     let post = serde_json::from_slice::<LspLikeDidChange>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     let file_path = post.uri.to_file_path().map_err(|_| {
-        ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", post.uri))
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("not a file:// URI: {}", post.uri),
+        )
     })?;
     let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     files_in_workspace::on_did_change(global_context.clone(), &cpath, &post.text).await;
@@ -102,7 +112,10 @@ pub async fn handle_v1_set_active_document(
     let post = serde_json::from_slice::<LspLikeSetActiveDocument>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     let file_path = post.uri.to_file_path().map_err(|_| {
-        ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", post.uri))
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("not a file:// URI: {}", post.uri),
+        )
     })?;
     let path = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     tracing::info!(
@@ -127,7 +140,10 @@ pub async fn handle_v1_lsp_add_folder(
     let post = serde_json::from_slice::<LspLikeAddFolder>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     let file_path = post.uri.to_file_path().map_err(|_| {
-        ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", post.uri))
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("not a file:// URI: {}", post.uri),
+        )
     })?;
     let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     files_in_workspace::add_folder(global_context.clone(), &cpath).await;
@@ -147,7 +163,10 @@ pub async fn handle_v1_lsp_remove_folder(
     let post = serde_json::from_slice::<LspLikeAddFolder>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     let file_path = post.uri.to_file_path().map_err(|_| {
-        ScratchError::new(StatusCode::BAD_REQUEST, format!("not a file:// URI: {}", post.uri))
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("not a file:// URI: {}", post.uri),
+        )
     })?;
     let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     files_in_workspace::remove_folder(global_context.clone(), &cpath).await;

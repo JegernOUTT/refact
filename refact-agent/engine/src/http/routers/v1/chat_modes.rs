@@ -9,7 +9,9 @@ use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_registry::load_merged_registry;
-use crate::yaml_configs::project_configs_bootstrap::{global_configs_try_create_all, project_configs_ensure_dirs};
+use crate::yaml_configs::project_configs_bootstrap::{
+    global_configs_try_create_all, project_configs_ensure_dirs,
+};
 
 #[derive(Serialize)]
 pub struct ChatModesResponse {
@@ -48,13 +50,22 @@ pub struct ChatModeError {
 }
 
 fn json_response<T: Serialize>(data: &T) -> Result<Response<Body>, ScratchError> {
-    let body = serde_json::to_string(data)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e)))?;
+    let body = serde_json::to_string(data).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization error: {}", e),
+        )
+    })?;
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .body(Body::from(body))
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Response build error: {}", e)))
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Response build error: {}", e),
+            )
+        })
 }
 
 pub async fn handle_v1_chat_modes(
@@ -70,18 +81,30 @@ pub async fn handle_v1_chat_modes(
     }
     let registry = load_merged_registry(&config_dir, project_root.as_deref()).await;
 
-    let mut modes: Vec<ChatModeInfo> = registry.modes.values()
+    let mut modes: Vec<ChatModeInfo> = registry
+        .modes
+        .values()
         .filter(|m| !m.specific)
         .map(|m| ChatModeInfo {
             id: m.id.clone(),
-            title: if m.title.is_empty() { m.id.clone() } else { m.title.clone() },
+            title: if m.title.is_empty() {
+                m.id.clone()
+            } else {
+                m.title.clone()
+            },
             description: m.description.clone(),
             tools_count: m.tools.len(),
             thread_defaults: ChatModeThreadDefaults {
                 include_project_info: m.thread_defaults.include_project_info.unwrap_or(true),
                 checkpoints_enabled: m.thread_defaults.checkpoints_enabled.unwrap_or(true),
-                auto_approve_editing_tools: m.thread_defaults.auto_approve_editing_tools.unwrap_or(false),
-                auto_approve_dangerous_commands: m.thread_defaults.auto_approve_dangerous_commands.unwrap_or(false),
+                auto_approve_editing_tools: m
+                    .thread_defaults
+                    .auto_approve_editing_tools
+                    .unwrap_or(false),
+                auto_approve_dangerous_commands: m
+                    .thread_defaults
+                    .auto_approve_dangerous_commands
+                    .unwrap_or(false),
             },
             ui: ChatModeUi {
                 order: m.ui.order.unwrap_or(100),
@@ -94,10 +117,14 @@ pub async fn handle_v1_chat_modes(
 
     let response = ChatModesResponse {
         modes,
-        errors: registry.errors.iter().map(|e| ChatModeError {
-            file_path: e.file_path.clone(),
-            error: e.error.clone(),
-        }).collect(),
+        errors: registry
+            .errors
+            .iter()
+            .map(|e| ChatModeError {
+                file_path: e.file_path.clone(),
+                error: e.error.clone(),
+            })
+            .collect(),
     };
 
     json_response(&response)

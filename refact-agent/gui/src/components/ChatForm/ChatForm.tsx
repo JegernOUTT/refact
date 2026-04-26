@@ -54,6 +54,8 @@ import {
   AgentIntegrationsButton,
   UnifiedSendButton,
   BrowserToggleButton,
+  WandButton,
+  AutoEnrichmentToggleButton,
 } from "../Buttons";
 import {
   StreamingTokenCounter,
@@ -72,6 +74,7 @@ import {
   useCapsForToolUse,
   useAutoFocusOnce,
   useChatActions,
+  useFirstSendAutoFlip,
 } from "../../hooks";
 import { ErrorCallout, Callout } from "../Callout";
 import { ComboBox } from "../ComboBox";
@@ -113,6 +116,8 @@ import {
   selectQueuedItems,
   selectThreadImages,
   selectThreadMode,
+  selectManualPreviewItems,
+  removeManualPreviewItem,
   setThreadMode,
   DEFAULT_MODE,
 } from "../../features/Chat";
@@ -160,8 +165,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const messages = useAppSelector(selectMessages);
   const queuedItems = useAppSelector(selectQueuedItems);
   const threadMode = useAppSelector(selectThreadMode);
+  const manualPreviewItems = useAppSelector(selectManualPreviewItems);
   const autoFocus = useAutoFocusOnce();
   const { abort, regenerate } = useChatActions();
+  useFirstSendAutoFlip();
 
   const onSetMode = useCallback(
     (
@@ -509,6 +516,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               <UnifiedAttachmentsTray
                 attachedFiles={attachedFiles}
                 previewFiles={previewFiles}
+                manualPreviewItems={manualPreviewItems}
+                onRemoveManualPreviewItem={
+                  chatId
+                    ? (index) =>
+                        dispatch(removeManualPreviewItem({ chatId, index }))
+                    : undefined
+                }
                 onOpenFile={queryPathThenOpenFile}
               />
               <Flex align="center" gap="2" justify="between" wrap="wrap">
@@ -574,6 +588,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
             <Flex justify="end" flexGrow="1" wrap="wrap" gap="2" align="center">
               <BrowserToggleButton chatId={chatId} />
+              <AutoEnrichmentToggleButton disabled={isStreaming || isWaiting} />
+              <WandButton
+                currentText={value}
+                disabled={isStreaming || isWaiting}
+                onUpdateText={handleChange}
+              />
               <AgentIntegrationsButton
                 title="Set up Agent Integrations"
                 onClick={handleAgentIntegrationsClick}

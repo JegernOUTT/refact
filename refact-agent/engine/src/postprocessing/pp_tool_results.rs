@@ -210,15 +210,18 @@ fn is_web_search_tool_message(msg: &ChatMessage, existing_messages: &[ChatMessag
             .tool_calls
             .as_ref()
             .map(|calls| {
-                calls.iter().any(|call| {
-                    call.id == msg.tool_call_id && call.function.name == "web_search"
-                })
+                calls
+                    .iter()
+                    .any(|call| call.id == msg.tool_call_id && call.function.name == "web_search")
             })
             .unwrap_or(false)
     })
 }
 
-fn deduplicate_web_search_tool_results(result: &mut [ChatMessage], existing_messages: &[ChatMessage]) {
+fn deduplicate_web_search_tool_results(
+    result: &mut [ChatMessage],
+    existing_messages: &[ChatMessage],
+) {
     for msg in result.iter_mut() {
         if !is_web_search_tool_message(msg, existing_messages) {
             continue;
@@ -528,11 +531,17 @@ async fn fill_skip_pp_files_with_budget(
     let max_files_by_budget = tokens_limit / MIN_PER_FILE_BUDGET;
     let files_to_skip = files.len().saturating_sub(max_files_by_budget);
     let files: Vec<_> = files.into_iter().take(max_files_by_budget).collect();
-    
+
     if files.is_empty() {
-        return (vec![], vec![format!("⚠️ {} files skipped due to token budget constraints", files_to_skip)]);
+        return (
+            vec![],
+            vec![format!(
+                "⚠️ {} files skipped due to token budget constraints",
+                files_to_skip
+            )],
+        );
     }
-    
+
     let per_file_budget = (tokens_limit / files.len()).min(MAX_PER_FILE_BUDGET);
     let mut result = Vec::new();
     let mut notes = Vec::new();
@@ -574,7 +583,9 @@ async fn fill_skip_pp_files_with_budget(
                     } else {
                         format!("{}\n{}", truncated, line)
                     };
-                    if count_text_tokens_with_fallback(tokenizer.clone(), &candidate) > per_file_budget {
+                    if count_text_tokens_with_fallback(tokenizer.clone(), &candidate)
+                        > per_file_budget
+                    {
                         if !truncated.is_empty() {
                             truncated.push_str("\n\n... (content truncated to fit token budget)");
                         }
@@ -897,7 +908,8 @@ mod tests {
         results: Vec<SearchResult>,
     ) -> ChatMessage {
         let mut msg = make_tool_message(content, tool_call_id);
-        msg.extra.insert("search_results".to_string(), serde_json::json!(results));
+        msg.extra
+            .insert("search_results".to_string(), serde_json::json!(results));
         msg
     }
 

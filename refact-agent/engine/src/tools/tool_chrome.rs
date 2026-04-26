@@ -30,7 +30,6 @@ use std::path::PathBuf;
 use headless_chrome::Tab as HeadlessTab;
 use headless_chrome::browser::tab::point::Point;
 
-
 use headless_chrome::protocol::cdp::Emulation;
 use headless_chrome::protocol::cdp::types::Event;
 
@@ -145,7 +144,6 @@ impl IntegrationSession for ChromeSession {
     }
 }
 
-
 #[async_trait]
 impl Tool for ToolChrome {
     async fn tool_execute(
@@ -160,8 +158,13 @@ impl Tool for ToolChrome {
         };
 
         let session_hashmap_key = get_session_hashmap_key("chrome", &chat_id);
-        let mut tool_log =
-            setup_chrome_session(gcx.clone(), &self.settings_chrome, &session_hashmap_key, &chat_id).await?;
+        let mut tool_log = setup_chrome_session(
+            gcx.clone(),
+            &self.settings_chrome,
+            &session_hashmap_key,
+            &chat_id,
+        )
+        .await?;
 
         let command_session = {
             let gcx_locked = gcx.read().await;
@@ -205,10 +208,12 @@ impl Tool for ToolChrome {
                     .browser_runtimes
                     .get(&runtime_id)
                     .cloned()
-                    .ok_or_else(|| format!(
-                        "BrowserRuntime {} not found. Browser may have been closed.",
-                        runtime_id
-                    ))?
+                    .ok_or_else(|| {
+                        format!(
+                            "BrowserRuntime {} not found. Browser may have been closed.",
+                            runtime_id
+                        )
+                    })?
             };
 
             match browser_controller::execute_request_with_runtime(runtime_arc, request).await {
@@ -523,11 +528,7 @@ async fn setup_chrome_session(
 
     let runtime = if args.chrome_path.starts_with("ws://") {
         setup_log.push("Connect to existing web socket.".to_string());
-        BrowserRuntime::connect(
-            args.chrome_path.clone(),
-            Some(idle_browser_timeout),
-            true,
-        )?
+        BrowserRuntime::connect(args.chrome_path.clone(), Some(idle_browser_timeout), true)?
     } else if let Some(container_address) = args.chrome_path.strip_prefix("container://") {
         setup_log.push("Connect to chrome from container.".to_string());
         let response = reqwest::get(&format!("http://{container_address}/json"))
@@ -551,11 +552,7 @@ async fn setup_chrome_session(
             ws_url_parts[2] = container_address;
         }
         let ws_url = ws_url_parts.join("/");
-        BrowserRuntime::connect(
-            ws_url,
-            Some(idle_browser_timeout),
-            true,
-        )?
+        BrowserRuntime::connect(ws_url, Some(idle_browser_timeout), true)?
     } else {
         let chrome_path = if args.chrome_path.is_empty() {
             None
@@ -648,10 +645,12 @@ async fn session_open_tab(
                     gcx_locked
                         .browser_runtimes
                         .get(&chrome_session.runtime_id)
-                        .ok_or_else(|| format!(
-                            "BrowserRuntime {} not found. Browser may have been closed.",
-                            chrome_session.runtime_id
-                        ))?
+                        .ok_or_else(|| {
+                            format!(
+                                "BrowserRuntime {} not found. Browser may have been closed.",
+                                chrome_session.runtime_id
+                            )
+                        })?
                         .clone()
                 };
                 let runtime_lock = runtime_arc.lock().await;
@@ -716,7 +715,10 @@ async fn session_open_tab(
                 .add_event_listener(Arc::new(move |event: &Event| {
                     if let Event::LogEntryAdded(e) = event {
                         let ts_raw = e.params.entry.timestamp;
-                        let formatted_ts = crate::integrations::browser_runtime::normalize_timestamp_ms_opt(ts_raw)
+                        let formatted_ts =
+                            crate::integrations::browser_runtime::normalize_timestamp_ms_opt(
+                                ts_raw,
+                            )
                             .and_then(|ms| DateTime::from_timestamp_millis(ms as i64))
                             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                             .unwrap_or_else(|| format!("ts={}", ts_raw));
@@ -737,7 +739,11 @@ async fn session_open_tab(
             drop(tab_lock);
             {
                 let gcx_locked = gcx.read().await;
-                if let Some(rt_arc) = gcx_locked.browser_runtimes.get(&chrome_session.runtime_id).cloned() {
+                if let Some(rt_arc) = gcx_locked
+                    .browser_runtimes
+                    .get(&chrome_session.runtime_id)
+                    .cloned()
+                {
                     let mut rt = rt_arc.lock().await;
                     let _ = setup_recording_for_tab(&mut rt, &runtime_tab);
                     rt.set_active_tab_target_id(target_id.clone());
@@ -811,10 +817,7 @@ async fn execute_via_controller(
                 } else {
                     format!("Available tabs: {:?}.", available)
                 };
-                return Err(format!(
-                    "Tab '{}' not found. {}",
-                    tab_id, suggestion
-                ));
+                return Err(format!("Tab '{}' not found. {}", tab_id, suggestion));
             }
         }
     };
@@ -838,7 +841,8 @@ async fn execute_via_controller(
         }
     }
 
-    let report = tokio::task::block_in_place(|| browser_controller::execute_steps(&*headless_tab, &steps));
+    let report =
+        tokio::task::block_in_place(|| browser_controller::execute_steps(&*headless_tab, &steps));
 
     {
         let runtime_id = {
@@ -891,10 +895,9 @@ fn format_controller_report(
                 if mime.starts_with("image/") {
                     match resize_screenshot_b64(b64_data) {
                         Ok(resized) => {
-                            if let Ok(el) = MultimodalElement::new(
-                                "image/jpeg".to_string(),
-                                resized,
-                            ) {
+                            if let Ok(el) =
+                                MultimodalElement::new("image/jpeg".to_string(), resized)
+                            {
                                 multimodal.push(el);
                             }
                         }
@@ -955,12 +958,14 @@ fn execution_report_to_multimodal(
 fn strip_image_data_for_text(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
-            let is_image = map.get("mime")
+            let is_image = map
+                .get("mime")
                 .and_then(|v| v.as_str())
                 .map(|m| m.starts_with("image/"))
                 .unwrap_or(false);
             if is_image {
-                let b64_len = map.get("data")
+                let b64_len = map
+                    .get("data")
                     .and_then(|v| v.as_str())
                     .map(|s| s.len())
                     .unwrap_or(0);
@@ -995,7 +1000,9 @@ fn resize_screenshot_b64(b64_data: &str) -> Result<String, String> {
         .map_err(|e| format!("Base64 decode failed: {}", e))?;
 
     let reader = ImageReader::with_format(Cursor::new(&raw), ImageFormat::Jpeg);
-    let mut image = reader.decode().map_err(|e| format!("Image decode failed: {}", e))?;
+    let mut image = reader
+        .decode()
+        .map_err(|e| format!("Image decode failed: {}", e))?;
 
     let max_dim = 800.0f32;
     let scale = max_dim / std::cmp::max(image.width(), image.height()) as f32;
@@ -1140,16 +1147,13 @@ async fn chrome_command_exec(
                     Ok::<(), String>(())
                 } {
                     Ok(_) => {
-                        format!(
-                            "clicked `{} {}` at {}",
-                            x, y,
-                            tab_lock.state_string()
-                        )
+                        format!("clicked `{} {}` at {}", x, y, tab_lock.state_string())
                     }
                     Err(e) => {
                         format!(
                             "clicked `{} {}` failed at {}: {}",
-                            x, y,
+                            x,
+                            y,
                             tab_lock.state_string(),
                             e
                         )
@@ -1174,11 +1178,7 @@ async fn chrome_command_exec(
                         format!("type `{}` at {}", text, tab_lock.state_string())
                     }
                     Err(e) => {
-                        format!(
-                            "type text failed at {}: {}",
-                            tab_lock.state_string(),
-                            e
-                        )
+                        format!("type text failed at {}: {}", tab_lock.state_string(), e)
                     }
                 }
             };
@@ -1191,22 +1191,41 @@ async fn chrome_command_exec(
                     .as_any_mut()
                     .downcast_mut::<ChromeSession>()
                     .ok_or("Failed to downcast to ChromeSession")?;
-                let tabs: Vec<(String, Arc<AMutex<ChromeTab>>)> = cs.tabs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let tabs: Vec<(String, Arc<AMutex<ChromeTab>>)> = cs
+                    .tabs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 (tabs, cs.runtime_id.clone())
             };
             let runtime_tabs = {
                 let gcx_locked = gcx.read().await;
                 if let Some(rt_arc) = gcx_locked.browser_runtimes.get(&runtime_id).cloned() {
                     let rt = rt_arc.lock().await;
-                    rt.browser.get_tabs().lock()
-                        .map(|tabs| tabs.iter().map(|t| (t.get_target_id().to_string(), t.get_url(), t.get_title().unwrap_or_default())).collect::<Vec<_>>())
+                    rt.browser
+                        .get_tabs()
+                        .lock()
+                        .map(|tabs| {
+                            tabs.iter()
+                                .map(|t| {
+                                    (
+                                        t.get_target_id().to_string(),
+                                        t.get_url(),
+                                        t.get_title().unwrap_or_default(),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
                         .unwrap_or_default()
                 } else {
                     Vec::new()
                 }
             };
             if session_tabs.is_empty() && runtime_tabs.is_empty() {
-                tool_log.push("No tabs are currently open. Use 'open_tab <tab_id> desktop' to open one.".to_string());
+                tool_log.push(
+                    "No tabs are currently open. Use 'open_tab <tab_id> desktop' to open one."
+                        .to_string(),
+                );
             } else {
                 if !session_tabs.is_empty() {
                     tool_log.push(format!("Session tabs ({}):", session_tabs.len()));
@@ -1223,13 +1242,19 @@ async fn chrome_command_exec(
                     }
                     ids
                 };
-                let extra_tabs: Vec<_> = runtime_tabs.iter()
+                let extra_tabs: Vec<_> = runtime_tabs
+                    .iter()
                     .filter(|(tid, _, _)| !session_target_ids.contains(tid))
                     .collect();
                 if !extra_tabs.is_empty() {
                     tool_log.push(format!("Runtime tabs ({}):", extra_tabs.len()));
                     for (tid, url, title) in &extra_tabs {
-                        tool_log.push(format!("  target={} url={} title={}", &tid[..8.min(tid.len())], url, title));
+                        tool_log.push(format!(
+                            "  target={} url={} title={}",
+                            &tid[..8.min(tid.len())],
+                            url,
+                            title
+                        ));
                     }
                 }
             }
@@ -1271,7 +1296,8 @@ async fn chrome_command_exec(
                                 if rt.recording_tab_target_id.as_deref() == Some(&target_id) {
                                     rt.recording_tab_target_id = None;
                                 }
-                                if rt.active_tab_target_id().as_deref() == Some(target_id.as_str()) {
+                                if rt.active_tab_target_id().as_deref() == Some(target_id.as_str())
+                                {
                                     rt.active_tab_target_id = None;
                                 }
                             }
@@ -1306,4 +1332,3 @@ async fn chrome_command_exec(
 
     Ok((tool_log, multimodal_els))
 }
-

@@ -4,22 +4,12 @@ use serde_yaml::Value;
 
 use crate::providers::traits::ProviderTrait;
 use crate::providers::{
-    refact::RefactProvider,
-    anthropic::AnthropicProvider,
-    openai::OpenAIProvider,
-    openai_responses::OpenAIResponsesProvider,
-    openai_codex::OpenAICodexProvider,
-    openrouter::OpenRouterProvider,
-    ollama::OllamaProvider,
-    lmstudio::LMStudioProvider,
-    vllm::VLLMProvider,
-    groq::GroqProvider,
-    deepseek::DeepseekProvider,
-    xai::XAIProvider,
-    xai_responses::XAIResponsesProvider,
-    google_gemini::GoogleGeminiProvider,
-    custom::CustomProvider,
-    claude_code::ClaudeCodeProvider,
+    refact::RefactProvider, anthropic::AnthropicProvider, openai::OpenAIProvider,
+    openai_responses::OpenAIResponsesProvider, openai_codex::OpenAICodexProvider,
+    openrouter::OpenRouterProvider, ollama::OllamaProvider, lmstudio::LMStudioProvider,
+    vllm::VLLMProvider, groq::GroqProvider, deepseek::DeepseekProvider, xai::XAIProvider,
+    xai_responses::XAIResponsesProvider, google_gemini::GoogleGeminiProvider,
+    custom::CustomProvider, claude_code::ClaudeCodeProvider,
 };
 
 pub const PROVIDER_NAMES: &[&str] = &[
@@ -81,7 +71,10 @@ impl ProviderRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn ProviderTrait> {
-        self.providers.iter().find(|p| p.name() == name).map(|p| p.as_ref())
+        self.providers
+            .iter()
+            .find(|p| p.name() == name)
+            .map(|p| p.as_ref())
     }
 
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Box<dyn ProviderTrait>> {
@@ -107,10 +100,8 @@ pub async fn load_providers_from_config(
 ) -> Result<ProviderRegistry, String> {
     let mut registry = ProviderRegistry::new();
 
-    let refact_provider = RefactProvider::from_cli(
-        refact_address_url.to_string(),
-        refact_api_key.to_string(),
-    );
+    let refact_provider =
+        RefactProvider::from_cli(refact_address_url.to_string(), refact_api_key.to_string());
     registry.add(Box::new(refact_provider));
 
     let providers_dir = config_dir.join("providers.d");
@@ -204,7 +195,10 @@ pub async fn load_providers_from_config(
     }
 
     for provider in registry.providers.iter_mut() {
-        if let Err(e) = provider.startup_refresh_and_sync(http_client, config_dir).await {
+        if let Err(e) = provider
+            .startup_refresh_and_sync(http_client, config_dir)
+            .await
+        {
             tracing::warn!(
                 "Provider '{}' startup refresh failed: {}",
                 provider.name(),
@@ -236,7 +230,9 @@ pub async fn save_provider_config(
 }
 
 pub async fn delete_provider_config(config_dir: &Path, name: &str) -> Result<(), String> {
-    let path = config_dir.join("providers.d").join(format!("{}.yaml", name));
+    let path = config_dir
+        .join("providers.d")
+        .join(format!("{}.yaml", name));
     if !path.exists() {
         return Ok(());
     }
@@ -244,5 +240,3 @@ pub async fn delete_provider_config(config_dir: &Path, name: &str) -> Result<(),
         .await
         .map_err(|e| format!("Failed to delete config: {}", e))
 }
-
-

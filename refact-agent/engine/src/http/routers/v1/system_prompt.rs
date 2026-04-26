@@ -13,8 +13,6 @@ use crate::scratchpads::chat_utils_prompts::prepend_the_right_system_prompt_and_
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use crate::tools::tools_list::get_tools_for_mode;
 
-
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PrependSystemPromptPost {
     pub messages: Vec<ChatMessage>,
@@ -41,13 +39,15 @@ pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
     })?;
     let mut has_rag_results = HasRagResults::new();
 
-    let mode_id = validate_mode_for_request(gcx.clone(), &post.chat_meta.chat_mode).await.map_err(|e| {
-        ScratchError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("Invalid chat mode: {}", e),
-        )
-    })?;
-    
+    let mode_id = validate_mode_for_request(gcx.clone(), &post.chat_meta.chat_mode)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Invalid chat mode: {}", e),
+            )
+        })?;
+
     let (messages, _) = prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         gcx.clone(),
         post.messages,

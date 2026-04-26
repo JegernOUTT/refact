@@ -21,27 +21,79 @@ impl std::fmt::Display for DeviceType {
 
 #[derive(Debug, Clone)]
 pub enum BrowserAction {
-    OpenTab { tab_id: String, device: DeviceType },
-    NavigateTo { tab_id: String, url: String },
-    ScrollTo { tab_id: String, selector: String },
-    Screenshot { tab_id: String },
-    Html { tab_id: String, selector: String },
-    Reload { tab_id: String },
-    ClickAtElement { tab_id: String, selector: String },
-    ClickAtPoint { tab_id: String, x: f64, y: f64 },
-    TypeText { tab_id: String, text: String },
-    FillField { tab_id: String, selector: String, text: String },
-    PressKey { tab_id: String, key: String, modifiers: Vec<String> },
-    TabLog { tab_id: String },
-    Eval { tab_id: String, expression: String },
-    Styles { tab_id: String, selector: String, property_filter: String },
-    WaitFor { tab_id: String, seconds: f64 },
-    WaitForSelector { tab_id: String, selector: String },
-    WaitForNavigation { tab_id: String },
+    OpenTab {
+        tab_id: String,
+        device: DeviceType,
+    },
+    NavigateTo {
+        tab_id: String,
+        url: String,
+    },
+    ScrollTo {
+        tab_id: String,
+        selector: String,
+    },
+    Screenshot {
+        tab_id: String,
+    },
+    Html {
+        tab_id: String,
+        selector: String,
+    },
+    Reload {
+        tab_id: String,
+    },
+    ClickAtElement {
+        tab_id: String,
+        selector: String,
+    },
+    ClickAtPoint {
+        tab_id: String,
+        x: f64,
+        y: f64,
+    },
+    TypeText {
+        tab_id: String,
+        text: String,
+    },
+    FillField {
+        tab_id: String,
+        selector: String,
+        text: String,
+    },
+    PressKey {
+        tab_id: String,
+        key: String,
+        modifiers: Vec<String>,
+    },
+    TabLog {
+        tab_id: String,
+    },
+    Eval {
+        tab_id: String,
+        expression: String,
+    },
+    Styles {
+        tab_id: String,
+        selector: String,
+        property_filter: String,
+    },
+    WaitFor {
+        tab_id: String,
+        seconds: f64,
+    },
+    WaitForSelector {
+        tab_id: String,
+        selector: String,
+    },
+    WaitForNavigation {
+        tab_id: String,
+    },
     ListTabs,
-    CloseTab { tab_id: String },
+    CloseTab {
+        tab_id: String,
+    },
 }
-
 
 pub fn normalize_key_name(key: &str) -> &str {
     match key {
@@ -56,7 +108,6 @@ pub fn normalize_key_name(key: &str) -> &str {
         other => other,
     }
 }
-
 
 fn rest_after_tokens(line: &str, n: usize) -> Option<String> {
     let mut pos = 0;
@@ -115,7 +166,6 @@ fn parse_modifier(m: &str) -> Result<String, String> {
     }
 }
 
-
 fn detect_heredoc(line: &str) -> Option<(&str, &str)> {
     let line = line.trim_end();
     for (i, _) in line.match_indices("<<") {
@@ -145,7 +195,6 @@ fn reject_extra_tokens(line: &str, max_tokens: usize, cmd: &str) -> Result<(), S
         Ok(())
     }
 }
-
 
 pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
     let trimmed = line.trim();
@@ -177,15 +226,13 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
 
         "navigate_to" => {
             let tab_id = tab_id.ok_or("navigate_to: missing <tab_id>")?;
-            let url =
-                rest_after_tokens(trimmed, 2).ok_or("navigate_to: missing <url>")?;
+            let url = rest_after_tokens(trimmed, 2).ok_or("navigate_to: missing <url>")?;
             Ok(BrowserAction::NavigateTo { tab_id, url })
         }
 
         "scroll_to" => {
             let tab_id = tab_id.ok_or("scroll_to: missing <tab_id>")?;
-            let selector = rest_after_tokens(trimmed, 2)
-                .ok_or("scroll_to: missing <selector>")?;
+            let selector = rest_after_tokens(trimmed, 2).ok_or("scroll_to: missing <selector>")?;
             Ok(BrowserAction::ScrollTo { tab_id, selector })
         }
 
@@ -197,8 +244,7 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
 
         "html" => {
             let tab_id = tab_id.ok_or("html: missing <tab_id>")?;
-            let selector =
-                rest_after_tokens(trimmed, 2).ok_or("html: missing <selector>")?;
+            let selector = rest_after_tokens(trimmed, 2).ok_or("html: missing <selector>")?;
             Ok(BrowserAction::Html { tab_id, selector })
         }
 
@@ -210,20 +256,16 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
 
         "click_at_element" => {
             let tab_id = tab_id.ok_or("click_at_element: missing <tab_id>")?;
-            let selector = rest_after_tokens(trimmed, 2)
-                .ok_or("click_at_element: missing <selector>")?;
+            let selector =
+                rest_after_tokens(trimmed, 2).ok_or("click_at_element: missing <selector>")?;
             Ok(BrowserAction::ClickAtElement { tab_id, selector })
         }
 
         "click_at_point" => {
             reject_extra_tokens(trimmed, 4, "click_at_point")?;
             let tab_id = tab_id.ok_or("click_at_point: missing <tab_id>")?;
-            let x_str = tokens
-                .get(2)
-                .ok_or("click_at_point: missing <x>")?;
-            let y_str = tokens
-                .get(3)
-                .ok_or("click_at_point: missing <y>")?;
+            let x_str = tokens.get(2).ok_or("click_at_point: missing <x>")?;
+            let y_str = tokens.get(3).ok_or("click_at_point: missing <y>")?;
             let x = x_str
                 .parse::<f64>()
                 .map_err(|e| format!("click_at_point: invalid x: {}", e))?;
@@ -235,16 +277,15 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
 
         "type_text_at" => {
             let tab_id = tab_id.ok_or("type_text_at: missing <tab_id>")?;
-            let text = rest_after_tokens(trimmed, 2)
-                .ok_or("type_text_at: missing <text>")?;
+            let text = rest_after_tokens(trimmed, 2).ok_or("type_text_at: missing <text>")?;
             Ok(BrowserAction::TypeText { tab_id, text })
         }
 
         "fill_field" => {
             let tab_id = tab_id.ok_or("fill_field: missing <tab_id>")?;
 
-            let after_tab_id = rest_after_tokens(trimmed, 2)
-                .ok_or("fill_field: missing <selector> <text>")?;
+            let after_tab_id =
+                rest_after_tokens(trimmed, 2).ok_or("fill_field: missing <selector> <text>")?;
             let (selector, text) = if after_tab_id.starts_with('"') {
                 let bytes = after_tab_id.as_bytes();
                 let mut sel = String::new();
@@ -272,14 +313,18 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
                 }
                 (sel, rest)
             } else {
-                let selector = tokens.get(2)
+                let selector = tokens
+                    .get(2)
                     .ok_or("fill_field: missing <selector>")?
                     .clone();
-                let text = rest_after_tokens(trimmed, 3)
-                    .ok_or("fill_field: missing <text>")?;
+                let text = rest_after_tokens(trimmed, 3).ok_or("fill_field: missing <text>")?;
                 (selector, text)
             };
-            Ok(BrowserAction::FillField { tab_id, selector, text })
+            Ok(BrowserAction::FillField {
+                tab_id,
+                selector,
+                text,
+            })
         }
 
         "press_key" => {
@@ -309,15 +354,13 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
 
         "eval" => {
             let tab_id = tab_id.ok_or("eval: missing <tab_id>")?;
-            let expression = rest_after_tokens(trimmed, 2)
-                .ok_or("eval: missing <expression>")?;
+            let expression = rest_after_tokens(trimmed, 2).ok_or("eval: missing <expression>")?;
             Ok(BrowserAction::Eval { tab_id, expression })
         }
 
         "styles" => {
             let tab_id = tab_id.ok_or("styles: missing <tab_id>")?;
-            let rest = rest_after_tokens(trimmed, 2)
-                .ok_or("styles: missing <selector>")?;
+            let rest = rest_after_tokens(trimmed, 2).ok_or("styles: missing <selector>")?;
 
             let (selector, property_filter) = if let Some(pos) = rest.find(" --filter ") {
                 (rest[..pos].to_string(), rest[pos + 10..].trim().to_string())
@@ -336,9 +379,7 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
         "wait_for" => {
             reject_extra_tokens(trimmed, 3, "wait_for")?;
             let tab_id = tab_id.ok_or("wait_for: missing <tab_id>")?;
-            let secs_str = tokens
-                .get(2)
-                .ok_or("wait_for: missing <seconds> (1-10)")?;
+            let secs_str = tokens.get(2).ok_or("wait_for: missing <seconds> (1-10)")?;
             let seconds = secs_str
                 .parse::<f64>()
                 .map_err(|e| format!("wait_for: invalid seconds: {}", e))?;
@@ -385,7 +426,6 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
     }
 }
 
-
 pub fn parse_commands(commands_str: &str) -> Vec<Result<BrowserAction, String>> {
     let lines: Vec<&str> = commands_str.lines().collect();
     let mut results = Vec::new();
@@ -431,7 +471,6 @@ pub fn parse_commands(commands_str: &str) -> Vec<Result<BrowserAction, String>> 
     results
 }
 
-
 pub fn get_tab_id(action: &BrowserAction) -> Option<&str> {
     match action {
         BrowserAction::OpenTab { tab_id, .. }
@@ -456,72 +495,61 @@ pub fn get_tab_id(action: &BrowserAction) -> Option<&str> {
     }
 }
 
-
 pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
     match action {
-        BrowserAction::NavigateTo { url, .. } => Some(vec![
-            BrowserStep::Navigate { url: url.clone() },
-        ]),
-        BrowserAction::ScrollTo { selector, .. } => Some(vec![
-            BrowserStep::ScrollTo {
-                locator: BrowserLocator::css(selector),
-            },
-        ]),
+        BrowserAction::NavigateTo { url, .. } => {
+            Some(vec![BrowserStep::Navigate { url: url.clone() }])
+        }
+        BrowserAction::ScrollTo { selector, .. } => Some(vec![BrowserStep::ScrollTo {
+            locator: BrowserLocator::css(selector),
+        }]),
         BrowserAction::Screenshot { .. } => Some(vec![BrowserStep::Screenshot]),
         BrowserAction::Reload { .. } => Some(vec![BrowserStep::Reload]),
-        BrowserAction::ClickAtElement { selector, .. } => Some(vec![
-            BrowserStep::Click {
-                locator: BrowserLocator::css(selector),
-            },
-        ]),
-        BrowserAction::PressKey { key, modifiers, .. } => Some(vec![
-            BrowserStep::PressKey {
-                key: key.clone(),
-                modifiers: modifiers.clone(),
-            },
-        ]),
+        BrowserAction::ClickAtElement { selector, .. } => Some(vec![BrowserStep::Click {
+            locator: BrowserLocator::css(selector),
+        }]),
+        BrowserAction::PressKey { key, modifiers, .. } => Some(vec![BrowserStep::PressKey {
+            key: key.clone(),
+            modifiers: modifiers.clone(),
+        }]),
         BrowserAction::TabLog { .. } => Some(vec![BrowserStep::TabLog]),
-        BrowserAction::Eval { expression, .. } => Some(vec![
-            BrowserStep::Eval {
-                expression: expression.clone(),
+        BrowserAction::Eval { expression, .. } => Some(vec![BrowserStep::Eval {
+            expression: expression.clone(),
+        }]),
+        BrowserAction::Styles {
+            selector,
+            property_filter,
+            ..
+        } => Some(vec![BrowserStep::Styles {
+            locator: BrowserLocator::css(selector),
+            property_filter: if property_filter.is_empty() {
+                None
+            } else {
+                Some(property_filter.clone())
             },
-        ]),
-        BrowserAction::Styles { selector, property_filter, .. } => Some(vec![
-            BrowserStep::Styles {
-                locator: BrowserLocator::css(selector),
-                property_filter: if property_filter.is_empty() {
-                    None
-                } else {
-                    Some(property_filter.clone())
-                },
-            },
-        ]),
-        BrowserAction::WaitFor { seconds, .. } => Some(vec![
-            BrowserStep::WaitSeconds { seconds: *seconds },
-        ]),
-        BrowserAction::WaitForSelector { selector, .. } => Some(vec![
-            BrowserStep::WaitForSelector {
+        }]),
+        BrowserAction::WaitFor { seconds, .. } => {
+            Some(vec![BrowserStep::WaitSeconds { seconds: *seconds }])
+        }
+        BrowserAction::WaitForSelector { selector, .. } => {
+            Some(vec![BrowserStep::WaitForSelector {
                 locator: BrowserLocator::css(selector),
                 timeout_ms: None,
-            },
-        ]),
-        BrowserAction::WaitForNavigation { .. } => Some(vec![
-            BrowserStep::WaitForNavigation { timeout_ms: None },
-        ]),
-        BrowserAction::Html { selector, .. } => Some(vec![
-            BrowserStep::DomSnapshot {
-                selector: selector.clone(),
-                max_chars: Some(3000),
-            },
-        ]),
-        BrowserAction::FillField { selector, text, .. } => Some(vec![
-            BrowserStep::Fill {
-                locator: BrowserLocator::css(selector),
-                text: text.clone(),
-                clear_first: true,
-                verify: true,
-            },
-        ]),
+            }])
+        }
+        BrowserAction::WaitForNavigation { .. } => {
+            Some(vec![BrowserStep::WaitForNavigation { timeout_ms: None }])
+        }
+        BrowserAction::Html { selector, .. } => Some(vec![BrowserStep::DomSnapshot {
+            selector: selector.clone(),
+            max_chars: Some(3000),
+        }]),
+        BrowserAction::FillField { selector, text, .. } => Some(vec![BrowserStep::Fill {
+            locator: BrowserLocator::css(selector),
+            text: text.clone(),
+            clear_first: true,
+            verify: true,
+        }]),
 
         BrowserAction::OpenTab { .. }
         | BrowserAction::CloseTab { .. }
@@ -640,8 +668,7 @@ mod tests {
 
     #[test]
     fn test_click_id_selector_with_hash() {
-        let action =
-            parse_command("click_at_element 1 #onetrust-accept-btn-handler").unwrap();
+        let action = parse_command("click_at_element 1 #onetrust-accept-btn-handler").unwrap();
         match action {
             BrowserAction::ClickAtElement { selector, .. } => {
                 assert_eq!(selector, "#onetrust-accept-btn-handler");
@@ -652,8 +679,7 @@ mod tests {
 
     #[test]
     fn test_click_nth_child_selector() {
-        let action =
-            parse_command("click_at_element 2 tr:nth-child(1) td:nth-child(3)").unwrap();
+        let action = parse_command("click_at_element 2 tr:nth-child(1) td:nth-child(3)").unwrap();
         match action {
             BrowserAction::ClickAtElement { selector, .. } => {
                 assert_eq!(selector, "tr:nth-child(1) td:nth-child(3)");
@@ -722,8 +748,7 @@ mod tests {
 
     #[test]
     fn test_styles_with_filter_separator() {
-        let action =
-            parse_command(r#"styles 1 [style*="aspect-ratio"] --filter color"#).unwrap();
+        let action = parse_command(r#"styles 1 [style*="aspect-ratio"] --filter color"#).unwrap();
         match action {
             BrowserAction::Styles {
                 selector,
@@ -755,8 +780,7 @@ mod tests {
 
     #[test]
     fn test_styles_descendant_selector_no_ambiguity() {
-        let action =
-            parse_command("styles 1 tr:nth-child(1) td:nth-child(3)").unwrap();
+        let action = parse_command("styles 1 tr:nth-child(1) td:nth-child(3)").unwrap();
         match action {
             BrowserAction::Styles {
                 selector,
@@ -772,8 +796,7 @@ mod tests {
 
     #[test]
     fn test_styles_descendant_selector_with_filter() {
-        let action =
-            parse_command("styles 1 div.container p.text --filter margin").unwrap();
+        let action = parse_command("styles 1 div.container p.text --filter margin").unwrap();
         match action {
             BrowserAction::Styles {
                 selector,
@@ -840,8 +863,7 @@ mod tests {
 
     #[test]
     fn test_navigate_url_with_query_params() {
-        let action =
-            parse_command("navigate_to 1 https://example.com/path?q=1&r=2#frag").unwrap();
+        let action = parse_command("navigate_to 1 https://example.com/path?q=1&r=2#frag").unwrap();
         match action {
             BrowserAction::NavigateTo { url, .. } => {
                 assert!(url.contains("?q=1&r=2#frag"));
@@ -917,9 +939,9 @@ mod tests {
 
     #[test]
     fn test_wait_for_selector_complex_css() {
-        let action = parse_command(
-            "wait_for_selector 1 button[data-testid='submit'], .form-submit"
-        ).unwrap();
+        let action =
+            parse_command("wait_for_selector 1 button[data-testid='submit'], .form-submit")
+                .unwrap();
         match action {
             BrowserAction::WaitForSelector { selector, .. } => {
                 assert!(selector.contains("data-testid"));
@@ -986,7 +1008,10 @@ mod tests {
         let input = "open_tab 1 desktop\nlist_tabs\nscreenshot 1";
         let results = parse_commands(input);
         assert_eq!(results.len(), 3);
-        assert!(matches!(results[1].as_ref().unwrap(), BrowserAction::ListTabs));
+        assert!(matches!(
+            results[1].as_ref().unwrap(),
+            BrowserAction::ListTabs
+        ));
     }
 
     #[test]
@@ -1194,7 +1219,9 @@ mod tests {
     fn test_convert_eval() {
         let action = parse_command("eval 1 document.title").unwrap();
         let steps = to_browser_steps(&action).unwrap();
-        assert!(matches!(&steps[0], BrowserStep::Eval { expression } if expression == "document.title"));
+        assert!(
+            matches!(&steps[0], BrowserStep::Eval { expression } if expression == "document.title")
+        );
     }
 
     #[test]
@@ -1209,7 +1236,9 @@ mod tests {
         let action = parse_command("styles 1 body --filter color").unwrap();
         let steps = to_browser_steps(&action).unwrap();
         match &steps[0] {
-            BrowserStep::Styles { property_filter, .. } => {
+            BrowserStep::Styles {
+                property_filter, ..
+            } => {
                 assert_eq!(property_filter.as_deref(), Some("color"));
             }
             _ => panic!("Expected Styles"),
@@ -1221,7 +1250,9 @@ mod tests {
         let action = parse_command("styles 1 body").unwrap();
         let steps = to_browser_steps(&action).unwrap();
         match &steps[0] {
-            BrowserStep::Styles { property_filter, .. } => {
+            BrowserStep::Styles {
+                property_filter, ..
+            } => {
                 assert!(property_filter.is_none());
             }
             _ => panic!("Expected Styles"),
@@ -1232,7 +1263,9 @@ mod tests {
     fn test_convert_wait_for() {
         let action = parse_command("wait_for 1 3").unwrap();
         let steps = to_browser_steps(&action).unwrap();
-        assert!(matches!(&steps[0], BrowserStep::WaitSeconds { seconds } if (*seconds - 3.0).abs() < f64::EPSILON));
+        assert!(
+            matches!(&steps[0], BrowserStep::WaitSeconds { seconds } if (*seconds - 3.0).abs() < f64::EPSILON)
+        );
     }
 
     #[test]
@@ -1285,7 +1318,10 @@ mod tests {
         let steps = to_browser_steps(&action).unwrap();
         assert_eq!(steps.len(), 1);
         match &steps[0] {
-            BrowserStep::DomSnapshot { selector, max_chars } => {
+            BrowserStep::DomSnapshot {
+                selector,
+                max_chars,
+            } => {
                 assert_eq!(selector, "#main");
                 assert_eq!(*max_chars, Some(3000));
             }
@@ -1295,9 +1331,9 @@ mod tests {
 
     #[test]
     fn test_convert_click_preserves_complex_selector() {
-        let action = parse_command(
-            r#"click_at_element 1 button[data-testid="accept"], .accept-all"#,
-        ).unwrap();
+        let action =
+            parse_command(r#"click_at_element 1 button[data-testid="accept"], .accept-all"#)
+                .unwrap();
         let steps = to_browser_steps(&action).unwrap();
         match &steps[0] {
             BrowserStep::Click { locator } => {
@@ -1313,14 +1349,15 @@ mod tests {
 
     #[test]
     fn test_convert_wait_selector_preserves_complex_css() {
-        let action = parse_command(
-            "wait_for_selector 1 tr:nth-child(1) td:nth-child(3)"
-        ).unwrap();
+        let action = parse_command("wait_for_selector 1 tr:nth-child(1) td:nth-child(3)").unwrap();
         let steps = to_browser_steps(&action).unwrap();
         match &steps[0] {
             BrowserStep::WaitForSelector { locator, .. } => {
                 let json = serde_json::to_value(locator).unwrap();
-                assert_eq!(json["value"].as_str().unwrap(), "tr:nth-child(1) td:nth-child(3)");
+                assert_eq!(
+                    json["value"].as_str().unwrap(),
+                    "tr:nth-child(1) td:nth-child(3)"
+                );
             }
             _ => panic!("Expected WaitForSelector"),
         }
@@ -1330,7 +1367,11 @@ mod tests {
     fn test_parse_fill_field_simple() {
         let action = parse_command("fill_field 1 #email user@test.com").unwrap();
         match action {
-            BrowserAction::FillField { tab_id, selector, text } => {
+            BrowserAction::FillField {
+                tab_id,
+                selector,
+                text,
+            } => {
                 assert_eq!(tab_id, "1");
                 assert_eq!(selector, "#email");
                 assert_eq!(text, "user@test.com");
@@ -1343,7 +1384,11 @@ mod tests {
     fn test_parse_fill_field_quoted_selector() {
         let action = parse_command(r#"fill_field 1 "form input[name=q]" hello world"#).unwrap();
         match action {
-            BrowserAction::FillField { tab_id, selector, text } => {
+            BrowserAction::FillField {
+                tab_id,
+                selector,
+                text,
+            } => {
                 assert_eq!(tab_id, "1");
                 assert_eq!(selector, "form input[name=q]");
                 assert_eq!(text, "hello world");
@@ -1354,9 +1399,14 @@ mod tests {
 
     #[test]
     fn test_parse_fill_field_quoted_descendant_selector() {
-        let action = parse_command(r#"fill_field 2 "div.search input[type=text]" rust tutorial"#).unwrap();
+        let action =
+            parse_command(r#"fill_field 2 "div.search input[type=text]" rust tutorial"#).unwrap();
         match action {
-            BrowserAction::FillField { tab_id, selector, text } => {
+            BrowserAction::FillField {
+                tab_id,
+                selector,
+                text,
+            } => {
                 assert_eq!(tab_id, "2");
                 assert_eq!(selector, "div.search input[type=text]");
                 assert_eq!(text, "rust tutorial");
@@ -1384,7 +1434,12 @@ mod tests {
         let action = parse_command("fill_field 1 [name=q] hello").unwrap();
         let steps = to_browser_steps(&action).unwrap();
         match &steps[0] {
-            BrowserStep::Fill { locator, text, clear_first, verify } => {
+            BrowserStep::Fill {
+                locator,
+                text,
+                clear_first,
+                verify,
+            } => {
                 let json = serde_json::to_value(locator).unwrap();
                 assert_eq!(json["by"], "css");
                 assert_eq!(json["value"], "[name=q]");

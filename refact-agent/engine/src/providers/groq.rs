@@ -7,7 +7,10 @@ use serde_json::json;
 
 use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
-use crate::providers::traits::{CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait, parse_enabled_models, parse_custom_models, set_model_enabled_impl};
+use crate::providers::traits::{
+    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+};
 use crate::providers::pricing::groq_pricing;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -122,7 +125,7 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::Api  // Groq has an API for models
+        ModelSource::Api // Groq has an API for models
     }
 
     fn enabled_models(&self) -> &[String] {

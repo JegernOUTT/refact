@@ -53,13 +53,9 @@ impl ProviderDefaults {
     pub async fn load(config_dir: &Path) -> Result<Self, String> {
         let defaults_path = config_dir.join("providers.d").join("defaults.yaml");
         match tokio::fs::read_to_string(&defaults_path).await {
-            Ok(content) => {
-                serde_yaml::from_str(&content)
-                    .map_err(|e| format!("Failed to parse defaults.yaml: {}", e))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok(Self::default())
-            }
+            Ok(content) => serde_yaml::from_str(&content)
+                .map_err(|e| format!("Failed to parse defaults.yaml: {}", e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(format!("Failed to read defaults.yaml: {}", e)),
         }
     }

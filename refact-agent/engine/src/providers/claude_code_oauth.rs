@@ -81,8 +81,7 @@ fn generate_code_challenge(verifier: &str) -> String {
 }
 
 fn build_authorize_url(_mode: &OAuthMode, code_challenge: &str, verifier: &str) -> String {
-    let mut url = url::Url::parse("https://claude.ai/oauth/authorize")
-        .expect("valid base URL");
+    let mut url = url::Url::parse("https://claude.ai/oauth/authorize").expect("valid base URL");
 
     url.query_pairs_mut()
         .append_pair("code", "true")
@@ -122,7 +121,8 @@ pub async fn exchange_code(
 ) -> Result<OAuthTokens, String> {
     let session = {
         let mut sessions = PENDING_SESSIONS.lock().await;
-        sessions.remove(session_id)
+        sessions
+            .remove(session_id)
             .ok_or_else(|| "Invalid or expired OAuth session".to_string())?
     };
 
@@ -204,5 +204,3 @@ pub async fn refresh_access_token(
         expires_at,
     })
 }
-
-

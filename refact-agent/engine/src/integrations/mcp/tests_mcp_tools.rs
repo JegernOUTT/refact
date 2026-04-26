@@ -65,9 +65,14 @@ mod tests {
             "tool-with-dashes",
         );
         let desc = tool.tool_description();
-        assert!(!desc.name.contains('-'), "hyphens should be replaced with underscores");
         assert!(
-            desc.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            !desc.name.contains('-'),
+            "hyphens should be replaced with underscores"
+        );
+        assert!(
+            desc.name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
             "name should only contain alphanumerics and underscores, got: {}",
             desc.name
         );
@@ -112,7 +117,10 @@ mod tests {
         let desc = tool.tool_description();
 
         assert_eq!(desc.input_schema["type"], json!("object"));
-        assert_eq!(desc.input_schema["properties"]["items"]["type"], json!("array"));
+        assert_eq!(
+            desc.input_schema["properties"]["items"]["type"],
+            json!("array")
+        );
         assert_eq!(
             desc.input_schema["properties"]["items"]["items"]["type"],
             json!("string")
@@ -140,7 +148,10 @@ mod tests {
         let tool = make_tool_mcp("mcp_stdio_srv.yaml", schema_without_type, "add");
         let desc = tool.tool_description();
         assert_eq!(desc.input_schema["type"], json!("object"));
-        assert_eq!(desc.input_schema["properties"]["a"]["type"], json!("integer"));
+        assert_eq!(
+            desc.input_schema["properties"]["a"]["type"],
+            json!("integer")
+        );
     }
 
     #[test]

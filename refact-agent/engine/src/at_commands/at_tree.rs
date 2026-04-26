@@ -273,7 +273,10 @@ fn print_files_tree_with_budget(
 ) -> String {
     let depth1_output = print_files_tree(tree, ast_db.clone(), 1, max_files, is_root_query);
     if depth1_output.len() > char_limit {
-        let truncated: String = depth1_output.chars().take(char_limit.saturating_sub(20)).collect();
+        let truncated: String = depth1_output
+            .chars()
+            .take(char_limit.saturating_sub(20))
+            .collect();
         return format!("{}...[truncated]", truncated);
     }
     let mut good_enough = depth1_output;

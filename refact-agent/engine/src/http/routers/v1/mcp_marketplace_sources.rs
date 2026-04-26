@@ -116,16 +116,17 @@ fn default_sources_config() -> SourcesConfig {
 
 async fn save_sources(config_dir: &PathBuf, config: &SourcesConfig) -> Result<(), String> {
     let path = sources_path(config_dir);
-    let yaml = serde_yaml::to_string(config)
-        .map_err(|e| format!("serialize sources: {}", e))?;
+    let yaml = serde_yaml::to_string(config).map_err(|e| format!("serialize sources: {}", e))?;
     let tmp_path = path.with_extension("yaml.tmp");
-    tokio::fs::write(&tmp_path, yaml.as_bytes()).await
+    tokio::fs::write(&tmp_path, yaml.as_bytes())
+        .await
         .map_err(|e| format!("write sources tmp: {}", e))?;
     #[cfg(target_os = "windows")]
     {
         let _ = tokio::fs::remove_file(&path).await;
     }
-    tokio::fs::rename(&tmp_path, &path).await
+    tokio::fs::rename(&tmp_path, &path)
+        .await
         .map_err(|e| format!("rename sources: {}", e))?;
     Ok(())
 }
@@ -134,18 +135,25 @@ pub fn source_to_api_json(source: &MarketplaceSource, removable: bool) -> Value 
     let mut obj = serde_json::Map::new();
     obj.insert("id".to_string(), json!(source.id));
     obj.insert("label".to_string(), json!(source.label));
-    obj.insert("type".to_string(), json!(match source.source_type {
-        SourceType::RefactIndex => "refact_index",
-        SourceType::Smithery => "smithery",
-        SourceType::OfficialMcp => "official_mcp",
-    }));
+    obj.insert(
+        "type".to_string(),
+        json!(match source.source_type {
+            SourceType::RefactIndex => "refact_index",
+            SourceType::Smithery => "smithery",
+            SourceType::OfficialMcp => "official_mcp",
+        }),
+    );
     obj.insert("enabled".to_string(), json!(source.enabled));
     obj.insert("removable".to_string(), json!(removable));
     if let Some(ref url) = source.url {
         obj.insert("url".to_string(), json!(url));
     }
     if source.source_type == SourceType::Smithery {
-        let has_key = source.api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
+        let has_key = source
+            .api_key
+            .as_ref()
+            .map(|k| !k.is_empty())
+            .unwrap_or(false);
         obj.insert("needs_api_key".to_string(), json!(true));
         obj.insert("has_api_key".to_string(), json!(has_key));
     }
@@ -186,18 +194,29 @@ pub async fn handle_v1_mcp_marketplace_sources_post(
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
     if req.id.is_empty() || req.id == BUNDLED_SOURCE_ID {
-        return Err(ScratchError::new(StatusCode::BAD_REQUEST, "invalid source id".to_string()));
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid source id".to_string(),
+        ));
     }
 
     let source_type = match req.source_type.as_str() {
         "refact_index" => SourceType::RefactIndex,
         "smithery" => SourceType::Smithery,
         "official_mcp" => SourceType::OfficialMcp,
-        _ => return Err(ScratchError::new(StatusCode::BAD_REQUEST, format!("unknown source type: {}", req.source_type))),
+        _ => {
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                format!("unknown source type: {}", req.source_type),
+            ))
+        }
     };
 
     if source_type == SourceType::RefactIndex && req.url.is_none() {
-        return Err(ScratchError::new(StatusCode::BAD_REQUEST, "refact_index source requires url".to_string()));
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "refact_index source requires url".to_string(),
+        ));
     }
 
     let config_dir = gcx.read().await.config_dir.clone();
@@ -218,7 +237,8 @@ pub async fn handle_v1_mcp_marketplace_sources_post(
         cfg.sources.push(new_source);
     }
 
-    save_sources(&config_dir, &cfg).await
+    save_sources(&config_dir, &cfg)
+        .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(json!({ "ok": true })))
@@ -229,7 +249,10 @@ pub async fn handle_v1_mcp_marketplace_sources_delete(
     Path(source_id): Path<String>,
 ) -> Result<Json<Value>, ScratchError> {
     if source_id == BUNDLED_SOURCE_ID {
-        return Err(ScratchError::new(StatusCode::BAD_REQUEST, "cannot remove built-in source".to_string()));
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "cannot remove built-in source".to_string(),
+        ));
     }
 
     let config_dir = gcx.read().await.config_dir.clone();
@@ -238,10 +261,14 @@ pub async fn handle_v1_mcp_marketplace_sources_delete(
     let before = cfg.sources.len();
     cfg.sources.retain(|s| s.id != source_id);
     if cfg.sources.len() == before {
-        return Err(ScratchError::new(StatusCode::NOT_FOUND, format!("source '{}' not found", source_id)));
+        return Err(ScratchError::new(
+            StatusCode::NOT_FOUND,
+            format!("source '{}' not found", source_id),
+        ));
     }
 
-    save_sources(&config_dir, &cfg).await
+    save_sources(&config_dir, &cfg)
+        .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(json!({ "ok": true })))
@@ -264,14 +291,25 @@ pub async fn handle_v1_mcp_marketplace_sources_configure(
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
     if source_id == BUNDLED_SOURCE_ID {
-        return Err(ScratchError::new(StatusCode::BAD_REQUEST, "cannot configure built-in source".to_string()));
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "cannot configure built-in source".to_string(),
+        ));
     }
 
     let config_dir = gcx.read().await.config_dir.clone();
     let mut cfg = load_sources(&config_dir).await;
 
-    let source = cfg.sources.iter_mut().find(|s| s.id == source_id)
-        .ok_or_else(|| ScratchError::new(StatusCode::NOT_FOUND, format!("source '{}' not found", source_id)))?;
+    let source = cfg
+        .sources
+        .iter_mut()
+        .find(|s| s.id == source_id)
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("source '{}' not found", source_id),
+            )
+        })?;
 
     if let Some(key) = req.api_key {
         source.api_key = if key.is_empty() { None } else { Some(key) };
@@ -280,7 +318,8 @@ pub async fn handle_v1_mcp_marketplace_sources_configure(
         source.enabled = enabled;
     }
 
-    save_sources(&config_dir, &cfg).await
+    save_sources(&config_dir, &cfg)
+        .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(json!({ "ok": true })))
@@ -292,7 +331,8 @@ pub async fn get_all_sources(config_dir: &PathBuf) -> (MarketplaceSource, Vec<Ma
 }
 
 pub fn smithery_api_key(sources: &[MarketplaceSource]) -> Option<String> {
-    sources.iter()
+    sources
+        .iter()
         .find(|s| s.id == SMITHERY_SOURCE_ID && s.enabled)
         .and_then(|s| s.api_key.clone())
         .filter(|k| !k.is_empty())
@@ -304,7 +344,10 @@ pub fn default_sources_config_for_test() -> SourcesConfig {
 }
 
 #[cfg(test)]
-pub fn get_source_map(bundled: &MarketplaceSource, sources: &[MarketplaceSource]) -> HashMap<String, MarketplaceSource> {
+pub fn get_source_map(
+    bundled: &MarketplaceSource,
+    sources: &[MarketplaceSource],
+) -> HashMap<String, MarketplaceSource> {
     let mut map = HashMap::new();
     map.insert(bundled.id.clone(), bundled.clone());
     for s in sources {
@@ -321,11 +364,17 @@ mod tests {
     fn test_default_sources_include_official_mcp() {
         let cfg = default_sources_config_for_test();
         let official = cfg.sources.iter().find(|s| s.id == OFFICIAL_MCP_SOURCE_ID);
-        assert!(official.is_some(), "official-mcp must be in default sources");
+        assert!(
+            official.is_some(),
+            "official-mcp must be in default sources"
+        );
         let official = official.unwrap();
         assert!(official.enabled, "official-mcp must be enabled by default");
         assert_eq!(official.source_type, SourceType::OfficialMcp);
-        assert!(official.api_key.is_none(), "official-mcp must not need an api key");
+        assert!(
+            official.api_key.is_none(),
+            "official-mcp must not need an api key"
+        );
     }
 
     #[test]
@@ -350,7 +399,10 @@ mod tests {
         let config_dir = tmp.path().to_path_buf();
 
         let initial = load_sources(&config_dir).await;
-        assert!(initial.sources.iter().any(|s| s.id == "refact"), "should have refact source by default");
+        assert!(
+            initial.sources.iter().any(|s| s.id == "refact"),
+            "should have refact source by default"
+        );
 
         let mut cfg = initial.clone();
         cfg.sources.push(MarketplaceSource {
@@ -364,7 +416,10 @@ mod tests {
         save_sources(&config_dir, &cfg).await.unwrap();
 
         let reloaded = load_sources(&config_dir).await;
-        assert!(reloaded.sources.iter().any(|s| s.id == "custom"), "custom source should persist");
+        assert!(
+            reloaded.sources.iter().any(|s| s.id == "custom"),
+            "custom source should persist"
+        );
     }
 
     #[test]
@@ -386,7 +441,10 @@ mod tests {
     #[test]
     fn test_smithery_api_key_extraction() {
         let mut sources = vec![default_smithery_source()];
-        assert!(smithery_api_key(&sources).is_none(), "no key when no api_key set");
+        assert!(
+            smithery_api_key(&sources).is_none(),
+            "no key when no api_key set"
+        );
 
         sources[0].api_key = Some("sk-test".to_string());
         sources[0].enabled = true;
@@ -431,7 +489,10 @@ mod tests {
         save_sources(&config_dir, &cfg1).await.unwrap();
 
         let loaded1 = load_sources(&config_dir).await;
-        assert!(loaded1.sources.iter().any(|s| s.id == "first"), "first save should persist");
+        assert!(
+            loaded1.sources.iter().any(|s| s.id == "first"),
+            "first save should persist"
+        );
 
         let cfg2 = SourcesConfig {
             sources: vec![MarketplaceSource {
@@ -446,7 +507,13 @@ mod tests {
         save_sources(&config_dir, &cfg2).await.unwrap();
 
         let loaded2 = load_sources(&config_dir).await;
-        assert!(loaded2.sources.iter().any(|s| s.id == "second"), "second save should persist");
-        assert!(!loaded2.sources.iter().any(|s| s.id == "first"), "first entry must be overwritten");
+        assert!(
+            loaded2.sources.iter().any(|s| s.id == "second"),
+            "second save should persist"
+        );
+        assert!(
+            !loaded2.sources.iter().any(|s| s.id == "first"),
+            "first entry must be overwritten"
+        );
     }
 }

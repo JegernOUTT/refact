@@ -123,7 +123,10 @@ pub struct ToolConfig {
 
 impl Default for ToolConfig {
     fn default() -> Self {
-        ToolConfig { enabled: true, allow_parallel: None }
+        ToolConfig {
+            enabled: true,
+            allow_parallel: None,
+        }
     }
 }
 
@@ -285,10 +288,13 @@ pub async fn set_tool_config(
 pub fn json_schema_from_params(params: &[(&str, &str, &str)], required: &[&str]) -> Value {
     let mut properties = serde_json::Map::new();
     for (name, param_type, description) in params {
-        properties.insert(name.to_string(), json!({
-            "type": param_type,
-            "description": description
-        }));
+        properties.insert(
+            name.to_string(),
+            json!({
+                "type": param_type,
+                "description": description
+            }),
+        );
     }
     json!({
         "type": "object",
@@ -349,7 +355,9 @@ fn apply_strict_schema(schema: Value) -> Value {
                     let new_v = if v.get("type") == Some(&json!("object")) {
                         apply_strict_schema(v)
                     } else if v.get("type") == Some(&json!("array")) {
-                        let Value::Object(mut arr_map) = v else { unreachable!() };
+                        let Value::Object(mut arr_map) = v else {
+                            unreachable!()
+                        };
                         if let Some(items) = arr_map.remove("items") {
                             arr_map.insert("items".to_string(), apply_strict_schema(items));
                         }
@@ -413,7 +421,10 @@ mod tests {
         );
         assert_eq!(schema["type"], json!("object"));
         assert_eq!(schema["properties"]["path"]["type"], json!("string"));
-        assert_eq!(schema["properties"]["path"]["description"], json!("File path"));
+        assert_eq!(
+            schema["properties"]["path"]["description"],
+            json!("File path")
+        );
         assert_eq!(schema["properties"]["content"]["type"], json!("string"));
         assert_eq!(schema["required"], json!(["path"]));
     }
@@ -465,7 +476,10 @@ mod tests {
             true,
         );
         assert_eq!(result["function"]["strict"], json!(true));
-        assert_eq!(result["function"]["parameters"]["additionalProperties"], json!(false));
+        assert_eq!(
+            result["function"]["parameters"]["additionalProperties"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -475,13 +489,11 @@ mod tests {
             "properties": {},
             "additionalProperties": true
         });
-        let result = make_openai_tool_value(
-            "tool".to_string(),
-            "A tool".to_string(),
-            schema,
-            true,
+        let result = make_openai_tool_value("tool".to_string(), "A tool".to_string(), schema, true);
+        assert_eq!(
+            result["function"]["parameters"]["additionalProperties"],
+            json!(true)
         );
-        assert_eq!(result["function"]["parameters"]["additionalProperties"], json!(true));
     }
 
     #[test]
@@ -513,8 +525,14 @@ mod tests {
             schema,
             false,
         );
-        assert_eq!(result["function"]["parameters"]["properties"]["items"]["type"], json!("array"));
-        assert_eq!(result["function"]["parameters"]["properties"]["mode"]["enum"], json!(["fast", "slow"]));
+        assert_eq!(
+            result["function"]["parameters"]["properties"]["items"]["type"],
+            json!("array")
+        );
+        assert_eq!(
+            result["function"]["parameters"]["properties"]["mode"]["enum"],
+            json!(["fast", "slow"])
+        );
     }
 
     #[test]
@@ -525,10 +543,8 @@ mod tests {
         );
         assert!(!confirmed);
 
-        let (denied, _) = command_should_be_denied(
-            &"some command".to_string(),
-            &vec!["[invalid".to_string()],
-        );
+        let (denied, _) =
+            command_should_be_denied(&"some command".to_string(), &vec!["[invalid".to_string()]);
         assert!(!denied);
     }
 
@@ -557,7 +573,10 @@ mod tests {
         };
         let result = desc.into_openai_style(false);
         assert_eq!(result["function"]["name"], json!("cat"));
-        assert_eq!(result["function"]["parameters"]["properties"]["filename"]["type"], json!("string"));
+        assert_eq!(
+            result["function"]["parameters"]["properties"]["filename"]["type"],
+            json!("string")
+        );
     }
 
     #[test]
@@ -675,7 +694,10 @@ mod tests {
         });
         let result = apply_strict_schema(schema);
         assert_eq!(result["additionalProperties"], json!(false));
-        assert_eq!(result["properties"]["config"]["additionalProperties"], json!(false));
+        assert_eq!(
+            result["properties"]["config"]["additionalProperties"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -696,7 +718,10 @@ mod tests {
         });
         let result = apply_strict_schema(schema);
         assert_eq!(result["additionalProperties"], json!(false));
-        assert_eq!(result["properties"]["items"]["items"]["additionalProperties"], json!(false));
+        assert_eq!(
+            result["properties"]["items"]["items"]["additionalProperties"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -733,9 +758,21 @@ mod tests {
             },
             "required": ["tasks"]
         });
-        let result = make_openai_tool_value("tasks_set".to_string(), "Set tasks".to_string(), schema, true);
+        let result = make_openai_tool_value(
+            "tasks_set".to_string(),
+            "Set tasks".to_string(),
+            schema,
+            true,
+        );
         assert_eq!(result["function"]["strict"], json!(true));
-        assert_eq!(result["function"]["parameters"]["additionalProperties"], json!(false));
-        assert_eq!(result["function"]["parameters"]["properties"]["tasks"]["items"]["additionalProperties"], json!(false));
+        assert_eq!(
+            result["function"]["parameters"]["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            result["function"]["parameters"]["properties"]["tasks"]["items"]
+                ["additionalProperties"],
+            json!(false)
+        );
     }
 }

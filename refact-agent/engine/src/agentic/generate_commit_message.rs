@@ -117,9 +117,16 @@ pub async fn generate_commit_message_by_diff(
         .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
 
     let messages = if let Some(text) = commit_message_prompt {
-        let system_prompt = subagent_config.prompts.diff_with_user_text
+        let system_prompt = subagent_config
+            .prompts
+            .diff_with_user_text
             .as_ref()
-            .ok_or_else(|| format!("prompts.diff_with_user_text not defined for subagent '{}'", SUBAGENT_ID))?;
+            .ok_or_else(|| {
+                format!(
+                    "prompts.diff_with_user_text not defined for subagent '{}'",
+                    SUBAGENT_ID
+                )
+            })?;
         vec![
             ChatMessage {
                 role: "system".to_string(),
@@ -136,9 +143,12 @@ pub async fn generate_commit_message_by_diff(
             },
         ]
     } else {
-        let system_prompt = subagent_config.prompts.diff_only
-            .as_ref()
-            .ok_or_else(|| format!("prompts.diff_only not defined for subagent '{}'", SUBAGENT_ID))?;
+        let system_prompt = subagent_config.prompts.diff_only.as_ref().ok_or_else(|| {
+            format!(
+                "prompts.diff_only not defined for subagent '{}'",
+                SUBAGENT_ID
+            )
+        })?;
         vec![
             ChatMessage {
                 role: "system".to_string(),

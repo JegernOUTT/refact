@@ -19,9 +19,16 @@ pub async fn compress_trajectory(
         .await
         .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
 
-    let compression_prompt = subagent_config.messages.user_template
+    let compression_prompt = subagent_config
+        .messages
+        .user_template
         .as_ref()
-        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", SUBAGENT_ID))?;
+        .ok_or_else(|| {
+            format!(
+                "messages.user_template not defined for subagent '{}'",
+                SUBAGENT_ID
+            )
+        })?;
 
     let mut messages_compress = messages.clone();
     messages_compress.push(ChatMessage {

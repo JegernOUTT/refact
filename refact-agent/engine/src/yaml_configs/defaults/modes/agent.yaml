@@ -259,7 +259,7 @@ tool_confirm:
     - match: "web*"
       action: auto
     - match: "chrome"
-      action: ask
+      action: auto
     - match: "tasks_set"
       action: auto
     - match: "task_done"

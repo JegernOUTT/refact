@@ -1,16 +1,22 @@
-use crate::integrations::browser_models::{
-    BrowserLocator, ElementInfo, FieldKind, LocatorStrategy,
-};
+use crate::integrations::browser_models::{BrowserLocator, ElementInfo, FieldKind, LocatorStrategy};
 
 pub fn to_css_selector(locator: &BrowserLocator) -> Option<String> {
     let base = match &locator.strategy {
         LocatorStrategy::Css { value } => value.clone(),
         LocatorStrategy::Id { value } => format!("#{}", css_escape_ident(value)),
         LocatorStrategy::Name { value } => format!("[name={}]", css_escape_attr_value(value)),
-        LocatorStrategy::TestId { value } => format!("[data-testid={}]", css_escape_attr_value(value)),
-        LocatorStrategy::Placeholder { value } => format!("[placeholder={}]", css_escape_attr_value(value)),
-        LocatorStrategy::Autocomplete { value } => format!("[autocomplete={}]", css_escape_attr_value(value)),
-        LocatorStrategy::Role { role, name: None } => format!("[role={}]", css_escape_attr_value(role)),
+        LocatorStrategy::TestId { value } => {
+            format!("[data-testid={}]", css_escape_attr_value(value))
+        }
+        LocatorStrategy::Placeholder { value } => {
+            format!("[placeholder={}]", css_escape_attr_value(value))
+        }
+        LocatorStrategy::Autocomplete { value } => {
+            format!("[autocomplete={}]", css_escape_attr_value(value))
+        }
+        LocatorStrategy::Role { role, name: None } => {
+            format!("[role={}]", css_escape_attr_value(role))
+        }
         LocatorStrategy::Text { .. } => return None,
         LocatorStrategy::Label { .. } => return None,
         LocatorStrategy::Role { name: Some(_), .. } => return None,
@@ -61,7 +67,6 @@ fn css_escape_attr_value(s: &str) -> String {
         .replace('\n', "\\a ");
     format!("\"{}\"", escaped)
 }
-
 
 pub fn generate_resolve_js(locator: &BrowserLocator) -> String {
     let find_code = generate_find_js(&locator.strategy);
@@ -120,7 +125,10 @@ pub fn generate_find_fragment_js(locator: &BrowserLocator) -> String {
 fn generate_find_js(strategy: &LocatorStrategy) -> String {
     match strategy {
         LocatorStrategy::Css { value } => {
-            format!("var elements = Array.from(scope.querySelectorAll({}));", js_string_literal(value))
+            format!(
+                "var elements = Array.from(scope.querySelectorAll({}));",
+                js_string_literal(value)
+            )
         }
         LocatorStrategy::Id { value } => {
             format!(
@@ -267,7 +275,6 @@ if (!window.__refact_inspect_element) {
 }
 "#;
 
-
 pub fn parse_element_info(json_str: &str) -> Result<ElementInfo, String> {
     let value: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| format!("Invalid JSON from browser: {}", e))?;
@@ -279,7 +286,6 @@ pub fn parse_element_info(json_str: &str) -> Result<ElementInfo, String> {
     serde_json::from_value(value).map_err(|e| format!("Failed to parse ElementInfo: {}", e))
 }
 
-
 #[allow(dead_code)]
 pub fn detect_field_kind(tag: &str, input_type: Option<&str>, content_editable: bool) -> FieldKind {
     let tag_lower = tag.to_lowercase();
@@ -289,27 +295,24 @@ pub fn detect_field_kind(tag: &str, input_type: Option<&str>, content_editable: 
     match tag_lower.as_str() {
         "textarea" => FieldKind::Textarea,
         "select" => FieldKind::Select,
-        "input" => {
-            match input_type.unwrap_or("text") {
-                "text" => FieldKind::TextInput,
-                "password" => FieldKind::PasswordInput,
-                "email" => FieldKind::EmailInput,
-                "search" => FieldKind::SearchInput,
-                "number" => FieldKind::NumberInput,
-                "tel" => FieldKind::TelInput,
-                "url" => FieldKind::UrlInput,
-                "date" | "datetime-local" | "month" | "week" | "time" => FieldKind::DateInput,
-                "file" => FieldKind::FileInput,
-                "hidden" => FieldKind::HiddenInput,
-                "checkbox" => FieldKind::Checkbox,
-                "radio" => FieldKind::Radio,
-                _ => FieldKind::TextInput,
-            }
-        }
+        "input" => match input_type.unwrap_or("text") {
+            "text" => FieldKind::TextInput,
+            "password" => FieldKind::PasswordInput,
+            "email" => FieldKind::EmailInput,
+            "search" => FieldKind::SearchInput,
+            "number" => FieldKind::NumberInput,
+            "tel" => FieldKind::TelInput,
+            "url" => FieldKind::UrlInput,
+            "date" | "datetime-local" | "month" | "week" | "time" => FieldKind::DateInput,
+            "file" => FieldKind::FileInput,
+            "hidden" => FieldKind::HiddenInput,
+            "checkbox" => FieldKind::Checkbox,
+            "radio" => FieldKind::Radio,
+            _ => FieldKind::TextInput,
+        },
         _ => FieldKind::Unknown,
     }
 }
-
 
 pub fn js_click_element() -> &'static str {
     r#"(function() {
@@ -520,7 +523,6 @@ pub fn js_check_element_hidden(css: &str) -> String {
     )
 }
 
-
 #[allow(dead_code)]
 pub fn js_detect_blocked_page() -> &'static str {
     r#"(function() {
@@ -577,7 +579,6 @@ pub fn js_find_search_input() -> &'static str {
 })()"#
 }
 
-
 pub fn js_string_literal(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 8);
     result.push('\'');
@@ -596,11 +597,9 @@ pub fn js_string_literal(s: &str) -> String {
     result
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_css_from_css_locator() {
@@ -645,7 +644,9 @@ mod tests {
     #[test]
     fn test_css_from_autocomplete_locator() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Autocomplete { value: "email".to_string() },
+            strategy: LocatorStrategy::Autocomplete {
+                value: "email".to_string(),
+            },
             nth: None,
             within: None,
         };
@@ -669,7 +670,10 @@ mod tests {
     #[test]
     fn test_css_from_text_returns_none() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Text { value: "Submit".to_string(), exact: false },
+            strategy: LocatorStrategy::Text {
+                value: "Submit".to_string(),
+                exact: false,
+            },
             nth: None,
             within: None,
         };
@@ -685,7 +689,9 @@ mod tests {
     #[test]
     fn test_css_from_xpath_returns_none() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Xpath { value: "//button".to_string() },
+            strategy: LocatorStrategy::Xpath {
+                value: "//button".to_string(),
+            },
             nth: None,
             within: None,
         };
@@ -695,14 +701,15 @@ mod tests {
     #[test]
     fn test_css_with_within_scope() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Name { value: "q".to_string() },
+            strategy: LocatorStrategy::Name {
+                value: "q".to_string(),
+            },
             nth: None,
             within: Some("#search-form".to_string()),
         };
         let css = to_css_selector(&loc).unwrap();
         assert_eq!(css, "#search-form [name=\"q\"]");
     }
-
 
     #[test]
     fn test_css_escape_ident_simple() {
@@ -741,9 +748,11 @@ mod tests {
 
     #[test]
     fn test_css_escape_attr_value_with_quotes() {
-        assert_eq!(css_escape_attr_value("it's \"here\""), "\"it's \\\"here\\\"\"");
+        assert_eq!(
+            css_escape_attr_value("it's \"here\""),
+            "\"it's \\\"here\\\"\""
+        );
     }
-
 
     #[test]
     fn test_js_string_literal_simple() {
@@ -772,7 +781,6 @@ mod tests {
         assert_eq!(lit, "'button[data-testid=\\'submit\\'], .form-submit'");
     }
 
-
     #[test]
     fn test_generate_resolve_js_css() {
         let loc = BrowserLocator::css("#email");
@@ -795,7 +803,10 @@ mod tests {
     #[test]
     fn test_generate_resolve_js_text() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Text { value: "Submit".to_string(), exact: true },
+            strategy: LocatorStrategy::Text {
+                value: "Submit".to_string(),
+                exact: true,
+            },
             nth: None,
             within: None,
         };
@@ -806,7 +817,10 @@ mod tests {
     #[test]
     fn test_generate_resolve_js_text_substring() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Text { value: "Sub".to_string(), exact: false },
+            strategy: LocatorStrategy::Text {
+                value: "Sub".to_string(),
+                exact: false,
+            },
             nth: None,
             within: None,
         };
@@ -817,7 +831,9 @@ mod tests {
     #[test]
     fn test_generate_resolve_js_xpath() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Xpath { value: "//button[@type='submit']".to_string() },
+            strategy: LocatorStrategy::Xpath {
+                value: "//button[@type='submit']".to_string(),
+            },
             nth: None,
             within: None,
         };
@@ -829,7 +845,9 @@ mod tests {
     #[test]
     fn test_generate_resolve_js_with_nth() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Css { value: "input".to_string() },
+            strategy: LocatorStrategy::Css {
+                value: "input".to_string(),
+            },
             nth: Some(2),
             within: None,
         };
@@ -840,7 +858,9 @@ mod tests {
     #[test]
     fn test_generate_resolve_js_with_within() {
         let loc = BrowserLocator {
-            strategy: LocatorStrategy::Css { value: "input".to_string() },
+            strategy: LocatorStrategy::Css {
+                value: "input".to_string(),
+            },
             nth: None,
             within: Some("#form".to_string()),
         };
@@ -858,7 +878,6 @@ mod tests {
         assert!(js.contains("aria-label"));
         assert!(js.contains("Search"));
     }
-
 
     #[test]
     fn test_parse_element_info_success() {
@@ -894,30 +913,44 @@ mod tests {
         assert!(result.is_err());
     }
 
-
     #[test]
     fn test_detect_field_kind_text_input() {
-        assert_eq!(detect_field_kind("input", Some("text"), false), FieldKind::TextInput);
+        assert_eq!(
+            detect_field_kind("input", Some("text"), false),
+            FieldKind::TextInput
+        );
     }
 
     #[test]
     fn test_detect_field_kind_password() {
-        assert_eq!(detect_field_kind("input", Some("password"), false), FieldKind::PasswordInput);
+        assert_eq!(
+            detect_field_kind("input", Some("password"), false),
+            FieldKind::PasswordInput
+        );
     }
 
     #[test]
     fn test_detect_field_kind_email() {
-        assert_eq!(detect_field_kind("input", Some("email"), false), FieldKind::EmailInput);
+        assert_eq!(
+            detect_field_kind("input", Some("email"), false),
+            FieldKind::EmailInput
+        );
     }
 
     #[test]
     fn test_detect_field_kind_search() {
-        assert_eq!(detect_field_kind("input", Some("search"), false), FieldKind::SearchInput);
+        assert_eq!(
+            detect_field_kind("input", Some("search"), false),
+            FieldKind::SearchInput
+        );
     }
 
     #[test]
     fn test_detect_field_kind_textarea() {
-        assert_eq!(detect_field_kind("textarea", None, false), FieldKind::Textarea);
+        assert_eq!(
+            detect_field_kind("textarea", None, false),
+            FieldKind::Textarea
+        );
     }
 
     #[test]
@@ -927,24 +960,32 @@ mod tests {
 
     #[test]
     fn test_detect_field_kind_content_editable() {
-        assert_eq!(detect_field_kind("div", None, true), FieldKind::ContentEditable);
+        assert_eq!(
+            detect_field_kind("div", None, true),
+            FieldKind::ContentEditable
+        );
     }
 
     #[test]
     fn test_detect_field_kind_checkbox() {
-        assert_eq!(detect_field_kind("input", Some("checkbox"), false), FieldKind::Checkbox);
+        assert_eq!(
+            detect_field_kind("input", Some("checkbox"), false),
+            FieldKind::Checkbox
+        );
     }
 
     #[test]
     fn test_detect_field_kind_input_default_type() {
-        assert_eq!(detect_field_kind("input", None, false), FieldKind::TextInput);
+        assert_eq!(
+            detect_field_kind("input", None, false),
+            FieldKind::TextInput
+        );
     }
 
     #[test]
     fn test_detect_field_kind_unknown_tag() {
         assert_eq!(detect_field_kind("span", None, false), FieldKind::Unknown);
     }
-
 
     #[test]
     fn test_js_click_element_valid_js() {
@@ -991,7 +1032,6 @@ mod tests {
         assert!(js.contains("getAttribute"));
         assert!(js.contains("href"));
     }
-
 
     #[test]
     fn test_js_detect_blocked_page_valid_js() {

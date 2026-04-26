@@ -24,12 +24,13 @@ fn merge_usage(existing: Option<ChatUsage>, incoming: ChatUsage) -> ChatUsage {
             let incoming_cache_read = incoming.cache_read_tokens.unwrap_or(0);
             let cache_read_increased = incoming_cache_read > prev_cache_read;
 
-            let merged_cache_creation = match (prev.cache_creation_tokens, incoming.cache_creation_tokens) {
-                (Some(a), Some(b)) => Some(std::cmp::max(a, b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            let merged_cache_creation =
+                match (prev.cache_creation_tokens, incoming.cache_creation_tokens) {
+                    (Some(a), Some(b)) => Some(std::cmp::max(a, b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
             let merged_cache_read = match (prev.cache_read_tokens, incoming.cache_read_tokens) {
                 (Some(a), Some(b)) => Some(std::cmp::max(a, b)),
                 (Some(a), None) => Some(a),
@@ -45,7 +46,8 @@ fn merge_usage(existing: Option<ChatUsage>, incoming: ChatUsage) -> ChatUsage {
                 std::cmp::max(prev.prompt_tokens, incoming.prompt_tokens)
             };
 
-            let merged_completion = std::cmp::max(prev.completion_tokens, incoming.completion_tokens);
+            let merged_completion =
+                std::cmp::max(prev.completion_tokens, incoming.completion_tokens);
 
             let merged_metering = match (prev.metering_usd, incoming.metering_usd) {
                 (_, Some(b)) => Some(b),
@@ -145,7 +147,10 @@ fn push_content_delta(
     }
     acc.content.push_str(&text);
     if let Some(idx) = block_index {
-        acc.content_per_block.entry(idx).or_default().push_str(&text);
+        acc.content_per_block
+            .entry(idx)
+            .or_default()
+            .push_str(&text);
     }
     ops.push(DeltaOp::AppendContent { text });
 }
@@ -161,7 +166,10 @@ fn push_reasoning_delta(
     }
     acc.reasoning.push_str(&text);
     if let Some(idx) = block_index {
-        acc.reasoning_per_block.entry(idx).or_default().push_str(&text);
+        acc.reasoning_per_block
+            .entry(idx)
+            .or_default()
+            .push_str(&text);
     }
     ops.push(DeltaOp::AppendReasoning { text });
 }
@@ -181,7 +189,9 @@ fn route_append_content_with_think_tags(
 
     loop {
         if acc.inside_think_tag {
-            if let Some(close_idx) = find_ascii_case_insensitive(&acc.pending_think_parse, THINK_CLOSE_TAG) {
+            if let Some(close_idx) =
+                find_ascii_case_insensitive(&acc.pending_think_parse, THINK_CLOSE_TAG)
+            {
                 let reasoning_text = acc.pending_think_parse[..close_idx].to_string();
                 push_reasoning_delta(acc, ops, reasoning_text, block_index);
                 let drain_until = close_idx + THINK_CLOSE_TAG.len();
@@ -190,7 +200,8 @@ fn route_append_content_with_think_tags(
                 continue;
             }
 
-            let (emit, keep) = split_with_partial_tag_suffix(&acc.pending_think_parse, THINK_CLOSE_TAG);
+            let (emit, keep) =
+                split_with_partial_tag_suffix(&acc.pending_think_parse, THINK_CLOSE_TAG);
             let reasoning_text = emit.to_string();
             let keep_text = keep.to_string();
             push_reasoning_delta(acc, ops, reasoning_text, block_index);
@@ -198,7 +209,9 @@ fn route_append_content_with_think_tags(
             break;
         }
 
-        if let Some(open_idx) = find_ascii_case_insensitive(&acc.pending_think_parse, THINK_OPEN_TAG) {
+        if let Some(open_idx) =
+            find_ascii_case_insensitive(&acc.pending_think_parse, THINK_OPEN_TAG)
+        {
             let content_text = acc.pending_think_parse[..open_idx].to_string();
             push_content_delta(acc, ops, content_text, block_index);
             let drain_until = open_idx + THINK_OPEN_TAG.len();
@@ -243,7 +256,6 @@ fn handle_append_content_delta(
     }
 }
 
-
 pub async fn run_llm_stream<C: StreamCollector>(
     gcx: Arc<ARwLock<GlobalContext>>,
     params: StreamRunParams,
@@ -283,7 +295,8 @@ pub async fn run_llm_stream<C: StreamCollector>(
         supports_cache_control: params.model_rec.supports_cache_control,
     };
 
-    let http_parts = adapter.build_http(&params.llm_request, &adapter_settings)
+    let http_parts = adapter
+        .build_http(&params.llm_request, &adapter_settings)
         .map_err(|e| format!("Failed to build LLM request: {}", e))?;
 
     let mut sanitized_for_commit: Option<serde_json::Value> = None;
@@ -413,35 +426,47 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 }
                 LlmStreamDelta::SetToolCalls { tool_calls } => {
                     let tool_calls = if !params.model_rec.auth_token.is_empty() {
-                        tool_calls.into_iter().map(|mut tc| {
-                            strip_mcp_prefix_from_tool_call(&mut tc);
-                            tc
-                        }).collect()
+                        tool_calls
+                            .into_iter()
+                            .map(|mut tc| {
+                                strip_mcp_prefix_from_tool_call(&mut tc);
+                                tc
+                            })
+                            .collect()
                     } else {
                         tool_calls
                     };
                     for tc in &tool_calls {
                         acc.tool_calls.merge(tc);
                     }
-                    ops.push(DeltaOp::SetToolCalls { tool_calls: acc.tool_calls.finalize() });
+                    ops.push(DeltaOp::SetToolCalls {
+                        tool_calls: acc.tool_calls.finalize(),
+                    });
                 }
                 LlmStreamDelta::FinalizeToolCalls { tool_calls } => {
                     let tool_calls = if !params.model_rec.auth_token.is_empty() {
-                        tool_calls.into_iter().map(|mut tc| {
-                            strip_mcp_prefix_from_tool_call(&mut tc);
-                            tc
-                        }).collect()
+                        tool_calls
+                            .into_iter()
+                            .map(|mut tc| {
+                                strip_mcp_prefix_from_tool_call(&mut tc);
+                                tc
+                            })
+                            .collect()
                     } else {
                         tool_calls
                     };
                     for tc in &tool_calls {
                         acc.tool_calls.set_final(tc);
                     }
-                    ops.push(DeltaOp::SetToolCalls { tool_calls: acc.tool_calls.finalize() });
+                    ops.push(DeltaOp::SetToolCalls {
+                        tool_calls: acc.tool_calls.finalize(),
+                    });
                 }
                 LlmStreamDelta::SetThinkingBlocks { blocks } => {
                     merge_thinking_blocks(&mut acc.thinking_blocks, blocks);
-                    ops.push(DeltaOp::SetThinkingBlocks { blocks: acc.thinking_blocks.clone() });
+                    ops.push(DeltaOp::SetThinkingBlocks {
+                        blocks: acc.thinking_blocks.clone(),
+                    });
                 }
                 LlmStreamDelta::AddCitation { citation } => {
                     acc.citations.push(citation.clone());
@@ -455,7 +480,9 @@ pub async fn run_llm_stream<C: StreamCollector>(
                     acc.usage = Some(merge_usage(acc.usage.take(), usage.clone()));
                     if let Some(ref merged) = acc.usage {
                         collector.on_usage(merged);
-                        ops.push(DeltaOp::SetUsage { usage: json!(merged) });
+                        ops.push(DeltaOp::SetUsage {
+                            usage: json!(merged),
+                        });
                     }
                 }
                 LlmStreamDelta::SetFinishReason { reason } => {
@@ -512,30 +539,37 @@ pub async fn run_llm_stream<C: StreamCollector>(
             // 2) OpenAI: thinking_blocks exist with type="reasoning" — leave opaque, don't modify
             // 3) No blocks but reasoning text exists — create a synthetic reasoning block
             let thinking_blocks = if !acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
-                acc.thinking_blocks.into_iter().map(|mut block| {
-                    if let Some(obj) = block.as_object_mut() {
-                        let is_anthropic_thinking = obj.get("type")
-                            .and_then(|t| t.as_str()) == Some("thinking");
-                        // Check if thinking text is missing or empty/whitespace.
-                        // LiteLLM sends final signed blocks with empty "thinking": ""
-                        // since the text was already streamed via reasoning_content.
-                        let thinking_is_empty = obj.get("thinking")
-                            .and_then(|v| v.as_str())
-                            .map_or(true, |s| s.trim().is_empty());
-                        if is_anthropic_thinking && thinking_is_empty {
-                            // Use per-block reasoning when available (interleaved thinking),
-                            // fall back to global reasoning for single-block case.
-                            let block_idx = obj.get("index").and_then(|v| v.as_u64());
-                            let reasoning_text = block_idx
-                                .and_then(|idx| acc.reasoning_per_block.get(&idx))
-                                .unwrap_or(&acc.reasoning);
-                            if !reasoning_text.is_empty() {
-                                obj.insert("thinking".to_string(), json!(reasoning_text.clone()));
+                acc.thinking_blocks
+                    .into_iter()
+                    .map(|mut block| {
+                        if let Some(obj) = block.as_object_mut() {
+                            let is_anthropic_thinking =
+                                obj.get("type").and_then(|t| t.as_str()) == Some("thinking");
+                            // Check if thinking text is missing or empty/whitespace.
+                            // LiteLLM sends final signed blocks with empty "thinking": ""
+                            // since the text was already streamed via reasoning_content.
+                            let thinking_is_empty = obj
+                                .get("thinking")
+                                .and_then(|v| v.as_str())
+                                .map_or(true, |s| s.trim().is_empty());
+                            if is_anthropic_thinking && thinking_is_empty {
+                                // Use per-block reasoning when available (interleaved thinking),
+                                // fall back to global reasoning for single-block case.
+                                let block_idx = obj.get("index").and_then(|v| v.as_u64());
+                                let reasoning_text = block_idx
+                                    .and_then(|idx| acc.reasoning_per_block.get(&idx))
+                                    .unwrap_or(&acc.reasoning);
+                                if !reasoning_text.is_empty() {
+                                    obj.insert(
+                                        "thinking".to_string(),
+                                        json!(reasoning_text.clone()),
+                                    );
+                                }
                             }
                         }
-                    }
-                    block
-                }).collect()
+                        block
+                    })
+                    .collect()
             } else if acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
                 vec![json!({
                     "type": "reasoning",
@@ -555,15 +589,14 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 extra: {
                     let mut extra = acc.extra;
                     if !acc.content_per_block.is_empty() {
-                        let mut text_blocks: Vec<_> = acc.content_per_block
-                            .into_iter()
-                            .collect();
+                        let mut text_blocks: Vec<_> = acc.content_per_block.into_iter().collect();
                         text_blocks.sort_by_key(|(idx, _)| *idx);
                         extra.insert(
                             "_anthropic_text_blocks".to_string(),
-                            json!(text_blocks.into_iter().map(|(idx, text)| {
-                                json!({"index": idx, "text": text})
-                            }).collect::<Vec<_>>()),
+                            json!(text_blocks
+                                .into_iter()
+                                .map(|(idx, text)| { json!({"index": idx, "text": text}) })
+                                .collect::<Vec<_>>()),
                         );
                     }
                     extra
@@ -584,7 +617,10 @@ pub async fn run_llm_stream<C: StreamCollector>(
 ///
 /// When a duplicate is found, the existing block's signature is updated
 /// to the latest value (handles streaming signature updates).
-pub(crate) fn merge_thinking_blocks(dst: &mut Vec<serde_json::Value>, incoming: Vec<serde_json::Value>) {
+pub(crate) fn merge_thinking_blocks(
+    dst: &mut Vec<serde_json::Value>,
+    incoming: Vec<serde_json::Value>,
+) {
     for block in incoming {
         let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let block_id = block.get("id").and_then(|v| v.as_str());
@@ -592,7 +628,8 @@ pub(crate) fn merge_thinking_blocks(dst: &mut Vec<serde_json::Value>, incoming: 
         let block_sig = block.get("signature").and_then(|v| v.as_str());
 
         let existing_idx = if let Some(id) = block_id {
-            dst.iter().position(|b| b.get("id").and_then(|v| v.as_str()) == Some(id))
+            dst.iter()
+                .position(|b| b.get("id").and_then(|v| v.as_str()) == Some(id))
         } else if let Some(idx) = block_index {
             dst.iter().position(|b| {
                 b.get("type").and_then(|v| v.as_str()).unwrap_or("") == block_type
@@ -642,7 +679,11 @@ struct ChoiceAccumulator {
 
 fn strip_mcp_prefix_from_tool_call(tc: &mut serde_json::Value) {
     if let Some(func) = tc.get_mut("function") {
-        if let Some(name) = func.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()) {
+        if let Some(name) = func
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string())
+        {
             if let Some(stripped) = name.strip_prefix("mcp_") {
                 func["name"] = serde_json::json!(stripped);
             }
@@ -670,7 +711,9 @@ pub fn normalize_tool_call(tc: &serde_json::Value) -> Option<crate::call_validat
 
     let arguments = match function.get("arguments") {
         Some(serde_json::Value::String(s)) if s.trim().starts_with('{') => s.clone(),
-        Some(serde_json::Value::Object(_)) => serde_json::to_string(&function["arguments"]).unwrap_or_else(|_| "{}".to_string()),
+        Some(serde_json::Value::Object(_)) => {
+            serde_json::to_string(&function["arguments"]).unwrap_or_else(|_| "{}".to_string())
+        }
         _ => "{}".to_string(),
     };
 
@@ -711,8 +754,6 @@ fn format_llm_error_body(status_label: &str, text: &str) -> String {
     let preview = safe_truncate(text, 500);
     format!("LLM error ({}): {}", status_label, preview)
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -834,25 +875,29 @@ mod tests {
     /// Helper: simulate accumulator finalization (same logic as run_llm_stream).
     fn finalize_accumulator(acc: ChoiceAccumulator) -> ChoiceFinal {
         let thinking_blocks = if !acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
-            acc.thinking_blocks.into_iter().map(|mut block| {
-                if let Some(obj) = block.as_object_mut() {
-                    let is_anthropic_thinking = obj.get("type")
-                        .and_then(|t| t.as_str()) == Some("thinking");
-                    let thinking_is_empty = obj.get("thinking")
-                        .and_then(|v| v.as_str())
-                        .map_or(true, |s| s.trim().is_empty());
-                    if is_anthropic_thinking && thinking_is_empty {
-                        let block_idx = obj.get("index").and_then(|v| v.as_u64());
-                        let reasoning_text = block_idx
-                            .and_then(|idx| acc.reasoning_per_block.get(&idx))
-                            .unwrap_or(&acc.reasoning);
-                        if !reasoning_text.is_empty() {
-                            obj.insert("thinking".to_string(), json!(reasoning_text.clone()));
+            acc.thinking_blocks
+                .into_iter()
+                .map(|mut block| {
+                    if let Some(obj) = block.as_object_mut() {
+                        let is_anthropic_thinking =
+                            obj.get("type").and_then(|t| t.as_str()) == Some("thinking");
+                        let thinking_is_empty = obj
+                            .get("thinking")
+                            .and_then(|v| v.as_str())
+                            .map_or(true, |s| s.trim().is_empty());
+                        if is_anthropic_thinking && thinking_is_empty {
+                            let block_idx = obj.get("index").and_then(|v| v.as_u64());
+                            let reasoning_text = block_idx
+                                .and_then(|idx| acc.reasoning_per_block.get(&idx))
+                                .unwrap_or(&acc.reasoning);
+                            if !reasoning_text.is_empty() {
+                                obj.insert("thinking".to_string(), json!(reasoning_text.clone()));
+                            }
                         }
                     }
-                }
-                block
-            }).collect()
+                    block
+                })
+                .collect()
         } else if acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
             vec![json!({
                 "type": "reasoning",
@@ -944,8 +989,10 @@ mod tests {
         // Each block must get only its own reasoning text, not the concatenation.
         let mut acc = ChoiceAccumulator::default();
         acc.reasoning = "First thought...Second thought...".to_string();
-        acc.reasoning_per_block.insert(0, "First thought...".to_string());
-        acc.reasoning_per_block.insert(4, "Second thought...".to_string());
+        acc.reasoning_per_block
+            .insert(0, "First thought...".to_string());
+        acc.reasoning_per_block
+            .insert(4, "Second thought...".to_string());
         acc.thinking_blocks = vec![
             json!({"index": 0, "type": "thinking", "signature": "sig1"}),
             json!({"index": 4, "type": "thinking", "signature": "sig2"}),
@@ -977,30 +1024,45 @@ mod tests {
         })];
 
         // First signature chunk
-        merge_thinking_blocks(&mut blocks, vec![json!({
-            "index": 0,
-            "type": "thinking",
-            "signature": "abc"
-        })]);
+        merge_thinking_blocks(
+            &mut blocks,
+            vec![json!({
+                "index": 0,
+                "type": "thinking",
+                "signature": "abc"
+            })],
+        );
         assert_eq!(blocks[0]["signature"].as_str().unwrap(), "abc");
 
         // Second signature chunk — should replace, not concatenate
-        merge_thinking_blocks(&mut blocks, vec![json!({
-            "index": 0,
-            "type": "thinking",
-            "signature": "def"
-        })]);
-        assert_eq!(blocks[0]["signature"].as_str().unwrap(), "def",
-            "Signature updates must replace, not concatenate");
+        merge_thinking_blocks(
+            &mut blocks,
+            vec![json!({
+                "index": 0,
+                "type": "thinking",
+                "signature": "def"
+            })],
+        );
+        assert_eq!(
+            blocks[0]["signature"].as_str().unwrap(),
+            "def",
+            "Signature updates must replace, not concatenate"
+        );
 
         // Third chunk
-        merge_thinking_blocks(&mut blocks, vec![json!({
-            "index": 0,
-            "type": "thinking",
-            "signature": "ghi"
-        })]);
-        assert_eq!(blocks[0]["signature"].as_str().unwrap(), "ghi",
-            "Latest signature update must win");
+        merge_thinking_blocks(
+            &mut blocks,
+            vec![json!({
+                "index": 0,
+                "type": "thinking",
+                "signature": "ghi"
+            })],
+        );
+        assert_eq!(
+            blocks[0]["signature"].as_str().unwrap(),
+            "ghi",
+            "Latest signature update must win"
+        );
     }
 
     #[test]
@@ -1039,7 +1101,10 @@ mod tests {
 
         assert_eq!(result.thinking_blocks.len(), 2);
         // thinking block gets reasoning merged
-        assert_eq!(result.thinking_blocks[0]["thinking"].as_str().unwrap(), "Some reasoning");
+        assert_eq!(
+            result.thinking_blocks[0]["thinking"].as_str().unwrap(),
+            "Some reasoning"
+        );
         // redacted block untouched
         assert_eq!(result.thinking_blocks[1]["type"], "redacted_thinking");
         assert_eq!(result.thinking_blocks[1]["data"], "encrypted_blob");
@@ -1124,105 +1189,125 @@ mod tests {
             "meta": {"chat_id": "c1"}
         });
 
-        assert!(crate::chat::cache_guard::is_append_only_prefix(&prev, &next_ok));
-        assert!(!crate::chat::cache_guard::is_append_only_prefix(&prev, &next_bad));
+        assert!(crate::chat::cache_guard::is_append_only_prefix(
+            &prev, &next_ok
+        ));
+        assert!(!crate::chat::cache_guard::is_append_only_prefix(
+            &prev, &next_bad
+        ));
     }
 
     #[test]
     fn test_merge_thinking_blocks_dedupe_by_index() {
-        let mut dst = vec![
-            json!({"index": 0, "type": "thinking", "signature": "sig_v1"}),
-        ];
+        let mut dst = vec![json!({"index": 0, "type": "thinking", "signature": "sig_v1"})];
 
-        merge_thinking_blocks(&mut dst, vec![
-            json!({"index": 0, "type": "thinking", "signature": "sig_v2"}),
-        ]);
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({"index": 0, "type": "thinking", "signature": "sig_v2"})],
+        );
 
         assert_eq!(dst.len(), 1, "Same (type, index) should dedupe");
-        assert_eq!(dst[0]["signature"], "sig_v2", "Signature should be updated to latest");
+        assert_eq!(
+            dst[0]["signature"], "sig_v2",
+            "Signature should be updated to latest"
+        );
     }
 
     #[test]
     fn test_merge_thinking_blocks_streaming_signature_does_not_concat() {
         // Even if the upstream sends multiple signature updates, we must NOT
         // concatenate them: signatures are integrity-checked by the provider.
-        let mut dst = vec![
-            json!({"index": 0, "type": "thinking", "signature": "sig_part1"}),
-        ];
+        let mut dst = vec![json!({"index": 0, "type": "thinking", "signature": "sig_part1"})];
 
-        merge_thinking_blocks(&mut dst, vec![
-            json!({"index": 0, "type": "thinking", "signature": "sig_part2"}),
-        ]);
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({"index": 0, "type": "thinking", "signature": "sig_part2"})],
+        );
 
         assert_eq!(dst.len(), 1);
-        assert_eq!(dst[0]["signature"], "sig_part2", "Signature must be replaced, not concatenated");
+        assert_eq!(
+            dst[0]["signature"], "sig_part2",
+            "Signature must be replaced, not concatenated"
+        );
     }
 
     #[test]
     fn test_merge_thinking_blocks_different_indices_kept() {
         let mut dst = Vec::new();
 
-        merge_thinking_blocks(&mut dst, vec![
-            json!({"index": 0, "type": "thinking", "signature": "sig1"}),
-            json!({"index": 4, "type": "thinking", "signature": "sig2"}),
-        ]);
+        merge_thinking_blocks(
+            &mut dst,
+            vec![
+                json!({"index": 0, "type": "thinking", "signature": "sig1"}),
+                json!({"index": 4, "type": "thinking", "signature": "sig2"}),
+            ],
+        );
 
-        assert_eq!(dst.len(), 2, "Different indices should produce separate blocks");
+        assert_eq!(
+            dst.len(),
+            2,
+            "Different indices should produce separate blocks"
+        );
     }
 
     #[test]
     fn test_merge_thinking_blocks_dedupe_by_signature_no_index() {
         // LiteLLM blocks often have no index — dedupe by (type, signature)
-        let mut dst = vec![
-            json!({"type": "thinking", "thinking": "text", "signature": "sig_abc"}),
-        ];
+        let mut dst = vec![json!({"type": "thinking", "thinking": "text", "signature": "sig_abc"})];
 
-        merge_thinking_blocks(&mut dst, vec![
-            json!({"type": "thinking", "thinking": "text", "signature": "sig_abc"}),
-        ]);
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({"type": "thinking", "thinking": "text", "signature": "sig_abc"})],
+        );
 
-        assert_eq!(dst.len(), 1, "Same (type, signature) without index should dedupe");
+        assert_eq!(
+            dst.len(),
+            1,
+            "Same (type, signature) without index should dedupe"
+        );
     }
 
     #[test]
     fn test_merge_thinking_blocks_different_types_same_index_not_deduped() {
-        let mut dst = vec![
-            json!({"index": 0, "type": "thinking", "signature": "sig1"}),
-        ];
+        let mut dst = vec![json!({"index": 0, "type": "thinking", "signature": "sig1"})];
 
-        merge_thinking_blocks(&mut dst, vec![
-            json!({"index": 0, "type": "redacted_thinking", "data": "encrypted"}),
-        ]);
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({"index": 0, "type": "redacted_thinking", "data": "encrypted"})],
+        );
 
-        assert_eq!(dst.len(), 2,
-            "Different types at same index should not dedupe");
+        assert_eq!(
+            dst.len(),
+            2,
+            "Different types at same index should not dedupe"
+        );
     }
 
     #[test]
     fn test_merge_thinking_blocks_signature_added_to_existing() {
         // First block has no signature, second adds it
-        let mut dst = vec![
-            json!({"index": 0, "type": "thinking"}),
-        ];
+        let mut dst = vec![json!({"index": 0, "type": "thinking"})];
 
-        merge_thinking_blocks(&mut dst, vec![
-            json!({"index": 0, "type": "thinking", "signature": "sig_new"}),
-        ]);
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({"index": 0, "type": "thinking", "signature": "sig_new"})],
+        );
 
         assert_eq!(dst.len(), 1);
-        assert_eq!(dst[0]["signature"], "sig_new",
-            "Signature should be added to existing block");
+        assert_eq!(
+            dst[0]["signature"], "sig_new",
+            "Signature should be added to existing block"
+        );
     }
 
     #[test]
     fn test_merge_thinking_blocks_dedupe_by_id() {
-        let mut dst = vec![
-            json!({"id": "block_1", "type": "thinking", "signature": "sig_old"}),
-        ];
+        let mut dst = vec![json!({"id": "block_1", "type": "thinking", "signature": "sig_old"})];
 
-        merge_thinking_blocks(&mut dst, vec![
-            json!({"id": "block_1", "type": "thinking", "signature": "sig_new"}),
-        ]);
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({"id": "block_1", "type": "thinking", "signature": "sig_new"})],
+        );
 
         assert_eq!(dst.len(), 1, "Same id should dedupe");
         assert_eq!(dst[0]["signature"], "sig_new");
@@ -1231,16 +1316,18 @@ mod tests {
     #[test]
     fn test_merge_thinking_blocks_no_key_never_dedupes() {
         // Blocks with no id, no index, no signature always append
-        let mut dst = vec![
-            json!({"type": "thinking", "thinking": "text1"}),
-        ];
+        let mut dst = vec![json!({"type": "thinking", "thinking": "text1"})];
 
-        merge_thinking_blocks(&mut dst, vec![
-            json!({"type": "thinking", "thinking": "text2"}),
-        ]);
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({"type": "thinking", "thinking": "text2"})],
+        );
 
-        assert_eq!(dst.len(), 2,
-            "Blocks with no dedup key should always append");
+        assert_eq!(
+            dst.len(),
+            2,
+            "Blocks with no dedup key should always append"
+        );
     }
 
     #[test]
@@ -1360,7 +1447,9 @@ mod tests {
 
         assert_eq!(acc.content, "before <think>secret</think> after");
         assert_eq!(acc.reasoning, "");
-        assert_eq!(acc.content_per_block.get(&4).map(|s| s.as_str()), Some("before <think>secret</think> after"));
+        assert_eq!(
+            acc.content_per_block.get(&4).map(|s| s.as_str()),
+            Some("before <think>secret</think> after")
+        );
     }
-
 }

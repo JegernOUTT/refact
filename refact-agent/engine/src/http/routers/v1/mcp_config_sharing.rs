@@ -15,7 +15,9 @@ const EXPORT_VERSION: u32 = 1;
 
 fn is_secret_field(key: &str) -> bool {
     let key_lower = key.to_lowercase();
-    key_lower.contains("token") || key_lower.contains("secret") || key_lower.contains("key")
+    key_lower.contains("token")
+        || key_lower.contains("secret")
+        || key_lower.contains("key")
         || key_lower.contains("password")
 }
 
@@ -23,7 +25,11 @@ fn is_secret_field(key: &str) -> bool {
 fn redact_env(env: &HashMap<String, String>) -> HashMap<String, String> {
     env.iter()
         .map(|(k, v)| {
-            let redacted = if is_secret_field(k) { "<REDACTED>".to_string() } else { v.clone() };
+            let redacted = if is_secret_field(k) {
+                "<REDACTED>".to_string()
+            } else {
+                v.clone()
+            };
             (k.clone(), redacted)
         })
         .collect()
@@ -57,7 +63,9 @@ fn parse_yaml_config(content: &str) -> HashMap<String, Value> {
     }
 }
 
-async fn collect_mcp_yaml_files(integrations_dir: &std::path::Path) -> Vec<(String, String, String)> {
+async fn collect_mcp_yaml_files(
+    integrations_dir: &std::path::Path,
+) -> Vec<(String, String, String)> {
     let mut result = Vec::new();
     let mut rd = match tokio::fs::read_dir(integrations_dir).await {
         Ok(rd) => rd,
@@ -80,7 +88,11 @@ async fn collect_mcp_yaml_files(integrations_dir: &std::path::Path) -> Vec<(Stri
         let content = match tokio::fs::read_to_string(entry.path()).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("Failed to read config file {}: {}", entry.path().display(), e);
+                tracing::warn!(
+                    "Failed to read config file {}: {}",
+                    entry.path().display(),
+                    e
+                );
                 continue;
             }
         };
@@ -181,16 +193,36 @@ pub struct ImportRequest {
     pub secrets: HashMap<String, HashMap<String, String>>,
 }
 
-fn build_yaml_from_config(config: &HashMap<String, Value>, tools_config: &HashMap<String, Value>, confirmation: &HashMap<String, Value>) -> String {
+fn build_yaml_from_config(
+    config: &HashMap<String, Value>,
+    tools_config: &HashMap<String, Value>,
+    confirmation: &HashMap<String, Value>,
+) -> String {
     let mut full: serde_json::Map<String, Value> = serde_json::Map::new();
     for (k, v) in config {
         full.insert(k.clone(), v.clone());
     }
     if !tools_config.is_empty() {
-        full.insert("tools".to_string(), Value::Object(tools_config.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
+        full.insert(
+            "tools".to_string(),
+            Value::Object(
+                tools_config
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        );
     }
     if !confirmation.is_empty() {
-        full.insert("confirmation".to_string(), Value::Object(confirmation.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
+        full.insert(
+            "confirmation".to_string(),
+            Value::Object(
+                confirmation
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        );
     }
     let val = Value::Object(full);
     serde_yaml::to_string(&val).unwrap_or_default()
@@ -217,8 +249,14 @@ pub async fn handle_v1_mcp_import(
 
     let config_dir = gcx.read().await.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
-    tokio::fs::create_dir_all(&integrations_dir).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("cannot create integrations dir: {}", e)))?;
+    tokio::fs::create_dir_all(&integrations_dir)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot create integrations dir: {}", e),
+            )
+        })?;
 
     let mut imported = Vec::new();
     let mut skipped = Vec::new();
@@ -252,11 +290,16 @@ pub async fn handle_v1_mcp_import(
         }
 
         let mut config = server.config.clone();
-        if let Some(server_secrets) = req.secrets.get(&config_name).or_else(|| req.secrets.get(&server.config_name)) {
+        if let Some(server_secrets) = req
+            .secrets
+            .get(&config_name)
+            .or_else(|| req.secrets.get(&server.config_name))
+        {
             apply_secrets_to_config(&mut config, server_secrets);
         }
 
-        let yaml_content = build_yaml_from_config(&config, &server.tools_config, &server.confirmation);
+        let yaml_content =
+            build_yaml_from_config(&config, &server.tools_config, &server.confirmation);
         let tmp_path = config_path.with_extension("yaml.tmp");
         if let Err(e) = tokio::fs::write(&tmp_path, &yaml_content).await {
             errors.push(json!({ "config_name": config_name, "error": e.to_string() }));
@@ -268,7 +311,9 @@ pub async fn handle_v1_mcp_import(
             continue;
         }
 
-        imported.push(json!({ "config_name": config_name, "config_path": config_path.display().to_string() }));
+        imported.push(
+            json!({ "config_name": config_name, "config_path": config_path.display().to_string() }),
+        );
     }
 
     Ok(Json(json!({
@@ -283,7 +328,12 @@ pub async fn handle_v1_mcp_project_config(
 ) -> Result<Json<Value>, ScratchError> {
     let workspace_folders = {
         let gcx_locked = gcx.read().await;
-        let folders = gcx_locked.documents_state.workspace_folders.lock().unwrap().clone();
+        let folders = gcx_locked
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .clone();
         folders
     };
 
@@ -296,7 +346,11 @@ pub async fn handle_v1_mcp_project_config(
         let content = match tokio::fs::read_to_string(&config_path).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("Failed to read config file {}: {}", config_path.display(), e);
+                tracing::warn!(
+                    "Failed to read config file {}: {}",
+                    config_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -397,7 +451,10 @@ mod tests {
     #[test]
     fn test_determine_transport_stdio() {
         assert_eq!(mcp_naming::detect_transport("mcp_stdio_github"), "stdio");
-        assert_eq!(mcp_naming::detect_transport("mcp_stdio_brave_search"), "stdio");
+        assert_eq!(
+            mcp_naming::detect_transport("mcp_stdio_brave_search"),
+            "stdio"
+        );
     }
 
     #[test]
@@ -412,11 +469,20 @@ mod tests {
 
     #[test]
     fn test_config_prefix_for_transport() {
-        assert_eq!(mcp_naming::config_prefix_for_transport("stdio"), "mcp_stdio_");
+        assert_eq!(
+            mcp_naming::config_prefix_for_transport("stdio"),
+            "mcp_stdio_"
+        );
         assert_eq!(mcp_naming::config_prefix_for_transport("sse"), "mcp_sse_");
         assert_eq!(mcp_naming::config_prefix_for_transport("http"), "mcp_http_");
-        assert_eq!(mcp_naming::config_prefix_for_transport("streamable-http"), "mcp_http_");
-        assert_eq!(mcp_naming::config_prefix_for_transport("unknown"), "mcp_stdio_");
+        assert_eq!(
+            mcp_naming::config_prefix_for_transport("streamable-http"),
+            "mcp_http_"
+        );
+        assert_eq!(
+            mcp_naming::config_prefix_for_transport("unknown"),
+            "mcp_stdio_"
+        );
     }
 
     #[test]
@@ -429,7 +495,10 @@ mod tests {
                 transport: "stdio".to_string(),
                 config: {
                     let mut m = HashMap::new();
-                    m.insert("command".to_string(), Value::String("npx github".to_string()));
+                    m.insert(
+                        "command".to_string(),
+                        Value::String("npx github".to_string()),
+                    );
                     m
                 },
                 tools_config: HashMap::new(),
@@ -447,32 +516,47 @@ mod tests {
     fn test_build_yaml_from_config_basic() {
         let mut config = HashMap::new();
         config.insert("command".to_string(), Value::String("npx test".to_string()));
-        config.insert("env".to_string(), Value::Object({
-            let mut m = serde_json::Map::new();
-            m.insert("TOKEN".to_string(), Value::String("abc".to_string()));
-            m
-        }));
+        config.insert(
+            "env".to_string(),
+            Value::Object({
+                let mut m = serde_json::Map::new();
+                m.insert("TOKEN".to_string(), Value::String("abc".to_string()));
+                m
+            }),
+        );
         let tools_config: HashMap<String, Value> = HashMap::new();
         let confirmation: HashMap<String, Value> = HashMap::new();
         let yaml = build_yaml_from_config(&config, &tools_config, &confirmation);
-        assert!(yaml.contains("command") || yaml.contains("npx test"), "yaml must contain command");
+        assert!(
+            yaml.contains("command") || yaml.contains("npx test"),
+            "yaml must contain command"
+        );
     }
 
     #[test]
     fn test_apply_secrets_to_config_env() {
         let mut config: HashMap<String, Value> = HashMap::new();
-        config.insert("env".to_string(), Value::Object({
-            let mut m = serde_json::Map::new();
-            m.insert("GITHUB_TOKEN".to_string(), Value::String("<REDACTED>".to_string()));
-            m
-        }));
+        config.insert(
+            "env".to_string(),
+            Value::Object({
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "GITHUB_TOKEN".to_string(),
+                    Value::String("<REDACTED>".to_string()),
+                );
+                m
+            }),
+        );
 
         let mut secrets = HashMap::new();
         secrets.insert("env.GITHUB_TOKEN".to_string(), "ghp_real".to_string());
         apply_secrets_to_config(&mut config, &secrets);
 
         if let Some(Value::Object(env_map)) = config.get("env") {
-            assert_eq!(env_map["GITHUB_TOKEN"], Value::String("ghp_real".to_string()));
+            assert_eq!(
+                env_map["GITHUB_TOKEN"],
+                Value::String("ghp_real".to_string())
+            );
         } else {
             panic!("env should be present");
         }
@@ -497,7 +581,8 @@ mod tests {
             confirmation: HashMap::new(),
         };
 
-        let yaml = build_yaml_from_config(&server.config, &server.tools_config, &server.confirmation);
+        let yaml =
+            build_yaml_from_config(&server.config, &server.tools_config, &server.confirmation);
         let config_path = integrations_dir.join("mcp_stdio_testserver.yaml");
         let tmp_path = config_path.with_extension("yaml.tmp");
         tokio::fs::write(&tmp_path, &yaml).await.unwrap();
@@ -505,7 +590,10 @@ mod tests {
 
         assert!(config_path.exists(), "config file must be created");
         let content = tokio::fs::read_to_string(&config_path).await.unwrap();
-        assert!(content.contains("npx test"), "yaml content must contain the command");
+        assert!(
+            content.contains("npx test"),
+            "yaml content must contain the command"
+        );
     }
 
     #[tokio::test]
@@ -516,12 +604,16 @@ mod tests {
 
         tokio::fs::write(
             integrations_dir.join("mcp_stdio_github.yaml"),
-            "command: \"npx github\"\nenv:\n  GITHUB_TOKEN: \"ghp_test\"\n"
-        ).await.unwrap();
+            "command: \"npx github\"\nenv:\n  GITHUB_TOKEN: \"ghp_test\"\n",
+        )
+        .await
+        .unwrap();
         tokio::fs::write(
             integrations_dir.join("not_mcp_integration.yaml"),
-            "some: config\n"
-        ).await.unwrap();
+            "some: config\n",
+        )
+        .await
+        .unwrap();
 
         let files = collect_mcp_yaml_files(&integrations_dir).await;
         assert_eq!(files.len(), 1, "must find exactly 1 MCP yaml file");
@@ -534,8 +626,15 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("GITHUB_TOKEN".to_string(), "ghp_real_token".to_string());
         let redacted = redact_env(&env);
-        let not_redacted: HashMap<String, String> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        assert_eq!(redacted["GITHUB_TOKEN"], "<REDACTED>", "redact_env always redacts");
-        assert_eq!(not_redacted["GITHUB_TOKEN"], "ghp_real_token", "original not modified");
+        let not_redacted: HashMap<String, String> =
+            env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        assert_eq!(
+            redacted["GITHUB_TOKEN"], "<REDACTED>",
+            "redact_env always redacts"
+        );
+        assert_eq!(
+            not_redacted["GITHUB_TOKEN"], "ghp_real_token",
+            "original not modified"
+        );
     }
 }

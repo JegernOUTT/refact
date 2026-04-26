@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use resvg::{tiny_skia, usvg};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::files_correction::{
     canonical_path, correct_to_nearest_dir_path, get_project_dirs,
@@ -142,13 +144,8 @@ impl Tool for ToolCat {
         let mut corrections = false;
         let (paths, path_line_ranges, symbols) = parse_cat_args(args)?;
         let (filenames_present, symbols_not_found, not_found_messages, context_enums, multimodal) =
-            paths_and_symbols_to_cat_with_path_ranges(
-                ccx.clone(),
-                paths,
-                path_line_ranges,
-                symbols,
-            )
-            .await;
+            paths_and_symbols_to_cat_with_path_ranges(ccx.clone(), paths, path_line_ranges, symbols)
+                .await;
 
         let mut content = "".to_string();
         if !filenames_present.is_empty() {
@@ -225,7 +222,9 @@ impl Tool for ToolCat {
         results.push(ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: match chat_content {
-                ChatContent::SimpleText(t) => ChatContent::SimpleText(format!("{}{}", t, related_section)),
+                ChatContent::SimpleText(t) => {
+                    ChatContent::SimpleText(format!("{}{}", t, related_section))
+                }
                 ChatContent::Multimodal(mut mm) => {
                     if !related_section.is_empty() {
                         mm.push(MultimodalElement {
@@ -365,10 +364,8 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
             preprocess_path_for_normalization(p)
         };
 
-        let candidates_file =
-            file_repair_candidates(gcx.clone(), &path, top_n, false).await;
-        let candidates_dir =
-            correct_to_nearest_dir_path(gcx.clone(), &path, false, top_n).await;
+        let candidates_file = file_repair_candidates(gcx.clone(), &path, top_n, false).await;
+        let candidates_dir = correct_to_nearest_dir_path(gcx.clone(), &path, false, top_n).await;
 
         if !candidates_file.is_empty() || candidates_dir.is_empty() {
             let file_path = match return_one_candidate_or_a_good_error(

@@ -601,3 +601,27 @@ export function getTaskProgressFromMessages(
     failed: tasks.filter((t) => t.status === "failed").length,
   };
 }
+
+export const selectAutoEnrichmentEnabled = (state: RootState) =>
+  state.chat.threads[state.chat.current_thread_id]?.thread
+    .auto_enrichment_enabled ?? false;
+
+export const selectAutoEnrichmentEnabledById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.thread.auto_enrichment_enabled ?? false;
+
+export const selectMemoryEnrichmentUserTouched = (state: RootState) =>
+  state.chat.threads[state.chat.current_thread_id]
+    ?.memory_enrichment_user_touched ?? false;
+
+export const selectManualPreviewItems = (state: RootState) =>
+  state.chat.threads[state.chat.current_thread_id]?.manual_preview_items ?? [];
+
+export const selectManualPreviewItemsById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.manual_preview_items ?? [];
+
+export const selectManualPreviewRan = (state: RootState) =>
+  state.chat.threads[state.chat.current_thread_id]?.manual_preview_ran ?? false;

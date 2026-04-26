@@ -19,6 +19,7 @@ import {
   FileIcon,
   CodeIcon,
   MixerHorizontalIcon,
+  ExternalLinkIcon,
 } from "@radix-ui/react-icons";
 
 import { ScrollArea } from "../../components/ScrollArea";
@@ -47,6 +48,8 @@ import {
   ConfigPatch,
   validateConfigId,
 } from "./components/configUtils";
+import { useAppDispatch } from "../../hooks";
+import { push } from "../Pages/pagesSlice";
 
 import styles from "./Customization.module.css";
 
@@ -565,6 +568,7 @@ export const Customization: React.FC<CustomizationProps> = ({
   initialKind = "modes",
   initialConfigId,
 }) => {
+  const dispatch = useAppDispatch();
   const [activeKind, setActiveKind] = useState<ConfigKind>(initialKind);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(
     initialConfigId ?? null,
@@ -660,6 +664,20 @@ export const Customization: React.FC<CustomizationProps> = ({
             if (!selectedConfigId) {
               return (
                 <ScrollArea scrollbars="vertical" className={styles.listPanel}>
+                  {activeKind === "subagents" && (
+                    <Flex justify="end" p="2">
+                      <Button
+                        size="1"
+                        variant="outline"
+                        onClick={() =>
+                          dispatch(push({ name: "subagents marketplace" }))
+                        }
+                      >
+                        <ExternalLinkIcon />
+                        Browse Subagents Marketplace
+                      </Button>
+                    </Flex>
+                  )}
                   <ConfigList
                     items={getItemsForKind(activeKind)}
                     selectedId={selectedConfigId}
@@ -676,6 +694,20 @@ export const Customization: React.FC<CustomizationProps> = ({
             if (!selectedItem) {
               return (
                 <ScrollArea scrollbars="vertical" className={styles.listPanel}>
+                  {activeKind === "subagents" && (
+                    <Flex justify="end" p="2">
+                      <Button
+                        size="1"
+                        variant="outline"
+                        onClick={() =>
+                          dispatch(push({ name: "subagents marketplace" }))
+                        }
+                      >
+                        <ExternalLinkIcon />
+                        Browse Subagents Marketplace
+                      </Button>
+                    </Flex>
+                  )}
                   <ConfigList
                     items={getItemsForKind(activeKind)}
                     selectedId={selectedConfigId}

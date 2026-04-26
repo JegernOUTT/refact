@@ -1,0 +1,48 @@
+.grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.card {
+  all: unset;
+  cursor: pointer;
+  display: block;
+  width: 100%;
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-3);
+  background: var(--color-surface);
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+
+.card:hover {
+  border-color: var(--accent-a8);
+  background: var(--gray-a2);
+}
+
+.cardBody {
+  padding: var(--space-3) var(--space-4);
+}
+
+.cardHeader {
+  position: relative;
+}
+
+.cardIcon {
+  color: var(--accent-9);
+  display: flex;
+  align-items: center;
+}
+
+.cardArrow {
+  margin-left: auto;
+  color: var(--gray-a9);
+  display: flex;
+  align-items: center;
+}
+
+.cardDesc {
+  line-height: 1.5;
+}

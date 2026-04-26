@@ -678,15 +678,13 @@ mod tests {
     fn test_chat_event_serialization_queue_updated() {
         let event = ChatEvent::QueueUpdated {
             queue_size: 2,
-            queued_items: vec![
-                QueuedItem {
-                    client_request_id: "req-1".to_string(),
-                    priority: false,
-                    command_type: "user_message".to_string(),
-                    preview: "Hello".to_string(),
-                    content: "Hello".to_string(),
-                },
-            ],
+            queued_items: vec![QueuedItem {
+                client_request_id: "req-1".to_string(),
+                priority: false,
+                command_type: "user_message".to_string(),
+                preview: "Hello".to_string(),
+                content: "Hello".to_string(),
+            }],
         };
 
         let json = serde_json::to_value(&event).expect("serialize");
@@ -1437,7 +1435,10 @@ mod tests {
         assert_eq!(canonical_mode_id("TASK_AGENT").unwrap(), "task_agent");
         assert_eq!(canonical_mode_id("task_agent").unwrap(), "task_agent");
         assert_eq!(canonical_mode_id("PLAN").unwrap(), "plan");
-        assert_eq!(canonical_mode_id("my_custom_mode").unwrap(), "my_custom_mode");
+        assert_eq!(
+            canonical_mode_id("my_custom_mode").unwrap(),
+            "my_custom_mode"
+        );
         assert_eq!(canonical_mode_id("").unwrap(), "agent");
         assert_eq!(canonical_mode_id("  ").unwrap(), "agent");
         assert!(canonical_mode_id("invalid!mode").is_err());

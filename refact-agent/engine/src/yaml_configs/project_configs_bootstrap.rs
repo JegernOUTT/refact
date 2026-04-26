@@ -23,10 +23,21 @@ fn default_schema_version() -> u32 {
 
 pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), String> {
     if let Err(e) = fs::create_dir_all(config_dir).await {
-        return Err(format!("Failed to create config dir {:?}: {}", config_dir, e));
+        return Err(format!(
+            "Failed to create config dir {:?}: {}",
+            config_dir, e
+        ));
     }
 
-    let dirs = ["modes", "subagents", "toolbox_commands", "code_lens", "knowledge", "trajectories", "tasks"];
+    let dirs = [
+        "modes",
+        "subagents",
+        "toolbox_commands",
+        "code_lens",
+        "knowledge",
+        "trajectories",
+        "tasks",
+    ];
     for dir in &dirs {
         let dir_path = config_dir.join(dir);
         if let Err(e) = fs::create_dir_all(&dir_path).await {
@@ -42,7 +53,14 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
         for (filename, content) in get_defaults_for_kind(kind) {
             let target_path = config_dir.join(kind).join(&filename);
             let checksum_key = format!("{}/{}", kind, filename);
-            write_default_if_unchanged(&target_path, &checksum_key, &content, &existing_checksums, &mut new_checksums).await;
+            write_default_if_unchanged(
+                &target_path,
+                &checksum_key,
+                &content,
+                &existing_checksums,
+                &mut new_checksums,
+            )
+            .await;
         }
     }
 
@@ -59,7 +77,15 @@ pub async fn project_configs_ensure_dirs(project_root: &Path) -> Result<(), Stri
         return Err("Project root does not exist".to_string());
     }
 
-    let dirs = ["modes", "subagents", "toolbox_commands", "code_lens", "knowledge", "trajectories", "tasks"];
+    let dirs = [
+        "modes",
+        "subagents",
+        "toolbox_commands",
+        "code_lens",
+        "knowledge",
+        "trajectories",
+        "tasks",
+    ];
     for dir in &dirs {
         let dir_path = refact_dir.join(dir);
         if let Err(e) = fs::create_dir_all(&dir_path).await {
@@ -218,7 +244,11 @@ mod tests {
         let config_dir = temp.path().join("fresh_config");
         assert!(!config_dir.exists());
         let result = global_configs_try_create_all(&config_dir).await;
-        assert!(result.is_ok(), "bootstrap should create root dir: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "bootstrap should create root dir: {:?}",
+            result
+        );
         assert!(config_dir.exists());
         assert!(config_dir.join("modes").exists());
         assert!(config_dir.join("subagents").exists());
@@ -244,11 +274,20 @@ mod tests {
         global_configs_try_create_all(config_dir).await.unwrap();
 
         let bugs_content = fs::read_to_string(&bugs_path).await.unwrap();
-        assert!(!bugs_content.trim().is_empty(), "bugs.yaml should be healed");
-        assert!(bugs_content.contains("schema_version"), "healed file should have schema_version");
+        assert!(
+            !bugs_content.trim().is_empty(),
+            "bugs.yaml should be healed"
+        );
+        assert!(
+            bugs_content.contains("schema_version"),
+            "healed file should have schema_version"
+        );
 
         let explain_content = fs::read_to_string(&explain_path).await.unwrap();
-        assert!(!explain_content.trim().is_empty(), "explain.yaml should be healed");
+        assert!(
+            !explain_content.trim().is_empty(),
+            "explain.yaml should be healed"
+        );
     }
 
     #[tokio::test]
@@ -269,8 +308,11 @@ mod tests {
             );
             let parts: Vec<&str> = key.splitn(2, '/').collect();
             assert_eq!(parts.len(), 2, "key should have exactly one slash: {}", key);
-            assert!(["modes", "subagents", "toolbox_commands", "code_lens"].contains(&parts[0]),
-                "key kind should be valid: {}", key);
+            assert!(
+                ["modes", "subagents", "toolbox_commands", "code_lens"].contains(&parts[0]),
+                "key kind should be valid: {}",
+                key
+            );
         }
     }
 
@@ -289,7 +331,8 @@ mod tests {
             assert!(
                 file_path.exists(),
                 "checksum entry {} exists but file {:?} does not",
-                key, file_path
+                key,
+                file_path
             );
         }
     }
@@ -308,6 +351,9 @@ mod tests {
         global_configs_try_create_all(config_dir).await.unwrap();
 
         let after = fs::read_to_string(&agent_path).await.unwrap();
-        assert!(after.contains("# user comment"), "user modification should be preserved");
+        assert!(
+            after.contains("# user comment"),
+            "user modification should be preserved"
+        );
     }
 }

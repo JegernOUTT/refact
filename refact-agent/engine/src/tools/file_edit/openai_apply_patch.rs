@@ -39,7 +39,10 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ParseError::InvalidPatch(msg) => write!(f, "Invalid patch: {}", msg),
-            ParseError::InvalidHunk { message, line_number } => {
+            ParseError::InvalidHunk {
+                message,
+                line_number,
+            } => {
                 write!(f, "Invalid hunk at line {}: {}", line_number, message)
             }
         }
@@ -105,7 +108,9 @@ pub fn parse_patch(patch: &str) -> Result<ParsedPatch, ParseError> {
     }
 
     if operations.is_empty() {
-        return Err(ParseError::InvalidPatch("No file operations found".to_string()));
+        return Err(ParseError::InvalidPatch(
+            "No file operations found".to_string(),
+        ));
     }
 
     Ok(ParsedPatch { operations })
@@ -223,7 +228,11 @@ fn parse_update_file(lines: &[&str], start: usize) -> Result<(FileOperation, usi
             break;
         }
 
-        if line.starts_with("@@") || line.starts_with('+') || line.starts_with('-') || line.starts_with(' ') {
+        if line.starts_with("@@")
+            || line.starts_with('+')
+            || line.starts_with('-')
+            || line.starts_with(' ')
+        {
             let (chunk, next_i) = parse_hunk(lines, i)?;
             chunks.push(chunk);
             i = next_i;
@@ -244,7 +253,14 @@ fn parse_update_file(lines: &[&str], start: usize) -> Result<(FileOperation, usi
         });
     }
 
-    Ok((FileOperation::Update { path, move_to, chunks }, i))
+    Ok((
+        FileOperation::Update {
+            path,
+            move_to,
+            chunks,
+        },
+        i,
+    ))
 }
 
 pub fn validate_relative_path(path: &str) -> Result<PathBuf, String> {
@@ -296,10 +312,7 @@ pub fn validate_relative_path(path: &str) -> Result<PathBuf, String> {
     Ok(path_buf)
 }
 
-pub fn apply_update_chunks(
-    original: &str,
-    chunks: &[UpdateChunk],
-) -> Result<String, String> {
+pub fn apply_update_chunks(original: &str, chunks: &[UpdateChunk]) -> Result<String, String> {
     let mut lines: Vec<String> = original.lines().map(String::from).collect();
     let had_trailing_newline = original.ends_with('\n');
 
@@ -363,7 +376,12 @@ fn compute_replacements(
                 } else {
                     &chunk.new_lines[..]
                 };
-                let retry = seek_sequence(original_lines, trimmed_pattern, line_index, chunk.is_end_of_file);
+                let retry = seek_sequence(
+                    original_lines,
+                    trimmed_pattern,
+                    line_index,
+                    chunk.is_end_of_file,
+                );
                 (retry, trimmed_pattern.len(), trimmed_new)
             }
             None => (None, pattern.len(), chunk.new_lines.as_slice()),
@@ -375,14 +393,23 @@ fn compute_replacements(
         } else {
             return Err(format!(
                 "Failed to find expected lines in file:\n{}",
-                chunk.old_lines.iter().take(5).cloned().collect::<Vec<_>>().join("\n")
+                chunk
+                    .old_lines
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ));
         }
     }
 
     replacements.sort_by(|a, b| a.0.cmp(&b.0).then(a.3.cmp(&b.3)));
 
-    Ok(replacements.into_iter().map(|(idx, len, lines, _)| (idx, len, lines)).collect())
+    Ok(replacements
+        .into_iter()
+        .map(|(idx, len, lines, _)| (idx, len, lines))
+        .collect())
 }
 
 fn seek_sequence(
@@ -500,12 +527,19 @@ fn parse_hunk(lines: &[&str], start: usize) -> Result<(UpdateChunk, usize), Pars
         } else if line.starts_with('-') {
             old_lines.push(line[1..].to_string());
         } else if line.starts_with(' ') || line.is_empty() {
-            let content = if line.is_empty() { String::new() } else { line[1..].to_string() };
+            let content = if line.is_empty() {
+                String::new()
+            } else {
+                line[1..].to_string()
+            };
             old_lines.push(content.clone());
             new_lines.push(content);
         } else {
             return Err(ParseError::InvalidHunk {
-                message: format!("Invalid diff line (must start with +, -, or space): '{}'", line),
+                message: format!(
+                    "Invalid diff line (must start with +, -, or space): '{}'",
+                    line
+                ),
                 line_number: i + 1,
             });
         }
@@ -566,7 +600,11 @@ mod tests {
         let parsed = parse_patch(&patch).unwrap();
         assert_eq!(parsed.operations.len(), 1);
         match &parsed.operations[0] {
-            FileOperation::Update { path, move_to, chunks } => {
+            FileOperation::Update {
+                path,
+                move_to,
+                chunks,
+            } => {
                 assert_eq!(path, "src/app.py");
                 assert!(move_to.is_none());
                 assert_eq!(chunks.len(), 1);
@@ -580,9 +618,7 @@ mod tests {
 
     #[test]
     fn test_parse_update_with_move() {
-        let patch = wrap_patch(
-            "*** Update File: old.py\n*** Move to: new.py\n@@ \n-old\n+new"
-        );
+        let patch = wrap_patch("*** Update File: old.py\n*** Move to: new.py\n@@ \n-old\n+new");
         let parsed = parse_patch(&patch).unwrap();
         match &parsed.operations[0] {
             FileOperation::Update { path, move_to, .. } => {
@@ -601,15 +637,19 @@ mod tests {
         let parsed = parse_patch(&patch).unwrap();
         assert_eq!(parsed.operations.len(), 3);
         assert!(matches!(&parsed.operations[0], FileOperation::Add { .. }));
-        assert!(matches!(&parsed.operations[1], FileOperation::Update { .. }));
-        assert!(matches!(&parsed.operations[2], FileOperation::Delete { .. }));
+        assert!(matches!(
+            &parsed.operations[1],
+            FileOperation::Update { .. }
+        ));
+        assert!(matches!(
+            &parsed.operations[2],
+            FileOperation::Delete { .. }
+        ));
     }
 
     #[test]
     fn test_parse_eof_marker() {
-        let patch = wrap_patch(
-            "*** Update File: file.txt\n@@\n+appended line\n*** End of File"
-        );
+        let patch = wrap_patch("*** Update File: file.txt\n@@\n+appended line\n*** End of File");
         let parsed = parse_patch(&patch).unwrap();
         match &parsed.operations[0] {
             FileOperation::Update { chunks, .. } => {
@@ -747,7 +787,10 @@ mod tests {
         let patch = wrap_patch("*** Update File: file.txt");
         let result = parse_patch(&patch);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("at least one hunk"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("at least one hunk"));
     }
 
     #[test]

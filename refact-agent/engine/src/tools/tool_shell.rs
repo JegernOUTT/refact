@@ -22,14 +22,15 @@ use crate::files_correction::get_project_dirs;
 use crate::files_correction::preprocess_path_for_normalization;
 use crate::files_correction::CommandSimplifiedDirExt;
 use crate::global_context::GlobalContext;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::postprocessing::pp_command_output::{
     OutputFilter, parse_output_filter_args, output_mini_postprocessing,
 };
 use crate::postprocessing::pp_capture_buffer::{CaptureBuffer, KeepStrategy};
 use crate::integrations::integr_abstract::IntegrationConfirmation;
-
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct SettingsShell {
@@ -149,7 +150,11 @@ impl Tool for ToolShell {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, subchat_tx, abort_flag) = {
             let ccx_lock = ccx.lock().await;
-            (ccx_lock.global_context.clone(), ccx_lock.subchat_tx.clone(), ccx_lock.abort_flag.clone())
+            (
+                ccx_lock.global_context.clone(),
+                ccx_lock.subchat_tx.clone(),
+                ccx_lock.abort_flag.clone(),
+            )
         };
         let (command, workdir_maybe, custom_filter, timeout_override) =
             parse_args_with_filter(gcx.clone(), args, &self.cfg.output_filter).await?;
@@ -363,10 +368,7 @@ async fn kill_and_reap(child: &mut tokio::process::Child) {
     }
     let _ = child.kill().await;
     // Reap the child to prevent zombie processes
-    let _ = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        child.wait()
-    ).await;
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), child.wait()).await;
 }
 
 pub async fn execute_shell_command_with_streaming(
@@ -485,14 +487,21 @@ pub async fn execute_shell_command_with_streaming(
 
             let (stdout_str, stderr_str) = {
                 let mut collector = output_collector.lock().await;
-                (collector.stdout.take_result(), collector.stderr.take_result())
+                (
+                    collector.stdout.take_result(),
+                    collector.stderr.take_result(),
+                )
             };
             let exit_code = status.code().unwrap_or_default();
 
             send_streaming_update(
                 subchat_tx,
                 tool_call_id,
-                &format!("✅ Finished (exit code: {}, {:.1}s)", exit_code, duration.as_secs_f64()),
+                &format!(
+                    "✅ Finished (exit code: {}, {:.1}s)",
+                    exit_code,
+                    duration.as_secs_f64()
+                ),
             );
 
             Ok(ShellStreamResult {
@@ -512,11 +521,17 @@ pub async fn execute_shell_command_with_streaming(
             let _ = streaming_handle.await;
 
             let duration = t0.elapsed();
-            tracing::info!("SHELL: /interrupted by user after {:.3}s", duration.as_secs_f64());
+            tracing::info!(
+                "SHELL: /interrupted by user after {:.3}s",
+                duration.as_secs_f64()
+            );
 
             let (stdout_str, stderr_str) = {
                 let mut collector = output_collector.lock().await;
-                (collector.stdout.take_result(), collector.stderr.take_result())
+                (
+                    collector.stdout.take_result(),
+                    collector.stderr.take_result(),
+                )
             };
 
             send_streaming_update(
@@ -638,4 +653,3 @@ async fn resolve_shell_workdir(
         Ok(workdir)
     }
 }
-

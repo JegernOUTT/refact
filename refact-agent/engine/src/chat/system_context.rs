@@ -11,9 +11,7 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextFile};
 use crate::files_correction::{get_project_dirs, paths_from_anywhere};
 use crate::memories::{load_memories_by_tags, MemoRecord};
 use crate::chat::config::limits;
-use crate::yaml_configs::project_information::{
-    load_project_information_config, to_relative_path,
-};
+use crate::yaml_configs::project_information::{load_project_information_config, to_relative_path};
 
 pub const PROJECT_CONTEXT_MARKER: &str = "project_context";
 use crate::files_in_workspace::detect_vcs_for_a_file_path;
@@ -1480,27 +1478,35 @@ pub async fn gather_system_context(
 
     // Detected environments - respect config (may be subset of all_environments)
     let detected_environments = if config.sections.detected_environments.enabled {
-        let max_items = config.sections.detected_environments.max_items.unwrap_or(50);
+        let max_items = config
+            .sections
+            .detected_environments
+            .max_items
+            .unwrap_or(50);
         all_environments.iter().take(max_items).cloned().collect()
     } else {
         vec![]
     };
 
     // Helper to get relative path for override lookup
-    let get_override_key = |abs_path: &str| -> Option<String> {
-        to_relative_path(abs_path, &project_dirs)
-    };
+    let get_override_key =
+        |abs_path: &str| -> Option<String> { to_relative_path(abs_path, &project_dirs) };
 
     // Instruction files - respect config and per-file overrides
     let instruction_files = if config.sections.instruction_files.enabled {
         let max_items = config.sections.instruction_files.max_items.unwrap_or(20);
-        let default_max_chars = config.sections.instruction_files.max_chars_per_item.unwrap_or(8000);
+        let default_max_chars = config
+            .sections
+            .instruction_files
+            .max_chars_per_item
+            .unwrap_or(8000);
         let overrides = &config.sections.instruction_files.overrides;
 
         let mut files = find_instruction_files(&project_dirs).await;
 
         // Filter out disabled files and apply per-file max_chars
-        files = files.into_iter()
+        files = files
+            .into_iter()
             .filter(|f| {
                 get_override_key(&f.file_path)
                     .and_then(|key| overrides.get(&key))
@@ -1549,7 +1555,11 @@ pub async fn gather_system_context(
     };
 
     // Project tree - respect config
-    let effective_max_depth = config.sections.project_tree.max_depth.unwrap_or(tree_max_depth);
+    let effective_max_depth = config
+        .sections
+        .project_tree
+        .max_depth
+        .unwrap_or(tree_max_depth);
     let project_tree = if include_tree && config.sections.project_tree.enabled {
         let max_chars = config.sections.project_tree.max_chars.unwrap_or(16000);
         match generate_compact_project_tree(gcx.clone(), effective_max_depth).await {
@@ -1568,7 +1578,11 @@ pub async fn gather_system_context(
 
     // Environment instructions - use all_environments (not the potentially limited detected_environments)
     let environment_instructions = if config.sections.environment_instructions.enabled {
-        let max_chars = config.sections.environment_instructions.max_chars.unwrap_or(6000);
+        let max_chars = config
+            .sections
+            .environment_instructions
+            .max_chars
+            .unwrap_or(6000);
         let instructions = generate_environment_instructions(&all_environments);
         if instructions.chars().count() > max_chars {
             truncate_to_chars(&instructions, max_chars)
@@ -1581,29 +1595,33 @@ pub async fn gather_system_context(
 
     // Memories - respect config and per-file overrides
     let memories = if config.sections.memories.enabled {
-        let max_items = config.sections.memories.max_items.unwrap_or(MAX_MEMORIES_IN_CONTEXT);
+        let max_items = config
+            .sections
+            .memories
+            .max_items
+            .unwrap_or(MAX_MEMORIES_IN_CONTEXT);
         let default_max_chars = config.sections.memories.max_chars_per_item.unwrap_or(2000);
         let overrides = &config.sections.memories.overrides;
 
-        let mut memos = load_memories_by_tags(
-            gcx.clone(),
-            MEMORY_TAGS_FOR_CONTEXT,
-            max_items,
-        )
-        .await
-        .unwrap_or_default();
+        let mut memos = load_memories_by_tags(gcx.clone(), MEMORY_TAGS_FOR_CONTEXT, max_items)
+            .await
+            .unwrap_or_default();
 
         // Filter out disabled memories and apply per-file max_chars
-        memos = memos.into_iter()
+        memos = memos
+            .into_iter()
             .filter(|m| {
-                m.file_path.as_ref()
+                m.file_path
+                    .as_ref()
                     .and_then(|p| to_relative_path(&p.display().to_string(), &project_dirs))
                     .and_then(|key| overrides.get(&key))
                     .and_then(|o| o.enabled)
                     .unwrap_or(true)
             })
             .map(|mut m| {
-                let max_chars = m.file_path.as_ref()
+                let max_chars = m
+                    .file_path
+                    .as_ref()
                     .and_then(|p| to_relative_path(&p.display().to_string(), &project_dirs))
                     .and_then(|key| overrides.get(&key))
                     .and_then(|o| o.max_chars)

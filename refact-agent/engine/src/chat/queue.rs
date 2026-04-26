@@ -19,6 +19,37 @@ use super::trajectories::maybe_save_trajectory;
 use crate::ext::slash_expand::expand_slash_command;
 use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
 
+fn apply_manual_context_files(
+    session: &mut super::types::ChatSession,
+    context_files: &[serde_json::Value],
+) {
+    const MAX_CTX_FILES: usize = 5;
+    const MAX_TOTAL_CHARS: usize = 50_000;
+    let mut validated: Vec<crate::call_validation::ContextFile> = Vec::new();
+    let mut total_chars = 0usize;
+    for v in context_files.iter().take(MAX_CTX_FILES) {
+        if let Ok(file) = serde_json::from_value::<crate::call_validation::ContextFile>(v.clone()) {
+            let chars = file.file_content.chars().count();
+            if total_chars + chars <= MAX_TOTAL_CHARS {
+                total_chars += chars;
+                validated.push(file);
+            } else {
+                continue;
+            }
+        }
+    }
+    if !validated.is_empty() {
+        let msg = ChatMessage {
+            message_id: Uuid::new_v4().to_string(),
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(validated),
+            tool_call_id: "manual_memory_enrichment".to_string(),
+            ..Default::default()
+        };
+        session.add_message(msg);
+    }
+}
+
 fn command_triggers_generation(cmd: &ChatCommand) -> bool {
     matches!(
         cmd,
@@ -49,9 +80,40 @@ pub async fn inject_priority_messages_if_any(
         if let ChatCommand::UserMessage {
             content,
             attachments,
+            context_files,
+            suppress_auto_enrichment: _,
         } = request.command
         {
-            // Extract data needed for checkpoint creation while holding the lock briefly
+            let (session_id, project_dir) = {
+                let session = session_arc.lock().await;
+                let sid = session.chat_id.clone();
+                drop(session);
+                let pd = get_project_dir_string(gcx.clone()).await;
+                (sid, pd)
+            };
+            let prompt_text = match &content {
+                serde_json::Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            };
+            let hook_results = run_hooks(
+                gcx.clone(),
+                HookEvent::UserPromptSubmit,
+                HookPayload {
+                    hook_event_name: "UserPromptSubmit".to_string(),
+                    session_id,
+                    project_dir,
+                    tool_name: None,
+                    tool_input: None,
+                    tool_output: None,
+                    user_prompt: Some(prompt_text),
+                    extra: std::collections::HashMap::new(),
+                },
+            )
+            .await;
+            if first_block_reason(&hook_results).is_some() {
+                continue;
+            }
+
             let (checkpoints_enabled, chat_id, latest_checkpoint) = {
                 let session = session_arc.lock().await;
                 (
@@ -61,15 +123,16 @@ pub async fn inject_priority_messages_if_any(
                 )
             };
 
-            // Create checkpoint without holding the session lock (can be slow)
             let checkpoints = if checkpoints_enabled {
                 create_checkpoint_async(gcx.clone(), latest_checkpoint.as_ref(), &chat_id).await
             } else {
                 Vec::new()
             };
 
-            // Reacquire lock to add the message
             let mut session = session_arc.lock().await;
+            if !context_files.is_empty() {
+                apply_manual_context_files(&mut session, &context_files);
+            }
             let parsed_content = parse_content_with_attachments(&content, &attachments);
             let user_message = ChatMessage {
                 message_id: Uuid::new_v4().to_string(),
@@ -164,7 +227,8 @@ pub fn apply_setparams_patch(
         }
     }
     if let Some(mode) = patch.get("mode").and_then(|v| v.as_str()) {
-        let normalized_mode = crate::yaml_configs::customization_registry::map_legacy_mode_to_id(mode);
+        let normalized_mode =
+            crate::yaml_configs::customization_registry::map_legacy_mode_to_id(mode);
         if thread.mode != normalized_mode {
             thread.mode = normalized_mode.to_string();
             changed = true;
@@ -187,7 +251,11 @@ pub fn apply_setparams_patch(
         let new_val = if effort_val.is_null() {
             None
         } else if let Some(effort) = effort_val.as_str() {
-            if effort.is_empty() { None } else { Some(effort.to_string()) }
+            if effort.is_empty() {
+                None
+            } else {
+                Some(effort.to_string())
+            }
         } else {
             thread.reasoning_effort.clone()
         };
@@ -303,16 +371,36 @@ pub fn apply_setparams_patch(
             changed = true;
         }
     }
-    if let Some(val) = patch.get("auto_approve_editing_tools").and_then(|v| v.as_bool()) {
+    if let Some(val) = patch
+        .get("auto_approve_editing_tools")
+        .and_then(|v| v.as_bool())
+    {
         if thread.auto_approve_editing_tools != val {
             thread.auto_approve_editing_tools = val;
             changed = true;
         }
     }
-    if let Some(val) = patch.get("auto_approve_dangerous_commands").and_then(|v| v.as_bool()) {
+    if let Some(val) = patch
+        .get("auto_approve_dangerous_commands")
+        .and_then(|v| v.as_bool())
+    {
         if thread.auto_approve_dangerous_commands != val {
             thread.auto_approve_dangerous_commands = val;
             changed = true;
+        }
+    }
+    if let Some(val) = patch.get("auto_enrichment_enabled") {
+        if val.is_null() {
+            if thread.auto_enrichment_enabled.is_some() {
+                thread.auto_enrichment_enabled = None;
+                changed = true;
+            }
+        } else if let Some(b) = val.as_bool() {
+            let new_val = Some(b);
+            if thread.auto_enrichment_enabled != new_val {
+                thread.auto_enrichment_enabled = new_val;
+                changed = true;
+            }
         }
     }
     if let Some(task_meta_value) = patch.get("task_meta") {
@@ -326,21 +414,33 @@ pub fn apply_setparams_patch(
         }
     }
     if let Some(parent_id) = patch.get("parent_id").and_then(|v| v.as_str()) {
-        let new_val = if parent_id.is_empty() { None } else { Some(parent_id.to_string()) };
+        let new_val = if parent_id.is_empty() {
+            None
+        } else {
+            Some(parent_id.to_string())
+        };
         if thread.parent_id != new_val {
             thread.parent_id = new_val;
             changed = true;
         }
     }
     if let Some(link_type) = patch.get("link_type").and_then(|v| v.as_str()) {
-        let new_val = if link_type.is_empty() { None } else { Some(link_type.to_string()) };
+        let new_val = if link_type.is_empty() {
+            None
+        } else {
+            Some(link_type.to_string())
+        };
         if thread.link_type != new_val {
             thread.link_type = new_val;
             changed = true;
         }
     }
     if let Some(root_chat_id) = patch.get("root_chat_id").and_then(|v| v.as_str()) {
-        let new_val = if root_chat_id.is_empty() { None } else { Some(root_chat_id.to_string()) };
+        let new_val = if root_chat_id.is_empty() {
+            None
+        } else {
+            Some(root_chat_id.to_string())
+        };
         if thread.root_chat_id != new_val {
             thread.root_chat_id = new_val;
             changed = true;
@@ -456,6 +556,8 @@ pub async fn process_command_queue(
             ChatCommand::UserMessage {
                 mut content,
                 attachments,
+                context_files,
+                suppress_auto_enrichment,
             } => {
                 let mut skill_activation_info = None;
                 if let Some(text) = content.as_str() {
@@ -493,7 +595,8 @@ pub async fn process_command_queue(
                     }
                 }
 
-                let skill_activation_name: Option<String> = skill_activation_info.as_ref().map(|i| i.name.clone());
+                let skill_activation_name: Option<String> =
+                    skill_activation_info.as_ref().map(|i| i.name.clone());
                 let skill_context_msg = if let Some(info) = skill_activation_info {
                     let body = expand_skill_includes(&info.body, &info.skill_dir).await;
                     let line_count = body.lines().count().max(1);
@@ -529,7 +632,6 @@ pub async fn process_command_queue(
                     Vec::new()
                 };
 
-                // Extract data needed for checkpoint creation while holding the lock briefly
                 let (checkpoints_enabled, chat_id, latest_checkpoint) = {
                     let session = session_arc.lock().await;
                     (
@@ -539,7 +641,6 @@ pub async fn process_command_queue(
                     )
                 };
 
-                // Create checkpoint without holding the session lock (can be slow)
                 let checkpoints = if checkpoints_enabled {
                     create_checkpoint_async(gcx.clone(), latest_checkpoint.as_ref(), &chat_id).await
                 } else {
@@ -561,7 +662,8 @@ pub async fn process_command_queue(
                     &browser_chat_id,
                     has_browser_meta,
                     attach_screenshot_on_send,
-                ).await;
+                )
+                .await;
 
                 let (session_id_for_hook, project_dir_for_hook) = {
                     let session = session_arc.lock().await;
@@ -577,14 +679,15 @@ pub async fn process_command_queue(
                 let prompt_payload = HookPayload {
                     hook_event_name: "UserPromptSubmit".to_string(),
                     session_id: session_id_for_hook.clone(),
-                    project_dir: project_dir_for_hook,
+                    project_dir: project_dir_for_hook.clone(),
                     tool_name: None,
                     tool_input: None,
                     tool_output: None,
                     user_prompt: Some(prompt_text),
                     extra: std::collections::HashMap::new(),
                 };
-                let prompt_results = run_hooks(gcx.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
+                let prompt_results =
+                    run_hooks(gcx.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
                 if let Some(reason) = first_block_reason(&prompt_results) {
                     let mut session = session_arc.lock().await;
                     session.emit(super::types::ChatEvent::RuntimeUpdated {
@@ -595,19 +698,66 @@ pub async fn process_command_queue(
                     continue;
                 }
 
-                let is_oversize = browser_ctx_result.as_ref().map_or(false, |(_, oversize)| *oversize);
+                let additional_messages = {
+                    let mut approved = Vec::new();
+                    for additional in additional_messages {
+                        let text = if let ChatCommand::UserMessage { ref content, .. } =
+                            additional.command
+                        {
+                            match content {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => serde_json::to_string(other).unwrap_or_default(),
+                            }
+                        } else {
+                            approved.push(additional);
+                            continue;
+                        };
+                        let add_results = run_hooks(
+                            gcx.clone(),
+                            HookEvent::UserPromptSubmit,
+                            HookPayload {
+                                hook_event_name: "UserPromptSubmit".to_string(),
+                                session_id: session_id_for_hook.clone(),
+                                project_dir: project_dir_for_hook.clone(),
+                                tool_name: None,
+                                tool_input: None,
+                                tool_output: None,
+                                user_prompt: Some(text),
+                                extra: std::collections::HashMap::new(),
+                            },
+                        )
+                        .await;
+                        if first_block_reason(&add_results).is_none() {
+                            approved.push(additional);
+                        }
+                    }
+                    approved
+                };
+
+                let is_oversize = browser_ctx_result
+                    .as_ref()
+                    .map_or(false, |(_, oversize)| *oversize);
 
                 if is_oversize {
                     if let Some((_, true)) = browser_ctx_result {
                         let snapshot = browser_context::get_browser_context_for_chat(
                             gcx.clone(),
                             &browser_chat_id,
-                        ).await;
+                        )
+                        .await;
                         if let Some(ref snap) = snapshot {
-                            let action_bytes = serde_json::to_string(&snap.actions).unwrap_or_default().len();
-                            let console_bytes = serde_json::to_string(&snap.console).unwrap_or_default().len();
-                            let network_bytes = serde_json::to_string(&snap.network).unwrap_or_default().len();
-                            let mutation_bytes = serde_json::to_string(&snap.mutations).unwrap_or_default().len();
+                            let action_bytes = serde_json::to_string(&snap.actions)
+                                .unwrap_or_default()
+                                .len();
+                            let console_bytes = serde_json::to_string(&snap.console)
+                                .unwrap_or_default()
+                                .len();
+                            let network_bytes = serde_json::to_string(&snap.network)
+                                .unwrap_or_default()
+                                .len();
+                            let mutation_bytes = serde_json::to_string(&snap.mutations)
+                                .unwrap_or_default()
+                                .len();
                             let pending_message_id = Uuid::new_v4().to_string();
                             let mut session = session_arc.lock().await;
                             session.pending_browser_message = Some(PendingBrowserMessage {
@@ -615,9 +765,16 @@ pub async fn process_command_queue(
                                 content: content.clone(),
                                 attachments: attachments.clone(),
                                 checkpoints: checkpoints.clone(),
+                                context_files: context_files.clone(),
+                                suppress_auto_enrichment,
+                                skill_activation_name: skill_activation_name.clone(),
+                                skill_context_msg: skill_context_msg.clone(),
                             });
                             session.emit(ChatEvent::BrowserContextOversize {
-                                total_bytes: action_bytes + console_bytes + network_bytes + mutation_bytes,
+                                total_bytes: action_bytes
+                                    + console_bytes
+                                    + network_bytes
+                                    + mutation_bytes,
                                 action_count: snap.actions.len(),
                                 action_bytes,
                                 console_count: snap.console.len(),
@@ -633,7 +790,6 @@ pub async fn process_command_queue(
                     continue;
                 }
 
-                // Reacquire lock to add messages
                 {
                     let mut session = session_arc.lock().await;
 
@@ -643,12 +799,18 @@ pub async fn process_command_queue(
 
                     // Set compaction anchor for slash-command skill activation before any skill
                     // messages are added, so deactivate_skill can truncate back to this point.
-                    if skill_activation_name.is_some() && session.active_command.started_at_index.is_none() {
+                    if skill_activation_name.is_some()
+                        && session.active_command.started_at_index.is_none()
+                    {
                         session.active_command.started_at_index = Some(session.messages.len());
                     }
 
                     if let Some(skill_msg) = skill_context_msg {
                         session.add_message(skill_msg);
+                    }
+
+                    if !context_files.is_empty() {
+                        apply_manual_context_files(&mut session, &context_files);
                     }
 
                     let parsed_content = parse_content_with_attachments(&content, &attachments);
@@ -661,6 +823,10 @@ pub async fn process_command_queue(
                     };
                     session.add_message(user_message);
 
+                    if suppress_auto_enrichment && context_files.is_empty() {
+                        session.suppress_auto_enrichment_for_next_turn = true;
+                    }
+
                     if let Some(ref skill_name) = skill_activation_name {
                         session.set_active_skill(skill_name.clone());
                     }
@@ -669,8 +835,13 @@ pub async fn process_command_queue(
                         if let ChatCommand::UserMessage {
                             content: add_content,
                             attachments: add_attachments,
+                            context_files: add_ctx_files,
+                            suppress_auto_enrichment: _,
                         } = additional.command
                         {
+                            if !add_ctx_files.is_empty() {
+                                apply_manual_context_files(&mut session, &add_ctx_files);
+                            }
                             let add_parsed =
                                 parse_content_with_attachments(&add_content, &add_attachments);
                             let add_message = ChatMessage {
@@ -802,7 +973,8 @@ pub async fn process_command_queue(
                         session.truncate_messages(idx + 1);
                         drop(session);
                         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-                        prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
+                        prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone())
+                            .await;
                         start_generation(gcx.clone(), session_arc.clone()).await;
                     }
                 }
@@ -820,7 +992,8 @@ pub async fn process_command_queue(
                         session.truncate_messages(idx);
                         drop(session);
                         maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-                        prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
+                        prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone())
+                            .await;
                         start_generation(gcx.clone(), session_arc.clone()).await;
                     }
                 }
@@ -843,7 +1016,10 @@ pub async fn process_command_queue(
                 drop(session);
                 maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
             }
-            ChatCommand::BranchFromChat { source_chat_id, up_to_message_id } => {
+            ChatCommand::BranchFromChat {
+                source_chat_id,
+                up_to_message_id,
+            } => {
                 if let Err(e) = super::trajectories::validate_trajectory_id(&source_chat_id) {
                     warn!("BranchFromChat: invalid source_chat_id: {}", e);
                     continue;
@@ -858,7 +1034,8 @@ pub async fn process_command_queue(
                     gcx.clone(),
                     &sessions,
                     &source_chat_id,
-                ).await;
+                )
+                .await;
 
                 let (messages_to_copy, root_id) = {
                     let source_session = source_session_arc.lock().await;
@@ -874,10 +1051,16 @@ pub async fn process_command_queue(
                         }
                     }
                     if !found {
-                        warn!("BranchFromChat: up_to_message_id '{}' not found in source chat", up_to_message_id);
+                        warn!(
+                            "BranchFromChat: up_to_message_id '{}' not found in source chat",
+                            up_to_message_id
+                        );
                         continue;
                     }
-                    let root = source_session.thread.root_chat_id.clone()
+                    let root = source_session
+                        .thread
+                        .root_chat_id
+                        .clone()
                         .unwrap_or_else(|| source_chat_id.clone());
                     (msgs, root)
                 };
@@ -926,10 +1109,9 @@ pub async fn process_command_queue(
                     session.chat_id.clone()
                 };
 
-                let snapshot = browser_context::get_browser_context_for_chat(
-                    gcx.clone(),
-                    &browser_chat_id,
-                ).await;
+                let snapshot =
+                    browser_context::get_browser_context_for_chat(gcx.clone(), &browser_chat_id)
+                        .await;
 
                 {
                     let mut session = session_arc.lock().await;
@@ -945,11 +1127,29 @@ pub async fn process_command_queue(
                             last_n_console,
                             last_n_network,
                         );
-                        let ctx_msg = browser_context::make_context_message(&snap, include_screenshot);
+                        let ctx_msg =
+                            browser_context::make_context_message(&snap, include_screenshot);
                         session.add_message(ctx_msg);
                     }
 
-                    let parsed_content = parse_content_with_attachments(&pending.content, &pending.attachments);
+                    if pending.skill_activation_name.is_some()
+                        && session.active_command.started_at_index.is_none()
+                    {
+                        session.active_command.started_at_index = Some(session.messages.len());
+                    }
+                    if let Some(skill_msg) = pending.skill_context_msg {
+                        session.add_message(skill_msg);
+                    }
+                    if !pending.context_files.is_empty() {
+                        apply_manual_context_files(&mut session, &pending.context_files);
+                    }
+
+                    if pending.suppress_auto_enrichment && pending.context_files.is_empty() {
+                        session.suppress_auto_enrichment_for_next_turn = true;
+                    }
+
+                    let parsed_content =
+                        parse_content_with_attachments(&pending.content, &pending.attachments);
                     let user_message = ChatMessage {
                         message_id: Uuid::new_v4().to_string(),
                         role: "user".to_string(),
@@ -958,6 +1158,10 @@ pub async fn process_command_queue(
                         ..Default::default()
                     };
                     session.add_message(user_message);
+
+                    if let Some(ref skill_name) = pending.skill_activation_name {
+                        session.set_active_skill(skill_name.clone());
+                    }
                 }
 
                 browser_context::commit_browser_cursors(gcx.clone(), &browser_chat_id).await;
@@ -980,7 +1184,7 @@ fn sanitize_message_for_restore(msg: &ChatMessage) -> ChatMessage {
         message_id: Uuid::new_v4().to_string(),
         role: msg.role.clone(),
         content: msg.content.clone(),
-        tool_calls: None,  // Security: strip tool_calls to prevent prerun of restored messages
+        tool_calls: None, // Security: strip tool_calls to prevent prerun of restored messages
         tool_call_id: msg.tool_call_id.clone(),
         tool_failed: msg.tool_failed,
         usage: None,
@@ -1018,7 +1222,10 @@ fn sanitize_message_for_branch(msg: &ChatMessage) -> ChatMessage {
 }
 
 fn is_allowed_role_for_branch(role: &str) -> bool {
-    matches!(role, "user" | "assistant" | "system" | "tool" | "context_file")
+    matches!(
+        role,
+        "user" | "assistant" | "system" | "tool" | "context_file"
+    )
 }
 
 async fn handle_tool_decisions(
@@ -1058,7 +1265,14 @@ async fn handle_tool_decisions(
         return;
     }
 
-    let (auto_approved_ids, has_remaining_pauses, tool_calls_to_execute, messages, thread, any_rejected) = {
+    let (
+        auto_approved_ids,
+        has_remaining_pauses,
+        tool_calls_to_execute,
+        messages,
+        thread,
+        any_rejected,
+    ) = {
         let mut session = session_arc.lock().await;
         let auto_approved = session.runtime.auto_approved_tool_ids.clone();
         let paused_msg_idx = session.runtime.paused_message_index;
@@ -1087,27 +1301,37 @@ async fn handle_tool_decisions(
 
         let remaining = !session.runtime.pause_reasons.is_empty();
 
-        let mut ids_to_execute: std::collections::HashSet<String> = session.runtime.accepted_tool_ids.iter().cloned().collect();
+        let mut ids_to_execute: std::collections::HashSet<String> =
+            session.runtime.accepted_tool_ids.iter().cloned().collect();
         if !any_rejected && !remaining {
             for id in &auto_approved {
                 ids_to_execute.insert(id.clone());
             }
         }
 
-        let tool_calls: Vec<crate::call_validation::ChatToolCall> = if let Some(msg_idx) = paused_msg_idx {
-            session.messages.get(msg_idx)
-                .and_then(|m| m.tool_calls.as_ref())
-                .map(|tcs| tcs.iter().filter(|tc| ids_to_execute.contains(&tc.id)).cloned().collect())
-                .unwrap_or_default()
-        } else {
-            session.messages
-                .iter()
-                .filter_map(|m| m.tool_calls.as_ref())
-                .flatten()
-                .filter(|tc| ids_to_execute.contains(&tc.id))
-                .cloned()
-                .collect()
-        };
+        let tool_calls: Vec<crate::call_validation::ChatToolCall> =
+            if let Some(msg_idx) = paused_msg_idx {
+                session
+                    .messages
+                    .get(msg_idx)
+                    .and_then(|m| m.tool_calls.as_ref())
+                    .map(|tcs| {
+                        tcs.iter()
+                            .filter(|tc| ids_to_execute.contains(&tc.id))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                session
+                    .messages
+                    .iter()
+                    .filter_map(|m| m.tool_calls.as_ref())
+                    .flatten()
+                    .filter(|tc| ids_to_execute.contains(&tc.id))
+                    .cloned()
+                    .collect()
+            };
 
         (
             auto_approved,
@@ -1133,14 +1357,19 @@ async fn handle_tool_decisions(
     if any_rejected && !auto_approved_ids.is_empty() {
         let mut session = session_arc.lock().await;
         for id in &auto_approved_ids {
-            let already_handled = session.messages.iter().any(|m| m.role == "tool" && m.tool_call_id == *id);
+            let already_handled = session
+                .messages
+                .iter()
+                .any(|m| m.role == "tool" && m.tool_call_id == *id);
             if already_handled {
                 continue;
             }
             let tool_message = ChatMessage {
                 message_id: Uuid::new_v4().to_string(),
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText("Tool execution skipped due to user rejection of related tools".to_string()),
+                content: ChatContent::SimpleText(
+                    "Tool execution skipped due to user rejection of related tools".to_string(),
+                ),
                 tool_call_id: id.clone(),
                 tool_failed: Some(true),
                 ..Default::default()
@@ -1156,7 +1385,8 @@ async fn handle_tool_decisions(
             tool_calls_to_execute,
             &thread.mode,
             Some(&thread.model),
-        ).await;
+        )
+        .await;
 
         {
             let mut session = session_arc.lock().await;
@@ -1181,7 +1411,9 @@ async fn handle_tool_decisions(
         let mut final_state = SessionState::Idle;
         for tool_call in &tool_calls_to_execute {
             match tool_call.function.name.as_str() {
-                "ask_questions" | "task_wait_for_agents" => final_state = SessionState::WaitingUserInput,
+                "ask_questions" | "task_wait_for_agents" => {
+                    final_state = SessionState::WaitingUserInput
+                }
                 "task_done" => final_state = SessionState::Completed,
                 "task_agent_finish" => final_state = SessionState::Completed,
                 _ => {}
@@ -1195,7 +1427,9 @@ async fn handle_tool_decisions(
         // Check if we were aborted during tool execution
         let was_aborted = {
             let session = session_arc.lock().await;
-            session.abort_flag.load(std::sync::atomic::Ordering::Relaxed)
+            session
+                .abort_flag
+                .load(std::sync::atomic::Ordering::Relaxed)
         };
 
         {
@@ -1254,7 +1488,6 @@ fn find_latest_checkpoint(session: &ChatSession) -> Option<crate::git::checkpoin
         .and_then(|msg| msg.checkpoints.first().cloned())
 }
 
-/// Create checkpoint without holding session lock (async, potentially slow)
 async fn create_checkpoint_async(
     gcx: Arc<ARwLock<GlobalContext>>,
     latest_checkpoint: Option<&crate::git::checkpoints::Checkpoint>,
@@ -1264,18 +1497,11 @@ async fn create_checkpoint_async(
 
     match create_workspace_checkpoint(gcx, latest_checkpoint, chat_id).await {
         Ok((checkpoint, _)) => {
-            tracing::info!(
-                "Checkpoint created for chat {}: {:?}",
-                chat_id,
-                checkpoint
-            );
+            tracing::info!("Checkpoint created for chat {}: {:?}", chat_id, checkpoint);
             vec![checkpoint]
         }
         Err(e) => {
-            warn!(
-                "Failed to create checkpoint for chat {}: {}",
-                chat_id, e
-            );
+            warn!("Failed to create checkpoint for chat {}: {}", chat_id, e);
             Vec::new()
         }
     }
@@ -1306,6 +1532,8 @@ mod tests {
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("hi"),
             attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::SetParams {
             patch: json!({"model": "gpt-4"}),
@@ -1319,6 +1547,8 @@ mod tests {
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("hi"),
             attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::ToolDecision {
             tool_call_id: "tc1".into(),
@@ -1345,10 +1575,14 @@ mod tests {
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("hi"),
             attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("another"),
             attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::Abort {}));
         assert_eq!(find_allowed_command_while_paused(&queue), Some(2));
@@ -1533,6 +1767,8 @@ mod tests {
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("hi"),
             attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::ToolDecision {
             tool_call_id: "tc1".into(),
@@ -1547,6 +1783,8 @@ mod tests {
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("hi"),
             attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::IdeToolResult {
             tool_call_id: "tc1".into(),
@@ -1562,6 +1800,8 @@ mod tests {
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("hi"),
             attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::Abort {}));
         assert_eq!(find_allowed_command_while_waiting_ide(&queue), Some(1));
@@ -1588,6 +1828,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("first"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         queue.push_back(CommandRequest {
@@ -1596,6 +1838,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("second"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         let priority_req = CommandRequest {
@@ -1604,6 +1848,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("priority"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         };
         let insert_pos = queue
@@ -1625,6 +1871,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("p1"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         queue.push_back(CommandRequest {
@@ -1633,6 +1881,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("normal"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         let priority_req = CommandRequest {
@@ -1641,6 +1891,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("p2"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         };
         let insert_pos = queue
@@ -1701,6 +1953,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("priority 1"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         queue.push_back(CommandRequest {
@@ -1709,6 +1963,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("normal"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         queue.push_back(CommandRequest {
@@ -1717,6 +1973,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("priority 2"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         queue.push_back(CommandRequest {
@@ -1743,6 +2001,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("first"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         queue.push_back(CommandRequest {
@@ -1751,6 +2011,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("priority"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         queue.push_back(CommandRequest {
@@ -1759,6 +2021,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("second"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
         queue.push_back(CommandRequest {
@@ -1767,6 +2031,8 @@ mod tests {
             command: ChatCommand::UserMessage {
                 content: json!("third"),
                 attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
             },
         });
 
@@ -1818,8 +2084,10 @@ mod tests {
 
         assert!(changed);
         assert_eq!(thread.model, "anthropic/claude-3");
-        assert_eq!(thread.previous_response_id, None,
-            "previous_response_id must be cleared on model switch");
+        assert_eq!(
+            thread.previous_response_id, None,
+            "previous_response_id must be cleared on model switch"
+        );
     }
 
     #[test]
@@ -1832,8 +2100,11 @@ mod tests {
         let (changed, _) = apply_setparams_patch(&mut thread, &patch);
 
         assert!(!changed);
-        assert_eq!(thread.previous_response_id, Some("resp_abc123".to_string()),
-            "previous_response_id should be preserved when model doesn't change");
+        assert_eq!(
+            thread.previous_response_id,
+            Some("resp_abc123".to_string()),
+            "previous_response_id should be preserved when model doesn't change"
+        );
     }
 
     #[test]

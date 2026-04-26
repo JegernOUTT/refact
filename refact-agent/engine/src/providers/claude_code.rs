@@ -69,10 +69,9 @@ impl ClaudeCodeProvider {
                 .map_err(|e| format!("Failed to read config: {}", e))?;
             let value: serde_yaml::Value = serde_yaml::from_str(&content)
                 .map_err(|e| format!("Failed to parse YAML: {}", e))?;
-            value
-                .as_mapping()
-                .cloned()
-                .ok_or_else(|| "Config file root is not a YAML mapping. Cannot safely patch.".to_string())?
+            value.as_mapping().cloned().ok_or_else(|| {
+                "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
+            })?
         } else {
             serde_yaml::Mapping::new()
         };
@@ -106,7 +105,11 @@ impl ClaudeCodeProvider {
 
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_path = config_path.with_extension(format!("yaml.tmp.oauth.{}.{}", std::process::id(), unique_id));
+        let temp_path = config_path.with_extension(format!(
+            "yaml.tmp.oauth.{}.{}",
+            std::process::id(),
+            unique_id
+        ));
 
         tokio::fs::write(&temp_path, &content)
             .await
@@ -131,10 +134,7 @@ impl ClaudeCodeProvider {
 
         #[cfg(unix)]
         {
-            let candidates = [
-                "/usr/local/bin/claude",
-                "/opt/homebrew/bin/claude",
-            ];
+            let candidates = ["/usr/local/bin/claude", "/opt/homebrew/bin/claude"];
             for c in &candidates {
                 if std::path::Path::new(c).exists() {
                     return Some(c.to_string());
@@ -150,7 +150,12 @@ impl ClaudeCodeProvider {
 
         #[cfg(windows)]
         if let Some(home) = home::home_dir() {
-            let candidate = home.join("AppData").join("Local").join("Programs").join("claude").join("claude.exe");
+            let candidate = home
+                .join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("claude")
+                .join("claude.exe");
             if candidate.exists() {
                 return Some(candidate.to_string_lossy().to_string());
             }
@@ -160,8 +165,7 @@ impl ClaudeCodeProvider {
     }
 
     fn get_cli_oauth_token(&self) -> Result<String, String> {
-        let home = home::home_dir()
-            .ok_or("Cannot determine home directory")?;
+        let home = home::home_dir().ok_or("Cannot determine home directory")?;
 
         let creds_path = home.join(".claude/.credentials.json");
         if !creds_path.exists() {
@@ -219,7 +223,9 @@ impl ClaudeCodeProvider {
                 }
 
                 if let Ok(token) = self.get_cli_oauth_token() {
-                    tracing::debug!("Claude Code: using CLI session OAuth token from credentials file");
+                    tracing::debug!(
+                        "Claude Code: using CLI session OAuth token from credentials file"
+                    );
                     return Ok(token);
                 }
 
@@ -240,11 +246,10 @@ impl ClaudeCodeProvider {
                     "  1. Click 'Login with Anthropic' in provider settings\n",
                     "  2. Install Claude CLI and run 'claude auth login'\n",
                     "  3. Provide oauth_token in provider config"
-                ).to_string())
+                )
+                .to_string())
             }
-            ClaudeCodeAuthMethod::CliSession => {
-                self.get_cli_oauth_token()
-            }
+            ClaudeCodeAuthMethod::CliSession => self.get_cli_oauth_token(),
             ClaudeCodeAuthMethod::OauthToken => {
                 if !self.oauth_token.is_empty() && self.oauth_token != "***" {
                     return Ok(self.oauth_token.clone());
@@ -254,7 +259,10 @@ impl ClaudeCodeProvider {
                         return Ok(token);
                     }
                 }
-                Err("OAuth token not provided. Set oauth_token or CLAUDE_CODE_OAUTH_TOKEN env var.".to_string())
+                Err(
+                    "OAuth token not provided. Set oauth_token or CLAUDE_CODE_OAUTH_TOKEN env var."
+                        .to_string(),
+                )
             }
         }
     }
@@ -282,7 +290,10 @@ pub struct ClaudeCodeUsage {
 }
 
 impl ClaudeCodeProvider {
-    pub async fn fetch_usage(&self, http_client: &reqwest::Client) -> Result<ClaudeCodeUsage, String> {
+    pub async fn fetch_usage(
+        &self,
+        http_client: &reqwest::Client,
+    ) -> Result<ClaudeCodeUsage, String> {
         let token = self.resolve_auth()?;
 
         let resp = http_client
@@ -300,7 +311,9 @@ impl ClaudeCodeProvider {
             return Err(format!("Usage API returned {}: {}", status, truncated));
         }
 
-        let root: serde_json::Value = resp.json().await
+        let root: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse usage response: {}", e))?;
 
         let data = root.get("data").unwrap_or(&root);
@@ -311,20 +324,35 @@ impl ClaudeCodeProvider {
 
         let parse_window = |key: &str| -> Option<ClaudeCodeUsageWindow> {
             let w = data.get(key)?;
-            let percent_used = w.get("utilization").and_then(as_f64_loose)
+            let percent_used = w
+                .get("utilization")
+                .and_then(as_f64_loose)
                 .or_else(|| w.get("percent_used").and_then(as_f64_loose))?;
-            let resets_at = w.get("resets_at")
+            let resets_at = w
+                .get("resets_at")
                 .or_else(|| w.get("reset_at"))
-                .and_then(|v| v.as_str()).map(|s| s.to_string());
-            Some(ClaudeCodeUsageWindow { percent_used, resets_at })
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Some(ClaudeCodeUsageWindow {
+                percent_used,
+                resets_at,
+            })
         };
 
         let extra_usage = data.get("extra_usage").and_then(|e| {
             let used_credits = e.get("used_credits").and_then(as_f64_loose).unwrap_or(0.0);
-            let is_enabled = e.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_enabled = e
+                .get("is_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let monthly_limit = e.get("monthly_limit").and_then(as_f64_loose);
             let utilization = e.get("utilization").and_then(as_f64_loose);
-            Some(ClaudeCodeExtraUsage { is_enabled, used_credits, monthly_limit, utilization })
+            Some(ClaudeCodeExtraUsage {
+                is_enabled,
+                used_credits,
+                monthly_limit,
+                utilization,
+            })
         });
 
         Ok(ClaudeCodeUsage {
@@ -409,8 +437,7 @@ available:
                 .map_err(|e| format!("invalid auth_method: {}", e))?;
         }
         if let Some(oauth_tokens) = yaml.get("oauth_tokens") {
-            self.oauth_tokens = serde_yaml::from_value(oauth_tokens.clone())
-                .unwrap_or_default();
+            self.oauth_tokens = serde_yaml::from_value(oauth_tokens.clone()).unwrap_or_default();
         }
         parse_enabled_models(&yaml, &mut self.enabled_models);
         parse_custom_models(&yaml, &mut self.custom_models);
@@ -421,7 +448,8 @@ available:
         let cli_detected = self.detect_cli_path().unwrap_or_default();
         let auth_status = self.diagnose_auth_status();
 
-        let oauth_connected = !self.oauth_tokens.is_empty() && !self.oauth_tokens.access_token.is_empty();
+        let oauth_connected =
+            !self.oauth_tokens.is_empty() && !self.oauth_tokens.access_token.is_empty();
 
         json!({
             "enabled": self.enabled,
@@ -476,7 +504,10 @@ available:
         if !self.oauth_token.is_empty() && self.oauth_token != "***" {
             return true;
         }
-        if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").map(|t| !t.is_empty()).unwrap_or(false) {
+        if std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
+        {
             return true;
         }
         // Check CLI credentials file existence (metadata only, no read)
@@ -515,7 +546,9 @@ available:
 
         let api_model_ids = fetch_claude_code_model_ids(http_client, &auth_token).await;
         if api_model_ids.is_empty() {
-            tracing::warn!("Claude Code: API returned no models, falling back to custom models only");
+            tracing::warn!(
+                "Claude Code: API returned no models, falling back to custom models only"
+            );
             return self.get_custom_models_only();
         }
 
@@ -523,7 +556,8 @@ available:
 
         let enabled_set: std::collections::HashSet<_> =
             self.enabled_models.iter().map(|s| s.as_str()).collect();
-        let regex_opt = self.model_filter_regex()
+        let regex_opt = self
+            .model_filter_regex()
             .and_then(|p| regex::Regex::new(p).ok());
 
         let date_regex = regex::Regex::new(r"^(.+?)-\d{8}$").expect("valid static regex");
@@ -543,7 +577,9 @@ available:
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_else(|| api_id.clone());
 
-            if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, &api_id_without_date) {
+            if let Some(caps) =
+                crate::caps::model_caps::resolve_model_caps(model_caps, &api_id_without_date)
+            {
                 let enabled = enabled_set.contains(api_id.as_str());
                 let pricing = self.model_pricing(api_id);
                 let mut model = AvailableModel::from_caps(api_id, &caps.caps, enabled, pricing);
@@ -622,7 +658,10 @@ pub async fn fetch_claude_code_model_ids(
         .header("content-type", "application/json")
         .header("Authorization", format!("Bearer {}", auth_token))
         .header("anthropic-beta", betas)
-        .header("user-agent", crate::llm::adapters::claude_code_compat::USER_AGENT);
+        .header(
+            "user-agent",
+            crate::llm::adapters::claude_code_compat::USER_AGENT,
+        );
 
     match request.send().await {
         Ok(response) => {
@@ -634,20 +673,17 @@ pub async fn fetch_claude_code_model_ids(
                 return vec![];
             }
             match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    json.get("data")
-                        .and_then(|d| d.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|m| {
-                                    m.get("id")
-                                        .and_then(|id| id.as_str())
-                                        .map(String::from)
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                }
+                Ok(json) => json
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| {
+                                m.get("id").and_then(|id| id.as_str()).map(String::from)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 Err(e) => {
                     tracing::warn!("Failed to parse Claude Code models response: {}", e);
                     vec![]

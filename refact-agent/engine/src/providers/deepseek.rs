@@ -7,7 +7,10 @@ use serde_json::json;
 
 use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
-use crate::providers::traits::{CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait, parse_enabled_models, parse_custom_models, set_model_enabled_impl};
+use crate::providers::traits::{
+    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+};
 use crate::providers::pricing::deepseek_pricing;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

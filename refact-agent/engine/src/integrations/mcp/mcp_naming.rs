@@ -35,13 +35,25 @@ pub fn validate_config_filename(name: &str) -> Result<(), String> {
         return Err("config name must not be empty".to_string());
     }
     if name.contains('/') || name.contains('\\') || name.contains("..") {
-        return Err(format!("config name '{}' contains invalid characters", name));
+        return Err(format!(
+            "config name '{}' contains invalid characters",
+            name
+        ));
     }
     if name.starts_with('/') || name.contains(':') {
-        return Err(format!("config name '{}' looks like an absolute path", name));
+        return Err(format!(
+            "config name '{}' looks like an absolute path",
+            name
+        ));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-        return Err(format!("config name '{}' contains unsafe characters (only a-z, A-Z, 0-9, _, - allowed)", name));
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "config name '{}' contains unsafe characters (only a-z, A-Z, 0-9, _, - allowed)",
+            name
+        ));
     }
     if name.len() > 128 {
         return Err(format!("config name '{}' exceeds 128 characters", name));
@@ -59,7 +71,10 @@ pub fn validate_server_id(id: &str) -> Result<(), String> {
     if id.chars().any(|c| c.is_control()) {
         return Err(format!("server id '{}' contains control characters", id));
     }
-    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.' ) {
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.')
+    {
         return Err(format!("server id '{}' contains unsafe characters", id));
     }
     if id.len() > 256 {
@@ -117,7 +132,10 @@ mod tests {
         assert_eq!(shorten_config_name("mcp_stdio_github"), "mcp_github");
         assert_eq!(shorten_config_name("mcp_sse_myserver"), "mcp_myserver");
         assert_eq!(shorten_config_name("mcp_http_myserver"), "mcp_myserver");
-        assert_eq!(shorten_config_name("other_integration"), "other_integration");
+        assert_eq!(
+            shorten_config_name("other_integration"),
+            "other_integration"
+        );
     }
 
     #[test]

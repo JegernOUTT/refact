@@ -28,7 +28,6 @@ use crate::stats::event::{
     LlmCallEvent, canonicalize_mode_for_stats, split_model_provider, sum_metering_coins,
 };
 
-
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     use std::collections::HashSet;
     let mut seen = HashSet::new();
@@ -255,7 +254,8 @@ impl StreamCollector for SubchatProgressCollector {
                     }
                 }
                 crate::chat::types::DeltaOp::AppendContent { text } => {
-                    if self.thinking_tail.trim().is_empty() && self.reasoning_tail.trim().is_empty() {
+                    if self.thinking_tail.trim().is_empty() && self.reasoning_tail.trim().is_empty()
+                    {
                         Self::append_tail(&mut self.content_tail, &text, 50_000);
                     }
                 }
@@ -307,11 +307,17 @@ fn normalize_subchat_params_for_model(
         params.subchat_n_ctx = model_rec.base.n_ctx;
 
         if requested_tokens_for_rag > 0 {
-            params.subchat_max_new_tokens =
-                scale_subchat_budget(requested_max_new_tokens, params.subchat_n_ctx, requested_n_ctx)
-                    .max(1);
-            params.subchat_tokens_for_rag =
-                scale_subchat_budget(requested_tokens_for_rag, params.subchat_n_ctx, requested_n_ctx);
+            params.subchat_max_new_tokens = scale_subchat_budget(
+                requested_max_new_tokens,
+                params.subchat_n_ctx,
+                requested_n_ctx,
+            )
+            .max(1);
+            params.subchat_tokens_for_rag = scale_subchat_budget(
+                requested_tokens_for_rag,
+                params.subchat_n_ctx,
+                requested_n_ctx,
+            );
         }
 
         info!(
@@ -350,9 +356,13 @@ pub async fn resolve_subchat_params(
 ) -> Result<SubchatParameters, String> {
     use crate::yaml_configs::customization_registry::get_subagent_config;
 
-    let subagent_config = get_subagent_config(gcx.clone(), tool_name, None).await
+    let subagent_config = get_subagent_config(gcx.clone(), tool_name, None)
+        .await
         .ok_or_else(|| {
-            format!("subchat params for '{}' not found in subagents registry", tool_name)
+            format!(
+                "subchat params for '{}' not found in subagents registry",
+                tool_name
+            )
         })?;
 
     let subchat = &subagent_config.subchat;
@@ -361,10 +371,12 @@ pub async fn resolve_subchat_params(
         Some(mt) if mt.eq_ignore_ascii_case("light") => ChatModelType::Light,
         Some(mt) if mt.eq_ignore_ascii_case("thinking") => ChatModelType::Thinking,
         Some(mt) if mt.eq_ignore_ascii_case("default") => ChatModelType::Default,
-        Some(mt) => return Err(format!(
-            "invalid model_type '{}' for '{}', expected: light, default, thinking",
-            mt, tool_name
-        )),
+        Some(mt) => {
+            return Err(format!(
+                "invalid model_type '{}' for '{}', expected: light, default, thinking",
+                mt, tool_name
+            ))
+        }
         None => ChatModelType::Default,
     };
 
@@ -505,7 +517,10 @@ pub async fn resolve_subchat_config_with_parent(
         return Err("max_steps must be > 0".to_string());
     }
     if subchat_depth >= MAX_SUBCHAT_DEPTH {
-        return Err(format!("subchat depth limit ({}) exceeded", MAX_SUBCHAT_DEPTH));
+        return Err(format!(
+            "subchat depth limit ({}) exceeded",
+            MAX_SUBCHAT_DEPTH
+        ));
     }
 
     let params = resolve_subchat_params(gcx.clone(), tool_name).await?;
@@ -967,7 +982,8 @@ fn truncate_args(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let boundary = s.char_indices()
+    let boundary = s
+        .char_indices()
         .take_while(|(i, _)| *i < max)
         .last()
         .map(|(i, c)| i + c.len_utf8())
@@ -1174,7 +1190,14 @@ async fn subchat_stream(
     let tools_count = tools.len();
     let mode_for_stats = canonicalize_mode_for_stats(mode_id);
 
-    let (stats_chat_id, stats_root_chat_id, stats_task_id, stats_task_role, stats_agent_id, stats_card_id) = {
+    let (
+        stats_chat_id,
+        stats_root_chat_id,
+        stats_task_id,
+        stats_task_role,
+        stats_agent_id,
+        stats_card_id,
+    ) = {
         let ccx_locked = ccx.lock().await;
         let tm = ccx_locked.task_meta.as_ref();
         (
@@ -1212,12 +1235,13 @@ async fn subchat_stream(
         supports_tools: model_rec.supports_tools,
         supports_reasoning: model_rec.has_reasoning_support(),
         reasoning_type: model_rec.reasoning_type_string(),
-        supports_temperature: model_rec.supports_temperature
+        supports_temperature: model_rec.supports_temperature,
     };
 
     let progress_sender: Option<mpsc::UnboundedSender<Value>> = if progress_tool_call_id.is_some() {
         let subchat_tx_arc = ccx.lock().await.subchat_tx.clone();
-        let x = Some(subchat_tx_arc.lock().await.clone()); x
+        let x = Some(subchat_tx_arc.lock().await.clone());
+        x
     } else {
         None
     };
@@ -1279,7 +1303,10 @@ async fn subchat_stream(
         }
         Ok(ref results_ok) => {
             let usage = results_ok.first().and_then(|r| r.usage.as_ref());
-            let cost_coins = results_ok.first().map(|r| &r.extra).and_then(|e| sum_metering_coins(e));
+            let cost_coins = results_ok
+                .first()
+                .map(|r| &r.extra)
+                .and_then(|e| sum_metering_coins(e));
             let event = LlmCallEvent {
                 id: uuid::Uuid::new_v4().to_string(),
                 ts_start: call_ts_start,
@@ -1309,7 +1336,9 @@ async fn subchat_stream(
                 cache_read_tokens: usage.and_then(|u| u.cache_read_tokens),
                 cache_creation_tokens: usage.and_then(|u| u.cache_creation_tokens),
                 total_tokens: usage.map(|u| u.total_tokens).unwrap_or(0),
-                cost_usd: usage.and_then(|u| u.metering_usd.as_ref()).map(|m| m.total_usd),
+                cost_usd: usage
+                    .and_then(|u| u.metering_usd.as_ref())
+                    .map(|m| m.total_usd),
                 cost_coins,
             };
             if let Some(sender) = &gcx.read().await.llm_stats_sender {
@@ -1495,7 +1524,9 @@ mod aggregate_metering_tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn assistant_msg_with_metering(extra: serde_json::Map<String, serde_json::Value>) -> ChatMessage {
+    fn assistant_msg_with_metering(
+        extra: serde_json::Map<String, serde_json::Value>,
+    ) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
             content: ChatContent::SimpleText("test".to_string()),
@@ -1520,8 +1551,22 @@ mod aggregate_metering_tests {
         ];
 
         let result = aggregate_metering_from_messages(&messages);
-        assert_eq!(result.get("metering_coins_prompt").unwrap().as_f64().unwrap(), 30.0);
-        assert_eq!(result.get("metering_coins_generated").unwrap().as_f64().unwrap(), 8.0);
+        assert_eq!(
+            result
+                .get("metering_coins_prompt")
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            30.0
+        );
+        assert_eq!(
+            result
+                .get("metering_coins_generated")
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            8.0
+        );
     }
 
     #[test]
@@ -1545,8 +1590,18 @@ mod aggregate_metering_tests {
         ];
 
         let result = aggregate_metering_from_messages(&messages);
-        assert_eq!(result.get("metering_balance").unwrap().as_f64().unwrap(), 49000.0);
-        assert_eq!(result.get("metering_coins_prompt").unwrap().as_f64().unwrap(), 22.0);
+        assert_eq!(
+            result.get("metering_balance").unwrap().as_f64().unwrap(),
+            49000.0
+        );
+        assert_eq!(
+            result
+                .get("metering_coins_prompt")
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            22.0
+        );
     }
 
     #[test]
@@ -1570,8 +1625,18 @@ mod aggregate_metering_tests {
         ];
 
         let result = aggregate_metering_from_messages(&messages);
-        assert_eq!(result.get("metering_coins_prompt").unwrap().as_f64().unwrap(), 10.0);
-        assert_eq!(result.get("metering_balance").unwrap().as_f64().unwrap(), 45000.0);
+        assert_eq!(
+            result
+                .get("metering_coins_prompt")
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            10.0
+        );
+        assert_eq!(
+            result.get("metering_balance").unwrap().as_f64().unwrap(),
+            45000.0
+        );
     }
 
     #[test]
@@ -1608,8 +1673,18 @@ mod aggregate_metering_tests {
         ];
 
         let result = aggregate_metering_from_messages(&messages);
-        assert_eq!(result.get("metering_balance").unwrap().as_f64().unwrap(), 50000.0);
-        assert_eq!(result.get("metering_coins_prompt").unwrap().as_f64().unwrap(), 15.0);
+        assert_eq!(
+            result.get("metering_balance").unwrap().as_f64().unwrap(),
+            50000.0
+        );
+        assert_eq!(
+            result
+                .get("metering_coins_prompt")
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            15.0
+        );
     }
 
     #[tokio::test]
@@ -1658,4 +1733,3 @@ mod aggregate_metering_tests {
         );
     }
 }
-

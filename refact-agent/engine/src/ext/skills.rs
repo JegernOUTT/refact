@@ -31,7 +31,10 @@ pub fn validate_skill_id(name: &str) -> Result<(), String> {
     if name.contains('/') || name.contains('\\') || name.contains("..") {
         return Err("skill name contains invalid path characters".to_string());
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
         return Err("skill name must match [a-zA-Z0-9._-]+".to_string());
     }
     Ok(())
@@ -58,11 +61,7 @@ pub struct SkillFull {
     pub skill_dir: PathBuf,
 }
 
-
-async fn load_skill_from_dir(
-    skill_dir: &Path,
-    source: CommandSource,
-) -> Option<SkillFull> {
+async fn load_skill_from_dir(skill_dir: &Path, source: CommandSource) -> Option<SkillFull> {
     if !skill_md_exists_case_sensitive(skill_dir).await {
         return None;
     }
@@ -87,21 +86,38 @@ async fn load_skill_from_dir(
     }
     let dir_name = skill_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if name != dir_name {
-        tracing::warn!("SKILL.md name '{}' doesn't match directory name '{}', skipping: {:?}", name, dir_name, skill_md);
+        tracing::warn!(
+            "SKILL.md name '{}' doesn't match directory name '{}', skipping: {:?}",
+            name,
+            dir_name,
+            skill_md
+        );
         return None;
     }
     let description = yaml_str(&fm, "description");
     if description.is_empty() {
-        tracing::warn!("SKILL.md missing required 'description' field: {:?}", skill_md);
+        tracing::warn!(
+            "SKILL.md missing required 'description' field: {:?}",
+            skill_md
+        );
         return None;
     }
     let user_invocable = yaml_bool(&fm, "user-invocable", true);
     let disable_model_invocation = yaml_bool(&fm, "disable-model-invocation", false);
     let argument_hint = yaml_str(&fm, "argument-hint");
     let allowed_tools = yaml_str_list(&fm, "allowed-tools");
-    let model = fm.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let context = fm.get("context").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let agent = fm.get("agent").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let model = fm
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let context = fm
+        .get("context")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let agent = fm
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let index = SkillIndex {
         name,
         description,
@@ -145,7 +161,12 @@ async fn load_skill_index_only(skill_dir: &Path, source: CommandSource) -> Optio
     }
     let dir_name = skill_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if name != dir_name {
-        tracing::warn!("SKILL.md name '{}' doesn't match directory name '{}', skipping: {:?}", name, dir_name, skill_md);
+        tracing::warn!(
+            "SKILL.md name '{}' doesn't match directory name '{}', skipping: {:?}",
+            name,
+            dir_name,
+            skill_md
+        );
         return None;
     }
     let description = yaml_str(&fm, "description");
@@ -240,7 +261,10 @@ pub async fn load_skill_linked_file(skill_dir: &Path, relative_path: &str) -> Op
     for component in Path::new(relative_path).components() {
         match component {
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                tracing::warn!("Rejecting @include with unsafe path component: {}", relative_path);
+                tracing::warn!(
+                    "Rejecting @include with unsafe path component: {}",
+                    relative_path
+                );
                 return None;
             }
             _ => {}
@@ -348,12 +372,9 @@ mod tests {
         let skill_dir = tmp.path().join("skills").join("no_desc");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
 
-        tokio::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: no_desc\n---\nBody",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(skill_dir.join("SKILL.md"), "---\nname: no_desc\n---\nBody")
+            .await
+            .unwrap();
 
         let result = load_skill_from_dir(&skill_dir, CommandSource::GlobalRefact).await;
         assert!(result.is_none());
@@ -372,7 +393,9 @@ mod tests {
         .await
         .unwrap();
 
-        let full = load_skill_from_dir(&skill_dir, CommandSource::GlobalRefact).await.unwrap();
+        let full = load_skill_from_dir(&skill_dir, CommandSource::GlobalRefact)
+            .await
+            .unwrap();
         assert!(full.index.user_invocable);
         assert!(!full.index.disable_model_invocation);
         assert!(full.model.is_none());
@@ -391,7 +414,10 @@ mod tests {
             tokio::fs::create_dir_all(&dir).await.unwrap();
             tokio::fs::write(
                 dir.join("SKILL.md"),
-                format!("---\nname: {}\ndescription: Skill {}\n---\nBody", skill_name, skill_name),
+                format!(
+                    "---\nname: {}\ndescription: Skill {}\n---\nBody",
+                    skill_name, skill_name
+                ),
             )
             .await
             .unwrap();
@@ -474,7 +500,9 @@ mod tests {
     #[tokio::test]
     async fn test_load_skill_linked_file() {
         let tmp = tempfile::tempdir().unwrap();
-        tokio::fs::write(tmp.path().join("context.md"), "Some linked content").await.unwrap();
+        tokio::fs::write(tmp.path().join("context.md"), "Some linked content")
+            .await
+            .unwrap();
 
         let result = load_skill_linked_file(tmp.path(), "context.md").await;
         assert_eq!(result, Some("Some linked content".to_string()));
@@ -503,7 +531,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let templates_dir = tmp.path().join("templates");
         tokio::fs::create_dir_all(&templates_dir).await.unwrap();
-        tokio::fs::write(templates_dir.join("foo.md"), "template content").await.unwrap();
+        tokio::fs::write(templates_dir.join("foo.md"), "template content")
+            .await
+            .unwrap();
 
         let result = load_skill_linked_file(tmp.path(), "templates/foo.md").await;
         assert_eq!(result, Some("template content".to_string()));
@@ -517,7 +547,9 @@ mod tests {
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
 
         let secret_file = tmp.path().join("secret.txt");
-        tokio::fs::write(&secret_file, "secret content").await.unwrap();
+        tokio::fs::write(&secret_file, "secret content")
+            .await
+            .unwrap();
 
         let symlink_path = skill_dir.join("link.md");
         std::os::unix::fs::symlink(&secret_file, &symlink_path).unwrap();
@@ -544,8 +576,13 @@ mod tests {
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
 
         let body = "x".repeat(50 * 1024);
-        let content = format!("---\nname: large_skill\ndescription: Large body skill\n---\n{}", body);
-        tokio::fs::write(skill_dir.join("SKILL.md"), &content).await.unwrap();
+        let content = format!(
+            "---\nname: large_skill\ndescription: Large body skill\n---\n{}",
+            body
+        );
+        tokio::fs::write(skill_dir.join("SKILL.md"), &content)
+            .await
+            .unwrap();
 
         let index = load_skill_index_only(&skill_dir, CommandSource::GlobalRefact).await;
         assert!(index.is_some());
@@ -571,7 +608,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("skills").join("no_name");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(skill_dir.join("SKILL.md"), "---\ndescription: No name\n---\nBody").await.unwrap();
+        tokio::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: No name\n---\nBody",
+        )
+        .await
+        .unwrap();
 
         let index = load_skill_index_only(&skill_dir, CommandSource::GlobalRefact).await;
         assert!(index.is_none());
@@ -583,7 +625,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("skills").join("case_test");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(skill_dir.join("skill.md"), "---\nname: case_test\ndescription: desc\n---\nBody").await.unwrap();
+        tokio::fs::write(
+            skill_dir.join("skill.md"),
+            "---\nname: case_test\ndescription: desc\n---\nBody",
+        )
+        .await
+        .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
@@ -656,16 +703,27 @@ mod tests {
             project_dirs: vec![],
         };
         let indices = load_skill_indices(&ext_dirs).await;
-        assert!(indices.is_empty(), "mismatched skill should not appear in indices");
+        assert!(
+            indices.is_empty(),
+            "mismatched skill should not appear in indices"
+        );
     }
 
     #[tokio::test]
     async fn test_include_component_check_allows_valid() {
         let tmp = tempfile::tempdir().unwrap();
-        tokio::fs::write(tmp.path().join("notes..md"), "content with double dots in name").await.unwrap();
+        tokio::fs::write(
+            tmp.path().join("notes..md"),
+            "content with double dots in name",
+        )
+        .await
+        .unwrap();
 
         let result = load_skill_linked_file(tmp.path(), "notes..md").await;
-        assert_eq!(result, Some("content with double dots in name".to_string()),
-            "notes..md should be allowed by component-based check (not a path component)");
+        assert_eq!(
+            result,
+            Some("content with double dots in name".to_string()),
+            "notes..md should be allowed by component-based check (not a path component)"
+        );
     }
 }

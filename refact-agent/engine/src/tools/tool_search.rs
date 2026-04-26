@@ -10,7 +10,9 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::{vec_context_file_to_context_tools, AtCommandsContext};
 use crate::at_commands::at_search::execute_at_search;
 use crate::tools::scope_utils::create_scope_filter;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::knowledge_index::format_related_memories_section;
 
@@ -93,7 +95,8 @@ impl Tool for ToolSearch {
             }
         };
 
-        let context_lines = parse_usize_arg(args, "context_lines")?.unwrap_or(DEFAULT_CONTEXT_LINES);
+        let context_lines =
+            parse_usize_arg(args, "context_lines")?.unwrap_or(DEFAULT_CONTEXT_LINES);
         let max_files = parse_usize_arg(args, "max_files")?.unwrap_or(DEFAULT_MAX_FILES);
         let max_recs_per_file =
             parse_usize_arg(args, "max_recs_per_file")?.unwrap_or(DEFAULT_MAX_RECS_PER_FILE);
@@ -150,15 +153,16 @@ impl Tool for ToolSearch {
                     if let Some(recs) = file_results_to_reqs.get(file) {
                         let mut recs_sorted = recs.clone();
                         recs_sorted.sort_by(|a, b| a.line1.cmp(&b.line1));
-                        let text = match crate::files_in_workspace::get_file_text_from_memory_or_disk(
-                            gcx.clone(),
-                            &std::path::PathBuf::from(file),
-                        )
-                        .await
-                        {
-                            Ok(t) => t,
-                            Err(_) => continue,
-                        };
+                        let text =
+                            match crate::files_in_workspace::get_file_text_from_memory_or_disk(
+                                gcx.clone(),
+                                &std::path::PathBuf::from(file),
+                            )
+                            .await
+                            {
+                                Ok(t) => t,
+                                Err(_) => continue,
+                            };
                         let lines: Vec<&str> = text.lines().collect();
                         if lines.is_empty() {
                             continue;
@@ -176,10 +180,7 @@ impl Tool for ToolSearch {
                                 rec.line1,
                                 rec.line2,
                                 rec.usefulness,
-                                preview
-                                    .lines()
-                                    .map(|l| format!("    {}", l))
-                                    .join("\n")
+                                preview.lines().map(|l| format!("    {}", l)).join("\n")
                             ));
                         }
                     }
@@ -203,7 +204,8 @@ impl Tool for ToolSearch {
                         .iter()
                         .sorted_by(|rec1, rec2| rec2.usefulness.total_cmp(&rec1.usefulness))
                     {
-                        if total_emitted >= max_total_recs || per_file_emitted >= max_recs_per_file {
+                        if total_emitted >= max_total_recs || per_file_emitted >= max_recs_per_file
+                        {
                             break;
                         }
                         all_content.push_str(&format!(

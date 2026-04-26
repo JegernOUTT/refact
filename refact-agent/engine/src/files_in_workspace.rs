@@ -177,7 +177,10 @@ impl CacheCorrection {
                     unique_directories.insert(parent);
                 }
             }
-            unique_directories.iter().map(|p| PathBuf::from(p)).collect()
+            unique_directories
+                .iter()
+                .map(|p| PathBuf::from(p))
+                .collect()
         };
         directories.sort();
 
@@ -720,7 +723,14 @@ pub async fn enqueue_all_files_from_workspace_folders(
     wake_up_indexers: bool,
     vecdb_only: bool,
 ) -> i32 {
-    let folders = gcx.read().await.documents_state.workspace_folders.lock().unwrap().clone();
+    let folders = gcx
+        .read()
+        .await
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .clone();
 
     info!(
         "enqueue_all_files_from_workspace_folders started files search with {} folders",
@@ -956,7 +966,8 @@ pub async fn on_did_delete(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
 }
 
 pub async fn add_folder(gcx: Arc<ARwLock<GlobalContext>>, fpath: &PathBuf) {
-    let canonical_path = crate::files_correction::canonical_path(fpath.to_string_lossy().to_string());
+    let canonical_path =
+        crate::files_correction::canonical_path(fpath.to_string_lossy().to_string());
     let was_added = {
         let documents_state = &gcx.write().await.documents_state;
         let mut folders = documents_state.workspace_folders.lock().unwrap();
@@ -971,12 +982,16 @@ pub async fn add_folder(gcx: Arc<ARwLock<GlobalContext>>, fpath: &PathBuf) {
         tracing::info!("Added folder {} to workspace", canonical_path.display());
         on_workspaces_init(gcx.clone()).await;
     } else {
-        tracing::debug!("Folder {} already in workspace, skipping", canonical_path.display());
+        tracing::debug!(
+            "Folder {} already in workspace, skipping",
+            canonical_path.display()
+        );
     }
 }
 
 pub async fn remove_folder(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
-    let canonical_path = crate::files_correction::canonical_path(path.to_string_lossy().to_string());
+    let canonical_path =
+        crate::files_correction::canonical_path(path.to_string_lossy().to_string());
     let was_removed = {
         let documents_state = &gcx.write().await.documents_state;
         let mut folders = documents_state.workspace_folders.lock().unwrap();
@@ -1032,7 +1047,10 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
     }
 
     fn path_triggers_registry_reload(path: &PathBuf) -> bool {
-        if !path.components().any(|c| c == Component::Normal(".refact".as_ref())) {
+        if !path
+            .components()
+            .any(|c| c == Component::Normal(".refact".as_ref()))
+        {
             return false;
         }
         path.components().any(|c| {

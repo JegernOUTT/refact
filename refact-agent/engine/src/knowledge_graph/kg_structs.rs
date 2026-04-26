@@ -138,11 +138,17 @@ impl KnowledgeFrontmatter {
             lines.push(format!("deprecated_at: {}", deprecated_at));
         }
         if let Some(source_chat_id) = &self.source_chat_id {
-            lines.push(format!("source_chat_id: \"{}\"", source_chat_id.replace('"', "\\\"")));
+            lines.push(format!(
+                "source_chat_id: \"{}\"",
+                source_chat_id.replace('"', "\\\"")
+            ));
         }
 
         if let Some(created_at) = &self.created_at {
-            lines.push(format!("created_at: \"{}\"", created_at.replace('"', "\\\"")));
+            lines.push(format!(
+                "created_at: \"{}\"",
+                created_at.replace('"', "\\\"")
+            ));
         }
         if let Some(summary) = &self.summary {
             lines.push(format!("summary: \"{}\"", summary.replace('"', "\\\"")));
@@ -181,10 +187,16 @@ impl KnowledgeFrontmatter {
             lines.push(format!("related_entities: [{}]", entities_str));
         }
         if let Some(content_hash) = &self.content_hash {
-            lines.push(format!("content_hash: \"{}\"", content_hash.replace('"', "\\\"")));
+            lines.push(format!(
+                "content_hash: \"{}\"",
+                content_hash.replace('"', "\\\"")
+            ));
         }
         if let Some(source_tool) = &self.source_tool {
-            lines.push(format!("source_tool: \"{}\"", source_tool.replace('"', "\\\"")));
+            lines.push(format!(
+                "source_tool: \"{}\"",
+                source_tool.replace('"', "\\\"")
+            ));
         }
         if let Some(source_trajectory_id) = &self.source_trajectory_id {
             lines.push(format!(

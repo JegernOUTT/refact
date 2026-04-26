@@ -229,7 +229,8 @@ fn build_chat_messages(messages: &[Value]) -> Vec<ChatMessage> {
                 return None;
             }
 
-            let content = msg.get("content")
+            let content = msg
+                .get("content")
                 .and_then(extract_text_with_image_placeholders_from_json)?;
 
             if content.trim().is_empty() {
@@ -247,7 +248,10 @@ fn build_chat_messages(messages: &[Value]) -> Vec<ChatMessage> {
     // Drop leading assistant messages — validate_chat_history requires the first message
     // to be 'user' or 'system'. This can happen when a subchat trajectory starts with a
     // system message (filtered above) followed by an assistant message.
-    let start = msgs.iter().position(|m| m.role == "user").unwrap_or(msgs.len());
+    let start = msgs
+        .iter()
+        .position(|m| m.role == "user")
+        .unwrap_or(msgs.len());
     msgs[start..].to_vec()
 }
 
@@ -276,9 +280,16 @@ async fn extract_memos_and_meta(
         .await
         .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
 
-    let extraction_prompt = subagent_config.messages.user_template
+    let extraction_prompt = subagent_config
+        .messages
+        .user_template
         .as_ref()
-        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", SUBAGENT_ID))?;
+        .ok_or_else(|| {
+            format!(
+                "messages.user_template not defined for subagent '{}'",
+                SUBAGENT_ID
+            )
+        })?;
 
     let title_hint = if is_title_generated {
         format!("\n\nNote: The current title \"{}\" was auto-generated. Please provide a better descriptive title.", current_title)

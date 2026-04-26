@@ -8,12 +8,13 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::at_commands::at_tree::{tree_for_tools, TreeNode};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::files_correction::{
-    correct_to_nearest_dir_path, correct_to_nearest_filename, get_project_dirs,
-    paths_from_anywhere,
+    correct_to_nearest_dir_path, correct_to_nearest_filename, get_project_dirs, paths_from_anywhere,
 };
 use crate::files_in_workspace::ls_files;
 use crate::knowledge_index::format_related_memories_section;

@@ -83,15 +83,17 @@ pub async fn handle_v1_links(
     let mut links: Vec<Link> = Vec::new();
     let mut uncommited_changes_warning = String::new();
 
-    let canonical_mode = validate_mode_for_request(gcx.clone(), &post.meta.chat_mode).await.map_err(|e| {
-        ScratchError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("Invalid chat mode: {}", e),
-        )
-    })?;
-    
+    let canonical_mode = validate_mode_for_request(gcx.clone(), &post.meta.chat_mode)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Invalid chat mode: {}", e),
+            )
+        })?;
+
     tracing::info!("for links, canonical_mode == {:?}", canonical_mode);
-    
+
     let integration_yaml_errors = if is_agentic_mode_id(&canonical_mode) {
         let (_integrations_map, integration_yaml_errors) =
             crate::integrations::running_integrations::load_integrations(
@@ -354,13 +356,23 @@ pub async fn handle_v1_links(
         "uncommited_changes_warning": uncommited_changes_warning,
         "new_chat_suggestion": new_chat_suggestion
     }))
-    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("response json error: {}", e)))?;
+    .map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("response json error: {}", e),
+        )
+    })?;
 
     let response = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .body(Body::from(payload))
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("response build error: {}", e)))?;
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("response build error: {}", e),
+            )
+        })?;
     Ok(response)
 }
 

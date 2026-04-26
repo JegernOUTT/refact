@@ -7,7 +7,10 @@ use serde_json::json;
 
 use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
-use crate::providers::traits::{CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait, parse_enabled_models, parse_custom_models, set_model_enabled_impl};
+use crate::providers::traits::{
+    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CustomProvider {
@@ -48,7 +51,8 @@ impl ProviderTrait for CustomProvider {
     }
 
     fn default_wire_format(&self) -> WireFormat {
-        self.wire_format.unwrap_or(WireFormat::OpenaiChatCompletions)
+        self.wire_format
+            .unwrap_or(WireFormat::OpenaiChatCompletions)
     }
 
     fn supported_wire_formats(&self) -> Vec<WireFormat> {
@@ -110,7 +114,8 @@ available:
         if let Some(chat_endpoint) = yaml.get("chat_endpoint").and_then(|v| v.as_str()) {
             self.chat_endpoint = chat_endpoint.to_string();
         }
-        if let Some(completion_endpoint) = yaml.get("completion_endpoint").and_then(|v| v.as_str()) {
+        if let Some(completion_endpoint) = yaml.get("completion_endpoint").and_then(|v| v.as_str())
+        {
             self.completion_endpoint = completion_endpoint.to_string();
         }
         if let Some(embedding_endpoint) = yaml.get("embedding_endpoint").and_then(|v| v.as_str()) {
@@ -135,10 +140,10 @@ available:
                 }
             }
             // Remove headers that are no longer in the new config (but preserve "***" ones)
-            let new_keys: std::collections::HashSet<&str> = headers.keys()
-                .filter_map(|k| k.as_str())
-                .collect();
-            self.extra_headers.retain(|k, _| new_keys.contains(k.as_str()));
+            let new_keys: std::collections::HashSet<&str> =
+                headers.keys().filter_map(|k| k.as_str()).collect();
+            self.extra_headers
+                .retain(|k, _| new_keys.contains(k.as_str()));
         }
         parse_enabled_models(&yaml, &mut self.enabled_models);
         parse_custom_models(&yaml, &mut self.custom_models);
@@ -147,7 +152,8 @@ available:
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
         // Redact extra_headers values (may contain secrets like Authorization)
-        let redacted_headers: std::collections::HashMap<String, String> = self.extra_headers
+        let redacted_headers: std::collections::HashMap<String, String> = self
+            .extra_headers
             .keys()
             .map(|k| (k.clone(), "***".to_string()))
             .collect();
@@ -171,7 +177,9 @@ available:
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
-            enabled: self.enabled && !self.chat_endpoint.is_empty() && !self.enabled_models.is_empty(),
+            enabled: self.enabled
+                && !self.chat_endpoint.is_empty()
+                && !self.enabled_models.is_empty(),
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: self.chat_endpoint.clone(),
@@ -194,7 +202,7 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::Manual  // Custom provider requires manual model definition
+        ModelSource::Manual // Custom provider requires manual model definition
     }
 
     fn enabled_models(&self) -> &[String] {
@@ -218,6 +226,8 @@ available:
     }
 
     fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
-        self.custom_models.get(model_id).and_then(|c| c.pricing.clone())
+        self.custom_models
+            .get(model_id)
+            .and_then(|c| c.pricing.clone())
     }
 }

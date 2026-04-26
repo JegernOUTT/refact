@@ -289,7 +289,10 @@ impl TextDecorator for CustomTextConversion {
     }
 
     fn finalise(&mut self, lines: Vec<String>) -> Vec<TaggedLine<()>> {
-        lines.into_iter().map(|line| TaggedLine::from_string(line, &())).collect()
+        lines
+            .into_iter()
+            .map(|line| TaggedLine::from_string(line, &()))
+            .collect()
     }
 }
 

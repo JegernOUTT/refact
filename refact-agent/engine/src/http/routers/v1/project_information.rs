@@ -9,15 +9,13 @@ use tokio::sync::RwLock as ARwLock;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::chat::system_context::{
-    SystemInfo, find_instruction_files, find_project_configs, gather_git_info,
-    detect_environments, generate_compact_project_tree, generate_git_info_prompt,
-    generate_environment_instructions,
+    SystemInfo, find_instruction_files, find_project_configs, gather_git_info, detect_environments,
+    generate_compact_project_tree, generate_git_info_prompt, generate_environment_instructions,
 };
 use crate::memories::load_memories_by_tags;
 
 pub use crate::yaml_configs::project_information::{
-    ProjectInformationConfig,
-    load_project_information_config, save_project_information_config,
+    ProjectInformationConfig, load_project_information_config, save_project_information_config,
     to_relative_path, sanitize_overrides,
 };
 
@@ -57,10 +55,15 @@ pub async fn handle_v1_project_information_save(
     axum::Json(mut config): axum::Json<ProjectInformationConfig>,
 ) -> Result<StatusCode, ScratchError> {
     let project_roots = get_project_dirs(gcx.clone()).await;
-    config.sections.instruction_files.overrides = sanitize_overrides(&config.sections.instruction_files.overrides, &project_roots);
-    config.sections.project_configs.overrides = sanitize_overrides(&config.sections.project_configs.overrides, &project_roots);
-    config.sections.memories.overrides = sanitize_overrides(&config.sections.memories.overrides, &project_roots);
-    save_project_information_config(gcx, &config).await.map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    config.sections.instruction_files.overrides =
+        sanitize_overrides(&config.sections.instruction_files.overrides, &project_roots);
+    config.sections.project_configs.overrides =
+        sanitize_overrides(&config.sections.project_configs.overrides, &project_roots);
+    config.sections.memories.overrides =
+        sanitize_overrides(&config.sections.memories.overrides, &project_roots);
+    save_project_information_config(gcx, &config)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::OK)
 }
 
@@ -105,7 +108,10 @@ pub async fn handle_v1_project_information_preview(
 
     if !config.enabled {
         warnings.push("Project information is disabled".into());
-        return Ok(axum::Json(ProjectInformationPreviewResponse { blocks, warnings }));
+        return Ok(axum::Json(ProjectInformationPreviewResponse {
+            blocks,
+            warnings,
+        }));
     }
 
     let project_dirs = get_project_dirs(gcx.clone()).await;
@@ -122,7 +128,11 @@ pub async fn handle_v1_project_information_preview(
             title: "System Information".into(),
             path: None,
             char_count: tr.char_count,
-            original_char_count: if tr.truncated { Some(tr.original_char_count) } else { None },
+            original_char_count: if tr.truncated {
+                Some(tr.original_char_count)
+            } else {
+                None
+            },
             content: tr.content,
             truncated: tr.truncated,
             enabled: true,
@@ -131,7 +141,11 @@ pub async fn handle_v1_project_information_preview(
 
     if config.sections.environment_instructions.enabled {
         let raw_content = generate_environment_instructions(&environments);
-        let max_chars = config.sections.environment_instructions.max_chars.unwrap_or(6000);
+        let max_chars = config
+            .sections
+            .environment_instructions
+            .max_chars
+            .unwrap_or(6000);
         let tr = truncate_to_chars(&raw_content, max_chars);
         blocks.push(ProjectInfoBlock {
             id: "environment_instructions".into(),
@@ -139,7 +153,11 @@ pub async fn handle_v1_project_information_preview(
             title: "Environment Instructions".into(),
             path: None,
             char_count: tr.char_count,
-            original_char_count: if tr.truncated { Some(tr.original_char_count) } else { None },
+            original_char_count: if tr.truncated {
+                Some(tr.original_char_count)
+            } else {
+                None
+            },
             content: tr.content,
             truncated: tr.truncated,
             enabled: true,
@@ -147,7 +165,11 @@ pub async fn handle_v1_project_information_preview(
     }
 
     if config.sections.detected_environments.enabled {
-        let max_items = config.sections.detected_environments.max_items.unwrap_or(50);
+        let max_items = config
+            .sections
+            .detected_environments
+            .max_items
+            .unwrap_or(50);
         let truncated = environments.len() > max_items;
         let envs_to_show: Vec<_> = environments.iter().take(max_items).collect();
         let content = if envs_to_show.is_empty() {
@@ -188,7 +210,11 @@ pub async fn handle_v1_project_information_preview(
             title: "Git Information".into(),
             path: project_dirs.first().map(|p| p.display().to_string()),
             char_count: tr.char_count,
-            original_char_count: if tr.truncated { Some(tr.original_char_count) } else { None },
+            original_char_count: if tr.truncated {
+                Some(tr.original_char_count)
+            } else {
+                None
+            },
             content: tr.content,
             truncated: tr.truncated,
             enabled: true,
@@ -213,7 +239,11 @@ pub async fn handle_v1_project_information_preview(
             title: "Project Tree".into(),
             path: project_dirs.first().map(|p| p.display().to_string()),
             char_count: tr.char_count,
-            original_char_count: if tr.truncated { Some(tr.original_char_count) } else { None },
+            original_char_count: if tr.truncated {
+                Some(tr.original_char_count)
+            } else {
+                None
+            },
             content: tr.content,
             truncated: tr.truncated,
             enabled: true,
@@ -223,7 +253,11 @@ pub async fn handle_v1_project_information_preview(
     if config.sections.instruction_files.enabled {
         let instruction_files = find_instruction_files(&project_dirs).await;
         let max_items = config.sections.instruction_files.max_items.unwrap_or(20);
-        let default_max_chars = config.sections.instruction_files.max_chars_per_item.unwrap_or(8000);
+        let default_max_chars = config
+            .sections
+            .instruction_files
+            .max_chars_per_item
+            .unwrap_or(8000);
         let overrides = &config.sections.instruction_files.overrides;
         let list_truncated = instruction_files.len() > max_items;
         let files_to_show: Vec<_> = instruction_files.into_iter().take(max_items).collect();
@@ -233,7 +267,9 @@ pub async fn handle_v1_project_information_preview(
             let override_key = to_relative_path(&file.file_path, &project_dirs);
             let file_override = override_key.as_ref().and_then(|k| overrides.get(k));
             let file_enabled = file_override.and_then(|o| o.enabled).unwrap_or(true);
-            let max_chars_per_item = file_override.and_then(|o| o.max_chars).unwrap_or(default_max_chars);
+            let max_chars_per_item = file_override
+                .and_then(|o| o.max_chars)
+                .unwrap_or(default_max_chars);
 
             let raw_content = if let Some(ref processed) = file.processed_content {
                 processed.clone()
@@ -251,7 +287,11 @@ pub async fn handle_v1_project_information_preview(
                 // Return relative path as the key for UI to use when saving overrides
                 path: override_key.or_else(|| Some(file.file_path.clone())),
                 char_count: if file_enabled { tr.char_count } else { 0 },
-                original_char_count: if tr.truncated { Some(tr.original_char_count) } else { None },
+                original_char_count: if tr.truncated {
+                    Some(tr.original_char_count)
+                } else {
+                    None
+                },
                 content: tr.content,
                 truncated: tr.truncated,
                 enabled: file_enabled,
@@ -272,7 +312,10 @@ pub async fn handle_v1_project_information_preview(
                 enabled: true,
             });
         } else if list_truncated {
-            warnings.push(format!("Instruction files truncated to {} items", max_items));
+            warnings.push(format!(
+                "Instruction files truncated to {} items",
+                max_items
+            ));
         }
     }
 
@@ -307,20 +350,28 @@ pub async fn handle_v1_project_information_preview(
     if config.sections.memories.enabled {
         let memory_tags = &["preference", "lesson", "insight", "pattern"];
         let max_items = config.sections.memories.max_items.unwrap_or(30);
-        let memories = load_memories_by_tags(gcx.clone(), memory_tags, max_items).await.unwrap_or_default();
+        let memories = load_memories_by_tags(gcx.clone(), memory_tags, max_items)
+            .await
+            .unwrap_or_default();
         let default_max_chars = config.sections.memories.max_chars_per_item.unwrap_or(2000);
         let overrides = &config.sections.memories.overrides;
 
         for (idx, memo) in memories.iter().enumerate() {
             let abs_path_str = memo.file_path.as_ref().map(|p| p.display().to_string());
             // Use relative path as the override key (consistent with UI and sanitization)
-            let override_key = abs_path_str.as_ref().and_then(|p| to_relative_path(p, &project_dirs));
+            let override_key = abs_path_str
+                .as_ref()
+                .and_then(|p| to_relative_path(p, &project_dirs));
             let file_override = override_key.as_ref().and_then(|k| overrides.get(k));
             let file_enabled = file_override.and_then(|o| o.enabled).unwrap_or(true);
-            let max_chars_per_item = file_override.and_then(|o| o.max_chars).unwrap_or(default_max_chars);
+            let max_chars_per_item = file_override
+                .and_then(|o| o.max_chars)
+                .unwrap_or(default_max_chars);
 
             let tr = truncate_to_chars(&memo.content, max_chars_per_item);
-            let title = memo.file_path.as_ref()
+            let title = memo
+                .file_path
+                .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| format!("Memory {}", idx + 1));
@@ -331,7 +382,11 @@ pub async fn handle_v1_project_information_preview(
                 // Return relative path as the key for UI to use when saving overrides
                 path: override_key.or(abs_path_str),
                 char_count: if file_enabled { tr.char_count } else { 0 },
-                original_char_count: if tr.truncated { Some(tr.original_char_count) } else { None },
+                original_char_count: if tr.truncated {
+                    Some(tr.original_char_count)
+                } else {
+                    None
+                },
                 content: tr.content,
                 truncated: tr.truncated,
                 enabled: file_enabled,
@@ -358,5 +413,8 @@ pub async fn handle_v1_project_information_preview(
         warnings.push("No sections enabled".into());
     }
 
-    Ok(axum::Json(ProjectInformationPreviewResponse { blocks, warnings }))
+    Ok(axum::Json(ProjectInformationPreviewResponse {
+        blocks,
+        warnings,
+    }))
 }

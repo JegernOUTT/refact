@@ -15,10 +15,10 @@ pub struct ToolCallEntry {
     pub id: Option<String>,
     pub tool_type: Option<String>,
     pub name: String,
-    pub arguments: String,  // Mutable String for efficient append
+    pub arguments: String, // Mutable String for efficient append
     pub index: usize,
-    pub initialized: bool,  // Track if this entry received meaningful data
-    pub extra_content: Option<serde_json::Value>,  // Gemini thought_signature etc.
+    pub initialized: bool, // Track if this entry received meaningful data
+    pub extra_content: Option<serde_json::Value>, // Gemini thought_signature etc.
 }
 
 impl ToolCallAccumulator {
@@ -33,7 +33,11 @@ impl ToolCallAccumulator {
 
         // Prevent memory DoS from huge indices
         if index >= MAX_TOOL_CALLS {
-            tracing::warn!("Tool call index {} exceeds maximum {}, ignoring", index, MAX_TOOL_CALLS);
+            tracing::warn!(
+                "Tool call index {} exceeds maximum {}, ignoring",
+                index,
+                MAX_TOOL_CALLS
+            );
             return;
         }
 
@@ -113,7 +117,11 @@ impl ToolCallAccumulator {
             .unwrap_or(0) as usize;
 
         if index >= MAX_TOOL_CALLS {
-            tracing::warn!("Tool call index {} exceeds maximum {}, ignoring finalize", index, MAX_TOOL_CALLS);
+            tracing::warn!(
+                "Tool call index {} exceeds maximum {}, ignoring finalize",
+                index,
+                MAX_TOOL_CALLS
+            );
             return;
         }
 
@@ -182,9 +190,10 @@ impl ToolCallAccumulator {
             .filter(|entry| entry.initialized && !entry.name.is_empty())
             .map(|entry| {
                 // Use stable synthetic ID based on index, not random UUID
-                let id = entry.id.clone().unwrap_or_else(|| {
-                    format!("pending_call_{}", entry.index)
-                });
+                let id = entry
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("pending_call_{}", entry.index));
                 let mut tc = json!({
                     "id": id,
                     "type": entry.tool_type.as_deref().unwrap_or("function"),
@@ -231,8 +240,12 @@ mod tests {
     #[test]
     fn test_accumulator_parallel_tool_calls() {
         let mut acc = ToolCallAccumulator::default();
-        acc.merge(&json!({"index": 0, "id": "call_1", "function": {"name": "func1", "arguments": "{}"}}));
-        acc.merge(&json!({"index": 1, "id": "call_2", "function": {"name": "func2", "arguments": "{}"}}));
+        acc.merge(
+            &json!({"index": 0, "id": "call_1", "function": {"name": "func1", "arguments": "{}"}}),
+        );
+        acc.merge(
+            &json!({"index": 1, "id": "call_2", "function": {"name": "func2", "arguments": "{}"}}),
+        );
 
         let result = acc.finalize();
         assert_eq!(result.len(), 2);
@@ -262,7 +275,11 @@ mod tests {
 
         let result = acc.finalize();
         // Should only have 1 entry (the real one), not 3 phantom entries
-        assert_eq!(result.len(), 1, "Should filter out uninitialized placeholder entries");
+        assert_eq!(
+            result.len(),
+            1,
+            "Should filter out uninitialized placeholder entries"
+        );
         assert_eq!(result[0]["id"], "call_real");
         assert_eq!(result[0]["function"]["name"], "real_func");
         assert_eq!(result[0]["index"], 2);
@@ -271,7 +288,9 @@ mod tests {
     #[test]
     fn test_accumulator_large_arguments_efficient() {
         let mut acc = ToolCallAccumulator::default();
-        acc.merge(&json!({"index": 0, "id": "call_1", "function": {"name": "test", "arguments": ""}}));
+        acc.merge(
+            &json!({"index": 0, "id": "call_1", "function": {"name": "test", "arguments": ""}}),
+        );
 
         // Simulate streaming many small chunks (would be O(n²) with naive concat)
         for i in 0..1000 {
@@ -313,7 +332,10 @@ mod tests {
         acc.merge(&json!({"index": 0}));
 
         let result = acc.finalize();
-        assert!(result.is_empty(), "Empty delta should not create initialized entry");
+        assert!(
+            result.is_empty(),
+            "Empty delta should not create initialized entry"
+        );
     }
 
     #[test]
@@ -344,7 +366,10 @@ mod tests {
 
         let result = acc.finalize();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0]["function"]["arguments"], "{\"location\":\"Paris\"}");
+        assert_eq!(
+            result[0]["function"]["arguments"],
+            "{\"location\":\"Paris\"}"
+        );
         assert_eq!(result[0]["id"], "call_123");
     }
 
@@ -368,10 +393,15 @@ mod tests {
     #[test]
     fn test_accumulator_filters_empty_name_with_arguments() {
         let mut acc = ToolCallAccumulator::default();
-        acc.merge(&json!({"index": 0, "id": "call_123", "function": {"arguments": "{\"q\":\"test\"}"}}));
-        
+        acc.merge(
+            &json!({"index": 0, "id": "call_123", "function": {"arguments": "{\"q\":\"test\"}"}}),
+        );
+
         let result = acc.finalize();
-        assert!(result.is_empty(), "Tool call with empty name should be filtered out");
+        assert!(
+            result.is_empty(),
+            "Tool call with empty name should be filtered out"
+        );
     }
 
     #[test]
@@ -381,6 +411,9 @@ mod tests {
         acc.merge(&json!({"index": 0, "id": "", "function": {"name": "", "arguments": ""}}));
 
         let result = acc.finalize();
-        assert!(result.is_empty(), "Empty strings should not create initialized entry");
+        assert!(
+            result.is_empty(),
+            "Empty strings should not create initialized entry"
+        );
     }
 }

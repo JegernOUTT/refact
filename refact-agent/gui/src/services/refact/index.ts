@@ -26,3 +26,4 @@ export * from "./sidebarSubscription";
 export * from "./browser";
 export * from "./skillsStatus";
 export * from "./mcpMarketplace";
+export * from "./extensionsMarketplace";

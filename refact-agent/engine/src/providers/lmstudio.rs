@@ -9,8 +9,8 @@ use crate::caps::model_caps::ModelCapabilities;
 use crate::llm::adapter::WireFormat;
 use crate::providers::traits::{
     AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    merge_custom_models, normalize_endpoint, derive_endpoint_from_chat_url,
-    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    merge_custom_models, normalize_endpoint, derive_endpoint_from_chat_url, parse_enabled_models,
+    parse_custom_models, set_model_enabled_impl,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +55,8 @@ impl LMStudioProvider {
             .get("supports_tools")
             .and_then(|v| v.as_bool())
             .or_else(|| {
-                model.get("capabilities")
+                model
+                    .get("capabilities")
                     .and_then(|v| v.as_array())
                     .map(|caps| caps.iter().any(|c| c.as_str() == Some("tools")))
             })
@@ -64,9 +65,13 @@ impl LMStudioProvider {
             .get("supports_vision")
             .and_then(|v| v.as_bool())
             .or_else(|| {
-                model.get("capabilities")
+                model
+                    .get("capabilities")
                     .and_then(|v| v.as_array())
-                    .map(|caps| caps.iter().any(|c| matches!(c.as_str(), Some("vision") | Some("image"))))
+                    .map(|caps| {
+                        caps.iter()
+                            .any(|c| matches!(c.as_str(), Some("vision") | Some("image")))
+                    })
             })
             .unwrap_or(false);
 
@@ -230,7 +235,9 @@ available:
     }
 
     fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
-        self.custom_models.get(model_id).and_then(|c| c.pricing.clone())
+        self.custom_models
+            .get(model_id)
+            .and_then(|c| c.pricing.clone())
     }
 
     async fn fetch_available_models(
@@ -245,7 +252,10 @@ available:
             .get(&models_url)
             .timeout(std::time::Duration::from_secs(5));
         if !self.api_key.is_empty() {
-            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", self.api_key));
+            request = request.header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", self.api_key),
+            );
         }
 
         let response = match request.send().await {
@@ -257,7 +267,10 @@ available:
         };
 
         if !response.status().is_success() {
-            tracing::warn!("LM Studio: /v1/models returned status {}", response.status());
+            tracing::warn!(
+                "LM Studio: /v1/models returned status {}",
+                response.status()
+            );
             return self.get_custom_models_only();
         }
 

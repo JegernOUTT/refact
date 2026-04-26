@@ -10,7 +10,9 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::ext::config_dirs::get_ext_dirs;
 use crate::ext::skills::load_skill_full;
 use crate::ext::skills_context::expand_skill_includes;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 
 pub struct ToolActivateSkill {
     pub config_path: String,
@@ -23,7 +25,8 @@ async fn activate_skill_inner(
     if let Err(e) = crate::ext::skills::validate_skill_id(name) {
         return Err(format!("Invalid skill name '{}': {}", name, e));
     }
-    let skill = load_skill_full(ext_dirs, name).await
+    let skill = load_skill_full(ext_dirs, name)
+        .await
         .ok_or_else(|| format!("Skill '{}' not found", name))?;
     if !skill.index.user_invocable {
         return Err(format!("Skill '{}' is not available for activation", name));
@@ -74,7 +77,10 @@ impl Tool for ToolActivateSkill {
 
         let (gcx, chat_id) = {
             let ccx_locked = ccx.lock().await;
-            (ccx_locked.global_context.clone(), ccx_locked.chat_id.clone())
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.chat_id.clone(),
+            )
         };
 
         {
@@ -135,19 +141,22 @@ impl Tool for ToolActivateSkill {
         });
         let cd_instruction_content = format!("💿 SKILL_ACTIVATED {}\n\n{}", header_json, body);
 
-        Ok((false, vec![
-            ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(format!("Skill '{}' activated.", name)),
-                tool_call_id: tool_call_id.clone(),
-                ..Default::default()
-            }),
-            ContextEnum::ChatMessage(ChatMessage {
-                role: "cd_instruction".to_string(),
-                content: ChatContent::SimpleText(cd_instruction_content),
-                ..Default::default()
-            }),
-        ]))
+        Ok((
+            false,
+            vec![
+                ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(format!("Skill '{}' activated.", name)),
+                    tool_call_id: tool_call_id.clone(),
+                    ..Default::default()
+                }),
+                ContextEnum::ChatMessage(ChatMessage {
+                    role: "cd_instruction".to_string(),
+                    content: ChatContent::SimpleText(cd_instruction_content),
+                    ..Default::default()
+                }),
+            ],
+        ))
     }
 }
 
@@ -183,15 +192,22 @@ impl Tool for ToolDeactivateSkill {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let report = match args.get("report") {
-            Some(Value::String(s)) => s.clone(),
-            Some(v) => return Err(format!("argument `report` is not a string: {:?}", v)),
-            None => return Err("argument `report` is missing. Provide a thorough overview of what was done.".to_string()),
-        };
+        let report =
+            match args.get("report") {
+                Some(Value::String(s)) => s.clone(),
+                Some(v) => return Err(format!("argument `report` is not a string: {:?}", v)),
+                None => return Err(
+                    "argument `report` is missing. Provide a thorough overview of what was done."
+                        .to_string(),
+                ),
+            };
 
         let (gcx, chat_id) = {
             let ccx_locked = ccx.lock().await;
-            (ccx_locked.global_context.clone(), ccx_locked.chat_id.clone())
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.chat_id.clone(),
+            )
         };
 
         {
@@ -206,42 +222,55 @@ impl Tool for ToolDeactivateSkill {
                     Some(name) => name,
                     None => return Err("No active skill to deactivate".to_string()),
                 };
-                let start_index = session.active_command
+                let start_index = session
+                    .active_command
                     .started_at_index
                     .unwrap_or(session.messages.len());
-                session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
-                    start_index,
-                    report: report.clone(),
-                    skill_name: skill_name.clone(),
-                    activation_tool_call_id: session.active_command.activation_tool_call_id.clone(),
-                });
+                session.pending_skill_deactivation =
+                    Some(crate::chat::types::PendingSkillDeactivation {
+                        start_index,
+                        report: report.clone(),
+                        skill_name: skill_name.clone(),
+                        activation_tool_call_id: session
+                            .active_command
+                            .activation_tool_call_id
+                            .clone(),
+                    });
                 let compaction_note = if session.active_command.started_at_index.is_some() {
                     String::new()
                 } else {
                     tracing::warn!("deactivate_skill: no started_at_index for skill '{}', reporting without compaction", skill_name);
-                    " (Note: skill history compaction was skipped — activation anchor was not set.)".to_string()
+                    " (Note: skill history compaction was skipped — activation anchor was not set.)"
+                        .to_string()
                 };
                 session.active_command = crate::chat::types::ActiveCommandContext::default();
                 session.clear_active_skill();
-                return Ok((false, vec![
-                    ContextEnum::ChatMessage(ChatMessage {
+                return Ok((
+                    false,
+                    vec![ContextEnum::ChatMessage(ChatMessage {
                         role: "tool".to_string(),
-                        content: ChatContent::SimpleText(format!("✅ Skill '{}' deactivated. Report has been recorded.{}", skill_name, compaction_note)),
+                        content: ChatContent::SimpleText(format!(
+                            "✅ Skill '{}' deactivated. Report has been recorded.{}",
+                            skill_name, compaction_note
+                        )),
                         tool_call_id: tool_call_id.clone(),
                         ..Default::default()
-                    }),
-                ]));
+                    })],
+                ));
             }
         }
 
-        Ok((false, vec![
-            ContextEnum::ChatMessage(ChatMessage {
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText("✅ Skill deactivated. Report has been recorded.".to_string()),
+                content: ChatContent::SimpleText(
+                    "✅ Skill deactivated. Report has been recorded.".to_string(),
+                ),
                 tool_call_id: tool_call_id.clone(),
                 ..Default::default()
-            }),
-        ]))
+            })],
+        ))
     }
 }
 
@@ -263,7 +292,9 @@ mod tests {
         let skill_dir = root.join("skills").join(name);
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         let content = format!("---\n{}\n---\n{}", frontmatter, body);
-        tokio::fs::write(skill_dir.join("SKILL.md"), content).await.unwrap();
+        tokio::fs::write(skill_dir.join("SKILL.md"), content)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -293,7 +324,11 @@ mod tests {
         let result = activate_skill_inner(&ext_dirs, "nonexistent").await;
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("not found"), "Expected 'not found' in error: {}", msg);
+        assert!(
+            msg.contains("not found"),
+            "Expected 'not found' in error: {}",
+            msg
+        );
     }
 
     #[tokio::test]
@@ -323,7 +358,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("skills").join("with-include");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(skill_dir.join("context.md"), "Included content here").await.unwrap();
+        tokio::fs::write(skill_dir.join("context.md"), "Included content here")
+            .await
+            .unwrap();
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: with-include\ndescription: Skill with includes\nuser-invocable: true\n---\nBefore\n@include context.md\nAfter",
@@ -340,7 +377,10 @@ mod tests {
             "@include should be expanded, got: {}",
             body
         );
-        assert!(!body.contains("@include"), "@include directive should be replaced");
+        assert!(
+            !body.contains("@include"),
+            "@include directive should be replaced"
+        );
     }
 
     #[tokio::test]
@@ -378,8 +418,14 @@ mod tests {
         let result = activate_skill_inner(&ext_dirs, "open-skill").await;
         assert!(result.is_ok());
         let (_, allowed_tools, model_override) = result.unwrap();
-        assert!(allowed_tools.is_empty(), "No restrictions should result in empty allowed_tools");
-        assert!(model_override.is_none(), "No model should result in None model_override");
+        assert!(
+            allowed_tools.is_empty(),
+            "No restrictions should result in empty allowed_tools"
+        );
+        assert!(
+            model_override.is_none(),
+            "No model should result in None model_override"
+        );
     }
 
     #[tokio::test]
@@ -420,24 +466,39 @@ mod tests {
 
     #[test]
     fn test_activate_skill_not_parallel() {
-        let tool = ToolActivateSkill { config_path: String::new() };
-        assert!(!tool.tool_description().allow_parallel, "activate_skill must have allow_parallel = false");
+        let tool = ToolActivateSkill {
+            config_path: String::new(),
+        };
+        assert!(
+            !tool.tool_description().allow_parallel,
+            "activate_skill must have allow_parallel = false"
+        );
     }
 
     #[test]
     fn test_deactivate_skill_no_context_file() {
-        let result: Vec<ContextEnum> = vec![
-            ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText("✅ Skill 'my-skill' deactivated. Report has been recorded.".to_string()),
-                tool_call_id: "tc1".to_string(),
-                ..Default::default()
-            }),
-        ];
-        let has_context_file = result.iter().any(|e| matches!(e, ContextEnum::ContextFile(_)));
-        assert!(!has_context_file, "deactivate_skill must not return ContextFile");
-        let has_chat_message = result.iter().any(|e| matches!(e, ContextEnum::ChatMessage(_)));
-        assert!(has_chat_message, "deactivate_skill must return a ChatMessage");
+        let result: Vec<ContextEnum> = vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(
+                "✅ Skill 'my-skill' deactivated. Report has been recorded.".to_string(),
+            ),
+            tool_call_id: "tc1".to_string(),
+            ..Default::default()
+        })];
+        let has_context_file = result
+            .iter()
+            .any(|e| matches!(e, ContextEnum::ContextFile(_)));
+        assert!(
+            !has_context_file,
+            "deactivate_skill must not return ContextFile"
+        );
+        let has_chat_message = result
+            .iter()
+            .any(|e| matches!(e, ContextEnum::ChatMessage(_)));
+        assert!(
+            has_chat_message,
+            "deactivate_skill must return a ChatMessage"
+        );
     }
 
     #[tokio::test]
@@ -509,6 +570,7 @@ mod tests {
             event_seq: 0,
             event_tx: tx,
             recent_request_ids: VecDeque::new(),
+            recent_request_ids_set: std::collections::HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -529,13 +591,17 @@ mod tests {
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
             stop_hook_handle: None,
+            suppress_auto_enrichment_for_next_turn: false,
         };
 
         let skill_name = match session.thread.active_skill.clone() {
             Some(name) => name,
             None => panic!("Expected active_skill to be set"),
         };
-        assert_eq!(skill_name, "real-skill", "Must use active_skill, not active_command.name");
+        assert_eq!(
+            skill_name, "real-skill",
+            "Must use active_skill, not active_command.name"
+        );
         assert_ne!(skill_name, session.active_command.name);
 
         session.active_command = ActiveCommandContext::default();

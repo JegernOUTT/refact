@@ -154,7 +154,11 @@ pub async fn initialize_vecdb_with_context(
 ) -> Result<(), VecDbInitError> {
     let (legacy_cache_dir, cmdline, shutdown_flag) = {
         let gcx_locked = gcx.read().await;
-        (gcx_locked.cache_dir.clone(), gcx_locked.cmdline.clone(), gcx_locked.shutdown_flag.clone())
+        (
+            gcx_locked.cache_dir.clone(),
+            gcx_locked.cmdline.clone(),
+            gcx_locked.shutdown_flag.clone(),
+        )
     };
 
     let vecdb_dir = if !cmdline.vecdb_force_path.is_empty() {

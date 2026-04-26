@@ -9,13 +9,14 @@ use indexmap::IndexMap;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
-    ChatContent, ChatMessage, ChatToolCall, ContextFile, PostprocessSettings,
-    SubchatParameters,
+    ChatContent, ChatMessage, ChatToolCall, ContextFile, PostprocessSettings, SubchatParameters,
 };
 use crate::global_context::GlobalContext;
 use crate::constants::CHAT_TOP_N;
 use crate::postprocessing::pp_tool_results::{postprocess_tool_results, ToolBudget};
-use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id, match_tool_confirm_action};
+use crate::yaml_configs::customization_registry::{
+    get_mode_config, map_legacy_mode_to_id, match_tool_confirm_action,
+};
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
 use crate::tools::tool_name_alias::build_registry_from_names;
@@ -66,38 +67,58 @@ pub async fn resolve_tool_call_aliases(
 ) -> Vec<ChatToolCall> {
     let raw_tools = crate::tools::tools_list::get_tools_for_mode(gcx, mode_id, model_id).await;
     let available_tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
-    let tool_names: Vec<String> = available_tools.iter().map(|t| t.tool_description().name.clone()).collect();
+    let tool_names: Vec<String> = available_tools
+        .iter()
+        .map(|t| t.tool_description().name.clone())
+        .collect();
     let registry = build_registry_from_names(&tool_names);
     let needs_cc = tool_calls.iter().any(|tc| {
-        tc.function.name.starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX)
+        tc.function
+            .name
+            .starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX)
     });
     if !registry.needs_aliasing() && !needs_cc {
         return tool_calls;
     }
-    tool_calls.into_iter().map(|mut tc| {
-        if tc.function.name.starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX) {
-            // t_-prefixed CC builtin: reverse CC rename, then try alias registry.
-            let cc_resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&tc.function.name);
-            let lookup_name = if cc_resolved != tc.function.name { &cc_resolved } else { &tc.function.name };
-            if let Some(internal_name) = registry.resolve_alias(lookup_name) {
+    tool_calls
+        .into_iter()
+        .map(|mut tc| {
+            if tc
+                .function
+                .name
+                .starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX)
+            {
+                // t_-prefixed CC builtin: reverse CC rename, then try alias registry.
+                let cc_resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
+                    &tc.function.name,
+                );
+                let lookup_name = if cc_resolved != tc.function.name {
+                    &cc_resolved
+                } else {
+                    &tc.function.name
+                };
+                if let Some(internal_name) = registry.resolve_alias(lookup_name) {
+                    tc.function.name = internal_name.to_string();
+                } else {
+                    tc.function.name = cc_resolved;
+                }
+            } else if needs_cc {
+                // CC mode: bare names are MCP tools with mcp_ stripped outbound.
+                // Re-add mcp_ so confirmation and dispatch find them in the registry.
+                let cc_resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
+                    &tc.function.name,
+                );
+                if let Some(internal_name) = registry.resolve_alias(&cc_resolved) {
+                    tc.function.name = internal_name.to_string();
+                } else {
+                    tc.function.name = cc_resolved;
+                }
+            } else if let Some(internal_name) = registry.resolve_alias(&tc.function.name) {
                 tc.function.name = internal_name.to_string();
-            } else {
-                tc.function.name = cc_resolved;
             }
-        } else if needs_cc {
-            // CC mode: bare names are MCP tools with mcp_ stripped outbound.
-            // Re-add mcp_ so confirmation and dispatch find them in the registry.
-            let cc_resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&tc.function.name);
-            if let Some(internal_name) = registry.resolve_alias(&cc_resolved) {
-                tc.function.name = internal_name.to_string();
-            } else {
-                tc.function.name = cc_resolved;
-            }
-        } else if let Some(internal_name) = registry.resolve_alias(&tc.function.name) {
-            tc.function.name = internal_name.to_string();
-        }
-        tc
-    }).collect()
+            tc
+        })
+        .collect()
 }
 
 const EDITING_TOOLS: &[&str] = &[
@@ -114,10 +135,7 @@ const EDITING_TOOLS: &[&str] = &[
     "mv",
 ];
 
-const DANGEROUS_TOOLS: &[&str] = &[
-    "shell",
-    "rm",
-];
+const DANGEROUS_TOOLS: &[&str] = &["shell", "rm"];
 
 fn is_editing_tool(tool_name: &str) -> bool {
     EDITING_TOOLS.contains(&tool_name)
@@ -321,7 +339,8 @@ mod tests {
             allow_parallel: Some(false),
         };
         let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: crate::tools::tools_description::ToolConfig = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: crate::tools::tools_description::ToolConfig =
+            serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.enabled, config.enabled);
         assert_eq!(parsed.allow_parallel, config.allow_parallel);
     }
@@ -374,7 +393,10 @@ source:
             false // ignore override-to-true for safety
         };
 
-        assert!(!effective, "YAML should not be able to enable parallelism for unsafe tools");
+        assert!(
+            !effective,
+            "YAML should not be able to enable parallelism for unsafe tools"
+        );
     }
 
     #[test]
@@ -394,7 +416,10 @@ source:
             false
         };
 
-        assert!(!effective, "YAML should be able to disable parallelism for safe tools");
+        assert!(
+            !effective,
+            "YAML should be able to disable parallelism for safe tools"
+        );
     }
 
     #[test]
@@ -407,8 +432,8 @@ source:
 
         let tool_allow_parallel = |name: &str| -> bool {
             match name {
-                "cat" | "tree" | "search" => true,  // parallel
-                "apply_patch" | "shell" => false,   // non-parallel (barriers)
+                "cat" | "tree" | "search" => true, // parallel
+                "apply_patch" | "shell" => false,  // non-parallel (barriers)
                 _ => false,
             }
         };
@@ -459,7 +484,10 @@ source:
         results.sort_by_key(|(idx, _)| *idx);
 
         let ordered: Vec<&str> = results.iter().map(|(_, r)| *r).collect();
-        assert_eq!(ordered, vec!["result_0", "result_1", "result_2", "result_3", "result_4"]);
+        assert_eq!(
+            ordered,
+            vec!["result_0", "result_1", "result_2", "result_3", "result_4"]
+        );
     }
 
     #[test]
@@ -470,12 +498,17 @@ source:
         // Results: (idx, had_corrections, msgs, files)
         let results: Vec<(usize, bool, Vec<&str>, Vec<&str>)> = vec![
             (0, false, vec!["msg0"], vec![]),
-            (1, true, vec!["msg1"], vec![]),  // This tool had corrections
+            (1, true, vec!["msg1"], vec![]), // This tool had corrections
             (2, false, vec!["msg2"], vec![]),
         ];
 
-        let any_corrections = results.iter().any(|(_, had_corrections, _, _)| *had_corrections);
-        assert!(any_corrections, "Should detect that at least one tool had corrections");
+        let any_corrections = results
+            .iter()
+            .any(|(_, had_corrections, _, _)| *had_corrections);
+        assert!(
+            any_corrections,
+            "Should detect that at least one tool had corrections"
+        );
 
         // Test with no corrections
         let results_no_corrections: Vec<(usize, bool, Vec<&str>, Vec<&str>)> = vec![
@@ -483,47 +516,118 @@ source:
             (1, false, vec!["msg1"], vec![]),
         ];
 
-        let any_corrections = results_no_corrections.iter().any(|(_, had_corrections, _, _)| *had_corrections);
-        assert!(!any_corrections, "Should detect no corrections when all tools succeeded cleanly");
+        let any_corrections = results_no_corrections
+            .iter()
+            .any(|(_, had_corrections, _, _)| *had_corrections);
+        assert!(
+            !any_corrections,
+            "Should detect no corrections when all tools succeeded cleanly"
+        );
     }
 
     #[test]
     fn test_allowed_tool_still_denied_if_tool_says_deny() {
         use crate::tools::tools_description::MatchConfirmDenyResult;
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::DENY, None, true, "shell"), "deny");
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::DENY, Some("auto"), true, "shell"), "deny");
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::DENY, Some("ask"), true, "shell"), "deny");
+        assert_eq!(
+            compute_final_action(&MatchConfirmDenyResult::DENY, None, true, "shell"),
+            "deny"
+        );
+        assert_eq!(
+            compute_final_action(&MatchConfirmDenyResult::DENY, Some("auto"), true, "shell"),
+            "deny"
+        );
+        assert_eq!(
+            compute_final_action(&MatchConfirmDenyResult::DENY, Some("ask"), true, "shell"),
+            "deny"
+        );
     }
 
     #[test]
     fn test_allowed_tool_auto_approves_confirmation() {
         use crate::tools::tools_description::MatchConfirmDenyResult;
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, None, true, "shell"), "auto");
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("ask"), true, "shell"), "auto");
+        assert_eq!(
+            compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, None, true, "shell"),
+            "auto"
+        );
+        assert_eq!(
+            compute_final_action(
+                &MatchConfirmDenyResult::CONFIRMATION,
+                Some("ask"),
+                true,
+                "shell"
+            ),
+            "auto"
+        );
     }
 
     #[test]
     fn test_allowed_tool_respects_mode_deny() {
         use crate::tools::tools_description::MatchConfirmDenyResult;
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("deny"), true, "shell"), "deny");
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::PASS, Some("deny"), true, "shell"), "deny");
+        assert_eq!(
+            compute_final_action(
+                &MatchConfirmDenyResult::CONFIRMATION,
+                Some("deny"),
+                true,
+                "shell"
+            ),
+            "deny"
+        );
+        assert_eq!(
+            compute_final_action(&MatchConfirmDenyResult::PASS, Some("deny"), true, "shell"),
+            "deny"
+        );
     }
 
     #[test]
     fn test_empty_allowed_tools_no_change() {
         use crate::tools::tools_description::MatchConfirmDenyResult;
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, None, false, "shell"), "ask");
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::PASS, None, false, "shell"), "auto");
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("ask"), false, "shell"), "ask");
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("auto"), false, "shell"), "auto");
-        assert_eq!(compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, Some("deny"), false, "shell"), "deny");
+        assert_eq!(
+            compute_final_action(&MatchConfirmDenyResult::CONFIRMATION, None, false, "shell"),
+            "ask"
+        );
+        assert_eq!(
+            compute_final_action(&MatchConfirmDenyResult::PASS, None, false, "shell"),
+            "auto"
+        );
+        assert_eq!(
+            compute_final_action(
+                &MatchConfirmDenyResult::CONFIRMATION,
+                Some("ask"),
+                false,
+                "shell"
+            ),
+            "ask"
+        );
+        assert_eq!(
+            compute_final_action(
+                &MatchConfirmDenyResult::CONFIRMATION,
+                Some("auto"),
+                false,
+                "shell"
+            ),
+            "auto"
+        );
+        assert_eq!(
+            compute_final_action(
+                &MatchConfirmDenyResult::CONFIRMATION,
+                Some("deny"),
+                false,
+                "shell"
+            ),
+            "deny"
+        );
     }
 
     #[test]
     fn test_always_ask_tools_override_auto() {
         use crate::tools::tools_description::MatchConfirmDenyResult;
         assert_eq!(
-            compute_final_action(&MatchConfirmDenyResult::PASS, Some("auto"), true, "compress_chat_probe"),
+            compute_final_action(
+                &MatchConfirmDenyResult::PASS,
+                Some("auto"),
+                true,
+                "compress_chat_probe"
+            ),
             "ask"
         );
         assert_eq!(
@@ -539,7 +643,15 @@ pub async fn process_tool_calls_once(
     mode_id: &str,
     model_id: Option<&str>,
 ) -> ToolStepOutcome {
-    let (tool_calls, server_tool_calls, messages, thread, tool_message_index, allowed_tools, source_command) = {
+    let (
+        tool_calls,
+        server_tool_calls,
+        messages,
+        thread,
+        tool_message_index,
+        allowed_tools,
+        source_command,
+    ) = {
         let session = session_arc.lock().await;
         let msg_count = session.messages.len();
         let last_msg = session.messages.last();
@@ -610,10 +722,19 @@ pub async fn process_tool_calls_once(
         tool_calls.len()
     );
 
-    let (confirmations, denials) =
-        check_tools_confirmation(gcx.clone(), &tool_calls, &messages, mode_id, model_id, &allowed_tools, &source_command).await;
+    let (confirmations, denials) = check_tools_confirmation(
+        gcx.clone(),
+        &tool_calls,
+        &messages,
+        mode_id,
+        model_id,
+        &allowed_tools,
+        &source_command,
+    )
+    .await;
 
-    let denied_ids: std::collections::HashSet<String> = denials.iter().map(|d| d.tool_call_id.clone()).collect();
+    let denied_ids: std::collections::HashSet<String> =
+        denials.iter().map(|d| d.tool_call_id.clone()).collect();
     if !denials.is_empty() {
         let mut session = session_arc.lock().await;
         for denial in &denials {
@@ -630,19 +751,22 @@ pub async fn process_tool_calls_once(
     }
 
     if !confirmations.is_empty() {
-        let (auto_approved, remaining): (Vec<_>, Vec<_>) = confirmations
-            .into_iter()
-            .partition(|c| {
-                let auto_editing = thread.auto_approve_editing_tools && is_editing_tool(&c.tool_name);
-                let auto_dangerous = thread.auto_approve_dangerous_commands && is_dangerous_tool(&c.tool_name);
+        let (auto_approved, remaining): (Vec<_>, Vec<_>) =
+            confirmations.into_iter().partition(|c| {
+                let auto_editing =
+                    thread.auto_approve_editing_tools && is_editing_tool(&c.tool_name);
+                let auto_dangerous =
+                    thread.auto_approve_dangerous_commands && is_dangerous_tool(&c.tool_name);
                 auto_editing || auto_dangerous
             });
 
         if !remaining.is_empty() {
-            let mut auto_approved_ids: Vec<String> = auto_approved.iter().map(|c| c.tool_call_id.clone()).collect();
-            let paused_ids: std::collections::HashSet<&str> = remaining.iter()
-                .map(|r| r.tool_call_id.as_str())
+            let mut auto_approved_ids: Vec<String> = auto_approved
+                .iter()
+                .map(|c| c.tool_call_id.clone())
                 .collect();
+            let paused_ids: std::collections::HashSet<&str> =
+                remaining.iter().map(|r| r.tool_call_id.as_str()).collect();
             for tc in &tool_calls {
                 if !denied_ids.contains(&tc.id)
                     && !paused_ids.contains(tc.id.as_str())
@@ -653,7 +777,11 @@ pub async fn process_tool_calls_once(
             }
 
             let mut session = session_arc.lock().await;
-            session.set_paused_with_reasons_and_auto_approved(remaining, auto_approved_ids, Some(tool_message_index));
+            session.set_paused_with_reasons_and_auto_approved(
+                remaining,
+                auto_approved_ids,
+                Some(tool_message_index),
+            );
             return ToolStepOutcome::Paused;
         }
     }
@@ -676,9 +804,13 @@ pub async fn process_tool_calls_once(
         (id, pd)
     };
 
-    let mut pre_hook_blocked_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pre_hook_blocked_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for tc in &tools_to_execute {
-        let args_value: Option<serde_json::Value> = tc.function.parse_args().ok()
+        let args_value: Option<serde_json::Value> = tc
+            .function
+            .parse_args()
+            .ok()
             .map(|m| serde_json::Value::Object(m.into_iter().collect()));
         let payload = HookPayload {
             hook_event_name: "PreToolUse".to_string(),
@@ -742,7 +874,9 @@ pub async fn process_tool_calls_once(
             .any(|r| r.tool_call_id == tool_call.id && r.tool_failed == Some(true));
         if !failed {
             match tool_call.function.name.as_str() {
-                "ask_questions" | "task_wait_for_agents" => final_state = SessionState::WaitingUserInput,
+                "ask_questions" | "task_wait_for_agents" => {
+                    final_state = SessionState::WaitingUserInput
+                }
                 "task_done" => final_state = SessionState::Completed,
                 "task_agent_finish" => final_state = SessionState::Completed,
                 _ => {}
@@ -821,7 +955,11 @@ fn compute_final_action(
     tool_name: &str,
 ) -> &'static str {
     use crate::tools::tools_description::MatchConfirmDenyResult;
-    const ALWAYS_ASK_TOOLS: &[&str] = &["compress_chat_probe", "compress_chat_apply", "handoff_to_mode"];
+    const ALWAYS_ASK_TOOLS: &[&str] = &[
+        "compress_chat_probe",
+        "compress_chat_apply",
+        "handoff_to_mode",
+    ];
     if *tool_result == MatchConfirmDenyResult::DENY {
         return "deny";
     }
@@ -880,24 +1018,25 @@ pub async fn check_tools_confirmation(
         .map(|m| m.tool_confirm.rules.as_slice())
         .unwrap_or(&[]);
 
-    let needed_names: std::collections::HashSet<&str> = tool_calls.iter()
+    let needed_names: std::collections::HashSet<&str> = tool_calls
+        .iter()
         .map(|tc| tc.function.name.as_str())
         .collect();
 
-    let all_tools =
-        crate::tools::tools_list::apply_mcp_lazy_filter(
-            crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id).await
-        ).tools
-        .into_iter()
-        .filter_map(|tool| {
-                let spec = tool.tool_description();
-                if needed_names.contains(spec.name.as_str()) {
-                    Some((spec.name, tool))
-                } else {
-                    None
-                }
-            })
-            .collect::<indexmap::IndexMap<_, _>>();
+    let all_tools = crate::tools::tools_list::apply_mcp_lazy_filter(
+        crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id).await,
+    )
+    .tools
+    .into_iter()
+    .filter_map(|tool| {
+        let spec = tool.tool_description();
+        if needed_names.contains(spec.name.as_str()) {
+            Some((spec.name, tool))
+        } else {
+            None
+        }
+    })
+    .collect::<indexmap::IndexMap<_, _>>();
 
     for tool_call in tool_calls {
         let tool = match all_tools.get(&tool_call.function.name) {
@@ -944,8 +1083,8 @@ pub async fn check_tools_confirmation(
                     continue;
                 }
 
-                let is_auto_approved = !allowed_tools.is_empty()
-                    && allowed_tools.contains(&tool_call.function.name);
+                let is_auto_approved =
+                    !allowed_tools.is_empty() && allowed_tools.contains(&tool_call.function.name);
                 let final_action = compute_final_action(
                     &result.result,
                     mode_action.as_deref(),
@@ -1097,8 +1236,10 @@ pub async fn execute_tools_with_session(
     result
 }
 
-type SerialToolRegistry =
-    std::collections::HashMap<String, Arc<AMutex<Box<dyn crate::tools::tools_description::Tool + Send>>>>;
+type SerialToolRegistry = std::collections::HashMap<
+    String,
+    Arc<AMutex<Box<dyn crate::tools::tools_description::Tool + Send>>>,
+>;
 
 async fn instantiate_tool_for_call(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -1140,10 +1281,7 @@ async fn execute_single_tool(
                     vec![ChatMessage {
                         message_id: Uuid::new_v4().to_string(),
                         role: "tool".to_string(),
-                        content: ChatContent::SimpleText(format!(
-                            "Error parsing arguments: {}",
-                            e
-                        )),
+                        content: ChatContent::SimpleText(format!("Error parsing arguments: {}", e)),
                         tool_call_id: tool_call.id.clone(),
                         tool_failed: Some(true),
                         ..Default::default()
@@ -1233,8 +1371,11 @@ async fn execute_single_tool(
             }
         }
     } else {
-        let resolved_name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&tool_call.function.name);
-        let tool_arc = match serial_registry.get(&tool_call.function.name)
+        let resolved_name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
+            &tool_call.function.name,
+        );
+        let tool_arc = match serial_registry
+            .get(&tool_call.function.name)
             .or_else(|| serial_registry.get(resolved_name.as_str()))
         {
             Some(t) => t.clone(),
@@ -1300,13 +1441,17 @@ async fn execute_single_tool(
         }
     };
 
-    let tool_output_text = msgs.iter()
+    let tool_output_text = msgs
+        .iter()
         .filter(|m| m.role == "tool")
         .map(|m| m.content.content_text_only())
         .collect::<Vec<_>>()
         .join("\n");
 
-    let args_value: Option<serde_json::Value> = tool_call.function.parse_args().ok()
+    let args_value: Option<serde_json::Value> = tool_call
+        .function
+        .parse_args()
+        .ok()
         .map(|m| serde_json::Value::Object(m.into_iter().collect()));
     let post_payload = HookPayload {
         hook_event_name: "PostToolUse".to_string(),
@@ -1350,10 +1495,13 @@ async fn execute_tools_inner(
 ) -> (Vec<ChatMessage>, bool) {
     let max_parallel = limits().max_parallel_tools.max(1);
 
-    let raw_available_tools = crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id).await;
-    let available_tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_available_tools).tools;
+    let raw_available_tools =
+        crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id).await;
+    let available_tools =
+        crate::tools::tools_list::apply_mcp_lazy_filter(raw_available_tools).tools;
 
-    let mut tool_allow_parallel: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut tool_allow_parallel: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
     let mut serial_registry: SerialToolRegistry = std::collections::HashMap::new();
 
     for tool in available_tools {
@@ -1387,7 +1535,9 @@ async fn execute_tools_inner(
     let mut current_parallel_batch: Vec<(usize, ChatToolCall)> = Vec::new();
 
     for (idx, tool_call) in tool_calls.iter().enumerate() {
-        let resolved_name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&tool_call.function.name);
+        let resolved_name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
+            &tool_call.function.name,
+        );
         let allow_parallel = tool_allow_parallel
             .get(&tool_call.function.name)
             .or_else(|| tool_allow_parallel.get(resolved_name.as_str()))
@@ -1406,7 +1556,8 @@ async fn execute_tools_inner(
                     max_parallel,
                     mode_id,
                     model_id,
-                ).await;
+                )
+                .await;
                 all_results.extend(batch_results);
                 current_parallel_batch.clear();
             }
@@ -1420,7 +1571,8 @@ async fn execute_tools_inner(
                 false,
                 mode_id,
                 model_id,
-            ).await;
+            )
+            .await;
             all_results.push(result);
         }
     }
@@ -1434,7 +1586,8 @@ async fn execute_tools_inner(
             max_parallel,
             mode_id,
             model_id,
-        ).await;
+        )
+        .await;
         all_results.extend(batch_results);
     }
 
@@ -1565,5 +1718,8 @@ pub async fn execute_tools(
         }
     }
 
-    execute_tools_inner(gcx, ccx, tool_calls, mode_id, model_id, budget, options, messages).await
+    execute_tools_inner(
+        gcx, ccx, tool_calls, mode_id, model_id, budget, options, messages,
+    )
+    .await
 }

@@ -46,7 +46,11 @@ pub fn sum_metering_coins(extra: &serde_json::Map<String, serde_json::Value>) ->
             }
         }
     }
-    if found { Some(total) } else { None }
+    if found {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 pub fn split_model_provider(model_id: &str) -> (String, String) {
@@ -96,7 +100,10 @@ mod tests {
     fn test_sum_metering_coins_basic() {
         let mut map = serde_json::Map::new();
         map.insert("metering_coins_prompt".to_string(), serde_json::json!(10.0));
-        map.insert("metering_coins_generated".to_string(), serde_json::json!(5.0));
+        map.insert(
+            "metering_coins_generated".to_string(),
+            serde_json::json!(5.0),
+        );
         let result = sum_metering_coins(&map);
         assert_eq!(result, Some(15.0));
     }

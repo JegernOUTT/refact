@@ -35,6 +35,7 @@ export interface ExtRegistryResponse {
   skills: SkillRegistryItem[];
   slash_commands: CommandRegistryItem[];
   hooks: HookRegistryItem[];
+  has_project_root: boolean;
 }
 
 export interface SkillDetail {

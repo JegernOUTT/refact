@@ -8,7 +8,10 @@ use tokio::sync::RwLock as ARwLock;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_types::*;
-use crate::yaml_configs::project_configs_bootstrap::{global_configs_try_create_all, project_configs_ensure_dirs, compute_checksum, get_default_checksum};
+use crate::yaml_configs::project_configs_bootstrap::{
+    global_configs_try_create_all, project_configs_ensure_dirs, compute_checksum,
+    get_default_checksum,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigScope {
@@ -30,7 +33,9 @@ pub struct RegistryCacheManager {
 
 impl RegistryCacheManager {
     pub fn new() -> Self {
-        Self { cache: HashMap::new() }
+        Self {
+            cache: HashMap::new(),
+        }
     }
 
     pub fn get(&self, project_root: &Path) -> Option<&RegistryCache> {
@@ -38,11 +43,14 @@ impl RegistryCacheManager {
     }
 
     pub fn insert(&mut self, project_root: PathBuf, registry: ProjectRegistry) {
-        self.cache.insert(project_root.clone(), RegistryCache {
-            project_root,
-            registry,
-            last_scan: SystemTime::now(),
-        });
+        self.cache.insert(
+            project_root.clone(),
+            RegistryCache {
+                project_root,
+                registry,
+                last_scan: SystemTime::now(),
+            },
+        );
     }
 
     #[allow(dead_code)]
@@ -195,7 +203,11 @@ async fn load_toolbox_commands_skip_defaults(dir: &Path, registry: &mut ProjectR
     load_toolbox_commands_inner(dir, registry, true).await;
 }
 
-async fn load_toolbox_commands_inner(dir: &Path, registry: &mut ProjectRegistry, skip_defaults: bool) {
+async fn load_toolbox_commands_inner(
+    dir: &Path,
+    registry: &mut ProjectRegistry,
+    skip_defaults: bool,
+) {
     let paths = collect_yaml_paths(dir).await;
 
     for path in paths {
@@ -268,8 +280,13 @@ async fn collect_yaml_paths(dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-            let effectively_empty = tokio::fs::read_to_string(&path).await
+        if path
+            .extension()
+            .map(|e| e == "yaml" || e == "yml")
+            .unwrap_or(false)
+        {
+            let effectively_empty = tokio::fs::read_to_string(&path)
+                .await
                 .map(|c| c.trim().is_empty())
                 .unwrap_or(false);
             if !effectively_empty {
@@ -285,8 +302,7 @@ async fn load_yaml_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| format!("Failed to read file: {}", e))?;
-    serde_yaml::from_str(&content)
-        .map_err(|e| format!("Failed to parse YAML: {}", e))
+    serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse YAML: {}", e))
 }
 
 async fn is_unchanged_default(path: &Path, kind: &str) -> bool {
@@ -320,10 +336,13 @@ pub fn resolve_mode_for_model(
         None => return Some(base.clone()),
     };
 
-    let matching_override = registry.mode_overrides.iter()
+    let matching_override = registry
+        .mode_overrides
+        .iter()
         .filter(|o| o.base.as_deref() == Some(mode_id))
         .find(|o| {
-            o.match_models.as_ref()
+            o.match_models
+                .as_ref()
                 .map(|patterns| patterns.iter().any(|p| model_matches_pattern(model_id, p)))
                 .unwrap_or(false)
         });
@@ -352,10 +371,13 @@ pub fn resolve_subagent_for_model(
         None => return Some(base.clone()),
     };
 
-    let matching_override = registry.subagent_overrides.iter()
+    let matching_override = registry
+        .subagent_overrides
+        .iter()
         .filter(|o| o.base.as_deref() == Some(subagent_id))
         .find(|o| {
-            o.match_models.as_ref()
+            o.match_models
+                .as_ref()
                 .map(|patterns| patterns.iter().any(|p| model_matches_pattern(model_id, p)))
                 .unwrap_or(false)
         });
@@ -376,7 +398,9 @@ fn model_matches_pattern(model_id: &str, pattern: &str) -> bool {
         canonical.last_segment_base.as_str(),
     ];
 
-    candidates.iter().any(|c| model_matches_pattern_single(c, pattern))
+    candidates
+        .iter()
+        .any(|c| model_matches_pattern_single(c, pattern))
         || {
             let pattern_norm = normalize_model_match_str(pattern);
             candidates
@@ -441,9 +465,7 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     pattern == name
 }
 
-pub async fn get_project_registry(
-    gcx: Arc<ARwLock<GlobalContext>>,
-) -> Option<ProjectRegistry> {
+pub async fn get_project_registry(gcx: Arc<ARwLock<GlobalContext>>) -> Option<ProjectRegistry> {
     let config_dir = gcx.read().await.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
@@ -479,9 +501,7 @@ pub async fn get_project_registry(
 }
 
 #[allow(dead_code)]
-pub async fn get_global_registry(
-    gcx: Arc<ARwLock<GlobalContext>>,
-) -> ProjectRegistry {
+pub async fn get_global_registry(gcx: Arc<ARwLock<GlobalContext>>) -> ProjectRegistry {
     let config_dir = gcx.read().await.config_dir.clone();
     let _ = global_configs_try_create_all(&config_dir).await;
     load_registry_from_dir(&config_dir).await
@@ -521,7 +541,10 @@ pub fn map_legacy_mode_to_id(mode_str: &str) -> &str {
         "TASK_PLANNER" => "task_planner",
         "TASK_AGENT" => "task_agent",
         _ => {
-            if mode_str.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+            if mode_str
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+            {
                 mode_str
             } else {
                 "agent"
@@ -584,7 +607,10 @@ mod tests {
         assert!(model_matches_pattern("openai/gpt-4o", "gpt-4*"));
         assert!(model_matches_pattern("openrouter/openai/gpt-4o", "gpt-4*"));
         assert!(model_matches_pattern("claude-3.7-sonnet", "claude-3-7*"));
-        assert!(model_matches_pattern("anthropic/claude-3.7-sonnet", "claude-3-7*"));
+        assert!(model_matches_pattern(
+            "anthropic/claude-3.7-sonnet",
+            "claude-3-7*"
+        ));
 
         assert!(model_matches_pattern("gpt-4o", "gpt-*"));
         assert!(model_matches_pattern("gpt-4-turbo", "gpt-*"));
@@ -620,14 +646,32 @@ mod tests {
     #[test]
     fn test_match_tool_confirm_action() {
         let rules = vec![
-            ToolConfirmRule { match_pattern: "tree".to_string(), action: "auto".to_string() },
-            ToolConfirmRule { match_pattern: "search_*".to_string(), action: "auto".to_string() },
-            ToolConfirmRule { match_pattern: "*".to_string(), action: "ask".to_string() },
+            ToolConfirmRule {
+                match_pattern: "tree".to_string(),
+                action: "auto".to_string(),
+            },
+            ToolConfirmRule {
+                match_pattern: "search_*".to_string(),
+                action: "auto".to_string(),
+            },
+            ToolConfirmRule {
+                match_pattern: "*".to_string(),
+                action: "ask".to_string(),
+            },
         ];
 
-        assert_eq!(match_tool_confirm_action(&rules, "tree"), Some("auto".to_string()));
-        assert_eq!(match_tool_confirm_action(&rules, "search_pattern"), Some("auto".to_string()));
-        assert_eq!(match_tool_confirm_action(&rules, "shell"), Some("ask".to_string()));
+        assert_eq!(
+            match_tool_confirm_action(&rules, "tree"),
+            Some("auto".to_string())
+        );
+        assert_eq!(
+            match_tool_confirm_action(&rules, "search_pattern"),
+            Some("auto".to_string())
+        );
+        assert_eq!(
+            match_tool_confirm_action(&rules, "shell"),
+            Some("ask".to_string())
+        );
     }
 
     #[test]
@@ -746,7 +790,10 @@ mod tests {
     fn test_setup_mcp_prompt_prefers_safe_examples() {
         let content = read_default_mode_file("setup_mcp.yaml");
 
-        assert!(content.contains("HTTP over deprecated SSE") || content.contains("prefer HTTP over deprecated SSE"));
+        assert!(
+            content.contains("HTTP over deprecated SSE")
+                || content.contains("prefer HTTP over deprecated SSE")
+        );
         assert!(!content.contains("@latest"));
         assert!(content.contains("@modelcontextprotocol/server-github@<version>"));
     }
@@ -762,7 +809,12 @@ mod tests {
             "disable-model-invocation",
             "@include <relative-file>",
         ] {
-            assert!(content.contains(key), "setup_skills.yaml should mention '{}': {}", key, content);
+            assert!(
+                content.contains(key),
+                "setup_skills.yaml should mention '{}': {}",
+                key,
+                content
+            );
         }
     }
 

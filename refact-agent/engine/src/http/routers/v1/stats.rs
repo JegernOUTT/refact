@@ -44,7 +44,10 @@ pub async fn handle_v1_stats_llm_summary(
     let events = read_stats_events_from_dirs(&stats_dirs, from, to);
     let summary = aggregate_summary(&events, from, to);
     let body = serde_json::to_string(&summary).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialization error: {}", e),
+        )
     })?;
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -93,7 +96,10 @@ pub async fn handle_v1_stats_llm_events(
         offset,
     };
     let body = serde_json::to_string(&resp).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialization error: {}", e),
+        )
     })?;
     Ok(Response::builder()
         .status(StatusCode::OK)

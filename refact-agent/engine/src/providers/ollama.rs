@@ -9,8 +9,8 @@ use crate::caps::model_caps::ModelCapabilities;
 use crate::llm::adapter::WireFormat;
 use crate::providers::traits::{
     AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    merge_custom_models, normalize_endpoint, derive_endpoint_from_chat_url,
-    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    merge_custom_models, normalize_endpoint, derive_endpoint_from_chat_url, parse_enabled_models,
+    parse_custom_models, set_model_enabled_impl,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,11 +45,18 @@ impl OllamaProvider {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let family = details.and_then(|d| d.get("family")).and_then(|v| v.as_str()).unwrap_or("");
+        let family = details
+            .and_then(|d| d.get("family"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let families: Vec<String> = details
             .and_then(|d| d.get("families"))
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let parameter_size = details
             .and_then(|d| d.get("parameter_size"))
@@ -64,7 +71,9 @@ impl OllamaProvider {
 
         let supports_tools = capabilities.iter().any(|c| c.as_str() == Some("tools"))
             || Self::family_supports_tools(family, &families);
-        let supports_multimodality = capabilities.iter().any(|c| matches!(c.as_str(), Some("vision") | Some("image")))
+        let supports_multimodality = capabilities
+            .iter()
+            .any(|c| matches!(c.as_str(), Some("vision") | Some("image")))
             || Self::family_supports_vision(family, &families);
 
         let display_name = if parameter_size.is_empty() {
@@ -97,8 +106,16 @@ impl OllamaProvider {
 
     fn family_supports_tools(family: &str, families: &[String]) -> bool {
         let tool_families = [
-            "llama", "qwen2", "qwen3", "command-r", "mistral",
-            "gemma2", "gemma3", "phi3", "phi4", "deepseek2",
+            "llama",
+            "qwen2",
+            "qwen3",
+            "command-r",
+            "mistral",
+            "gemma2",
+            "gemma3",
+            "phi3",
+            "phi4",
+            "deepseek2",
         ];
         let check = |f: &str| tool_families.iter().any(|tf| f.contains(tf));
         check(family) || families.iter().any(|f| check(f))
@@ -248,7 +265,9 @@ available:
     }
 
     fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
-        self.custom_models.get(model_id).and_then(|c| c.pricing.clone())
+        self.custom_models
+            .get(model_id)
+            .and_then(|c| c.pricing.clone())
     }
 
     async fn fetch_available_models(
@@ -263,7 +282,10 @@ available:
             .get(&tags_url)
             .timeout(std::time::Duration::from_secs(5));
         if !self.api_key.is_empty() {
-            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", self.api_key));
+            request = request.header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", self.api_key),
+            );
         }
 
         let response = match request.send().await {

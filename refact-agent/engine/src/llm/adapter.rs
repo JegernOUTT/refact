@@ -56,7 +56,8 @@ pub struct AdapterSettings {
 }
 
 pub trait LlmWireAdapter: Send + Sync {
-    fn build_http(&self, req: &LlmRequest, settings: &AdapterSettings) -> Result<HttpParts, String>;
+    fn build_http(&self, req: &LlmRequest, settings: &AdapterSettings)
+        -> Result<HttpParts, String>;
 
     fn parse_stream_chunk(&self, data: &str) -> Result<Vec<LlmStreamDelta>, StreamParseError>;
 }
@@ -70,9 +71,13 @@ pub enum StreamParseError {
 
 use std::sync::OnceLock;
 
-static OPENAI_CHAT_ADAPTER: OnceLock<crate::llm::adapters::openai_chat::OpenAiChatAdapter> = OnceLock::new();
-static OPENAI_RESPONSES_ADAPTER: OnceLock<crate::llm::adapters::openai_responses::OpenAiResponsesAdapter> = OnceLock::new();
-static ANTHROPIC_ADAPTER: OnceLock<crate::llm::adapters::anthropic::AnthropicAdapter> = OnceLock::new();
+static OPENAI_CHAT_ADAPTER: OnceLock<crate::llm::adapters::openai_chat::OpenAiChatAdapter> =
+    OnceLock::new();
+static OPENAI_RESPONSES_ADAPTER: OnceLock<
+    crate::llm::adapters::openai_responses::OpenAiResponsesAdapter,
+> = OnceLock::new();
+static ANTHROPIC_ADAPTER: OnceLock<crate::llm::adapters::anthropic::AnthropicAdapter> =
+    OnceLock::new();
 static REFACT_ADAPTER: OnceLock<crate::llm::adapters::refact::RefactAdapter> = OnceLock::new();
 
 pub fn get_adapter(format: WireFormat) -> &'static dyn LlmWireAdapter {
@@ -80,9 +85,8 @@ pub fn get_adapter(format: WireFormat) -> &'static dyn LlmWireAdapter {
         WireFormat::OpenaiChatCompletions => {
             OPENAI_CHAT_ADAPTER.get_or_init(|| crate::llm::adapters::openai_chat::OpenAiChatAdapter)
         }
-        WireFormat::OpenaiResponses => {
-            OPENAI_RESPONSES_ADAPTER.get_or_init(|| crate::llm::adapters::openai_responses::OpenAiResponsesAdapter)
-        }
+        WireFormat::OpenaiResponses => OPENAI_RESPONSES_ADAPTER
+            .get_or_init(|| crate::llm::adapters::openai_responses::OpenAiResponsesAdapter),
         WireFormat::AnthropicMessages => {
             ANTHROPIC_ADAPTER.get_or_init(|| crate::llm::adapters::anthropic::AnthropicAdapter)
         }
@@ -110,7 +114,10 @@ pub fn insert_extra_headers(headers: &mut HeaderMap, extra_headers: &HashMap<Str
     for (key, value) in extra_headers {
         let key_lower = key.to_lowercase();
         if PROTECTED_HEADERS.contains(&key_lower.as_str()) {
-            tracing::warn!("extra_headers attempted to override protected header '{}', ignoring", key);
+            tracing::warn!(
+                "extra_headers attempted to override protected header '{}', ignoring",
+                key
+            );
             continue;
         }
         if let (Ok(name), Ok(val)) = (
@@ -169,9 +176,15 @@ mod tests {
 
     #[test]
     fn test_wire_format_display() {
-        assert_eq!(WireFormat::OpenaiChatCompletions.to_string(), "openai_chat_completions");
+        assert_eq!(
+            WireFormat::OpenaiChatCompletions.to_string(),
+            "openai_chat_completions"
+        );
         assert_eq!(WireFormat::OpenaiResponses.to_string(), "openai_responses");
-        assert_eq!(WireFormat::AnthropicMessages.to_string(), "anthropic_messages");
+        assert_eq!(
+            WireFormat::AnthropicMessages.to_string(),
+            "anthropic_messages"
+        );
         assert_eq!(WireFormat::Refact.to_string(), "refact");
     }
 

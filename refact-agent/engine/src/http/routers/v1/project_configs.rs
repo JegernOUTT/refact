@@ -9,7 +9,9 @@ use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_registry::load_merged_registry;
-use crate::yaml_configs::project_configs_bootstrap::{global_configs_try_create_all, project_configs_ensure_dirs};
+use crate::yaml_configs::project_configs_bootstrap::{
+    global_configs_try_create_all, project_configs_ensure_dirs,
+};
 
 #[derive(Deserialize)]
 pub struct RescanRequest {
@@ -50,22 +52,24 @@ async fn validate_project_root(
     match requested {
         Some(path) => {
             let requested_path = std::path::PathBuf::from(&path);
-            let canonical_requested = requested_path.canonicalize()
+            let canonical_requested = requested_path
+                .canonicalize()
                 .unwrap_or_else(|_| requested_path.clone());
-            let matched = dirs.iter().any(|d| {
-                d.canonicalize().unwrap_or_else(|_| d.clone()) == canonical_requested
-            });
+            let matched = dirs
+                .iter()
+                .any(|d| d.canonicalize().unwrap_or_else(|_| d.clone()) == canonical_requested);
             if matched {
                 Ok(requested_path)
             } else {
-                Err(json_error_response(StatusCode::BAD_REQUEST, "Invalid project root: not a workspace directory"))
+                Err(json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid project root: not a workspace directory",
+                ))
             }
         }
-        None => {
-            dirs.into_iter().next().ok_or_else(|| {
-                json_error_response(StatusCode::BAD_REQUEST, "No project root available")
-            })
-        }
+        None => dirs.into_iter().next().ok_or_else(|| {
+            json_error_response(StatusCode::BAD_REQUEST, "No project root available")
+        }),
     }
 }
 
@@ -90,10 +94,14 @@ pub async fn handle_v1_project_configs_rescan(
         subagents_loaded: registry.subagents.len(),
         toolbox_commands_loaded: registry.toolbox_commands.len(),
         code_lens_loaded: registry.code_lens.len(),
-        errors: registry.errors.iter().map(|e| RegistryErrorResponse {
-            file_path: e.file_path.clone(),
-            error: e.error.clone(),
-        }).collect(),
+        errors: registry
+            .errors
+            .iter()
+            .map(|e| RegistryErrorResponse {
+                file_path: e.file_path.clone(),
+                error: e.error.clone(),
+            })
+            .collect(),
     };
 
     Ok(Response::builder()
@@ -164,10 +172,14 @@ pub async fn handle_v1_project_configs_bootstrap(
                 subagents_loaded: registry.subagents.len(),
                 toolbox_commands_loaded: registry.toolbox_commands.len(),
                 code_lens_loaded: registry.code_lens.len(),
-                errors: registry.errors.iter().map(|e| RegistryErrorResponse {
-                    file_path: e.file_path.clone(),
-                    error: e.error.clone(),
-                }).collect(),
+                errors: registry
+                    .errors
+                    .iter()
+                    .map(|e| RegistryErrorResponse {
+                        file_path: e.file_path.clone(),
+                        error: e.error.clone(),
+                    })
+                    .collect(),
             };
             Ok(Response::builder()
                 .status(StatusCode::OK)
@@ -175,9 +187,7 @@ pub async fn handle_v1_project_configs_bootstrap(
                 .body(Body::from(serde_json::to_string(&response).unwrap()))
                 .unwrap())
         }
-        Err(e) => {
-            Ok(json_error_response(StatusCode::INTERNAL_SERVER_ERROR, &e))
-        }
+        Err(e) => Ok(json_error_response(StatusCode::INTERNAL_SERVER_ERROR, &e)),
     }
 }
 
@@ -203,7 +213,9 @@ pub async fn handle_v1_project_configs_get(
     let registry = load_merged_registry(&config_dir, Some(&project_root)).await;
 
     let response = ProjectConfigsResponse {
-        modes: registry.modes.values()
+        modes: registry
+            .modes
+            .values()
             .filter(|m| !m.specific)
             .map(|m| ModeInfo {
                 id: m.id.clone(),
@@ -212,7 +224,9 @@ pub async fn handle_v1_project_configs_get(
                 specific: m.specific,
             })
             .collect(),
-        subagents: registry.subagents.values()
+        subagents: registry
+            .subagents
+            .values()
             .filter(|s| s.expose_as_tool)
             .map(|s| SubagentInfo {
                 id: s.id.clone(),
@@ -222,22 +236,30 @@ pub async fn handle_v1_project_configs_get(
                 has_code: s.has_code,
             })
             .collect(),
-        toolbox_commands: registry.toolbox_commands.values()
+        toolbox_commands: registry
+            .toolbox_commands
+            .values()
             .map(|t| ToolboxInfo {
                 id: t.id.clone(),
                 description: t.description.clone(),
             })
             .collect(),
-        code_lens: registry.code_lens.values()
+        code_lens: registry
+            .code_lens
+            .values()
             .map(|c| CodeLensInfo {
                 id: c.id.clone(),
                 label: c.label.clone(),
             })
             .collect(),
-        errors: registry.errors.iter().map(|e| RegistryErrorResponse {
-            file_path: e.file_path.clone(),
-            error: e.error.clone(),
-        }).collect(),
+        errors: registry
+            .errors
+            .iter()
+            .map(|e| RegistryErrorResponse {
+                file_path: e.file_path.clone(),
+                error: e.error.clone(),
+            })
+            .collect(),
     };
 
     Ok(Response::builder()

@@ -429,10 +429,12 @@ cards:
     // Test 14: Task board default columns
     #[test]
     fn test_task_board_default_columns() {
-        let columns = [("planned", "Planned"),
+        let columns = [
+            ("planned", "Planned"),
             ("doing", "Doing"),
             ("done", "Done"),
-            ("failed", "Failed")];
+            ("failed", "Failed"),
+        ];
 
         assert_eq!(columns.len(), 4, "Should have 4 default columns");
         assert_eq!(columns[0].0, "planned", "First column should be planned");

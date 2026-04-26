@@ -8,12 +8,13 @@ use axum::http::StatusCode;
 use std::collections::HashMap;
 
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::tools::tool_helpers::{load_code_subagent_config};
 use crate::tools::subagent_phases::{gather_files_phase, GatherFilesParams};
 use crate::call_validation::{
-    ChatMessage, ChatContent, ContextEnum, SubchatParameters, ContextFile,
-    PostprocessSettings,
+    ChatMessage, ChatContent, ContextEnum, SubchatParameters, ContextFile, PostprocessSettings,
 };
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::caps::resolve_chat_model;
@@ -38,7 +39,8 @@ fn get_gather_files_params(config: &CodeSubagentConfig) -> GatherFilesParams<'_>
         default_subagent_id: "strategic_planning_gather_files",
         title: "Strategic Planning: Gathering Files",
         default_system_prompt: config.gather_system_prompt.as_deref().unwrap_or(""),
-        user_instruction: "Based on the conversation above, identify all relevant files for solving this problem.",
+        user_instruction:
+            "Based on the conversation above, identify all relevant files for solving this problem.",
     }
 }
 
@@ -59,7 +61,8 @@ async fn make_planning_prompt(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))
         .map_err(|x| x.message)?;
 
-    let tokens_extra_budget = (subchat_params.subchat_n_ctx as f32 * TOKENS_EXTRA_BUDGET_PERCENT) as usize;
+    let tokens_extra_budget =
+        (subchat_params.subchat_n_ctx as f32 * TOKENS_EXTRA_BUDGET_PERCENT) as usize;
     let required_tokens = subchat_params.subchat_max_new_tokens
         + subchat_params.subchat_tokens_for_rag
         + tokens_extra_budget;
@@ -76,7 +79,9 @@ async fn make_planning_prompt(
     }
 
     let mut tokens_budget: i64 = (subchat_params.subchat_n_ctx - required_tokens) as i64;
-    let final_message = config.solver_prompt.clone()
+    let final_message = config
+        .solver_prompt
+        .clone()
         .ok_or("solver_prompt not configured for strategic_planning")?;
     tokens_budget -= count_text_tokens_with_fallback(tokenizer.clone(), &final_message) as i64;
 
@@ -108,12 +113,22 @@ async fn make_planning_prompt(
     for message in previous_messages.iter().rev() {
         let message_row = match message.role.as_str() {
             "system" => continue,
-            "user" => format!("👤:\n{}\n\n", &message.content.to_text_with_image_placeholders()),
-            "assistant" => format!("🤖:\n{}\n\n", &message.content.to_text_with_image_placeholders()),
-            "tool" => format!("📎:\n{}\n\n", &message.content.to_text_with_image_placeholders()),
+            "user" => format!(
+                "👤:\n{}\n\n",
+                &message.content.to_text_with_image_placeholders()
+            ),
+            "assistant" => format!(
+                "🤖:\n{}\n\n",
+                &message.content.to_text_with_image_placeholders()
+            ),
+            "tool" => format!(
+                "📎:\n{}\n\n",
+                &message.content.to_text_with_image_placeholders()
+            ),
             _ => continue,
         };
-        let left_tokens = tokens_budget - count_text_tokens_with_fallback(tokenizer.clone(), &message_row) as i64;
+        let left_tokens =
+            tokens_budget - count_text_tokens_with_fallback(tokenizer.clone(), &message_row) as i64;
         if left_tokens >= 0 {
             tokens_budget = left_tokens;
             context.insert_str(0, &message_row);
@@ -143,7 +158,9 @@ async fn make_planning_prompt(
                 context_file.file_content
             ));
         }
-        Ok(format!("{final_message}\n\n# Conversation\n{context}\n\n# Files context\n{files_context}"))
+        Ok(format!(
+            "{final_message}\n\n# Conversation\n{context}\n\n# Files context\n{files_context}"
+        ))
     } else {
         Ok(format!("{final_message}\n\n# Conversation\n{context}"))
     }
@@ -203,10 +220,18 @@ async fn execute_strategic_planning(
     let files_section = format!(
         "# Files Analyzed ({})\n{}\n\n",
         filenames.len(),
-        filenames.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n")
+        filenames
+            .iter()
+            .map(|f| format!("- {}", f))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
-    let solution_content = format!("{}# Solution\n{}", files_section, initial_solution.content.to_text_with_image_placeholders());
+    let solution_content = format!(
+        "{}# Solution\n{}",
+        files_section,
+        initial_solution.content.to_text_with_image_placeholders()
+    );
 
     let root_chat_id = ccx.lock().await.root_chat_id.clone();
     let enrichment_params = EnrichmentParams {
@@ -217,7 +242,9 @@ async fn execute_strategic_planning(
         source_chat_id: (!root_chat_id.is_empty()).then_some(root_chat_id),
     };
 
-    let memory_note = match memories_add_enriched(ccx.clone(), &solution_content, enrichment_params).await {
+    let memory_note = match memories_add_enriched(ccx.clone(), &solution_content, enrichment_params)
+        .await
+    {
         Ok(path) => {
             format!(
                 "\n\n---\n📝 **This plan has been saved to the knowledge base:** `{}`\n\nRelated memories may be shown elsewhere in short form. To load full content of a memory, call `cat(paths=\"{}\")`.",
@@ -265,7 +292,9 @@ impl Tool for ToolStrategicPlanning {
         let gcx = ccx.lock().await.global_context.clone();
 
         let config = load_code_subagent_config(gcx.clone(), "strategic_planning", None).await?;
-        let guardrails_prompt = config.guardrails_prompt.clone()
+        let guardrails_prompt = config
+            .guardrails_prompt
+            .clone()
             .ok_or("guardrails_prompt not configured for strategic_planning")?;
 
         let external_messages = {

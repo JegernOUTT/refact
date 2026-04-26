@@ -57,9 +57,16 @@ pub async fn enrich_knowledge_metadata(
         .await
         .ok_or_else(|| format!("subagent config '{}' not found", KG_ENRICH_SUBAGENT_ID))?;
 
-    let enrichment_template = subagent_config.messages.user_template
+    let enrichment_template = subagent_config
+        .messages
+        .user_template
         .as_ref()
-        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", KG_ENRICH_SUBAGENT_ID))?;
+        .ok_or_else(|| {
+            format!(
+                "messages.user_template not defined for subagent '{}'",
+                KG_ENRICH_SUBAGENT_ID
+            )
+        })?;
 
     let entities_str = entities.join(", ");
     let files_str = candidate_files
@@ -117,9 +124,17 @@ pub async fn check_deprecation(
         .await
         .ok_or_else(|| format!("subagent config '{}' not found", KG_DEPRECATE_SUBAGENT_ID))?;
 
-    let deprecation_template = subagent_config.messages.user_template
-        .as_ref()
-        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", KG_DEPRECATE_SUBAGENT_ID))?;
+    let deprecation_template =
+        subagent_config
+            .messages
+            .user_template
+            .as_ref()
+            .ok_or_else(|| {
+                format!(
+                    "messages.user_template not defined for subagent '{}'",
+                    KG_DEPRECATE_SUBAGENT_ID
+                )
+            })?;
 
     let candidates_str = candidates
         .iter()

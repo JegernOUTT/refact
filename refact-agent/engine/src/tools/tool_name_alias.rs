@@ -5,8 +5,13 @@ pub const MAX_TOOL_NAME_LEN: usize = 64;
 fn is_provider_safe(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_TOOL_NAME_LEN
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        && name.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && name
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_alphabetic())
 }
 
 pub fn generate_tool_alias(name: &str, max_len: usize) -> String {
@@ -21,7 +26,12 @@ pub fn generate_tool_alias(name: &str, max_len: usize) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
         .take(prefix_len)
         .collect();
-    let prefix = if prefix.is_empty() || !prefix.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+    let prefix = if prefix.is_empty()
+        || !prefix
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_alphabetic())
+    {
         format!("t_{}", &prefix)
     } else {
         prefix
@@ -47,20 +57,32 @@ impl ToolAliasRegistry {
             return alias.clone();
         }
         let mut candidate = generate_tool_alias(internal_name, MAX_TOOL_NAME_LEN);
-        if self.alias_to_name.contains_key(&candidate) && self.alias_to_name[&candidate] != internal_name {
+        if self.alias_to_name.contains_key(&candidate)
+            && self.alias_to_name[&candidate] != internal_name
+        {
             let mut suffix = 1u32;
             loop {
-                let suffixed = format!("{}_{}", &candidate[..candidate.len().min(MAX_TOOL_NAME_LEN - 3)], suffix);
+                let suffixed = format!(
+                    "{}_{}",
+                    &candidate[..candidate.len().min(MAX_TOOL_NAME_LEN - 3)],
+                    suffix
+                );
                 if !self.alias_to_name.contains_key(&suffixed) {
                     candidate = suffixed;
                     break;
                 }
                 suffix += 1;
             }
-            tracing::warn!("tool_name_alias: collision resolved: {} → {}", internal_name, candidate);
+            tracing::warn!(
+                "tool_name_alias: collision resolved: {} → {}",
+                internal_name,
+                candidate
+            );
         }
-        self.name_to_alias.insert(internal_name.to_string(), candidate.clone());
-        self.alias_to_name.insert(candidate.clone(), internal_name.to_string());
+        self.name_to_alias
+            .insert(internal_name.to_string(), candidate.clone());
+        self.alias_to_name
+            .insert(candidate.clone(), internal_name.to_string());
         candidate
     }
 
@@ -98,8 +120,12 @@ mod tests {
 
     #[test]
     fn test_long_name_gets_truncated_with_hash() {
-        let long_name = "mcp_some_extremely_long_tool_name_that_clearly_exceeds_the_sixty_four_character_limit";
-        assert!(long_name.len() > 64, "test name should be longer than 64 chars");
+        let long_name =
+            "mcp_some_extremely_long_tool_name_that_clearly_exceeds_the_sixty_four_character_limit";
+        assert!(
+            long_name.len() > 64,
+            "test name should be longer than 64 chars"
+        );
         let alias = generate_tool_alias(long_name, 64);
         assert!(alias.len() <= 64, "alias too long: {} chars", alias.len());
         assert!(
@@ -108,7 +134,10 @@ mod tests {
             alias
         );
         assert_ne!(alias, long_name);
-        assert!(alias.chars().next().map_or(false, |c| c.is_ascii_alphabetic()));
+        assert!(alias
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_alphabetic()));
     }
 
     #[test]
@@ -159,8 +188,13 @@ mod tests {
         assert!(name.len() > 64 || name.len() <= 64);
         let alias = generate_tool_alias(name, 64);
         assert!(alias.len() <= 64);
-        assert!(alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
-        assert!(alias.chars().next().map_or(false, |c| c.is_ascii_alphabetic()));
+        assert!(alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        assert!(alias
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_alphabetic()));
     }
 
     #[test]
@@ -187,16 +221,17 @@ mod tests {
 
     #[test]
     fn test_needs_aliasing_true_for_long_names() {
-        let names = vec![
-            "mcp_very_long_name_that_needs_aliasing_to_fit_in_the_64_char_limit".to_string(),
-        ];
+        let names =
+            vec!["mcp_very_long_name_that_needs_aliasing_to_fit_in_the_64_char_limit".to_string()];
         let registry = build_registry_from_names(&names);
         assert!(registry.needs_aliasing());
     }
 
     #[test]
     fn test_alias_registry_maps_tool_choice() {
-        let names = vec!["very_long_mcp_tool_name_that_exceeds_the_64_char_limit_for_provider_apis".to_string()];
+        let names = vec![
+            "very_long_mcp_tool_name_that_exceeds_the_64_char_limit_for_provider_apis".to_string(),
+        ];
         let registry = build_registry_from_names(&names);
         let alias = registry.get_alias(&names[0]);
         assert!(alias.is_some());

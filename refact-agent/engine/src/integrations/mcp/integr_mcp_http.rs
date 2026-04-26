@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use tokio::sync::RwLock as ARwLock;
 use tokio::sync::Mutex as AMutex;
 use tokio::time::Duration;
-use rmcp::transport::streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpClientTransport};
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+};
 use rmcp::transport::common::client_side_sse::ExponentialBackoff;
 use rmcp::serve_client;
 use serde::{Deserialize, Serialize};
@@ -14,8 +16,8 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationCommon;
 use super::session_mcp::{McpClientHandler, McpRunningService};
 use super::integr_mcp_common::{
-    CommonMCPSettings, MCPTransportInitializer,
-    build_reqwest_client_for_mcp, build_auth_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
+    CommonMCPSettings, MCPTransportInitializer, build_reqwest_client_for_mcp,
+    build_auth_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
 };
 use super::mcp_auth::{MCPAuthSettings, AuthType};
 
@@ -33,8 +35,14 @@ pub struct SettingsMCPHttp {
 
 pub fn default_http_headers() -> HashMap<String, String> {
     HashMap::from([
-        ("User-Agent".to_string(), "Refact.ai (+https://github.com/smallcloudai/refact)".to_string()),
-        ("Accept".to_string(), "application/json, text/event-stream".to_string()),
+        (
+            "User-Agent".to_string(),
+            "Refact.ai (+https://github.com/smallcloudai/refact)".to_string(),
+        ),
+        (
+            "Accept".to_string(),
+            "application/json, text/event-stream".to_string(),
+        ),
         ("Content-Type".to_string(), "application/json".to_string()),
     ])
 }
@@ -73,7 +81,8 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
                 logs.clone(),
                 &debug_name,
                 session,
-            ).await?;
+            )
+            .await?;
             let transport = StreamableHttpClientTransport::with_client(auth_client, config);
             serve_client_with_timeout(
                 serve_client(handler, transport),
@@ -81,7 +90,8 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
                 "Streamable HTTP",
                 logs,
                 &debug_name,
-            ).await
+            )
+            .await
         } else {
             let client = build_reqwest_client_for_mcp(
                 self.cfg.mcp_url.trim(),
@@ -90,7 +100,8 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
                 "Streamable HTTP",
                 logs.clone(),
                 &debug_name,
-            ).await?;
+            )
+            .await?;
             let transport = StreamableHttpClientTransport::with_client(client, config);
             serve_client_with_timeout(
                 serve_client(handler, transport),
@@ -98,7 +109,8 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
                 "Streamable HTTP",
                 logs,
                 &debug_name,
-            ).await
+            )
+            .await
         }
     }
 }

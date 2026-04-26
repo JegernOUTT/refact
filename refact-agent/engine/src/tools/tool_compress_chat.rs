@@ -16,8 +16,7 @@ use crate::chat::types::SessionState;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{
-    json_schema_from_params, Tool, ToolDesc, ToolSource,
-    ToolSourceType,
+    json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 
 const TOOL_OUTPUT_TRUNCATE_LIMIT: usize = 200;
@@ -125,7 +124,8 @@ impl Tool for ToolCompressChatProbe {
         };
 
         let sessions = gcx.read().await.chat_sessions.clone();
-        let session_arc = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+        let session_arc =
+            get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
         let messages = {
             let session = session_arc.lock().await;
             session.messages.clone()
@@ -146,7 +146,9 @@ impl Tool for ToolCompressChatProbe {
             let content_len = match &msg.content {
                 ChatContent::SimpleText(text) => text.len(),
                 ChatContent::Multimodal(elements) => elements.len() * 100,
-                ChatContent::ContextFiles(files) => files.iter().map(|cf| cf.file_content.len()).sum(),
+                ChatContent::ContextFiles(files) => {
+                    files.iter().map(|cf| cf.file_content.len()).sum()
+                }
             };
             let tokens = approx_tokens_for_len(content_len);
             total_tokens += tokens;
@@ -257,7 +259,9 @@ impl Tool for ToolCompressChatProbe {
             let tail = MAX_CONTEXT_ENTRIES - head;
             let mut trimmed = Vec::with_capacity(MAX_CONTEXT_ENTRIES);
             trimmed.extend_from_slice(&context_messages[..head]);
-            trimmed.extend_from_slice(&context_messages[context_messages.len().saturating_sub(tail)..]);
+            trimmed.extend_from_slice(
+                &context_messages[context_messages.len().saturating_sub(tail)..],
+            );
             context_messages = trimmed;
             context_messages_truncated = true;
         }
@@ -424,16 +428,28 @@ impl Tool for ToolCompressChatApply {
         };
 
         let sessions = gcx.read().await.chat_sessions.clone();
-        let session_arc = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+        let session_arc =
+            get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
 
-        let (before_tokens, before_count, active_start, mut head_messages, tail_messages, tool_call_names) = {
+        let (
+            before_tokens,
+            before_count,
+            active_start,
+            mut head_messages,
+            tail_messages,
+            tool_call_names,
+        ) = {
             let session = session_arc.lock().await;
 
             if matches!(session.runtime.state, SessionState::Generating) {
                 return Err("Cannot compress while generating".to_string());
             }
 
-            let before_tokens = session.messages.iter().map(approx_tokens_for_message).sum::<usize>();
+            let before_tokens = session
+                .messages
+                .iter()
+                .map(approx_tokens_for_message)
+                .sum::<usize>();
             let before_count = session.messages.len();
             let active_start = session
                 .messages
@@ -568,7 +584,9 @@ impl Tool for ToolCompressChatApply {
                 continue;
             }
             if drop_tool_outputs.contains(&msg.tool_call_id) {
-                msg.content = ChatContent::SimpleText("Tool result removed by compress_chat_apply".to_string());
+                msg.content = ChatContent::SimpleText(
+                    "Tool result removed by compress_chat_apply".to_string(),
+                );
                 tool_dropped += 1;
                 continue;
             }
@@ -580,11 +598,10 @@ impl Tool for ToolCompressChatApply {
                 }
                 let content = msg.content.content_text_only();
                 if content.len() > TOOL_OUTPUT_TRUNCATE_LIMIT {
-                    let preview: String = content.chars().take(TOOL_OUTPUT_TRUNCATE_LIMIT).collect();
-                    msg.content = ChatContent::SimpleText(format!(
-                        "Tool result compressed: {}...",
-                        preview
-                    ));
+                    let preview: String =
+                        content.chars().take(TOOL_OUTPUT_TRUNCATE_LIMIT).collect();
+                    msg.content =
+                        ChatContent::SimpleText(format!("Tool result compressed: {}...", preview));
                     tool_truncated += 1;
                 }
             }
@@ -597,7 +614,8 @@ impl Tool for ToolCompressChatApply {
             .enumerate()
             .find(|(_, msg)| {
                 msg.role == "assistant"
-                    && msg.tool_calls
+                    && msg
+                        .tool_calls
                         .as_ref()
                         .map(|tcs| tcs.iter().any(|tc| tc.id == active_call_id))
                         .unwrap_or(false)
@@ -609,7 +627,8 @@ impl Tool for ToolCompressChatApply {
         if let Some((active_idx, active_msg)) = active_msg {
             let still_present = head_messages.iter().any(|msg| {
                 msg.role == "assistant"
-                    && msg.tool_calls
+                    && msg
+                        .tool_calls
                         .as_ref()
                         .map(|tcs| tcs.iter().any(|tc| tc.id == active_call_id))
                         .unwrap_or(false)
@@ -619,7 +638,10 @@ impl Tool for ToolCompressChatApply {
             }
         }
 
-        let after_tokens = head_messages.iter().map(approx_tokens_for_message).sum::<usize>();
+        let after_tokens = head_messages
+            .iter()
+            .map(approx_tokens_for_message)
+            .sum::<usize>();
         let after_count = head_messages.len();
 
         if head_messages.first().map(|m| m.role.as_str()).unwrap_or("") != "system"
@@ -668,7 +690,6 @@ impl Tool for ToolCompressChatApply {
             })],
         ))
     }
-
 
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
         None

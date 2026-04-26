@@ -442,7 +442,10 @@ impl AtCommand for AtFile {
                     } else {
                         arg0.text.clone()
                     };
-                    return Ok((vec_context_file_to_context_tools(vec![context_file]), replacement_text));
+                    return Ok((
+                        vec_context_file_to_context_tools(vec![context_file]),
+                        replacement_text,
+                    ));
                 }
                 Err(e) => {
                     if is_preview {
@@ -464,7 +467,10 @@ impl AtCommand for AtFile {
                 cmd.reason = arg0.reason.clone();
                 return Ok((vec![], "".to_string()));
             }
-            return Err(format!("arg0 is incorrect: {:?}. Reason: {:?}", arg0.text, arg0.reason));
+            return Err(format!(
+                "arg0 is incorrect: {:?}. Reason: {:?}",
+                arg0.text, arg0.reason
+            ));
         }
 
         let candidates = {
@@ -486,17 +492,18 @@ impl AtCommand for AtFile {
             return Err(format!("cannot find {:?}", arg0.text));
         }
 
-        let context_file = match context_file_from_file_path(gcx.clone(), candidates[0].clone()).await {
-            Ok(cf) => cf,
-            Err(e) => {
-                if is_preview {
-                    cmd.ok = false;
-                    cmd.reason = Some(e);
-                    return Ok((vec![], "".to_string()));
+        let context_file =
+            match context_file_from_file_path(gcx.clone(), candidates[0].clone()).await {
+                Ok(cf) => cf,
+                Err(e) => {
+                    if is_preview {
+                        cmd.ok = false;
+                        cmd.reason = Some(e);
+                        return Ok((vec![], "".to_string()));
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
 
         let replacement_text = if cmd.pos1 == 0 {
             "".to_string()

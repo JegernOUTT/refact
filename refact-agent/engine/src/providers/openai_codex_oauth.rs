@@ -121,8 +121,7 @@ fn codex_home_dir() -> Option<std::path::PathBuf> {
 }
 
 pub fn read_codex_cli_credentials() -> Result<OAuthTokens, String> {
-    let codex_home = codex_home_dir()
-        .ok_or("Cannot determine Codex home directory")?;
+    let codex_home = codex_home_dir().ok_or("Cannot determine Codex home directory")?;
 
     let auth_path = codex_home.join("auth.json");
     if !auth_path.exists() {
@@ -224,7 +223,8 @@ fn build_authorize_url(code_challenge: &str, state: &str, redirect_uri: &str) ->
         ("state", state),
         ("originator", "codex_cli_rs"),
     ];
-    let qs = params.iter()
+    let qs = params
+        .iter()
         .map(|(k, v)| format!("{}={}", k, percent_encode_param(v)))
         .collect::<Vec<_>>()
         .join("&");
@@ -247,7 +247,11 @@ pub async fn start_oauth_session(fallback_port: u16) -> (String, String, u16) {
     let callback_port = if port_available(CODEX_CALLBACK_PORT) {
         CODEX_CALLBACK_PORT
     } else {
-        tracing::warn!("OpenAI Codex OAuth: port {} unavailable, falling back to {}", CODEX_CALLBACK_PORT, fallback_port);
+        tracing::warn!(
+            "OpenAI Codex OAuth: port {} unavailable, falling back to {}",
+            CODEX_CALLBACK_PORT,
+            fallback_port
+        );
         fallback_port
     };
 
@@ -278,7 +282,8 @@ pub async fn exchange_code(
 ) -> Result<OAuthTokens, String> {
     let session = {
         let mut sessions = PENDING_SESSIONS.lock().await;
-        sessions.remove(session_id)
+        sessions
+            .remove(session_id)
             .ok_or_else(|| "Invalid or expired OAuth session".to_string())?
     };
 
@@ -322,12 +327,18 @@ pub async fn exchange_code(
         match obtain_openai_api_key(http_client, &token_resp.id_token).await {
             Ok(k) => (k, String::new()),
             Err(e) => {
-                tracing::warn!("OpenAI Codex OAuth: failed to obtain OPENAI_API_KEY via token-exchange: {e}");
+                tracing::warn!(
+                    "OpenAI Codex OAuth: failed to obtain OPENAI_API_KEY via token-exchange: {e}"
+                );
                 (String::new(), e)
             }
         }
     } else {
-        (String::new(), "Token exchange response did not include id_token; cannot obtain OPENAI_API_KEY".to_string())
+        (
+            String::new(),
+            "Token exchange response did not include id_token; cannot obtain OPENAI_API_KEY"
+                .to_string(),
+        )
     };
 
     Ok(OAuthTokens {
@@ -403,7 +414,10 @@ async fn obtain_openai_api_key(
     }
 
     let params = [
-        ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+        (
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ),
         ("client_id", CLIENT_ID),
         ("requested_token", "openai-api-key"),
         ("subject_token", id_token),
@@ -449,7 +463,10 @@ pub async fn start_callback_listener(
         .await
         .map_err(|e| format!("Cannot bind callback listener on port {}: {}", port, e))?;
 
-    tracing::info!("OpenAI Codex OAuth: callback listener started on port {}", port);
+    tracing::info!(
+        "OpenAI Codex OAuth: callback listener started on port {}",
+        port
+    );
 
     let handle = tokio::spawn(async move {
         let timeout = tokio::time::Duration::from_secs(SESSION_TTL_SECS as u64);
@@ -495,16 +512,29 @@ pub async fn start_callback_listener(
         let params: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
 
         if let Some(err) = params.get("error") {
-            let desc = params.get("error_description").map(|s| s.as_str()).unwrap_or("Unknown error");
+            let desc = params
+                .get("error_description")
+                .map(|s| s.as_str())
+                .unwrap_or("Unknown error");
             tracing::warn!("OpenAI Codex OAuth error: {} — {}", err, desc);
-            send_http_response(&mut stream, 200, &callback_html(false, &format!("{}: {}", err, desc))).await;
+            send_http_response(
+                &mut stream,
+                200,
+                &callback_html(false, &format!("{}: {}", err, desc)),
+            )
+            .await;
             return None;
         }
 
         let code = match params.get("code") {
             Some(c) if !c.is_empty() => c.clone(),
             _ => {
-                send_http_response(&mut stream, 200, &callback_html(false, "No authorization code received")).await;
+                send_http_response(
+                    &mut stream,
+                    200,
+                    &callback_html(false, "No authorization code received"),
+                )
+                .await;
                 return None;
             }
         };
@@ -512,19 +542,37 @@ pub async fn start_callback_listener(
         let session_id = match params.get("state") {
             Some(s) if !s.is_empty() => s.clone(),
             _ => {
-                send_http_response(&mut stream, 200, &callback_html(false, "Missing state parameter")).await;
+                send_http_response(
+                    &mut stream,
+                    200,
+                    &callback_html(false, "Missing state parameter"),
+                )
+                .await;
                 return None;
             }
         };
 
         match exchange_code(&http_client, &session_id, &code).await {
             Ok(tokens) => {
-                send_http_response(&mut stream, 200, &callback_html(true, "Authentication successful. You can close this window.")).await;
+                send_http_response(
+                    &mut stream,
+                    200,
+                    &callback_html(
+                        true,
+                        "Authentication successful. You can close this window.",
+                    ),
+                )
+                .await;
                 Some(tokens)
             }
             Err(e) => {
                 tracing::warn!("OpenAI Codex OAuth: token exchange failed: {}", e);
-                send_http_response(&mut stream, 200, &callback_html(false, &format!("Token exchange failed: {}", e))).await;
+                send_http_response(
+                    &mut stream,
+                    200,
+                    &callback_html(false, &format!("Token exchange failed: {}", e)),
+                )
+                .await;
                 None
             }
         }
@@ -549,9 +597,17 @@ async fn send_http_response(stream: &mut tokio::net::TcpStream, status: u16, bod
 
 fn callback_html(success: bool, message: &str) -> String {
     let (title, heading, color) = if success {
-        ("Authentication Successful", "&#x2713; Authentication Successful", "#4ade80")
+        (
+            "Authentication Successful",
+            "&#x2713; Authentication Successful",
+            "#4ade80",
+        )
     } else {
-        ("Authentication Failed", "&#x2717; Authentication Failed", "#ef4444")
+        (
+            "Authentication Failed",
+            "&#x2717; Authentication Failed",
+            "#ef4444",
+        )
     };
     // HTML-escape the message to prevent XSS
     let escaped_message = message

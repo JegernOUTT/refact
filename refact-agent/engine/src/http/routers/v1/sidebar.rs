@@ -59,7 +59,9 @@ pub struct SidebarEventEnvelope {
     pub event: SidebarEvent,
 }
 
-async fn fetch_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> Result<(Vec<TrajectoryMeta>, Vec<TaskMeta>), String> {
+async fn fetch_snapshot(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> Result<(Vec<TrajectoryMeta>, Vec<TaskMeta>), String> {
     let trajectories = list_all_trajectories_meta(gcx.clone()).await?;
     let tasks = list_tasks_with_session_state(gcx.clone())
         .await
@@ -83,10 +85,7 @@ pub async fn handle_sidebar_subscribe(
             .as_ref()
             .map(|tx| tx.subscribe());
 
-        let task_rx = gcx_locked
-            .task_events_tx
-            .as_ref()
-            .map(|tx| tx.subscribe());
+        let task_rx = gcx_locked.task_events_tx.as_ref().map(|tx| tx.subscribe());
 
         let notification_rx = gcx_locked
             .notification_events_tx
@@ -101,7 +100,13 @@ pub async fn handle_sidebar_subscribe(
         }
 
         let seq_counter = Arc::new(AtomicU64::new(0));
-        (trajectory_rx, workspace_changed_rx, task_rx, notification_rx, seq_counter)
+        (
+            trajectory_rx,
+            workspace_changed_rx,
+            task_rx,
+            notification_rx,
+            seq_counter,
+        )
     };
 
     let (trajectories, tasks) = fetch_snapshot(gcx.clone())

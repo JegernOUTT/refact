@@ -247,8 +247,11 @@ pub fn stage_changes(
                 if let Some(ref wd) = workdir {
                     if let Ok(meta) = std::fs::metadata(wd.join(&file_change.relative_path)) {
                         if meta.len() > MAX_STAGE_FILE_SIZE_BYTES {
-                            tracing::warn!("shadow git: skipping large file {} ({:.1} MB)",
-                                file_change.relative_path.display(), meta.len() as f64 / 1_048_576.0);
+                            tracing::warn!(
+                                "shadow git: skipping large file {} ({:.1} MB)",
+                                file_change.relative_path.display(),
+                                meta.len() as f64 / 1_048_576.0
+                            );
                             skipped += 1;
                             continue;
                         }
@@ -474,7 +477,12 @@ pub fn create_worktree(
                 .into_reference();
             (r, true)
         }
-        Err(e) => return Err(format!("Failed to look up branch ref '{}': {}", ref_name, e)),
+        Err(e) => {
+            return Err(format!(
+                "Failed to look up branch ref '{}': {}",
+                ref_name, e
+            ))
+        }
     };
 
     let mut worktree_opts = git2::WorktreeAddOptions::new();
@@ -498,7 +506,11 @@ pub fn remove_worktree(repo: &Repository, worktree_name: &str, worktree_path: &P
             }
         }
         Err(e) => {
-            tracing::warn!("Could not find worktree '{}' to remove: {}", worktree_name, e);
+            tracing::warn!(
+                "Could not find worktree '{}' to remove: {}",
+                worktree_name,
+                e
+            );
         }
     }
     if worktree_path.exists() {

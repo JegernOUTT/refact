@@ -223,7 +223,10 @@ pub async fn forward_to_openai_style_endpoint_streaming(
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("HTTP {} from {}: {}", status, model_rec.endpoint, text));
+        return Err(format!(
+            "HTTP {} from {}: {}",
+            status, model_rec.endpoint, text
+        ));
     }
     Ok(response)
 }

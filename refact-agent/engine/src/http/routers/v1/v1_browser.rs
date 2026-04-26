@@ -11,7 +11,8 @@ use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::integrations::browser_runtime::{
     BrowserRuntime, compute_frame_hash, ensure_injection_into_tab, get_browser_profile_dir,
-    register_browser_runtime, remove_browser_runtime, find_runtime_by_chat_id, setup_recording_for_runtime,
+    register_browser_runtime, remove_browser_runtime, find_runtime_by_chat_id,
+    setup_recording_for_runtime,
 };
 use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry, NetworkEntry};
 use crate::integrations::browser_models::BrowserActionRequest;
@@ -104,7 +105,10 @@ pub async fn handle_browser_start(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
     if let Some((rid, runtime_arc)) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await {
@@ -132,8 +136,12 @@ pub async fn handle_browser_start(
                 Some(idle_timeout),
                 mask_passwords,
                 false,
-            ).map_err(|e| {
-                ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to relaunch browser in visible mode: {}", e))
+            )
+            .map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to relaunch browser in visible mode: {}", e),
+                )
             })?;
 
             let mut rt = runtime;
@@ -154,17 +162,23 @@ pub async fn handle_browser_start(
                 runtime_id.clone(),
             ));
 
-            return Ok(json_response(StatusCode::OK, serde_json::json!({
-                "runtime_id": runtime_id,
-                "status": "started"
-            })));
+            return Ok(json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "runtime_id": runtime_id,
+                    "status": "started"
+                }),
+            ));
         }
 
         let should_spawn_emitter = {
             let mut rt = runtime_arc.lock().await;
             if rt.recording_tab_target_id.is_none() {
                 if let Err(e) = setup_recording_for_runtime(&mut rt) {
-                    tracing::warn!("Browser recording setup on attach failed (non-fatal): {}", e);
+                    tracing::warn!(
+                        "Browser recording setup on attach failed (non-fatal): {}",
+                        e
+                    );
                 }
             }
             if !rt.frame_emitter_active {
@@ -181,25 +195,25 @@ pub async fn handle_browser_start(
                 rid.clone(),
             ));
         }
-        return Ok(json_response(StatusCode::OK, serde_json::json!({
-            "runtime_id": rid,
-            "status": "already_running"
-        })));
+        return Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "runtime_id": rid,
+                "status": "already_running"
+            }),
+        ));
     }
 
     let cache_dir = gcx.read().await.cache_dir.clone();
     let profile_dir = get_browser_profile_dir(&cache_dir, &post.chat_id);
 
-    let runtime = BrowserRuntime::launch(
-        profile_dir,
-        None,
-        None,
-        None,
-        true,
-        false,
-    ).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to launch browser: {}", e))
-    })?;
+    let runtime =
+        BrowserRuntime::launch(profile_dir, None, None, None, true, false).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to launch browser: {}", e),
+            )
+        })?;
 
     let mut rt = runtime;
     rt.reattach(&post.chat_id);
@@ -219,10 +233,13 @@ pub async fn handle_browser_start(
         runtime_id.clone(),
     ));
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "runtime_id": runtime_id,
-        "status": "started"
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "runtime_id": runtime_id,
+            "status": "started"
+        }),
+    ))
 }
 
 pub async fn handle_browser_stop(
@@ -230,20 +247,31 @@ pub async fn handle_browser_stop(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (rid, _) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (rid, _) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     remove_browser_runtime(gcx.clone(), &rid).await;
 
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "status": "stopped"
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "status": "stopped"
+        }),
+    ))
 }
 
 pub async fn handle_browser_screenshot(
@@ -251,17 +279,28 @@ pub async fn handle_browser_screenshot(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ScreenshotBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
     let url = tab.get_url();
@@ -281,34 +320,43 @@ pub async fn handle_browser_screenshot(
         )
     };
 
-    let screenshot_result = tab.call_method(
-        headless_chrome::protocol::cdp::Page::CaptureScreenshot {
+    let screenshot_result = tab
+        .call_method(headless_chrome::protocol::cdp::Page::CaptureScreenshot {
             format: Some(format_option),
             clip: None,
             quality,
             from_surface: Some(true),
             capture_beyond_viewport: Some(post.full_page),
             optimize_for_speed: None,
-        },
-    ).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Screenshot failed: {}", e))
-    })?;
+        })
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Screenshot failed: {}", e),
+            )
+        })?;
 
     let raw_data = base64::prelude::BASE64_STANDARD
         .decode(&screenshot_result.data)
         .map_err(|e| {
-            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Base64 decode failed: {}", e))
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Base64 decode failed: {}", e),
+            )
         })?;
 
     let resized_data = resize_screenshot(&raw_data, 800, mime)?;
     let b64 = base64::prelude::BASE64_STANDARD.encode(&resized_data);
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "mime": mime,
-        "data": b64,
-        "url": url,
-        "title": title
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "mime": mime,
+            "data": b64,
+            "url": url,
+            "title": title
+        }),
+    ))
 }
 
 fn resize_screenshot(data: &[u8], max_dim: u32, mime: &str) -> Result<Vec<u8>, ScratchError> {
@@ -319,7 +367,10 @@ fn resize_screenshot(data: &[u8], max_dim: u32, mime: &str) -> Result<Vec<u8>, S
     };
     let reader = image::ImageReader::with_format(std::io::Cursor::new(data), format);
     let mut img = reader.decode().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Image decode failed: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Image decode failed: {}", e),
+        )
     })?;
 
     let scale = max_dim as f32 / std::cmp::max(img.width(), img.height()) as f32;
@@ -330,9 +381,13 @@ fn resize_screenshot(data: &[u8], max_dim: u32, mime: &str) -> Result<Vec<u8>, S
     }
 
     let mut out = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut out), format).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Image encode failed: {}", e))
-    })?;
+    img.write_to(&mut std::io::Cursor::new(&mut out), format)
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Image encode failed: {}", e),
+            )
+        })?;
     Ok(out)
 }
 
@@ -341,12 +396,20 @@ pub async fn handle_browser_context(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ContextBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
@@ -355,20 +418,26 @@ pub async fn handle_browser_context(
         None => (String::new(), String::new()),
     };
 
-    let (actions_snapshot, console_snapshot, network_snapshot, mutations_snapshot) = if post.skip_cursor {
-        (&rt.action_buffer[..], &rt.console_buffer[..], &rt.network_buffer[..], &rt.mutation_summary[..])
-    } else {
-        let a0 = rt.last_send_action_cursor.min(rt.action_buffer.len());
-        let c0 = rt.last_send_console_cursor.min(rt.console_buffer.len());
-        let n0 = rt.last_send_network_cursor.min(rt.network_buffer.len());
-        let m0 = rt.last_send_mutation_cursor.min(rt.mutation_summary.len());
-        (
-            &rt.action_buffer[a0..],
-            &rt.console_buffer[c0..],
-            &rt.network_buffer[n0..],
-            &rt.mutation_summary[m0..],
-        )
-    };
+    let (actions_snapshot, console_snapshot, network_snapshot, mutations_snapshot) =
+        if post.skip_cursor {
+            (
+                &rt.action_buffer[..],
+                &rt.console_buffer[..],
+                &rt.network_buffer[..],
+                &rt.mutation_summary[..],
+            )
+        } else {
+            let a0 = rt.last_send_action_cursor.min(rt.action_buffer.len());
+            let c0 = rt.last_send_console_cursor.min(rt.console_buffer.len());
+            let n0 = rt.last_send_network_cursor.min(rt.network_buffer.len());
+            let m0 = rt.last_send_mutation_cursor.min(rt.mutation_summary.len());
+            (
+                &rt.action_buffer[a0..],
+                &rt.console_buffer[c0..],
+                &rt.network_buffer[n0..],
+                &rt.mutation_summary[m0..],
+            )
+        };
 
     let mut actions_json = serde_json::to_value(actions_snapshot).unwrap_or(serde_json::json!([]));
     let mut console_json = serde_json::to_value(console_snapshot).unwrap_or(serde_json::json!([]));
@@ -384,23 +453,43 @@ pub async fn handle_browser_context(
     }
 
     // Apply a default cap when skip_cursor is used to avoid unbounded payloads
-    let effective_max_bytes = post.max_bytes.or_else(|| if post.skip_cursor { Some(512 * 1024) } else { None });
+    let effective_max_bytes = post.max_bytes.or_else(|| {
+        if post.skip_cursor {
+            Some(512 * 1024)
+        } else {
+            None
+        }
+    });
 
     if let Some(max_bytes) = effective_max_bytes {
-        let bytes_before_trim = serde_json::to_string(&actions_json).unwrap_or_default().len()
-            + serde_json::to_string(&console_json).unwrap_or_default().len()
-            + serde_json::to_string(&network_json).unwrap_or_default().len()
-            + serde_json::to_string(&mutations_json).unwrap_or_default().len();
+        let bytes_before_trim = serde_json::to_string(&actions_json)
+            .unwrap_or_default()
+            .len()
+            + serde_json::to_string(&console_json)
+                .unwrap_or_default()
+                .len()
+            + serde_json::to_string(&network_json)
+                .unwrap_or_default()
+                .len()
+            + serde_json::to_string(&mutations_json)
+                .unwrap_or_default()
+                .len();
         if bytes_before_trim > max_bytes {
             let trim_arrays = |arr: &mut serde_json::Value| {
                 if let Some(a) = arr.as_array_mut() {
                     let budget = max_bytes / 4;
                     let n = a.len();
-                    if n == 0 { return; }
+                    if n == 0 {
+                        return;
+                    }
                     // Estimate bytes per item and keep as many tail items as fit
                     let total_len = serde_json::to_string(a).unwrap_or_default().len();
                     let bytes_per_item = total_len / n;
-                    let keep = if bytes_per_item > 0 { (budget / bytes_per_item).max(1) } else { n };
+                    let keep = if bytes_per_item > 0 {
+                        (budget / bytes_per_item).max(1)
+                    } else {
+                        n
+                    };
                     if keep < n {
                         a.drain(0..n - keep);
                     }
@@ -412,20 +501,31 @@ pub async fn handle_browser_context(
         }
     }
 
-    let total_bytes = serde_json::to_string(&actions_json).unwrap_or_default().len()
-        + serde_json::to_string(&console_json).unwrap_or_default().len()
-        + serde_json::to_string(&network_json).unwrap_or_default().len()
-        + serde_json::to_string(&mutations_json).unwrap_or_default().len();
+    let total_bytes = serde_json::to_string(&actions_json)
+        .unwrap_or_default()
+        .len()
+        + serde_json::to_string(&console_json)
+            .unwrap_or_default()
+            .len()
+        + serde_json::to_string(&network_json)
+            .unwrap_or_default()
+            .len()
+        + serde_json::to_string(&mutations_json)
+            .unwrap_or_default()
+            .len();
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "url": url,
-        "title": title,
-        "actions": actions_json,
-        "console": console_json,
-        "network": network_json,
-        "mutations": mutations_json,
-        "total_bytes": total_bytes
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "url": url,
+            "title": title,
+            "actions": actions_json,
+            "console": console_json,
+            "network": network_json,
+            "mutations": mutations_json,
+            "total_bytes": total_bytes
+        }),
+    ))
 }
 
 pub async fn handle_browser_context_commit(
@@ -433,19 +533,30 @@ pub async fn handle_browser_context_commit(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let mut rt = runtime_arc.lock().await;
     rt.commit_cursors();
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "status": "committed"
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "status": "committed"
+        }),
+    ))
 }
 
 pub async fn handle_browser_element_pick(
@@ -453,17 +564,28 @@ pub async fn handle_browser_element_pick(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
     let picker_js = r#"
@@ -505,12 +627,18 @@ pub async fn handle_browser_element_pick(
     "#;
 
     tab.evaluate(picker_js, false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to inject picker: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to inject picker: {}", e),
+        )
     })?;
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "status": "picker_active"
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "status": "picker_active"
+        }),
+    ))
 }
 
 pub async fn handle_browser_element_pick_result(
@@ -518,36 +646,59 @@ pub async fn handle_browser_element_pick_result(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
-    let result = tab.evaluate("JSON.stringify(window.__refact_picked_element)", false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read picker result: {}", e))
-    })?;
+    let result = tab
+        .evaluate("JSON.stringify(window.__refact_picked_element)", false)
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read picker result: {}", e),
+            )
+        })?;
 
     match result.value {
         Some(val) => {
             if val.is_null() {
-                Ok(json_response(StatusCode::OK, serde_json::json!({ "status": "waiting" })))
+                Ok(json_response(
+                    StatusCode::OK,
+                    serde_json::json!({ "status": "waiting" }),
+                ))
             } else {
                 let parsed: serde_json::Value = match val.as_str() {
-                    Some(s) => serde_json::from_str(s).unwrap_or(serde_json::json!({ "status": "waiting" })),
+                    Some(s) => serde_json::from_str(s)
+                        .unwrap_or(serde_json::json!({ "status": "waiting" })),
                     None => val,
                 };
                 Ok(json_response(StatusCode::OK, parsed))
             }
         }
-        None => Ok(json_response(StatusCode::OK, serde_json::json!({ "status": "waiting" }))),
+        None => Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({ "status": "waiting" }),
+        )),
     }
 }
 
@@ -556,17 +707,28 @@ pub async fn handle_browser_annotate_start(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
     let annotate_js = r#"
@@ -780,7 +942,10 @@ pub async fn handle_browser_annotate_start(
     "#;
 
     let result = tab.evaluate(annotate_js, false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to inject annotation overlay: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to inject annotation overlay: {}", e),
+        )
     })?;
 
     let status = match result.value.and_then(|v| v.as_str().map(|s| s.to_string())) {
@@ -788,9 +953,12 @@ pub async fn handle_browser_annotate_start(
         None => "started".to_string(),
     };
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "status": status
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "status": status
+        }),
+    ))
 }
 
 pub async fn handle_browser_annotate_result(
@@ -798,17 +966,28 @@ pub async fn handle_browser_annotate_result(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
     let result = tab.evaluate("JSON.stringify({ annotations: window.__refact_annotations || [], active: !!window.__refact_annotate_active })", false).map_err(|e| {
@@ -818,12 +997,16 @@ pub async fn handle_browser_annotate_result(
     match result.value {
         Some(val) => {
             let parsed: serde_json::Value = match val.as_str() {
-                Some(s) => serde_json::from_str(s).unwrap_or(serde_json::json!({ "annotations": [], "active": false })),
+                Some(s) => serde_json::from_str(s)
+                    .unwrap_or(serde_json::json!({ "annotations": [], "active": false })),
                 None => val,
             };
             Ok(json_response(StatusCode::OK, parsed))
         }
-        None => Ok(json_response(StatusCode::OK, serde_json::json!({ "annotations": [], "active": false }))),
+        None => Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({ "annotations": [], "active": false }),
+        )),
     }
 }
 
@@ -832,17 +1015,28 @@ pub async fn handle_browser_annotate_clear(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
     let clear_js = r#"
@@ -868,12 +1062,18 @@ pub async fn handle_browser_annotate_clear(
     "#;
 
     tab.evaluate(clear_js, false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to clear annotations: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to clear annotations: {}", e),
+        )
     })?;
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "status": "cleared"
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "status": "cleared"
+        }),
+    ))
 }
 
 pub async fn handle_browser_curl(
@@ -881,28 +1081,44 @@ pub async fn handle_browser_curl(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: CurlBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
-    let idx = post.request_index.unwrap_or_else(|| rt.network_buffer.len().saturating_sub(1));
+    let idx = post
+        .request_index
+        .unwrap_or_else(|| rt.network_buffer.len().saturating_sub(1));
     let entry = rt.network_buffer.get(idx).ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, "No network request at specified index".to_string())
+        ScratchError::new(
+            StatusCode::NOT_FOUND,
+            "No network request at specified index".to_string(),
+        )
     })?;
 
     let curl = format_curl_minimal(entry);
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "curl": curl,
-        "url": entry.url,
-        "method": entry.method,
-        "status": entry.status.unwrap_or(0)
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "curl": curl,
+            "url": entry.url,
+            "method": entry.method,
+            "status": entry.status.unwrap_or(0)
+        }),
+    ))
 }
 
 fn format_curl_minimal(entry: &crate::integrations::browser_types::NetworkEntry) -> String {
@@ -919,17 +1135,28 @@ pub async fn handle_browser_eval(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: EvalBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let tab = {
         let rt = runtime_arc.lock().await;
         rt.get_active_tab().ok_or_else(|| {
-            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "No active tab".to_string(),
+            )
         })?
     };
 
@@ -954,26 +1181,35 @@ pub async fn handle_browser_eval(
             .and_then(|sr| sr.error.as_ref())
             .cloned()
             .unwrap_or_else(|| "Eval failed".to_string());
-        return Ok(json_response(StatusCode::OK, serde_json::json!({
-            "ok": false,
-            "error": error_msg,
-            "result": serde_json::Value::Null,
-        })));
+        return Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "ok": false,
+                "error": error_msg,
+                "result": serde_json::Value::Null,
+            }),
+        ));
     }
 
     let result_str = first_step
         .and_then(|sr| sr.data.as_ref())
         .and_then(|d| d.get("value"))
         .map(|v| {
-            if let Some(s) = v.as_str() { s.to_string() }
-            else { serde_json::to_string(v).unwrap_or_default() }
+            if let Some(s) = v.as_str() {
+                s.to_string()
+            } else {
+                serde_json::to_string(v).unwrap_or_default()
+            }
         })
         .unwrap_or_else(|| "undefined".to_string());
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "ok": true,
-        "result": result_str
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "result": result_str
+        }),
+    ))
 }
 
 pub async fn handle_browser_inject_css(
@@ -981,20 +1217,33 @@ pub async fn handle_browser_inject_css(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: InjectCssBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
-    let style_id = post.id.unwrap_or_else(|| format!("refact-css-{}", uuid::Uuid::new_v4()));
+    let style_id = post
+        .id
+        .unwrap_or_else(|| format!("refact-css-{}", uuid::Uuid::new_v4()));
     let id_json = serde_json::to_string(&style_id).unwrap_or_else(|_| "\"\"".to_string());
     let css_json = serde_json::to_string(&post.css).unwrap_or_else(|_| "\"\"".to_string());
     let js = format!(
@@ -1012,12 +1261,18 @@ pub async fn handle_browser_inject_css(
     );
 
     tab.evaluate(&js, false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("CSS injection failed: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("CSS injection failed: {}", e),
+        )
     })?;
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "style_id": style_id
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "style_id": style_id
+        }),
+    ))
 }
 
 pub async fn handle_browser_remove_css(
@@ -1025,17 +1280,28 @@ pub async fn handle_browser_remove_css(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: RemoveCssBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
     let id_json = serde_json::to_string(&post.style_id).unwrap_or_else(|_| "\"\"".to_string());
@@ -1045,12 +1311,18 @@ pub async fn handle_browser_remove_css(
     );
 
     tab.evaluate(&js, false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("CSS removal failed: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("CSS removal failed: {}", e),
+        )
     })?;
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "status": "removed"
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "status": "removed"
+        }),
+    ))
 }
 
 pub async fn handle_browser_dom_snapshot(
@@ -1058,24 +1330,37 @@ pub async fn handle_browser_dom_snapshot(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: DomSnapshotBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let tab = {
         let rt = runtime_arc.lock().await;
         rt.get_active_tab().ok_or_else(|| {
-            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "No active tab".to_string(),
+            )
         })?
     };
 
-    let steps = vec![crate::integrations::browser_models::BrowserStep::DomSnapshot {
-        selector: post.selector.clone(),
-        max_chars: post.max_chars,
-    }];
+    let steps = vec![
+        crate::integrations::browser_models::BrowserStep::DomSnapshot {
+            selector: post.selector.clone(),
+            max_chars: post.max_chars,
+        },
+    ];
     let report = tokio::task::block_in_place(|| browser_controller::execute_steps(&*tab, &steps));
 
     // Push agent timeline entry
@@ -1094,12 +1379,15 @@ pub async fn handle_browser_dom_snapshot(
             .and_then(|sr| sr.error.as_ref())
             .cloned()
             .unwrap_or_else(|| "DOM snapshot failed".to_string());
-        return Ok(json_response(StatusCode::OK, serde_json::json!({
-            "ok": false,
-            "error": error_msg,
-            "html": "",
-            "truncated": false,
-        })));
+        return Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "ok": false,
+                "error": error_msg,
+                "html": "",
+                "truncated": false,
+            }),
+        ));
     }
 
     let html = first_step
@@ -1112,13 +1400,20 @@ pub async fn handle_browser_dom_snapshot(
     let max_chars = post.max_chars.unwrap_or(50000);
     let char_count = html.chars().count();
     let truncated = char_count > max_chars;
-    let html_out: String = if truncated { html.chars().take(max_chars).collect() } else { html };
+    let html_out: String = if truncated {
+        html.chars().take(max_chars).collect()
+    } else {
+        html
+    };
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "ok": true,
-        "html": html_out,
-        "truncated": truncated
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "html": html_out,
+            "truncated": truncated
+        }),
+    ))
 }
 
 pub async fn handle_browser_accessibility(
@@ -1126,17 +1421,28 @@ pub async fn handle_browser_accessibility(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
     let js = r#"
@@ -1158,7 +1464,10 @@ pub async fn handle_browser_accessibility(
     "#;
 
     let result = tab.evaluate(js, false).map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Accessibility query failed: {}", e))
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Accessibility query failed: {}", e),
+        )
     })?;
 
     let tree: Vec<AccessibilityNode> = match result.value {
@@ -1172,9 +1481,12 @@ pub async fn handle_browser_accessibility(
         None => vec![],
     };
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "tree": tree
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "tree": tree
+        }),
+    ))
 }
 
 pub async fn handle_browser_record_animation(
@@ -1182,17 +1494,28 @@ pub async fn handle_browser_record_animation(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: RecordAnimationBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
 
     let rt = runtime_arc.lock().await;
 
     let tab = rt.get_active_tab().ok_or_else(|| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "No active tab".to_string())
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No active tab".to_string(),
+        )
     })?;
 
     let duration_ms = post.duration_ms.unwrap_or(2000).clamp(100, 10000);
@@ -1204,23 +1527,31 @@ pub async fn handle_browser_record_animation(
 
     let mut frames = Vec::new();
     for i in 0..num_frames {
-        let screenshot_result = tab.call_method(
-            headless_chrome::protocol::cdp::Page::CaptureScreenshot {
-                format: Some(headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Jpeg),
+        let screenshot_result = tab
+            .call_method(headless_chrome::protocol::cdp::Page::CaptureScreenshot {
+                format: Some(
+                    headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Jpeg,
+                ),
                 clip: None,
                 quality: Some(60),
                 from_surface: Some(true),
                 capture_beyond_viewport: Some(false),
                 optimize_for_speed: Some(true),
-            },
-        ).map_err(|e| {
-            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Frame capture failed: {}", e))
-        })?;
+            })
+            .map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Frame capture failed: {}", e),
+                )
+            })?;
 
         let raw = base64::prelude::BASE64_STANDARD
             .decode(&screenshot_result.data)
             .map_err(|e| {
-                ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Base64 decode failed: {}", e))
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Base64 decode failed: {}", e),
+                )
             })?;
 
         let resized = resize_screenshot(&raw, 800, "image/jpeg")?;
@@ -1238,9 +1569,12 @@ pub async fn handle_browser_record_animation(
         }
     }
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "frames": frames
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "frames": frames
+        }),
+    ))
 }
 
 pub async fn handle_browser_handoff(
@@ -1248,17 +1582,28 @@ pub async fn handle_browser_handoff(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: HandoffBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (rid, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.from_chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.from_chat_id))
-    })?;
+    let (rid, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.from_chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.from_chat_id),
+            )
+        })?;
 
     let (profile_dir, tab_urls, window_bounds, mask_passwords, attach_screenshot) = {
         let mut rt = runtime_arc.lock().await;
         let profile_dir = rt.profile_dir.to_string_lossy().to_string();
-        let tab_urls: Vec<String> = rt.browser.get_tabs().lock()
+        let tab_urls: Vec<String> = rt
+            .browser
+            .get_tabs()
+            .lock()
             .map(|tabs| tabs.iter().map(|t| t.get_url()).collect())
             .unwrap_or_default();
         let window_bounds = rt.window_bounds.clone();
@@ -1269,20 +1614,29 @@ pub async fn handle_browser_handoff(
         rt.reattach(&post.to_chat_id);
         rt.touch();
 
-        (profile_dir, tab_urls, window_bounds, mask_passwords, attach_screenshot)
+        (
+            profile_dir,
+            tab_urls,
+            window_bounds,
+            mask_passwords,
+            attach_screenshot,
+        )
     };
 
-    Ok(json_response(StatusCode::OK, serde_json::json!({
-        "runtime_id": rid,
-        "status": "transferred",
-        "from_chat_id": post.from_chat_id,
-        "to_chat_id": post.to_chat_id,
-        "profile_dir": profile_dir,
-        "tab_urls": tab_urls,
-        "window_bounds": window_bounds,
-        "mask_passwords": mask_passwords,
-        "attach_screenshot_on_send": attach_screenshot
-    })))
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "runtime_id": rid,
+            "status": "transferred",
+            "from_chat_id": post.from_chat_id,
+            "to_chat_id": post.to_chat_id,
+            "profile_dir": profile_dir,
+            "tab_urls": tab_urls,
+            "window_bounds": window_bounds,
+            "mask_passwords": mask_passwords,
+            "attach_screenshot_on_send": attach_screenshot
+        }),
+    ))
 }
 
 pub async fn handle_browser_status(
@@ -1290,7 +1644,10 @@ pub async fn handle_browser_status(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
     match find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await {
@@ -1303,28 +1660,32 @@ pub async fn handle_browser_status(
                 None => (String::new(), String::new()),
             };
 
-            Ok(json_response(StatusCode::OK, serde_json::json!({
-                "runtime_id": rid,
-                "connected": rt.is_connected,
-                "active_tab": rt.active_tab_target_id().map(|s| s.to_string()),
-                "url": url,
-                "title": title,
-                "tab_urls": tab_urls,
-                "tabs": tab_infos.iter().map(|t| serde_json::json!({
-                    "tab_id": t.tab_id,
-                    "url": t.url,
-                    "title": t.title,
-                })).collect::<Vec<_>>(),
-                "idle_seconds": rt.last_activity.elapsed().as_secs(),
-                "idle_timeout": rt.idle_timeout.as_secs()
-            })))
+            Ok(json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "runtime_id": rid,
+                    "connected": rt.is_connected,
+                    "active_tab": rt.active_tab_target_id().map(|s| s.to_string()),
+                    "url": url,
+                    "title": title,
+                    "tab_urls": tab_urls,
+                    "tabs": tab_infos.iter().map(|t| serde_json::json!({
+                        "tab_id": t.tab_id,
+                        "url": t.url,
+                        "title": t.title,
+                    })).collect::<Vec<_>>(),
+                    "idle_seconds": rt.last_activity.elapsed().as_secs(),
+                    "idle_timeout": rt.idle_timeout.as_secs()
+                }),
+            ))
         }
-        None => {
-            Ok(json_response(StatusCode::OK, serde_json::json!({
+        None => Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({
                 "runtime_id": null,
                 "connected": false
-            })))
-        }
+            }),
+        )),
     }
 }
 
@@ -1340,12 +1701,20 @@ pub async fn handle_browser_action(
     }
 
     let post: ActionBody = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON problem: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
     })?;
 
-    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id).await.ok_or_else(|| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("No browser runtime for chat_id={}", post.chat_id))
-    })?;
+    let (_, runtime_arc) = find_runtime_by_chat_id(gcx.clone(), &post.chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("No browser runtime for chat_id={}", post.chat_id),
+            )
+        })?;
     let report = browser_controller::execute_request_with_runtime(runtime_arc, post.request)
         .await
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
@@ -1375,13 +1744,22 @@ fn recorder_events_to_timeline(
             RecorderEvent::Navigation { url, .. } => {
                 ("navigation".to_string(), format!("navigate → {}", url))
             }
-            RecorderEvent::Click { selector, text, x, y, .. } => {
+            RecorderEvent::Click {
+                selector,
+                text,
+                x,
+                y,
+                ..
+            } => {
                 let label = if text.is_empty() {
                     selector.clone()
                 } else {
                     format!("{} \"{}\"", selector, text)
                 };
-                ("click".to_string(), format!("click → {} (x:{}, y:{})", label, *x as i32, *y as i32))
+                (
+                    "click".to_string(),
+                    format!("click → {} (x:{}, y:{})", label, *x as i32, *y as i32),
+                )
             }
             RecorderEvent::Input { selector, .. } => {
                 ("input".to_string(), format!("input → {}", selector))
@@ -1392,17 +1770,35 @@ fn recorder_events_to_timeline(
                 } else {
                     format!("{}+", modifiers.join("+"))
                 };
-                ("keypress".to_string(), format!("keypress → {}{}", mods, key))
+                (
+                    "keypress".to_string(),
+                    format!("keypress → {}{}", mods, key),
+                )
             }
-            RecorderEvent::Submit { selector, method, action, .. } => {
-                ("submit".to_string(), format!("submit → {} {} {}", selector, method, action))
-            }
-            RecorderEvent::Scroll { scroll_x, scroll_y, .. } => {
-                ("scroll".to_string(), format!("scroll → ({}, {})", *scroll_x as i32, *scroll_y as i32))
-            }
-            RecorderEvent::MutationSummary { added, removed, changed, .. } => {
-                ("mutation".to_string(), format!("dom-change → +{} -{} ~{}", added, removed, changed))
-            }
+            RecorderEvent::Submit {
+                selector,
+                method,
+                action,
+                ..
+            } => (
+                "submit".to_string(),
+                format!("submit → {} {} {}", selector, method, action),
+            ),
+            RecorderEvent::Scroll {
+                scroll_x, scroll_y, ..
+            } => (
+                "scroll".to_string(),
+                format!("scroll → ({}, {})", *scroll_x as i32, *scroll_y as i32),
+            ),
+            RecorderEvent::MutationSummary {
+                added,
+                removed,
+                changed,
+                ..
+            } => (
+                "mutation".to_string(),
+                format!("dom-change → +{} -{} ~{}", added, removed, changed),
+            ),
             RecorderEvent::ToolbarAction { action, .. } => {
                 ("toolbar".to_string(), format!("toolbar → {}", action))
             }
@@ -1433,7 +1829,11 @@ fn recorder_events_to_timeline(
             entry_type: "network".to_string(),
             summary: format!(
                 "{} {}{}",
-                if entry.method.is_empty() { "GET" } else { &entry.method },
+                if entry.method.is_empty() {
+                    "GET"
+                } else {
+                    &entry.method
+                },
                 entry.url,
                 entry
                     .status
@@ -1467,13 +1867,21 @@ async fn browser_frame_emission_task(
             None => break,
         };
 
-        let (toolbar_actions, timeline_entries, actions_len, console_len, network_len, mutation_len) = {
+        let (
+            toolbar_actions,
+            timeline_entries,
+            actions_len,
+            console_len,
+            network_len,
+            mutation_len,
+        ) = {
             let mut rt = runtime_arc.lock().await;
             rt.drain_raw_events();
             let toolbar_actions = rt.drain_toolbar_actions();
             let (new_actions, new_console, new_network) = rt.flush_timeline_events();
             let agent_actions = rt.drain_agent_actions();
-            let mut timeline_entries = recorder_events_to_timeline(&new_actions, &new_console, &new_network);
+            let mut timeline_entries =
+                recorder_events_to_timeline(&new_actions, &new_console, &new_network);
             for aa in &agent_actions {
                 timeline_entries.push(TimelineEntry {
                     timestamp: format_ts(aa.timestamp_ms),
@@ -1508,15 +1916,22 @@ async fn browser_frame_emission_task(
 
         {
             let rt = runtime_arc.lock().await;
-            let all_tabs: Vec<Arc<headless_chrome::Tab>> = rt.browser.get_tabs()
+            let all_tabs: Vec<Arc<headless_chrome::Tab>> = rt
+                .browser
+                .get_tabs()
                 .lock()
                 .map(|tabs| tabs.iter().cloned().collect())
                 .unwrap_or_default();
             for tab in all_tabs {
                 let url = tab.get_url();
                 if url.starts_with("chrome://") || url == "about:blank" {
-                    let is_active = rt.active_tab_target_id().map(|id| id == tab.get_target_id()).unwrap_or(false);
-                    if !is_active && rt.recording_tab_target_id.as_deref() != Some(tab.get_target_id()) {
+                    let is_active = rt
+                        .active_tab_target_id()
+                        .map(|id| id == tab.get_target_id())
+                        .unwrap_or(false);
+                    if !is_active
+                        && rt.recording_tab_target_id.as_deref() != Some(tab.get_target_id())
+                    {
                         let _ = tab.close(false);
                     }
                 }
@@ -1546,7 +1961,9 @@ async fn browser_frame_emission_task(
                     session.emit(ChatEvent::BrowserToolbarAction { action });
                 }
                 if !timeline_entries.is_empty() {
-                    session.emit(ChatEvent::BrowserTimeline { events: timeline_entries });
+                    session.emit(ChatEvent::BrowserTimeline {
+                        events: timeline_entries,
+                    });
                 }
             }
         }
@@ -1600,16 +2017,17 @@ async fn browser_frame_emission_task(
             None => continue,
         };
 
-        let screenshot_result = tab.call_method(
-            headless_chrome::protocol::cdp::Page::CaptureScreenshot {
-                format: Some(headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Jpeg),
+        let screenshot_result =
+            tab.call_method(headless_chrome::protocol::cdp::Page::CaptureScreenshot {
+                format: Some(
+                    headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Jpeg,
+                ),
                 clip: None,
                 quality: Some(60),
                 from_surface: Some(true),
                 capture_beyond_viewport: Some(false),
                 optimize_for_speed: Some(true),
-            },
-        );
+            });
 
         let raw_data = match screenshot_result {
             Ok(r) => match base64::prelude::BASE64_STANDARD.decode(&r.data) {
@@ -1717,7 +2135,11 @@ mod tests {
     fn test_resize_screenshot_small_image() {
         let img = image::RgbImage::new(100, 100);
         let mut buf = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg).unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
         let result = resize_screenshot(&buf, 800, "image/jpeg").unwrap();
         assert!(!result.is_empty());
     }

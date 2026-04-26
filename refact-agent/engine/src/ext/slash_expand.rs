@@ -93,7 +93,8 @@ fn expand_template(body: &str, args_str: &str, positional: &[String]) -> String 
         } else {
             String::new()
         }
-    }).into_owned()
+    })
+    .into_owned()
 }
 
 async fn expand_with_data(
@@ -132,7 +133,11 @@ async fn expand_with_data(
         let prefix = &raw_input[..byte_pos];
         if let Some(command) = commands_map.get(cmd_name) {
             return Ok(Some(ExpandedCommand {
-                expanded_text: format!("{}{}", prefix, expand_template(&command.body, &args_str, &positional)),
+                expanded_text: format!(
+                    "{}{}",
+                    prefix,
+                    expand_template(&command.body, &args_str, &positional)
+                ),
                 model_override: command.model.clone(),
                 allowed_tools: command.allowed_tools.clone(),
                 source_command: cmd_name.to_string(),
@@ -143,14 +148,20 @@ async fn expand_with_data(
         if skill_names.contains(cmd_name) {
             if let Some(skill) = load_skill_full(ext_dirs, cmd_name).await {
                 if skill.index.user_invocable {
-                    let agent_name = skill.agent.clone().unwrap_or_else(|| "subagent".to_string());
+                    let agent_name = skill
+                        .agent
+                        .clone()
+                        .unwrap_or_else(|| "subagent".to_string());
                     let context_fork = if skill.context.as_deref() == Some("fork") {
                         Some(agent_name)
                     } else {
                         None
                     };
                     let expanded_text = if args_str.is_empty() {
-                        format!("{}Follow the instructions from the {} skill.", prefix, cmd_name)
+                        format!(
+                            "{}Follow the instructions from the {} skill.",
+                            prefix, cmd_name
+                        )
                     } else {
                         format!("{}{}", prefix, args_str)
                     };
@@ -174,7 +185,10 @@ async fn expand_with_data(
 }
 
 #[cfg(test)]
-async fn expand_with_dirs(ext_dirs: &ExtDirs, raw_input: &str) -> Result<Option<ExpandedCommand>, String> {
+async fn expand_with_dirs(
+    ext_dirs: &ExtDirs,
+    raw_input: &str,
+) -> Result<Option<ExpandedCommand>, String> {
     if !raw_input.contains('/') {
         return Ok(None);
     }
@@ -221,7 +235,9 @@ pub async fn expand_slash_command(
             (commands, skill_indices)
         }
     };
-    if let Some(expanded) = expand_with_data(&commands, &skill_indices, &ext_dirs, raw_input).await? {
+    if let Some(expanded) =
+        expand_with_data(&commands, &skill_indices, &ext_dirs, raw_input).await?
+    {
         return Ok(Some(expanded));
     }
     expand_mcp_prompt_command(gcx, raw_input).await
@@ -276,7 +292,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_ext_dirs(config_dir: PathBuf) -> ExtDirs {
-        ExtDirs { global_dirs: vec![config_dir], installed_dirs: vec![], project_dirs: vec![] }
+        ExtDirs {
+            global_dirs: vec![config_dir],
+            installed_dirs: vec![],
+            project_dirs: vec![],
+        }
     }
 
     #[test]
@@ -301,13 +321,19 @@ mod tests {
 
     #[test]
     fn test_expand_template_arguments() {
-        assert_eq!(expand_template("Do: $ARGUMENTS", "hello", &["hello".to_string()]), "Do: hello");
+        assert_eq!(
+            expand_template("Do: $ARGUMENTS", "hello", &["hello".to_string()]),
+            "Do: hello"
+        );
     }
 
     #[test]
     fn test_expand_template_positional() {
         let args = vec!["a".to_string(), "b c".to_string(), "d".to_string()];
-        assert_eq!(expand_template("$1 and $2 and $3", "a \"b c\" d", &args), "a and b c and d");
+        assert_eq!(
+            expand_template("$1 and $2 and $3", "a \"b c\" d", &args),
+            "a and b c and d"
+        );
     }
 
     #[test]
@@ -324,26 +350,42 @@ mod tests {
     #[test]
     fn test_expand_template_with_at_commands() {
         let args = vec!["fix".to_string(), "it".to_string()];
-        assert_eq!(expand_template("@file path.rs $ARGUMENTS", "fix it", &args), "@file path.rs fix it");
+        assert_eq!(
+            expand_template("@file path.rs $ARGUMENTS", "fix it", &args),
+            "@file path.rs fix it"
+        );
     }
 
     #[test]
     fn test_expand_template_dollar_10_not_corrupted() {
         let args: Vec<String> = (1..=10).map(|i| format!("arg{}", i)).collect();
-        let result = expand_template("$1 $10", "arg1 arg2 arg3 arg4 arg5 arg6 arg7 arg8 arg9 arg10", &args);
-        assert_eq!(result, "arg1 arg10", "$10 must not be corrupted by $1 replacement");
+        let result = expand_template(
+            "$1 $10",
+            "arg1 arg2 arg3 arg4 arg5 arg6 arg7 arg8 arg9 arg10",
+            &args,
+        );
+        assert_eq!(
+            result, "arg1 arg10",
+            "$10 must not be corrupted by $1 replacement"
+        );
     }
 
     #[tokio::test]
     async fn test_no_slash_returns_none() {
         let ext_dirs = make_ext_dirs(PathBuf::from("/nonexistent"));
-        assert!(expand_with_dirs(&ext_dirs, "hello world").await.unwrap().is_none());
+        assert!(expand_with_dirs(&ext_dirs, "hello world")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
     async fn test_slash_space_returns_none() {
         let ext_dirs = make_ext_dirs(PathBuf::from("/nonexistent"));
-        assert!(expand_with_dirs(&ext_dirs, "/ hello").await.unwrap().is_none());
+        assert!(expand_with_dirs(&ext_dirs, "/ hello")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -351,10 +393,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let commands_dir = tmp.path().join("commands");
         tokio::fs::create_dir_all(&commands_dir).await.unwrap();
-        tokio::fs::write(commands_dir.join("cmd.md"), "Expanded: $ARGUMENTS").await.unwrap();
+        tokio::fs::write(commands_dir.join("cmd.md"), "Expanded: $ARGUMENTS")
+            .await
+            .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "text /cmd arg").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "text /cmd arg")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "text Expanded: arg");
         assert_eq!(result.source_command, "cmd");
     }
@@ -363,7 +410,10 @@ mod tests {
     async fn test_unknown_command_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        assert!(expand_with_dirs(&ext_dirs, "/nonexistent_cmd arg1").await.unwrap().is_none());
+        assert!(expand_with_dirs(&ext_dirs, "/nonexistent_cmd arg1")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -377,7 +427,10 @@ mod tests {
         ).await.unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/greet world").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "/greet world")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "Hello world!");
         assert_eq!(result.model_override, Some("gpt-4o".to_string()));
         assert_eq!(result.allowed_tools, vec!["cat", "tree"]);
@@ -389,10 +442,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let commands_dir = tmp.path().join("commands");
         tokio::fs::create_dir_all(&commands_dir).await.unwrap();
-        tokio::fs::write(commands_dir.join("hi.md"), "Hi $ARGUMENTS").await.unwrap();
+        tokio::fs::write(commands_dir.join("hi.md"), "Hi $ARGUMENTS")
+            .await
+            .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "  /hi there").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "  /hi there")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "  Hi there");
     }
 
@@ -401,10 +459,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let commands_dir = tmp.path().join("commands");
         tokio::fs::create_dir_all(&commands_dir).await.unwrap();
-        tokio::fs::write(commands_dir.join("show.md"), "$1 | $2 | $3").await.unwrap();
+        tokio::fs::write(commands_dir.join("show.md"), "$1 | $2 | $3")
+            .await
+            .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/show a \"b c\" d").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "/show a \"b c\" d")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "a | b c | d");
     }
 
@@ -413,10 +476,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let commands_dir = tmp.path().join("commands");
         tokio::fs::create_dir_all(&commands_dir).await.unwrap();
-        tokio::fs::write(commands_dir.join("fmt.md"), "[$1][$2][$3]").await.unwrap();
+        tokio::fs::write(commands_dir.join("fmt.md"), "[$1][$2][$3]")
+            .await
+            .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/fmt x y").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "/fmt x y")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "[x][y][]");
     }
 
@@ -425,7 +493,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let commands_dir = tmp.path().join("commands");
         tokio::fs::create_dir_all(&commands_dir).await.unwrap();
-        tokio::fs::write(commands_dir.join("cmd.md"), "Do: $ARGUMENTS").await.unwrap();
+        tokio::fs::write(commands_dir.join("cmd.md"), "Do: $ARGUMENTS")
+            .await
+            .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
         let result = expand_with_dirs(&ext_dirs, "/cmd").await.unwrap().unwrap();
@@ -443,13 +513,18 @@ mod tests {
         ).await.unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/my-skill some args").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "/my-skill some args")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "some args");
         assert_eq!(result.model_override, Some("gpt-4o".to_string()));
         assert_eq!(result.allowed_tools, vec!["cat"]);
         assert_eq!(result.source_command, "my-skill");
         assert!(result.context_fork.is_none());
-        let info = result.skill_to_activate.expect("skill_to_activate must be Some for skill invocation");
+        let info = result
+            .skill_to_activate
+            .expect("skill_to_activate must be Some for skill invocation");
         assert_eq!(info.name, "my-skill");
         assert!(info.body.contains("Do something with $ARGUMENTS"));
     }
@@ -462,11 +537,19 @@ mod tests {
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: my-skill\ndescription: A useful skill\nuser-invocable: true\n---\nBody",
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/my-skill").await.unwrap().unwrap();
-        assert_eq!(result.expanded_text, "Follow the instructions from the my-skill skill.");
+        let result = expand_with_dirs(&ext_dirs, "/my-skill")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.expanded_text,
+            "Follow the instructions from the my-skill skill."
+        );
         assert!(result.skill_to_activate.is_some());
     }
 
@@ -481,7 +564,10 @@ mod tests {
         ).await.unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/tester fix the bug").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "/tester fix the bug")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "fix the bug");
         let info = result.skill_to_activate.unwrap();
         assert_eq!(info.name, "tester");
@@ -495,10 +581,15 @@ mod tests {
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: helper\ndescription: Helper skill\nuser-invocable: true\n---\nBody",
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "please /helper do work").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "please /helper do work")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "please do work");
         assert!(result.skill_to_activate.is_some());
     }
@@ -511,11 +602,18 @@ mod tests {
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: hidden-skill\ndescription: Hidden skill\nuser-invocable: false\n---\nBody",
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/hidden-skill args").await.unwrap();
-        assert!(result.is_none(), "Non-user-invocable skill should not be invocable via /skill-name");
+        let result = expand_with_dirs(&ext_dirs, "/hidden-skill args")
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "Non-user-invocable skill should not be invocable via /skill-name"
+        );
     }
 
     #[tokio::test]
@@ -529,10 +627,20 @@ mod tests {
         ).await.unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/fork-skill some work").await.unwrap().unwrap();
-        assert_eq!(result.context_fork, Some("my-agent".to_string()), "Fork skill should set context_fork to agent name");
+        let result = expand_with_dirs(&ext_dirs, "/fork-skill some work")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.context_fork,
+            Some("my-agent".to_string()),
+            "Fork skill should set context_fork to agent name"
+        );
         assert_eq!(result.source_command, "fork-skill");
-        assert!(result.expanded_text.contains("some work"), "Expanded text should contain args");
+        assert!(
+            result.expanded_text.contains("some work"),
+            "Expanded text should contain args"
+        );
     }
 
     #[tokio::test]
@@ -546,8 +654,15 @@ mod tests {
         ).await.unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/default-fork").await.unwrap().unwrap();
-        assert_eq!(result.context_fork, Some("subagent".to_string()), "Default fork agent should be 'subagent'");
+        let result = expand_with_dirs(&ext_dirs, "/default-fork")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.context_fork,
+            Some("subagent".to_string()),
+            "Default fork agent should be 'subagent'"
+        );
     }
 
     #[tokio::test]
@@ -558,7 +673,9 @@ mod tests {
         tokio::fs::write(
             commands_dir.join("same-name.md"),
             "---\ndescription: Command version\n---\nCommand body: $ARGUMENTS",
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let skill_dir = tmp.path().join("skills").join("same-name");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
@@ -568,8 +685,14 @@ mod tests {
         ).await.unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "/same-name arg").await.unwrap().unwrap();
-        assert!(result.expanded_text.contains("Command body"), "Slash command should take precedence over skill");
+        let result = expand_with_dirs(&ext_dirs, "/same-name arg")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.expanded_text.contains("Command body"),
+            "Slash command should take precedence over skill"
+        );
         assert!(result.context_fork.is_none());
     }
 
@@ -578,10 +701,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let commands_dir = tmp.path().join("commands");
         tokio::fs::create_dir_all(&commands_dir).await.unwrap();
-        tokio::fs::write(commands_dir.join("greet.md"), "Hello $ARGUMENTS!").await.unwrap();
+        tokio::fs::write(commands_dir.join("greet.md"), "Hello $ARGUMENTS!")
+            .await
+            .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "Please /greet world").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "Please /greet world")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "Please Hello world!");
     }
 
@@ -590,17 +718,25 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let commands_dir = tmp.path().join("commands");
         tokio::fs::create_dir_all(&commands_dir).await.unwrap();
-        tokio::fs::write(commands_dir.join("greet.md"), "Hello $ARGUMENTS!").await.unwrap();
+        tokio::fs::write(commands_dir.join("greet.md"), "Hello $ARGUMENTS!")
+            .await
+            .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path().to_path_buf());
-        let result = expand_with_dirs(&ext_dirs, "see /usr/bin then /greet world").await.unwrap().unwrap();
+        let result = expand_with_dirs(&ext_dirs, "see /usr/bin then /greet world")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.expanded_text, "see /usr/bin then Hello world!");
     }
 
     #[tokio::test]
     async fn test_url_not_expanded() {
         let ext_dirs = make_ext_dirs(PathBuf::from("/nonexistent"));
-        assert!(expand_with_dirs(&ext_dirs, "visit http://example.com/path").await.unwrap().is_none());
+        assert!(expand_with_dirs(&ext_dirs, "visit http://example.com/path")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -613,6 +749,9 @@ mod tests {
     async fn test_no_slash_skips_loading() {
         let ext_dirs = make_ext_dirs(PathBuf::from("/nonexistent_dir_wont_be_read"));
         let result = expand_with_dirs(&ext_dirs, "plain text without any slashes here").await;
-        assert!(result.unwrap().is_none(), "Input with no '/' should return None without loading");
+        assert!(
+            result.unwrap().is_none(),
+            "Input with no '/' should return None without loading"
+        );
     }
 }

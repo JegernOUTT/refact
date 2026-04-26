@@ -56,7 +56,8 @@ where
                 if field.name() == "message" {
                     self.message = format!("{:?}", value);
                 } else {
-                    self.fields.push((field.name().to_string(), format!("{:?}", value)));
+                    self.fields
+                        .push((field.name().to_string(), format!("{:?}", value)));
                 }
             }
         }
@@ -70,7 +71,15 @@ where
         let fields_str = if visitor.fields.is_empty() {
             String::new()
         } else {
-            format!("{} ", visitor.fields.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" "))
+            format!(
+                "{} ",
+                visitor
+                    .fields
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
         };
 
         let ev_level = event.metadata().level();

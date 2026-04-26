@@ -51,7 +51,8 @@ fn is_integration_mcp_tool(t: &Box<dyn Tool + Send>) -> bool {
 pub fn apply_mcp_lazy_filter(mut tools: Vec<Box<dyn Tool + Send>>) -> ToolsForMode {
     // Collect the index of ALL real MCP integration tools before filtering.
     // Proxy builtins (mcp_call / mcp_tool_search) are excluded via source_type check.
-    let mcp_tool_index: Vec<(String, String)> = tools.iter()
+    let mcp_tool_index: Vec<(String, String)> = tools
+        .iter()
         .filter(|t| is_integration_mcp_tool(t))
         .map(|t| {
             let d = t.tool_description();
@@ -74,7 +75,11 @@ pub fn apply_mcp_lazy_filter(mut tools: Vec<Box<dyn Tool + Send>>) -> ToolsForMo
         tools,
         mcp_lazy_mode,
         mcp_total_count,
-        mcp_tool_index: if mcp_lazy_mode { mcp_tool_index } else { vec![] },
+        mcp_tool_index: if mcp_lazy_mode {
+            mcp_tool_index
+        } else {
+            vec![]
+        },
     }
 }
 
@@ -238,9 +243,11 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_shell_service::ToolShellService {
             config_path: config_path.clone(),
         }),
-        Box::new(crate::tools::tool_add_workspace_folder::ToolAddWorkspaceFolder {
-            config_path: config_path.clone(),
-        }),
+        Box::new(
+            crate::tools::tool_add_workspace_folder::ToolAddWorkspaceFolder {
+                config_path: config_path.clone(),
+            },
+        ),
     ];
 
     let deep_analysis_tools: Vec<Box<dyn Tool + Send>> = vec![
@@ -249,11 +256,9 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
                 config_path: config_path.clone(),
             },
         ),
-        Box::new(
-            crate::tools::tool_code_review::ToolCodeReview {
-                config_path: config_path.clone(),
-            },
-        ),
+        Box::new(crate::tools::tool_code_review::ToolCodeReview {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_deep_research::ToolDeepResearch {
             config_path: config_path.clone(),
         }),
@@ -293,11 +298,11 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
         }),
     ];
 
-    let interaction_tools: Vec<Box<dyn Tool + Send>> = vec![
-        Box::new(crate::tools::tool_ask_questions::ToolAskQuestions {
+    let interaction_tools: Vec<Box<dyn Tool + Send>> = vec![Box::new(
+        crate::tools::tool_ask_questions::ToolAskQuestions {
             config_path: config_path.clone(),
-        }),
-    ];
+        },
+    )];
 
     let chat_management_tools: Vec<Box<dyn Tool + Send>> = vec![
         Box::new(crate::tools::tool_compress_chat::ToolCompressChatProbe {
@@ -553,7 +558,8 @@ pub async fn get_tools_for_mode(
         })
         .collect();
 
-    let tool_order: HashMap<&str, usize> = mode_config.tools
+    let tool_order: HashMap<&str, usize> = mode_config
+        .tools
         .iter()
         .enumerate()
         .map(|(i, name)| (name.as_str(), i))
@@ -561,21 +567,27 @@ pub async fn get_tools_for_mode(
 
     let mut result: Vec<Box<dyn Tool + Send>> = all_tools
         .into_iter()
-        .filter(|(cat, tool)| {
-            match cat {
-                ToolGroupCategory::Integration if allow_integrations => true,
-                ToolGroupCategory::MCP if allow_mcp => true,
-                ToolGroupCategory::ConfigSubagent if allow_subagents => true,
-                _ => allowed_tools.contains(tool.tool_description().name.as_str()),
-            }
+        .filter(|(cat, tool)| match cat {
+            ToolGroupCategory::Integration if allow_integrations => true,
+            ToolGroupCategory::MCP if allow_mcp => true,
+            ToolGroupCategory::ConfigSubagent if allow_subagents => true,
+            _ => allowed_tools.contains(tool.tool_description().name.as_str()),
         })
         .map(|(_, tool)| tool)
         .collect();
 
     result.sort_by(|a, b| {
-        let a_order = tool_order.get(a.tool_description().name.as_str()).copied().unwrap_or(usize::MAX);
-        let b_order = tool_order.get(b.tool_description().name.as_str()).copied().unwrap_or(usize::MAX);
-        a_order.cmp(&b_order).then_with(|| a.tool_description().name.cmp(&b.tool_description().name))
+        let a_order = tool_order
+            .get(a.tool_description().name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        let b_order = tool_order
+            .get(b.tool_description().name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        a_order
+            .cmp(&b_order)
+            .then_with(|| a.tool_description().name.cmp(&b.tool_description().name))
     });
 
     result

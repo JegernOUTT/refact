@@ -1,21 +1,22 @@
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, DiffChunk};
-use crate::files_correction::{
-    check_if_its_inside_a_workspace_or_config, get_project_dirs,
-};
+use crate::files_correction::{check_if_its_inside_a_workspace_or_config, get_project_dirs};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::{check_file_privacy, FilePrivacyLevel};
 use crate::tools::file_edit::auxiliary::{
-    await_ast_indexing, convert_edit_to_diffchunks, normalize_line_endings,
-    restore_line_endings, sync_documents_ast, write_file,
+    await_ast_indexing, convert_edit_to_diffchunks, normalize_line_endings, restore_line_endings,
+    sync_documents_ast, write_file,
 };
 use crate::tools::file_edit::openai_apply_patch::{
     apply_update_chunks, parse_patch, validate_relative_path, FileOperation, ParsedPatch,
 };
 use crate::tools::file_edit::undo_history;
-use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
+    json_schema_from_params,
+};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -110,10 +111,14 @@ async fn resolve_patch_path(
     };
 
     let canonical = if full_path.exists() {
-        full_path.canonicalize().map_err(|e| format!("Failed to canonicalize: {}", e))?
+        full_path
+            .canonicalize()
+            .map_err(|e| format!("Failed to canonicalize: {}", e))?
     } else if let Some(parent) = full_path.parent() {
         if parent.exists() {
-            let canonical_parent = parent.canonicalize().map_err(|e| format!("Failed to canonicalize parent: {}", e))?;
+            let canonical_parent = parent
+                .canonicalize()
+                .map_err(|e| format!("Failed to canonicalize parent: {}", e))?;
             canonical_parent.join(full_path.file_name().unwrap())
         } else {
             full_path.clone()
@@ -125,8 +130,17 @@ async fn resolve_patch_path(
     check_if_its_inside_a_workspace_or_config(gcx.clone(), &canonical).await?;
 
     let privacy_settings = gcx.read().await.privacy_settings.clone();
-    if check_file_privacy(privacy_settings, &canonical, &FilePrivacyLevel::AllowToSendAnywhere).is_err() {
-        return Err(format!("Cannot access {:?} (blocked by privacy)", canonical));
+    if check_file_privacy(
+        privacy_settings,
+        &canonical,
+        &FilePrivacyLevel::AllowToSendAnywhere,
+    )
+    .is_err()
+    {
+        return Err(format!(
+            "Cannot access {:?} (blocked by privacy)",
+            canonical
+        ));
     }
 
     Ok(canonical)
@@ -170,7 +184,8 @@ pub async fn tool_apply_patch_exec(
                     sync_documents_ast(gcx.clone(), &full_path).await?;
                 }
 
-                let chunks = convert_edit_to_diffchunks(full_path.clone(), &String::new(), &contents)?;
+                let chunks =
+                    convert_edit_to_diffchunks(full_path.clone(), &String::new(), &contents)?;
                 all_chunks.extend(chunks.clone());
                 file_results.push(SingleFileResult {
                     path: full_path,
@@ -201,8 +216,14 @@ pub async fn tool_apply_patch_exec(
                     overlay.insert(full_path.clone(), OverlayState::Deleted);
                 } else {
                     undo_history::record_before_edit(&full_path, &file_content);
-                    tokio::fs::remove_file(&full_path).await.map_err(|e| format!("Failed to delete: {}", e))?;
-                    gcx.write().await.documents_state.memory_document_map.remove(&full_path);
+                    tokio::fs::remove_file(&full_path)
+                        .await
+                        .map_err(|e| format!("Failed to delete: {}", e))?;
+                    gcx.write()
+                        .await
+                        .documents_state
+                        .memory_document_map
+                        .remove(&full_path);
                 }
 
                 let chunk = DiffChunk {
@@ -227,7 +248,11 @@ pub async fn tool_apply_patch_exec(
                 });
             }
 
-            FileOperation::Update { path, move_to, chunks } => {
+            FileOperation::Update {
+                path,
+                move_to,
+                chunks,
+            } => {
                 let full_path = resolve_patch_path(gcx.clone(), &path, true).await?;
 
                 let file_content = match overlay.get(&full_path) {
@@ -262,12 +287,21 @@ pub async fn tool_apply_patch_exec(
 
                     if dry {
                         overlay.insert(full_path.clone(), OverlayState::Deleted);
-                        overlay.insert(dest_path.clone(), OverlayState::Present(new_file_content.clone()));
+                        overlay.insert(
+                            dest_path.clone(),
+                            OverlayState::Present(new_file_content.clone()),
+                        );
                     } else {
                         write_file(gcx.clone(), &dest_path, &new_file_content, false, None).await?;
                         undo_history::record_before_edit(&full_path, &file_content);
-                        tokio::fs::remove_file(&full_path).await.map_err(|e| format!("Failed to remove: {}", e))?;
-                        gcx.write().await.documents_state.memory_document_map.remove(&full_path);
+                        tokio::fs::remove_file(&full_path)
+                            .await
+                            .map_err(|e| format!("Failed to remove: {}", e))?;
+                        gcx.write()
+                            .await
+                            .documents_state
+                            .memory_document_map
+                            .remove(&full_path);
                         sync_documents_ast(gcx.clone(), &dest_path).await?;
                     }
 
@@ -292,13 +326,20 @@ pub async fn tool_apply_patch_exec(
                     });
                 } else {
                     if dry {
-                        overlay.insert(full_path.clone(), OverlayState::Present(new_file_content.clone()));
+                        overlay.insert(
+                            full_path.clone(),
+                            OverlayState::Present(new_file_content.clone()),
+                        );
                     } else {
                         write_file(gcx.clone(), &full_path, &new_file_content, false, None).await?;
                         sync_documents_ast(gcx.clone(), &full_path).await?;
                     }
 
-                    let diff_chunks = convert_edit_to_diffchunks(full_path.clone(), &file_content, &new_file_content)?;
+                    let diff_chunks = convert_edit_to_diffchunks(
+                        full_path.clone(),
+                        &file_content,
+                        &new_file_content,
+                    )?;
                     all_chunks.extend(diff_chunks.clone());
                     file_results.push(SingleFileResult {
                         path: full_path,
@@ -312,7 +353,10 @@ pub async fn tool_apply_patch_exec(
         }
     }
 
-    Ok(ApplyPatchResult { file_results, all_chunks })
+    Ok(ApplyPatchResult {
+        file_results,
+        all_chunks,
+    })
 }
 
 #[async_trait]
@@ -414,7 +458,10 @@ impl Tool for ToolApplyPatch {
             experimental: false,
             allow_parallel: false,
             description: APPLY_PATCH_DESCRIPTION.to_string(),
-            input_schema: json_schema_from_params(&[("patch", "string", APPLY_PATCH_PARAM_DESCRIPTION)], &["patch"]),
+            input_schema: json_schema_from_params(
+                &[("patch", "string", APPLY_PATCH_PARAM_DESCRIPTION)],
+                &["patch"],
+            ),
             output_schema: None,
             annotations: None,
         }

@@ -5,6 +5,7 @@ import { ArrowLeftIcon } from "@radix-ui/react-icons";
 import { PageWrapper } from "../../components/PageWrapper";
 import { Spinner } from "../../components/Spinner";
 import type { Config } from "../Config/configSlice";
+import { useAppDispatch } from "../../hooks";
 import {
   useGetExtRegistryQuery,
   useDeleteSkillMutation,
@@ -17,11 +18,10 @@ import {
   HooksEditor,
   CreateItemDialog,
 } from "./components";
-import { MarketplacePanel } from "./components/MarketplacePanel";
-
 import styles from "./Extensions.module.css";
+import { push } from "../Pages/pagesSlice";
 
-export type ExtensionsTab = "skills" | "commands" | "hooks" | "marketplace";
+export type ExtensionsTab = "skills" | "commands" | "hooks";
 
 export type ExtensionsProps = {
   backFromExtensions: () => void;
@@ -44,6 +44,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   initialTab = "skills",
   initialItemId,
 }) => {
+  const dispatch = useAppDispatch();
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(initialTab);
   const [selectedSkill, setSelectedSkill] = useState<string | null>(
     initialTab === "skills" ? initialItemId ?? null : null,
@@ -123,10 +124,15 @@ export const Extensions: React.FC<ExtensionsProps> = ({
     setCreateDialogOpen(true);
   }, []);
 
-  const hasProjectRoot =
-    registry !== undefined &&
-    (registry.skills.some((s) => s.scope === "local") ||
-      registry.slash_commands.some((c) => c.scope === "local"));
+  const openSkillsMarketplace = useCallback(() => {
+    dispatch(push({ name: "skills marketplace" }));
+  }, [dispatch]);
+
+  const openCommandsMarketplace = useCallback(() => {
+    dispatch(push({ name: "commands marketplace" }));
+  }, [dispatch]);
+
+  const hasProjectRoot = registry?.has_project_root ?? false;
 
   if (isLoading) return <Spinner spinning />;
 
@@ -171,7 +177,6 @@ export const Extensions: React.FC<ExtensionsProps> = ({
               Commands ({registry?.slash_commands.length ?? 0})
             </Tabs.Trigger>
             <Tabs.Trigger value="hooks">Hooks</Tabs.Trigger>
-            <Tabs.Trigger value="marketplace">Marketplace</Tabs.Trigger>
           </Tabs.List>
         </Tabs.Root>
 
@@ -189,13 +194,22 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                 onBack={() => setSelectedSkill(null)}
               />
             ) : (
-              <ExtItemList
-                items={registry?.skills ?? []}
-                selectedId={selectedSkill}
-                onSelect={setSelectedSkill}
-                onCreate={() => openCreateDialog("skill")}
-                onDelete={handleDeleteSkill}
-              />
+              <Flex direction="column" gap="2">
+                <Button
+                  variant="outline"
+                  size="1"
+                  onClick={openSkillsMarketplace}
+                >
+                  Browse Skills Marketplace
+                </Button>
+                <ExtItemList
+                  items={registry?.skills ?? []}
+                  selectedId={selectedSkill}
+                  onSelect={setSelectedSkill}
+                  onCreate={() => openCreateDialog("skill")}
+                  onDelete={handleDeleteSkill}
+                />
+              </Flex>
             ))}
 
           {activeTab === "commands" &&
@@ -205,18 +219,25 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                 onBack={() => setSelectedCommand(null)}
               />
             ) : (
-              <ExtItemList
-                items={registry?.slash_commands ?? []}
-                selectedId={selectedCommand}
-                onSelect={setSelectedCommand}
-                onCreate={() => openCreateDialog("command")}
-                onDelete={handleDeleteCommand}
-              />
+              <Flex direction="column" gap="2">
+                <Button
+                  variant="outline"
+                  size="1"
+                  onClick={openCommandsMarketplace}
+                >
+                  Browse Commands Marketplace
+                </Button>
+                <ExtItemList
+                  items={registry?.slash_commands ?? []}
+                  selectedId={selectedCommand}
+                  onSelect={setSelectedCommand}
+                  onCreate={() => openCreateDialog("command")}
+                  onDelete={handleDeleteCommand}
+                />
+              </Flex>
             ))}
 
           {activeTab === "hooks" && <HooksEditor />}
-
-          {activeTab === "marketplace" && <MarketplacePanel />}
         </div>
 
         <CreateItemDialog

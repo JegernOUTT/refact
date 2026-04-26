@@ -391,10 +391,7 @@ fn parse_searxng_json(body: &str) -> Result<Vec<SearchResult>, String> {
             .get("title")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let url = obj
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or_default();
         let snippet = obj
             .get("content")
             .and_then(|v| v.as_str())
@@ -558,7 +555,10 @@ async fn search_wikipedia(
             .get("title")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let page_id = obj.get("pageid").and_then(|v| v.as_i64()).unwrap_or_default();
+        let page_id = obj
+            .get("pageid")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_default();
         let snippet = obj
             .get("snippet")
             .and_then(|v| v.as_str())

@@ -143,7 +143,12 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
 
     let mut background_tasks = BackgroundTasksHolder::new(vec![]);
     loop {
-        if gcx.read().await.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        if gcx
+            .read()
+            .await
+            .shutdown_flag
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             break;
         }
         let (need_reload, consts) = do_i_need_to_reload_vecdb(gcx.clone()).await;

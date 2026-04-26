@@ -412,10 +412,8 @@ impl VecDBSqlite {
 
         fn parse_scope_filter(filter: &str) -> Option<ScopeFilter> {
             // Accept: (scope LIKE '...%')  or  scope LIKE "...%"
-            let like_re = Regex::new(
-                r#"(?i)\bscope\s+like\s+['\"]([^'\"]+)['\"]\s*\)?\s*$"#,
-            )
-            .ok()?;
+            let like_re =
+                Regex::new(r#"(?i)\bscope\s+like\s+['\"]([^'\"]+)['\"]\s*\)?\s*$"#).ok()?;
             if let Some(caps) = like_re.captures(filter.trim()) {
                 let pattern = caps.get(1)?.as_str().to_string();
                 let prefix = pattern.trim_end_matches('%').to_string();
@@ -423,10 +421,7 @@ impl VecDBSqlite {
             }
 
             // Accept: (scope = '...')  or  scope = "..."
-            let eq_re = Regex::new(
-                r#"(?i)\bscope\s*=\s*['\"]([^'\"]+)['\"]\s*\)?\s*$"#,
-            )
-            .ok()?;
+            let eq_re = Regex::new(r#"(?i)\bscope\s*=\s*['\"]([^'\"]+)['\"]\s*\)?\s*$"#).ok()?;
             if let Some(caps) = eq_re.captures(filter.trim()) {
                 let value = caps.get(1)?.as_str().to_string();
                 return Some(ScopeFilter::SqlExact(value));
@@ -434,25 +429,20 @@ impl VecDBSqlite {
             None
         }
 
-        let (scope_condition, scope_param, scope_prefix) =
-            match vecdb_scope_filter_mb.as_deref() {
-                Some(filter_str) => match parse_scope_filter(filter_str) {
-                    Some(ScopeFilter::SqlExact(val)) => {
-                        ("AND scope = ?".to_string(), Some(val), None)
-                    }
-                    Some(ScopeFilter::RustPrefix(prefix)) => {
-                        (String::new(), None, Some(prefix))
-                    }
-                    None => {
-                        tracing::warn!(
-                            "vecdb_search: unsupported scope filter format, ignoring: {}",
-                            filter_str
-                        );
-                        (String::new(), None, None)
-                    }
-                },
-                None => (String::new(), None, None),
-            };
+        let (scope_condition, scope_param, scope_prefix) = match vecdb_scope_filter_mb.as_deref() {
+            Some(filter_str) => match parse_scope_filter(filter_str) {
+                Some(ScopeFilter::SqlExact(val)) => ("AND scope = ?".to_string(), Some(val), None),
+                Some(ScopeFilter::RustPrefix(prefix)) => (String::new(), None, Some(prefix)),
+                None => {
+                    tracing::warn!(
+                        "vecdb_search: unsupported scope filter format, ignoring: {}",
+                        filter_str
+                    );
+                    (String::new(), None, None)
+                }
+            },
+            None => (String::new(), None, None),
+        };
         let embedding_owned = embedding.clone();
         let emb_table_name = self.emb_table_name.clone();
 

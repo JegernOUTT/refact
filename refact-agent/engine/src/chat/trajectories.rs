@@ -93,7 +93,10 @@ pub async fn get_session_state_for_chat(
     match session_arc {
         Some(arc) => {
             let session = arc.lock().await;
-            (session.runtime.state.to_string(), session.runtime.error.clone())
+            (
+                session.runtime.state.to_string(),
+                session.runtime.error.clone(),
+            )
         }
         None => (SessionState::Idle.to_string(), None),
     }
@@ -203,6 +206,7 @@ pub struct TrajectorySnapshot {
 
     pub previous_response_id: Option<String>,
     pub active_skill: Option<String>,
+    pub auto_enrichment_enabled: Option<bool>,
 }
 
 impl TrajectorySnapshot {
@@ -235,6 +239,7 @@ impl TrajectorySnapshot {
             parallel_tool_calls: session.thread.parallel_tool_calls,
             previous_response_id: session.thread.previous_response_id.clone(),
             active_skill: session.thread.active_skill.clone(),
+            auto_enrichment_enabled: session.thread.auto_enrichment_enabled,
         }
     }
 }
@@ -252,7 +257,9 @@ pub async fn apply_mode_defaults_to_thread(
         gcx.clone(),
         &thread.mode,
         None,
-    ).await {
+    )
+    .await
+    {
         let defaults = &mode_config.thread_defaults;
         if !auto_approve_editing_present {
             if let Some(v) = defaults.auto_approve_editing_tools {
@@ -315,7 +322,10 @@ fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
     }
 }
 
-pub async fn find_trajectory_path(gcx: Arc<ARwLock<GlobalContext>>, chat_id: &str) -> Option<PathBuf> {
+pub async fn find_trajectory_path(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    chat_id: &str,
+) -> Option<PathBuf> {
     let traj_dirs = get_all_trajectories_dirs(gcx.clone()).await;
     if let Some(path) = traj_dirs
         .iter()
@@ -374,18 +384,19 @@ pub async fn load_trajectory_for_chat(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
     fix_tool_call_indexes(&mut messages);
-    
+
     for msg in &mut messages {
         if msg.message_id.is_empty() {
             msg.message_id = Uuid::new_v4().to_string();
         }
-        
+
         if let Some(tool_calls) = &msg.tool_calls {
-            let filtered: Vec<_> = tool_calls.iter()
+            let filtered: Vec<_> = tool_calls
+                .iter()
                 .filter(|tc| !tc.function.name.is_empty())
                 .cloned()
                 .collect();
-            
+
             if filtered.len() != tool_calls.len() {
                 tracing::warn!(
                     "Filtered out {} tool call(s) with empty names from message {}",
@@ -393,7 +404,7 @@ pub async fn load_trajectory_for_chat(
                     msg.message_id
                 );
             }
-            
+
             msg.tool_calls = if filtered.is_empty() {
                 None
             } else {
@@ -419,16 +430,15 @@ pub async fn load_trajectory_for_chat(
             .unwrap_or("")
             .to_string(),
         mode: crate::yaml_configs::customization_registry::map_legacy_mode_to_id(
-            t.get("mode").and_then(|v| v.as_str()).unwrap_or("agent")
-        ).to_string(),
+            t.get("mode").and_then(|v| v.as_str()).unwrap_or("agent"),
+        )
+        .to_string(),
         tool_use: t
             .get("tool_use")
             .and_then(|v| v.as_str())
             .unwrap_or("agent")
             .to_string(),
-        boost_reasoning: t
-            .get("boost_reasoning")
-            .and_then(|v| v.as_bool()),
+        boost_reasoning: t.get("boost_reasoning").and_then(|v| v.as_bool()),
         context_tokens_cap: t
             .get("context_tokens_cap")
             .and_then(|v| v.as_u64())
@@ -486,9 +496,7 @@ pub async fn load_trajectory_for_chat(
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize),
-        parallel_tool_calls: t
-            .get("parallel_tool_calls")
-            .and_then(|v| v.as_bool()),
+        parallel_tool_calls: t.get("parallel_tool_calls").and_then(|v| v.as_bool()),
 
         previous_response_id: t
             .get("previous_response_id")
@@ -503,10 +511,18 @@ pub async fn load_trajectory_for_chat(
             .get("active_skill")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+
+        auto_enrichment_enabled: t.get("auto_enrichment_enabled").and_then(|v| v.as_bool()),
     };
 
-    let auto_approve_editing_tools_present = t.get("auto_approve_editing_tools").and_then(|v| v.as_bool()).is_some();
-    let auto_approve_dangerous_commands_present = t.get("auto_approve_dangerous_commands").and_then(|v| v.as_bool()).is_some();
+    let auto_approve_editing_tools_present = t
+        .get("auto_approve_editing_tools")
+        .and_then(|v| v.as_bool())
+        .is_some();
+    let auto_approve_dangerous_commands_present = t
+        .get("auto_approve_dangerous_commands")
+        .and_then(|v| v.as_bool())
+        .is_some();
 
     let created_at = t
         .get("created_at")
@@ -559,7 +575,6 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
 
 **Ready when you are!** Tell me what you'd like to build or fix.";
 
-    let now = chrono::Utc::now().to_rfc3339();
     let greeting_msg = ChatMessage {
         message_id: Uuid::new_v4().to_string(),
         role: "assistant".to_string(),
@@ -578,8 +593,6 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         output_filter: None,
     };
 
-    let messages_json = vec![serde_json::to_value(&greeting_msg).unwrap_or_default()];
-
     let task_meta = super::types::TaskMeta {
         task_id: task_id.to_string(),
         role: "planner".to_string(),
@@ -587,46 +600,38 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         card_id: None,
     };
 
-    let trajectory = json!({
-        "id": chat_id,
-        "title": "",
-        "model": "",
-        "mode": "task_planner",
-        "tool_use": "agent",
-        "messages": messages_json,
-        "created_at": now.clone(),
-        "updated_at": now,
-        "boost_reasoning": false,
-        "checkpoints_enabled": true,
-        "context_tokens_cap": null,
-        "include_project_info": true,
-        "isTitleGenerated": false,
-        "auto_approve_editing_tools": true,
-        "auto_approve_dangerous_commands": true,
-        "task_meta": serde_json::to_value(&task_meta).unwrap_or_default(),
-    });
+    let snapshot = TrajectorySnapshot {
+        chat_id: chat_id.to_string(),
+        title: String::new(),
+        model: String::new(),
+        mode: "task_planner".to_string(),
+        tool_use: "agent".to_string(),
+        messages: vec![greeting_msg],
+        created_at: chrono::Utc::now().to_rfc3339(),
+        boost_reasoning: false,
+        checkpoints_enabled: true,
+        context_tokens_cap: None,
+        include_project_info: true,
+        is_title_generated: false,
+        auto_approve_editing_tools: true,
+        auto_approve_dangerous_commands: true,
+        auto_enrichment_enabled: Some(false),
+        task_meta: Some(task_meta),
+        version: 1,
+        parent_id: None,
+        link_type: None,
+        root_chat_id: None,
+        reasoning_effort: None,
+        thinking_budget: None,
+        temperature: None,
+        frequency_penalty: None,
+        max_tokens: None,
+        parallel_tool_calls: None,
+        previous_response_id: None,
+        active_skill: None,
+    };
 
-    let task_dir = crate::tasks::storage::find_task_dir(gcx.clone(), task_id).await?;
-    let traj_dir = crate::tasks::storage::get_task_trajectory_dir(&task_dir, "planner", None);
-    tokio::fs::create_dir_all(&traj_dir)
-        .await
-        .map_err(|e| format!("Failed to create task trajectories dir: {}", e))?;
-
-    let file_path = traj_dir.join(format!("{}.json", chat_id));
-    let tmp_path = file_path.with_extension("json.tmp");
-    let json_str = serde_json::to_string_pretty(&trajectory)
-        .map_err(|e| format!("Failed to serialize trajectory: {}", e))?;
-    tokio::fs::write(&tmp_path, &json_str)
-        .await
-        .map_err(|e| format!("Failed to write trajectory: {}", e))?;
-    atomic_write_file(&tmp_path, &file_path).await?;
-
-    info!(
-        "Created initial planner trajectory for task {} at {:?}",
-        task_id, file_path
-    );
-
-    Ok(())
+    save_trajectory_snapshot(gcx, snapshot).await
 }
 
 pub async fn save_trajectory_as(
@@ -665,6 +670,7 @@ pub async fn save_trajectory_as(
         parallel_tool_calls: thread.parallel_tool_calls,
         previous_response_id: thread.previous_response_id.clone(),
         active_skill: thread.active_skill.clone(),
+        auto_enrichment_enabled: thread.auto_enrichment_enabled,
     };
     if let Err(e) = save_trajectory_snapshot(gcx, snapshot).await {
         warn!("Failed to save trajectory: {}", e);
@@ -728,6 +734,9 @@ pub async fn save_trajectory_snapshot(
     if let Some(ref skill) = snapshot.active_skill {
         trajectory["active_skill"] = serde_json::Value::String(skill.clone());
     }
+    if let Some(auto_enrich) = snapshot.auto_enrichment_enabled {
+        trajectory["auto_enrichment_enabled"] = json!(auto_enrich);
+    }
 
     if let Some(ref parent_id) = snapshot.parent_id {
         trajectory["parent_id"] = serde_json::Value::String(parent_id.clone());
@@ -736,7 +745,9 @@ pub async fn save_trajectory_snapshot(
         trajectory["link_type"] = serde_json::Value::String(link_type.clone());
     }
 
-    let effective_root = snapshot.root_chat_id.clone()
+    let effective_root = snapshot
+        .root_chat_id
+        .clone()
         .unwrap_or_else(|| snapshot.chat_id.clone());
     trajectory["root_chat_id"] = serde_json::Value::String(effective_root);
 
@@ -745,7 +756,8 @@ pub async fn save_trajectory_snapshot(
     }
 
     let file_path = if let Some(ref task_meta) = snapshot.task_meta {
-        let task_dir = crate::tasks::storage::find_task_dir(gcx.clone(), &task_meta.task_id).await?;
+        let task_dir =
+            crate::tasks::storage::find_task_dir(gcx.clone(), &task_meta.task_id).await?;
         let traj_dir = crate::tasks::storage::get_task_trajectory_dir(
             &task_dir,
             &task_meta.role,
@@ -786,12 +798,18 @@ pub async fn save_trajectory_snapshot(
     }
 
     if snapshot.task_meta.is_none() {
-        let effective_root = snapshot.root_chat_id.clone().unwrap_or_else(|| snapshot.chat_id.clone());
+        let effective_root = snapshot
+            .root_chat_id
+            .clone()
+            .unwrap_or_else(|| snapshot.chat_id.clone());
         let sessions = gcx.read().await.chat_sessions.clone();
-        let (session_state, session_error) = get_session_state_for_chat(&sessions, &snapshot.chat_id).await;
+        let (session_state, session_error) =
+            get_session_state_for_chat(&sessions, &snapshot.chat_id).await;
         let total_coins = calculate_total_coins_from_chat_messages(&snapshot.messages);
-        let (total_lines_added, total_lines_removed) = calculate_line_changes_from_chat_messages(&snapshot.messages);
-        let (tasks_total, tasks_done, tasks_failed) = calculate_task_progress_from_chat_messages(&snapshot.messages);
+        let (total_lines_added, total_lines_removed) =
+            calculate_line_changes_from_chat_messages(&snapshot.messages);
+        let (tasks_total, tasks_done, tasks_failed) =
+            calculate_task_progress_from_chat_messages(&snapshot.messages);
         let token_totals = calculate_token_totals_from_chat_messages(&snapshot.messages);
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let event = TrajectoryEvent {
@@ -903,7 +921,8 @@ pub async fn check_external_reload_pending(
             &mut loaded.thread,
             loaded.auto_approve_editing_tools_present,
             loaded.auto_approve_dangerous_commands_present,
-        ).await;
+        )
+        .await;
         let mut session = session_arc.lock().await;
         if session.runtime.state == SessionState::Idle && !session.trajectory_dirty {
             info!("Applying pending external reload for {}", chat_id);
@@ -955,34 +974,59 @@ async fn process_trajectory_change(
         }
     } else {
         let loaded = load_trajectory_for_chat(gcx.clone(), chat_id).await;
-        let (updated_at, title, is_title_generated, message_count, parent_id, link_type, root_chat_id, model, mode, total_coins, total_lines_added, total_lines_removed, tasks_total, tasks_done, tasks_failed, token_totals) =
-            if let Some(t) = loaded {
-                let effective_root = t.thread.root_chat_id.clone().unwrap_or_else(|| t.thread.id.clone());
-                let coins = calculate_total_coins_from_chat_messages(&t.messages);
-                let (lines_added, lines_removed) = calculate_line_changes_from_chat_messages(&t.messages);
-                let (t_total, t_done, t_failed) = calculate_task_progress_from_chat_messages(&t.messages);
-                let tok = calculate_token_totals_from_chat_messages(&t.messages);
-                (
-                    Some(t.updated_at),
-                    Some(t.thread.title),
-                    Some(t.thread.is_title_generated),
-                    Some(t.messages.len()),
-                    t.thread.parent_id,
-                    t.thread.link_type,
-                    Some(effective_root),
-                    Some(t.thread.model),
-                    Some(t.thread.mode),
-                    coins,
-                    Some(lines_added),
-                    Some(lines_removed),
-                    Some(t_total),
-                    Some(t_done),
-                    Some(t_failed),
-                    Some(tok),
-                )
-            } else {
-                (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
-            };
+        let (
+            updated_at,
+            title,
+            is_title_generated,
+            message_count,
+            parent_id,
+            link_type,
+            root_chat_id,
+            model,
+            mode,
+            total_coins,
+            total_lines_added,
+            total_lines_removed,
+            tasks_total,
+            tasks_done,
+            tasks_failed,
+            token_totals,
+        ) = if let Some(t) = loaded {
+            let effective_root = t
+                .thread
+                .root_chat_id
+                .clone()
+                .unwrap_or_else(|| t.thread.id.clone());
+            let coins = calculate_total_coins_from_chat_messages(&t.messages);
+            let (lines_added, lines_removed) =
+                calculate_line_changes_from_chat_messages(&t.messages);
+            let (t_total, t_done, t_failed) =
+                calculate_task_progress_from_chat_messages(&t.messages);
+            let tok = calculate_token_totals_from_chat_messages(&t.messages);
+            (
+                Some(t.updated_at),
+                Some(t.thread.title),
+                Some(t.thread.is_title_generated),
+                Some(t.messages.len()),
+                t.thread.parent_id,
+                t.thread.link_type,
+                Some(effective_root),
+                Some(t.thread.model),
+                Some(t.thread.mode),
+                coins,
+                Some(lines_added),
+                Some(lines_removed),
+                Some(t_total),
+                Some(t_done),
+                Some(t_failed),
+                Some(tok),
+            )
+        } else {
+            (
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            )
+        };
         let (session_state, session_error) = get_session_state_for_chat(&sessions, chat_id).await;
         if let Some(tx) = &gcx.read().await.trajectory_events_tx {
             let _ = tx.send(TrajectoryEvent {
@@ -1055,7 +1099,8 @@ async fn process_trajectory_change(
             &mut loaded.thread,
             loaded.auto_approve_editing_tools_present,
             loaded.auto_approve_dangerous_commands_present,
-        ).await;
+        )
+        .await;
         let mut session = session_arc.lock().await;
         if session.runtime.state != SessionState::Idle || session.trajectory_dirty {
             session.external_reload_pending = true;
@@ -1084,7 +1129,10 @@ pub fn start_trajectory_watcher(gcx: Arc<ARwLock<GlobalContext>>) {
 
         for dir in &trajectories_dirs {
             if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                warn!("Failed to create trajectories dir {:?} for watcher: {}", dir, e);
+                warn!(
+                    "Failed to create trajectories dir {:?} for watcher: {}",
+                    dir, e
+                );
             }
         }
 
@@ -1187,7 +1235,10 @@ pub fn validate_trajectory_id(id: &str) -> Result<(), ScratchError> {
             "Invalid trajectory id".to_string(),
         ));
     }
-    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "Invalid trajectory id".to_string(),
@@ -1233,7 +1284,10 @@ fn extract_first_user_message(messages: &[serde_json::Value]) -> Option<String> 
         if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
             continue;
         }
-        if let Some(content) = msg.get("content").and_then(extract_text_with_image_placeholders_from_json) {
+        if let Some(content) = msg
+            .get("content")
+            .and_then(extract_text_with_image_placeholders_from_json)
+        {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.chars().take(200).collect());
@@ -1243,7 +1297,9 @@ fn extract_first_user_message(messages: &[serde_json::Value]) -> Option<String> 
     None
 }
 
-pub fn extract_text_with_image_placeholders_from_json(content_value: &serde_json::Value) -> Option<String> {
+pub fn extract_text_with_image_placeholders_from_json(
+    content_value: &serde_json::Value,
+) -> Option<String> {
     if let Some(content) = content_value.as_str() {
         return Some(content.to_string());
     }
@@ -1286,10 +1342,14 @@ fn build_title_generation_context(messages: &[serde_json::Value]) -> String {
             .get("role")
             .and_then(|r| r.as_str())
             .unwrap_or("unknown");
-        if role == "system" || role == "tool" || role == "context_file" || role == "cd_instruction" {
+        if role == "system" || role == "tool" || role == "context_file" || role == "cd_instruction"
+        {
             continue;
         }
-        let content_text = match msg.get("content").and_then(extract_text_with_image_placeholders_from_json) {
+        let content_text = match msg
+            .get("content")
+            .and_then(extract_text_with_image_placeholders_from_json)
+        {
             Some(text) => text,
             None => continue,
         };
@@ -1329,26 +1389,30 @@ async fn generate_title_llm(
         return None;
     }
 
-    let subagent_config = match get_subagent_config(gcx.clone(), TITLE_GENERATION_SUBAGENT_ID, None).await {
-        Some(config) => config,
-        None => {
-            warn!("subagent config '{}' not found", TITLE_GENERATION_SUBAGENT_ID);
-            return None;
-        }
-    };
+    let subagent_config =
+        match get_subagent_config(gcx.clone(), TITLE_GENERATION_SUBAGENT_ID, None).await {
+            Some(config) => config,
+            None => {
+                warn!(
+                    "subagent config '{}' not found",
+                    TITLE_GENERATION_SUBAGENT_ID
+                );
+                return None;
+            }
+        };
 
     let title_prompt = match subagent_config.messages.user_template.as_ref() {
         Some(prompt) => prompt,
         None => {
-            warn!("messages.user_template not defined for subagent '{}'", TITLE_GENERATION_SUBAGENT_ID);
+            warn!(
+                "messages.user_template not defined for subagent '{}'",
+                TITLE_GENERATION_SUBAGENT_ID
+            );
             return None;
         }
     };
 
-    let prompt = format!(
-        "Chat conversation:\n{}\n\n{}",
-        context, title_prompt
-    );
+    let prompt = format!("Chat conversation:\n{}\n\n{}", context, title_prompt);
     let chat_messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
     match run_subchat_once(gcx, TITLE_GENERATION_SUBAGENT_ID, chat_messages).await {
@@ -1594,18 +1658,26 @@ fn calculate_total_coins_from_messages(messages: &[serde_json::Value]) -> Option
         }
     }
 
-    if found_any { Some(total) } else { None }
+    if found_any {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 fn calculate_task_progress_from_messages(messages: &[serde_json::Value]) -> (i32, i32, i32) {
     // Build a set of successful tool call IDs (tool messages without tool_failed=true)
-    let mut successful_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut successful_tool_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for msg in messages {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
         if role != "tool" {
             continue;
         }
-        let tool_failed = msg.get("tool_failed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let tool_failed = msg
+            .get("tool_failed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !tool_failed {
             if let Some(tool_call_id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
                 successful_tool_ids.insert(tool_call_id.to_string());
@@ -1643,7 +1715,10 @@ fn calculate_task_progress_from_messages(messages: &[serde_json::Value]) -> (i32
             }
 
             // Parse the arguments
-            let args_str = function.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+            let args_str = function
+                .get("arguments")
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
                 if let Some(tasks) = args.get("tasks").and_then(|t| t.as_array()) {
                     let mut total = 0i32;
@@ -1717,12 +1792,17 @@ fn calculate_total_coins_from_chat_messages(messages: &[ChatMessage]) -> Option<
         }
     }
 
-    if found_any { Some(total) } else { None }
+    if found_any {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 fn calculate_task_progress_from_chat_messages(messages: &[ChatMessage]) -> (i32, i32, i32) {
     // Build a set of successful tool call IDs (tool messages without tool_failed=true)
-    let mut successful_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut successful_tool_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for msg in messages {
         if msg.role != "tool" {
             continue;
@@ -1915,8 +1995,10 @@ fn trajectory_data_to_meta(data: &TrajectoryData) -> TrajectoryMeta {
         .map(|s| s.to_string());
 
     let total_coins = calculate_total_coins_from_messages(&data.messages);
-    let (total_lines_added, total_lines_removed) = calculate_line_changes_from_messages(&data.messages);
-    let (tasks_total, tasks_done, tasks_failed) = calculate_task_progress_from_messages(&data.messages);
+    let (total_lines_added, total_lines_removed) =
+        calculate_line_changes_from_messages(&data.messages);
+    let (tasks_total, tasks_done, tasks_failed) =
+        calculate_task_progress_from_messages(&data.messages);
     let token_totals = calculate_token_totals_from_messages(&data.messages);
 
     TrajectoryMeta {
@@ -1972,7 +2054,9 @@ fn encode_cursor(updated_at: &str, id: &str) -> String {
 
 fn decode_cursor(cursor: &str) -> Option<(String, String)> {
     use base64::Engine;
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .ok()?;
     let cursor_str = String::from_utf8(decoded).ok()?;
     let parts: Vec<&str> = cursor_str.splitn(2, '|').collect();
     if parts.len() == 2 {
@@ -2027,11 +2111,9 @@ pub async fn handle_v1_trajectories_list(
         }
     }
     enrich_with_session_state(gcx, &mut all_items).await;
-    all_items.sort_by(|a, b| {
-        match b.updated_at.cmp(&a.updated_at) {
-            std::cmp::Ordering::Equal => b.id.cmp(&a.id),
-            other => other,
-        }
+    all_items.sort_by(|a, b| match b.updated_at.cmp(&a.updated_at) {
+        std::cmp::Ordering::Equal => b.id.cmp(&a.id),
+        other => other,
     });
 
     let total_count = all_items.len();
@@ -2040,7 +2122,8 @@ pub async fn handle_v1_trajectories_list(
         all_items
             .iter()
             .position(|item| {
-                (item.updated_at.as_str(), item.id.as_str()) < (cursor_updated_at.as_str(), cursor_id.as_str())
+                (item.updated_at.as_str(), item.id.as_str())
+                    < (cursor_updated_at.as_str(), cursor_id.as_str())
             })
             .unwrap_or(all_items.len())
     } else {
@@ -2057,7 +2140,9 @@ pub async fn handle_v1_trajectories_list(
     let items: Vec<TrajectoryMeta> = page_items.into_iter().take(limit).collect();
 
     let next_cursor = if has_more {
-        items.last().map(|last| encode_cursor(&last.updated_at, &last.id))
+        items
+            .last()
+            .map(|last| encode_cursor(&last.updated_at, &last.id))
     } else {
         None
     };
@@ -2069,8 +2154,12 @@ pub async fn handle_v1_trajectories_list(
         total_count,
     };
 
-    let json = serde_json::to_string(&response)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {}", e)))?;
+    let json = serde_json::to_string(&response).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Serialization error: {}", e),
+        )
+    })?;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
@@ -2140,11 +2229,9 @@ pub async fn list_all_trajectories_meta(
     }
 
     enrich_with_session_state(gcx, &mut result).await;
-    result.sort_by(|a, b| {
-        match b.updated_at.cmp(&a.updated_at) {
-            std::cmp::Ordering::Equal => b.id.cmp(&a.id),
-            other => other,
-        }
+    result.sort_by(|a, b| match b.updated_at.cmp(&a.updated_at) {
+        std::cmp::Ordering::Equal => b.id.cmp(&a.id),
+        other => other,
     });
 
     Ok(result)
@@ -2173,9 +2260,7 @@ async fn enrich_with_session_state(
         trajectories
             .iter()
             .enumerate()
-            .filter_map(|(idx, traj)| {
-                sessions.get(&traj.id).map(|arc| (idx, arc.clone()))
-            })
+            .filter_map(|(idx, traj)| sessions.get(&traj.id).map(|arc| (idx, arc.clone())))
             .collect()
     };
 
@@ -2293,17 +2378,29 @@ pub async fn handle_v1_trajectories_save(
     atomic_write_json(&file_path, &data)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let parent_id = data.extra.get("parent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let link_type = data.extra.get("link_type").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let effective_root = data.extra.get("root_chat_id")
+    let parent_id = data
+        .extra
+        .get("parent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let link_type = data
+        .extra
+        .get("link_type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let effective_root = data
+        .extra
+        .get("root_chat_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| id.clone());
     let sessions = gcx.read().await.chat_sessions.clone();
     let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
     let total_coins = calculate_total_coins_from_messages(&data.messages);
-    let (total_lines_added, total_lines_removed) = calculate_line_changes_from_messages(&data.messages);
-    let (tasks_total, tasks_done, tasks_failed) = calculate_task_progress_from_messages(&data.messages);
+    let (total_lines_added, total_lines_removed) =
+        calculate_line_changes_from_messages(&data.messages);
+    let (tasks_total, tasks_done, tasks_failed) =
+        calculate_task_progress_from_messages(&data.messages);
     let token_totals = calculate_token_totals_from_messages(&data.messages);
     let event = TrajectoryEvent {
         event_type: if is_new {
@@ -2797,9 +2894,7 @@ mod tests {
 
     #[test]
     fn test_calculate_token_totals_from_messages_null_usage() {
-        let messages = vec![
-            json!({"role": "assistant", "content": "Hi", "usage": null}),
-        ];
+        let messages = vec![json!({"role": "assistant", "content": "Hi", "usage": null})];
         let totals = calculate_token_totals_from_messages(&messages);
         assert_eq!(totals.prompt_tokens, 0);
         assert!(totals.cost_usd.is_none());
@@ -2807,19 +2902,17 @@ mod tests {
 
     #[test]
     fn test_calculate_token_totals_from_messages_alias_keys() {
-        let messages = vec![
-            json!({
-                "role": "assistant",
-                "content": "Hi",
-                "usage": {
-                    "prompt_tokens": 5,
-                    "completion_tokens": 3,
-                    "total_tokens": 8,
-                    "cache_read_tokens": 7,
-                    "cache_creation_tokens": 4,
-                }
-            }),
-        ];
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "Hi",
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 3,
+                "total_tokens": 8,
+                "cache_read_tokens": 7,
+                "cache_creation_tokens": 4,
+            }
+        })];
         let totals = calculate_token_totals_from_messages(&messages);
         assert_eq!(totals.cache_read_tokens, 7);
         assert_eq!(totals.cache_creation_tokens, 4);
@@ -2872,12 +2965,10 @@ mod tests {
 
     #[test]
     fn test_calculate_token_totals_from_chat_messages_no_usage() {
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                ..Default::default()
-            },
-        ];
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            ..Default::default()
+        }];
         let totals = calculate_token_totals_from_chat_messages(&messages);
         assert_eq!(totals.prompt_tokens, 0);
         assert!(totals.cost_usd.is_none());
@@ -2970,6 +3061,7 @@ mod tests {
                 previous_response_id: None,
                 browser_meta: None,
                 active_skill: None,
+                auto_enrichment_enabled: None,
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
             runtime: super::super::types::RuntimeState::default(),
@@ -2979,6 +3071,7 @@ mod tests {
             event_seq: 0,
             event_tx: tx,
             recent_request_ids: VecDeque::new(),
+            recent_request_ids_set: std::collections::HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -3000,6 +3093,7 @@ mod tests {
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
             stop_hook_handle: None,
+            suppress_auto_enrichment_for_next_turn: false,
         };
 
         let snapshot = TrajectorySnapshot::from_session(&session);
@@ -3041,6 +3135,7 @@ mod tests {
             event_seq: 0,
             event_tx: tx,
             recent_request_ids: VecDeque::new(),
+            recent_request_ids_set: std::collections::HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -3062,6 +3157,7 @@ mod tests {
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
             stop_hook_handle: None,
+            suppress_auto_enrichment_for_next_turn: false,
         };
 
         let snapshot = TrajectorySnapshot::from_session(&session);
@@ -3076,8 +3172,14 @@ mod tests {
     fn test_trajectory_load_without_active_skill_field() {
         let json_str = r#"{"id":"chat-1","title":"T","model":"m","mode":"agent","tool_use":"agent","messages":[],"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","include_project_info":true,"checkpoints_enabled":true}"#;
         let t: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        let active_skill = t.get("active_skill").and_then(|v| v.as_str()).map(|s| s.to_string());
-        assert!(active_skill.is_none(), "Old trajectories must load with active_skill = None");
+        let active_skill = t
+            .get("active_skill")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        assert!(
+            active_skill.is_none(),
+            "Old trajectories must load with active_skill = None"
+        );
     }
 
     #[tokio::test]
@@ -3120,7 +3222,10 @@ mod tests {
         assert!(file_path.exists());
         let content = fs::read_to_string(&file_path).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed.get("id").and_then(|v| v.as_str()), Some("stress-chat"));
+        assert_eq!(
+            parsed.get("id").and_then(|v| v.as_str()),
+            Some("stress-chat")
+        );
         assert_eq!(
             parsed
                 .get("messages")

@@ -36,6 +36,24 @@ export type QueuedItem = {
   content?: string;
 };
 
+/** A single item returned by the wand-preview endpoint, shown as an editable chip. */
+export type ManualPreviewItem = {
+  /** "memory" | "trajectory" | "file" */
+  kind: "memory" | "trajectory" | "file";
+  /** Human-friendly display label for the chip */
+  label: string;
+  /** Full ContextFile to inject when the user sends */
+  context_file: {
+    file_name: string;
+    file_content: string;
+    line1: number;
+    line2: number;
+    usefulness: number;
+    skip_pp?: boolean;
+    gradient_type?: number;
+  };
+};
+
 export type IntegrationMeta = {
   name?: string;
   path?: string;
@@ -116,6 +134,8 @@ export type ChatThread = {
 
   /** Currently active skill name, set by activate_skill tool */
   active_skill?: string | null;
+
+  auto_enrichment_enabled?: boolean;
 };
 
 export type SuggestedChat = {
@@ -182,6 +202,9 @@ export type ChatThreadRuntime = {
   last_applied_seq?: string;
   /** Fast lookup index from message_id to message index (rebuilt on snapshots/mutations) */
   message_index_by_id?: Record<string, number>;
+  memory_enrichment_user_touched: boolean;
+  manual_preview_items: ManualPreviewItem[];
+  manual_preview_ran: boolean;
 };
 
 export type Chat = {

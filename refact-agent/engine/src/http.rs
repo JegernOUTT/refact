@@ -54,10 +54,8 @@ pub async fn start_server(
                 let router = make_refact_http_server().layer(Extension(gcx.clone()));
                 let gcx_for_shutdown = gcx.clone();
                 let shutdown = async move {
-                    crate::global_context::block_until_signal(
-                        ask_shutdown_receiver,
-                        shutdown_flag,
-                    ).await;
+                    crate::global_context::block_until_signal(ask_shutdown_receiver, shutdown_flag)
+                        .await;
                     crate::chat::close_all_chat_sessions(gcx_for_shutdown).await;
                 };
                 let server = builder

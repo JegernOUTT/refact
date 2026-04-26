@@ -16,19 +16,16 @@ use crate::providers::traits::{
 
 /// Generic GPT-5 model IDs without a "codex" suffix that are included by this provider.
 /// Explicit allowlist avoids accidentally pulling in unrelated variants like "-pro" or "-reasoning".
-const GENERIC_GPT5_ALLOWLIST: &[&str] = &[
-    "gpt-5.2",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.5",
-];
+const GENERIC_GPT5_ALLOWLIST: &[&str] = &["gpt-5.2", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"];
 
 fn is_codex_model(id: &str) -> bool {
     let lower = id.to_lowercase();
     if lower.contains("codex") {
         return true;
     }
-    GENERIC_GPT5_ALLOWLIST.iter().any(|&allowed| lower == allowed)
+    GENERIC_GPT5_ALLOWLIST
+        .iter()
+        .any(|&allowed| lower == allowed)
 }
 
 fn is_codex_model_conservative(id: &str) -> bool {
@@ -44,7 +41,9 @@ enum AuthSource {
 
 #[derive(Debug, Clone)]
 enum CodexAuth {
-    PlatformApiKey { api_key: String },
+    PlatformApiKey {
+        api_key: String,
+    },
     ChatGptBackendOAuth {
         access_token: String,
         chatgpt_account_id: String,
@@ -114,10 +113,9 @@ impl OpenAICodexProvider {
                 .map_err(|e| format!("Failed to read config: {}", e))?;
             let value: serde_yaml::Value = serde_yaml::from_str(&content)
                 .map_err(|e| format!("Failed to parse YAML: {}", e))?;
-            value
-                .as_mapping()
-                .cloned()
-                .ok_or_else(|| "Config file root is not a YAML mapping. Cannot safely patch.".to_string())?
+            value.as_mapping().cloned().ok_or_else(|| {
+                "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
+            })?
         } else {
             serde_yaml::Mapping::new()
         };
@@ -163,7 +161,11 @@ impl OpenAICodexProvider {
 
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_path = config_path.with_extension(format!("yaml.tmp.oauth.{}.{}", std::process::id(), unique_id));
+        let temp_path = config_path.with_extension(format!(
+            "yaml.tmp.oauth.{}.{}",
+            std::process::id(),
+            unique_id
+        ));
 
         tokio::fs::write(&temp_path, &content)
             .await
@@ -185,7 +187,9 @@ impl OpenAICodexProvider {
             );
         }
 
-        if self.oauth_tokens.has_valid_access_token() && !self.oauth_tokens.chatgpt_account_id.is_empty() {
+        if self.oauth_tokens.has_valid_access_token()
+            && !self.oauth_tokens.chatgpt_account_id.is_empty()
+        {
             return (
                 AuthSource::InAppOAuth,
                 CodexAuth::ChatGptBackendOAuth {
@@ -231,7 +235,10 @@ impl OpenAICodexProvider {
         Err("No ChatGPT OAuth access token available for usage API".to_string())
     }
 
-    pub async fn fetch_usage(&self, http_client: &reqwest::Client) -> Result<OpenAICodexUsage, String> {
+    pub async fn fetch_usage(
+        &self,
+        http_client: &reqwest::Client,
+    ) -> Result<OpenAICodexUsage, String> {
         let token = self.resolve_wham_token()?;
 
         let resp = http_client
@@ -249,7 +256,9 @@ impl OpenAICodexProvider {
             return Err(format!("Usage API returned {}: {}", status, truncated));
         }
 
-        let root: serde_json::Value = resp.json().await
+        let root: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse usage response: {}", e))?;
 
         let data = root.get("data").unwrap_or(&root);
@@ -263,40 +272,64 @@ impl OpenAICodexProvider {
             let reset_at = obj.get("reset_at").and_then(|v| {
                 if let Some(ts) = v.as_i64() {
                     use std::time::{Duration, UNIX_EPOCH};
-                    let dt: chrono::DateTime<chrono::Utc> = (UNIX_EPOCH + Duration::from_secs(ts as u64)).into();
+                    let dt: chrono::DateTime<chrono::Utc> =
+                        (UNIX_EPOCH + Duration::from_secs(ts as u64)).into();
                     Some(dt.to_rfc3339())
                 } else {
                     v.as_str().map(|s| s.to_string())
                 }
             });
-            Some(OpenAICodexUsageWindow { used_percent, reset_at })
+            Some(OpenAICodexUsageWindow {
+                used_percent,
+                reset_at,
+            })
         };
 
         let parse_rate_limit = |rl: &serde_json::Value| -> OpenAICodexRateLimit {
             OpenAICodexRateLimit {
-                limit_reached: rl.get("limit_reached").and_then(|v| v.as_bool()).unwrap_or(false),
+                limit_reached: rl
+                    .get("limit_reached")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 primary_window: rl.get("primary_window").and_then(|w| parse_window(w)),
                 secondary_window: rl.get("secondary_window").and_then(|w| parse_window(w)),
             }
         };
 
-        let plan_type = data.get("plan_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let plan_type = data
+            .get("plan_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let rate_limit = data.get("rate_limit").map(|rl| parse_rate_limit(rl));
-        let code_review_rate_limit = data.get("code_review_rate_limit").map(|rl| parse_rate_limit(rl));
+        let code_review_rate_limit = data
+            .get("code_review_rate_limit")
+            .map(|rl| parse_rate_limit(rl));
 
         let credits = data.get("credits").map(|c| {
-            let balance = c.get("balance")
+            let balance = c
+                .get("balance")
                 .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()))
                 .or_else(|| as_f64_loose(c.get("balance").unwrap_or(&serde_json::Value::Null)))
                 .unwrap_or(0.0);
             OpenAICodexCredits {
                 balance,
-                unlimited: c.get("unlimited").and_then(|v| v.as_bool()).unwrap_or(false),
-                has_credits: c.get("has_credits").and_then(|v| v.as_bool()).unwrap_or(false),
+                unlimited: c
+                    .get("unlimited")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                has_credits: c
+                    .get("has_credits")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             }
         });
 
-        Ok(OpenAICodexUsage { plan_type, rate_limit, code_review_rate_limit, credits })
+        Ok(OpenAICodexUsage {
+            plan_type,
+            rate_limit,
+            code_review_rate_limit,
+            credits,
+        })
     }
 
     fn diagnose_auth_status(&self) -> String {
@@ -335,7 +368,10 @@ impl OpenAICodexProvider {
 
         let mut req = http_client
             .get(CHATGPT_CODEX_MODELS_URL)
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {access_token}"))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {access_token}"),
+            )
             .header("OpenAI-Beta", "responses=experimental")
             .header("originator", "codex_cli_rs");
         if !chatgpt_account_id.is_empty() {
@@ -358,7 +394,10 @@ impl OpenAICodexProvider {
         }
 
         if !status.is_success() {
-            tracing::warn!("OpenAI Codex: /codex/models returned {} (transient), using hardcoded list", status);
+            tracing::warn!(
+                "OpenAI Codex: /codex/models returned {} (transient), using hardcoded list",
+                status
+            );
             return self.fetch_models_from_hardcoded_list(model_caps);
         }
 
@@ -386,19 +425,28 @@ impl OpenAICodexProvider {
                 Some(s) => s.to_string(),
                 None => continue,
             };
-            let supported_in_api = model.get("supported_in_api").and_then(|v| v.as_bool()).unwrap_or(true);
+            let supported_in_api = model
+                .get("supported_in_api")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             if !supported_in_api {
                 continue;
             }
-            let display_name = model.get("display_name").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let n_ctx = model.get("max_context_window")
+            let display_name = model
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let n_ctx = model
+                .get("max_context_window")
                 .or_else(|| model.get("context_window"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
-            let supports_parallel = model.get("supports_parallel_tool_calls")
+            let supports_parallel = model
+                .get("supports_parallel_tool_calls")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let supports_multimodality = model.get("input_modalities")
+            let supports_multimodality = model
+                .get("input_modalities")
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().any(|m| m.as_str() == Some("image")))
                 .unwrap_or(true);
@@ -407,7 +455,11 @@ impl OpenAICodexProvider {
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|r| r.get("effort").and_then(|e| e.as_str()).map(|s| s.to_string()))
+                        .filter_map(|r| {
+                            r.get("effort")
+                                .and_then(|e| e.as_str())
+                                .map(|s| s.to_string())
+                        })
                         .collect()
                 });
             let enabled = enabled_set.contains(slug.as_str());
@@ -431,7 +483,10 @@ impl OpenAICodexProvider {
             }
         }
 
-        tracing::info!("OpenAI Codex: {} models available (from chatgpt backend /codex/models)", models_map.len());
+        tracing::info!(
+            "OpenAI Codex: {} models available (from chatgpt backend /codex/models)",
+            models_map.len()
+        );
 
         let mut models: Vec<AvailableModel> = models_map.into_values().collect();
         merge_custom_models(&mut models, &self.custom_models, &enabled_set);
@@ -468,14 +523,20 @@ impl OpenAICodexProvider {
         }
 
         if !status.is_success() {
-            tracing::warn!("OpenAI Codex: /v1/models returned {} (transient), using hardcoded list", status);
+            tracing::warn!(
+                "OpenAI Codex: /v1/models returned {} (transient), using hardcoded list",
+                status
+            );
             return self.fetch_models_from_hardcoded_list(model_caps);
         }
 
         let json: serde_json::Value = match response.json().await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("OpenAI Codex: failed to parse /v1/models response: {}, using hardcoded list", e);
+                tracing::warn!(
+                    "OpenAI Codex: failed to parse /v1/models response: {}, using hardcoded list",
+                    e
+                );
                 return self.fetch_models_from_hardcoded_list(model_caps);
             }
         };
@@ -502,7 +563,10 @@ impl OpenAICodexProvider {
             let enabled = enabled_set.contains(id.as_str());
             let pricing = self.model_pricing(id.as_str());
             if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, &id) {
-                models_map.insert(id.clone(), AvailableModel::from_caps(&id, &caps.caps, enabled, pricing));
+                models_map.insert(
+                    id.clone(),
+                    AvailableModel::from_caps(&id, &caps.caps, enabled, pricing),
+                );
             } else {
                 models_map.insert(id.clone(), self.default_codex_model(id, enabled, pricing));
             }
@@ -512,11 +576,17 @@ impl OpenAICodexProvider {
             if is_codex_model_conservative(name) && !models_map.contains_key(name) {
                 let enabled = enabled_set.contains(name.as_str());
                 let pricing = self.model_pricing(name);
-                models_map.insert(name.clone(), AvailableModel::from_caps(name, caps, enabled, pricing));
+                models_map.insert(
+                    name.clone(),
+                    AvailableModel::from_caps(name, caps, enabled, pricing),
+                );
             }
         }
 
-        tracing::info!("OpenAI Codex: {} models available (from /v1/models API)", models_map.len());
+        tracing::info!(
+            "OpenAI Codex: {} models available (from /v1/models API)",
+            models_map.len()
+        );
 
         let mut models: Vec<AvailableModel> = models_map.into_values().collect();
         merge_custom_models(&mut models, &self.custom_models, &enabled_set);
@@ -524,7 +594,10 @@ impl OpenAICodexProvider {
         models
     }
 
-    fn fetch_models_from_hardcoded_list(&self, model_caps: &HashMap<String, ModelCapabilities>) -> Vec<AvailableModel> {
+    fn fetch_models_from_hardcoded_list(
+        &self,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
         let (_, auth) = self.resolve_auth();
         let (caps_filter, base_ids): (fn(&str) -> bool, &[&str]) = match auth {
             CodexAuth::ChatGptBackendOAuth { .. } => (
@@ -560,7 +633,10 @@ impl OpenAICodexProvider {
             }
         }
 
-        tracing::info!("OpenAI Codex: {} models available (hardcoded + caps-discovered)", codex_model_ids.len());
+        tracing::info!(
+            "OpenAI Codex: {} models available (hardcoded + caps-discovered)",
+            codex_model_ids.len()
+        );
 
         let enabled_set: HashSet<&str> = self.enabled_models.iter().map(|s| s.as_str()).collect();
         let mut models: Vec<AvailableModel> = Vec::new();
@@ -570,9 +646,14 @@ impl OpenAICodexProvider {
             let pricing = self.model_pricing(model_id);
 
             if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, model_id) {
-                models.push(AvailableModel::from_caps(model_id, &caps.caps, enabled, pricing));
+                models.push(AvailableModel::from_caps(
+                    model_id, &caps.caps, enabled, pricing,
+                ));
             } else {
-                tracing::debug!("OpenAI Codex: no model_caps match for '{}', using defaults", model_id);
+                tracing::debug!(
+                    "OpenAI Codex: no model_caps match for '{}', using defaults",
+                    model_id
+                );
                 models.push(self.default_codex_model(model_id.clone(), enabled, pricing));
             }
         }
@@ -582,7 +663,12 @@ impl OpenAICodexProvider {
         models
     }
 
-    fn default_codex_model(&self, id: String, enabled: bool, pricing: Option<ModelPricing>) -> AvailableModel {
+    fn default_codex_model(
+        &self,
+        id: String,
+        enabled: bool,
+        pricing: Option<ModelPricing>,
+    ) -> AvailableModel {
         AvailableModel {
             id,
             display_name: None,
@@ -591,7 +677,11 @@ impl OpenAICodexProvider {
             supports_parallel_tools: true,
             supports_strict_tools: false,
             supports_multimodality: true,
-            reasoning_effort_options: Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()]),
+            reasoning_effort_options: Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ]),
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
             tokenizer: None,
@@ -657,8 +747,7 @@ available:
 
     fn provider_settings_apply(&mut self, yaml: serde_yaml::Value) -> Result<(), String> {
         if let Some(oauth_tokens) = yaml.get("oauth_tokens") {
-            self.oauth_tokens = serde_yaml::from_value(oauth_tokens.clone())
-                .unwrap_or_default();
+            self.oauth_tokens = serde_yaml::from_value(oauth_tokens.clone()).unwrap_or_default();
         }
         parse_enabled_models(&yaml, &mut self.enabled_models);
         parse_custom_models(&yaml, &mut self.custom_models);
@@ -667,7 +756,8 @@ available:
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
         let auth_status = self.diagnose_auth_status();
-        let oauth_connected = self.oauth_tokens.has_valid_access_token() || self.oauth_tokens.has_refresh_token();
+        let oauth_connected =
+            self.oauth_tokens.has_valid_access_token() || self.oauth_tokens.has_refresh_token();
         let api_key_ready = !self.oauth_tokens.openai_api_key.is_empty();
 
         json!({
@@ -685,12 +775,21 @@ available:
         let mut extra_headers = HashMap::new();
 
         let (chat_endpoint, api_key) = match auth {
-            CodexAuth::PlatformApiKey { api_key } => ("https://api.openai.com/v1/responses".to_string(), api_key),
-            CodexAuth::ChatGptBackendOAuth { access_token, chatgpt_account_id, .. } => {
+            CodexAuth::PlatformApiKey { api_key } => {
+                ("https://api.openai.com/v1/responses".to_string(), api_key)
+            }
+            CodexAuth::ChatGptBackendOAuth {
+                access_token,
+                chatgpt_account_id,
+                ..
+            } => {
                 if !chatgpt_account_id.is_empty() {
                     extra_headers.insert("chatgpt-account-id".to_string(), chatgpt_account_id);
                 }
-                extra_headers.insert("OpenAI-Beta".to_string(), "responses=experimental".to_string());
+                extra_headers.insert(
+                    "OpenAI-Beta".to_string(),
+                    "responses=experimental".to_string(),
+                );
                 extra_headers.insert("originator".to_string(), "codex_cli_rs".to_string());
                 extra_headers.insert("accept".to_string(), "text/event-stream".to_string());
                 (
@@ -765,10 +864,22 @@ available:
                 return self.get_custom_models_only();
             }
             CodexAuth::PlatformApiKey { ref api_key } if !api_key.is_empty() => {
-                return self.fetch_models_from_api(http_client, model_caps, api_key).await;
+                return self
+                    .fetch_models_from_api(http_client, model_caps, api_key)
+                    .await;
             }
-            CodexAuth::ChatGptBackendOAuth { ref access_token, ref chatgpt_account_id } => {
-                return self.fetch_models_from_chatgpt_api(http_client, model_caps, access_token, chatgpt_account_id).await;
+            CodexAuth::ChatGptBackendOAuth {
+                ref access_token,
+                ref chatgpt_account_id,
+            } => {
+                return self
+                    .fetch_models_from_chatgpt_api(
+                        http_client,
+                        model_caps,
+                        access_token,
+                        chatgpt_account_id,
+                    )
+                    .await;
             }
             _ => {}
         }
@@ -891,7 +1002,10 @@ mod tests {
         assert!(super::is_codex_model("gpt-5.2-codex"));
         assert!(super::is_codex_model("gpt-5.1-codex-max"));
         assert!(super::is_codex_model("gpt-5.1-codex-mini"));
-        assert!(super::is_codex_model("GPT-5.3-CODEX"), "must be case-insensitive");
+        assert!(
+            super::is_codex_model("GPT-5.3-CODEX"),
+            "must be case-insensitive"
+        );
         assert!(super::is_codex_model("gpt-5-codex"));
         assert!(super::is_codex_model("gpt-5.3-codex-spark"));
     }
@@ -900,15 +1014,27 @@ mod tests {
     fn is_codex_model_matches_explicit_allowlist_variants() {
         assert!(super::is_codex_model("gpt-5.2"), "gpt-5.2 is in allowlist");
         assert!(super::is_codex_model("gpt-5.4"), "gpt-5.4 is in allowlist");
-        assert!(super::is_codex_model("gpt-5.4-mini"), "gpt-5.4-mini is in allowlist");
+        assert!(
+            super::is_codex_model("gpt-5.4-mini"),
+            "gpt-5.4-mini is in allowlist"
+        );
         assert!(super::is_codex_model("gpt-5.5"), "gpt-5.5 is in allowlist");
     }
 
     #[test]
     fn is_codex_model_excludes_non_allowlist_generic_gpt5() {
-        assert!(!super::is_codex_model("gpt-5.3"), "gpt-5.3 not in allowlist");
-        assert!(!super::is_codex_model("gpt-5.6"), "gpt-5.6 not in allowlist");
-        assert!(!super::is_codex_model("gpt-5.1"), "gpt-5.1 not in allowlist");
+        assert!(
+            !super::is_codex_model("gpt-5.3"),
+            "gpt-5.3 not in allowlist"
+        );
+        assert!(
+            !super::is_codex_model("gpt-5.6"),
+            "gpt-5.6 not in allowlist"
+        );
+        assert!(
+            !super::is_codex_model("gpt-5.1"),
+            "gpt-5.1 not in allowlist"
+        );
     }
 
     #[test]
@@ -917,8 +1043,14 @@ mod tests {
         assert!(!super::is_codex_model("gpt-4"));
         assert!(!super::is_codex_model("gpt-3.5-turbo"));
         assert!(!super::is_codex_model("gpt-5.2-pro"), "not in allowlist");
-        assert!(!super::is_codex_model("gpt-5.4-preview"), "not in allowlist");
-        assert!(!super::is_codex_model("gpt-5.4-reasoning"), "not in allowlist");
+        assert!(
+            !super::is_codex_model("gpt-5.4-preview"),
+            "not in allowlist"
+        );
+        assert!(
+            !super::is_codex_model("gpt-5.4-reasoning"),
+            "not in allowlist"
+        );
     }
 
     #[test]
@@ -931,9 +1063,18 @@ mod tests {
         assert!(re.is_match("GPT-5.3-CODEX"), "must be case-insensitive");
         assert!(re.is_match("gpt-5.1-codex-max"));
 
-        assert!(!re.is_match("gpt-5.4"), "allowlist entry: not in conservative regex");
-        assert!(!re.is_match("gpt-5.5"), "allowlist entry: not in conservative regex");
-        assert!(!re.is_match("gpt-5.2"), "allowlist entry: not in conservative regex");
+        assert!(
+            !re.is_match("gpt-5.4"),
+            "allowlist entry: not in conservative regex"
+        );
+        assert!(
+            !re.is_match("gpt-5.5"),
+            "allowlist entry: not in conservative regex"
+        );
+        assert!(
+            !re.is_match("gpt-5.2"),
+            "allowlist entry: not in conservative regex"
+        );
         assert!(!re.is_match("gpt-4o"));
         assert!(!re.is_match("gpt-4"));
         assert!(!re.is_match("gpt-3.5-turbo"));
@@ -958,7 +1099,11 @@ mod tests {
 
         let conservative = regex::Regex::new(r"(?i)^gpt.*codex").unwrap();
         for id in &ids {
-            assert!(conservative.is_match(id), "OAuth path returned non-codex model: '{}'", id);
+            assert!(
+                conservative.is_match(id),
+                "OAuth path returned non-codex model: '{}'",
+                id
+            );
         }
 
         assert!(!ids.contains(&"gpt-5.5"));
@@ -991,7 +1136,11 @@ mod tests {
 
         for id in &ids {
             let count = ids.iter().filter(|x| **x == *id).count();
-            assert_eq!(count, 1, "model '{}' appears {} times (must be 1)", id, count);
+            assert_eq!(
+                count, 1,
+                "model '{}' appears {} times (must be 1)",
+                id, count
+            );
         }
         assert!(ids.contains(&"gpt-5.6-codex"));
     }
@@ -1010,7 +1159,8 @@ mod tests {
     #[tokio::test]
     async fn custom_models_appear_with_no_auth() {
         let mut p = OpenAICodexProvider::default();
-        p.custom_models.insert("my-custom".to_string(), CustomModelConfig::default());
+        p.custom_models
+            .insert("my-custom".to_string(), CustomModelConfig::default());
         let client = reqwest::Client::new();
         let models: Vec<AvailableModel> = p.fetch_available_models(&client, &empty_caps()).await;
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
@@ -1020,7 +1170,8 @@ mod tests {
     #[tokio::test]
     async fn custom_models_appear_with_oauth() {
         let mut p = provider_with_oauth("tok", "acct");
-        p.custom_models.insert("my-custom".to_string(), CustomModelConfig::default());
+        p.custom_models
+            .insert("my-custom".to_string(), CustomModelConfig::default());
         let client = reqwest::Client::new();
         let models: Vec<AvailableModel> = p.fetch_available_models(&client, &empty_caps()).await;
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();

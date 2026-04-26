@@ -4,7 +4,9 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use serde_json::json;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -25,10 +27,13 @@ impl ToolConfigSubagent {
         if let Some(ref tool_schema) = self.config.tool {
             let mut properties = serde_json::Map::new();
             for p in &tool_schema.parameters {
-                properties.insert(p.name.clone(), json!({
-                    "type": p.param_type,
-                    "description": p.description
-                }));
+                properties.insert(
+                    p.name.clone(),
+                    json!({
+                        "type": p.param_type,
+                        "description": p.description
+                    }),
+                );
             }
             json!({
                 "type": "object",
@@ -36,10 +41,7 @@ impl ToolConfigSubagent {
                 "required": tool_schema.required
             })
         } else {
-            json_schema_from_params(
-                &[("task", "string", "The task to execute")],
-                &["task"],
-            )
+            json_schema_from_params(&[("task", "string", "The task to execute")], &["task"])
         }
     }
 
@@ -68,7 +70,12 @@ impl Tool for ToolConfigSubagent {
             self.config.description.clone()
         };
 
-        let allow_parallel = self.config.tool.as_ref().map(|t| t.allow_parallel).unwrap_or(false);
+        let allow_parallel = self
+            .config
+            .tool
+            .as_ref()
+            .map(|t| t.allow_parallel)
+            .unwrap_or(false);
 
         ToolDesc {
             name: self.config.id.clone(),
@@ -94,7 +101,14 @@ impl Tool for ToolConfigSubagent {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
 
-        let (gcx, parent_chat_id, parent_root_chat_id, parent_subchat_tx, parent_abort_flag, current_depth) = {
+        let (
+            gcx,
+            parent_chat_id,
+            parent_root_chat_id,
+            parent_subchat_tx,
+            parent_abort_flag,
+            current_depth,
+        ) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.global_context.clone(),
@@ -179,7 +193,8 @@ impl Tool for ToolConfigSubagent {
                 ..Default::default()
             });
         } else {
-            let task = args.get("task")
+            let task = args
+                .get("task")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Execute the task");
             messages.push(ChatMessage {
@@ -210,7 +225,10 @@ impl Tool for ToolConfigSubagent {
                     false,
                     vec![ContextEnum::ChatMessage(ChatMessage {
                         role: "tool".to_string(),
-                        content: ChatContent::SimpleText(format!("{} aborted by user.", self.config.title)),
+                        content: ChatContent::SimpleText(format!(
+                            "{} aborted by user.",
+                            self.config.title
+                        )),
                         tool_calls: None,
                         tool_call_id: tool_call_id.clone(),
                         tool_failed: Some(true),
@@ -225,12 +243,11 @@ impl Tool for ToolConfigSubagent {
         let last_assistant = result.messages.iter().rev().find(|m| m.role == "assistant");
         let result_content = last_assistant
             .map(|m| m.content.content_text_only())
-            .unwrap_or_else(|| format!("{} completed but produced no response.", self.config.title));
+            .unwrap_or_else(|| {
+                format!("{} completed but produced no response.", self.config.title)
+            });
 
-        let result_message = format!(
-            "# {} Result\n\n{}",
-            self.config.title, result_content
-        );
+        let result_message = format!("# {} Result\n\n{}", self.config.title, result_content);
 
         Ok((
             false,

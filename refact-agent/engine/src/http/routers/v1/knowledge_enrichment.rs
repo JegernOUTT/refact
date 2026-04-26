@@ -1,11 +1,35 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock as ARwLock;
 use regex::Regex;
+use axum::extract::{Extension, Path};
+use axum::response::IntoResponse;
+use axum::Json;
+use hyper::StatusCode;
+use serde::{Deserialize, Serialize};
 
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 use crate::global_context::GlobalContext;
 use crate::memories::memories_search;
+use crate::subchat::{resolve_subchat_config, run_subchat};
+use crate::yaml_configs::customization_registry::get_subagent_config;
+
+static PATH_IN_CARD_RE: OnceLock<Regex> = OnceLock::new();
+static TITLE_IN_CARD_RE: OnceLock<Regex> = OnceLock::new();
+static CODE_FENCE_RE: OnceLock<Regex> = OnceLock::new();
+
+fn path_in_card_re() -> &'static Regex {
+    PATH_IN_CARD_RE.get_or_init(|| Regex::new(r"Memory file: (.+)").unwrap())
+}
+
+fn title_in_card_re() -> &'static Regex {
+    TITLE_IN_CARD_RE.get_or_init(|| Regex::new(r"(?m)^Title: (.+)$").unwrap())
+}
+
+fn code_fence_re() -> &'static Regex {
+    CODE_FENCE_RE.get_or_init(|| Regex::new(r"```[\s\S]*?```").unwrap())
+}
 
 fn format_enrichment_card(m: &crate::memories::MemoRecord) -> String {
     let mut out = String::new();
@@ -25,9 +49,11 @@ fn format_enrichment_card(m: &crate::memories::MemoRecord) -> String {
     }
     if let Some(path) = &m.file_path {
         out.push_str(&format!("Memory file: {}\n", path.display()));
-        out.push_str(&format!("To load full content: call `cat(paths=\"{}\")`\n\n", path.display()));
+        out.push_str(&format!(
+            "To load full content: call `cat(paths=\"{}\")`\n\n",
+            path.display()
+        ));
     }
-    // Keep the card small to preserve user intent.
     let snippet: String = m.content.chars().take(900).collect();
     out.push_str(&snippet);
     if m.content.chars().count() > 900 {
@@ -77,8 +103,7 @@ pub async fn enrich_messages_with_knowledge(
 }
 
 fn normalize_query(query: &str) -> String {
-    let code_fence_re = Regex::new(r"```[\s\S]*?```").unwrap();
-    let normalized = code_fence_re.replace_all(query, " [code] ").to_string();
+    let normalized = code_fence_re().replace_all(query, " [code] ").to_string();
     let normalized = normalized.trim();
     if normalized.len() > MAX_QUERY_LENGTH {
         normalized.chars().take(MAX_QUERY_LENGTH).collect()
@@ -152,7 +177,8 @@ fn count_strong_signals(query: &str) -> usize {
     {
         count += 1;
     }
-    let path_re = Regex::new(r"\b[\w-]+/[\w-]+(?:/[\w.-]+)*\b").unwrap();
+    static PATH_RE: OnceLock<Regex> = OnceLock::new();
+    let path_re = PATH_RE.get_or_init(|| Regex::new(r"\b[\w-]+/[\w-]+(?:/[\w.-]+)*\b").unwrap());
     if path_re.is_match(query) {
         count += 1;
     }
@@ -172,7 +198,6 @@ fn count_strong_signals(query: &str) -> usize {
     if retrieval_phrases.iter().any(|p| query_lower.contains(p)) {
         count += 1;
     }
-
     count
 }
 
@@ -277,7 +302,6 @@ async fn create_knowledge_context(
 fn has_knowledge_enrichment_near(messages: &[ChatMessage], user_idx: usize) -> bool {
     let search_start = user_idx.saturating_sub(2);
     let search_end = (user_idx + 2).min(messages.len());
-
     for i in search_start..search_end {
         if messages[i].role == "context_file"
             && messages[i].tool_call_id == KNOWLEDGE_ENRICHMENT_MARKER
@@ -306,4 +330,280 @@ fn get_existing_context_file_paths(messages: &[ChatMessage]) -> HashSet<String> 
         }
     }
     paths
+}
+
+/// Returns all directories that memory/trajectory files may legitimately live in.
+async fn get_allowed_enrichment_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let config_dir = gcx.read().await.config_dir.clone();
+    dirs.push(config_dir.clone());
+
+    let traj_dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx.clone()).await;
+    dirs.extend(traj_dirs);
+
+    let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
+    for pd in project_dirs {
+        dirs.push(pd.join(".refact"));
+    }
+
+    dirs
+}
+
+fn is_path_in_allowed_dirs(path: &std::path::Path, allowed: &[PathBuf]) -> bool {
+    allowed.iter().any(|root| path.starts_with(root))
+}
+
+/// Extract enrichment items from tool result messages produced by the knowledge tool.
+/// Content comes directly from tool results (server-generated) — no re-reading from disk.
+/// Paths are validated against allowed directories.
+fn extract_items_from_tool_results(
+    messages: &[ChatMessage],
+    allowed_dirs: &[PathBuf],
+) -> Vec<EnrichmentItem> {
+    let path_re = path_in_card_re();
+    let title_re = title_in_card_re();
+
+    let mut items: Vec<EnrichmentItem> = Vec::new();
+    let mut seen_paths: HashSet<String> = HashSet::new();
+
+    for msg in messages {
+        if msg.role != "tool" {
+            continue;
+        }
+        let text = match &msg.content {
+            ChatContent::SimpleText(t) => t.as_str(),
+            _ => continue,
+        };
+
+        if !text.contains("Memory file:") {
+            continue;
+        }
+
+        for section in text.split("# Related memory").skip(1) {
+            let path_str = match path_re
+                .captures(section)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().trim().to_string())
+            {
+                Some(p) if !p.is_empty() => p,
+                _ => continue,
+            };
+
+            if seen_paths.contains(&path_str) {
+                continue;
+            }
+
+            let path = std::path::Path::new(&path_str);
+            if !is_path_in_allowed_dirs(path, allowed_dirs) {
+                tracing::warn!(
+                    "preview: skipping enrichment path outside allowed roots: {}",
+                    path_str
+                );
+                continue;
+            }
+
+            let label = title_re
+                .captures(section)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().trim().to_string())
+                .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()))
+                .unwrap_or_else(|| path_str.clone());
+
+            let kind = if path_str.contains("trajectories") {
+                "trajectory"
+            } else {
+                "memory"
+            };
+
+            let card = format!("# Related memory{}", section);
+            let content: String = card.chars().take(900).collect();
+            let line_count = content.lines().count().max(1);
+
+            seen_paths.insert(path_str.clone());
+
+            items.push(EnrichmentItem {
+                kind: kind.to_string(),
+                label,
+                context_file: ContextFile {
+                    file_name: path_str,
+                    file_content: content,
+                    line1: 1,
+                    line2: line_count,
+                    file_rev: None,
+                    symbols: vec![],
+                    gradient_type: -1,
+                    usefulness: 85.0,
+                    skip_pp: true,
+                },
+            });
+        }
+    }
+
+    items
+}
+
+/// Request body for the manual memory enrichment preview endpoint.
+#[derive(Deserialize)]
+pub struct MemoryEnrichmentPreviewRequest {
+    pub text: String,
+}
+
+/// A single enrichment item returned to the frontend for wand-preview chip rendering.
+#[derive(Serialize)]
+pub struct EnrichmentItem {
+    pub kind: String,
+    pub label: String,
+    pub context_file: ContextFile,
+}
+
+/// Response shape for the wand-preview endpoint.
+#[derive(Serialize)]
+pub struct MemoryEnrichmentPreviewResponse {
+    pub query_used: String,
+    pub rewritten_text: String,
+    pub items: Vec<EnrichmentItem>,
+}
+
+/// POST /v1/chats/:chat_id/memory-enrichment/preview
+pub async fn handle_v1_memory_enrichment_preview(
+    Path(_chat_id): Path<String>,
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Json(payload): Json<MemoryEnrichmentPreviewRequest>,
+) -> impl IntoResponse {
+    let text = payload.text.trim().to_string();
+    if text.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"detail": "text must not be empty"})),
+        )
+            .into_response();
+    }
+
+    let query = if text.len() > MAX_QUERY_LENGTH {
+        text.chars().take(MAX_QUERY_LENGTH).collect::<String>()
+    } else {
+        text.clone()
+    };
+
+    match model_gather_and_rewrite(gcx.clone(), &query).await {
+        Ok((rewritten_text, items)) => {
+            let resp = MemoryEnrichmentPreviewResponse {
+                query_used: query,
+                rewritten_text,
+                items,
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(resp).unwrap_or_default()),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!("memory enrichment preview failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"detail": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+const ENRICHMENT_SUBAGENT_ID: &str = "memory_enrichment_rewrite";
+
+async fn model_gather_and_rewrite(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    query: &str,
+) -> Result<(String, Vec<EnrichmentItem>), String> {
+    let system_prompt = get_subagent_config(gcx.clone(), ENRICHMENT_SUBAGENT_ID, None)
+        .await
+        .and_then(|c| c.messages.system_prompt)
+        .unwrap_or_else(|| {
+            "Search for relevant memories using the knowledge tool, then output JSON: \
+            {\"rewritten_text\": \"...\"}"
+                .to_string()
+        });
+
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: ChatContent::SimpleText(system_prompt),
+            ..Default::default()
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText(query.to_string()),
+            ..Default::default()
+        },
+    ];
+
+    let config = resolve_subchat_config(
+        gcx.clone(),
+        ENRICHMENT_SUBAGENT_ID,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(vec!["knowledge".to_string()]),
+        4,
+        false,
+        None,
+        "agent".to_string(),
+    )
+    .await
+    .map_err(|e| format!("config: {}", e))?;
+
+    let result = run_subchat(gcx.clone(), messages, config)
+        .await
+        .map_err(|e| format!("subchat: {}", e))?;
+
+    let last_text = result
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant")
+        .and_then(|m| match &m.content {
+            ChatContent::SimpleText(t) => Some(t.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let rewritten_text = parse_rewritten_text(&last_text);
+
+    let allowed_dirs = get_allowed_enrichment_dirs(gcx.clone()).await;
+    let mut items = extract_items_from_tool_results(&result.messages, &allowed_dirs);
+
+    items.truncate(5);
+
+    Ok((rewritten_text, items))
+}
+
+fn parse_rewritten_text(text: &str) -> String {
+    let stripped = {
+        let t = text.trim();
+        if t.starts_with("```") {
+            let inner: Vec<&str> = t.lines().skip(1).collect();
+            let last = inner
+                .iter()
+                .rposition(|l| l.trim() == "```")
+                .unwrap_or(inner.len());
+            inner[..last].join("\n")
+        } else {
+            t.to_string()
+        }
+    };
+
+    let val = serde_json::from_str::<serde_json::Value>(stripped.trim())
+        .or_else(|_| crate::json_utils::extract_json_object(text));
+
+    match val {
+        Ok(v) => v
+            .get("rewritten_text")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
 }

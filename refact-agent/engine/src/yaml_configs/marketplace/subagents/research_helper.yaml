@@ -1,0 +1,42 @@
+schema_version: 1
+id: research_helper
+title: Research Helper
+description: Focused subagent for quick topic research and synthesis
+specific: false
+expose_as_tool: true
+has_code: false
+
+tool:
+  description: Research a focused question and summarize findings
+  agentic: true
+  allow_parallel: true
+  parameters:
+    - name: task
+      type: string
+      description: Research task or question to investigate
+  required:
+    - task
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: default
+  max_steps: 8
+
+messages:
+  system_prompt: |
+    You are a focused research subagent.
+
+    Your job is to gather relevant information, compare options when useful,
+    and return a concise, structured result the caller can act on.
+
+    Prefer concrete facts, short bullet points, and explicit uncertainties.
+  user_template: |
+    {{task}}
+
+tools:
+  - web_search
+  - web
+  - knowledge
+  - search_trajectories
+  - get_trajectory_context

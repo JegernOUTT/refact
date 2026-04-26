@@ -8,12 +8,11 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_web_search::{
-    clamp_num_results,
-    execute_web_search_results,
-    DEFAULT_NUM_RESULTS,
-    MAX_NUM_RESULTS,
+    clamp_num_results, execute_web_search_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS,
 };
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 
 pub struct ToolWebSearch {

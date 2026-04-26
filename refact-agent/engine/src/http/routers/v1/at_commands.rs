@@ -103,7 +103,11 @@ pub async fn invalidate_slash_cache() {
 async fn load_slash_commands_and_skills(
     gcx: Arc<ARwLock<GlobalContext>>,
 ) -> (Vec<SlashCommand>, Vec<SkillIndex>) {
-    let current_gen = gcx.read().await.ext_cache_generation.load(Ordering::Relaxed);
+    let current_gen = gcx
+        .read()
+        .await
+        .ext_cache_generation
+        .load(Ordering::Relaxed);
     let lock = SLASH_CACHE.get_or_init(|| tokio::sync::RwLock::new(None));
     {
         let read = lock.read().await;
@@ -151,12 +155,19 @@ pub fn slash_completions_for_prefix(
     for cmd in commands {
         let name_with_slash = format!("/{}", cmd.name);
         if name_with_slash.starts_with(prefix) {
-            details.insert(name_with_slash.clone(), CompletionDetail {
-                description: cmd.description.clone(),
-                argument_hint: if cmd.argument_hint.is_empty() { None } else { Some(cmd.argument_hint.clone()) },
-                source: source_label(&cmd.source),
-                kind: "cmd".to_string(),
-            });
+            details.insert(
+                name_with_slash.clone(),
+                CompletionDetail {
+                    description: cmd.description.clone(),
+                    argument_hint: if cmd.argument_hint.is_empty() {
+                        None
+                    } else {
+                        Some(cmd.argument_hint.clone())
+                    },
+                    source: source_label(&cmd.source),
+                    kind: "cmd".to_string(),
+                },
+            );
             completions.push(name_with_slash);
         }
     }
@@ -166,12 +177,15 @@ pub fn slash_completions_for_prefix(
         }
         let name_with_slash = format!("/{}", skill.name);
         if name_with_slash.starts_with(prefix) && !details.contains_key(&name_with_slash) {
-            details.insert(name_with_slash.clone(), CompletionDetail {
-                description: skill.description.clone(),
-                argument_hint: None,
-                source: source_label(&skill.source),
-                kind: "skill".to_string(),
-            });
+            details.insert(
+                name_with_slash.clone(),
+                CompletionDetail {
+                    description: skill.description.clone(),
+                    argument_hint: None,
+                    source: source_label(&skill.source),
+                    kind: "skill".to_string(),
+                },
+            );
             completions.push(name_with_slash);
         }
     }
@@ -274,7 +288,8 @@ pub async fn handle_v1_command_completion(
         let focused_slash = args.iter().find(|a| a.focused && a.value.starts_with('/'));
         if let Some(focused) = focused_slash {
             let (slash_cmds, skills) = load_slash_commands_and_skills(global_context.clone()).await;
-            let (raw_completions, details) = slash_completions_for_prefix(&slash_cmds, &skills, &focused.value);
+            let (raw_completions, details) =
+                slash_completions_for_prefix(&slash_cmds, &skills, &focused.value);
             is_cmd_executable = raw_completions.iter().any(|c| c == &focused.value);
             pos1 = focused.pos1;
             pos2 = focused.pos2;
@@ -536,11 +551,9 @@ pub async fn handle_v1_at_command_execute(
 
     if !post.chat_id.is_empty() && any_context_produced {
         let sessions = global_context.read().await.chat_sessions.clone();
-        let session_arc = get_or_create_session_with_trajectory(
-            global_context.clone(),
-            &sessions,
-            &post.chat_id,
-        ).await;
+        let session_arc =
+            get_or_create_session_with_trajectory(global_context.clone(), &sessions, &post.chat_id)
+                .await;
         let mut session = session_arc.lock().await;
         let original_len = post.messages.len();
         for msg in messages.iter().skip(original_len) {
@@ -735,18 +748,28 @@ pub async fn handle_v1_slash_commands(
 ) -> Result<Response<Body>, ScratchError> {
     let (commands, skills) = load_slash_commands_and_skills(global_context).await;
     let response = SlashCommandsListResponse {
-        commands: commands.iter().map(|cmd| SlashCommandInfo {
-            name: cmd.name.clone(),
-            description: cmd.description.clone(),
-            argument_hint: if cmd.argument_hint.is_empty() { None } else { Some(cmd.argument_hint.clone()) },
-            source: source_label(&cmd.source),
-        }).collect(),
-        skills: skills.iter().map(|skill| SkillInfo {
-            name: skill.name.clone(),
-            description: skill.description.clone(),
-            user_invocable: skill.user_invocable,
-            source: source_label(&skill.source),
-        }).collect(),
+        commands: commands
+            .iter()
+            .map(|cmd| SlashCommandInfo {
+                name: cmd.name.clone(),
+                description: cmd.description.clone(),
+                argument_hint: if cmd.argument_hint.is_empty() {
+                    None
+                } else {
+                    Some(cmd.argument_hint.clone())
+                },
+                source: source_label(&cmd.source),
+            })
+            .collect(),
+        skills: skills
+            .iter()
+            .map(|skill| SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                user_invocable: skill.user_invocable,
+                source: source_label(&skill.source),
+            })
+            .collect(),
     };
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -868,7 +891,12 @@ mod tests {
     }
 
     fn make_arg(value: &str, pos1: i64, pos2: i64, focused: bool) -> QueryLineArg {
-        QueryLineArg { value: value.to_string(), pos1, pos2, focused }
+        QueryLineArg {
+            value: value.to_string(),
+            pos1,
+            pos2,
+            focused,
+        }
     }
 
     #[test]
@@ -879,7 +907,10 @@ mod tests {
             make_arg("/greet", 10, 16, true),
         ];
         let focused_slash = args.iter().find(|a| a.focused && a.value.starts_with('/'));
-        assert!(focused_slash.is_some(), "Any focused slash token should trigger completions");
+        assert!(
+            focused_slash.is_some(),
+            "Any focused slash token should trigger completions"
+        );
     }
 
     #[test]
@@ -892,10 +923,20 @@ mod tests {
         let completions: Vec<_> = raw_completions
             .into_iter()
             .unique()
-            .map(|x| if x.starts_with('/') { x } else { format!("{} ", x) })
+            .map(|x| {
+                if x.starts_with('/') {
+                    x
+                } else {
+                    format!("{} ", x)
+                }
+            })
             .collect();
         for c in &completions {
-            assert!(details.contains_key(c.as_str()), "No detail found for completion '{}'", c);
+            assert!(
+                details.contains_key(c.as_str()),
+                "No detail found for completion '{}'",
+                c
+            );
         }
         assert_eq!(completions, vec!["/format", "/review"]);
     }

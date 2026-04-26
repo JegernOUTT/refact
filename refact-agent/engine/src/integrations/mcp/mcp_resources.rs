@@ -30,7 +30,13 @@ pub fn is_text_mime(mime_type: &Option<String>) -> bool {
 fn uri_to_filename(uri: &str) -> String {
     let sanitized: String = uri
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let hash = crate::ast::chunk_utils::official_text_hashing_function(uri);
     let prefix = sanitized.chars().take(40).collect::<String>();
@@ -43,7 +49,13 @@ fn server_name_for_path(config_path: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("mcp")
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -71,7 +83,11 @@ pub async fn index_mcp_resources(
     let server_name = server_name_for_path(&config_path);
     let resources_dir = cache_dir.join("mcp_resources").join(&server_name);
     if let Err(e) = tokio::fs::create_dir_all(&resources_dir).await {
-        tracing::error!("mcp_resources: failed to create dir {:?}: {}", resources_dir, e);
+        tracing::error!(
+            "mcp_resources: failed to create dir {:?}: {}",
+            resources_dir,
+            e
+        );
         return;
     }
 
@@ -89,7 +105,9 @@ pub async fn index_mcp_resources(
         let result = match timeout(
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
             peer.read_resource(param),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 let msg = format!("mcp_resources: failed to read {}: {:?}", resource.uri, e);
@@ -107,7 +125,12 @@ pub async fn index_mcp_resources(
 
         for content in result.contents {
             match content {
-                ResourceContents::TextResourceContents { uri, mime_type, text, .. } => {
+                ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type,
+                    text,
+                    ..
+                } => {
                     if !is_text_mime(&mime_type) || text.len() > MAX_RESOURCE_SIZE_BYTES {
                         continue;
                     }
@@ -135,7 +158,11 @@ pub async fn index_mcp_resources(
                             indexed_paths.push(file_path.to_string_lossy().to_string());
                         }
                         Err(e) => {
-                            tracing::error!("mcp_resources: failed to write {:?}: {}", file_path, e);
+                            tracing::error!(
+                                "mcp_resources: failed to write {:?}: {}",
+                                file_path,
+                                e
+                            );
                         }
                     }
                 }
@@ -148,7 +175,11 @@ pub async fn index_mcp_resources(
         return;
     }
 
-    let msg = format!("mcp_resources: indexing {} text resources for {}", indexed_paths.len(), server_name);
+    let msg = format!(
+        "mcp_resources: indexing {} text resources for {}",
+        indexed_paths.len(),
+        server_name
+    );
     tracing::info!("{}", msg);
     super::session_mcp::add_log_entry(logs.clone(), msg).await;
 
@@ -158,10 +189,7 @@ pub async fn index_mcp_resources(
     }
 }
 
-pub async fn remove_indexed_resources(
-    gcx_weak: Weak<ARwLock<GlobalContext>>,
-    config_path: String,
-) {
+pub async fn remove_indexed_resources(gcx_weak: Weak<ARwLock<GlobalContext>>, config_path: String) {
     let gcx = match gcx_weak.upgrade() {
         Some(g) => g,
         None => return,
@@ -204,7 +232,10 @@ pub async fn remove_indexed_resources(
 }
 
 #[cfg(test)]
-pub fn resources_cache_dir(cache_dir: &std::path::PathBuf, config_path: &str) -> std::path::PathBuf {
+pub fn resources_cache_dir(
+    cache_dir: &std::path::PathBuf,
+    config_path: &str,
+) -> std::path::PathBuf {
     let server_name = server_name_for_path(config_path);
     cache_dir.join("mcp_resources").join(server_name)
 }
@@ -262,7 +293,10 @@ mod tests {
 
     #[test]
     fn test_server_name_for_path() {
-        assert_eq!(server_name_for_path("/home/user/.refact/integrations.d/mcp_stdio_myserver.yaml"), "mcp_stdio_myserver");
+        assert_eq!(
+            server_name_for_path("/home/user/.refact/integrations.d/mcp_stdio_myserver.yaml"),
+            "mcp_stdio_myserver"
+        );
         assert_eq!(server_name_for_path("/tmp/test-server.yaml"), "test_server");
     }
 
@@ -270,7 +304,10 @@ mod tests {
     fn test_resources_cache_dir() {
         let cache_dir = std::path::PathBuf::from("/home/user/.cache/refact");
         let dir = resources_cache_dir(&cache_dir, "/path/to/mcp_stdio_myserver.yaml");
-        assert_eq!(dir, std::path::PathBuf::from("/home/user/.cache/refact/mcp_resources/mcp_stdio_myserver"));
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/home/user/.cache/refact/mcp_resources/mcp_stdio_myserver")
+        );
     }
 
     #[test]
@@ -321,8 +358,14 @@ mod tests {
         }
 
         assert!(cap_reached, "cap should have been reached");
-        assert!(indexed.len() < uris.len(), "not all resources should be indexed");
-        assert!(total_bytes <= MAX_TOTAL_INDEX_BYTES, "total bytes should not exceed cap");
+        assert!(
+            indexed.len() < uris.len(),
+            "not all resources should be indexed"
+        );
+        assert!(
+            total_bytes <= MAX_TOTAL_INDEX_BYTES,
+            "total bytes should not exceed cap"
+        );
 
         let log_entries = logs.lock().await;
         assert!(!log_entries.is_empty(), "warning should have been logged");

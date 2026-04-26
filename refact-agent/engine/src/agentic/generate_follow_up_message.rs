@@ -54,11 +54,23 @@ pub async fn generate_follow_up_message(
         .await
         .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
 
-    let system_prompt = subagent_config.messages.system_prompt
+    let system_prompt = subagent_config
+        .messages
+        .system_prompt
         .as_ref()
-        .ok_or_else(|| format!("messages.system_prompt not defined for subagent '{}'", SUBAGENT_ID))?;
+        .ok_or_else(|| {
+            format!(
+                "messages.system_prompt not defined for subagent '{}'",
+                SUBAGENT_ID
+            )
+        })?;
 
-    let result = run_subchat_once(gcx, SUBAGENT_ID, _make_conversation(&messages, system_prompt)).await?;
+    let result = run_subchat_once(
+        gcx,
+        SUBAGENT_ID,
+        _make_conversation(&messages, system_prompt),
+    )
+    .await?;
 
     let response = result
         .messages

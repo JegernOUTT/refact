@@ -5,7 +5,9 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::tasks::storage;
@@ -149,9 +151,10 @@ impl Tool for ToolTaskMergeAgent {
             &format!("{}..{}", base_branch, agent_branch),
         ]);
         let commits_ahead = match commits_ahead_result {
-            Ok(output) => output.trim().parse::<u32>().map_err(|e| {
-                format!("Failed to parse commits ahead count: {}", e)
-            })?,
+            Ok(output) => output
+                .trim()
+                .parse::<u32>()
+                .map_err(|e| format!("Failed to parse commits ahead count: {}", e))?,
             Err(e) => {
                 return Err(format!(
                     "Failed to count commits ahead (base: {}, agent: {}): {}. \
@@ -188,9 +191,14 @@ impl Tool for ToolTaskMergeAgent {
 
             let mut cleanup_status = Vec::new();
             if delete_worktree && agent_branch != base_branch {
-                crate::files_in_workspace::remove_folder(gcx.clone(), &std::path::PathBuf::from(agent_worktree)).await;
+                crate::files_in_workspace::remove_folder(
+                    gcx.clone(),
+                    &std::path::PathBuf::from(agent_worktree),
+                )
+                .await;
                 let _guard = git_merge_lock().lock().await;
-                let worktree_removed = run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
+                let worktree_removed =
+                    run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
                 let branch_deleted = run_git(&["branch", "-D", agent_branch]).is_ok();
                 drop(_guard);
 
@@ -216,7 +224,8 @@ impl Tool for ToolTaskMergeAgent {
                             }
                         }
                         Ok(())
-                    }).await;
+                    })
+                    .await;
                 }
             }
 
@@ -277,33 +286,49 @@ Then call `task_merge_agent` again."#,
                 if conflict_files.is_empty() {
                     "None detected (check `git status`)".to_string()
                 } else {
-                    conflict_files.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n")
+                    conflict_files
+                        .iter()
+                        .map(|f| format!("- {}", f))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 }
             );
 
-            return Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(conflict_msg),
-                tool_calls: None,
-                tool_call_id: tool_call_id.clone(),
-                ..Default::default()
-            })]));
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(conflict_msg),
+                    tool_calls: None,
+                    tool_call_id: tool_call_id.clone(),
+                    ..Default::default()
+                })],
+            ));
         }
 
         let main_status = run_git(&["status", "--porcelain"]).unwrap_or_default();
         if !main_status.trim().is_empty() {
-            return Err("Main workspace has uncommitted changes. Please commit or stash before merging.".to_string());
+            return Err(
+                "Main workspace has uncommitted changes. Please commit or stash before merging."
+                    .to_string(),
+            );
         }
 
         // Generate commit message before acquiring the lock: git diff base...agent is read-only
         // and produces the same content as git diff --cached after a squash merge.
-        let diff = run_git(&["diff", &format!("{}...{}", base_branch, agent_branch)]).unwrap_or_default();
-        let commit_msg = match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
-            gcx.clone(), &diff, &Some(card.title.clone())
-        ).await {
-            Ok(msg) if !msg.trim().is_empty() => msg,
-            _ => format!("Card {}: {}", card_id, card.title),
-        };
+        let diff =
+            run_git(&["diff", &format!("{}...{}", base_branch, agent_branch)]).unwrap_or_default();
+        let commit_msg =
+            match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
+                gcx.clone(),
+                &diff,
+                &Some(card.title.clone()),
+            )
+            .await
+            {
+                Ok(msg) if !msg.trim().is_empty() => msg,
+                _ => format!("Card {}: {}", card_id, card.title),
+            };
 
         let _guard = git_merge_lock().lock().await;
 
@@ -374,7 +399,11 @@ Use `cat <file>` to see conflict markers in each file."#,
                     agent_branch,
                     base_branch,
                     strategy,
-                    conflict_files.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n"),
+                    conflict_files
+                        .iter()
+                        .map(|f| format!("- {}", f))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     agent_branch
                 );
 
@@ -402,7 +431,11 @@ Use `cat <file>` to see conflict markers in each file."#,
         }
 
         let (worktree_removed, branch_deleted) = if delete_worktree && agent_branch != base_branch {
-            crate::files_in_workspace::remove_folder(gcx.clone(), &std::path::PathBuf::from(agent_worktree)).await;
+            crate::files_in_workspace::remove_folder(
+                gcx.clone(),
+                &std::path::PathBuf::from(agent_worktree),
+            )
+            .await;
             let wr = run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
             let bd = run_git(&["branch", "-D", agent_branch]).is_ok();
             (wr, bd)

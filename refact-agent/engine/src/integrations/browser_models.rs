@@ -3,24 +3,40 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum LocatorStrategy {
-    Css { value: String },
-    Id { value: String },
-    Name { value: String },
-    TestId { value: String },
-    Placeholder { value: String },
-    Autocomplete { value: String },
+    Css {
+        value: String,
+    },
+    Id {
+        value: String,
+    },
+    Name {
+        value: String,
+    },
+    TestId {
+        value: String,
+    },
+    Placeholder {
+        value: String,
+    },
+    Autocomplete {
+        value: String,
+    },
     Text {
         value: String,
         #[serde(default)]
         exact: bool,
     },
-    Label { value: String },
+    Label {
+        value: String,
+    },
     Role {
         role: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    Xpath { value: String },
+    Xpath {
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -36,7 +52,9 @@ pub struct BrowserLocator {
 impl BrowserLocator {
     pub fn css(selector: &str) -> Self {
         Self {
-            strategy: LocatorStrategy::Css { value: selector.to_string() },
+            strategy: LocatorStrategy::Css {
+                value: selector.to_string(),
+            },
             nth: None,
             within: None,
         }
@@ -45,7 +63,9 @@ impl BrowserLocator {
     #[allow(dead_code)]
     pub fn id(id: &str) -> Self {
         Self {
-            strategy: LocatorStrategy::Id { value: id.to_string() },
+            strategy: LocatorStrategy::Id {
+                value: id.to_string(),
+            },
             nth: None,
             within: None,
         }
@@ -54,7 +74,9 @@ impl BrowserLocator {
     #[allow(dead_code)]
     pub fn name(name: &str) -> Self {
         Self {
-            strategy: LocatorStrategy::Name { value: name.to_string() },
+            strategy: LocatorStrategy::Name {
+                value: name.to_string(),
+            },
             nth: None,
             within: None,
         }
@@ -63,7 +85,9 @@ impl BrowserLocator {
     #[allow(dead_code)]
     pub fn label(label: &str) -> Self {
         Self {
-            strategy: LocatorStrategy::Label { value: label.to_string() },
+            strategy: LocatorStrategy::Label {
+                value: label.to_string(),
+            },
             nth: None,
             within: None,
         }
@@ -72,7 +96,9 @@ impl BrowserLocator {
     #[allow(dead_code)]
     pub fn placeholder(ph: &str) -> Self {
         Self {
-            strategy: LocatorStrategy::Placeholder { value: ph.to_string() },
+            strategy: LocatorStrategy::Placeholder {
+                value: ph.to_string(),
+            },
             nth: None,
             within: None,
         }
@@ -93,13 +119,14 @@ impl BrowserLocator {
     #[allow(dead_code)]
     pub fn test_id(tid: &str) -> Self {
         Self {
-            strategy: LocatorStrategy::TestId { value: tid.to_string() },
+            strategy: LocatorStrategy::TestId {
+                value: tid.to_string(),
+            },
             nth: None,
             within: None,
         }
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -114,11 +141,12 @@ impl Default for TabTarget {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BrowserStep {
-    Navigate { url: String },
+    Navigate {
+        url: String,
+    },
     Reload,
     GoBack,
     GoForward,
@@ -128,15 +156,29 @@ pub enum BrowserStep {
         device: Option<String>,
     },
     CloseTab,
-    SwitchTab { tab: TabTarget },
+    SwitchTab {
+        tab: TabTarget,
+    },
     ListTabs,
 
-    Click { locator: BrowserLocator },
-    ClickIfExists { locator: BrowserLocator },
-    Hover { locator: BrowserLocator },
-    Focus { locator: BrowserLocator },
-    Blur { locator: BrowserLocator },
-    ScrollTo { locator: BrowserLocator },
+    Click {
+        locator: BrowserLocator,
+    },
+    ClickIfExists {
+        locator: BrowserLocator,
+    },
+    Hover {
+        locator: BrowserLocator,
+    },
+    Focus {
+        locator: BrowserLocator,
+    },
+    Blur {
+        locator: BrowserLocator,
+    },
+    ScrollTo {
+        locator: BrowserLocator,
+    },
     PressKey {
         key: String,
         #[serde(default)]
@@ -160,8 +202,12 @@ pub enum BrowserStep {
         locator: BrowserLocator,
         value: String,
     },
-    Check { locator: BrowserLocator },
-    Uncheck { locator: BrowserLocator },
+    Check {
+        locator: BrowserLocator,
+    },
+    Uncheck {
+        locator: BrowserLocator,
+    },
 
     WaitForSelector {
         locator: BrowserLocator,
@@ -196,10 +242,16 @@ pub enum BrowserStep {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
-    WaitSeconds { seconds: f64 },
+    WaitSeconds {
+        seconds: f64,
+    },
 
-    GetText { locator: BrowserLocator },
-    GetHtml { locator: BrowserLocator },
+    GetText {
+        locator: BrowserLocator,
+    },
+    GetHtml {
+        locator: BrowserLocator,
+    },
     GetAttribute {
         locator: BrowserLocator,
         attribute: String,
@@ -210,7 +262,9 @@ pub enum BrowserStep {
         #[serde(default)]
         limit: Option<usize>,
     },
-    ExtractTable { locator: BrowserLocator },
+    ExtractTable {
+        locator: BrowserLocator,
+    },
     DomSnapshot {
         selector: String,
         #[serde(default)]
@@ -218,9 +272,13 @@ pub enum BrowserStep {
     },
     AccessibilitySnapshot,
     Screenshot,
-    ScreenshotElement { locator: BrowserLocator },
+    ScreenshotElement {
+        locator: BrowserLocator,
+    },
 
-    Eval { expression: String },
+    Eval {
+        expression: String,
+    },
     Styles {
         locator: BrowserLocator,
         #[serde(default)]
@@ -230,13 +288,14 @@ pub enum BrowserStep {
     TabLog,
 
     DismissOverlays,
-    HighlightElement { locator: BrowserLocator },
+    HighlightElement {
+        locator: BrowserLocator,
+    },
 }
 
 fn default_true() -> bool {
     true
 }
-
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -251,7 +310,6 @@ impl Default for SessionPolicy {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserActionRequest {
     #[serde(default)]
@@ -260,7 +318,6 @@ pub struct BrowserActionRequest {
     pub target: TabTarget,
     pub steps: Vec<BrowserStep>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -327,7 +384,11 @@ impl StepResult {
         }
     }
 
-    pub fn failure(step_index: usize, summary: impl Into<String>, error: impl Into<String>) -> Self {
+    pub fn failure(
+        step_index: usize,
+        summary: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
         Self {
             step_index,
             ok: false,
@@ -356,7 +417,6 @@ pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElementInfo {
@@ -404,11 +464,9 @@ pub struct TabInfo {
     pub is_active: bool,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_locator_css_serde() {
@@ -531,7 +589,6 @@ mod tests {
         assert!(json.get("within").is_none());
     }
 
-
     #[test]
     fn test_tab_target_active_serde() {
         let t = TabTarget::Active;
@@ -541,16 +598,19 @@ mod tests {
 
     #[test]
     fn test_tab_target_id_serde() {
-        let t = TabTarget::Id { id: "main".to_string() };
+        let t = TabTarget::Id {
+            id: "main".to_string(),
+        };
         let json = serde_json::to_value(&t).unwrap();
         assert_eq!(json["type"], "id");
         assert_eq!(json["id"], "main");
     }
 
-
     #[test]
     fn test_step_navigate_serde() {
-        let step = BrowserStep::Navigate { url: "https://example.com".to_string() };
+        let step = BrowserStep::Navigate {
+            url: "https://example.com".to_string(),
+        };
         let json = serde_json::to_value(&step).unwrap();
         assert_eq!(json["action"], "navigate");
         assert_eq!(json["url"], "https://example.com");
@@ -562,7 +622,12 @@ mod tests {
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         match step {
             BrowserStep::Click { locator } => {
-                assert_eq!(locator.strategy, LocatorStrategy::Css { value: "#btn".to_string() });
+                assert_eq!(
+                    locator.strategy,
+                    LocatorStrategy::Css {
+                        value: "#btn".to_string()
+                    }
+                );
             }
             _ => panic!("Expected Click"),
         }
@@ -579,7 +644,12 @@ mod tests {
         }"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         match step {
-            BrowserStep::Fill { locator, text, clear_first, verify } => {
+            BrowserStep::Fill {
+                locator,
+                text,
+                clear_first,
+                verify,
+            } => {
                 assert_eq!(text, "rust tutorial");
                 assert!(clear_first);
                 assert!(verify);
@@ -601,7 +671,11 @@ mod tests {
         }"##;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         match step {
-            BrowserStep::Fill { clear_first, verify, .. } => {
+            BrowserStep::Fill {
+                clear_first,
+                verify,
+                ..
+            } => {
                 assert!(clear_first, "clear_first should default to true");
                 assert!(verify, "verify should default to true");
             }
@@ -614,7 +688,10 @@ mod tests {
         let json_str = r#"{"action": "wait_for_url", "contains": "/search", "timeout_ms": 5000}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         match step {
-            BrowserStep::WaitForUrl { contains, timeout_ms } => {
+            BrowserStep::WaitForUrl {
+                contains,
+                timeout_ms,
+            } => {
                 assert_eq!(contains, "/search");
                 assert_eq!(timeout_ms, Some(5000));
             }
@@ -686,7 +763,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_full_request_serde() {
         let json_str = r#"{
@@ -714,7 +790,6 @@ mod tests {
         assert_eq!(req.target, TabTarget::Active);
     }
 
-
     #[test]
     fn test_step_result_success() {
         let r = StepResult::success(0, "Navigated to https://example.com");
@@ -732,11 +807,10 @@ mod tests {
 
     #[test]
     fn test_step_result_with_data() {
-        let r = StepResult::success(0, "Extracted")
-            .with_data(serde_json::json!(["link1", "link2"]));
+        let r =
+            StepResult::success(0, "Extracted").with_data(serde_json::json!(["link1", "link2"]));
         assert!(r.data.is_some());
     }
-
 
     #[test]
     fn test_field_kind_serde() {
@@ -755,7 +829,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_fill_strategy_serde() {
         let strategies = vec![
@@ -771,7 +844,6 @@ mod tests {
             assert_eq!(parsed, s);
         }
     }
-
 
     #[test]
     fn test_execution_report_serde() {
@@ -790,7 +862,6 @@ mod tests {
         let parsed: ExecutionReport = serde_json::from_value(json).unwrap();
         assert!(parsed.ok);
     }
-
 
     #[test]
     fn test_element_info_parse_from_js_json() {
@@ -818,7 +889,6 @@ mod tests {
         assert!(info.enabled);
         assert_eq!(info.field_kind, FieldKind::TextInput);
     }
-
 
     #[test]
     fn test_tab_info_serde() {

@@ -15,8 +15,8 @@ use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::integrations::mcp::mcp_naming;
 use crate::http::routers::v1::mcp_marketplace_sources::{
-    load_sources, get_all_sources, smithery_api_key, source_to_api_json,
-    BUNDLED_SOURCE_ID, SourceType, MarketplaceSource,
+    load_sources, get_all_sources, smithery_api_key, source_to_api_json, BUNDLED_SOURCE_ID,
+    SourceType, MarketplaceSource,
 };
 #[cfg(test)]
 use crate::http::routers::v1::mcp_marketplace_sources::{SMITHERY_SOURCE_ID, OFFICIAL_MCP_SOURCE_ID};
@@ -27,7 +27,8 @@ const OFFICIAL_MCP_CACHE_TTL_SECS: u64 = 900;
 
 const OFFICIAL_MCP_REGISTRY_URL: &str = "https://registry.modelcontextprotocol.io/v0/servers";
 
-static SOURCE_CACHES: Mutex<Option<HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>>> = Mutex::new(None);
+static SOURCE_CACHES: Mutex<Option<HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>>> =
+    Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallRecipe {
@@ -80,8 +81,10 @@ pub struct MarketplaceIndex {
 }
 
 fn bundled_index() -> MarketplaceIndex {
-    serde_json::from_str(include_str!("../../../yaml_configs/mcp_marketplace_index.json"))
-        .expect("bundled MCP marketplace index must be valid JSON")
+    serde_json::from_str(include_str!(
+        "../../../yaml_configs/mcp_marketplace_index.json"
+    ))
+    .expect("bundled MCP marketplace index must be valid JSON")
 }
 
 fn get_cache() -> HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)> {
@@ -163,41 +166,59 @@ async fn fetch_smithery_servers(
         return Err(format!("smithery: HTTP {}", resp.status()));
     }
 
-    let data: SmitheryListResponse = resp.json().await
+    let data: SmitheryListResponse = resp
+        .json()
+        .await
         .map_err(|e| format!("smithery parse: {}", e))?;
 
-    let servers: Vec<MarketplaceServer> = data.servers.into_iter().map(|s| {
-        let transport = if s.remote.unwrap_or(false) { "http" } else { "stdio" }.to_string();
-        let publisher = s.qualified_name.split('/').next().unwrap_or("").to_string();
-        let mut tags = vec!["smithery".to_string()];
-        if s.verified.unwrap_or(false) {
-            tags.push("verified".to_string());
-        }
-        MarketplaceServer {
-            id: s.qualified_name,
-            name: s.display_name,
-            description: s.description,
-            publisher,
-            tags,
-            icon_url: s.icon_url,
-            homepage: s.homepage,
-            transport,
-            install_recipe: InstallRecipe {
-                command: None,
-                url: None,
-                env: HashMap::new(),
-                headers: HashMap::new(),
-                args_from_env: vec![],
-            },
-            confirmation_default: vec!["*".to_string()],
-        }
-    }).collect();
+    let servers: Vec<MarketplaceServer> = data
+        .servers
+        .into_iter()
+        .map(|s| {
+            let transport = if s.remote.unwrap_or(false) {
+                "http"
+            } else {
+                "stdio"
+            }
+            .to_string();
+            let publisher = s.qualified_name.split('/').next().unwrap_or("").to_string();
+            let mut tags = vec!["smithery".to_string()];
+            if s.verified.unwrap_or(false) {
+                tags.push("verified".to_string());
+            }
+            MarketplaceServer {
+                id: s.qualified_name,
+                name: s.display_name,
+                description: s.description,
+                publisher,
+                tags,
+                icon_url: s.icon_url,
+                homepage: s.homepage,
+                transport,
+                install_recipe: InstallRecipe {
+                    command: None,
+                    url: None,
+                    env: HashMap::new(),
+                    headers: HashMap::new(),
+                    args_from_env: vec![],
+                },
+                confirmation_default: vec!["*".to_string()],
+            }
+        })
+        .collect();
 
     Ok((servers, data.pagination.total_count))
 }
 
-async fn fetch_smithery_detail(http_client: &reqwest::Client, qualified_name: &str, api_key: &str) -> Option<MarketplaceServer> {
-    let url = format!("https://registry.smithery.ai/servers/{}", utf8_percent_encode(qualified_name, NON_ALPHANUMERIC));
+async fn fetch_smithery_detail(
+    http_client: &reqwest::Client,
+    qualified_name: &str,
+    api_key: &str,
+) -> Option<MarketplaceServer> {
+    let url = format!(
+        "https://registry.smithery.ai/servers/{}",
+        utf8_percent_encode(qualified_name, NON_ALPHANUMERIC)
+    );
     let resp = http_client
         .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -212,7 +233,8 @@ async fn fetch_smithery_detail(http_client: &reqwest::Client, qualified_name: &s
 
     let data: Value = resp.json().await.ok()?;
 
-    let transport_type = data["connections"].as_array()
+    let transport_type = data["connections"]
+        .as_array()
         .and_then(|c| c.first())
         .and_then(|c| c["type"].as_str())
         .map(|t| match t {
@@ -224,7 +246,8 @@ async fn fetch_smithery_detail(http_client: &reqwest::Client, qualified_name: &s
 
     let deployment_url = data["deploymentUrl"].as_str().map(|s| s.to_string());
     let command = if transport_type == "stdio" {
-        data["connections"].as_array()
+        data["connections"]
+            .as_array()
             .and_then(|c| c.first())
             .and_then(|c| c["command"].as_str())
             .map(|s| s.to_string())
@@ -241,7 +264,10 @@ async fn fetch_smithery_detail(http_client: &reqwest::Client, qualified_name: &s
 
     Some(MarketplaceServer {
         id: qualified_name.to_string(),
-        name: data["displayName"].as_str().unwrap_or(qualified_name).to_string(),
+        name: data["displayName"]
+            .as_str()
+            .unwrap_or(qualified_name)
+            .to_string(),
         description: data["description"].as_str().unwrap_or("").to_string(),
         publisher,
         tags,
@@ -330,10 +356,14 @@ async fn fetch_official_registry_servers(
         return Err(format!("official-mcp: HTTP {}", resp.status()));
     }
 
-    let body: OfficialRegistryResponse = resp.json().await
+    let body: OfficialRegistryResponse = resp
+        .json()
+        .await
         .map_err(|e| format!("official-mcp parse: {}", e))?;
 
-    let servers: Vec<MarketplaceServer> = body.servers.into_iter()
+    let servers: Vec<MarketplaceServer> = body
+        .servers
+        .into_iter()
         .map(|entry| {
             let s = entry.server;
             let parts: Vec<&str> = s.name.splitn(2, '/').collect();
@@ -341,7 +371,9 @@ async fn fetch_official_registry_servers(
             let short_name = parts.get(1).copied().unwrap_or(s.name.as_str());
             let display_name = s.title.unwrap_or_else(|| short_name.to_string());
 
-            let (transport, install_url) = s.remotes.first()
+            let (transport, install_url) = s
+                .remotes
+                .first()
                 .map(|r| {
                     let t = match r.remote_type.as_str() {
                         "streamable-http" => "http",
@@ -385,12 +417,15 @@ async fn fetch_official_registry_servers(
         servers
     } else {
         let q = query.to_lowercase();
-        servers.into_iter().filter(|s| {
-            s.name.to_lowercase().contains(&q)
-                || s.description.to_lowercase().contains(&q)
-                || s.id.to_lowercase().contains(&q)
-                || s.publisher.to_lowercase().contains(&q)
-        }).collect()
+        servers
+            .into_iter()
+            .filter(|s| {
+                s.name.to_lowercase().contains(&q)
+                    || s.description.to_lowercase().contains(&q)
+                    || s.id.to_lowercase().contains(&q)
+                    || s.publisher.to_lowercase().contains(&q)
+            })
+            .collect()
     };
 
     let total = filtered.len() as u32;
@@ -419,43 +454,73 @@ async fn load_source_servers(
             let total = cached.len() as u32;
             let start = ((page - 1) * page_size) as usize;
             let end = (start + page_size as usize).min(cached.len());
-            let page_items = if start < cached.len() { cached[start..end].to_vec() } else { vec![] };
+            let page_items = if start < cached.len() {
+                cached[start..end].to_vec()
+            } else {
+                vec![]
+            };
             return (page_items, total, "cached");
         }
     }
 
     match source.source_type {
         SourceType::RefactIndex => {
-            let (index, status): (MarketplaceIndex, &'static str) = if source.id == BUNDLED_SOURCE_ID {
-                (bundled_index(), "bundled")
-            } else {
-                let http_client = gcx.read().await.http_client.clone();
-                match source.url.as_deref() {
-                    Some(url) => match fetch_refact_index(&http_client, url).await {
-                        Some(idx) => (idx, "remote"),
-                        None => (MarketplaceIndex { version: 1, updated_at: String::new(), servers: vec![] }, "error"),
-                    },
-                    None => (MarketplaceIndex { version: 1, updated_at: String::new(), servers: vec![] }, "error"),
-                }
-            };
+            let (index, status): (MarketplaceIndex, &'static str) =
+                if source.id == BUNDLED_SOURCE_ID {
+                    (bundled_index(), "bundled")
+                } else {
+                    let http_client = gcx.read().await.http_client.clone();
+                    match source.url.as_deref() {
+                        Some(url) => match fetch_refact_index(&http_client, url).await {
+                            Some(idx) => (idx, "remote"),
+                            None => (
+                                MarketplaceIndex {
+                                    version: 1,
+                                    updated_at: String::new(),
+                                    servers: vec![],
+                                },
+                                "error",
+                            ),
+                        },
+                        None => (
+                            MarketplaceIndex {
+                                version: 1,
+                                updated_at: String::new(),
+                                servers: vec![],
+                            },
+                            "error",
+                        ),
+                    }
+                };
 
             let source_id = source.id.clone();
-            let all_with_source: Vec<MarketplaceServerWithSource> = index.servers.into_iter()
+            let all_with_source: Vec<MarketplaceServerWithSource> = index
+                .servers
+                .into_iter()
                 .filter(|s| {
-                    if query_str.is_empty() { return true; }
+                    if query_str.is_empty() {
+                        return true;
+                    }
                     let q = query_str.to_lowercase();
                     s.name.to_lowercase().contains(&q)
                         || s.description.to_lowercase().contains(&q)
                         || s.tags.iter().any(|t| t.to_lowercase().contains(&q))
                 })
-                .map(|s| MarketplaceServerWithSource { server: s, source_id: source_id.clone() })
+                .map(|s| MarketplaceServerWithSource {
+                    server: s,
+                    source_id: source_id.clone(),
+                })
                 .collect();
 
             let total = all_with_source.len() as u32;
             cache.insert(cache_key, (Instant::now(), all_with_source.clone()));
             let start = ((page - 1) * page_size) as usize;
             let end = (start + page_size as usize).min(all_with_source.len());
-            let page_items = if start < all_with_source.len() { all_with_source[start..end].to_vec() } else { vec![] };
+            let page_items = if start < all_with_source.len() {
+                all_with_source[start..end].to_vec()
+            } else {
+                vec![]
+            };
             (page_items, total, status)
         }
         SourceType::Smithery => {
@@ -470,8 +535,12 @@ async fn load_source_servers(
             match fetch_smithery_servers(&http_client, &api_key, query, page, page_size).await {
                 Ok((servers, total)) => {
                     let source_id = source.id.clone();
-                    let with_source: Vec<MarketplaceServerWithSource> = servers.into_iter()
-                        .map(|s| MarketplaceServerWithSource { server: s, source_id: source_id.clone() })
+                    let with_source: Vec<MarketplaceServerWithSource> = servers
+                        .into_iter()
+                        .map(|s| MarketplaceServerWithSource {
+                            server: s,
+                            source_id: source_id.clone(),
+                        })
                         .collect();
                     (with_source, total, "ok")
                 }
@@ -484,14 +553,22 @@ async fn load_source_servers(
             match fetch_official_registry_servers(&http_client, query_str, page, page_size).await {
                 Ok((servers, _)) => {
                     let source_id = source.id.clone();
-                    let all_with_source: Vec<MarketplaceServerWithSource> = servers.into_iter()
-                        .map(|s| MarketplaceServerWithSource { server: s, source_id: source_id.clone() })
+                    let all_with_source: Vec<MarketplaceServerWithSource> = servers
+                        .into_iter()
+                        .map(|s| MarketplaceServerWithSource {
+                            server: s,
+                            source_id: source_id.clone(),
+                        })
                         .collect();
                     let total = all_with_source.len() as u32;
                     cache.insert(cache_key, (Instant::now(), all_with_source.clone()));
                     let start = ((page - 1) * page_size) as usize;
                     let end = (start + page_size as usize).min(all_with_source.len());
-                    let page_items = if start < all_with_source.len() { all_with_source[start..end].to_vec() } else { vec![] };
+                    let page_items = if start < all_with_source.len() {
+                        all_with_source[start..end].to_vec()
+                    } else {
+                        vec![]
+                    };
                     (page_items, total, "ok")
                 }
                 Err(_) => (vec![], 0, "error"),
@@ -501,7 +578,11 @@ async fn load_source_servers(
 }
 
 fn validate_env_key(key: &str) -> bool {
-    !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') && key.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && key.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
 }
 
 #[derive(Deserialize)]
@@ -534,7 +615,10 @@ pub async fn handle_v1_mcp_marketplace_get(
     let filter_source = params.source.as_deref();
     if let Some(fsrc) = filter_source {
         if !all_sources.iter().any(|(s, _)| s.id == fsrc) {
-            return Err((StatusCode::NOT_FOUND, format!("source '{}' not found", fsrc)));
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("source '{}' not found", fsrc),
+            ));
         }
     }
 
@@ -576,7 +660,11 @@ pub async fn handle_v1_mcp_marketplace_get(
         }
         // OfficialMcp IS included in merged mode (free, no API key)
 
-        let fetch_page_size = if is_merged_mode { MERGED_MODE_PAGE_SIZE_CAP } else { page_size };
+        let fetch_page_size = if is_merged_mode {
+            MERGED_MODE_PAGE_SIZE_CAP
+        } else {
+            page_size
+        };
         let fetch_page = if is_merged_mode { 1 } else { page };
 
         let (page_items, total, status) = load_source_servers(
@@ -586,7 +674,8 @@ pub async fn handle_v1_mcp_marketplace_get(
             fetch_page,
             fetch_page_size,
             &mut cache,
-        ).await;
+        )
+        .await;
 
         let mut meta = source_to_api_json(source, *removable);
         if let Some(obj) = meta.as_object_mut() {
@@ -601,20 +690,26 @@ pub async fn handle_v1_mcp_marketplace_get(
     set_cache(cache);
 
     let (final_servers, final_total) = if filter_source.is_some() {
-        let t = sources_meta.iter()
+        let t = sources_meta
+            .iter()
             .find(|m| m["id"].as_str() == filter_source)
             .and_then(|m| m["server_count"].as_u64())
             .unwrap_or(0) as u32;
         (all_servers, t)
     } else {
         let mut seen_ids: HashSet<String> = HashSet::new();
-        let deduped: Vec<MarketplaceServerWithSource> = all_servers.into_iter().filter(|s| {
-            seen_ids.insert(s.server.id.clone())
-        }).collect();
+        let deduped: Vec<MarketplaceServerWithSource> = all_servers
+            .into_iter()
+            .filter(|s| seen_ids.insert(s.server.id.clone()))
+            .collect();
         let total_count = deduped.len() as u32;
         let start = ((page - 1) * page_size) as usize;
         let end = (start + page_size as usize).min(deduped.len());
-        let sliced = if start < deduped.len() { deduped[start..end].to_vec() } else { vec![] };
+        let sliced = if start < deduped.len() {
+            deduped[start..end].to_vec()
+        } else {
+            vec![]
+        };
         (sliced, total_count)
     };
 
@@ -692,7 +787,9 @@ async fn find_server_in_sources(
             }
         } else if source.source_type == SourceType::OfficialMcp {
             let http_client = gcx.read().await.http_client.clone();
-            if let Ok((servers, _)) = fetch_official_registry_servers(&http_client, "", 1, 100).await {
+            if let Ok((servers, _)) =
+                fetch_official_registry_servers(&http_client, "", 1, 100).await
+            {
                 if let Some(server) = servers.into_iter().find(|s| s.id == server_id) {
                     return Some((server, source.id.clone()));
                 }
@@ -710,32 +807,57 @@ pub async fn handle_v1_mcp_marketplace_install(
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
     if mcp_naming::validate_server_id(&req.server_id).is_err() {
-        return Err(ScratchError::new(StatusCode::BAD_REQUEST, "invalid server_id".to_string()));
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid server_id".to_string(),
+        ));
     }
 
-    let (server, found_source_id) = find_server_in_sources(
-        gcx.clone(),
-        &req.server_id,
-        req.source_id.as_deref(),
-    ).await.ok_or_else(|| ScratchError::new(StatusCode::NOT_FOUND, format!("server '{}' not found in marketplace", req.server_id)))?;
+    let (server, found_source_id) =
+        find_server_in_sources(gcx.clone(), &req.server_id, req.source_id.as_deref())
+            .await
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::NOT_FOUND,
+                    format!("server '{}' not found in marketplace", req.server_id),
+                )
+            })?;
 
     match server.transport.as_str() {
         "http" | "streamable-http" | "sse" => {
             if server.install_recipe.url.is_none() {
-                return Err(ScratchError::new(StatusCode::BAD_REQUEST, format!("server '{}' has transport '{}' but no url in recipe", server.id, server.transport)));
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "server '{}' has transport '{}' but no url in recipe",
+                        server.id, server.transport
+                    ),
+                ));
             }
         }
         _ => {
             if server.install_recipe.command.is_none() {
-                return Err(ScratchError::new(StatusCode::BAD_REQUEST, format!("server '{}' has transport 'stdio' but no command in recipe", server.id)));
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "server '{}' has transport 'stdio' but no command in recipe",
+                        server.id
+                    ),
+                ));
             }
         }
     }
 
     let config_dir = gcx.read().await.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
-    tokio::fs::create_dir_all(&integrations_dir).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("cannot create integrations dir: {}", e)))?;
+    tokio::fs::create_dir_all(&integrations_dir)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot create integrations dir: {}", e),
+            )
+        })?;
 
     let prefix = match server.transport.as_str() {
         "http" | "streamable-http" => "mcp_http",
@@ -751,25 +873,37 @@ pub async fn handle_v1_mcp_marketplace_install(
     if let Some(overrides) = &req.config_overrides {
         for (k, v) in &overrides.env {
             if !validate_env_key(k) {
-                return Err(ScratchError::new(StatusCode::BAD_REQUEST, format!("invalid env key: {:?}", k)));
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid env key: {:?}", k),
+                ));
             }
             env.insert(k.clone(), v.clone());
         }
         for (k, v) in &overrides.headers {
             if !validate_env_key(k) {
-                return Err(ScratchError::new(StatusCode::BAD_REQUEST, format!("invalid header key: {:?}", k)));
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid header key: {:?}", k),
+                ));
             }
             headers.insert(k.clone(), v.clone());
         }
     }
     for k in env.keys() {
         if !validate_env_key(k) {
-            return Err(ScratchError::new(StatusCode::BAD_REQUEST, format!("invalid env key in recipe: {:?}", k)));
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                format!("invalid env key in recipe: {:?}", k),
+            ));
         }
     }
     for k in headers.keys() {
         if !validate_env_key(k) {
-            return Err(ScratchError::new(StatusCode::BAD_REQUEST, format!("invalid header key in recipe: {:?}", k)));
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                format!("invalid header key in recipe: {:?}", k),
+            ));
         }
     }
 
@@ -782,14 +916,24 @@ pub async fn handle_v1_mcp_marketplace_install(
     {
         Ok(mut file) => {
             use tokio::io::AsyncWriteExt;
-            file.write_all(yaml_content.as_bytes()).await
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("write error: {}", e)))?;
+            file.write_all(yaml_content.as_bytes()).await.map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("write error: {}", e),
+                )
+            })?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(ScratchError::new(StatusCode::CONFLICT, format!("config file '{}' already exists", filename)));
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                format!("config file '{}' already exists", filename),
+            ));
         }
         Err(e) => {
-            return Err(ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("create error: {}", e)));
+            return Err(ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("create error: {}", e),
+            ));
         }
     }
 
@@ -799,36 +943,74 @@ pub async fn handle_v1_mcp_marketplace_install(
     })))
 }
 
-fn build_integration_yaml(server: &MarketplaceServer, env: &HashMap<String, String>, headers: &HashMap<String, String>, source_id: &str) -> String {
+fn build_integration_yaml(
+    server: &MarketplaceServer,
+    env: &HashMap<String, String>,
+    headers: &HashMap<String, String>,
+    source_id: &str,
+) -> String {
     let mut map = serde_yaml::Mapping::new();
 
     match server.transport.as_str() {
         "http" | "streamable-http" => {
             if let Some(ref url) = server.install_recipe.url {
-                map.insert(serde_yaml::Value::String("url".to_string()), serde_yaml::Value::String(url.clone()));
+                map.insert(
+                    serde_yaml::Value::String("url".to_string()),
+                    serde_yaml::Value::String(url.clone()),
+                );
             }
-            let headers_map: serde_yaml::Mapping = headers.iter()
-                .map(|(k, v)| (serde_yaml::Value::String(k.clone()), serde_yaml::Value::String(v.clone())))
+            let headers_map: serde_yaml::Mapping = headers
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        serde_yaml::Value::String(k.clone()),
+                        serde_yaml::Value::String(v.clone()),
+                    )
+                })
                 .collect();
-            map.insert(serde_yaml::Value::String("headers".to_string()), serde_yaml::Value::Mapping(headers_map));
-            map.insert(serde_yaml::Value::String("auth_type".to_string()), serde_yaml::Value::String("none".to_string()));
+            map.insert(
+                serde_yaml::Value::String("headers".to_string()),
+                serde_yaml::Value::Mapping(headers_map),
+            );
+            map.insert(
+                serde_yaml::Value::String("auth_type".to_string()),
+                serde_yaml::Value::String("none".to_string()),
+            );
         }
         "sse" => {
             if let Some(ref url) = server.install_recipe.url {
-                map.insert(serde_yaml::Value::String("url".to_string()), serde_yaml::Value::String(url.clone()));
+                map.insert(
+                    serde_yaml::Value::String("url".to_string()),
+                    serde_yaml::Value::String(url.clone()),
+                );
             }
-            let headers_map: serde_yaml::Mapping = headers.iter()
-                .map(|(k, v)| (serde_yaml::Value::String(k.clone()), serde_yaml::Value::String(v.clone())))
+            let headers_map: serde_yaml::Mapping = headers
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        serde_yaml::Value::String(k.clone()),
+                        serde_yaml::Value::String(v.clone()),
+                    )
+                })
                 .collect();
-            map.insert(serde_yaml::Value::String("headers".to_string()), serde_yaml::Value::Mapping(headers_map));
-            map.insert(serde_yaml::Value::String("auth_type".to_string()), serde_yaml::Value::String("none".to_string()));
+            map.insert(
+                serde_yaml::Value::String("headers".to_string()),
+                serde_yaml::Value::Mapping(headers_map),
+            );
+            map.insert(
+                serde_yaml::Value::String("auth_type".to_string()),
+                serde_yaml::Value::String("none".to_string()),
+            );
         }
         _ => {
             if let Some(ref cmd) = server.install_recipe.command {
                 let full_cmd = if server.install_recipe.args_from_env.is_empty() {
                     cmd.clone()
                 } else {
-                    let extra: Vec<&str> = server.install_recipe.args_from_env.iter()
+                    let extra: Vec<&str> = server
+                        .install_recipe
+                        .args_from_env
+                        .iter()
                         .filter_map(|k| env.get(k).map(|v| v.as_str()))
                         .collect();
                     if extra.is_empty() {
@@ -837,32 +1019,69 @@ fn build_integration_yaml(server: &MarketplaceServer, env: &HashMap<String, Stri
                         format!("{} {}", cmd, extra.join(" "))
                     }
                 };
-                map.insert(serde_yaml::Value::String("command".to_string()), serde_yaml::Value::String(full_cmd));
+                map.insert(
+                    serde_yaml::Value::String("command".to_string()),
+                    serde_yaml::Value::String(full_cmd),
+                );
             }
-            let env_map: serde_yaml::Mapping = env.iter()
-                .map(|(k, v)| (serde_yaml::Value::String(k.clone()), serde_yaml::Value::String(v.clone())))
+            let env_map: serde_yaml::Mapping = env
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        serde_yaml::Value::String(k.clone()),
+                        serde_yaml::Value::String(v.clone()),
+                    )
+                })
                 .collect();
-            map.insert(serde_yaml::Value::String("env".to_string()), serde_yaml::Value::Mapping(env_map));
+            map.insert(
+                serde_yaml::Value::String("env".to_string()),
+                serde_yaml::Value::Mapping(env_map),
+            );
         }
     }
 
-    map.insert(serde_yaml::Value::String("init_timeout".to_string()), serde_yaml::Value::String("60".to_string()));
-    map.insert(serde_yaml::Value::String("request_timeout".to_string()), serde_yaml::Value::String("30".to_string()));
+    map.insert(
+        serde_yaml::Value::String("init_timeout".to_string()),
+        serde_yaml::Value::String("60".to_string()),
+    );
+    map.insert(
+        serde_yaml::Value::String("request_timeout".to_string()),
+        serde_yaml::Value::String("30".to_string()),
+    );
 
     let mut available = serde_yaml::Mapping::new();
-    available.insert(serde_yaml::Value::String("on_your_laptop".to_string()), serde_yaml::Value::Bool(true));
-    available.insert(serde_yaml::Value::String("when_isolated".to_string()), serde_yaml::Value::Bool(false));
-    map.insert(serde_yaml::Value::String("available".to_string()), serde_yaml::Value::Mapping(available));
+    available.insert(
+        serde_yaml::Value::String("on_your_laptop".to_string()),
+        serde_yaml::Value::Bool(true),
+    );
+    available.insert(
+        serde_yaml::Value::String("when_isolated".to_string()),
+        serde_yaml::Value::Bool(false),
+    );
+    map.insert(
+        serde_yaml::Value::String("available".to_string()),
+        serde_yaml::Value::Mapping(available),
+    );
 
     let confirmation_list: serde_yaml::Value = serde_yaml::Value::Sequence(
-        server.confirmation_default.iter().map(|s| serde_yaml::Value::String(s.clone())).collect()
+        server
+            .confirmation_default
+            .iter()
+            .map(|s| serde_yaml::Value::String(s.clone()))
+            .collect(),
     );
     let mut confirmation = serde_yaml::Mapping::new();
-    confirmation.insert(serde_yaml::Value::String("ask_user_default".to_string()), confirmation_list);
-    map.insert(serde_yaml::Value::String("confirmation".to_string()), serde_yaml::Value::Mapping(confirmation));
+    confirmation.insert(
+        serde_yaml::Value::String("ask_user_default".to_string()),
+        confirmation_list,
+    );
+    map.insert(
+        serde_yaml::Value::String("confirmation".to_string()),
+        serde_yaml::Value::Mapping(confirmation),
+    );
 
-    let yaml_body = serde_yaml::to_string(&serde_yaml::Value::Mapping(map))
-        .unwrap_or_else(|_| String::new());
+    let yaml_body =
+        serde_yaml::to_string(&serde_yaml::Value::Mapping(map)).unwrap_or_else(|_| String::new());
 
     format!(
         "# mcp_marketplace_source: {}\n# mcp_marketplace_server: {}\n{}",
@@ -893,7 +1112,8 @@ pub async fn handle_v1_mcp_marketplace_installed(
     let integrations_dir = config_dir.join("integrations.d");
 
     let bundled = bundled_index();
-    let index_ids: std::collections::HashSet<String> = bundled.servers.iter().map(|s| s.id.clone()).collect();
+    let index_ids: std::collections::HashSet<String> =
+        bundled.servers.iter().map(|s| s.id.clone()).collect();
     let mut installed = Vec::new();
 
     let read_dir = match tokio::fs::read_dir(&integrations_dir).await {
@@ -910,7 +1130,9 @@ pub async fn handle_v1_mcp_marketplace_installed(
         if !fname_str.ends_with(".yaml") {
             continue;
         }
-        let is_mcp = ["mcp_stdio_", "mcp_sse_", "mcp_http_"].iter().any(|p| fname_str.starts_with(p));
+        let is_mcp = ["mcp_stdio_", "mcp_sse_", "mcp_http_"]
+            .iter()
+            .any(|p| fname_str.starts_with(p));
         if !is_mcp {
             continue;
         }
@@ -987,7 +1209,11 @@ fn extract_name_from_url(url: &str) -> String {
         .trim_start_matches("http://");
     let host_and_port = without_scheme.split('/').next().unwrap_or(without_scheme);
     let host = if host_and_port.starts_with('[') {
-        host_and_port.trim_start_matches('[').split(']').next().unwrap_or("mcp")
+        host_and_port
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or("mcp")
     } else {
         host_and_port.split(':').next().unwrap_or(host_and_port)
     };
@@ -996,7 +1222,9 @@ fn extract_name_from_url(url: &str) -> String {
         return "localhost".to_string();
     }
 
-    let is_ip = host.split('.').all(|seg| seg.chars().all(|c| c.is_ascii_digit()));
+    let is_ip = host
+        .split('.')
+        .all(|seg| seg.chars().all(|c| c.is_ascii_digit()));
     if is_ip || host.starts_with('[') {
         return host.replace('[', "").replace(']', "").replace(':', "_");
     }
@@ -1009,7 +1237,10 @@ fn extract_name_from_url(url: &str) -> String {
         let last = parts[parts.len() - 1];
         let second_last = parts[parts.len() - 2];
         let is_country_code_sld = last.len() == 2
-            && matches!(second_last, "co" | "com" | "org" | "net" | "ac" | "gov" | "edu" | "or" | "ne");
+            && matches!(
+                second_last,
+                "co" | "com" | "org" | "net" | "ac" | "gov" | "edu" | "or" | "ne"
+            );
         if is_country_code_sld {
             return parts[parts.len() - 3].to_string();
         }
@@ -1031,18 +1262,26 @@ fn extract_name_from_command(cmd: &str) -> String {
         if arg.starts_with('-') {
             continue;
         }
-        if i > 0 && (args[i - 1] == "-e" || args[i - 1] == "--env" || args[i - 1] == "-p" || args[i - 1] == "--port") {
+        if i > 0
+            && (args[i - 1] == "-e"
+                || args[i - 1] == "--env"
+                || args[i - 1] == "-p"
+                || args[i - 1] == "--port")
+        {
             continue;
         }
         candidate = arg;
-        if *arg != "npx" && *arg != "uvx" && *arg != "docker" && *arg != "node" && *arg != "python" && *arg != "python3" {
+        if *arg != "npx"
+            && *arg != "uvx"
+            && *arg != "docker"
+            && *arg != "node"
+            && *arg != "python"
+            && *arg != "python3"
+        {
             break;
         }
     }
-    let name = candidate
-        .rsplit('/')
-        .next()
-        .unwrap_or(candidate);
+    let name = candidate.rsplit('/').next().unwrap_or(candidate);
     let name = name.trim_end_matches(".js");
     let name = name.trim_start_matches('@');
     let name = if let Some(slash_pos) = name.find('/') {
@@ -1065,22 +1304,31 @@ fn strip_mcp_prefixes(s: &str) -> String {
 fn sanitize_name(s: &str) -> String {
     let snake: String = s
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     let snake = snake.trim_matches('_').to_string();
     let snake: String = {
         let mut prev_underscore = false;
-        snake.chars().filter(|c| {
-            if *c == '_' {
-                if prev_underscore {
-                    return false;
+        snake
+            .chars()
+            .filter(|c| {
+                if *c == '_' {
+                    if prev_underscore {
+                        return false;
+                    }
+                    prev_underscore = true;
+                } else {
+                    prev_underscore = false;
                 }
-                prev_underscore = true;
-            } else {
-                prev_underscore = false;
-            }
-            true
-        }).collect()
+                true
+            })
+            .collect()
     };
     if snake.len() > 40 {
         snake[..40].to_string()
@@ -1119,7 +1367,11 @@ mod tests {
     fn test_bundled_index_parses() {
         let index = bundled_index();
         assert!(index.version >= 1, "version must be >= 1");
-        assert!(index.servers.len() >= 30, "must have at least 30 servers, got {}", index.servers.len());
+        assert!(
+            index.servers.len() >= 30,
+            "must have at least 30 servers, got {}",
+            index.servers.len()
+        );
     }
 
     #[test]
@@ -1127,9 +1379,21 @@ mod tests {
         let index = bundled_index();
         for server in &index.servers {
             assert!(!server.id.is_empty(), "server id must not be empty");
-            assert!(!server.name.is_empty(), "server name must not be empty for id={}", server.id);
-            assert!(!server.description.is_empty(), "server description must not be empty for id={}", server.id);
-            assert!(!server.transport.is_empty(), "server transport must not be empty for id={}", server.id);
+            assert!(
+                !server.name.is_empty(),
+                "server name must not be empty for id={}",
+                server.id
+            );
+            assert!(
+                !server.description.is_empty(),
+                "server description must not be empty for id={}",
+                server.id
+            );
+            assert!(
+                !server.transport.is_empty(),
+                "server transport must not be empty for id={}",
+                server.id
+            );
         }
     }
 
@@ -1138,24 +1402,49 @@ mod tests {
         let index = bundled_index();
         let mut ids = std::collections::HashSet::new();
         for server in &index.servers {
-            assert!(ids.insert(server.id.clone()), "duplicate server id: {}", server.id);
+            assert!(
+                ids.insert(server.id.clone()),
+                "duplicate server id: {}",
+                server.id
+            );
         }
     }
 
     #[test]
     fn test_bundled_index_expanded() {
         let index = bundled_index();
-        assert!(index.servers.len() >= 30, "bundled index must have at least 30 servers");
+        assert!(
+            index.servers.len() >= 30,
+            "bundled index must have at least 30 servers"
+        );
     }
 
     #[test]
     fn test_validate_server_id() {
-        assert!(mcp_naming::validate_server_id("github").is_ok(), "valid name");
-        assert!(mcp_naming::validate_server_id("my-server").is_ok(), "valid name with dash");
-        assert!(mcp_naming::validate_server_id("").is_err(), "empty name invalid");
-        assert!(mcp_naming::validate_server_id("../evil").is_err(), "path traversal invalid");
-        assert!(mcp_naming::validate_server_id("a/b").is_ok(), "slash valid for smithery IDs");
-        assert!(mcp_naming::validate_server_id("a\\b").is_err(), "backslash invalid");
+        assert!(
+            mcp_naming::validate_server_id("github").is_ok(),
+            "valid name"
+        );
+        assert!(
+            mcp_naming::validate_server_id("my-server").is_ok(),
+            "valid name with dash"
+        );
+        assert!(
+            mcp_naming::validate_server_id("").is_err(),
+            "empty name invalid"
+        );
+        assert!(
+            mcp_naming::validate_server_id("../evil").is_err(),
+            "path traversal invalid"
+        );
+        assert!(
+            mcp_naming::validate_server_id("a/b").is_ok(),
+            "slash valid for smithery IDs"
+        );
+        assert!(
+            mcp_naming::validate_server_id("a\\b").is_err(),
+            "backslash invalid"
+        );
     }
 
     #[test]
@@ -1179,16 +1468,40 @@ mod tests {
             confirmation_default: vec!["*".to_string()],
         };
         let mut env = HashMap::new();
-        env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), "ghp_test".to_string());
+        env.insert(
+            "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+            "ghp_test".to_string(),
+        );
         let yaml = build_integration_yaml(&server, &env, &HashMap::new(), "refact-bundled");
-        assert!(yaml.contains("npx -y @modelcontextprotocol/server-github"), "yaml must contain command");
-        assert!(yaml.contains("GITHUB_PERSONAL_ACCESS_TOKEN"), "yaml must contain env key");
+        assert!(
+            yaml.contains("npx -y @modelcontextprotocol/server-github"),
+            "yaml must contain command"
+        );
+        assert!(
+            yaml.contains("GITHUB_PERSONAL_ACCESS_TOKEN"),
+            "yaml must contain env key"
+        );
         assert!(yaml.contains("ghp_test"), "yaml must contain env value");
-        assert!(yaml.contains("init_timeout"), "yaml must contain init_timeout");
-        assert!(yaml.contains("request_timeout"), "yaml must contain request_timeout");
-        assert!(yaml.contains("ask_user_default"), "yaml must contain confirmation");
-        assert!(yaml.contains("# mcp_marketplace_source: refact-bundled"), "yaml must have source comment");
-        assert!(yaml.contains("# mcp_marketplace_server: github"), "yaml must have server comment");
+        assert!(
+            yaml.contains("init_timeout"),
+            "yaml must contain init_timeout"
+        );
+        assert!(
+            yaml.contains("request_timeout"),
+            "yaml must contain request_timeout"
+        );
+        assert!(
+            yaml.contains("ask_user_default"),
+            "yaml must contain confirmation"
+        );
+        assert!(
+            yaml.contains("# mcp_marketplace_source: refact-bundled"),
+            "yaml must have source comment"
+        );
+        assert!(
+            yaml.contains("# mcp_marketplace_server: github"),
+            "yaml must have server comment"
+        );
     }
 
     #[test]
@@ -1211,7 +1524,8 @@ mod tests {
             },
             confirmation_default: vec!["*".to_string()],
         };
-        let yaml = build_integration_yaml(&server, &HashMap::new(), &HashMap::new(), "refact-bundled");
+        let yaml =
+            build_integration_yaml(&server, &HashMap::new(), &HashMap::new(), "refact-bundled");
         assert!(yaml.contains("env:"), "yaml must contain env section");
     }
 
@@ -1235,11 +1549,15 @@ mod tests {
             },
             confirmation_default: vec![],
         };
-        let yaml = build_integration_yaml(&server, &HashMap::new(), &HashMap::new(), "refact-bundled");
+        let yaml =
+            build_integration_yaml(&server, &HashMap::new(), &HashMap::new(), "refact-bundled");
         assert!(yaml.contains("url:"), "yaml must contain url");
         assert!(yaml.contains("auth_type:"), "yaml must contain auth_type");
         assert!(yaml.contains("headers:"), "yaml must contain headers");
-        assert!(!yaml.contains("command:"), "yaml must not contain command for http");
+        assert!(
+            !yaml.contains("command:"),
+            "yaml must not contain command for http"
+        );
         assert!(!yaml.contains("env:"), "yaml must not contain env for http");
     }
 
@@ -1267,7 +1585,10 @@ mod tests {
         headers.insert("Authorization".to_string(), "Bearer token123".to_string());
         let yaml = build_integration_yaml(&server, &HashMap::new(), &headers, "refact-bundled");
         assert!(yaml.contains("url:"), "yaml must contain url");
-        assert!(yaml.contains("Authorization"), "yaml must contain Authorization header");
+        assert!(
+            yaml.contains("Authorization"),
+            "yaml must contain Authorization header"
+        );
         assert!(yaml.contains("token123"), "yaml must contain token value");
         assert!(yaml.contains("auth_type:"), "yaml must contain auth_type");
     }
@@ -1317,7 +1638,13 @@ mod tests {
                 icon_url: None,
                 homepage: None,
                 transport: "stdio".to_string(),
-                install_recipe: InstallRecipe { command: Some("cmd".to_string()), url: None, env: HashMap::new(), headers: HashMap::new(), args_from_env: vec![] },
+                install_recipe: InstallRecipe {
+                    command: Some("cmd".to_string()),
+                    url: None,
+                    env: HashMap::new(),
+                    headers: HashMap::new(),
+                    args_from_env: vec![],
+                },
                 confirmation_default: vec![],
             },
             source_id: BUNDLED_SOURCE_ID.to_string(),
@@ -1332,7 +1659,13 @@ mod tests {
                 icon_url: None,
                 homepage: None,
                 transport: "http".to_string(),
-                install_recipe: InstallRecipe { command: None, url: Some("https://ex.com".to_string()), env: HashMap::new(), headers: HashMap::new(), args_from_env: vec![] },
+                install_recipe: InstallRecipe {
+                    command: None,
+                    url: Some("https://ex.com".to_string()),
+                    env: HashMap::new(),
+                    headers: HashMap::new(),
+                    args_from_env: vec![],
+                },
                 confirmation_default: vec![],
             },
             source_id: SMITHERY_SOURCE_ID.to_string(),
@@ -1355,7 +1688,13 @@ mod tests {
                 icon_url: None,
                 homepage: None,
                 transport: "stdio".to_string(),
-                install_recipe: InstallRecipe { command: Some("cmd".to_string()), url: None, env: HashMap::new(), headers: HashMap::new(), args_from_env: vec![] },
+                install_recipe: InstallRecipe {
+                    command: Some("cmd".to_string()),
+                    url: None,
+                    env: HashMap::new(),
+                    headers: HashMap::new(),
+                    args_from_env: vec![],
+                },
                 confirmation_default: vec![],
             },
             source_id: "my-source".to_string(),
@@ -1367,13 +1706,17 @@ mod tests {
 
     #[test]
     fn test_source_cache_independence() {
-        let mut cache: HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)> = HashMap::new();
+        let mut cache: HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)> =
+            HashMap::new();
         cache.insert("source-a:".to_string(), (Instant::now(), vec![]));
         cache.insert("source-b:".to_string(), (Instant::now(), vec![]));
         assert!(cache.contains_key("source-a:"));
         assert!(cache.contains_key("source-b:"));
         cache.remove("source-a:");
-        assert!(!cache.contains_key("source-a:"), "removing source-a doesn't affect source-b");
+        assert!(
+            !cache.contains_key("source-a:"),
+            "removing source-a doesn't affect source-b"
+        );
         assert!(cache.contains_key("source-b:"));
     }
 
@@ -1397,7 +1740,8 @@ mod tests {
             },
             confirmation_default: vec![],
         };
-        let yaml = build_integration_yaml(&server, &HashMap::new(), &HashMap::new(), "refact-bundled");
+        let yaml =
+            build_integration_yaml(&server, &HashMap::new(), &HashMap::new(), "refact-bundled");
         assert!(yaml.contains("command:"));
     }
 
@@ -1419,7 +1763,11 @@ mod tests {
             install_recipe: InstallRecipe {
                 command: Some("npx -y @modelcontextprotocol/server-brave-search".to_string()),
                 url: None,
-                env: { let mut m = HashMap::new(); m.insert("BRAVE_API_KEY".to_string(), "".to_string()); m },
+                env: {
+                    let mut m = HashMap::new();
+                    m.insert("BRAVE_API_KEY".to_string(), "".to_string());
+                    m
+                },
                 headers: HashMap::new(),
                 args_from_env: vec![],
             },
@@ -1456,7 +1804,10 @@ mod tests {
             .open(&path)
             .await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
     }
 
     #[test]
@@ -1479,13 +1830,19 @@ mod tests {
 
     #[test]
     fn test_extract_name_from_url_country_code_tld() {
-        assert_eq!(extract_name_from_url("https://api.example.co.uk/mcp"), "example");
+        assert_eq!(
+            extract_name_from_url("https://api.example.co.uk/mcp"),
+            "example"
+        );
     }
 
     #[test]
     fn test_extract_name_from_url_localhost() {
         assert_eq!(extract_name_from_url("http://localhost:3000"), "localhost");
-        assert_eq!(extract_name_from_url("http://localhost:3000/path"), "localhost");
+        assert_eq!(
+            extract_name_from_url("http://localhost:3000/path"),
+            "localhost"
+        );
     }
 
     #[test]
@@ -1497,14 +1854,26 @@ mod tests {
     #[test]
     fn test_extract_name_from_url_ipv6() {
         let name = extract_name_from_url("http://[::1]:3000/mcp");
-        assert!(!name.contains('['), "brackets must be stripped from ipv6 result");
-        assert!(!name.contains(']'), "brackets must be stripped from ipv6 result");
+        assert!(
+            !name.contains('['),
+            "brackets must be stripped from ipv6 result"
+        );
+        assert!(
+            !name.contains(']'),
+            "brackets must be stripped from ipv6 result"
+        );
     }
 
     #[test]
     fn test_extract_name_from_url_simple_domain() {
-        assert_eq!(extract_name_from_url("https://api.example.com/path"), "example");
-        assert_eq!(extract_name_from_url("https://mcp.myservice.io/v1"), "myservice");
+        assert_eq!(
+            extract_name_from_url("https://api.example.com/path"),
+            "example"
+        );
+        assert_eq!(
+            extract_name_from_url("https://mcp.myservice.io/v1"),
+            "myservice"
+        );
     }
 
     #[test]
@@ -1529,7 +1898,10 @@ mod tests {
 
     #[test]
     fn test_transport_detection_command() {
-        assert_eq!(detect_transport("npx -y @notionhq/notion-mcp-server"), "stdio");
+        assert_eq!(
+            detect_transport("npx -y @notionhq/notion-mcp-server"),
+            "stdio"
+        );
         assert_eq!(detect_transport("uvx mcp-server-fetch"), "stdio");
         assert_eq!(detect_transport("docker run -i --rm mcp/github"), "stdio");
     }
@@ -1545,19 +1917,37 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let integrations_dir = tmp.path().join("integrations.d");
         tokio::fs::create_dir_all(&integrations_dir).await.unwrap();
-        tokio::fs::write(integrations_dir.join("mcp_stdio_github.yaml"), "command: npx github\n").await.unwrap();
-        tokio::fs::write(integrations_dir.join("mcp_stdio_brave_search.yaml"), "command: npx brave\n").await.unwrap();
-        tokio::fs::write(integrations_dir.join("other_integration.yaml"), "some: config\n").await.unwrap();
+        tokio::fs::write(
+            integrations_dir.join("mcp_stdio_github.yaml"),
+            "command: npx github\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            integrations_dir.join("mcp_stdio_brave_search.yaml"),
+            "command: npx brave\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            integrations_dir.join("other_integration.yaml"),
+            "some: config\n",
+        )
+        .await
+        .unwrap();
 
         let index = bundled_index();
-        let index_ids: std::collections::HashSet<String> = index.servers.iter().map(|s| s.id.clone()).collect();
+        let index_ids: std::collections::HashSet<String> =
+            index.servers.iter().map(|s| s.id.clone()).collect();
 
         let mut installed_ids = Vec::new();
         let mut rd = tokio::fs::read_dir(&integrations_dir).await.unwrap();
         while let Ok(Some(entry)) = rd.next_entry().await {
             let fname = entry.file_name();
             let fname_str = fname.to_string_lossy().to_string();
-            if !fname_str.ends_with(".yaml") { continue; }
+            if !fname_str.ends_with(".yaml") {
+                continue;
+            }
             for prefix in &["mcp_stdio_", "mcp_sse_", "mcp_http_"] {
                 if let Some(rest) = fname_str.strip_prefix(prefix) {
                     let id_candidate = rest.trim_end_matches(".yaml").replace('_', "-");
@@ -1568,9 +1958,18 @@ mod tests {
                 }
             }
         }
-        assert!(installed_ids.contains(&"github".to_string()), "must detect github as installed");
-        assert!(installed_ids.contains(&"brave-search".to_string()), "must detect brave-search as installed");
-        assert!(!installed_ids.contains(&"other".to_string()), "must not detect non-mcp integrations");
+        assert!(
+            installed_ids.contains(&"github".to_string()),
+            "must detect github as installed"
+        );
+        assert!(
+            installed_ids.contains(&"brave-search".to_string()),
+            "must detect brave-search as installed"
+        );
+        assert!(
+            !installed_ids.contains(&"other".to_string()),
+            "must not detect non-mcp integrations"
+        );
     }
 
     #[test]
@@ -1589,7 +1988,9 @@ mod tests {
 
     #[test]
     fn test_smithery_source_has_api_key_fields() {
-        use crate::http::routers::v1::mcp_marketplace_sources::{source_to_api_json, SMITHERY_SOURCE_ID};
+        use crate::http::routers::v1::mcp_marketplace_sources::{
+            source_to_api_json, SMITHERY_SOURCE_ID,
+        };
         let mut smithery = MarketplaceSource {
             id: SMITHERY_SOURCE_ID.to_string(),
             label: "Smithery.ai".to_string(),
@@ -1599,13 +2000,25 @@ mod tests {
             api_key: None,
         };
         let json_no_key = source_to_api_json(&smithery, true);
-        assert_eq!(json_no_key["needs_api_key"], true, "smithery must need api key");
-        assert_eq!(json_no_key["has_api_key"], false, "no api key configured initially");
-        assert!(json_no_key.get("api_key_configured").is_none(), "must not use old field name");
+        assert_eq!(
+            json_no_key["needs_api_key"], true,
+            "smithery must need api key"
+        );
+        assert_eq!(
+            json_no_key["has_api_key"], false,
+            "no api key configured initially"
+        );
+        assert!(
+            json_no_key.get("api_key_configured").is_none(),
+            "must not use old field name"
+        );
 
         smithery.api_key = Some("sk-test".to_string());
         let json_with_key = source_to_api_json(&smithery, true);
-        assert_eq!(json_with_key["has_api_key"], true, "has_api_key must be true when key is set");
+        assert_eq!(
+            json_with_key["has_api_key"], true,
+            "has_api_key must be true when key is set"
+        );
     }
 
     #[test]
@@ -1620,7 +2033,13 @@ mod tests {
                 icon_url: None,
                 homepage: None,
                 transport: "stdio".to_string(),
-                install_recipe: InstallRecipe { command: Some("cmd".to_string()), url: None, env: HashMap::new(), headers: HashMap::new(), args_from_env: vec![] },
+                install_recipe: InstallRecipe {
+                    command: Some("cmd".to_string()),
+                    url: None,
+                    env: HashMap::new(),
+                    headers: HashMap::new(),
+                    args_from_env: vec![],
+                },
                 confirmation_default: vec![],
             },
             source_id: source.to_string(),
@@ -1633,13 +2052,20 @@ mod tests {
         ];
 
         let mut seen_ids: HashSet<String> = HashSet::new();
-        let deduped: Vec<MarketplaceServerWithSource> = all_servers.into_iter().filter(|s| {
-            seen_ids.insert(s.server.id.clone())
-        }).collect();
+        let deduped: Vec<MarketplaceServerWithSource> = all_servers
+            .into_iter()
+            .filter(|s| seen_ids.insert(s.server.id.clone()))
+            .collect();
 
         assert_eq!(deduped.len(), 2, "duplicate github must be removed");
-        assert!(deduped.iter().any(|s| s.server.id == "github"), "github must be present");
-        assert!(deduped.iter().any(|s| s.server.id == "brave-search"), "brave-search must be present");
+        assert!(
+            deduped.iter().any(|s| s.server.id == "github"),
+            "github must be present"
+        );
+        assert!(
+            deduped.iter().any(|s| s.server.id == "brave-search"),
+            "brave-search must be present"
+        );
         let github = deduped.iter().find(|s| s.server.id == "github").unwrap();
         assert_eq!(github.source_id, "refact-bundled", "first occurrence wins");
     }
@@ -1666,13 +2092,19 @@ mod tests {
             url: None,
             api_key: None,
         };
-        let should_skip_refact = is_merged_mode && refact_source.source_type == SourceType::Smithery;
-        assert!(!should_skip_refact, "RefactIndex must not be excluded in merged mode");
+        let should_skip_refact =
+            is_merged_mode && refact_source.source_type == SourceType::Smithery;
+        assert!(
+            !should_skip_refact,
+            "RefactIndex must not be excluded in merged mode"
+        );
     }
 
     #[test]
     fn test_has_api_key_field_name_not_api_key_configured() {
-        use crate::http::routers::v1::mcp_marketplace_sources::{source_to_api_json, SMITHERY_SOURCE_ID};
+        use crate::http::routers::v1::mcp_marketplace_sources::{
+            source_to_api_json, SMITHERY_SOURCE_ID,
+        };
         let smithery = MarketplaceSource {
             id: SMITHERY_SOURCE_ID.to_string(),
             label: "Smithery.ai".to_string(),
@@ -1682,8 +2114,14 @@ mod tests {
             api_key: Some("sk-test".to_string()),
         };
         let json = source_to_api_json(&smithery, true);
-        assert!(json.get("has_api_key").is_some(), "field must be named has_api_key");
-        assert!(json.get("api_key_configured").is_none(), "old field name api_key_configured must not exist");
+        assert!(
+            json.get("has_api_key").is_some(),
+            "field must be named has_api_key"
+        );
+        assert!(
+            json.get("api_key_configured").is_none(),
+            "old field name api_key_configured must not exist"
+        );
     }
 
     #[test]
@@ -1709,11 +2147,24 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("MY_KEY".to_string(), "safe_value".to_string());
         let yaml = build_integration_yaml(&server, &env, &HashMap::new(), "refact-bundled");
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml.lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n")).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(
+            &yaml
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
         let env_section = &parsed["env"];
-        assert!(env_section["MY_KEY"].as_str().is_some(), "MY_KEY must be present");
+        assert!(
+            env_section["MY_KEY"].as_str().is_some(),
+            "MY_KEY must be present"
+        );
         assert_eq!(env_section["MY_KEY"].as_str().unwrap(), "safe_value");
-        assert!(env_section.get("evil_field").is_none(), "injection must not create new YAML fields");
+        assert!(
+            env_section.get("evil_field").is_none(),
+            "injection must not create new YAML fields"
+        );
     }
 
     #[test]
@@ -1737,9 +2188,18 @@ mod tests {
             confirmation_default: vec!["*".to_string()],
         };
         let yaml = build_integration_yaml(&server, &HashMap::new(), &HashMap::new(), "smithery");
-        assert!(yaml.contains("# mcp_marketplace_source: smithery"), "must have source comment");
-        assert!(yaml.contains("# mcp_marketplace_server: acme/my-server"), "must preserve slash in server ID");
-        assert!(yaml.contains("npx @acme/my-server"), "command must be present");
+        assert!(
+            yaml.contains("# mcp_marketplace_source: smithery"),
+            "must have source comment"
+        );
+        assert!(
+            yaml.contains("# mcp_marketplace_server: acme/my-server"),
+            "must preserve slash in server ID"
+        );
+        assert!(
+            yaml.contains("npx @acme/my-server"),
+            "command must be present"
+        );
     }
 
     #[test]
@@ -1773,22 +2233,36 @@ mod tests {
         tokio::fs::create_dir_all(&integrations_dir).await.unwrap();
 
         let smithery_yaml = "# mcp_marketplace_source: smithery\n# mcp_marketplace_server: acme/my-server\ncommand: npx @acme/my-server\n";
-        tokio::fs::write(integrations_dir.join("mcp_stdio_acme_my_server.yaml"), smithery_yaml).await.unwrap();
+        tokio::fs::write(
+            integrations_dir.join("mcp_stdio_acme_my_server.yaml"),
+            smithery_yaml,
+        )
+        .await
+        .unwrap();
 
         let bundled_yaml = "command: npx github\n";
-        tokio::fs::write(integrations_dir.join("mcp_stdio_github.yaml"), bundled_yaml).await.unwrap();
+        tokio::fs::write(integrations_dir.join("mcp_stdio_github.yaml"), bundled_yaml)
+            .await
+            .unwrap();
 
         let mut smithery_found = None;
         let bundled = bundled_index();
-        let index_ids: std::collections::HashSet<String> = bundled.servers.iter().map(|s| s.id.clone()).collect();
+        let index_ids: std::collections::HashSet<String> =
+            bundled.servers.iter().map(|s| s.id.clone()).collect();
 
         let mut rd = tokio::fs::read_dir(&integrations_dir).await.unwrap();
         while let Ok(Some(entry)) = rd.next_entry().await {
             let fname = entry.file_name();
             let fname_str = fname.to_string_lossy().to_string();
-            if !fname_str.ends_with(".yaml") { continue; }
-            let is_mcp = ["mcp_stdio_", "mcp_sse_", "mcp_http_"].iter().any(|p| fname_str.starts_with(p));
-            if !is_mcp { continue; }
+            if !fname_str.ends_with(".yaml") {
+                continue;
+            }
+            let is_mcp = ["mcp_stdio_", "mcp_sse_", "mcp_http_"]
+                .iter()
+                .any(|p| fname_str.starts_with(p));
+            if !is_mcp {
+                continue;
+            }
             let content = tokio::fs::read_to_string(entry.path()).await.unwrap();
             let (found_source, found_server) = parse_marketplace_comments(&content);
             if let (Some(src_id), Some(srv_id)) = (found_source, found_server) {
@@ -1807,14 +2281,21 @@ mod tests {
                 }
             }
         }
-        assert_eq!(smithery_found.as_deref(), Some("smithery"), "must detect smithery server via comment headers");
+        assert_eq!(
+            smithery_found.as_deref(),
+            Some("smithery"),
+            "must detect smithery server via comment headers"
+        );
     }
 
     #[test]
     fn test_validate_env_key_valid() {
         assert!(validate_env_key("MY_KEY"), "simple env key");
         assert!(validate_env_key("GITHUB_TOKEN"), "env key with underscore");
-        assert!(validate_env_key("_PRIVATE"), "env key starting with underscore");
+        assert!(
+            validate_env_key("_PRIVATE"),
+            "env key starting with underscore"
+        );
         assert!(validate_env_key("API-KEY"), "env key with dash");
     }
 
@@ -1822,25 +2303,41 @@ mod tests {
     fn test_validate_env_key_invalid() {
         assert!(!validate_env_key(""), "empty key invalid");
         assert!(!validate_env_key("evil:\nfield"), "newline in key invalid");
-        assert!(!validate_env_key("evil: true\n  injection"), "injection invalid");
-        assert!(!validate_env_key("1STARTS_WITH_NUM"), "key starting with number invalid");
+        assert!(
+            !validate_env_key("evil: true\n  injection"),
+            "injection invalid"
+        );
+        assert!(
+            !validate_env_key("1STARTS_WITH_NUM"),
+            "key starting with number invalid"
+        );
     }
 
     #[test]
     fn test_official_mcp_default_source_enabled() {
-        use crate::http::routers::v1::mcp_marketplace_sources::{default_sources_config_for_test, OFFICIAL_MCP_SOURCE_ID};
+        use crate::http::routers::v1::mcp_marketplace_sources::{
+            default_sources_config_for_test, OFFICIAL_MCP_SOURCE_ID,
+        };
         let cfg = default_sources_config_for_test();
         let official = cfg.sources.iter().find(|s| s.id == OFFICIAL_MCP_SOURCE_ID);
-        assert!(official.is_some(), "official-mcp must be in default sources");
+        assert!(
+            official.is_some(),
+            "official-mcp must be in default sources"
+        );
         let official = official.unwrap();
         assert!(official.enabled, "official-mcp must be enabled by default");
-        assert!(official.api_key.is_none(), "official-mcp must not require api key");
+        assert!(
+            official.api_key.is_none(),
+            "official-mcp must not require api key"
+        );
         assert_eq!(official.source_type, SourceType::OfficialMcp);
     }
 
     #[test]
     fn test_official_mcp_source_json() {
-        use crate::http::routers::v1::mcp_marketplace_sources::{source_to_api_json, OFFICIAL_MCP_SOURCE_ID};
+        use crate::http::routers::v1::mcp_marketplace_sources::{
+            source_to_api_json, OFFICIAL_MCP_SOURCE_ID,
+        };
         let source = MarketplaceSource {
             id: OFFICIAL_MCP_SOURCE_ID.to_string(),
             label: "MCP Registry".to_string(),
@@ -1850,10 +2347,19 @@ mod tests {
             api_key: None,
         };
         let json = source_to_api_json(&source, false);
-        assert_eq!(json["type"], "official_mcp", "type must serialize as official_mcp");
+        assert_eq!(
+            json["type"], "official_mcp",
+            "type must serialize as official_mcp"
+        );
         assert_eq!(json["enabled"], true);
-        assert!(json.get("needs_api_key").is_none(), "official-mcp must not have needs_api_key");
-        assert!(json.get("has_api_key").is_none(), "official-mcp must not have has_api_key");
+        assert!(
+            json.get("needs_api_key").is_none(),
+            "official-mcp must not have needs_api_key"
+        );
+        assert!(
+            json.get("has_api_key").is_none(),
+            "official-mcp must not have has_api_key"
+        );
     }
 
     #[test]
@@ -1902,8 +2408,13 @@ mod tests {
                 title: Some("My Tool".to_string()),
                 description: Some("Does stuff".to_string()),
                 website_url: Some("https://acme.com".to_string()),
-                icons: vec![OfficialRegistryIcon { src: "https://acme.com/icon.png".to_string() }],
-                remotes: vec![OfficialRegistryRemote { remote_type: "streamable-http".to_string(), url: "https://api.acme.com/mcp".to_string() }],
+                icons: vec![OfficialRegistryIcon {
+                    src: "https://acme.com/icon.png".to_string(),
+                }],
+                remotes: vec![OfficialRegistryRemote {
+                    remote_type: "streamable-http".to_string(),
+                    url: "https://api.acme.com/mcp".to_string(),
+                }],
                 packages: vec![],
             },
         };
@@ -1912,7 +2423,9 @@ mod tests {
         let publisher = parts.first().copied().unwrap_or("").to_string();
         let short_name = parts.get(1).copied().unwrap_or(s.name.as_str());
         let display_name = s.title.unwrap_or_else(|| short_name.to_string());
-        let (transport, install_url) = s.remotes.first()
+        let (transport, install_url) = s
+            .remotes
+            .first()
             .map(|r| {
                 let t = match r.remote_type.as_str() {
                     "streamable-http" => "http",
@@ -1941,7 +2454,13 @@ mod tests {
                 icon_url: None,
                 homepage: None,
                 transport: "http".to_string(),
-                install_recipe: InstallRecipe { command: None, url: Some("https://api.acme.com/mcp".to_string()), env: HashMap::new(), headers: HashMap::new(), args_from_env: vec![] },
+                install_recipe: InstallRecipe {
+                    command: None,
+                    url: Some("https://api.acme.com/mcp".to_string()),
+                    env: HashMap::new(),
+                    headers: HashMap::new(),
+                    args_from_env: vec![],
+                },
                 confirmation_default: vec!["**".to_string()],
             },
             MarketplaceServer {
@@ -1953,18 +2472,27 @@ mod tests {
                 icon_url: None,
                 homepage: None,
                 transport: "stdio".to_string(),
-                install_recipe: InstallRecipe { command: None, url: None, env: HashMap::new(), headers: HashMap::new(), args_from_env: vec![] },
+                install_recipe: InstallRecipe {
+                    command: None,
+                    url: None,
+                    env: HashMap::new(),
+                    headers: HashMap::new(),
+                    args_from_env: vec![],
+                },
                 confirmation_default: vec!["**".to_string()],
             },
         ];
 
         let q = "github".to_lowercase();
-        let filtered: Vec<_> = servers.iter().filter(|s| {
-            s.name.to_lowercase().contains(&q)
-                || s.description.to_lowercase().contains(&q)
-                || s.id.to_lowercase().contains(&q)
-                || s.publisher.to_lowercase().contains(&q)
-        }).collect();
+        let filtered: Vec<_> = servers
+            .iter()
+            .filter(|s| {
+                s.name.to_lowercase().contains(&q)
+                    || s.description.to_lowercase().contains(&q)
+                    || s.id.to_lowercase().contains(&q)
+                    || s.publisher.to_lowercase().contains(&q)
+            })
+            .collect();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "acme/github-tool");
     }
@@ -1981,6 +2509,9 @@ mod tests {
         };
         let is_merged_mode = true;
         let should_skip = is_merged_mode && official_source.source_type == SourceType::Smithery;
-        assert!(!should_skip, "OfficialMcp must NOT be excluded in merged mode");
+        assert!(
+            !should_skip,
+            "OfficialMcp must NOT be excluded in merged mode"
+        );
     }
 }

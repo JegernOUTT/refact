@@ -133,7 +133,12 @@ pub struct TransformStats {
     pub tool_messages_modified: usize,
 }
 
-pub const TOOLS_TO_PRESERVE: &[&str] = &["deep_research", "subagent", "strategic_planning", "code_review"];
+pub const TOOLS_TO_PRESERVE: &[&str] = &[
+    "deep_research",
+    "subagent",
+    "strategic_planning",
+    "code_review",
+];
 
 fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
@@ -265,7 +270,8 @@ pub fn compress_in_place(
     if opts.strip_metering {
         for msg in messages.iter_mut() {
             msg.usage = None;
-            msg.extra.retain(|key, _| !key.starts_with("metering_coins_"));
+            msg.extra
+                .retain(|key, _| !key.starts_with("metering_coins_"));
         }
     }
 
@@ -474,10 +480,8 @@ pub async fn handoff_select(
     let mut summary_msg: Option<ChatMessage> = None;
 
     if opts.llm_summary_for_excluded && generate_summary {
-        let selected_ids: std::collections::HashSet<&str> = conversation
-            .iter()
-            .map(|m| m.message_id.as_str())
-            .collect();
+        let selected_ids: std::collections::HashSet<&str> =
+            conversation.iter().map(|m| m.message_id.as_str()).collect();
         let excluded: Vec<ChatMessage> = messages
             .iter()
             .skip(system_prefix_len)
@@ -649,7 +653,12 @@ mod tests {
     #[test]
     fn test_compress_preserves_agentic_tools() {
         let long_content = "x".repeat(1000);
-        for tool_name in &["deep_research", "subagent", "strategic_planning", "code_review"] {
+        for tool_name in &[
+            "deep_research",
+            "subagent",
+            "strategic_planning",
+            "code_review",
+        ] {
             let mut messages = vec![
                 make_user_msg("hello"),
                 make_assistant_with_tool_call("tc1", tool_name),
@@ -809,7 +818,9 @@ mod tests {
         // Pure-memory message is gone
         assert!(!messages.iter().any(|m| {
             if let ChatContent::ContextFiles(files) = &m.content {
-                files.iter().any(|f| f.file_name.contains(".refact/knowledge/2026"))
+                files
+                    .iter()
+                    .any(|f| f.file_name.contains(".refact/knowledge/2026"))
             } else {
                 false
             }
@@ -1105,7 +1116,10 @@ mod tests {
 
         assert_system_prefix(&selected);
         assert!(selected.iter().all(|m| m.role != "tool"));
-        assert_eq!(roles(&selected), vec!["system", "user", "assistant", "user"]);
+        assert_eq!(
+            roles(&selected),
+            vec!["system", "user", "assistant", "user"]
+        );
     }
 
     #[tokio::test]
@@ -1380,7 +1394,10 @@ mod tests {
             .unwrap();
 
         assert_system_prefix(&selected);
-        assert_eq!(roles(&selected), vec!["system", "user", "assistant", "user"]);
+        assert_eq!(
+            roles(&selected),
+            vec!["system", "user", "assistant", "user"]
+        );
     }
 
     #[tokio::test]

@@ -114,9 +114,15 @@ available:
         let api_key = resolve_env_var(&self.api_key, "", "openai api_key");
 
         let (wire_format, chat_endpoint) = if self.use_responses_api {
-            (WireFormat::OpenaiResponses, "https://api.openai.com/v1/responses".to_string())
+            (
+                WireFormat::OpenaiResponses,
+                "https://api.openai.com/v1/responses".to_string(),
+            )
         } else {
-            (WireFormat::OpenaiChatCompletions, "https://api.openai.com/v1/chat/completions".to_string())
+            (
+                WireFormat::OpenaiChatCompletions,
+                "https://api.openai.com/v1/chat/completions".to_string(),
+            )
         };
 
         Ok(ProviderRuntime {
@@ -202,7 +208,10 @@ available:
         };
 
         if !response.status().is_success() {
-            tracing::warn!("OpenAI: models endpoint returned status {}", response.status());
+            tracing::warn!(
+                "OpenAI: models endpoint returned status {}",
+                response.status()
+            );
             return self.get_available_models_from_caps(model_caps);
         }
 
@@ -214,7 +223,8 @@ available:
             }
         };
 
-        let filter_regex = self.model_filter_regex()
+        let filter_regex = self
+            .model_filter_regex()
             .and_then(|pattern| Regex::new(pattern).ok());
 
         let enabled_set: std::collections::HashSet<&str> =
@@ -241,28 +251,34 @@ available:
                 let pricing = self.model_pricing(&id);
 
                 if let Some(caps) = model_caps.get(&id) {
-                    models_map.insert(id.clone(), AvailableModel::from_caps(&id, caps, enabled, pricing));
+                    models_map.insert(
+                        id.clone(),
+                        AvailableModel::from_caps(&id, caps, enabled, pricing),
+                    );
                 } else {
-                    models_map.insert(id.clone(), AvailableModel {
-                        id: id.clone(),
-                        display_name: None,
-                        n_ctx: 128_000,
-                        supports_tools: true,
-                        supports_parallel_tools: true,
-                        supports_strict_tools: false,
-                        supports_multimodality: true,
-                        reasoning_effort_options: None,
-                        supports_thinking_budget: false,
-                        supports_adaptive_thinking_budget: false,
-                        tokenizer: None,
-                        enabled,
-                        is_custom: false,
-                        pricing,
-                        available_providers: Vec::new(),
-                        selected_provider: None,
-                        max_output_tokens: None,
-                        provider_variants: Vec::new(),
-                    });
+                    models_map.insert(
+                        id.clone(),
+                        AvailableModel {
+                            id: id.clone(),
+                            display_name: None,
+                            n_ctx: 128_000,
+                            supports_tools: true,
+                            supports_parallel_tools: true,
+                            supports_strict_tools: false,
+                            supports_multimodality: true,
+                            reasoning_effort_options: None,
+                            supports_thinking_budget: false,
+                            supports_adaptive_thinking_budget: false,
+                            tokenizer: None,
+                            enabled,
+                            is_custom: false,
+                            pricing,
+                            available_providers: Vec::new(),
+                            selected_provider: None,
+                            max_output_tokens: None,
+                            provider_variants: Vec::new(),
+                        },
+                    );
                 }
             }
         }
@@ -277,7 +293,10 @@ available:
             if matches && !models_map.contains_key(name) {
                 let enabled = enabled_set.contains(name.as_str());
                 let pricing = self.model_pricing(name);
-                models_map.insert(name.clone(), AvailableModel::from_caps(name, caps, enabled, pricing));
+                models_map.insert(
+                    name.clone(),
+                    AvailableModel::from_caps(name, caps, enabled, pricing),
+                );
             }
         }
 

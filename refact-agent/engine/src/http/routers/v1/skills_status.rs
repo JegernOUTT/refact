@@ -28,7 +28,10 @@ pub async fn handle_v1_skills_status(
         sessions_read.get(&chat_id).cloned()
     };
     let Some(session_arc) = session_arc else {
-        return Err(ScratchError::new(StatusCode::NOT_FOUND, format!("chat_id {} not found", chat_id)));
+        return Err(ScratchError::new(
+            StatusCode::NOT_FOUND,
+            format!("chat_id {} not found", chat_id),
+        ));
     };
     let session = session_arc.lock().await;
     let active_skill = session.thread.active_skill.clone();

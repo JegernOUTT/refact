@@ -37,10 +37,7 @@ pub fn is_cache_guard_pause_reason(reason: &crate::chat::types::PauseReason) -> 
     reason.tool_name == CACHE_GUARD_TOOL_NAME || is_cache_guard_pause_id(&reason.tool_call_id)
 }
 
-pub async fn is_guard_enabled_for_model(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    model_id: &str,
-) -> bool {
+pub async fn is_guard_enabled_for_model(gcx: Arc<ARwLock<GlobalContext>>, model_id: &str) -> bool {
     let Some(pricing) = get_model_pricing(&gcx, model_id).await else {
         return false;
     };
@@ -151,7 +148,10 @@ pub async fn check_or_pause_cache_guard(
     // the server handles caching via response chaining. The request body intentionally
     // sends only tail items (not the full conversation), so the append-only prefix
     // check does not apply.
-    if request_body.get("previous_response_id").is_some_and(|v| !v.is_null()) {
+    if request_body
+        .get("previous_response_id")
+        .is_some_and(|v| !v.is_null())
+    {
         return Ok(None);
     }
 
@@ -307,8 +307,10 @@ mod tests {
 
     #[test]
     fn test_tools_array_strict_equality() {
-        let tool_a = json!({"type": "function", "function": {"name": "tool_a", "description": "A"}});
-        let tool_b = json!({"type": "function", "function": {"name": "tool_b", "description": "B"}});
+        let tool_a =
+            json!({"type": "function", "function": {"name": "tool_a", "description": "A"}});
+        let tool_b =
+            json!({"type": "function", "function": {"name": "tool_b", "description": "B"}});
 
         // Identical tools → OK
         let prev = json!({"messages": [1], "tools": [tool_a.clone()]});
@@ -325,7 +327,8 @@ mod tests {
         assert!(!is_append_only_prefix(&prev2, &next_removed));
 
         // Tool description changed mid-session → violation
-        let tool_a_changed = json!({"type": "function", "function": {"name": "tool_a", "description": "Changed"}});
+        let tool_a_changed =
+            json!({"type": "function", "function": {"name": "tool_a", "description": "Changed"}});
         let next_changed = json!({"messages": [1, 2], "tools": [tool_a_changed]});
         assert!(!is_append_only_prefix(&prev, &next_changed));
     }

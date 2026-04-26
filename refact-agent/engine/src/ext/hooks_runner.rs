@@ -71,7 +71,10 @@ fn compile_hooks(hooks: Vec<HookConfig>) -> Vec<CompiledHook> {
                 }
             },
         };
-        result.push(CompiledHook { config, compiled_matcher });
+        result.push(CompiledHook {
+            config,
+            compiled_matcher,
+        });
     }
     result
 }
@@ -87,7 +90,9 @@ fn compiled_matcher_matches(compiled: Option<&regex::Regex>, tool_name: Option<&
 }
 
 async fn get_compiled_hooks_from_ext_dirs(ext_dirs: &ExtDirs) -> Vec<CompiledHook> {
-    let project_key = ext_dirs.project_dirs.first()
+    let project_key = ext_dirs
+        .project_dirs
+        .first()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     let lock = HOOKS_CACHE.get_or_init(|| tokio::sync::RwLock::new(None));
@@ -119,9 +124,11 @@ pub async fn get_project_dir_string(gcx: Arc<ARwLock<GlobalContext>>) -> String 
 }
 
 pub fn is_global_source(source: &CommandSource) -> bool {
-    matches!(source, CommandSource::GlobalClaude | CommandSource::GlobalRefact)
+    matches!(
+        source,
+        CommandSource::GlobalClaude | CommandSource::GlobalRefact
+    )
 }
-
 
 pub async fn get_hooks_for_event(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -132,7 +139,7 @@ pub async fn get_hooks_for_event(
     let compiled_hooks = get_compiled_hooks_from_ext_dirs(&ext_dirs).await;
     compiled_hooks
         .into_iter()
-        .filter(|h| is_global_source(&h.config.source))  // Trust gating: only global hooks
+        .filter(|h| is_global_source(&h.config.source)) // Trust gating: only global hooks
         .filter(|h| h.config.event == event)
         .filter(|h| compiled_matcher_matches(h.compiled_matcher.as_ref(), tool_name))
         .map(|h| h.config)
@@ -140,13 +147,18 @@ pub async fn get_hooks_for_event(
 }
 
 async fn run_single_hook_with_semaphore(config: &HookConfig, payload: &HookPayload) -> HookResult {
-    let semaphore = HOOK_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_HOOKS));
-    let _permit = semaphore.acquire().await.expect("hook semaphore should not be closed");
+    let semaphore =
+        HOOK_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_HOOKS));
+    let _permit = semaphore
+        .acquire()
+        .await
+        .expect("hook semaphore should not be closed");
     run_single_hook(config, payload).await
 }
 
 async fn run_hooks_from_list(hooks: &[HookConfig], payload: &HookPayload) -> Vec<HookResult> {
-    let futs: Vec<_> = hooks.iter()
+    let futs: Vec<_> = hooks
+        .iter()
         .map(|hook| run_single_hook_with_semaphore(hook, payload))
         .collect();
     futures::future::join_all(futs).await
@@ -161,7 +173,6 @@ pub async fn run_hooks(
     let matching_hooks = get_hooks_for_event(gcx, event, tool_name.as_deref()).await;
     run_hooks_from_list(&matching_hooks, &payload).await
 }
-
 
 async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(mut reader: R, max_bytes: usize) -> Vec<u8> {
     use tokio::io::AsyncReadExt;
@@ -208,12 +219,14 @@ async fn run_single_hook(config: &HookConfig, payload: &HookPayload) -> HookResu
         drop(stdin);
     }
 
-    let stdout_task = child.stdout.take().map(|out| {
-        tokio::spawn(read_bounded(out, HOOK_MAX_OUTPUT_BYTES))
-    });
-    let stderr_task = child.stderr.take().map(|err| {
-        tokio::spawn(read_bounded(err, HOOK_MAX_OUTPUT_BYTES))
-    });
+    let stdout_task = child
+        .stdout
+        .take()
+        .map(|out| tokio::spawn(read_bounded(out, HOOK_MAX_OUTPUT_BYTES)));
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|err| tokio::spawn(read_bounded(err, HOOK_MAX_OUTPUT_BYTES)));
 
     match tokio::time::timeout(timeout_dur, child.wait()).await {
         Ok(Ok(status)) => {
@@ -246,9 +259,17 @@ async fn run_single_hook(config: &HookConfig, payload: &HookPayload) -> HookResu
             }
         }
         Ok(Err(e)) => {
-            tracing::warn!("hooks_runner: failed to wait for '{}': {}", config.command, e);
-            if let Some(t) = stdout_task { t.abort(); }
-            if let Some(t) = stderr_task { t.abort(); }
+            tracing::warn!(
+                "hooks_runner: failed to wait for '{}': {}",
+                config.command,
+                e
+            );
+            if let Some(t) = stdout_task {
+                t.abort();
+            }
+            if let Some(t) = stderr_task {
+                t.abort();
+            }
             HookResult::Warning(format!("Failed to wait: {}", e))
         }
         Err(_) => {
@@ -259,17 +280,18 @@ async fn run_single_hook(config: &HookConfig, payload: &HookPayload) -> HookResu
             );
             let _ = child.kill().await;
             let _ = child.wait().await;
-            if let Some(t) = stdout_task { t.abort(); }
-            if let Some(t) = stderr_task { t.abort(); }
+            if let Some(t) = stdout_task {
+                t.abort();
+            }
+            if let Some(t) = stderr_task {
+                t.abort();
+            }
             HookResult::Timeout
         }
     }
 }
 
-fn make_hook_command(
-    config: &HookConfig,
-    payload: &HookPayload,
-) -> tokio::process::Command {
+fn make_hook_command(config: &HookConfig, payload: &HookPayload) -> tokio::process::Command {
     #[cfg(unix)]
     let mut cmd = {
         let mut c = tokio::process::Command::new("sh");
@@ -355,10 +377,9 @@ mod tests {
     #[test]
     fn test_payload_extra_flattened() {
         let mut payload = make_payload("Stop", None);
-        payload.extra.insert(
-            "finish_reason".to_string(),
-            serde_json::json!("stop"),
-        );
+        payload
+            .extra
+            .insert("finish_reason".to_string(), serde_json::json!("stop"));
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("finish_reason"));
         assert!(json.contains("\"stop\""));
@@ -398,21 +419,23 @@ mod tests {
 
     #[test]
     fn test_compile_hooks_none_matcher_becomes_match_all() {
-        let configs = vec![
-            make_hook_config(HookEvent::SessionStart, None, "cmd"),
-        ];
+        let configs = vec![make_hook_config(HookEvent::SessionStart, None, "cmd")];
         let compiled = compile_hooks(configs);
         assert_eq!(compiled.len(), 1);
         assert!(compiled[0].compiled_matcher.is_none());
-        assert!(compiled_matcher_matches(compiled[0].compiled_matcher.as_ref(), Some("anything")));
-        assert!(compiled_matcher_matches(compiled[0].compiled_matcher.as_ref(), None));
+        assert!(compiled_matcher_matches(
+            compiled[0].compiled_matcher.as_ref(),
+            Some("anything")
+        ));
+        assert!(compiled_matcher_matches(
+            compiled[0].compiled_matcher.as_ref(),
+            None
+        ));
     }
 
     #[test]
     fn test_compile_hooks_empty_matcher_becomes_match_all() {
-        let configs = vec![
-            make_hook_config(HookEvent::SessionStart, Some(""), "cmd"),
-        ];
+        let configs = vec![make_hook_config(HookEvent::SessionStart, Some(""), "cmd")];
         let compiled = compile_hooks(configs);
         assert_eq!(compiled.len(), 1);
         assert!(compiled[0].compiled_matcher.is_none());
@@ -428,12 +451,30 @@ mod tests {
         let compiled2 = compile_hooks(configs);
         assert_eq!(compiled1.len(), compiled2.len());
         assert_eq!(compiled1.len(), 2);
-        assert!(compiled_matcher_matches(compiled1[0].compiled_matcher.as_ref(), Some("shell")));
-        assert!(compiled_matcher_matches(compiled2[0].compiled_matcher.as_ref(), Some("shell")));
-        assert!(!compiled_matcher_matches(compiled1[0].compiled_matcher.as_ref(), Some("cat")));
-        assert!(!compiled_matcher_matches(compiled2[0].compiled_matcher.as_ref(), Some("cat")));
-        assert!(compiled_matcher_matches(compiled1[1].compiled_matcher.as_ref(), None));
-        assert!(compiled_matcher_matches(compiled2[1].compiled_matcher.as_ref(), None));
+        assert!(compiled_matcher_matches(
+            compiled1[0].compiled_matcher.as_ref(),
+            Some("shell")
+        ));
+        assert!(compiled_matcher_matches(
+            compiled2[0].compiled_matcher.as_ref(),
+            Some("shell")
+        ));
+        assert!(!compiled_matcher_matches(
+            compiled1[0].compiled_matcher.as_ref(),
+            Some("cat")
+        ));
+        assert!(!compiled_matcher_matches(
+            compiled2[0].compiled_matcher.as_ref(),
+            Some("cat")
+        ));
+        assert!(compiled_matcher_matches(
+            compiled1[1].compiled_matcher.as_ref(),
+            None
+        ));
+        assert!(compiled_matcher_matches(
+            compiled2[1].compiled_matcher.as_ref(),
+            None
+        ));
     }
 
     #[tokio::test]
@@ -526,10 +567,7 @@ mod tests {
             HookResult::Block("blocked".to_string()),
             HookResult::Warning("warn".to_string()),
         ];
-        assert_eq!(
-            first_block_reason(&results),
-            Some("blocked".to_string())
-        );
+        assert_eq!(first_block_reason(&results), Some("blocked".to_string()));
     }
 
     #[test]
@@ -550,16 +588,25 @@ mod tests {
     #[test]
     fn test_is_global_source() {
         use std::path::PathBuf;
-        assert!(is_global_source(&crate::ext::config_dirs::CommandSource::GlobalClaude));
-        assert!(is_global_source(&crate::ext::config_dirs::CommandSource::GlobalRefact));
-        assert!(!is_global_source(&crate::ext::config_dirs::CommandSource::ProjectClaude(PathBuf::from("/p"))));
-        assert!(!is_global_source(&crate::ext::config_dirs::CommandSource::ProjectRefact(PathBuf::from("/p"))));
+        assert!(is_global_source(
+            &crate::ext::config_dirs::CommandSource::GlobalClaude
+        ));
+        assert!(is_global_source(
+            &crate::ext::config_dirs::CommandSource::GlobalRefact
+        ));
+        assert!(!is_global_source(
+            &crate::ext::config_dirs::CommandSource::ProjectClaude(PathBuf::from("/p"))
+        ));
+        assert!(!is_global_source(
+            &crate::ext::config_dirs::CommandSource::ProjectRefact(PathBuf::from("/p"))
+        ));
     }
 
     #[test]
     fn test_project_hooks_skipped_by_default() {
         use std::path::PathBuf;
-        let source = crate::ext::config_dirs::CommandSource::ProjectRefact(PathBuf::from("/project"));
+        let source =
+            crate::ext::config_dirs::CommandSource::ProjectRefact(PathBuf::from("/project"));
         assert!(!is_global_source(&source));
     }
 
@@ -613,7 +660,12 @@ mod tests {
         let result = run_single_hook(&config, &payload).await;
         match result {
             HookResult::Success(out) => {
-                assert!(out.len() <= HOOK_MAX_OUTPUT_BYTES, "output should be bounded: {} > {}", out.len(), HOOK_MAX_OUTPUT_BYTES);
+                assert!(
+                    out.len() <= HOOK_MAX_OUTPUT_BYTES,
+                    "output should be bounded: {} > {}",
+                    out.len(),
+                    HOOK_MAX_OUTPUT_BYTES
+                );
             }
             other => panic!("Expected Success, got {:?}", other),
         }
@@ -622,12 +674,21 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_run_single_hook_large_stderr_truncated() {
-        let config = make_hook_config(HookEvent::PreToolUse, None, "yes | head -c 102400 >&2; exit 2");
+        let config = make_hook_config(
+            HookEvent::PreToolUse,
+            None,
+            "yes | head -c 102400 >&2; exit 2",
+        );
         let payload = make_payload("PreToolUse", Some("shell"));
         let result = run_single_hook(&config, &payload).await;
         match result {
             HookResult::Block(reason) => {
-                assert!(reason.len() <= HOOK_MAX_OUTPUT_BYTES, "stderr should be bounded: {} > {}", reason.len(), HOOK_MAX_OUTPUT_BYTES);
+                assert!(
+                    reason.len() <= HOOK_MAX_OUTPUT_BYTES,
+                    "stderr should be bounded: {} > {}",
+                    reason.len(),
+                    HOOK_MAX_OUTPUT_BYTES
+                );
             }
             other => panic!("Expected Block, got {:?}", other),
         }
@@ -657,36 +718,53 @@ mod tests {
     async fn test_run_hooks_parallel_block_propagates() {
         let hooks = vec![
             make_hook_config(HookEvent::PreToolUse, None, "echo success"),
-            make_hook_config(HookEvent::PreToolUse, None, "sh -c 'echo blocked >&2; exit 2'"),
+            make_hook_config(
+                HookEvent::PreToolUse,
+                None,
+                "sh -c 'echo blocked >&2; exit 2'",
+            ),
             make_hook_config(HookEvent::PreToolUse, None, "echo success2"),
         ];
         let payload = make_payload("PreToolUse", None);
         let results = run_hooks_from_list(&hooks, &payload).await;
         assert_eq!(results.len(), 3);
         let block_reason = first_block_reason(&results);
-        assert!(block_reason.is_some(), "Expected a Block result from one of the parallel hooks");
+        assert!(
+            block_reason.is_some(),
+            "Expected a Block result from one of the parallel hooks"
+        );
         assert!(block_reason.unwrap().contains("blocked"));
     }
 
     #[test]
     fn test_subagent_stop_event_fires() {
-        let configs = vec![
-            make_hook_config(HookEvent::SubagentStop, None, "echo subagent_done"),
-        ];
+        let configs = vec![make_hook_config(
+            HookEvent::SubagentStop,
+            None,
+            "echo subagent_done",
+        )];
         let compiled = compile_hooks(configs);
         assert_eq!(compiled.len(), 1);
         assert_eq!(compiled[0].config.event, HookEvent::SubagentStop);
-        assert!(compiled_matcher_matches(compiled[0].compiled_matcher.as_ref(), None));
+        assert!(compiled_matcher_matches(
+            compiled[0].compiled_matcher.as_ref(),
+            None
+        ));
     }
 
     #[test]
     fn test_notification_event_fires() {
-        let configs = vec![
-            make_hook_config(HookEvent::Notification, None, "echo notify"),
-        ];
+        let configs = vec![make_hook_config(
+            HookEvent::Notification,
+            None,
+            "echo notify",
+        )];
         let compiled = compile_hooks(configs);
         assert_eq!(compiled.len(), 1);
         assert_eq!(compiled[0].config.event, HookEvent::Notification);
-        assert!(compiled_matcher_matches(compiled[0].compiled_matcher.as_ref(), None));
+        assert!(compiled_matcher_matches(
+            compiled[0].compiled_matcher.as_ref(),
+            None
+        ));
     }
 }

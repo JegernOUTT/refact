@@ -18,7 +18,9 @@ use crate::files_correction::shortify_paths;
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
 use crate::tools::scope_utils::{resolve_scope, validate_scope_files};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::knowledge_index::format_related_memories_section;
 
 pub struct ToolRegexSearch {
@@ -33,8 +35,8 @@ const DEFAULT_MAX_TOTAL_MATCHES: usize = 200;
 #[derive(Clone, Debug)]
 struct RegexMatch {
     file_name: String,
-    match_line: usize,         // 1-based
-    context_start: usize,      // 1-based
+    match_line: usize,    // 1-based
+    context_start: usize, // 1-based
     context_end_inclusive: usize,
     preview: String,
 }
@@ -103,21 +105,26 @@ async fn search_files_with_regex(
     let regex_arc = Arc::new(regex);
 
     // Use bounded concurrency to avoid overwhelming I/O with thousands of files
-    let results: Vec<Vec<RegexMatch>> = stream::iter(files_to_search.iter().cloned())
-        .map(|file_path| {
-            let gcx_clone = gcx.clone();
-            let regex_clone = regex_arc.clone();
-            let context_lines = context_lines;
-            async move {
-                search_single_file(gcx_clone, file_path, &regex_clone, context_lines).await
-            }
-        })
-        .buffer_unordered(MAX_CONCURRENT_FILE_READS)
-        .collect()
-        .await;
+    let results: Vec<Vec<RegexMatch>> =
+        stream::iter(files_to_search.iter().cloned())
+            .map(|file_path| {
+                let gcx_clone = gcx.clone();
+                let regex_clone = regex_arc.clone();
+                let context_lines = context_lines;
+                async move {
+                    search_single_file(gcx_clone, file_path, &regex_clone, context_lines).await
+                }
+            })
+            .buffer_unordered(MAX_CONCURRENT_FILE_READS)
+            .collect()
+            .await;
 
     let mut flat_results: Vec<RegexMatch> = results.into_iter().flatten().collect();
-    flat_results.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.match_line.cmp(&b.match_line)));
+    flat_results.sort_by(|a, b| {
+        a.file_name
+            .cmp(&b.file_name)
+            .then(a.match_line.cmp(&b.match_line))
+    });
     Ok(flat_results)
 }
 
@@ -276,7 +283,8 @@ impl Tool for ToolRegexSearch {
             }
         };
 
-        let context_lines = parse_usize_arg(args, "context_lines")?.unwrap_or(DEFAULT_CONTEXT_LINES);
+        let context_lines =
+            parse_usize_arg(args, "context_lines")?.unwrap_or(DEFAULT_CONTEXT_LINES);
         let max_files = parse_usize_arg(args, "max_files")?.unwrap_or(DEFAULT_MAX_FILES);
         let max_matches_per_file =
             parse_usize_arg(args, "max_matches_per_file")?.unwrap_or(DEFAULT_MAX_MATCHES_PER_FILE);
@@ -338,13 +346,8 @@ impl Tool for ToolRegexSearch {
             all_search_results.push(cf);
         }
 
-        let search_results = search_files_with_regex(
-            gcx.clone(),
-            &pattern,
-            &files_in_scope,
-            context_lines,
-        )
-        .await?;
+        let search_results =
+            search_files_with_regex(gcx.clone(), &pattern, &files_in_scope, context_lines).await?;
         all_content.push_str("\nText matches inside files:\n");
         if search_results.is_empty() {
             all_content.push_str("  No text matches found in any file.\n");

@@ -80,14 +80,49 @@ pub struct ProjectInformationSections {
 impl Default for ProjectInformationSections {
     fn default() -> Self {
         Self {
-            system_info: SectionConfig { enabled: true, ..Default::default() },
-            environment_instructions: SectionConfig { enabled: true, max_chars: Some(6000), ..Default::default() },
-            detected_environments: SectionConfig { enabled: true, max_items: Some(50), ..Default::default() },
-            git_info: SectionConfig { enabled: true, max_chars: Some(6000), ..Default::default() },
-            project_tree: SectionConfig { enabled: true, max_depth: Some(4), max_chars: Some(16000), ..Default::default() },
-            instruction_files: SectionConfig { enabled: true, max_items: Some(20), max_chars_per_item: Some(8000), ..Default::default() },
-            project_configs: SectionConfig { enabled: true, max_items: Some(30), max_chars_per_item: Some(4000), ..Default::default() },
-            memories: SectionConfig { enabled: true, max_items: Some(30), max_chars_per_item: Some(2000), ..Default::default() },
+            system_info: SectionConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            environment_instructions: SectionConfig {
+                enabled: true,
+                max_chars: Some(6000),
+                ..Default::default()
+            },
+            detected_environments: SectionConfig {
+                enabled: true,
+                max_items: Some(50),
+                ..Default::default()
+            },
+            git_info: SectionConfig {
+                enabled: true,
+                max_chars: Some(6000),
+                ..Default::default()
+            },
+            project_tree: SectionConfig {
+                enabled: true,
+                max_depth: Some(4),
+                max_chars: Some(16000),
+                ..Default::default()
+            },
+            instruction_files: SectionConfig {
+                enabled: true,
+                max_items: Some(20),
+                max_chars_per_item: Some(8000),
+                ..Default::default()
+            },
+            project_configs: SectionConfig {
+                enabled: true,
+                max_items: Some(30),
+                max_chars_per_item: Some(4000),
+                ..Default::default()
+            },
+            memories: SectionConfig {
+                enabled: true,
+                max_items: Some(30),
+                max_chars_per_item: Some(2000),
+                ..Default::default()
+            },
         }
     }
 }
@@ -104,8 +139,12 @@ pub struct ProjectInformationConfig {
     pub sections: ProjectInformationSections,
 }
 
-fn default_schema_version() -> u32 { 1 }
-fn default_enabled() -> bool { true }
+fn default_schema_version() -> u32 {
+    1
+}
+fn default_enabled() -> bool {
+    true
+}
 
 impl Default for ProjectInformationConfig {
     fn default() -> Self {
@@ -124,10 +163,13 @@ async fn get_project_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
 
 async fn get_config_path(gcx: Arc<ARwLock<GlobalContext>>) -> Option<PathBuf> {
     let dirs = get_project_dirs(gcx).await;
-    dirs.first().map(|d| d.join(".refact").join("project_information.yaml"))
+    dirs.first()
+        .map(|d| d.join(".refact").join("project_information.yaml"))
 }
 
-pub async fn load_project_information_config(gcx: Arc<ARwLock<GlobalContext>>) -> ProjectInformationConfig {
+pub async fn load_project_information_config(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> ProjectInformationConfig {
     let Some(path) = get_config_path(gcx.clone()).await else {
         return ProjectInformationConfig::default();
     };
@@ -150,13 +192,17 @@ pub async fn save_project_information_config(
     config: &ProjectInformationConfig,
 ) -> std::io::Result<()> {
     let Some(path) = get_config_path(gcx).await else {
-        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No project directory"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No project directory",
+        ));
     };
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     let tmp_path = path.with_extension("yaml.tmp");
-    let yaml = serde_yaml::to_string(config).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let yaml = serde_yaml::to_string(config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     tokio::fs::write(&tmp_path, &yaml).await?;
     tokio::fs::rename(&tmp_path, &path).await?;
     Ok(())
@@ -229,7 +275,9 @@ pub fn sanitize_overrides(
         .collect()
 }
 
-pub async fn ensure_default_config_exists(gcx: Arc<ARwLock<GlobalContext>>) -> std::io::Result<bool> {
+pub async fn ensure_default_config_exists(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> std::io::Result<bool> {
     let Some(path) = get_config_path(gcx.clone()).await else {
         return Ok(false);
     };
@@ -332,10 +380,13 @@ mod tests {
         std::fs::write(&file_path, "test").unwrap();
 
         let mut overrides = HashMap::new();
-        overrides.insert("AGENTS.md".to_string(), FileOverride {
-            enabled: Some(false),
-            max_chars: Some(1000),
-        });
+        overrides.insert(
+            "AGENTS.md".to_string(),
+            FileOverride {
+                enabled: Some(false),
+                max_chars: Some(1000),
+            },
+        );
 
         let roots = vec![root];
         let result = sanitize_overrides(&overrides, &roots);
@@ -347,10 +398,13 @@ mod tests {
     fn test_sanitize_overrides_drops_absolute() {
         let roots = vec![PathBuf::from("/project")];
         let mut overrides = HashMap::new();
-        overrides.insert("/etc/passwd".to_string(), FileOverride {
-            enabled: Some(false),
-            max_chars: None,
-        });
+        overrides.insert(
+            "/etc/passwd".to_string(),
+            FileOverride {
+                enabled: Some(false),
+                max_chars: None,
+            },
+        );
 
         let result = sanitize_overrides(&overrides, &roots);
         assert!(result.is_empty());
@@ -360,10 +414,13 @@ mod tests {
     fn test_sanitize_overrides_drops_parent_traversal() {
         let roots = vec![PathBuf::from("/project")];
         let mut overrides = HashMap::new();
-        overrides.insert("../secret.txt".to_string(), FileOverride {
-            enabled: Some(false),
-            max_chars: None,
-        });
+        overrides.insert(
+            "../secret.txt".to_string(),
+            FileOverride {
+                enabled: Some(false),
+                max_chars: None,
+            },
+        );
 
         let result = sanitize_overrides(&overrides, &roots);
         assert!(result.is_empty());
@@ -386,7 +443,10 @@ mod tests {
 
         assert!(config.sections.instruction_files.enabled);
         assert_eq!(config.sections.instruction_files.max_items, Some(20));
-        assert_eq!(config.sections.instruction_files.max_chars_per_item, Some(8000));
+        assert_eq!(
+            config.sections.instruction_files.max_chars_per_item,
+            Some(8000)
+        );
 
         assert!(config.sections.memories.enabled);
         assert_eq!(config.sections.memories.max_items, Some(30));

@@ -44,10 +44,8 @@ pub async fn git_shadow_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>
             cache_dir.join("shadow_git"),
             cache_dir.join("shadow_git").join("nested"),
         ];
-        let existing_shadow_git_dirs: Vec<&PathBuf> = shadow_git_dirs
-            .iter()
-            .filter(|dir| dir.exists())
-            .collect();
+        let existing_shadow_git_dirs: Vec<&PathBuf> =
+            shadow_git_dirs.iter().filter(|dir| dir.exists()).collect();
 
         for dir in &existing_shadow_git_dirs {
             match cleanup_inactive_shadow_repositories(dir, &workspace_folder_hashes).await {
@@ -196,12 +194,20 @@ async fn cleanup_active_shadow_repository(repo_dir: &Path) {
     match prune_old_refact_branches(repo_dir) {
         Ok(deleted) if deleted > 0 => {
             if let Err(e) = run_git_gc(repo_dir).await {
-                tracing::warn!("Git shadow cleanup: git gc failed in {}: {}", repo_dir.display(), e);
+                tracing::warn!(
+                    "Git shadow cleanup: git gc failed in {}: {}",
+                    repo_dir.display(),
+                    e
+                );
             }
         }
         Ok(_) => {}
         Err(e) => {
-            tracing::warn!("Git shadow cleanup: failed to prune branches in {}: {}", repo_dir.display(), e);
+            tracing::warn!(
+                "Git shadow cleanup: failed to prune branches in {}: {}",
+                repo_dir.display(),
+                e
+            );
         }
     }
 }
@@ -215,7 +221,9 @@ fn prune_old_refact_branches(repo_dir: &Path) -> Result<usize, String> {
         .unwrap_or(0);
 
     let mut branches_to_delete: Vec<String> = Vec::new();
-    let branches = repo.branches(Some(git2::BranchType::Local)).map_err_to_string()?;
+    let branches = repo
+        .branches(Some(git2::BranchType::Local))
+        .map_err_to_string()?;
     for branch_result in branches {
         let (branch, _) = branch_result.map_err_to_string()?;
         let name = match branch.name().map_err_to_string()? {
@@ -232,7 +240,9 @@ fn prune_old_refact_branches(repo_dir: &Path) -> Result<usize, String> {
         }
     }
 
-    let head_branch = repo.head().ok()
+    let head_branch = repo
+        .head()
+        .ok()
         .filter(|h| h.is_branch())
         .and_then(|h| h.shorthand().map(|s| s.to_string()));
     if let Some(ref head) = head_branch {
@@ -275,7 +285,9 @@ fn prune_old_refact_branches(repo_dir: &Path) -> Result<usize, String> {
 
 async fn run_git_gc(repo_dir: &Path) -> Result<(), String> {
     let output = tokio::process::Command::new("git")
-        .arg("-C").arg(repo_dir).args(["gc", "--prune=now", "--quiet"])
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["gc", "--prune=now", "--quiet"])
         .output()
         .await
         .map_err_to_string()?;

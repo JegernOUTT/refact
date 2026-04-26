@@ -28,6 +28,9 @@ const createThreadRuntime = (
     status: { wasInteracted: false, confirmationStatus: true },
   },
   task_widget_expanded: false,
+  memory_enrichment_user_touched: false,
+  manual_preview_items: [],
+  manual_preview_ran: false,
   ...overrides,
 });
 

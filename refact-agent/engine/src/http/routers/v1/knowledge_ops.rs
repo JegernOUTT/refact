@@ -98,17 +98,13 @@ pub async fn auto_link_memory(
 ) -> Result<(), String> {
     let entities = extract_entities(content);
     let kg = build_knowledge_graph(gcx.clone()).await;
-    let similar_docs = kg.find_similar_docs(
-        &frontmatter.tags,
-        &frontmatter.filenames,
-        &entities,
-    );
+    let similar_docs = kg.find_similar_docs(&frontmatter.tags, &frontmatter.filenames, &entities);
 
     let doc_id = frontmatter
         .id
         .clone()
         .unwrap_or_else(|| doc_path.to_string_lossy().to_string());
-    
+
     let suggested_links: Vec<String> = similar_docs
         .into_iter()
         .filter(|(id, score)| {
@@ -136,7 +132,7 @@ pub async fn auto_link_memory(
     }
 
     frontmatter.links.retain(|link| link != &doc_id);
-    
+
     Ok(())
 }
 
@@ -235,7 +231,11 @@ pub async fn handle_v1_knowledge_update_memory(
             if !VALID_STATUSES.contains(&status.as_str()) {
                 return Err(ScratchError::new(
                     StatusCode::BAD_REQUEST,
-                    format!("Invalid status '{}'. Must be one of: {}", status, VALID_STATUSES.join(", ")),
+                    format!(
+                        "Invalid status '{}'. Must be one of: {}",
+                        status,
+                        VALID_STATUSES.join(", ")
+                    ),
                 ));
             }
             frontmatter.status = Some(status);
@@ -248,7 +248,9 @@ pub async fn handle_v1_knowledge_update_memory(
 
     let auto_link_enabled = post.auto_link.unwrap_or(true);
     if auto_link_enabled {
-        if let Err(e) = auto_link_memory(gcx.clone(), &mut frontmatter, &content_to_write, &file_path).await {
+        if let Err(e) =
+            auto_link_memory(gcx.clone(), &mut frontmatter, &content_to_write, &file_path).await
+        {
             tracing::warn!("Auto-linking failed: {}", e);
         }
     }

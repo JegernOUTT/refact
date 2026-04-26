@@ -92,7 +92,12 @@ impl Tool for ToolTasksSet {
 
         let tasks: Vec<TaskItem> = match serde_json::from_value(tasks_value.clone()) {
             Ok(t) => t,
-            Err(e) => return Err(format!("Invalid tasks format: {}. Expected array of {{id, content, status}}", e)),
+            Err(e) => {
+                return Err(format!(
+                    "Invalid tasks format: {}. Expected array of {{id, content, status}}",
+                    e
+                ))
+            }
         };
 
         if tasks.len() > 100 {
@@ -102,10 +107,16 @@ impl Tool for ToolTasksSet {
         let mut seen_ids = std::collections::HashSet::new();
         for (i, task) in tasks.iter().enumerate() {
             if task.id.trim().is_empty() || task.id.len() > 50 {
-                return Err(format!("Task {} has invalid id (must be 1-50 non-whitespace chars)", i));
+                return Err(format!(
+                    "Task {} has invalid id (must be 1-50 non-whitespace chars)",
+                    i
+                ));
             }
             if task.content.trim().is_empty() || task.content.len() > 500 {
-                return Err(format!("Task {} has invalid content (must be 1-500 non-whitespace chars)", i));
+                return Err(format!(
+                    "Task {} has invalid content (must be 1-500 non-whitespace chars)",
+                    i
+                ));
             }
             if !seen_ids.insert(&task.id) {
                 return Err(format!("Duplicate task id: {}", task.id));

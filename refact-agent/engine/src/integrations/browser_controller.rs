@@ -7,8 +7,8 @@ use headless_chrome::protocol::cdp::Page;
 use tokio::sync::Mutex as AMutex;
 
 use crate::integrations::browser_locators::{
-    self, generate_find_fragment_js, generate_resolve_js, js_string_literal,
-    parse_element_info, to_css_selector, INSPECT_ELEMENT_JS,
+    self, generate_find_fragment_js, generate_resolve_js, js_string_literal, parse_element_info,
+    to_css_selector, INSPECT_ELEMENT_JS,
 };
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
@@ -25,7 +25,9 @@ const ACCESSIBILITY_MAX_DEPTH: u32 = 6;
 const ACCESSIBILITY_MAX_CHILDREN: u32 = 20;
 
 fn clamp_timeout_ms(requested: Option<u64>) -> u64 {
-    requested.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS).min(MAX_WAIT_TIMEOUT_MS)
+    requested
+        .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
+        .min(MAX_WAIT_TIMEOUT_MS)
 }
 
 fn clamp_wait_seconds(requested: f64) -> f64 {
@@ -44,10 +46,7 @@ const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
 const SCREENSHOT_MAX_DIM: u32 = 800;
 
 #[allow(dead_code)]
-pub fn resolve_tab(
-    runtime: &BrowserRuntime,
-    target: &TabTarget,
-) -> Result<Arc<Tab>, String> {
+pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<Tab>, String> {
     match target {
         TabTarget::Active => runtime
             .get_active_tab()
@@ -78,8 +77,9 @@ fn eval_js_value(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
 fn eval_js_json(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     let val = eval_js_value(tab, js)?;
     match val.as_str() {
-        Some(s) => serde_json::from_str(s)
-            .map_err(|e| format!("Failed to parse JS JSON result: {}", e)),
+        Some(s) => {
+            serde_json::from_str(s).map_err(|e| format!("Failed to parse JS JSON result: {}", e))
+        }
         None if val.is_object() || val.is_array() => Ok(val),
         None => Err(format!("Unexpected JS result type: {:?}", val)),
     }
@@ -104,10 +104,7 @@ fn resolve_element(tab: &Tab, locator: &BrowserLocator) -> Result<ElementInfo, S
     parse_element_info(&json_str)
 }
 
-fn resolve_interactable(
-    tab: &Tab,
-    locator: &BrowserLocator,
-) -> Result<ElementInfo, String> {
+fn resolve_interactable(tab: &Tab, locator: &BrowserLocator) -> Result<ElementInfo, String> {
     let info = resolve_element(tab, locator)?;
     if !info.visible {
         return Err("Element is not visible".to_string());
@@ -182,7 +179,12 @@ pub async fn execute_request_with_runtime(
         let mut rt = runtime_arc.lock().await;
         rt.touch();
         if let TabTarget::Id { id } = &request.target {
-            let tabs = rt.browser.get_tabs().lock().map(|t| t.clone()).unwrap_or_default();
+            let tabs = rt
+                .browser
+                .get_tabs()
+                .lock()
+                .map(|t| t.clone())
+                .unwrap_or_default();
             let tab = tabs
                 .iter()
                 .find(|t| t.get_target_id() == id.as_str())
@@ -278,47 +280,59 @@ pub fn execute_steps_with_runtime(
 
     for (idx, step) in steps.iter().enumerate() {
         let result = match step {
-            BrowserStep::OpenTab { device } => {
-                match runtime.browser.new_tab() {
-                    Ok(new_tab) => {
-                        let device_label = device.as_deref().unwrap_or("desktop");
-                        let target_id = new_tab.get_target_id().to_string();
-                        let (w, h, mobile) = match device.as_deref() {
-                            Some("mobile") => (400, 800, true),
-                            Some("tablet") => (600, 800, true),
-                            _ => (800, 600, false),
-                        };
-                        let _ = new_tab.call_method(
-                            headless_chrome::protocol::cdp::Emulation::SetDeviceMetricsOverride {
-                                width: w, height: h,
-                                device_scale_factor: 0.0,
-                                mobile,
-                                screen_width: None, screen_height: None,
-                                position_x: None, position_y: None,
-                                dont_set_visible_size: None,
-                                screen_orientation: None,
-                                viewport: None,
-                                display_feature: None,
-                                device_posture: None,
-                                scale: None,
-                            },
-                        );
-                        let _ = crate::integrations::browser_runtime::setup_recording_for_tab(runtime, &new_tab);
-                        let _ = new_tab.evaluate(INSPECT_ELEMENT_JS, false);
-                        current_tab = Some(new_tab);
-                        runtime.set_active_tab_target_id(target_id.clone());
-                        StepResult::success(
-                            idx,
-                            format!("Opened new {} tab ({})", device_label, &target_id[..8.min(target_id.len())]),
-                        ).with_data(serde_json::json!({"target_id": target_id}))
-                    }
-                    Err(e) => StepResult::failure(idx, "OpenTab", &format!("Failed: {}", e)),
+            BrowserStep::OpenTab { device } => match runtime.browser.new_tab() {
+                Ok(new_tab) => {
+                    let device_label = device.as_deref().unwrap_or("desktop");
+                    let target_id = new_tab.get_target_id().to_string();
+                    let (w, h, mobile) = match device.as_deref() {
+                        Some("mobile") => (400, 800, true),
+                        Some("tablet") => (600, 800, true),
+                        _ => (800, 600, false),
+                    };
+                    let _ = new_tab.call_method(
+                        headless_chrome::protocol::cdp::Emulation::SetDeviceMetricsOverride {
+                            width: w,
+                            height: h,
+                            device_scale_factor: 0.0,
+                            mobile,
+                            screen_width: None,
+                            screen_height: None,
+                            position_x: None,
+                            position_y: None,
+                            dont_set_visible_size: None,
+                            screen_orientation: None,
+                            viewport: None,
+                            display_feature: None,
+                            device_posture: None,
+                            scale: None,
+                        },
+                    );
+                    let _ = crate::integrations::browser_runtime::setup_recording_for_tab(
+                        runtime, &new_tab,
+                    );
+                    let _ = new_tab.evaluate(INSPECT_ELEMENT_JS, false);
+                    current_tab = Some(new_tab);
+                    runtime.set_active_tab_target_id(target_id.clone());
+                    StepResult::success(
+                        idx,
+                        format!(
+                            "Opened new {} tab ({})",
+                            device_label,
+                            &target_id[..8.min(target_id.len())]
+                        ),
+                    )
+                    .with_data(serde_json::json!({"target_id": target_id}))
                 }
-            }
+                Err(e) => StepResult::failure(idx, "OpenTab", &format!("Failed: {}", e)),
+            },
             BrowserStep::CloseTab => {
                 let tab = match &current_tab {
                     Some(t) => t.clone(),
-                    None => { all_ok = false; results.push(StepResult::failure(idx, "CloseTab", "No active tab")); break; }
+                    None => {
+                        all_ok = false;
+                        results.push(StepResult::failure(idx, "CloseTab", "No active tab"));
+                        break;
+                    }
                 };
                 let target_id = tab.get_target_id().to_string();
                 match tab.close(false) {
@@ -330,13 +344,19 @@ pub fn execute_steps_with_runtime(
                             runtime.active_tab_target_id = None;
                         }
                         current_tab = runtime.get_active_tab();
-                        StepResult::success(idx, format!("Closed tab {}", &target_id[..8.min(target_id.len())]))
+                        StepResult::success(
+                            idx,
+                            format!("Closed tab {}", &target_id[..8.min(target_id.len())]),
+                        )
                     }
                     Err(e) => StepResult::failure(idx, "CloseTab", &format!("Failed: {}", e)),
                 }
             }
             BrowserStep::SwitchTab { tab: tab_target } => {
-                let tabs = runtime.browser.get_tabs().lock()
+                let tabs = runtime
+                    .browser
+                    .get_tabs()
+                    .lock()
                     .map(|t| t.clone())
                     .unwrap_or_default();
                 let target_str = match tab_target {
@@ -345,16 +365,26 @@ pub fn execute_steps_with_runtime(
                 };
                 let found = match tab_target {
                     TabTarget::Active => runtime.get_active_tab().or_else(|| tabs.first().cloned()),
-                    TabTarget::Id { id } => tabs.iter().find(|t| t.get_target_id() == id.as_str()).cloned(),
+                    TabTarget::Id { id } => tabs
+                        .iter()
+                        .find(|t| t.get_target_id() == id.as_str())
+                        .cloned(),
                 };
                 match found {
                     Some(found_tab) => {
                         runtime.set_active_tab_target_id(found_tab.get_target_id().to_string());
                         let _ = found_tab.evaluate(INSPECT_ELEMENT_JS, false);
                         current_tab = Some(found_tab.clone());
-                        StepResult::success(idx, format!("Switched to tab {} ({})", target_str, found_tab.get_url()))
+                        StepResult::success(
+                            idx,
+                            format!("Switched to tab {} ({})", target_str, found_tab.get_url()),
+                        )
                     }
-                    None => StepResult::failure(idx, "SwitchTab", format!("No tab matching '{}'", target_str)),
+                    None => StepResult::failure(
+                        idx,
+                        "SwitchTab",
+                        format!("No tab matching '{}'", target_str),
+                    ),
                 }
             }
             BrowserStep::ListTabs => {
@@ -363,17 +393,17 @@ pub fn execute_steps_with_runtime(
                     .into_iter()
                     .map(|tab| serde_json::to_value(tab).unwrap_or_default())
                     .collect::<Vec<_>>();
-                StepResult::success(
+                StepResult::success(idx, format!("Listed {} tabs", tab_list.len()))
+                    .with_data(serde_json::json!({"tabs": tab_list}))
+            }
+            other => match &current_tab {
+                Some(tab) => execute_single_step(tab, other, idx, pre_step_url.as_deref()),
+                None => StepResult::failure(
                     idx,
-                    format!("Listed {} tabs", tab_list.len()),
-                ).with_data(serde_json::json!({"tabs": tab_list}))
-            }
-            other => {
-                match &current_tab {
-                    Some(tab) => execute_single_step(tab, other, idx, pre_step_url.as_deref()),
-                    None => StepResult::failure(idx, "No active tab", "No tab available. Use OpenTab first."),
-                }
-            }
+                    "No active tab",
+                    "No tab available. Use OpenTab first.",
+                ),
+            },
         };
 
         let is_non_fatal = matches!(step, BrowserStep::ClickIfExists { .. });
@@ -407,13 +437,18 @@ fn is_navigation_step(step: &BrowserStep) -> bool {
     matches!(
         step,
         BrowserStep::Navigate { .. }
-        | BrowserStep::Reload
-        | BrowserStep::GoBack
-        | BrowserStep::GoForward
+            | BrowserStep::Reload
+            | BrowserStep::GoBack
+            | BrowserStep::GoForward
     )
 }
 
-fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize, pre_step_url: Option<&str>) -> StepResult {
+fn execute_single_step(
+    tab: &Tab,
+    step: &BrowserStep,
+    idx: usize,
+    pre_step_url: Option<&str>,
+) -> StepResult {
     match step {
         BrowserStep::Navigate { url } => step_navigate(tab, idx, url),
         BrowserStep::Reload => step_nav_js(tab, idx, "location.reload()", "Reloaded page"),
@@ -437,36 +472,47 @@ fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize, pre_step_url: 
         BrowserStep::ScrollTo { locator } => step_locator_action(tab, idx, locator, "scroll_to"),
         BrowserStep::PressKey { key, modifiers } => step_press_key(tab, idx, key, modifiers),
 
-        BrowserStep::Fill { locator, text, clear_first, verify } => {
-            step_fill(tab, idx, locator, text, *clear_first, *verify)
-        }
+        BrowserStep::Fill {
+            locator,
+            text,
+            clear_first,
+            verify,
+        } => step_fill(tab, idx, locator, text, *clear_first, *verify),
         BrowserStep::Clear { locator, verify } => step_clear(tab, idx, locator, *verify),
-        BrowserStep::SelectOption { locator, value } => step_select_option(tab, idx, locator, value),
+        BrowserStep::SelectOption { locator, value } => {
+            step_select_option(tab, idx, locator, value)
+        }
         BrowserStep::Check { locator } => step_check_uncheck(tab, idx, locator, true),
         BrowserStep::Uncheck { locator } => step_check_uncheck(tab, idx, locator, false),
 
-        BrowserStep::WaitForSelector { locator, timeout_ms } => {
-            step_wait_for_selector(tab, idx, locator, clamp_timeout_ms(*timeout_ms))
-        }
+        BrowserStep::WaitForSelector {
+            locator,
+            timeout_ms,
+        } => step_wait_for_selector(tab, idx, locator, clamp_timeout_ms(*timeout_ms)),
         BrowserStep::WaitForNavigation { timeout_ms } => {
             step_wait_for_navigation(tab, idx, clamp_timeout_ms(*timeout_ms), pre_step_url)
         }
-        BrowserStep::WaitForUrl { contains, timeout_ms } => {
-            step_wait_for_url(tab, idx, contains, clamp_timeout_ms(*timeout_ms))
-        }
+        BrowserStep::WaitForUrl {
+            contains,
+            timeout_ms,
+        } => step_wait_for_url(tab, idx, contains, clamp_timeout_ms(*timeout_ms)),
         BrowserStep::WaitForText { text, timeout_ms } => {
             step_wait_for_text(tab, idx, text, clamp_timeout_ms(*timeout_ms))
         }
         BrowserStep::WaitForNetworkIdle { timeout_ms } => {
             step_wait_for_network_idle(tab, idx, clamp_timeout_ms(*timeout_ms))
         }
-        BrowserStep::WaitForElementHidden { locator, timeout_ms } => {
-            step_wait_for_element_hidden(tab, idx, locator, clamp_timeout_ms(*timeout_ms))
+        BrowserStep::WaitForElementHidden {
+            locator,
+            timeout_ms,
+        } => step_wait_for_element_hidden(tab, idx, locator, clamp_timeout_ms(*timeout_ms)),
+        BrowserStep::WaitForElementStable {
+            locator,
+            timeout_ms,
+        } => step_wait_for_element_stable(tab, idx, locator, clamp_timeout_ms(*timeout_ms)),
+        BrowserStep::WaitSeconds { seconds } => {
+            step_wait_seconds(idx, clamp_wait_seconds(*seconds))
         }
-        BrowserStep::WaitForElementStable { locator, timeout_ms } => {
-            step_wait_for_element_stable(tab, idx, locator, clamp_timeout_ms(*timeout_ms))
-        }
-        BrowserStep::WaitSeconds { seconds } => step_wait_seconds(idx, clamp_wait_seconds(*seconds)),
 
         BrowserStep::GetText { locator } => step_get_text(tab, idx, locator),
         BrowserStep::GetHtml { locator } => step_get_html(tab, idx, locator),
@@ -477,17 +523,19 @@ fn execute_single_step(tab: &Tab, step: &BrowserStep, idx: usize, pre_step_url: 
             step_extract_links(tab, idx, locator.as_ref(), *limit)
         }
         BrowserStep::ExtractTable { locator } => step_extract_table(tab, idx, locator),
-        BrowserStep::DomSnapshot { selector, max_chars } => {
-            step_dom_snapshot(tab, idx, selector, *max_chars)
-        }
+        BrowserStep::DomSnapshot {
+            selector,
+            max_chars,
+        } => step_dom_snapshot(tab, idx, selector, *max_chars),
         BrowserStep::AccessibilitySnapshot => step_accessibility_snapshot(tab, idx),
         BrowserStep::Screenshot => step_screenshot(tab, idx),
         BrowserStep::ScreenshotElement { locator } => step_screenshot_element(tab, idx, locator),
 
         BrowserStep::Eval { expression } => step_eval(tab, idx, expression),
-        BrowserStep::Styles { locator, property_filter } => {
-            step_styles(tab, idx, locator, property_filter.as_deref())
-        }
+        BrowserStep::Styles {
+            locator,
+            property_filter,
+        } => step_styles(tab, idx, locator, property_filter.as_deref()),
 
         BrowserStep::TabLog => step_tab_log(tab, idx),
 
@@ -530,12 +578,19 @@ fn step_locator_action(
                 "focus" => browser_locators::js_focus_element().to_string(),
                 "blur" => browser_locators::js_blur_element().to_string(),
                 "scroll_to" => browser_locators::js_scroll_to_element().to_string(),
-                _ => return StepResult::failure(idx, action, format!("Unknown action: {}", action)),
+                _ => {
+                    return StepResult::failure(idx, action, format!("Unknown action: {}", action))
+                }
             };
             match eval_js_ok(tab, &action_js) {
                 Ok(_) => StepResult::success(
                     idx,
-                    format!("{} on <{}> ({})", action, info.tag, describe_locator(locator)),
+                    format!(
+                        "{} on <{}> ({})",
+                        action,
+                        info.tag,
+                        describe_locator(locator)
+                    ),
                 ),
                 Err(e) => StepResult::failure(idx, format!("{} failed", action), e),
             }
@@ -546,12 +601,13 @@ fn step_locator_action(
 
 fn step_click_if_exists(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
     match resolve_element(tab, locator) {
-        Ok(info) if info.visible => {
-            match eval_js_ok(tab, browser_locators::js_click_element()) {
-                Ok(_) => StepResult::success(idx, format!("Clicked <{}> (found)", info.tag)),
-                Err(e) => StepResult::success(idx, format!("Click on <{}> failed (non-fatal): {}", info.tag, e)),
-            }
-        }
+        Ok(info) if info.visible => match eval_js_ok(tab, browser_locators::js_click_element()) {
+            Ok(_) => StepResult::success(idx, format!("Clicked <{}> (found)", info.tag)),
+            Err(e) => StepResult::success(
+                idx,
+                format!("Click on <{}> failed (non-fatal): {}", info.tag, e),
+            ),
+        },
         _ => StepResult::success(idx, "Element not found or not visible, skipped".to_string()),
     }
 }
@@ -608,7 +664,10 @@ fn step_fill(
         return StepResult::failure(
             idx,
             "Fill failed",
-            format!("Cannot fill {:?} — use select_option or check/uncheck instead", info.field_kind),
+            format!(
+                "Cannot fill {:?} — use select_option or check/uncheck instead",
+                info.field_kind
+            ),
         );
     }
 
@@ -694,7 +753,10 @@ fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> 
             return StepResult::failure(
                 idx,
                 "Clear not supported for this field",
-                format!("Use uncheck instead for <{}> ({:?})", info.tag, info.field_kind),
+                format!(
+                    "Use uncheck instead for <{}> ({:?})",
+                    info.tag, info.field_kind
+                ),
             );
         }
         FieldKind::FileInput => {
@@ -729,7 +791,8 @@ fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> 
 })()"#;
             return match eval_js_ok(tab, js) {
                 Ok(result) => {
-                    let had_empty = result.get("had_empty_option")
+                    let had_empty = result
+                        .get("had_empty_option")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     if verify && !had_empty {
@@ -758,7 +821,11 @@ fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> 
                         r.verified = Some(true);
                         r
                     }
-                    Ok(false) => StepResult::failure(idx, "Clear verification failed", "Field still has content"),
+                    Ok(false) => StepResult::failure(
+                        idx,
+                        "Clear verification failed",
+                        "Field still has content",
+                    ),
                     Err(e) => StepResult::failure(idx, "Clear verification error", e),
                 }
             } else {
@@ -769,12 +836,7 @@ fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> 
     }
 }
 
-fn step_select_option(
-    tab: &Tab,
-    idx: usize,
-    locator: &BrowserLocator,
-    value: &str,
-) -> StepResult {
+fn step_select_option(tab: &Tab, idx: usize, locator: &BrowserLocator, value: &str) -> StepResult {
     match resolve_interactable(tab, locator) {
         Ok(info) => {
             let js = format!(
@@ -797,10 +859,9 @@ fn step_select_option(
                 value = js_string_literal(value),
             );
             match eval_js_ok(tab, &js) {
-                Ok(_) => StepResult::success(
-                    idx,
-                    format!("Selected '{}' in <{}>", value, info.tag),
-                ),
+                Ok(_) => {
+                    StepResult::success(idx, format!("Selected '{}' in <{}>", value, info.tag))
+                }
                 Err(e) => StepResult::failure(idx, "Select option failed", e),
             }
         }
@@ -955,12 +1016,18 @@ fn step_wait_for_navigation(
         Ok(()) => {
             let end_url = tab.get_url();
             let _ = poll_condition(tab, complete_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS);
-            StepResult::success(idx, format!("Navigation detected: {} -> {}", reference_url, end_url))
+            StepResult::success(
+                idx,
+                format!("Navigation detected: {} -> {}", reference_url, end_url),
+            )
         }
         Err(_) => StepResult::failure(
             idx,
             "Wait for navigation",
-            format!("Timed out after {}ms; URL unchanged ({})", timeout_ms, current_url),
+            format!(
+                "Timed out after {}ms; URL unchanged ({})",
+                timeout_ms, current_url
+            ),
         ),
     }
 }
@@ -1108,10 +1175,17 @@ fn step_wait_for_network_idle(tab: &Tab, idx: usize, timeout_ms: u64) -> StepRes
         let snapshot = eval_js_value(tab, snapshot_js).unwrap_or(serde_json::Value::Null);
         let (inflight, ready) = match snapshot.as_str() {
             Some(s) => {
-                let parsed: serde_json::Value = serde_json::from_str(s)
-                    .unwrap_or(serde_json::Value::Null);
-                let i = parsed.get("inflight").and_then(|v| v.as_i64()).unwrap_or(-1);
-                let r = parsed.get("ready").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let parsed: serde_json::Value =
+                    serde_json::from_str(s).unwrap_or(serde_json::Value::Null);
+                let i = parsed
+                    .get("inflight")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(-1);
+                let r = parsed
+                    .get("ready")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 (i, r)
             }
             None => (-1, String::new()),
@@ -1123,7 +1197,10 @@ fn step_wait_for_network_idle(tab: &Tab, idx: usize, timeout_ms: u64) -> StepRes
                 if Instant::now().duration_since(since) >= idle_window {
                     return StepResult::success(
                         idx,
-                        format!("Network idle (inflight=0, readyState=complete, window={}ms)", NETWORK_IDLE_WINDOW_MS),
+                        format!(
+                            "Network idle (inflight=0, readyState=complete, window={}ms)",
+                            NETWORK_IDLE_WINDOW_MS
+                        ),
                     );
                 }
             } else {
@@ -1186,7 +1263,10 @@ fn step_get_attribute(
             let js = browser_locators::js_get_attribute(attribute);
             match eval_js_ok(tab, &js) {
                 Ok(result) => {
-                    let value = result.get("value").cloned().unwrap_or(serde_json::Value::Null);
+                    let value = result
+                        .get("value")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     StepResult::success(
                         idx,
                         format!("Got attribute '{}' from <{}>", attribute, info.tag),
@@ -1216,8 +1296,7 @@ fn step_extract_links(
     let effective_limit = limit.unwrap_or(50).min(MAX_EXTRACT_LINKS);
     let js = browser_locators::js_extract_links(effective_limit);
     match eval_js_ok(tab, &js) {
-        Ok(result) => StepResult::success(idx, "Extracted links".to_string())
-            .with_data(result),
+        Ok(result) => StepResult::success(idx, "Extracted links".to_string()).with_data(result),
         Err(e) => StepResult::failure(idx, "Extract links failed", e),
     }
 }
@@ -1225,11 +1304,8 @@ fn step_extract_links(
 fn step_extract_table(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
     match resolve_element(tab, locator) {
         Ok(info) => match eval_js_ok(tab, browser_locators::js_extract_table()) {
-            Ok(result) => StepResult::success(
-                idx,
-                format!("Extracted table from <{}>", info.tag),
-            )
-            .with_data(result),
+            Ok(result) => StepResult::success(idx, format!("Extracted table from <{}>", info.tag))
+                .with_data(result),
             Err(e) => StepResult::failure(idx, "Extract table failed", e),
         },
         Err(e) => StepResult::failure(idx, "Extract table: resolution failed", e),
@@ -1260,8 +1336,9 @@ fn step_dom_snapshot(
         limit = limit,
     );
     match eval_js_ok(tab, &js) {
-        Ok(result) => StepResult::success(idx, "DOM snapshot captured".to_string())
-            .with_data(result),
+        Ok(result) => {
+            StepResult::success(idx, "DOM snapshot captured".to_string()).with_data(result)
+        }
         Err(e) => StepResult::failure(idx, "DOM snapshot failed", e),
     }
 }
@@ -1298,8 +1375,9 @@ fn step_accessibility_snapshot(tab: &Tab, idx: usize) -> StepResult {
         max_children = ACCESSIBILITY_MAX_CHILDREN,
     );
     match eval_js_ok(tab, &js) {
-        Ok(result) => StepResult::success(idx, "Accessibility snapshot".to_string())
-            .with_data(result),
+        Ok(result) => {
+            StepResult::success(idx, "Accessibility snapshot".to_string()).with_data(result)
+        }
         Err(e) => StepResult::failure(idx, "Accessibility snapshot failed", e),
     }
 }
@@ -1313,11 +1391,12 @@ fn step_screenshot(tab: &Tab, idx: usize) -> StepResult {
         capture_beyond_viewport: Some(false),
         optimize_for_speed: None,
     }) {
-        Ok(result) => StepResult::success(idx, "Screenshot captured".to_string())
-            .with_data(serde_json::json!({
+        Ok(result) => StepResult::success(idx, "Screenshot captured".to_string()).with_data(
+            serde_json::json!({
                 "mime": "image/jpeg",
                 "data": result.data,
-            })),
+            }),
+        ),
         Err(e) => StepResult::failure(idx, "Screenshot failed", e.to_string()),
     }
 }
@@ -1330,7 +1409,9 @@ fn step_screenshot_element(tab: &Tab, idx: usize, locator: &BrowserLocator) -> S
 
     let bbox = match &info.bbox {
         Some(b) if b.width > 0.0 && b.height > 0.0 => b,
-        _ => return StepResult::failure(idx, "Screenshot element", "Element has no visible bounds"),
+        _ => {
+            return StepResult::failure(idx, "Screenshot element", "Element has no visible bounds")
+        }
     };
 
     let clip = Page::Viewport {
@@ -1349,14 +1430,11 @@ fn step_screenshot_element(tab: &Tab, idx: usize, locator: &BrowserLocator) -> S
         capture_beyond_viewport: Some(false),
         optimize_for_speed: None,
     }) {
-        Ok(result) => StepResult::success(
-            idx,
-            format!("Element screenshot of <{}>", info.tag),
-        )
-        .with_data(serde_json::json!({
-            "mime": "image/jpeg",
-            "data": result.data,
-        })),
+        Ok(result) => StepResult::success(idx, format!("Element screenshot of <{}>", info.tag))
+            .with_data(serde_json::json!({
+                "mime": "image/jpeg",
+                "data": result.data,
+            })),
         Err(e) => StepResult::failure(idx, "Element screenshot failed", e.to_string()),
     }
 }
@@ -1404,11 +1482,8 @@ fn step_styles(
                 filter = filter_js,
             );
             match eval_js_ok(tab, &js) {
-                Ok(result) => StepResult::success(
-                    idx,
-                    format!("Got styles for <{}>", info.tag),
-                )
-                .with_data(result),
+                Ok(result) => StepResult::success(idx, format!("Got styles for <{}>", info.tag))
+                    .with_data(result),
                 Err(e) => StepResult::failure(idx, "Styles failed", e),
             }
         }
@@ -1422,11 +1497,11 @@ fn step_tab_log(tab: &Tab, idx: usize) -> StepResult {
   return JSON.stringify({ok: true, entries: window.__refact_console_log.slice(-50)});
 })()"#;
     match eval_js_ok(tab, js) {
-        Ok(result) => StepResult::success(idx, "Tab log retrieved".to_string())
-            .with_data(result),
+        Ok(result) => StepResult::success(idx, "Tab log retrieved".to_string()).with_data(result),
         Err(_) => StepResult::success(
             idx,
-            "Tab log: no captured logs available (use BrowserRuntime buffers for full logs)".to_string(),
+            "Tab log: no captured logs available (use BrowserRuntime buffers for full logs)"
+                .to_string(),
         ),
     }
 }
@@ -1447,10 +1522,7 @@ fn step_dismiss_overlays(tab: &Tab, idx: usize) -> StepResult {
 fn step_highlight_element(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
     match resolve_element(tab, locator) {
         Ok(info) => match eval_js_ok(tab, browser_locators::js_highlight_element()) {
-            Ok(_) => StepResult::success(
-                idx,
-                format!("Highlighted <{}>", info.tag),
-            ),
+            Ok(_) => StepResult::success(idx, format!("Highlighted <{}>", info.tag)),
             Err(e) => StepResult::failure(idx, "Highlight failed", e),
         },
         Err(e) => StepResult::failure(idx, "Highlight: resolution failed", e),
@@ -1673,10 +1745,7 @@ fn verify_field_value(tab: &Tab, expected: &str, field_kind: &FieldKind) -> Resu
             Ok(actual_len == expected.len() as u64)
         }
         _ => {
-            let actual = result
-                .get("actual")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let actual = result.get("actual").and_then(|v| v.as_str()).unwrap_or("");
             Ok(actual == expected)
         }
     }
@@ -1941,8 +2010,16 @@ mod tests {
         ];
         for s in strategies {
             let js = generate_fill_js(&s, "test", true);
-            assert!(js.starts_with("(function()"), "Strategy {:?} should be IIFE", s);
-            assert!(js.ends_with("})()"), "Strategy {:?} should end with {{}})()", s);
+            assert!(
+                js.starts_with("(function()"),
+                "Strategy {:?} should be IIFE",
+                s
+            );
+            assert!(
+                js.ends_with("})()"),
+                "Strategy {:?} should end with {{}})()",
+                s
+            );
             assert!(
                 js.contains("JSON.stringify"),
                 "Strategy {:?} should return JSON",
@@ -1966,7 +2043,6 @@ mod tests {
         let js_val = js_string_literal(value);
         assert_eq!(js_val, "'Option A'");
     }
-
 
     #[test]
     fn test_all_text_like_inputs_have_strategies() {

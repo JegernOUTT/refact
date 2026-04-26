@@ -1,0 +1,26 @@
+schema_version: 2
+id: memory_enrichment_rewrite
+title: Memory Enrichment Rewrite
+description: Gather relevant context via knowledge search and rewrite user query
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: light
+  n_ctx: 32000
+  max_new_tokens: 500
+  temperature: 0.1
+  tokens_for_rag: 0
+
+messages:
+  system_prompt: |
+    You help users find relevant context before they send a message. You MUST always call the knowledge tool at least once to search for relevant memories, past conversations, and documentation.
+
+    After searching, output ONLY a JSON object on a single line with no markdown fencing:
+    {"rewritten_text": "..."}
+
+    Rules:
+    - rewritten_text: a clearer, more specific version of the user's message based on what you found
+    - Output ONLY the JSON, nothing else

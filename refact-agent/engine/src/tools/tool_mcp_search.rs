@@ -7,7 +7,9 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
-use crate::tools::tools_description::{Tool, ToolConfig, ToolDesc, ToolGroupCategory, ToolSource, ToolSourceType};
+use crate::tools::tools_description::{
+    Tool, ToolConfig, ToolDesc, ToolGroupCategory, ToolSource, ToolSourceType,
+};
 use crate::tools::tools_list::get_integration_tools;
 
 pub struct ToolMcpSearch {}
@@ -19,10 +21,11 @@ impl Tool for ToolMcpSearch {
             name: "mcp_tool_search".to_string(),
             experimental: false,
             allow_parallel: false,
-            description: "Search available MCP tools by regex pattern (case-insensitive, matched \
+            description:
+                "Search available MCP tools by regex pattern (case-insensitive, matched \
                 against tool name and description). Returns matching tool names and their full \
                 JSON schemas as text. After discovering a tool here, call `mcp_call` to execute it."
-                .to_string(),
+                    .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -49,7 +52,10 @@ impl Tool for ToolMcpSearch {
     }
 
     fn config(&self) -> Result<ToolConfig, String> {
-        Ok(ToolConfig { enabled: true, allow_parallel: None })
+        Ok(ToolConfig {
+            enabled: true,
+            allow_parallel: None,
+        })
     }
 
     async fn tool_execute(
@@ -58,11 +64,13 @@ impl Tool for ToolMcpSearch {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let query = args.get("query")
+        let query = args
+            .get("query")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let max_results = args.get("max_results")
+        let max_results = args
+            .get("max_results")
             .and_then(|v| v.as_u64())
             .unwrap_or(10) as usize;
 
@@ -72,7 +80,8 @@ impl Tool for ToolMcpSearch {
         let gcx = ccx.lock().await.global_context.clone();
         let integration_groups = get_integration_tools(gcx).await;
 
-        let matched: Vec<(String, String, Value)> = integration_groups.iter()
+        let matched: Vec<(String, String, Value)> = integration_groups
+            .iter()
             .filter(|g| matches!(g.category, ToolGroupCategory::MCP))
             .flat_map(|g| g.tools.iter())
             .filter(|tool| tool.config().unwrap_or_default().enabled)
@@ -87,7 +96,8 @@ impl Tool for ToolMcpSearch {
             })
             .collect();
 
-        let total_mcp: usize = integration_groups.iter()
+        let total_mcp: usize = integration_groups
+            .iter()
             .filter(|g| matches!(g.category, ToolGroupCategory::MCP))
             .map(|g| g.tools.len())
             .sum();
@@ -98,19 +108,23 @@ impl Tool for ToolMcpSearch {
                  Use mcp_tool_search({{\"query\": \".\"}}) to list all {} available tools.",
                 query, total_mcp
             );
-            return Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                tool_call_id: tool_call_id.clone(),
-                content: ChatContent::SimpleText(text),
-                tool_failed: Some(false),
-                ..Default::default()
-            })]));
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    tool_call_id: tool_call_id.clone(),
+                    content: ChatContent::SimpleText(text),
+                    tool_failed: Some(false),
+                    ..Default::default()
+                })],
+            ));
         }
 
         // Return schemas as text — no session state modified (cache-safe).
         let mut lines = vec![format!(
             "Found {} MCP tool(s) matching '{}'. Use `mcp_call` to execute them.\n",
-            matched.len(), query
+            matched.len(),
+            query
         )];
         for (name, description, schema) in &matched {
             lines.push(format!(
@@ -121,12 +135,15 @@ impl Tool for ToolMcpSearch {
             ));
         }
 
-        Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            tool_call_id: tool_call_id.clone(),
-            content: ChatContent::SimpleText(lines.join("\n")),
-            tool_failed: Some(false),
-            ..Default::default()
-        })]))
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: tool_call_id.clone(),
+                content: ChatContent::SimpleText(lines.join("\n")),
+                tool_failed: Some(false),
+                ..Default::default()
+            })],
+        ))
     }
 }

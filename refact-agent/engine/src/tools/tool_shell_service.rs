@@ -15,10 +15,15 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::integrations::integr_cmdline::{create_command_from_string, format_output};
-use crate::integrations::process_io_utils::{blocking_read_until_token_or_timeout, is_someone_listening_on_that_tcp_port};
+use crate::integrations::process_io_utils::{
+    blocking_read_until_token_or_timeout, is_someone_listening_on_that_tcp_port,
+};
 use crate::integrations::sessions::IntegrationSession;
 use crate::postprocessing::pp_command_output::{OutputFilter, output_mini_postprocessing};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, MatchConfirmDeny, MatchConfirmDenyResult, command_should_be_denied, command_should_be_confirmed_by_user, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, MatchConfirmDeny, MatchConfirmDenyResult,
+    command_should_be_denied, command_should_be_confirmed_by_user, json_schema_from_params,
+};
 
 const ASK_USER_DEFAULT: &[&str] = &[
     "*rm*",
@@ -183,8 +188,14 @@ fn parse_service_args(
     let command = if action == "start" || action == "restart" {
         match args.get("command") {
             Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
-            Some(Value::String(_)) => return Err("Argument `command` cannot be empty for start/restart".to_string()),
-            None => return Err("Missing required argument `command` for start/restart action".to_string()),
+            Some(Value::String(_)) => {
+                return Err("Argument `command` cannot be empty for start/restart".to_string())
+            }
+            None => {
+                return Err(
+                    "Missing required argument `command` for start/restart action".to_string(),
+                )
+            }
             _ => return Err("Argument `command` must be a string".to_string()),
         }
     } else {
@@ -230,10 +241,15 @@ fn parse_output_params(args: &HashMap<String, Value>) -> OutputFilter {
 
     let output_limit = args
         .get("output_limit")
-        .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_u64().map(|n| n.to_string())))
+        .and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
         .unwrap_or_default();
 
-    let is_unlimited = output_limit.eq_ignore_ascii_case("all") || output_limit.eq_ignore_ascii_case("full");
+    let is_unlimited =
+        output_limit.eq_ignore_ascii_case("all") || output_limit.eq_ignore_ascii_case("full");
 
     let limit_lines = if is_unlimited {
         usize::MAX
@@ -245,12 +261,20 @@ fn parse_output_params(args: &HashMap<String, Value>) -> OutputFilter {
 
     OutputFilter {
         limit_lines,
-        limit_chars: if is_unlimited { usize::MAX } else { limit_lines.saturating_mul(200) },
+        limit_chars: if is_unlimited {
+            usize::MAX
+        } else {
+            limit_lines.saturating_mul(200)
+        },
         valuable_top_or_bottom: "top".to_string(),
         grep: output_filter_pattern.unwrap_or_default(),
         grep_context_lines: 3,
         remove_from_output: "".to_string(),
-        limit_tokens: if is_unlimited { None } else { Some(limit_lines.saturating_mul(50)) },
+        limit_tokens: if is_unlimited {
+            None
+        } else {
+            Some(limit_lines.saturating_mul(50))
+        },
         skip: skip_filtering,
     }
 }
@@ -302,10 +326,17 @@ async fn execute_start_action(
     env_variables: &HashMap<String, String>,
 ) -> Result<String, String> {
     let session_key = format!("builtin_shell_service_{}", service_name);
-    
-    let session_exists = gcx.read().await.integration_sessions.contains_key(&session_key);
+
+    let session_exists = gcx
+        .read()
+        .await
+        .integration_sessions
+        .contains_key(&session_key);
     if session_exists {
-        return Err(format!("Service '{}' is already running. Use 'stop' or 'restart' action first.", service_name));
+        return Err(format!(
+            "Service '{}' is already running. Use 'stop' or 'restart' action first.",
+            service_name
+        ));
     }
 
     let mut port_already_open = false;
@@ -318,17 +349,18 @@ async fn execute_start_action(
     }
 
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
-    let mut cmd = create_command_from_string(command, &workdir.to_string(), env_variables, project_dirs)?;
-    
+    let mut cmd =
+        create_command_from_string(command, &workdir.to_string(), env_variables, project_dirs)?;
+
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    
+
     let mut command_wrap = TokioCommandWrap::from(cmd);
     #[cfg(unix)]
     command_wrap.wrap(ProcessGroup::leader());
     #[cfg(windows)]
     command_wrap.wrap(JobObject);
-    
+
     let mut process = command_wrap
         .spawn()
         .map_err(|e| format!("Failed to spawn process: {}", e))?;
@@ -339,7 +371,10 @@ async fn execute_start_action(
     let t0 = tokio::time::Instant::now();
     let mut accumulated_stdout = String::new();
     let mut accumulated_stderr = String::new();
-    let mut actions_log = format!("Starting service '{}' with command:\n{}\n\n", service_name, command);
+    let mut actions_log = format!(
+        "Starting service '{}' with command:\n{}\n\n",
+        service_name, command
+    );
 
     loop {
         if t0.elapsed() >= tokio::time::Duration::from_secs(startup_wait) {
@@ -350,12 +385,15 @@ async fn execute_start_action(
             break;
         }
 
-        let (stdout_out, stderr_out) = get_stdout_and_stderr(100, &mut stdout_reader, &mut stderr_reader).await?;
+        let (stdout_out, stderr_out) =
+            get_stdout_and_stderr(100, &mut stdout_reader, &mut stderr_reader).await?;
         accumulated_stdout.push_str(&stdout_out);
         accumulated_stderr.push_str(&stderr_out);
 
         if !startup_wait_keyword.is_empty() {
-            if accumulated_stdout.contains(startup_wait_keyword) || accumulated_stderr.contains(startup_wait_keyword) {
+            if accumulated_stdout.contains(startup_wait_keyword)
+                || accumulated_stderr.contains(startup_wait_keyword)
+            {
                 actions_log.push_str(&format!(
                     "Startup keyword '{}' found in output, success!\n\n",
                     startup_wait_keyword
@@ -383,7 +421,7 @@ async fn execute_start_action(
                 tokio::time::Duration::from_millis(REALLY_HORRIBLE_ROUNDTRIP),
             )
             .await;
-            
+
             if port_busy && !port_already_open {
                 actions_log.push_str(&format!("Port {} is now busy, success!\n\n", wait_port));
                 break;
@@ -422,7 +460,7 @@ async fn execute_stop_action(
     service_name: &str,
 ) -> Result<String, String> {
     let session_key = format!("builtin_shell_service_{}", service_name);
-    
+
     let session_arc = gcx
         .read()
         .await
@@ -439,7 +477,7 @@ async fn execute_stop_action(
                 .unwrap();
             stop_service_locked(sess).await
         };
-        
+
         gcx.write().await.integration_sessions.remove(&session_key);
         Ok(format!("Service '{}' stopped.\n{}", service_name, stop_msg))
     } else {
@@ -453,7 +491,7 @@ async fn execute_status_action(
     output_filter: &OutputFilter,
 ) -> Result<String, String> {
     let session_key = format!("builtin_shell_service_{}", service_name);
-    
+
     let session_arc = gcx
         .read()
         .await
@@ -469,26 +507,35 @@ async fn execute_status_action(
             .unwrap();
 
         let exit_status = sess.process.try_wait().map_err(|e| e.to_string())?;
-        
+
         if let Some(status) = exit_status {
             let exit_code = status.code().unwrap_or(-1);
-            let (stdout_out, stderr_out) = get_stdout_and_stderr(100, &mut sess.stdout_reader, &mut sess.stderr_reader).await?;
+            let (stdout_out, stderr_out) =
+                get_stdout_and_stderr(100, &mut sess.stdout_reader, &mut sess.stderr_reader)
+                    .await?;
             let filtered_stdout = output_mini_postprocessing(output_filter, &stdout_out);
             let filtered_stderr = output_mini_postprocessing(output_filter, &stderr_out);
-            
+
             drop(session_locked);
             gcx.write().await.integration_sessions.remove(&session_key);
-            
-            let mut result = format!("Service '{}' has exited with code {}.\n\n", service_name, exit_code);
+
+            let mut result = format!(
+                "Service '{}' has exited with code {}.\n\n",
+                service_name, exit_code
+            );
             result.push_str(&format_output(&filtered_stdout, &filtered_stderr));
             Ok(result)
         } else {
-            let (stdout_out, stderr_out) = get_stdout_and_stderr(100, &mut sess.stdout_reader, &mut sess.stderr_reader).await?;
+            let (stdout_out, stderr_out) =
+                get_stdout_and_stderr(100, &mut sess.stdout_reader, &mut sess.stderr_reader)
+                    .await?;
             let filtered_stdout = output_mini_postprocessing(output_filter, &stdout_out);
             let filtered_stderr = output_mini_postprocessing(output_filter, &stderr_out);
-            
-            let mut result = format!("Service '{}' is running.\nworkdir: {}\ncommand: {}\n\n", 
-                service_name, sess.workdir, sess.command_string);
+
+            let mut result = format!(
+                "Service '{}' is running.\nworkdir: {}\ncommand: {}\n\n",
+                service_name, sess.workdir, sess.command_string
+            );
             result.push_str("Recent output:\n");
             result.push_str(&format_output(&filtered_stdout, &filtered_stderr));
             Ok(result)
@@ -518,10 +565,14 @@ async fn execute_restart_action(
     env_variables: &HashMap<String, String>,
 ) -> Result<String, String> {
     let mut result = String::new();
-    
+
     let session_key = format!("builtin_shell_service_{}", service_name);
-    let session_exists = gcx.read().await.integration_sessions.contains_key(&session_key);
-    
+    let session_exists = gcx
+        .read()
+        .await
+        .integration_sessions
+        .contains_key(&session_key);
+
     if session_exists {
         match execute_stop_action(gcx.clone(), service_name).await {
             Ok(stop_msg) => result.push_str(&stop_msg),
@@ -572,18 +623,20 @@ impl Tool for ToolShellService {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (service_name, action, command_opt, workdir_opt) = parse_service_args(args)?;
-        let (startup_wait, startup_wait_port, startup_wait_keyword) = parse_startup_wait_params(args);
+        let (startup_wait, startup_wait_port, startup_wait_keyword) =
+            parse_startup_wait_params(args);
         let output_filter = parse_output_params(args);
 
         let gcx = ccx.lock().await.global_context.clone();
         let workdir = resolve_workdir(gcx.clone(), workdir_opt).await?;
 
         let mut error_log = Vec::<YamlError>::new();
-        let env_variables = crate::integrations::setting_up_integrations::get_vars_for_replacements(
-            gcx.clone(),
-            &mut error_log,
-        )
-        .await;
+        let env_variables =
+            crate::integrations::setting_up_integrations::get_vars_for_replacements(
+                gcx.clone(),
+                &mut error_log,
+            )
+            .await;
 
         let result = match action.as_str() {
             "start" => {
@@ -641,13 +694,13 @@ impl Tool for ToolShellService {
         args: &HashMap<String, Value>,
     ) -> Result<String, String> {
         let (service_name, action, command_opt, _) = parse_service_args(args)?;
-        
+
         if action == "start" || action == "restart" {
             if let Some(command) = command_opt {
                 return Ok(command);
             }
         }
-        
+
         Ok(format!("shell_service {} {}", action, service_name))
     }
 

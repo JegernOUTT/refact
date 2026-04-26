@@ -8,7 +8,10 @@ use tokio::task::{AbortHandle, JoinHandle};
 use rmcp::{RoleClient, service::RunningService};
 use rmcp::transport::auth::AuthorizationManager;
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{Tool as McpTool, Resource as McpResource, Prompt as McpPrompt, ServerInfo, ClientInfo, ClientCapabilities};
+use rmcp::model::{
+    Tool as McpTool, Resource as McpResource, Prompt as McpPrompt, ServerInfo, ClientInfo,
+    ClientCapabilities,
+};
 use rmcp::service::{Peer, RequestContext, NotificationContext};
 use tokio::time::{timeout, sleep, Duration};
 use serde::{Deserialize, Serialize};
@@ -59,12 +62,15 @@ pub struct McpClientHandler {
 
 pub fn redact_sensitive_value(key: &str, value: &str) -> String {
     let key_lower = key.to_lowercase();
-    if key_lower.contains("token") || key_lower.contains("secret")
-        || key_lower.contains("password") || key_lower.contains("key")
-        || key_lower.contains("authorization") || key_lower.contains("cookie")
+    if key_lower.contains("token")
+        || key_lower.contains("secret")
+        || key_lower.contains("password")
+        || key_lower.contains("key")
+        || key_lower.contains("authorization")
+        || key_lower.contains("cookie")
     {
         if value.len() > 8 {
-            format!("{}...{}", &value[..4], &value[value.len()-4..])
+            format!("{}...{}", &value[..4], &value[value.len() - 4..])
         } else {
             "***REDACTED***".to_string()
         }
@@ -76,7 +82,8 @@ pub fn redact_sensitive_value(key: &str, value: &str) -> String {
 pub fn redact_sensitive_json(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
-            let redacted: serde_json::Map<String, serde_json::Value> = map.iter()
+            let redacted: serde_json::Map<String, serde_json::Value> = map
+                .iter()
                 .map(|(k, v)| {
                     let new_v = match v {
                         serde_json::Value::String(s) => {
@@ -107,15 +114,17 @@ impl ClientHandler for McpClientHandler {
         &self,
         params: rmcp::model::CreateMessageRequestParams,
         _context: RequestContext<RoleClient>,
-    ) -> impl Future<Output = Result<rmcp::model::CreateMessageResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl Future<Output = Result<rmcp::model::CreateMessageResult, rmcp::ErrorData>> + Send + '_
+    {
         let gcx_weak = self.gcx.clone();
         let debug_name = self.debug_name.clone();
-        async move {
-            mcp_sampling_create_message(gcx_weak, params, &debug_name).await
-        }
+        async move { mcp_sampling_create_message(gcx_weak, params, &debug_name).await }
     }
 
-    fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) -> impl Future<Output = ()> + Send + '_ {
+    fn on_tool_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
         let peer_arc = self.peer_arc.clone();
         let session_arc = self.session_arc.clone();
         let logs = self.logs.clone();
@@ -197,7 +206,10 @@ impl ClientHandler for McpClientHandler {
         }
     }
 
-    fn on_resource_list_changed(&self, _context: NotificationContext<RoleClient>) -> impl Future<Output = ()> + Send + '_ {
+    fn on_resource_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
         let peer_arc = self.peer_arc.clone();
         let session_arc = self.session_arc.clone();
         let logs = self.logs.clone();
@@ -225,7 +237,10 @@ impl ClientHandler for McpClientHandler {
                 let peer = match peer {
                     Some(p) => p,
                     None => {
-                        tracing::warn!("resources/list_changed: no peer available for {}", debug_name);
+                        tracing::warn!(
+                            "resources/list_changed: no peer available for {}",
+                            debug_name
+                        );
                         return;
                     }
                 };
@@ -233,16 +248,22 @@ impl ClientHandler for McpClientHandler {
                 let new_resources = match timeout(
                     Duration::from_secs(request_timeout),
                     peer.list_all_resources(),
-                ).await {
+                )
+                .await
+                {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => {
-                        let msg = format!("resources/list_changed: failed to list resources: {:?}", e);
+                        let msg =
+                            format!("resources/list_changed: failed to list resources: {:?}", e);
                         tracing::error!("{} for {}", msg, debug_name);
                         add_log_entry(logs, msg).await;
                         return;
                     }
                     Err(_) => {
-                        let msg = format!("resources/list_changed: list_resources timed out after {}s", request_timeout);
+                        let msg = format!(
+                            "resources/list_changed: list_resources timed out after {}s",
+                            request_timeout
+                        );
                         tracing::error!("{} for {}", msg, debug_name);
                         add_log_entry(logs, msg).await;
                         return;
@@ -262,7 +283,8 @@ impl ClientHandler for McpClientHandler {
 
                 let msg = format!(
                     "resources/list_changed: {} → {} resources",
-                    old_count, new_resources.len()
+                    old_count,
+                    new_resources.len()
                 );
                 tracing::info!("{} for {}", msg, debug_name);
                 add_log_entry(logs.clone(), msg).await;
@@ -282,7 +304,10 @@ impl ClientHandler for McpClientHandler {
         }
     }
 
-    fn on_prompt_list_changed(&self, _context: NotificationContext<RoleClient>) -> impl Future<Output = ()> + Send + '_ {
+    fn on_prompt_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
         let peer_arc = self.peer_arc.clone();
         let session_arc = self.session_arc.clone();
         let logs = self.logs.clone();
@@ -305,7 +330,10 @@ impl ClientHandler for McpClientHandler {
                 let peer = match peer {
                     Some(p) => p,
                     None => {
-                        tracing::warn!("prompts/list_changed: no peer available for {}", debug_name);
+                        tracing::warn!(
+                            "prompts/list_changed: no peer available for {}",
+                            debug_name
+                        );
                         return;
                     }
                 };
@@ -392,7 +420,15 @@ impl IntegrationSession for SessionMCP {
         self_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
     ) -> Box<dyn Future<Output = String> + Send> {
         Box::new(async move {
-            let (debug_name, client, logs, startup_task_handles, health_task_handle, oauth_refresh_task_handle, stderr_file) = {
+            let (
+                debug_name,
+                client,
+                logs,
+                startup_task_handles,
+                health_task_handle,
+                oauth_refresh_task_handle,
+                stderr_file,
+            ) = {
                 let mut session_locked = self_arc.lock().await;
                 let session_downcasted = session_locked
                     .as_any_mut()
@@ -545,18 +581,35 @@ mod tests {
         };
         assert_eq!(handler.debug_name, "test");
         assert_eq!(handler.request_timeout, 30);
-        assert!(handler.peer_arc.try_lock().ok().and_then(|g| g.clone()).is_none());
+        assert!(handler
+            .peer_arc
+            .try_lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_none());
     }
 
     #[test]
     fn test_redact_sensitive_value() {
-        assert_eq!(redact_sensitive_value("Authorization", "Bearer sk-1234567890"), "Bear...7890");
+        assert_eq!(
+            redact_sensitive_value("Authorization", "Bearer sk-1234567890"),
+            "Bear...7890"
+        );
         assert_eq!(redact_sensitive_value("api_key", "short"), "***REDACTED***");
-        assert_eq!(redact_sensitive_value("description", "not secret"), "not secret");
+        assert_eq!(
+            redact_sensitive_value("description", "not secret"),
+            "not secret"
+        );
         assert_eq!(redact_sensitive_value("token", "abcdefghij"), "abcd...ghij");
         assert_eq!(redact_sensitive_value("password", "abc"), "***REDACTED***");
-        assert_eq!(redact_sensitive_value("cookie", "session=xyz123456"), "sess...3456");
-        assert_eq!(redact_sensitive_value("Content-Type", "application/json"), "application/json");
+        assert_eq!(
+            redact_sensitive_value("cookie", "session=xyz123456"),
+            "sess...3456"
+        );
+        assert_eq!(
+            redact_sensitive_value("Content-Type", "application/json"),
+            "application/json"
+        );
     }
 
     #[test]
@@ -604,7 +657,10 @@ mod tests {
     fn test_redact_sensitive_json_primitives() {
         assert_eq!(redact_sensitive_json(&serde_json::json!("hello")), "hello");
         assert_eq!(redact_sensitive_json(&serde_json::json!(42)), 42);
-        assert_eq!(redact_sensitive_json(&serde_json::json!(null)), serde_json::Value::Null);
+        assert_eq!(
+            redact_sensitive_json(&serde_json::json!(null)),
+            serde_json::Value::Null
+        );
     }
 
     #[test]

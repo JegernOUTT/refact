@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "updated_at": "2026-03-06",
-  "total": 120,
+  "updated_at": "2026-04-26",
+  "total": 161,
   "servers": [
     {
       "id": "github",
@@ -1864,6 +1864,665 @@
         "command": "uvx mcp-dnsdumpster",
         "env": {
           "DNSDUMPSTER_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "gcp",
+      "name": "Google Cloud Platform",
+      "description": "Manage GCP resources: Cloud Run, GCS, BigTable, Pub/Sub, IAM, and more",
+      "publisher": "google-cloud",
+      "tags": ["cloud", "gcp", "google", "infrastructure"],
+      "homepage": "https://github.com/googleapis/mcp-toolbox-for-databases",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @google-cloud/mcp-server",
+        "env": {
+          "GOOGLE_APPLICATION_CREDENTIALS": "",
+          "GOOGLE_CLOUD_PROJECT": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "telegram",
+      "name": "Telegram",
+      "description": "Send messages, manage bots, and interact with Telegram groups and channels",
+      "publisher": "community",
+      "tags": ["communication", "telegram", "messaging", "bots"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/telegram",
+        "env": {
+          "TELEGRAM_BOT_TOKEN": "",
+          "TELEGRAM_CHAT_ID": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "zoom",
+      "name": "Zoom",
+      "description": "Create and manage Zoom meetings, webinars, recordings, and participants",
+      "publisher": "community",
+      "tags": ["communication", "meetings", "zoom", "video"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/zoom",
+        "env": {
+          "ZOOM_CLIENT_ID": "",
+          "ZOOM_CLIENT_SECRET": "",
+          "ZOOM_ACCOUNT_ID": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "twitter-x",
+      "name": "Twitter / X",
+      "description": "Post tweets, search content, and manage your Twitter/X account",
+      "publisher": "community",
+      "tags": ["social-media", "twitter", "x", "communication"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/twitter",
+        "env": {
+          "TWITTER_API_KEY": "",
+          "TWITTER_API_SECRET": "",
+          "TWITTER_ACCESS_TOKEN": "",
+          "TWITTER_ACCESS_SECRET": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "reddit",
+      "name": "Reddit",
+      "description": "Search posts, read subreddits, and submit content to Reddit",
+      "publisher": "community",
+      "tags": ["social-media", "reddit", "community", "research"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/reddit",
+        "env": {
+          "REDDIT_CLIENT_ID": "",
+          "REDDIT_CLIENT_SECRET": "",
+          "REDDIT_USER_AGENT": "refact-agent/1.0"
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "dropbox",
+      "name": "Dropbox",
+      "description": "Upload, download, and manage files and folders in Dropbox",
+      "publisher": "community",
+      "tags": ["storage", "cloud", "files", "dropbox"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/dropbox",
+        "env": {
+          "DROPBOX_ACCESS_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "onedrive",
+      "name": "Microsoft OneDrive",
+      "description": "Read, write, and manage files in Microsoft OneDrive and SharePoint",
+      "publisher": "community",
+      "tags": ["storage", "cloud", "microsoft", "files"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/onedrive",
+        "env": {
+          "MICROSOFT_CLIENT_ID": "",
+          "MICROSOFT_CLIENT_SECRET": "",
+          "MICROSOFT_TENANT_ID": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "box",
+      "name": "Box",
+      "description": "Upload, download, collaborate, and manage enterprise files in Box",
+      "publisher": "community",
+      "tags": ["storage", "cloud", "enterprise", "files", "box"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/box",
+        "env": {
+          "BOX_CLIENT_ID": "",
+          "BOX_CLIENT_SECRET": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "netlify",
+      "name": "Netlify",
+      "description": "Deploy sites, manage domains, build hooks, and forms on Netlify",
+      "publisher": "netlify",
+      "tags": ["deployment", "hosting", "netlify", "jamstack"],
+      "homepage": "https://github.com/netlify/netlify-mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @netlify/mcp-server",
+        "env": {
+          "NETLIFY_ACCESS_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "fly-io",
+      "name": "Fly.io",
+      "description": "Deploy and manage apps globally on Fly.io edge infrastructure",
+      "publisher": "community",
+      "tags": ["deployment", "hosting", "fly-io", "edge"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/flyio",
+        "env": {
+          "FLY_API_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "helm",
+      "name": "Helm",
+      "description": "Manage Kubernetes applications using Helm charts: install, upgrade, rollback",
+      "publisher": "community",
+      "tags": ["kubernetes", "k8s", "helm", "devops", "packages"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx helm-mcp-server",
+        "env": {
+          "KUBECONFIG": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "argocd",
+      "name": "Argo CD",
+      "description": "Manage GitOps deployments, applications, and sync status in Argo CD",
+      "publisher": "community",
+      "tags": ["gitops", "kubernetes", "cd", "argocd", "devops"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx argocd-mcp-server",
+        "env": {
+          "ARGOCD_SERVER": "localhost:8080",
+          "ARGOCD_AUTH_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "semgrep",
+      "name": "Semgrep",
+      "description": "Static application security testing: find bugs and vulnerabilities in code",
+      "publisher": "semgrep",
+      "tags": ["security", "sast", "code-analysis", "semgrep"],
+      "homepage": "https://github.com/semgrep/semgrep-mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx semgrep-mcp",
+        "env": {
+          "SEMGREP_APP_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "snyk",
+      "name": "Snyk",
+      "description": "Find and fix security vulnerabilities in code, dependencies, containers, and IaC",
+      "publisher": "snyk",
+      "tags": ["security", "vulnerabilities", "dependencies", "snyk"],
+      "homepage": "https://github.com/snyk/mcp-server-snyk",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @snyk/mcp-server",
+        "env": {
+          "SNYK_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "sonarqube",
+      "name": "SonarQube",
+      "description": "Inspect code quality, coverage, bugs, and code smells in SonarQube",
+      "publisher": "community",
+      "tags": ["code-quality", "security", "sonarqube", "analysis"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx sonarqube-mcp-server",
+        "env": {
+          "SONAR_HOST_URL": "http://localhost:9000",
+          "SONAR_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "databricks",
+      "name": "Databricks",
+      "description": "Run Spark jobs, query Delta Lake tables, and manage Databricks workspaces",
+      "publisher": "databricks",
+      "tags": ["data", "analytics", "spark", "databricks", "lakehouse"],
+      "homepage": "https://github.com/databricks/databricks-mcp-server",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx databricks-mcp-server",
+        "env": {
+          "DATABRICKS_HOST": "https://your-workspace.azuredatabricks.net",
+          "DATABRICKS_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "apache-airflow",
+      "name": "Apache Airflow",
+      "description": "Trigger DAGs, monitor task runs, and manage workflows in Apache Airflow",
+      "publisher": "community",
+      "tags": ["data", "workflows", "orchestration", "airflow"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx airflow-mcp-server",
+        "env": {
+          "AIRFLOW_BASE_URL": "http://localhost:8080",
+          "AIRFLOW_USERNAME": "admin",
+          "AIRFLOW_PASSWORD": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "plaid",
+      "name": "Plaid",
+      "description": "Access bank accounts, transactions, balances, and financial data via Plaid",
+      "publisher": "community",
+      "tags": ["finance", "banking", "payments", "plaid"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/plaid",
+        "env": {
+          "PLAID_CLIENT_ID": "",
+          "PLAID_SECRET": "",
+          "PLAID_ENV": "sandbox"
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "docusign",
+      "name": "DocuSign",
+      "description": "Send, sign, and manage e-signature documents and envelopes via DocuSign",
+      "publisher": "community",
+      "tags": ["e-signature", "documents", "legal", "docusign"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/docusign",
+        "env": {
+          "DOCUSIGN_ACCOUNT_ID": "",
+          "DOCUSIGN_ACCESS_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "contentful",
+      "name": "Contentful",
+      "description": "Manage content types, entries, and assets in Contentful headless CMS",
+      "publisher": "contentful",
+      "tags": ["cms", "content", "headless", "contentful"],
+      "homepage": "https://github.com/contentful/contentful-mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @contentful/mcp-server",
+        "env": {
+          "CONTENTFUL_MANAGEMENT_TOKEN": "",
+          "CONTENTFUL_SPACE_ID": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "sanity",
+      "name": "Sanity",
+      "description": "Read and write content in Sanity headless CMS using GROQ queries",
+      "publisher": "sanity",
+      "tags": ["cms", "content", "headless", "sanity"],
+      "homepage": "https://github.com/sanity-io/sanity-mcp-server",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @sanity/mcp-server",
+        "env": {
+          "SANITY_PROJECT_ID": "",
+          "SANITY_DATASET": "production",
+          "SANITY_API_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral AI",
+      "description": "Call Mistral AI models for text generation, embeddings, and code completion",
+      "publisher": "mistral",
+      "tags": ["ai", "llm", "mistral", "inference"],
+      "homepage": "https://github.com/mistralai/mistral-mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mistral-ai/mcp-server",
+        "env": {
+          "MISTRAL_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "groq",
+      "name": "Groq",
+      "description": "Run LLMs at ultra-fast speeds on Groq LPU inference hardware",
+      "publisher": "community",
+      "tags": ["ai", "llm", "groq", "inference", "fast"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/groq",
+        "env": {
+          "GROQ_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "replicate",
+      "name": "Replicate",
+      "description": "Run open-source AI models — image gen, audio, video, code — via Replicate",
+      "publisher": "replicate",
+      "tags": ["ai", "ml", "image-generation", "replicate", "models"],
+      "homepage": "https://github.com/replicate/replicate-mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @replicate/mcp-server",
+        "env": {
+          "REPLICATE_API_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "together-ai",
+      "name": "Together AI",
+      "description": "Run open-source LLMs at scale with fine-tuning and embedding support via Together AI",
+      "publisher": "community",
+      "tags": ["ai", "llm", "inference", "together-ai", "open-source"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/together-ai",
+        "env": {
+          "TOGETHER_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "new-relic",
+      "name": "New Relic",
+      "description": "Query APM metrics, logs, distributed traces, and alerts in New Relic",
+      "publisher": "new-relic",
+      "tags": ["monitoring", "observability", "apm", "new-relic"],
+      "homepage": "https://github.com/newrelic/newrelic-mcp-server",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @newrelic/mcp-server",
+        "env": {
+          "NEW_RELIC_LICENSE_KEY": "",
+          "NEW_RELIC_ACCOUNT_ID": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "apify",
+      "name": "Apify",
+      "description": "Run web scraping and browser automation actors on Apify cloud platform",
+      "publisher": "apify",
+      "tags": ["web", "scraping", "automation", "apify"],
+      "homepage": "https://github.com/apify/actors-mcp-server",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @apify/actors-mcp-server",
+        "env": {
+          "APIFY_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "turso",
+      "name": "Turso",
+      "description": "Query and manage libSQL / Turso edge databases built on SQLite",
+      "publisher": "tursodatabase",
+      "tags": ["database", "sqlite", "edge", "turso", "libsql"],
+      "homepage": "https://github.com/tursodatabase/mcp-server-turso",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @turso/mcp-server",
+        "env": {
+          "TURSO_DATABASE_URL": "libsql://your-db.turso.io",
+          "TURSO_AUTH_TOKEN": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "cockroachdb",
+      "name": "CockroachDB",
+      "description": "Query and manage CockroachDB distributed SQL database clusters",
+      "publisher": "community",
+      "tags": ["database", "sql", "distributed", "cockroachdb"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/cockroachdb",
+        "env": {
+          "COCKROACHDB_CONNECTION_STRING": "postgresql://root@localhost:26257/defaultdb?sslmode=disable"
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "npm-registry",
+      "name": "npm Registry",
+      "description": "Search npm packages, view metadata, check vulnerabilities, and compare versions",
+      "publisher": "community",
+      "tags": ["package-manager", "npm", "javascript", "nodejs"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx npm-registry-mcp-server",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "pypi",
+      "name": "PyPI",
+      "description": "Search Python packages, view metadata, download stats, and dependency trees on PyPI",
+      "publisher": "community",
+      "tags": ["package-manager", "python", "pypi"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx pypi-mcp-server",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "plausible",
+      "name": "Plausible Analytics",
+      "description": "Query privacy-first website analytics from Plausible — visitors, pages, sources",
+      "publisher": "community",
+      "tags": ["analytics", "privacy", "web", "plausible"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx plausible-mcp-server",
+        "env": {
+          "PLAUSIBLE_API_KEY": "",
+          "PLAUSIBLE_SITE_ID": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "joplin",
+      "name": "Joplin",
+      "description": "Read, create, and manage notes and notebooks in Joplin note-taking app",
+      "publisher": "community",
+      "tags": ["notes", "markdown", "joplin", "knowledge"],
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @mcp-server/joplin",
+        "env": {
+          "JOPLIN_TOKEN": "",
+          "JOPLIN_PORT": "41184"
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "chroma",
+      "name": "Chroma",
+      "description": "Query and manage Chroma vector database for embedding storage and semantic search",
+      "publisher": "chroma-core",
+      "tags": ["vector-db", "embeddings", "ai", "semantic-search"],
+      "homepage": "https://github.com/chroma-core/chroma-mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx chroma-mcp",
+        "env": {}
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "upstash-redis",
+      "name": "Upstash",
+      "description": "Manage serverless Redis databases and Kafka topics on Upstash",
+      "publisher": "upstash",
+      "tags": ["database", "redis", "kafka", "serverless", "cache"],
+      "homepage": "https://github.com/upstash/mcp-server",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @upstash/mcp-server",
+        "env": {
+          "UPSTASH_EMAIL": "",
+          "UPSTASH_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "cal-com",
+      "name": "Cal.com",
+      "description": "Create and manage meetings, bookings, and availability via Cal.com scheduling platform",
+      "publisher": "calcom",
+      "tags": ["scheduling", "calendar", "meetings", "productivity"],
+      "homepage": "https://github.com/calcom/cal.com/tree/main/packages/mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @calcom/mcp",
+        "env": {
+          "CAL_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "make",
+      "name": "Make",
+      "description": "Trigger and manage Make (formerly Integromat) scenarios and automation workflows",
+      "publisher": "make",
+      "tags": ["automation", "workflows", "integrations", "make"],
+      "homepage": "https://github.com/makehq/mcp-server",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @makehq/mcp-server",
+        "env": {
+          "MAKE_API_KEY": "",
+          "MAKE_ZONE": "eu2.make.com",
+          "MAKE_TEAM_ID": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "hyperbrowser",
+      "name": "Hyperbrowser",
+      "description": "Scalable cloud browsers for web automation, scraping, and AI agent web tasks",
+      "publisher": "hyperbrowser",
+      "tags": ["browser", "automation", "web", "scraping", "cloud"],
+      "homepage": "https://github.com/hyperbrowserai/mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @hyperbrowser/mcp",
+        "env": {
+          "HYPERBROWSER_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "e2b",
+      "name": "E2B Code Sandbox",
+      "description": "Run code securely in sandboxed cloud environments with file system access and package support",
+      "publisher": "e2b",
+      "tags": ["sandbox", "code-execution", "cloud", "python", "javascript"],
+      "homepage": "https://github.com/e2b-dev/mcp-server",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @e2b/mcp-server",
+        "env": {
+          "E2B_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "kagi",
+      "name": "Kagi Search",
+      "description": "High-quality, privacy-first web search with no ads via Kagi Search API",
+      "publisher": "kagisearch",
+      "tags": ["search", "web", "privacy", "kagi"],
+      "homepage": "https://github.com/kagisearch/mcp",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "uvx kagi-mcp-server",
+        "env": {
+          "KAGI_API_KEY": ""
+        }
+      },
+      "confirmation_default": ["*"]
+    },
+    {
+      "id": "chrome-devtools",
+      "name": "Chrome DevTools",
+      "description": "Inspect DOM, capture network requests, run JS, and profile pages via Chrome DevTools Protocol",
+      "publisher": "community",
+      "tags": ["browser", "devtools", "debugging", "chrome", "web"],
+      "homepage": "https://github.com/modelcontextprotocol/servers",
+      "transport": "stdio",
+      "install_recipe": {
+        "command": "npx -y @modelcontextprotocol/server-chrome-devtools",
+        "env": {
+          "CHROME_DEBUG_PORT": "9222"
         }
       },
       "confirmation_default": ["*"]

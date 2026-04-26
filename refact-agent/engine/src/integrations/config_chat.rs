@@ -184,7 +184,9 @@ pub async fn mix_config_messages(
         gcx.clone(),
         "configurator",
         None,
-    ).await {
+    )
+    .await
+    {
         Some(mode_config) => mode_config.prompt,
         None => {
             tracing::error!("Mode 'configurator' not found");

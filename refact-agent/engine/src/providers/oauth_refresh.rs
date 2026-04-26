@@ -28,7 +28,10 @@ pub async fn oauth_token_refresh_background_task(gcx: Arc<ARwLock<GlobalContext>
 async fn try_refresh_all_providers(gcx: &Arc<ARwLock<GlobalContext>>) -> () {
     let (http_client, config_dir) = {
         let gcx_locked = gcx.read().await;
-        (gcx_locked.http_client.clone(), gcx_locked.config_dir.clone())
+        (
+            gcx_locked.http_client.clone(),
+            gcx_locked.config_dir.clone(),
+        )
     };
 
     try_refresh_claude_code(gcx, &http_client, &config_dir).await;
@@ -63,15 +66,29 @@ async fn try_refresh_claude_code(
         return;
     }
 
-    tracing::info!("Claude Code: refreshing OAuth token (expires_at={})", oauth_tokens.expires_at);
+    tracing::info!(
+        "Claude Code: refreshing OAuth token (expires_at={})",
+        oauth_tokens.expires_at
+    );
 
     match crate::providers::claude_code_oauth::refresh_access_token(
         http_client,
         &oauth_tokens.refresh_token,
-    ).await {
+    )
+    .await
+    {
         Ok(new_tokens) => {
             tracing::info!("Claude Code: OAuth token refreshed successfully");
-            if let Err(e) = save_refreshed_tokens(gcx, config_dir, "claude_code", &new_tokens.access_token, &new_tokens.refresh_token, new_tokens.expires_at).await {
+            if let Err(e) = save_refreshed_tokens(
+                gcx,
+                config_dir,
+                "claude_code",
+                &new_tokens.access_token,
+                &new_tokens.refresh_token,
+                new_tokens.expires_at,
+            )
+            .await
+            {
                 tracing::warn!("Claude Code: failed to save refreshed tokens: {}", e);
             }
         }
@@ -109,15 +126,29 @@ async fn try_refresh_openai_codex(
         return;
     }
 
-    tracing::info!("OpenAI Codex: refreshing OAuth token (expires_at={})", oauth_tokens.expires_at);
+    tracing::info!(
+        "OpenAI Codex: refreshing OAuth token (expires_at={})",
+        oauth_tokens.expires_at
+    );
 
     match crate::providers::openai_codex_oauth::refresh_access_token(
         http_client,
         &oauth_tokens.refresh_token,
-    ).await {
+    )
+    .await
+    {
         Ok(new_tokens) => {
             tracing::info!("OpenAI Codex: OAuth token refreshed successfully");
-            if let Err(e) = save_refreshed_tokens(gcx, config_dir, "openai_codex", &new_tokens.access_token, &new_tokens.refresh_token, new_tokens.expires_at).await {
+            if let Err(e) = save_refreshed_tokens(
+                gcx,
+                config_dir,
+                "openai_codex",
+                &new_tokens.access_token,
+                &new_tokens.refresh_token,
+                new_tokens.expires_at,
+            )
+            .await
+            {
                 tracing::warn!("OpenAI Codex: failed to save refreshed tokens: {}", e);
             }
         }
@@ -146,19 +177,19 @@ async fn save_refreshed_tokens(
     let providers_dir = config_dir.join("providers.d");
     let config_path = providers_dir.join(format!("{}.yaml", provider_name));
 
-    tokio::fs::create_dir_all(&providers_dir).await
+    tokio::fs::create_dir_all(&providers_dir)
+        .await
         .map_err(|e| format!("Failed to create providers.d: {}", e))?;
 
     let mut yaml_map: serde_yaml::Mapping = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|e| format!("Failed to read config: {}", e))?;
-        let value: serde_yaml::Value = serde_yaml::from_str(&content)
-            .map_err(|e| format!("Failed to parse YAML: {}", e))?;
-        value
-            .as_mapping()
-            .cloned()
-            .ok_or_else(|| "Config file root is not a YAML mapping. Cannot safely patch.".to_string())?
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse YAML: {}", e))?;
+        value.as_mapping().cloned().ok_or_else(|| {
+            "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
+        })?
     } else {
         serde_yaml::Mapping::new()
     };
@@ -194,25 +225,33 @@ async fn save_refreshed_tokens(
     use std::sync::atomic::{AtomicU64, Ordering};
     static REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
     let unique_id = REFRESH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_path = config_path.with_extension(format!("yaml.tmp.refresh.{}.{}", std::process::id(), unique_id));
+    let temp_path = config_path.with_extension(format!(
+        "yaml.tmp.refresh.{}.{}",
+        std::process::id(),
+        unique_id
+    ));
 
-    tokio::fs::write(&temp_path, &content).await
+    tokio::fs::write(&temp_path, &content)
+        .await
         .map_err(|e| format!("Failed to write temp config: {}", e))?;
-    tokio::fs::rename(&temp_path, &config_path).await
+    tokio::fs::rename(&temp_path, &config_path)
+        .await
         .map_err(|e| format!("Failed to rename config: {}", e))?;
 
     {
         let gcx_locked = gcx.read().await;
         let mut registry = gcx_locked.providers.write().await;
 
-        let full_content = tokio::fs::read_to_string(&config_path).await
+        let full_content = tokio::fs::read_to_string(&config_path)
+            .await
             .map_err(|e| format!("Failed to reload config: {}", e))?;
         let yaml: serde_yaml::Value = serde_yaml::from_str(&full_content)
             .map_err(|e| format!("Invalid YAML after save: {}", e))?;
 
         let mut provider = create_provider(provider_name)
             .ok_or_else(|| format!("Failed to create provider '{}'", provider_name))?;
-        provider.provider_settings_apply(yaml)
+        provider
+            .provider_settings_apply(yaml)
             .map_err(|e| format!("Failed to apply settings: {}", e))?;
         registry.add(provider);
     }

@@ -3,8 +3,7 @@ use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_o
 use crate::call_validation::DiffChunk;
 use crate::files_correction::{
     canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
-    correct_to_nearest_dir_path, get_project_dirs,
-    preprocess_path_for_normalization,
+    correct_to_nearest_dir_path, get_project_dirs, preprocess_path_for_normalization,
 };
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
@@ -17,7 +16,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 
-fn resolve_path_with_workdir(path: &PathBuf, code_workdir: &Option<PathBuf>) -> Result<PathBuf, String> {
+fn resolve_path_with_workdir(
+    path: &PathBuf,
+    code_workdir: &Option<PathBuf>,
+) -> Result<PathBuf, String> {
     let Some(workdir) = code_workdir else {
         return Ok(path.clone());
     };
@@ -425,7 +427,14 @@ pub async fn str_replace(
         normalized_content.replacen(&normalized_old_str, &normalized_new_str, 1)
     };
     let new_file_content = restore_line_endings(&new_content, has_crlf);
-    write_file(gcx.clone(), path, &new_file_content, dry, Some(&file_content)).await?;
+    write_file(
+        gcx.clone(),
+        path,
+        &new_file_content,
+        dry,
+        Some(&file_content),
+    )
+    .await?;
     Ok((file_content, new_file_content))
 }
 
@@ -503,7 +512,14 @@ pub async fn str_replace_anchored(
     };
 
     let new_file_content = restore_line_endings(&result, has_crlf);
-    write_file(gcx.clone(), path, &new_file_content, dry, Some(&file_content)).await?;
+    write_file(
+        gcx.clone(),
+        path,
+        &new_file_content,
+        dry,
+        Some(&file_content),
+    )
+    .await?;
     Ok((file_content, new_file_content))
 }
 
@@ -770,7 +786,14 @@ pub async fn str_replace_lines(
         restore_line_endings(&new_content_joined, has_crlf)
     };
 
-    write_file(gcx.clone(), path, &new_file_content, dry, Some(&file_content)).await?;
+    write_file(
+        gcx.clone(),
+        path,
+        &new_file_content,
+        dry,
+        Some(&file_content),
+    )
+    .await?;
     Ok((file_content, new_file_content))
 }
 
@@ -834,7 +857,14 @@ pub async fn str_replace_regex(
             .to_string()
     };
     let new_file_content = restore_line_endings(&new_content, has_crlf);
-    write_file(gcx.clone(), path, &new_file_content, dry, Some(&file_content)).await?;
+    write_file(
+        gcx.clone(),
+        path,
+        &new_file_content,
+        dry,
+        Some(&file_content),
+    )
+    .await?;
     Ok((file_content, new_file_content))
 }
 
@@ -1069,7 +1099,10 @@ mod tests {
     fn test_resolve_path_workdir_absolute_inside_workdir() {
         let workdir = PathBuf::from("/project/worktree");
         let path = PathBuf::from("/project/worktree/src/file.rs");
-        assert_eq!(resolve_path_with_workdir(&path, &Some(workdir)).unwrap(), path);
+        assert_eq!(
+            resolve_path_with_workdir(&path, &Some(workdir)).unwrap(),
+            path
+        );
     }
 
     #[test]

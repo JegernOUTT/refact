@@ -8,7 +8,9 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::ast::ast_structs::AstDB;
 use crate::ast::ast_db::fetch_counters;
 use crate::custom_error::trace_and_default;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::knowledge_index::format_related_memories_section;
@@ -169,7 +171,10 @@ impl Tool for ToolAstDefinition {
             };
             all_context_files.push(ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText(format!("{}{}", combined_message, related_section)),
+                content: ChatContent::SimpleText(format!(
+                    "{}{}",
+                    combined_message, related_section
+                )),
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
                 output_filter: Some(OutputFilter::no_limits()), // Already compressed internally

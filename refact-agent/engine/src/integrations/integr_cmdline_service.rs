@@ -420,20 +420,28 @@ impl Tool for ToolService {
     }
 
     fn tool_description(&self) -> ToolDesc {
-        let required: Vec<String> = self.cfg.parameters_required.clone().unwrap_or_else(|| {
-            self.cfg.parameters.iter().map(|p| p.name.clone()).collect()
-        });
+        let required: Vec<String> = self
+            .cfg
+            .parameters_required
+            .clone()
+            .unwrap_or_else(|| self.cfg.parameters.iter().map(|p| p.name.clone()).collect());
         let mut properties = serde_json::Map::new();
         for p in &self.cfg.parameters {
-            properties.insert(p.name.clone(), json!({
-                "type": p.param_type,
-                "description": p.description
-            }));
+            properties.insert(
+                p.name.clone(),
+                json!({
+                    "type": p.param_type,
+                    "description": p.description
+                }),
+            );
         }
-        properties.insert("action".to_string(), json!({
-            "type": "string",
-            "description": "Action to perform: start, restart, stop, status"
-        }));
+        properties.insert(
+            "action".to_string(),
+            json!({
+                "type": "string",
+                "description": "Action to perform: start, restart, stop, status"
+            }),
+        );
         let input_schema = json!({
             "type": "object",
             "properties": properties,

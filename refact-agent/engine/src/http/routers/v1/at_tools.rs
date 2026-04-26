@@ -224,22 +224,21 @@ pub async fn handle_v1_tools_check_if_confirmation_needed(
             }
         };
 
-        let args =
-            match tool_call.function.parse_args() {
-                Ok(args) => args,
-                Err(e) => {
-                    return Ok(reply(
-                        false,
-                        &vec![PauseReason {
-                            reason_type: PauseReasonType::Denial,
-                            command: tool_call.function.name.clone(),
-                            rule: format!("tool parsing problem: {}", e),
-                            tool_call_id: tool_call.id.clone(),
-                            integr_config_path: tool.has_config_path(),
-                        }],
-                    ));
-                }
-            };
+        let args = match tool_call.function.parse_args() {
+            Ok(args) => args,
+            Err(e) => {
+                return Ok(reply(
+                    false,
+                    &vec![PauseReason {
+                        reason_type: PauseReasonType::Denial,
+                        command: tool_call.function.name.clone(),
+                        rule: format!("tool parsing problem: {}", e),
+                        tool_call_id: tool_call.id.clone(),
+                        integr_config_path: tool.has_config_path(),
+                    }],
+                ));
+            }
+        };
 
         let should_confirm = match tool.match_against_confirm_deny(ccx.clone(), &args).await {
             Ok(should_confirm) => should_confirm,

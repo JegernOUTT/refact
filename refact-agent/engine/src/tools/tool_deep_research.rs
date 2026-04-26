@@ -5,7 +5,10 @@ use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 
 use crate::subchat::run_subchat_once_with_parent;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, MatchConfirmDeny, MatchConfirmDenyResult, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, MatchConfirmDeny, MatchConfirmDenyResult,
+    json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::global_context::GlobalContext;
@@ -29,20 +32,21 @@ async fn execute_deep_research(
     tool_call_id: String,
     abort_flag: Arc<std::sync::atomic::AtomicBool>,
     parent_depth: usize,
-) -> Result<
-    (
-        ChatMessage,
-        serde_json::Map<String, serde_json::Value>,
-    ),
-    String,
-> {
+) -> Result<(ChatMessage, serde_json::Map<String, serde_json::Value>), String> {
     let subagent_config = get_subagent_config(gcx.clone(), SUBAGENT_ID, None)
         .await
         .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
 
-    let researcher_prompt = subagent_config.messages.user_template
+    let researcher_prompt = subagent_config
+        .messages
+        .user_template
         .as_ref()
-        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", SUBAGENT_ID))?;
+        .ok_or_else(|| {
+            format!(
+                "messages.user_template not defined for subagent '{}'",
+                SUBAGENT_ID
+            )
+        })?;
 
     let messages = vec![
         ChatMessage::new("user".to_string(), researcher_prompt.clone()),
@@ -144,21 +148,26 @@ impl Tool for ToolDeepResearch {
             base_title: Some(title),
             source_chat_id: (!root_chat_id.is_empty()).then_some(root_chat_id),
         };
-        let memory_note =
-            match memories_add_enriched(ccx.clone(), &research_content, enrichment_params).await {
-                Ok(path) => {
-                    tracing::info!("Created enriched memory from deep research: {:?}", path);
-                    format!(
+        let memory_note = match memories_add_enriched(
+            ccx.clone(),
+            &research_content,
+            enrichment_params,
+        )
+        .await
+        {
+            Ok(path) => {
+                tracing::info!("Created enriched memory from deep research: {:?}", path);
+                format!(
                         "\n\n---\n📝 **This report has been saved to the knowledge base:** `{}`\n\nRelated memories may be shown elsewhere in short form. To load full content of a memory, call `cat(paths=\"{}\")`.",
                         path.display(),
                         path.display()
                     )
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create enriched memory from deep research: {}", e);
-                    String::new()
-                }
-            };
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create enriched memory from deep research: {}", e);
+                String::new()
+            }
+        };
         let related_memories_note = {
             let gcx = ccx.lock().await.global_context.clone();
             let gcx_read = gcx.read().await;
@@ -170,7 +179,10 @@ impl Tool for ToolDeepResearch {
             format_related_memories_section(&cards, None)
         };
 
-        let final_message = format!("{}{}{}", research_content, memory_note, related_memories_note);
+        let final_message = format!(
+            "{}{}{}",
+            research_content, memory_note, related_memories_note
+        );
 
         Ok((
             false,

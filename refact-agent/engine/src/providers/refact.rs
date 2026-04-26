@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::caps::model_caps::{ModelCapabilities, resolve_model_caps};
 use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
-use crate::providers::traits::{AvailableModel, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait};
+use crate::providers::traits::{
+    AvailableModel, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RefactProvider {
@@ -34,13 +36,15 @@ impl RefactProvider {
             .map_err(|e| format!("Failed to create providers.d: {}", e))?;
 
         let config_path = Self::config_path(config_dir);
-        let payload = serde_yaml::to_string(&serde_yaml::to_value(json!({
-            "enabled": self.enabled,
-            "disabled_models": self.disabled_models,
-            "running_models": self.running_models,
-        }))
-            .map_err(|e| format!("Failed to serialize refact provider settings: {}", e))?)
-            .map_err(|e| format!("Failed to render refact provider yaml: {}", e))?;
+        let payload = serde_yaml::to_string(
+            &serde_yaml::to_value(json!({
+                "enabled": self.enabled,
+                "disabled_models": self.disabled_models,
+                "running_models": self.running_models,
+            }))
+            .map_err(|e| format!("Failed to serialize refact provider settings: {}", e))?,
+        )
+        .map_err(|e| format!("Failed to render refact provider yaml: {}", e))?;
 
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let temp_path = config_path.with_extension(format!(
@@ -98,7 +102,9 @@ impl RefactProvider {
 
     fn model_is_disabled(&self, model_id: &str) -> bool {
         self.disabled_models.contains(&model_id.to_string())
-            || self.disabled_models.contains(&format!("refact/{}", model_id))
+            || self
+                .disabled_models
+                .contains(&format!("refact/{}", model_id))
     }
 
     pub fn extract_chat_model_ids_from_catalog(catalog: &serde_json::Value) -> Vec<String> {
@@ -116,12 +122,10 @@ impl RefactProvider {
         &self,
         http_client: &reqwest::Client,
     ) -> Result<serde_json::Value, String> {
-        let mut request = http_client
-            .get(self.model_catalog_url())
-            .header(
-                reqwest::header::USER_AGENT,
-                format!("refact-lsp {}", crate::version::build::PKG_VERSION),
-            );
+        let mut request = http_client.get(self.model_catalog_url()).header(
+            reqwest::header::USER_AGENT,
+            format!("refact-lsp {}", crate::version::build::PKG_VERSION),
+        );
 
         let api_key = resolve_env_var(&self.api_key, "", "refact api_key");
         if !api_key.is_empty() {
@@ -377,7 +381,8 @@ available:
         if self.running_models.is_empty() {
             return 0;
         }
-        self.running_models.iter()
+        self.running_models
+            .iter()
             .filter(|m| !self.model_is_disabled(m))
             .count()
     }
@@ -387,7 +392,11 @@ available:
     }
 
     fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
-        crate::providers::traits::set_model_disabled_impl(&mut self.disabled_models, model_id, enabled);
+        crate::providers::traits::set_model_disabled_impl(
+            &mut self.disabled_models,
+            model_id,
+            enabled,
+        );
     }
 
     fn get_available_models_from_caps(
@@ -404,7 +413,8 @@ available:
             if let Some(resolved) = resolve_model_caps(model_caps, running_model) {
                 let disabled = self.model_is_disabled(running_model);
                 let pricing = self.model_pricing(running_model);
-                let mut model = AvailableModel::from_caps(running_model, &resolved.caps, !disabled, pricing);
+                let mut model =
+                    AvailableModel::from_caps(running_model, &resolved.caps, !disabled, pricing);
                 if running_model != &resolved.matched_key {
                     model.display_name = Some(running_model.clone());
                 }
@@ -471,4 +481,3 @@ available:
         self.save_config(config_dir).await
     }
 }
-

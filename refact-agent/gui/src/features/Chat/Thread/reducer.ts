@@ -68,6 +68,11 @@ import {
   requestSseRefresh,
   clearSseRefreshRequest,
   setTaskWidgetExpanded,
+  setAutoEnrichmentEnabled,
+  markMemoryEnrichmentUserTouched,
+  setManualPreviewItems,
+  removeManualPreviewItem,
+  clearManualPreviewItems,
 } from "./actions";
 import { applyDeltaOps } from "../../../services/refact/chatSubscription";
 import {
@@ -105,6 +110,7 @@ const createChatThread = (
     increase_max_tokens: false,
     include_project_info: true,
     context_tokens_cap: undefined,
+    auto_enrichment_enabled: true,
   };
 };
 
@@ -133,6 +139,9 @@ const createThreadRuntime = (
     },
     snapshot_received: false,
     task_widget_expanded: false,
+    memory_enrichment_user_touched: false,
+    manual_preview_items: [],
+    manual_preview_ran: false,
   };
 };
 
@@ -487,6 +496,41 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (rt) rt.task_widget_expanded = action.payload.expanded;
   });
 
+  builder.addCase(setAutoEnrichmentEnabled, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) rt.thread.auto_enrichment_enabled = action.payload.value;
+  });
+
+  builder.addCase(markMemoryEnrichmentUserTouched, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) rt.memory_enrichment_user_touched = true;
+  });
+
+  builder.addCase(setManualPreviewItems, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) {
+      rt.manual_preview_items = action.payload.items;
+      rt.manual_preview_ran = true;
+    }
+  });
+
+  builder.addCase(removeManualPreviewItem, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) {
+      rt.manual_preview_items = rt.manual_preview_items.filter(
+        (_, i) => i !== action.payload.index,
+      );
+    }
+  });
+
+  builder.addCase(clearManualPreviewItems, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) {
+      rt.manual_preview_items = [];
+      rt.manual_preview_ran = false;
+    }
+  });
+
   builder.addCase(setLastUserMessageId, (state, action) => {
     const rt = getRuntime(state, action.payload.chatId);
     if (rt) rt.thread.last_user_message_id = action.payload.messageId;
@@ -541,6 +585,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         tool_use: action.payload.tool_use ?? state.tool_use,
         mode,
         new_chat_suggested: { wasSuggested: false },
+        auto_enrichment_enabled: false,
       },
       streaming: false,
       waiting_for_response: false,
@@ -560,6 +605,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
       },
       snapshot_received: false,
       task_widget_expanded: false,
+      memory_enrichment_user_touched: false,
+      manual_preview_items: [],
+      manual_preview_ran: false,
     };
 
     state.threads[action.payload.id] = newRuntime;
@@ -944,6 +992,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
             typeof event.thread.parallel_tool_calls === "boolean"
               ? event.thread.parallel_tool_calls
               : undefined,
+          auto_enrichment_enabled:
+            typeof event.thread.auto_enrichment_enabled === "boolean"
+              ? (event.thread.auto_enrichment_enabled as boolean)
+              : existing?.auto_enrichment_enabled ?? false,
         };
 
         const snapshotState = event.runtime.state as string;
@@ -978,6 +1030,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
           task_widget_expanded: existingRuntime?.task_widget_expanded ?? false,
           last_applied_seq: event.seq,
           message_index_by_id: rebuildMessageIndexById(snapshotMessages),
+          memory_enrichment_user_touched:
+            existingRuntime?.memory_enrichment_user_touched ?? false,
+          manual_preview_items: existingRuntime?.manual_preview_items ?? [],
+          manual_preview_ran: existingRuntime?.manual_preview_ran ?? false,
         };
 
         state.threads[chat_id] = newRt;
@@ -1080,6 +1136,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
             params.parallel_tool_calls == null
               ? undefined
               : (params.parallel_tool_calls as boolean);
+        }
+        if ("auto_enrichment_enabled" in params) {
+          const rawAe = params.auto_enrichment_enabled;
+          rt.thread.auto_enrichment_enabled =
+            rawAe == null ? undefined : (rawAe as boolean);
         }
         if ("task_meta" in params && params.task_meta != null) {
           rt.thread.task_meta = params.task_meta as ChatThread["task_meta"];

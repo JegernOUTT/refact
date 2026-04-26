@@ -81,15 +81,33 @@ pub struct ModelTypeConfig {
 
 impl ModelTypeConfig {
     pub fn merge_from(&mut self, other: &ModelTypeConfig) {
-        if other.model.is_some() { self.model = other.model.clone(); }
-        if other.max_new_tokens.is_some() { self.max_new_tokens = other.max_new_tokens; }
-        if other.temperature.is_some() { self.temperature = other.temperature; }
-        if other.top_p.is_some() { self.top_p = other.top_p; }
-        if other.boost_reasoning.is_some() { self.boost_reasoning = other.boost_reasoning; }
-        if other.reasoning_effort.is_some() { self.reasoning_effort = other.reasoning_effort.clone(); }
-        if other.thinking_budget.is_some() { self.thinking_budget = other.thinking_budget; }
-        if other.tool_choice.is_some() { self.tool_choice = other.tool_choice.clone(); }
-        if other.parallel_tool_calls.is_some() { self.parallel_tool_calls = other.parallel_tool_calls; }
+        if other.model.is_some() {
+            self.model = other.model.clone();
+        }
+        if other.max_new_tokens.is_some() {
+            self.max_new_tokens = other.max_new_tokens;
+        }
+        if other.temperature.is_some() {
+            self.temperature = other.temperature;
+        }
+        if other.top_p.is_some() {
+            self.top_p = other.top_p;
+        }
+        if other.boost_reasoning.is_some() {
+            self.boost_reasoning = other.boost_reasoning;
+        }
+        if other.reasoning_effort.is_some() {
+            self.reasoning_effort = other.reasoning_effort.clone();
+        }
+        if other.thinking_budget.is_some() {
+            self.thinking_budget = other.thinking_budget;
+        }
+        if other.tool_choice.is_some() {
+            self.tool_choice = other.tool_choice.clone();
+        }
+        if other.parallel_tool_calls.is_some() {
+            self.parallel_tool_calls = other.parallel_tool_calls;
+        }
     }
 }
 
@@ -106,13 +124,19 @@ pub struct ModeModelDefaults {
 impl ModeModelDefaults {
     pub fn merge_from(&mut self, other: &ModeModelDefaults) {
         if let Some(ref ovr) = other.default {
-            self.default.get_or_insert_with(ModelTypeConfig::default).merge_from(ovr);
+            self.default
+                .get_or_insert_with(ModelTypeConfig::default)
+                .merge_from(ovr);
         }
         if let Some(ref ovr) = other.light {
-            self.light.get_or_insert_with(ModelTypeConfig::default).merge_from(ovr);
+            self.light
+                .get_or_insert_with(ModelTypeConfig::default)
+                .merge_from(ovr);
         }
         if let Some(ref ovr) = other.thinking {
-            self.thinking.get_or_insert_with(ModelTypeConfig::default).merge_from(ovr);
+            self.thinking
+                .get_or_insert_with(ModelTypeConfig::default)
+                .merge_from(ovr);
         }
     }
 }
@@ -190,10 +214,18 @@ impl ModeConfig {
             result.tool_confirm = confirm.clone();
         }
         if let Some(td) = &override_config.thread_defaults {
-            if let Some(v) = td.include_project_info { result.thread_defaults.include_project_info = Some(v); }
-            if let Some(v) = td.checkpoints_enabled { result.thread_defaults.checkpoints_enabled = Some(v); }
-            if let Some(v) = td.auto_approve_editing_tools { result.thread_defaults.auto_approve_editing_tools = Some(v); }
-            if let Some(v) = td.auto_approve_dangerous_commands { result.thread_defaults.auto_approve_dangerous_commands = Some(v); }
+            if let Some(v) = td.include_project_info {
+                result.thread_defaults.include_project_info = Some(v);
+            }
+            if let Some(v) = td.checkpoints_enabled {
+                result.thread_defaults.checkpoints_enabled = Some(v);
+            }
+            if let Some(v) = td.auto_approve_editing_tools {
+                result.thread_defaults.auto_approve_editing_tools = Some(v);
+            }
+            if let Some(v) = td.auto_approve_dangerous_commands {
+                result.thread_defaults.auto_approve_dangerous_commands = Some(v);
+            }
         }
         result
     }
@@ -236,34 +268,90 @@ pub struct SubagentConfig {
 impl SubagentConfig {
     pub fn apply_override(&self, ovr: &SubagentConfig) -> SubagentConfig {
         let mut result = self.clone();
-        if !ovr.title.is_empty() { result.title = ovr.title.clone(); }
-        if !ovr.description.is_empty() { result.description = ovr.description.clone(); }
-        if ovr.expose_as_tool { result.expose_as_tool = true; }
-        if ovr.has_code { result.has_code = true; }
-        if ovr.tool.is_some() { result.tool = ovr.tool.clone(); }
-        if ovr.subchat.context_mode != "bare" { result.subchat.context_mode = ovr.subchat.context_mode.clone(); }
-        if ovr.subchat.stateful { result.subchat.stateful = true; }
-        if ovr.subchat.model.is_some() { result.subchat.model = ovr.subchat.model.clone(); }
-        if ovr.subchat.model_type.is_some() { result.subchat.model_type = ovr.subchat.model_type.clone(); }
-        if ovr.subchat.n_ctx.is_some() { result.subchat.n_ctx = ovr.subchat.n_ctx; }
-        if ovr.subchat.max_new_tokens.is_some() { result.subchat.max_new_tokens = ovr.subchat.max_new_tokens; }
-        if ovr.subchat.max_steps.is_some() { result.subchat.max_steps = ovr.subchat.max_steps; }
-        if ovr.subchat.temperature.is_some() { result.subchat.temperature = ovr.subchat.temperature; }
-        if ovr.subchat.reasoning_effort.is_some() { result.subchat.reasoning_effort = ovr.subchat.reasoning_effort.clone(); }
-        if ovr.subchat.tokens_for_rag.is_some() { result.subchat.tokens_for_rag = ovr.subchat.tokens_for_rag; }
-        if ovr.messages.system_prompt.is_some() { result.messages.system_prompt = ovr.messages.system_prompt.clone(); }
-        if ovr.messages.user_template.is_some() { result.messages.user_template = ovr.messages.user_template.clone(); }
-        if !ovr.messages.pre_messages.is_empty() { result.messages.pre_messages = ovr.messages.pre_messages.clone(); }
-        if !ovr.messages.post_messages.is_empty() { result.messages.post_messages = ovr.messages.post_messages.clone(); }
-        if ovr.prompts.solver.is_some() { result.prompts.solver = ovr.prompts.solver.clone(); }
-        if ovr.prompts.reviewer.is_some() { result.prompts.reviewer = ovr.prompts.reviewer.clone(); }
-        if ovr.prompts.guardrails.is_some() { result.prompts.guardrails = ovr.prompts.guardrails.clone(); }
-        if ovr.prompts.gather_system.is_some() { result.prompts.gather_system = ovr.prompts.gather_system.clone(); }
-        if ovr.prompts.gather_retry.is_some() { result.prompts.gather_retry = ovr.prompts.gather_retry.clone(); }
-        if ovr.gather_files.subagent.is_some() { result.gather_files.subagent = ovr.gather_files.subagent.clone(); }
-        if ovr.gather_files.max_files.is_some() { result.gather_files.max_files = ovr.gather_files.max_files; }
-        if ovr.gather_files.max_steps.is_some() { result.gather_files.max_steps = ovr.gather_files.max_steps; }
-        if !ovr.tools.is_empty() { result.tools = ovr.tools.clone(); }
+        if !ovr.title.is_empty() {
+            result.title = ovr.title.clone();
+        }
+        if !ovr.description.is_empty() {
+            result.description = ovr.description.clone();
+        }
+        if ovr.expose_as_tool {
+            result.expose_as_tool = true;
+        }
+        if ovr.has_code {
+            result.has_code = true;
+        }
+        if ovr.tool.is_some() {
+            result.tool = ovr.tool.clone();
+        }
+        if ovr.subchat.context_mode != "bare" {
+            result.subchat.context_mode = ovr.subchat.context_mode.clone();
+        }
+        if ovr.subchat.stateful {
+            result.subchat.stateful = true;
+        }
+        if ovr.subchat.model.is_some() {
+            result.subchat.model = ovr.subchat.model.clone();
+        }
+        if ovr.subchat.model_type.is_some() {
+            result.subchat.model_type = ovr.subchat.model_type.clone();
+        }
+        if ovr.subchat.n_ctx.is_some() {
+            result.subchat.n_ctx = ovr.subchat.n_ctx;
+        }
+        if ovr.subchat.max_new_tokens.is_some() {
+            result.subchat.max_new_tokens = ovr.subchat.max_new_tokens;
+        }
+        if ovr.subchat.max_steps.is_some() {
+            result.subchat.max_steps = ovr.subchat.max_steps;
+        }
+        if ovr.subchat.temperature.is_some() {
+            result.subchat.temperature = ovr.subchat.temperature;
+        }
+        if ovr.subchat.reasoning_effort.is_some() {
+            result.subchat.reasoning_effort = ovr.subchat.reasoning_effort.clone();
+        }
+        if ovr.subchat.tokens_for_rag.is_some() {
+            result.subchat.tokens_for_rag = ovr.subchat.tokens_for_rag;
+        }
+        if ovr.messages.system_prompt.is_some() {
+            result.messages.system_prompt = ovr.messages.system_prompt.clone();
+        }
+        if ovr.messages.user_template.is_some() {
+            result.messages.user_template = ovr.messages.user_template.clone();
+        }
+        if !ovr.messages.pre_messages.is_empty() {
+            result.messages.pre_messages = ovr.messages.pre_messages.clone();
+        }
+        if !ovr.messages.post_messages.is_empty() {
+            result.messages.post_messages = ovr.messages.post_messages.clone();
+        }
+        if ovr.prompts.solver.is_some() {
+            result.prompts.solver = ovr.prompts.solver.clone();
+        }
+        if ovr.prompts.reviewer.is_some() {
+            result.prompts.reviewer = ovr.prompts.reviewer.clone();
+        }
+        if ovr.prompts.guardrails.is_some() {
+            result.prompts.guardrails = ovr.prompts.guardrails.clone();
+        }
+        if ovr.prompts.gather_system.is_some() {
+            result.prompts.gather_system = ovr.prompts.gather_system.clone();
+        }
+        if ovr.prompts.gather_retry.is_some() {
+            result.prompts.gather_retry = ovr.prompts.gather_retry.clone();
+        }
+        if ovr.gather_files.subagent.is_some() {
+            result.gather_files.subagent = ovr.gather_files.subagent.clone();
+        }
+        if ovr.gather_files.max_files.is_some() {
+            result.gather_files.max_files = ovr.gather_files.max_files;
+        }
+        if ovr.gather_files.max_steps.is_some() {
+            result.gather_files.max_steps = ovr.gather_files.max_steps;
+        }
+        if !ovr.tools.is_empty() {
+            result.tools = ovr.tools.clone();
+        }
         for (k, v) in &ovr.extra {
             result.extra.insert(k.clone(), v.clone());
         }
@@ -528,8 +616,19 @@ tool_confirm:
         let result = base.apply_override(&override_cfg);
         assert_eq!(result.prompt, "Override prompt");
         assert_eq!(result.tools, vec!["tree", "cat", "shell"]);
-        assert_eq!(result.model_defaults.default.as_ref().unwrap().max_new_tokens, Some(1000));
-        assert_eq!(result.model_defaults.default.as_ref().unwrap().temperature, Some(0.8));
+        assert_eq!(
+            result
+                .model_defaults
+                .default
+                .as_ref()
+                .unwrap()
+                .max_new_tokens,
+            Some(1000)
+        );
+        assert_eq!(
+            result.model_defaults.default.as_ref().unwrap().temperature,
+            Some(0.8)
+        );
     }
 
     #[test]
@@ -637,7 +736,10 @@ another_extra: 123
             match_models: None,
             extra: {
                 let mut m = HashMap::new();
-                m.insert("base_extra".to_string(), serde_yaml::Value::String("value".to_string()));
+                m.insert(
+                    "base_extra".to_string(),
+                    serde_yaml::Value::String("value".to_string()),
+                );
                 m
             },
         };
@@ -660,7 +762,10 @@ another_extra: 123
             match_models: Some(vec!["gpt-*".to_string()]),
             extra: {
                 let mut m = HashMap::new();
-                m.insert("override_extra".to_string(), serde_yaml::Value::String("new".to_string()));
+                m.insert(
+                    "override_extra".to_string(),
+                    serde_yaml::Value::String("new".to_string()),
+                );
                 m
             },
         };
@@ -711,7 +816,6 @@ messages:
     }
 }
 
-
 #[cfg(test)]
 mod ui_defaults_tests {
     use super::*;
@@ -734,7 +838,11 @@ mod ui_defaults_tests {
     fn test_ui_default_toolbox_command_config() {
         let json = r#"{"schema_version":1,"id":"test_cmd","description":"","messages":[]}"#;
         let result: Result<ToolboxCommandConfig, _> = serde_json::from_str(json);
-        assert!(result.is_ok(), "toolbox_command default: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "toolbox_command default: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -749,7 +857,11 @@ mod ui_defaults_tests {
         // UI sends selection_needed as [1, 10000] - test if tuple deserializes from array
         let json = r#"{"schema_version":1,"id":"test_cmd","description":"","selection_needed":[1,10000],"messages":[]}"#;
         let result: Result<ToolboxCommandConfig, _> = serde_json::from_str(json);
-        assert!(result.is_ok(), "toolbox selection_needed [1,10000]: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "toolbox selection_needed [1,10000]: {:?}",
+            result.err()
+        );
         assert_eq!(result.unwrap().selection_needed, Some((1, 10000)));
     }
 }

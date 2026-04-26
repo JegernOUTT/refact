@@ -12,15 +12,26 @@ use crate::caps::model_caps::get_model_caps;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 
-
-fn json_response(status: StatusCode, body: &impl Serialize) -> Result<Response<Body>, ScratchError> {
-    let json = serde_json::to_string(body)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization failed: {}", e)))?;
+fn json_response(
+    status: StatusCode,
+    body: &impl Serialize,
+) -> Result<Response<Body>, ScratchError> {
+    let json = serde_json::to_string(body).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization failed: {}", e),
+        )
+    })?;
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
         .body(Body::from(json))
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Response build failed: {}", e)))
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Response build failed: {}", e),
+            )
+        })
 }
 
 async fn invalidate_caps(gcx: Arc<ARwLock<GlobalContext>>) {
@@ -32,7 +43,9 @@ use crate::providers::config::ProviderDefaults;
 use crate::providers::registry::{
     create_provider, delete_provider_config, save_provider_config, PROVIDER_NAMES,
 };
-use crate::providers::traits::{AvailableModel, CustomModelConfig, ModelSource, ProviderModel, ProviderRuntime};
+use crate::providers::traits::{
+    AvailableModel, CustomModelConfig, ModelSource, ProviderModel, ProviderRuntime,
+};
 use super::openrouter::OpenRouterProvider;
 use super::google_gemini::GoogleGeminiProvider;
 use super::claude_code::ClaudeCodeProvider;
@@ -222,21 +235,22 @@ pub async fn handle_v1_provider_update(
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-    let settings: serde_yaml::Value = if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-        serde_yaml::to_value(json_val).map_err(|e| {
-            ScratchError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Failed to convert JSON to YAML: {}", e),
-            )
-        })?
-    } else {
-        serde_yaml::from_slice(&body_bytes).map_err(|e| {
-            ScratchError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Invalid JSON/YAML: {}", e),
-            )
-        })?
-    };
+    let settings: serde_yaml::Value =
+        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            serde_yaml::to_value(json_val).map_err(|e| {
+                ScratchError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("Failed to convert JSON to YAML: {}", e),
+                )
+            })?
+        } else {
+            serde_yaml::from_slice(&body_bytes).map_err(|e| {
+                ScratchError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("Invalid JSON/YAML: {}", e),
+                )
+            })?
+        };
 
     let config_dir = {
         let gcx_locked = gcx.read().await;
@@ -260,7 +274,8 @@ pub async fn handle_v1_provider_update(
     }
 
     let settings = strip_derived_fields(settings);
-    let merged_settings = merge_provider_settings_preserving_secrets(&config_dir, &params.name, settings).await?;
+    let merged_settings =
+        merge_provider_settings_preserving_secrets(&config_dir, &params.name, settings).await?;
 
     save_provider_config(&config_dir, &params.name, merged_settings)
         .await
@@ -270,18 +285,38 @@ pub async fn handle_v1_provider_update(
         let gcx_locked = gcx.read().await;
         let mut registry = gcx_locked.providers.write().await;
 
-        let provider_path = config_dir.join("providers.d").join(format!("{}.yaml", params.name));
-        let content = tokio::fs::read_to_string(&provider_path).await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reload config: {}", e)))?;
+        let provider_path = config_dir
+            .join("providers.d")
+            .join(format!("{}.yaml", params.name));
+        let content = tokio::fs::read_to_string(&provider_path)
+            .await
+            .map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to reload config: {}", e),
+                )
+            })?;
 
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&content)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid YAML after save: {}", e)))?;
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid YAML after save: {}", e),
+            )
+        })?;
 
-        let mut provider = create_provider(&params.name)
-            .ok_or_else(|| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create provider".to_string()))?;
+        let mut provider = create_provider(&params.name).ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create provider".to_string(),
+            )
+        })?;
 
-        provider.provider_settings_apply(yaml)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply settings: {}", e)))?;
+        provider.provider_settings_apply(yaml).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to apply settings: {}", e),
+            )
+        })?;
 
         registry.add(provider);
     }
@@ -357,9 +392,9 @@ pub async fn handle_v1_provider_models(
             ));
         };
 
-    let runtime = provider.build_runtime().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e)
-    })?;
+    let runtime = provider
+        .build_runtime()
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let mut models = runtime.chat_models;
     models.extend(runtime.completion_models);
@@ -457,13 +492,21 @@ pub async fn handle_v1_models(
             ));
         };
 
-    let runtime = provider.build_runtime().map_err(|e| {
-        ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e)
-    })?;
+    let runtime = provider
+        .build_runtime()
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = ModelsResponse {
-        chat_models: runtime.chat_models.iter().map(SimplifiedModel::from).collect(),
-        completion_models: runtime.completion_models.iter().map(SimplifiedModel::from).collect(),
+        chat_models: runtime
+            .chat_models
+            .iter()
+            .map(SimplifiedModel::from)
+            .collect(),
+        completion_models: runtime
+            .completion_models
+            .iter()
+            .map(SimplifiedModel::from)
+            .collect(),
         embedding_model: runtime.embedding_model.as_ref().map(SimplifiedModel::from),
     };
 
@@ -529,11 +572,23 @@ pub async fn handle_v1_provider_available_models(
     let (model_caps, caps_error) = match get_model_caps(gcx.clone(), &address_url, false).await {
         Ok(caps) => (caps, None),
         Err(e) => {
-            tracing::warn!("Failed to fetch model_caps for provider '{}': {}", params.name, e);
-            (HashMap::new(), Some(format!("Failed to fetch model capabilities: {}. Model limits may be inaccurate.", e)))
+            tracing::warn!(
+                "Failed to fetch model_caps for provider '{}': {}",
+                params.name,
+                e
+            );
+            (
+                HashMap::new(),
+                Some(format!(
+                    "Failed to fetch model capabilities: {}. Model limits may be inaccurate.",
+                    e
+                )),
+            )
         }
     };
-    let models = provider.fetch_available_models(&http_client, &model_caps).await;
+    let models = provider
+        .fetch_available_models(&http_client, &model_caps)
+        .await;
     let error = caps_error;
 
     let source_str = match source {
@@ -828,19 +883,21 @@ async fn update_model_enabled_state(
 
         // Auto-create default provider if not yet configured (e.g. first model toggle on Ollama)
         if registry.get(provider_name).is_none() {
-            let default_provider = create_provider(provider_name)
-                .ok_or_else(|| ScratchError::new(
+            let default_provider = create_provider(provider_name).ok_or_else(|| {
+                ScratchError::new(
                     StatusCode::NOT_FOUND,
                     format!("Unknown provider type '{}'", provider_name),
-                ))?;
+                )
+            })?;
             registry.add(default_provider);
         }
 
-        let provider = registry.get_mut(provider_name)
-            .ok_or_else(|| ScratchError::new(
+        let provider = registry.get_mut(provider_name).ok_or_else(|| {
+            ScratchError::new(
                 StatusCode::NOT_FOUND,
                 format!("Provider '{}' not found or not configured", provider_name),
-            ))?;
+            )
+        })?;
 
         if provider.is_readonly() {
             return Err(ScratchError::new(
@@ -854,7 +911,11 @@ async fn update_model_enabled_state(
         let previous_disabled = provider.disabled_models().to_vec();
 
         provider.set_model_enabled(model_id, enabled);
-        (gcx_locked.config_dir.clone(), previous_enabled, previous_disabled)
+        (
+            gcx_locked.config_dir.clone(),
+            previous_enabled,
+            previous_disabled,
+        )
     };
 
     // Try to save updated config
@@ -883,7 +944,10 @@ async fn update_model_enabled_state(
 
     invalidate_caps(gcx).await;
 
-    json_response(StatusCode::OK, &json!({"success": true, "model_id": model_id, "enabled": enabled}))
+    json_response(
+        StatusCode::OK,
+        &json!({"success": true, "model_id": model_id, "enabled": enabled}),
+    )
 }
 
 async fn update_model_selected_provider_state(
@@ -897,11 +961,12 @@ async fn update_model_selected_provider_state(
         let mut registry = gcx_locked.providers.write().await;
 
         if registry.get(provider_name).is_none() {
-            let default_provider = create_provider(provider_name)
-                .ok_or_else(|| ScratchError::new(
+            let default_provider = create_provider(provider_name).ok_or_else(|| {
+                ScratchError::new(
                     StatusCode::NOT_FOUND,
                     format!("Unknown provider type '{}'", provider_name),
-                ))?;
+                )
+            })?;
             registry.add(default_provider);
         }
 
@@ -979,19 +1044,21 @@ pub async fn handle_v1_provider_add_custom_model(
         let mut registry = gcx_locked.providers.write().await;
 
         if registry.get(&params.name).is_none() {
-            let default_provider = create_provider(&params.name)
-                .ok_or_else(|| ScratchError::new(
+            let default_provider = create_provider(&params.name).ok_or_else(|| {
+                ScratchError::new(
                     StatusCode::NOT_FOUND,
                     format!("Unknown provider type '{}'", params.name),
-                ))?;
+                )
+            })?;
             registry.add(default_provider);
         }
 
-        let provider = registry.get_mut(&params.name)
-            .ok_or_else(|| ScratchError::new(
+        let provider = registry.get_mut(&params.name).ok_or_else(|| {
+            ScratchError::new(
                 StatusCode::NOT_FOUND,
                 format!("Provider '{}' not found or not configured", params.name),
-            ))?;
+            )
+        })?;
 
         if provider.is_readonly() {
             return Err(ScratchError::new(
@@ -1020,7 +1087,10 @@ pub async fn handle_v1_provider_add_custom_model(
 
     invalidate_caps(gcx).await;
 
-    json_response(StatusCode::OK, &json!({"success": true, "model_id": request.id}))
+    json_response(
+        StatusCode::OK,
+        &json!({"success": true, "model_id": request.id}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -1075,11 +1145,12 @@ async fn handle_v1_provider_remove_custom_model_impl(
         let gcx_locked = gcx.read().await;
         let mut registry = gcx_locked.providers.write().await;
 
-        let provider = registry.get_mut(provider_name)
-            .ok_or_else(|| ScratchError::new(
+        let provider = registry.get_mut(provider_name).ok_or_else(|| {
+            ScratchError::new(
                 StatusCode::NOT_FOUND,
                 format!("Provider '{}' not found or not configured", provider_name),
-            ))?;
+            )
+        })?;
 
         if provider.is_readonly() {
             return Err(ScratchError::new(
@@ -1117,12 +1188,18 @@ async fn handle_v1_provider_remove_custom_model_impl(
 
     invalidate_caps(gcx).await;
 
-    json_response(StatusCode::OK, &json!({"success": true, "model_id": request.model_id}))
+    json_response(
+        StatusCode::OK,
+        &json!({"success": true, "model_id": request.model_id}),
+    )
 }
 
 /// Merge new settings with existing config, preserving secret fields when value is "***"
 const DERIVED_SETTINGS_KEYS: &[&str] = &[
-    "auth_status", "oauth_connected", "claude_cli_path", "readonly",
+    "auth_status",
+    "oauth_connected",
+    "claude_cli_path",
+    "readonly",
 ];
 
 fn strip_derived_fields(value: serde_yaml::Value) -> serde_yaml::Value {
@@ -1141,27 +1218,40 @@ async fn merge_provider_settings_preserving_secrets(
     provider_name: &str,
     new_settings: serde_yaml::Value,
 ) -> Result<serde_yaml::Value, ScratchError> {
-    let config_path = config_dir.join("providers.d").join(format!("{}.yaml", provider_name));
+    let config_path = config_dir
+        .join("providers.d")
+        .join(format!("{}.yaml", provider_name));
 
     // If no existing config, just return new settings (but strip "***" values)
     if !config_path.exists() {
         return Ok(strip_masked_secrets(new_settings));
     }
 
-    let content = tokio::fs::read_to_string(&config_path).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read config: {}", e)))?;
+    let content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read config: {}", e),
+        )
+    })?;
 
-    let existing: serde_yaml::Value = serde_yaml::from_str(&content)
-        .map_err(|e| ScratchError::new(
+    let existing: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| {
+        ScratchError::new(
             StatusCode::CONFLICT,
-            format!("Existing config is invalid YAML: {}. Fix manually or delete the file.", e)
-        ))?;
+            format!(
+                "Existing config is invalid YAML: {}. Fix manually or delete the file.",
+                e
+            ),
+        )
+    })?;
 
     Ok(merge_yaml_preserving_secrets(existing, new_settings))
 }
 
 /// Recursively merge YAML, preserving existing values when new value is "***"
-fn merge_yaml_preserving_secrets(existing: serde_yaml::Value, new: serde_yaml::Value) -> serde_yaml::Value {
+fn merge_yaml_preserving_secrets(
+    existing: serde_yaml::Value,
+    new: serde_yaml::Value,
+) -> serde_yaml::Value {
     use serde_yaml::Value;
 
     match (existing, new) {
@@ -1191,7 +1281,8 @@ fn strip_masked_secrets(value: serde_yaml::Value) -> serde_yaml::Value {
     match value {
         Value::String(s) if s == "***" => Value::String(String::new()),
         Value::Mapping(map) => {
-            let filtered: serde_yaml::Mapping = map.into_iter()
+            let filtered: serde_yaml::Mapping = map
+                .into_iter()
                 .map(|(k, v)| (k, strip_masked_secrets(v)))
                 .collect();
             Value::Mapping(filtered)
@@ -1216,11 +1307,12 @@ async fn patch_provider_model_config(
     let (enabled_models, disabled_models, custom_models, selected_providers) = {
         let gcx_locked = gcx.read().await;
         let registry = gcx_locked.providers.read().await;
-        let provider = registry.get(provider_name)
-            .ok_or_else(|| ScratchError::new(
+        let provider = registry.get(provider_name).ok_or_else(|| {
+            ScratchError::new(
                 StatusCode::NOT_FOUND,
                 format!("Provider '{}' not found", provider_name),
-            ))?;
+            )
+        })?;
         (
             provider.enabled_models().to_vec(),
             provider.disabled_models().to_vec(),
@@ -1234,8 +1326,12 @@ async fn patch_provider_model_config(
 
     // Load existing YAML - DO NOT use unwrap_or_default() to avoid destroying config on parse error
     let mut yaml_map: serde_yaml::Mapping = if config_path.exists() {
-        let content = tokio::fs::read_to_string(&config_path).await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read config: {}", e)))?;
+        let content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read config: {}", e),
+            )
+        })?;
 
         let value: serde_yaml::Value = serde_yaml::from_str(&content)
             .map_err(|e| ScratchError::new(
@@ -1243,10 +1339,12 @@ async fn patch_provider_model_config(
                 format!("Config file is invalid YAML and cannot be safely patched: {}. Please fix the file manually.", e)
             ))?;
 
-        value.as_mapping().cloned().ok_or_else(|| ScratchError::new(
-            StatusCode::CONFLICT,
-            "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
-        ))?
+        value.as_mapping().cloned().ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::CONFLICT,
+                "Config file root is not a YAML mapping. Cannot safely patch.".to_string(),
+            )
+        })?
     } else {
         serde_yaml::Mapping::new()
     };
@@ -1255,8 +1353,12 @@ async fn patch_provider_model_config(
     // Always persist enabled_models (even empty) so clearing all models is reflected on reload
     yaml_map.insert(
         serde_yaml::Value::String("enabled_models".to_string()),
-        serde_yaml::to_value(&enabled_models)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize enabled_models: {}", e)))?,
+        serde_yaml::to_value(&enabled_models).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to serialize enabled_models: {}", e),
+            )
+        })?,
     );
     if !enabled_models.is_empty() {
         yaml_map.insert(
@@ -1268,43 +1370,76 @@ async fn patch_provider_model_config(
     if !disabled_models.is_empty() {
         yaml_map.insert(
             serde_yaml::Value::String("disabled_models".to_string()),
-            serde_yaml::to_value(&disabled_models)
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize disabled_models: {}", e)))?,
+            serde_yaml::to_value(&disabled_models).map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to serialize disabled_models: {}", e),
+                )
+            })?,
         );
     } else {
         yaml_map.remove(serde_yaml::Value::String("disabled_models".to_string()));
     }
     yaml_map.insert(
         serde_yaml::Value::String("custom_models".to_string()),
-        serde_yaml::to_value(&custom_models)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize custom_models: {}", e)))?,
+        serde_yaml::to_value(&custom_models).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to serialize custom_models: {}", e),
+            )
+        })?,
     );
     if selected_providers.is_empty() {
         yaml_map.remove(serde_yaml::Value::String("selected_providers".to_string()));
     } else {
         yaml_map.insert(
             serde_yaml::Value::String("selected_providers".to_string()),
-            serde_yaml::to_value(&selected_providers)
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize selected_providers: {}", e)))?,
+            serde_yaml::to_value(&selected_providers).map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to serialize selected_providers: {}", e),
+                )
+            })?,
         );
     }
 
     // Ensure directory exists
-    tokio::fs::create_dir_all(&providers_dir).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create providers.d: {}", e)))?;
+    tokio::fs::create_dir_all(&providers_dir)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create providers.d: {}", e),
+            )
+        })?;
 
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_path = config_path.with_extension(format!("yaml.tmp.{}.{}", std::process::id(), unique_id));
-    let content = serde_yaml::to_string(&yaml_map)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize config: {}", e)))?;
+    let temp_path =
+        config_path.with_extension(format!("yaml.tmp.{}.{}", std::process::id(), unique_id));
+    let content = serde_yaml::to_string(&yaml_map).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize config: {}", e),
+        )
+    })?;
 
-    tokio::fs::write(&temp_path, &content).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write temp config: {}", e)))?;
+    tokio::fs::write(&temp_path, &content).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write temp config: {}", e),
+        )
+    })?;
 
-    tokio::fs::rename(&temp_path, &config_path).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to rename config: {}", e)))?;
+    tokio::fs::rename(&temp_path, &config_path)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to rename config: {}", e),
+            )
+        })?;
 
     Ok(())
 }
@@ -1314,31 +1449,52 @@ async fn reload_provider_from_disk(
     provider_name: &str,
     config_dir: &std::path::Path,
 ) -> Result<(), ScratchError> {
-    let provider_path = config_dir.join("providers.d").join(format!("{}.yaml", provider_name));
+    let provider_path = config_dir
+        .join("providers.d")
+        .join(format!("{}.yaml", provider_name));
     if !provider_path.exists() {
         return Ok(());
     }
 
     let content = tokio::fs::read_to_string(&provider_path)
         .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reload config: {}", e)))?;
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to reload config: {}", e),
+            )
+        })?;
 
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&content)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid YAML after save: {}", e)))?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Invalid YAML after save: {}", e),
+        )
+    })?;
 
     let gcx_locked = gcx.read().await;
     let mut registry = gcx_locked.providers.write().await;
 
     if let Some(existing) = registry.get_mut(provider_name) {
-        existing
-            .provider_settings_apply(yaml)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply settings: {}", e)))?;
+        existing.provider_settings_apply(yaml).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to apply settings: {}", e),
+            )
+        })?;
     } else {
-        let mut provider = create_provider(provider_name)
-            .ok_or_else(|| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create provider".to_string()))?;
-        provider
-            .provider_settings_apply(yaml)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply settings: {}", e)))?;
+        let mut provider = create_provider(provider_name).ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create provider".to_string(),
+            )
+        })?;
+        provider.provider_settings_apply(yaml).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to apply settings: {}", e),
+            )
+        })?;
         registry.add(provider);
     }
 
@@ -1353,20 +1509,30 @@ pub async fn handle_v1_provider_oauth_start(
     match params.name.as_str() {
         "claude_code" => {
             let mode = crate::providers::claude_code_oauth::OAuthMode::Max;
-            let (session_id, authorize_url) = crate::providers::claude_code_oauth::start_oauth_session(mode).await;
-            json_response(StatusCode::OK, &json!({
-                "session_id": session_id,
-                "authorize_url": authorize_url,
-            }))
+            let (session_id, authorize_url) =
+                crate::providers::claude_code_oauth::start_oauth_session(mode).await;
+            json_response(
+                StatusCode::OK,
+                &json!({
+                    "session_id": session_id,
+                    "authorize_url": authorize_url,
+                }),
+            )
         }
         "openai_codex" => {
             let fallback_port = gcx.read().await.cmdline.http_port;
-            let (session_id, authorize_url, callback_port) = crate::providers::openai_codex_oauth::start_oauth_session(fallback_port).await;
+            let (session_id, authorize_url, callback_port) =
+                crate::providers::openai_codex_oauth::start_oauth_session(fallback_port).await;
 
             // If callback port differs from our main HTTP port, start a dedicated listener
             if callback_port != fallback_port {
                 let http_client = gcx.read().await.http_client.clone();
-                match crate::providers::openai_codex_oauth::start_callback_listener(callback_port, http_client).await {
+                match crate::providers::openai_codex_oauth::start_callback_listener(
+                    callback_port,
+                    http_client,
+                )
+                .await
+                {
                     Ok(listener_handle) => {
                         let gcx_clone = gcx.clone();
                         tokio::spawn(async move {
@@ -1374,8 +1540,13 @@ pub async fn handle_v1_provider_oauth_start(
                                 let config_dir = gcx_clone.read().await.config_dir.clone();
                                 if let Ok(tokens_value) = serde_yaml::to_value(&tokens) {
                                     if let Err(e) = save_provider_oauth_tokens(
-                                        &gcx_clone, &config_dir, "openai_codex", &tokens_value,
-                                    ).await {
+                                        &gcx_clone,
+                                        &config_dir,
+                                        "openai_codex",
+                                        &tokens_value,
+                                    )
+                                    .await
+                                    {
                                         tracing::warn!("OpenAI Codex: failed to save OAuth tokens from callback listener: {:?}", e);
                                     } else {
                                         tracing::info!("OpenAI Codex: OAuth tokens saved successfully from callback listener");
@@ -1390,10 +1561,13 @@ pub async fn handle_v1_provider_oauth_start(
                 }
             }
 
-            json_response(StatusCode::OK, &json!({
-                "session_id": session_id,
-                "authorize_url": authorize_url,
-            }))
+            json_response(
+                StatusCode::OK,
+                &json!({
+                    "session_id": session_id,
+                    "authorize_url": authorize_url,
+                }),
+            )
         }
         _ => Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
@@ -1414,7 +1588,10 @@ pub async fn handle_v1_provider_oauth_exchange(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let request: OAuthExchangeRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("Invalid JSON: {}", e))
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Invalid JSON: {}", e),
+        )
     })?;
 
     let http_client = gcx.read().await.http_client.clone();
@@ -1430,9 +1607,18 @@ pub async fn handle_v1_provider_oauth_exchange(
             .await
             .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
-            save_provider_oauth_tokens(&gcx, &config_dir, "claude_code", &serde_yaml::to_value(&tokens)
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize tokens: {}", e)))?
-            ).await?;
+            save_provider_oauth_tokens(
+                &gcx,
+                &config_dir,
+                "claude_code",
+                &serde_yaml::to_value(&tokens).map_err(|e| {
+                    ScratchError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to serialize tokens: {}", e),
+                    )
+                })?,
+            )
+            .await?;
         }
         "openai_codex" => {
             let tokens = crate::providers::openai_codex_oauth::exchange_code(
@@ -1443,9 +1629,18 @@ pub async fn handle_v1_provider_oauth_exchange(
             .await
             .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
-            save_provider_oauth_tokens(&gcx, &config_dir, "openai_codex", &serde_yaml::to_value(&tokens)
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize tokens: {}", e)))?
-            ).await?;
+            save_provider_oauth_tokens(
+                &gcx,
+                &config_dir,
+                "openai_codex",
+                &serde_yaml::to_value(&tokens).map_err(|e| {
+                    ScratchError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to serialize tokens: {}", e),
+                    )
+                })?,
+            )
+            .await?;
         }
         _ => {
             return Err(ScratchError::new(
@@ -1455,10 +1650,13 @@ pub async fn handle_v1_provider_oauth_exchange(
         }
     }
 
-    json_response(StatusCode::OK, &json!({
-        "success": true,
-        "auth_status": "OK (OAuth login)",
-    }))
+    json_response(
+        StatusCode::OK,
+        &json!({
+            "success": true,
+            "auth_status": "OK (OAuth login)",
+        }),
+    )
 }
 
 pub async fn handle_v1_provider_oauth_logout(
@@ -1469,13 +1667,25 @@ pub async fn handle_v1_provider_oauth_logout(
 
     match params.name.as_str() {
         "claude_code" => {
-            let empty = serde_yaml::to_value(&crate::providers::claude_code_oauth::OAuthTokens::default())
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize: {}", e)))?;
+            let empty =
+                serde_yaml::to_value(&crate::providers::claude_code_oauth::OAuthTokens::default())
+                    .map_err(|e| {
+                        ScratchError::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to serialize: {}", e),
+                        )
+                    })?;
             save_provider_oauth_tokens(&gcx, &config_dir, "claude_code", &empty).await?;
         }
         "openai_codex" => {
-            let empty = serde_yaml::to_value(&crate::providers::openai_codex_oauth::OAuthTokens::default())
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize: {}", e)))?;
+            let empty =
+                serde_yaml::to_value(&crate::providers::openai_codex_oauth::OAuthTokens::default())
+                    .map_err(|e| {
+                        ScratchError::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to serialize: {}", e),
+                        )
+                    })?;
             save_provider_oauth_tokens(&gcx, &config_dir, "openai_codex", &empty).await?;
         }
         _ => {
@@ -1486,12 +1696,14 @@ pub async fn handle_v1_provider_oauth_logout(
         }
     }
 
-    json_response(StatusCode::OK, &json!({
-        "success": true,
-        "auth_status": "No credentials found",
-    }))
+    json_response(
+        StatusCode::OK,
+        &json!({
+            "success": true,
+            "auth_status": "No credentials found",
+        }),
+    )
 }
-
 
 #[derive(Deserialize)]
 pub struct OAuthCallbackParams {
@@ -1505,7 +1717,12 @@ pub struct OAuthCallbackParams {
     pub error_description: Option<String>,
 }
 
-fn html_response(title: &str, heading: &str, heading_color: &str, message: &str) -> Result<Response<Body>, ScratchError> {
+fn html_response(
+    title: &str,
+    heading: &str,
+    heading_color: &str,
+    message: &str,
+) -> Result<Response<Body>, ScratchError> {
     let html = format!(
         r#"<!DOCTYPE html>
 <html><head><title>{title}</title></head>
@@ -1521,7 +1738,12 @@ fn html_response(title: &str, heading: &str, heading_color: &str, message: &str)
         .status(StatusCode::OK)
         .header("Content-Type", "text/html")
         .body(Body::from(html))
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Response build failed: {}", e)))
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Response build failed: {}", e),
+            )
+        })
 }
 
 pub async fn handle_v1_provider_oauth_callback(
@@ -1532,12 +1754,18 @@ pub async fn handle_v1_provider_oauth_callback(
     if params.name != "openai_codex" {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
-            format!("OAuth callback not supported for provider '{}'", params.name),
+            format!(
+                "OAuth callback not supported for provider '{}'",
+                params.name
+            ),
         ));
     }
 
     if let Some(err) = &query.error {
-        let desc = query.error_description.as_deref().unwrap_or("Unknown error");
+        let desc = query
+            .error_description
+            .as_deref()
+            .unwrap_or("Unknown error");
         tracing::warn!("OpenAI OAuth error: {} — {}", err, desc);
         return html_response(
             "Authentication Failed",
@@ -1574,28 +1802,35 @@ pub async fn handle_v1_provider_oauth_callback(
     let http_client = gcx.read().await.http_client.clone();
     let config_dir = gcx.read().await.config_dir.clone();
 
-    let tokens = match crate::providers::openai_codex_oauth::exchange_code(
-        &http_client,
-        &session_id,
-        &code,
-    ).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!("OpenAI OAuth exchange failed: {}", e);
-            return html_response(
-                "Authentication Failed",
-                "✗ Authentication Failed",
-                "#ef4444",
-                &format!("Token exchange failed: {}", e),
-            );
-        }
-    };
+    let tokens =
+        match crate::providers::openai_codex_oauth::exchange_code(&http_client, &session_id, &code)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("OpenAI OAuth exchange failed: {}", e);
+                return html_response(
+                    "Authentication Failed",
+                    "✗ Authentication Failed",
+                    "#ef4444",
+                    &format!("Token exchange failed: {}", e),
+                );
+            }
+        };
 
     if let Err(e) = save_provider_oauth_tokens(
-        &gcx, &config_dir, "openai_codex",
-        &serde_yaml::to_value(&tokens)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize tokens: {}", e)))?,
-    ).await {
+        &gcx,
+        &config_dir,
+        "openai_codex",
+        &serde_yaml::to_value(&tokens).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to serialize tokens: {}", e),
+            )
+        })?,
+    )
+    .await
+    {
         tracing::warn!("Failed to save OAuth tokens: {:?}", e);
         return html_response(
             "Authentication Failed",
@@ -1618,7 +1853,10 @@ pub async fn handle_openai_codex_auth_callback(
     Query(query): Query<OAuthCallbackParams>,
 ) -> Result<Response<Body>, ScratchError> {
     if let Some(err) = &query.error {
-        let desc = query.error_description.as_deref().unwrap_or("Unknown error");
+        let desc = query
+            .error_description
+            .as_deref()
+            .unwrap_or("Unknown error");
         tracing::warn!("OpenAI OAuth error: {} — {}", err, desc);
         return html_response(
             "Authentication Failed",
@@ -1655,28 +1893,35 @@ pub async fn handle_openai_codex_auth_callback(
     let http_client = gcx.read().await.http_client.clone();
     let config_dir = gcx.read().await.config_dir.clone();
 
-    let tokens = match crate::providers::openai_codex_oauth::exchange_code(
-        &http_client,
-        &session_id,
-        &code,
-    ).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!("OpenAI OAuth exchange failed: {}", e);
-            return html_response(
-                "Authentication Failed",
-                "✗ Authentication Failed",
-                "#ef4444",
-                &format!("Token exchange failed: {}", e),
-            );
-        }
-    };
+    let tokens =
+        match crate::providers::openai_codex_oauth::exchange_code(&http_client, &session_id, &code)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("OpenAI OAuth exchange failed: {}", e);
+                return html_response(
+                    "Authentication Failed",
+                    "✗ Authentication Failed",
+                    "#ef4444",
+                    &format!("Token exchange failed: {}", e),
+                );
+            }
+        };
 
     if let Err(e) = save_provider_oauth_tokens(
-        &gcx, &config_dir, "openai_codex",
-        &serde_yaml::to_value(&tokens)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize tokens: {}", e)))?,
-    ).await {
+        &gcx,
+        &config_dir,
+        "openai_codex",
+        &serde_yaml::to_value(&tokens).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to serialize tokens: {}", e),
+            )
+        })?,
+    )
+    .await
+    {
         tracing::warn!("Failed to save OAuth tokens: {:?}", e);
         return html_response(
             "Authentication Failed",
@@ -1723,10 +1968,7 @@ pub async fn handle_v1_claude_code_usage(
 
     match claude_code.fetch_usage(&http_client).await {
         Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
-        Err(e) => json_response(
-            StatusCode::OK,
-            &json!({"error": e}),
-        ),
+        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
     }
 }
 
@@ -1759,10 +2001,7 @@ pub async fn handle_v1_openai_codex_usage(
 
     match codex.fetch_usage(&http_client).await {
         Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
-        Err(e) => json_response(
-            StatusCode::OK,
-            &json!({"error": e}),
-        ),
+        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
     }
 }
 
@@ -1775,21 +2014,33 @@ async fn save_provider_oauth_tokens(
     let providers_dir = config_dir.join("providers.d");
     let config_path = providers_dir.join(format!("{}.yaml", provider_name));
 
-    tokio::fs::create_dir_all(&providers_dir).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create providers.d: {}", e)))?;
+    tokio::fs::create_dir_all(&providers_dir)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create providers.d: {}", e),
+            )
+        })?;
 
     let mut yaml_map: serde_yaml::Mapping = if config_path.exists() {
-        let content = tokio::fs::read_to_string(&config_path).await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read config: {}", e)))?;
+        let content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read config: {}", e),
+            )
+        })?;
         let value: serde_yaml::Value = serde_yaml::from_str(&content)
             .map_err(|e| ScratchError::new(
                 StatusCode::CONFLICT,
                 format!("Config file is invalid YAML and cannot be safely patched: {}. Please fix the file manually.", e),
             ))?;
-        value.as_mapping().cloned().ok_or_else(|| ScratchError::new(
-            StatusCode::CONFLICT,
-            "Config file root is not a YAML mapping. Cannot safely patch.".to_string(),
-        ))?
+        value.as_mapping().cloned().ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::CONFLICT,
+                "Config file root is not a YAML mapping. Cannot safely patch.".to_string(),
+            )
+        })?
     } else {
         serde_yaml::Mapping::new()
     };
@@ -1812,36 +2063,66 @@ async fn save_provider_oauth_tokens(
         );
     }
 
-    let content = serde_yaml::to_string(&yaml_map)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize config: {}", e)))?;
+    let content = serde_yaml::to_string(&yaml_map).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize config: {}", e),
+        )
+    })?;
 
     use std::sync::atomic::{AtomicU64, Ordering};
     static OAUTH_COUNTER: AtomicU64 = AtomicU64::new(0);
     let unique_id = OAUTH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_path = config_path.with_extension(format!("yaml.tmp.{}.{}", std::process::id(), unique_id));
+    let temp_path =
+        config_path.with_extension(format!("yaml.tmp.{}.{}", std::process::id(), unique_id));
 
-    tokio::fs::write(&temp_path, &content).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write temp config: {}", e)))?;
-    tokio::fs::rename(&temp_path, &config_path).await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to rename config: {}", e)))?;
+    tokio::fs::write(&temp_path, &content).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write temp config: {}", e),
+        )
+    })?;
+    tokio::fs::rename(&temp_path, &config_path)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to rename config: {}", e),
+            )
+        })?;
 
     {
         let gcx_locked = gcx.read().await;
         let mut registry = gcx_locked.providers.write().await;
 
-        let full_content = tokio::fs::read_to_string(&config_path).await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reload config: {}", e)))?;
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&full_content)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid YAML after save: {}", e)))?;
+        let full_content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to reload config: {}", e),
+            )
+        })?;
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&full_content).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid YAML after save: {}", e),
+            )
+        })?;
 
-        let mut provider = create_provider(provider_name)
-            .ok_or_else(|| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create provider '{}'", provider_name)))?;
-        provider.provider_settings_apply(yaml)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply settings: {}", e)))?;
+        let mut provider = create_provider(provider_name).ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create provider '{}'", provider_name),
+            )
+        })?;
+        provider.provider_settings_apply(yaml).map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to apply settings: {}", e),
+            )
+        })?;
         registry.add(provider);
     }
 
     invalidate_caps(gcx.clone()).await;
     Ok(())
 }
-

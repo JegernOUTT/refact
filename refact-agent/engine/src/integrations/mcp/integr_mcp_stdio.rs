@@ -16,9 +16,7 @@ use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon};
 use super::session_mcp::{McpClientHandler, McpRunningService, SessionMCP, add_log_entry};
 use super::mcp_metrics::SharedMetrics;
 use super::mcp_path_resolution;
-use super::integr_mcp_common::{
-    CommonMCPSettings, MCPTransportInitializer, impl_mcp_integration_trait,
-};
+use super::integr_mcp_common::{CommonMCPSettings, MCPTransportInitializer, impl_mcp_integration_trait};
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default, Debug)]
 pub struct SettingsMCPStdio {
@@ -137,7 +135,12 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
             Err(e) => {
                 log(
                     tracing::Level::ERROR,
-                    format!("Failed to start MCP server process '{}': {}. Resolved binary: {}", &parsed_args[0], e, resolved.program.display()),
+                    format!(
+                        "Failed to start MCP server process '{}': {}. Resolved binary: {}",
+                        &parsed_args[0],
+                        e,
+                        resolved.program.display()
+                    ),
                 )
                 .await;
                 return None;
@@ -183,7 +186,8 @@ fn read_last_child_pid() -> Option<u32> {
     let self_pid = std::process::id();
     let path = format!("/proc/{}/task/{}/children", self_pid, self_pid);
     let content = std::fs::read_to_string(&path).ok()?;
-    content.split_whitespace()
+    content
+        .split_whitespace()
         .filter_map(|s| s.parse::<u32>().ok())
         .last()
 }
@@ -203,7 +207,9 @@ impl IntegrationTrait for IntegrationMCPUnified {
         config_path: String,
         value: &serde_json::Value,
     ) -> Result<(), serde_json::Error> {
-        self.inner.integr_settings_apply(gcx, config_path, value).await
+        self.inner
+            .integr_settings_apply(gcx, config_path, value)
+            .await
     }
 
     fn integr_settings_as_json(&self) -> serde_json::Value {

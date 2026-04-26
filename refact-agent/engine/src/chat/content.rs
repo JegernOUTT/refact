@@ -98,6 +98,40 @@ pub fn validate_content_with_attachments(
     }
 }
 
+pub fn validate_context_files(files: &[serde_json::Value]) -> Result<(), String> {
+    const MAX_ITEMS: usize = 5;
+    const MAX_TOTAL_CHARS: usize = 50_000;
+    if files.len() > MAX_ITEMS {
+        return Err(format!(
+            "context_files exceeds limit of {} items (got {})",
+            MAX_ITEMS,
+            files.len()
+        ));
+    }
+    let mut total = 0usize;
+    for (i, v) in files.iter().enumerate() {
+        if serde_json::from_value::<crate::call_validation::ContextFile>(v.clone()).is_err() {
+            return Err(format!(
+                "context_files[{}] is not a valid ContextFile object",
+                i
+            ));
+        }
+        let chars = v
+            .get("file_content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.chars().count())
+            .unwrap_or(0);
+        total += chars;
+    }
+    if total > MAX_TOTAL_CHARS {
+        return Err(format!(
+            "context_files exceeds {} character limit (got {})",
+            MAX_TOTAL_CHARS, total
+        ));
+    }
+    Ok(())
+}
+
 pub fn parse_content_with_attachments(
     content: &serde_json::Value,
     attachments: &[serde_json::Value],

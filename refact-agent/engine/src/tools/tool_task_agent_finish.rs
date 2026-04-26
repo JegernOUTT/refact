@@ -13,7 +13,9 @@ use uuid::Uuid;
 use crate::global_context::GlobalContext;
 use crate::agentic::generate_commit_message::generate_commit_message_by_diff;
 
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::tasks::storage;
@@ -96,10 +98,11 @@ async fn auto_commit_worktree(
         .map_err(|e| format!("Failed to get diff: {}", e))?;
     let diff = String::from_utf8_lossy(&diff_output.stdout).to_string();
 
-    let commit_msg = match generate_commit_message_by_diff(gcx, &diff, &Some(card_title.to_string())).await {
-        Ok(msg) if !msg.trim().is_empty() => msg,
-        _ => format!("Card {}: {}", card_id, card_title),
-    };
+    let commit_msg =
+        match generate_commit_message_by_diff(gcx, &diff, &Some(card_title.to_string())).await {
+            Ok(msg) if !msg.trim().is_empty() => msg,
+            _ => format!("Card {}: {}", card_id, card_title),
+        };
 
     let commit_output = Command::new("git")
         .args([
@@ -196,7 +199,9 @@ impl Tool for ToolTaskAgentFinish {
         let commit_result = if success {
             if let Some(ref wt) = worktree_path {
                 let wt_path = Path::new(wt);
-                match auto_commit_worktree(gcx.clone(), wt_path, &card_id, &card_title_for_commit).await {
+                match auto_commit_worktree(gcx.clone(), wt_path, &card_id, &card_title_for_commit)
+                    .await
+                {
                     Ok(hash) => hash,
                     Err(e) => {
                         return Err(format!(
@@ -273,10 +278,17 @@ impl Tool for ToolTaskAgentFinish {
 
         if !success {
             if let Some(ref wt) = worktree_path {
-                if let Some(branch) = board.get_card(&card_id).and_then(|c| c.agent_branch.clone()) {
+                if let Some(branch) = board
+                    .get_card(&card_id)
+                    .and_then(|c| c.agent_branch.clone())
+                {
                     let _diff = crate::chat::task_agent_monitor::cleanup_failed_agent_worktree(
-                        gcx.clone(), wt, &branch, None
-                    ).await;
+                        gcx.clone(),
+                        wt,
+                        &branch,
+                        None,
+                    )
+                    .await;
                     let card_id_clear = card_id.clone();
                     let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                         if let Some(c) = board.get_card_mut(&card_id_clear) {
@@ -284,7 +296,8 @@ impl Tool for ToolTaskAgentFinish {
                             c.agent_branch = None;
                         }
                         Ok(())
-                    }).await;
+                    })
+                    .await;
                 }
             }
         }
@@ -399,6 +412,8 @@ impl Tool for ToolTaskAgentFinish {
                 command: ChatCommand::UserMessage {
                     content: serde_json::Value::String(planner_message),
                     attachments: vec![],
+                    context_files: vec![],
+                    suppress_auto_enrichment: false,
                 },
             };
 

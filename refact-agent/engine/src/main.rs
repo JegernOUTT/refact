@@ -62,8 +62,8 @@ mod http;
 mod lsp;
 
 mod agentic;
-mod ext;
 pub mod constants;
+mod ext;
 mod files_correction_cache;
 mod git;
 mod integrations;

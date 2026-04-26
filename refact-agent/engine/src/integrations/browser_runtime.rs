@@ -15,9 +15,8 @@ use uuid::Uuid;
 use crate::chat::types::WindowBounds;
 use crate::global_context::GlobalContext;
 use crate::integrations::browser_types::{
-    RecorderEvent, ConsoleEntry, NetworkEntry, MutationSummaryEntry,
-    MAX_BUFFER_SIZE, SCROLL_DEBOUNCE_MS,
-    apply_password_masking, enforce_buffer_limit, flush_buffer_since,
+    RecorderEvent, ConsoleEntry, NetworkEntry, MutationSummaryEntry, MAX_BUFFER_SIZE,
+    SCROLL_DEBOUNCE_MS, apply_password_masking, enforce_buffer_limit, flush_buffer_since,
 };
 
 const FRAME_RATE_LIMIT_MS: u128 = 500;
@@ -183,7 +182,12 @@ impl BrowserBuffers {
                 }
 
                 match &event {
-                    RecorderEvent::MutationSummary { added, removed, changed, timestamp } => {
+                    RecorderEvent::MutationSummary {
+                        added,
+                        removed,
+                        changed,
+                        timestamp,
+                    } => {
                         self.mutation_summary.push(MutationSummaryEntry {
                             timestamp: *timestamp,
                             added: *added,
@@ -191,7 +195,10 @@ impl BrowserBuffers {
                             changed: *changed,
                             descriptions: Vec::new(),
                         });
-                        enforce_buffer_limit(&mut self.mutation_summary, &mut self.last_send_mutation_cursor);
+                        enforce_buffer_limit(
+                            &mut self.mutation_summary,
+                            &mut self.last_send_mutation_cursor,
+                        );
                     }
                     RecorderEvent::ToolbarAction { action, .. } => {
                         if self.toolbar_action_queue.len() < 50 {
@@ -200,7 +207,10 @@ impl BrowserBuffers {
                     }
                     _ => {
                         self.action_buffer.push(event);
-                        enforce_buffer_limit(&mut self.action_buffer, &mut self.last_send_action_cursor);
+                        enforce_buffer_limit(
+                            &mut self.action_buffer,
+                            &mut self.last_send_action_cursor,
+                        );
                     }
                 }
             }
@@ -251,16 +261,24 @@ impl BrowserBuffers {
         }
     }
 
-    pub fn flush_timeline_events(&mut self) -> (Vec<RecorderEvent>, Vec<ConsoleEntry>, Vec<NetworkEntry>) {
-        let action_start = self.last_timeline_action_cursor.min(self.action_buffer.len());
+    pub fn flush_timeline_events(
+        &mut self,
+    ) -> (Vec<RecorderEvent>, Vec<ConsoleEntry>, Vec<NetworkEntry>) {
+        let action_start = self
+            .last_timeline_action_cursor
+            .min(self.action_buffer.len());
         let new_actions = self.action_buffer[action_start..].to_vec();
         self.last_timeline_action_cursor = self.action_buffer.len();
 
-        let console_start = self.last_timeline_console_cursor.min(self.console_buffer.len());
+        let console_start = self
+            .last_timeline_console_cursor
+            .min(self.console_buffer.len());
         let new_console = self.console_buffer[console_start..].to_vec();
         self.last_timeline_console_cursor = self.console_buffer.len();
 
-        let network_start = self.last_timeline_network_cursor.min(self.network_buffer.len());
+        let network_start = self
+            .last_timeline_network_cursor
+            .min(self.network_buffer.len());
         let new_network = self.network_buffer[network_start..].to_vec();
         self.last_timeline_network_cursor = self.network_buffer.len();
 
@@ -369,7 +387,10 @@ impl BrowserRuntime {
         let browser = Browser::new(launch_options).map_err(|e| e.to_string())?;
         let runtime_id = Uuid::new_v4().to_string();
 
-        info!("BrowserRuntime {} launched with profile {:?}", runtime_id, profile_dir);
+        info!(
+            "BrowserRuntime {} launched with profile {:?}",
+            runtime_id, profile_dir
+        );
 
         Ok(Self {
             runtime_id,
@@ -399,7 +420,10 @@ impl BrowserRuntime {
             .map_err(|e| format!("Failed to connect to browser at {}: {}", ws_url, e))?;
         let runtime_id = Uuid::new_v4().to_string();
 
-        info!("BrowserRuntime {} connected via WebSocket to {}", runtime_id, ws_url);
+        info!(
+            "BrowserRuntime {} connected via WebSocket to {}",
+            runtime_id, ws_url
+        );
 
         Ok(Self {
             runtime_id,
@@ -443,7 +467,10 @@ impl BrowserRuntime {
     pub fn check_connection(&mut self) -> bool {
         let connected = self.browser.get_version().is_ok();
         if self.is_connected && !connected {
-            warn!("BrowserRuntime {} detected browser disconnect", self.runtime_id);
+            warn!(
+                "BrowserRuntime {} detected browser disconnect",
+                self.runtime_id
+            );
         }
         self.is_connected = connected;
         connected
@@ -493,12 +520,18 @@ impl BrowserRuntime {
             return None;
         }
         if let Some(target_id) = &self.active_tab_target_id {
-            if let Some(tab) = tabs_guard.iter().find(|tab| tab.get_target_id() == target_id) {
+            if let Some(tab) = tabs_guard
+                .iter()
+                .find(|tab| tab.get_target_id() == target_id)
+            {
                 return Some(tab.clone());
             }
         }
         if let Some(target_id) = &self.recording_tab_target_id {
-            if let Some(tab) = tabs_guard.iter().find(|tab| tab.get_target_id() == target_id) {
+            if let Some(tab) = tabs_guard
+                .iter()
+                .find(|tab| tab.get_target_id() == target_id)
+            {
                 return Some(tab.clone());
             }
         }
@@ -684,7 +717,8 @@ pub fn setup_console_capture(
     tab: &headless_chrome::Tab,
     console_buffer: Arc<Mutex<Vec<ConsoleEntry>>>,
 ) -> Result<(), String> {
-    tab.enable_log().map_err(|e| format!("Failed to enable log: {}", e))?;
+    tab.enable_log()
+        .map_err(|e| format!("Failed to enable log: {}", e))?;
 
     tab.add_event_listener(Arc::new(move |event: &Event| {
         if let Event::LogEntryAdded(e) = event {
@@ -701,7 +735,8 @@ pub fn setup_console_capture(
                 }
             }
         }
-    })).map_err(|e| format!("Failed to add console listener: {}", e))?;
+    }))
+    .map_err(|e| format!("Failed to add console listener: {}", e))?;
 
     Ok(())
 }
@@ -737,7 +772,8 @@ pub fn setup_network_capture(
                 }
             }
         }),
-    ).map_err(|e| format!("Failed to setup network capture: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to setup network capture: {}", e))?;
 
     Ok(())
 }
@@ -760,7 +796,9 @@ pub fn setup_recording_for_tab(
 }
 
 pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), String> {
-    let startup_tabs: Vec<Arc<headless_chrome::Tab>> = runtime.browser.get_tabs()
+    let startup_tabs: Vec<Arc<headless_chrome::Tab>> = runtime
+        .browser
+        .get_tabs()
         .lock()
         .map(|tabs| tabs.iter().cloned().collect())
         .unwrap_or_default();
@@ -776,7 +814,10 @@ pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), S
     let url = primary_tab.get_url();
     if url.starts_with("chrome://") {
         if let Err(e) = primary_tab.navigate_to("about:blank") {
-            tracing::debug!("Could not navigate chrome:// tab to about:blank (non-fatal): {}", e);
+            tracing::debug!(
+                "Could not navigate chrome:// tab to about:blank (non-fatal): {}",
+                e
+            );
         } else {
             let _ = primary_tab.wait_until_navigated();
         }
@@ -804,13 +845,8 @@ pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), S
     Ok(())
 }
 
-pub fn get_browser_profile_dir(
-    gcx_cache_dir: &PathBuf,
-    thread_id: &str,
-) -> PathBuf {
-    gcx_cache_dir
-        .join("browser_profiles")
-        .join(thread_id)
+pub fn get_browser_profile_dir(gcx_cache_dir: &PathBuf, thread_id: &str) -> PathBuf {
+    gcx_cache_dir.join("browser_profiles").join(thread_id)
 }
 
 pub async fn register_browser_runtime(
@@ -819,7 +855,10 @@ pub async fn register_browser_runtime(
 ) -> String {
     let runtime_id = runtime.runtime_id.clone();
     let arc = Arc::new(AMutex::new(runtime));
-    gcx.write().await.browser_runtimes.insert(runtime_id.clone(), arc);
+    gcx.write()
+        .await
+        .browser_runtimes
+        .insert(runtime_id.clone(), arc);
     runtime_id
 }
 
@@ -836,7 +875,9 @@ pub async fn find_runtime_by_chat_id(
 ) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
     let runtime_arcs: Vec<(String, Arc<AMutex<BrowserRuntime>>)> = {
         let gcx_locked = gcx.read().await;
-        gcx_locked.browser_runtimes.iter()
+        gcx_locked
+            .browser_runtimes
+            .iter()
             .map(|(rid, arc)| (rid.clone(), arc.clone()))
             .collect()
     };
@@ -963,9 +1004,15 @@ mod tests {
     #[test]
     fn test_handle_recorder_event_scroll_debounce() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":100,"timestamp":1000.0}"#);
-        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":200,"timestamp":1100.0}"#);
-        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":300,"timestamp":1150.0}"#);
+        buf.handle_recorder_event(
+            r#"{"type":"scroll","scroll_x":0,"scroll_y":100,"timestamp":1000.0}"#,
+        );
+        buf.handle_recorder_event(
+            r#"{"type":"scroll","scroll_x":0,"scroll_y":200,"timestamp":1100.0}"#,
+        );
+        buf.handle_recorder_event(
+            r#"{"type":"scroll","scroll_x":0,"scroll_y":300,"timestamp":1150.0}"#,
+        );
         assert_eq!(buf.action_buffer.len(), 1);
         match &buf.action_buffer[0] {
             RecorderEvent::Scroll { scroll_y, .. } => assert_eq!(*scroll_y, 300.0),
@@ -976,8 +1023,12 @@ mod tests {
     #[test]
     fn test_handle_recorder_event_scroll_no_debounce_when_separated() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":100,"timestamp":1000.0}"#);
-        buf.handle_recorder_event(r#"{"type":"scroll","scroll_x":0,"scroll_y":200,"timestamp":1500.0}"#);
+        buf.handle_recorder_event(
+            r#"{"type":"scroll","scroll_x":0,"scroll_y":100,"timestamp":1000.0}"#,
+        );
+        buf.handle_recorder_event(
+            r#"{"type":"scroll","scroll_x":0,"scroll_y":200,"timestamp":1500.0}"#,
+        );
         assert_eq!(buf.action_buffer.len(), 2);
     }
 
@@ -1011,7 +1062,9 @@ mod tests {
     #[test]
     fn test_handle_recorder_event_mutation_goes_to_mutation_buffer() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r#"{"type":"mutation_summary","added":3,"removed":1,"changed":2,"timestamp":1000.0}"#);
+        buf.handle_recorder_event(
+            r#"{"type":"mutation_summary","added":3,"removed":1,"changed":2,"timestamp":1000.0}"#,
+        );
         assert!(buf.action_buffer.is_empty());
         assert_eq!(buf.mutation_summary.len(), 1);
         assert_eq!(buf.mutation_summary[0].added, 3);
@@ -1020,8 +1073,13 @@ mod tests {
     #[test]
     fn test_toolbar_action_routes_to_toolbar_queue() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r#"{"type":"toolbar_action","action":"screenshot","timestamp":1000.0}"#);
-        assert!(buf.action_buffer.is_empty(), "toolbar actions should not go to action_buffer");
+        buf.handle_recorder_event(
+            r#"{"type":"toolbar_action","action":"screenshot","timestamp":1000.0}"#,
+        );
+        assert!(
+            buf.action_buffer.is_empty(),
+            "toolbar actions should not go to action_buffer"
+        );
         assert_eq!(buf.toolbar_action_queue.len(), 1);
         assert_eq!(buf.toolbar_action_queue[0], "screenshot");
     }
@@ -1029,11 +1087,18 @@ mod tests {
     #[test]
     fn test_toolbar_action_queue_multiple() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r#"{"type":"toolbar_action","action":"screenshot","timestamp":1.0}"#);
-        buf.handle_recorder_event(r#"{"type":"toolbar_action","action":"summarize","timestamp":2.0}"#);
+        buf.handle_recorder_event(
+            r#"{"type":"toolbar_action","action":"screenshot","timestamp":1.0}"#,
+        );
+        buf.handle_recorder_event(
+            r#"{"type":"toolbar_action","action":"summarize","timestamp":2.0}"#,
+        );
         buf.handle_recorder_event(r#"{"type":"toolbar_action","action":"curl","timestamp":3.0}"#);
         assert_eq!(buf.toolbar_action_queue.len(), 3);
-        assert_eq!(buf.toolbar_action_queue, vec!["screenshot", "summarize", "curl"]);
+        assert_eq!(
+            buf.toolbar_action_queue,
+            vec!["screenshot", "summarize", "curl"]
+        );
     }
 
     #[test]
@@ -1041,7 +1106,8 @@ mod tests {
         let mut buf = make_test_buffers();
         for i in 0..60 {
             buf.handle_recorder_event(&format!(
-                r#"{{"type":"toolbar_action","action":"action_{}","timestamp":{}.0}}"#, i, i
+                r#"{{"type":"toolbar_action","action":"action_{}","timestamp":{}.0}}"#,
+                i, i
             ));
         }
         assert_eq!(buf.toolbar_action_queue.len(), 50);
@@ -1052,8 +1118,12 @@ mod tests {
     #[test]
     fn test_drain_toolbar_actions_returns_and_clears() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r#"{"type":"toolbar_action","action":"screenshot","timestamp":1.0}"#);
-        buf.handle_recorder_event(r#"{"type":"toolbar_action","action":"summarize","timestamp":2.0}"#);
+        buf.handle_recorder_event(
+            r#"{"type":"toolbar_action","action":"screenshot","timestamp":1.0}"#,
+        );
+        buf.handle_recorder_event(
+            r#"{"type":"toolbar_action","action":"summarize","timestamp":2.0}"#,
+        );
         let drained = buf.drain_toolbar_actions();
         assert_eq!(drained, vec!["screenshot", "summarize"]);
         assert!(buf.toolbar_action_queue.is_empty());
@@ -1083,8 +1153,12 @@ mod tests {
     #[test]
     fn test_flush_action_buffer() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r##"{"type":"click","selector":"#a","text":"A","x":0,"y":0,"timestamp":1.0}"##);
-        buf.handle_recorder_event(r##"{"type":"click","selector":"#b","text":"B","x":0,"y":0,"timestamp":2.0}"##);
+        buf.handle_recorder_event(
+            r##"{"type":"click","selector":"#a","text":"A","x":0,"y":0,"timestamp":1.0}"##,
+        );
+        buf.handle_recorder_event(
+            r##"{"type":"click","selector":"#b","text":"B","x":0,"y":0,"timestamp":2.0}"##,
+        );
         let flushed = buf.flush_action_buffer();
         assert_eq!(flushed.len(), 2);
         let flushed2 = buf.flush_action_buffer();
@@ -1094,9 +1168,12 @@ mod tests {
     #[test]
     fn test_flush_console_buffer() {
         let mut buf = make_test_buffers();
-        buf.console_buffer.push(crate::integrations::browser_types::ConsoleEntry {
-            timestamp: 1.0, level: "log".to_string(), text: "hello".to_string(),
-        });
+        buf.console_buffer
+            .push(crate::integrations::browser_types::ConsoleEntry {
+                timestamp: 1.0,
+                level: "log".to_string(),
+                text: "hello".to_string(),
+            });
         let flushed = buf.flush_console_buffer();
         assert_eq!(flushed.len(), 1);
         let flushed2 = buf.flush_console_buffer();
@@ -1106,10 +1183,14 @@ mod tests {
     #[test]
     fn test_flush_network_buffer() {
         let mut buf = make_test_buffers();
-        buf.network_buffer.push(crate::integrations::browser_types::NetworkEntry {
-            timestamp: 1.0, method: "GET".to_string(), url: "https://example.com".to_string(),
-            resource_type: "Document".to_string(), status: None,
-        });
+        buf.network_buffer
+            .push(crate::integrations::browser_types::NetworkEntry {
+                timestamp: 1.0,
+                method: "GET".to_string(),
+                url: "https://example.com".to_string(),
+                resource_type: "Document".to_string(),
+                status: None,
+            });
         let flushed = buf.flush_network_buffer();
         assert_eq!(flushed.len(), 1);
         let flushed2 = buf.flush_network_buffer();
@@ -1119,7 +1200,9 @@ mod tests {
     #[test]
     fn test_flush_mutation_summary() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r#"{"type":"mutation_summary","added":1,"removed":0,"changed":0,"timestamp":1.0}"#);
+        buf.handle_recorder_event(
+            r#"{"type":"mutation_summary","added":1,"removed":0,"changed":0,"timestamp":1.0}"#,
+        );
         let flushed = buf.flush_mutation_summary();
         assert_eq!(flushed.len(), 1);
         let flushed2 = buf.flush_mutation_summary();
@@ -1193,8 +1276,6 @@ mod tests {
         assert!(buf.last_frame_time.is_some());
     }
 
-
-
     #[test]
     fn test_is_frame_rate_limited_no_previous() {
         let buf = make_test_buffers();
@@ -1218,10 +1299,15 @@ mod tests {
     #[test]
     fn test_detach_then_reattach_preserves_buffers() {
         let mut buf = make_test_buffers();
-        buf.handle_recorder_event(r##"{"type":"click","selector":"#btn","text":"OK","x":0,"y":0,"timestamp":1.0}"##);
-        buf.console_buffer.push(crate::integrations::browser_types::ConsoleEntry {
-            timestamp: 1.0, level: "log".to_string(), text: "test".to_string(),
-        });
+        buf.handle_recorder_event(
+            r##"{"type":"click","selector":"#btn","text":"OK","x":0,"y":0,"timestamp":1.0}"##,
+        );
+        buf.console_buffer
+            .push(crate::integrations::browser_types::ConsoleEntry {
+                timestamp: 1.0,
+                level: "log".to_string(),
+                text: "test".to_string(),
+            });
         assert_eq!(buf.action_buffer.len(), 1);
         assert_eq!(buf.console_buffer.len(), 1);
     }

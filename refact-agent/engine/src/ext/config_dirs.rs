@@ -25,7 +25,8 @@ pub struct ExtDirs {
 
 impl ExtDirs {
     pub fn all_dirs_in_order(&self) -> Vec<&PathBuf> {
-        self.installed_dirs.iter()
+        self.installed_dirs
+            .iter()
             .chain(self.global_dirs.iter())
             .chain(self.project_dirs.iter())
             .collect()
@@ -36,12 +37,17 @@ pub fn is_claude_dir(dir: &Path) -> bool {
     dir.file_name().map(|n| n == ".claude").unwrap_or(false)
 }
 
-pub fn source_for_dir(dir: &Path, global_dirs: &[PathBuf], installed_dirs: &[PathBuf]) -> CommandSource {
+pub fn source_for_dir(
+    dir: &Path,
+    global_dirs: &[PathBuf],
+    installed_dirs: &[PathBuf],
+) -> CommandSource {
     let in_global = global_dirs.iter().any(|d| d == dir);
     let in_installed = installed_dirs.iter().any(|d| d == dir);
     let claude = is_claude_dir(dir);
     if in_installed {
-        let name = dir.file_name()
+        let name = dir
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
@@ -92,7 +98,11 @@ pub async fn get_ext_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> ExtDirs {
         }
     }
 
-    ExtDirs { global_dirs, installed_dirs, project_dirs }
+    ExtDirs {
+        global_dirs,
+        installed_dirs,
+        project_dirs,
+    }
 }
 
 pub async fn collect_md_files_recursive(dir: &Path) -> Vec<PathBuf> {
@@ -197,9 +207,9 @@ mod tests {
                 PathBuf::from("/home/.claude"),
                 PathBuf::from("/home/.config/refact"),
             ],
-            installed_dirs: vec![
-                PathBuf::from("/home/.config/refact/plugins/installed/plugin-a"),
-            ],
+            installed_dirs: vec![PathBuf::from(
+                "/home/.config/refact/plugins/installed/plugin-a",
+            )],
             project_dirs: vec![
                 PathBuf::from("/proj/.claude"),
                 PathBuf::from("/proj/.refact"),
@@ -207,7 +217,10 @@ mod tests {
         };
         let all = ext_dirs.all_dirs_in_order();
         assert_eq!(all.len(), 5);
-        assert_eq!(all[0], &PathBuf::from("/home/.config/refact/plugins/installed/plugin-a"));
+        assert_eq!(
+            all[0],
+            &PathBuf::from("/home/.config/refact/plugins/installed/plugin-a")
+        );
         assert_eq!(all[1], &PathBuf::from("/home/.claude"));
         assert_eq!(all[2], &PathBuf::from("/home/.config/refact"));
         assert_eq!(all[3], &PathBuf::from("/proj/.claude"));

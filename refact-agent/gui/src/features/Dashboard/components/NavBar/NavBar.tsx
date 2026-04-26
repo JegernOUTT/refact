@@ -43,13 +43,13 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     icon: <LightningBoltIcon width={ICON_SIZE} height={ICON_SIZE} />,
-    label: "Skills",
+    label: "Extensions",
     page: { name: "extensions", tab: "skills" },
   },
   {
     icon: <CubeIcon width={ICON_SIZE} height={ICON_SIZE} />,
     label: "Marketplace",
-    page: { name: "mcp marketplace" },
+    page: { name: "marketplace hub" },
   },
 ];
 

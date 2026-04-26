@@ -86,7 +86,17 @@ pub async fn handle_v1_mcp_server_info(
             format!("no session for {}", session_key),
         ))?;
 
-    let (config_path_clone, connection_status, auth_status, server_info, tools_raw, resources_raw, prompts_raw, logs_arc, metrics_arc) = {
+    let (
+        config_path_clone,
+        connection_status,
+        auth_status,
+        server_info,
+        tools_raw,
+        resources_raw,
+        prompts_raw,
+        logs_arc,
+        metrics_arc,
+    ) = {
         let mut session_locked = session.lock().await;
         let mcp_session = session_locked
             .as_any_mut()
@@ -144,50 +154,56 @@ pub async fn handle_v1_mcp_server_info(
         .unwrap_or("unknown");
     let shortened_yaml_name = mcp_naming::shorten_config_name(yaml_name);
 
-    let tools: Vec<McpToolInfo> = tools_raw.iter().map(|tool| {
-        let input_schema = {
-            let mut map = tool.input_schema.as_ref().clone();
-            if !map.contains_key("type") {
-                map.insert("type".to_string(), serde_json::json!("object"));
+    let tools: Vec<McpToolInfo> = tools_raw
+        .iter()
+        .map(|tool| {
+            let input_schema = {
+                let mut map = tool.input_schema.as_ref().clone();
+                if !map.contains_key("type") {
+                    map.insert("type".to_string(), serde_json::json!("object"));
+                }
+                serde_json::Value::Object(map)
+            };
+
+            let internal_name = format!("{}_{}", shortened_yaml_name, tool.name)
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>();
+
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .and_then(|a| serde_json::to_value(a).ok());
+
+            McpToolInfo {
+                name: tool.name.to_string(),
+                description: tool.description.as_deref().unwrap_or_default().to_string(),
+                input_schema,
+                annotations,
+                internal_name,
             }
-            serde_json::Value::Object(map)
-        };
+        })
+        .collect();
 
-        let internal_name = format!("{}_{}", shortened_yaml_name, tool.name)
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect::<String>();
-
-        let annotations = tool.annotations.as_ref().and_then(|a| serde_json::to_value(a).ok());
-
-        McpToolInfo {
-            name: tool.name.to_string(),
-            description: tool.description.as_deref().unwrap_or_default().to_string(),
-            input_schema,
-            annotations,
-            internal_name,
-        }
-    }).collect();
-
-    let resources: Vec<McpResourceInfo> = resources_raw.iter().map(|resource| {
-        McpResourceInfo {
+    let resources: Vec<McpResourceInfo> = resources_raw
+        .iter()
+        .map(|resource| McpResourceInfo {
             uri: resource.uri.to_string(),
             name: resource.name.to_string(),
             description: resource.description.as_deref().map(|s| s.to_string()),
             mime_type: resource.mime_type.clone().map(|s| s.to_string()),
-        }
-    }).collect();
+        })
+        .collect();
 
-    let prompts: Vec<McpPromptInfo> = prompts_raw.iter().map(|prompt| {
-        McpPromptInfo {
+    let prompts: Vec<McpPromptInfo> = prompts_raw
+        .iter()
+        .map(|prompt| McpPromptInfo {
             name: prompt.name.to_string(),
             description: prompt.description.as_deref().map(|s| s.to_string()),
-        }
-    }).collect();
+        })
+        .collect();
 
-    let logs_tail = logs_arc.try_lock()
-        .map(|l| l.clone())
-        .unwrap_or_default();
+    let logs_tail = logs_arc.try_lock().map(|l| l.clone()).unwrap_or_default();
 
     let metrics = if let Ok(mut m) = metrics_arc.try_lock() {
         m.snapshot()
@@ -275,12 +291,8 @@ pub async fn handle_v1_mcp_server_reconnect(
     };
 
     if let Some(client_arc) = client {
-        crate::integrations::mcp::session_mcp::cancel_mcp_client(
-            &session_key,
-            client_arc,
-            logs,
-        )
-        .await;
+        crate::integrations::mcp::session_mcp::cancel_mcp_client(&session_key, client_arc, logs)
+            .await;
     }
 
     {
@@ -303,12 +315,18 @@ pub async fn handle_v1_mcp_server_reconnect(
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_default();
-    let _ = load_integrations(gcx.clone(), &[format!("**/integrations.d/{}", config_filename)]).await;
+    let _ = load_integrations(
+        gcx.clone(),
+        &[format!("**/integrations.d/{}", config_filename)],
+    )
+    .await;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::json!({"reconnect_triggered": true}).to_string()))
+        .body(Body::from(
+            serde_json::json!({"reconnect_triggered": true}).to_string(),
+        ))
         .unwrap())
 }
 
@@ -366,10 +384,22 @@ mod tests {
         };
 
         let json = serde_json::to_value(&response).unwrap();
-        assert!(json.get("server_name").is_none(), "server_name should be omitted when None");
-        assert!(json.get("server_version").is_none(), "server_version should be omitted when None");
-        assert!(json.get("protocol_version").is_none(), "protocol_version should be omitted when None");
-        assert!(json.get("metrics").is_some(), "metrics should always be present");
+        assert!(
+            json.get("server_name").is_none(),
+            "server_name should be omitted when None"
+        );
+        assert!(
+            json.get("server_version").is_none(),
+            "server_version should be omitted when None"
+        );
+        assert!(
+            json.get("protocol_version").is_none(),
+            "protocol_version should be omitted when None"
+        );
+        assert!(
+            json.get("metrics").is_some(),
+            "metrics should always be present"
+        );
         assert_eq!(json["capabilities"]["sampling"], serde_json::json!(true));
     }
 
@@ -391,10 +421,22 @@ mod tests {
 
     #[test]
     fn test_shorten_mcp_yaml_name() {
-        assert_eq!(mcp_naming::shorten_config_name("mcp_stdio_github"), "mcp_github");
-        assert_eq!(mcp_naming::shorten_config_name("mcp_sse_myserver"), "mcp_myserver");
-        assert_eq!(mcp_naming::shorten_config_name("mcp_http_myserver"), "mcp_myserver");
-        assert_eq!(mcp_naming::shorten_config_name("other_integration"), "other_integration");
+        assert_eq!(
+            mcp_naming::shorten_config_name("mcp_stdio_github"),
+            "mcp_github"
+        );
+        assert_eq!(
+            mcp_naming::shorten_config_name("mcp_sse_myserver"),
+            "mcp_myserver"
+        );
+        assert_eq!(
+            mcp_naming::shorten_config_name("mcp_http_myserver"),
+            "mcp_myserver"
+        );
+        assert_eq!(
+            mcp_naming::shorten_config_name("other_integration"),
+            "other_integration"
+        );
     }
 
     #[test]
@@ -430,7 +472,10 @@ mod tests {
             oauth_refresh_task_handle: None,
         };
         session.connection_status = MCPConnectionStatus::Connecting;
-        assert!(matches!(session.connection_status, MCPConnectionStatus::Connecting));
+        assert!(matches!(
+            session.connection_status,
+            MCPConnectionStatus::Connecting
+        ));
     }
 
     #[test]

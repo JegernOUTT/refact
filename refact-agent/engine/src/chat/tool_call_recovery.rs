@@ -84,7 +84,10 @@ fn find_chatml_single_tool(
     let tool_name = &after_marker[..name_end];
 
     if !allowed.contains(tool_name) {
-        warn!("tool_call_recovery: leaked tool name '{}' not in allowed set, skipping", tool_name);
+        warn!(
+            "tool_call_recovery: leaked tool name '{}' not in allowed set, skipping",
+            tool_name
+        );
         return None;
     }
 
@@ -134,9 +137,7 @@ fn find_chatml_multi_tool(
     let json_str = extract_first_json_object(rest)?;
     let parsed: Value = serde_json::from_str(&json_str).ok()?;
 
-    let tool_uses = parsed
-        .get("tool_uses")
-        .and_then(|v| v.as_array())?;
+    let tool_uses = parsed.get("tool_uses").and_then(|v| v.as_array())?;
 
     if tool_uses.is_empty() {
         return None;
@@ -159,10 +160,7 @@ fn find_chatml_multi_tool(
             continue;
         }
 
-        let parameters = use_item
-            .get("parameters")
-            .cloned()
-            .unwrap_or(json!({}));
+        let parameters = use_item.get("parameters").cloned().unwrap_or(json!({}));
         let args_str = if parameters.is_object() {
             serde_json::to_string(&parameters).unwrap_or_else(|_| "{}".to_string())
         } else if let Some(s) = parameters.as_str() {
@@ -234,7 +232,10 @@ pub fn unwrap_multi_tool_use_parallel(
         let args: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
-                warn!("tool_call_recovery: failed to parse multi_tool_use.parallel arguments: {}", e);
+                warn!(
+                    "tool_call_recovery: failed to parse multi_tool_use.parallel arguments: {}",
+                    e
+                );
                 result.push(tc.clone());
                 continue;
             }
@@ -267,7 +268,10 @@ pub fn unwrap_multi_tool_use_parallel(
             //                  {name:"X", arguments:{...}}
             let tool_name = extract_inner_tool_name(inner);
             if tool_name.is_empty() {
-                warn!("tool_call_recovery: multi_tool_use inner call {} has no tool name, skipping", i);
+                warn!(
+                    "tool_call_recovery: multi_tool_use inner call {} has no tool name, skipping",
+                    i
+                );
                 continue;
             }
 
@@ -337,7 +341,11 @@ fn extract_inner_tool_name(inner: &Value) -> String {
         return name.to_string();
     }
     // Format 4: {"function":{"name":"X"}, ...}
-    if let Some(name) = inner.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+    if let Some(name) = inner
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(|n| n.as_str())
+    {
         return name.to_string();
     }
     String::new()
@@ -500,10 +508,7 @@ mod tests {
     #[test]
     fn test_extract_json_simple() {
         let s = r#"some garbage {"key":"value"} more"#;
-        assert_eq!(
-            extract_first_json_object(s).unwrap(),
-            r#"{"key":"value"}"#
-        );
+        assert_eq!(extract_first_json_object(s).unwrap(), r#"{"key":"value"}"#);
     }
 
     #[test]
@@ -740,8 +745,10 @@ mod tests {
 
     #[test]
     fn test_unwrap_no_parallel_passthrough() {
-        let normal1 = json!({"type":"function","id":"c1","function":{"name":"cat","arguments":"{}"}});
-        let normal2 = json!({"type":"function","id":"c2","function":{"name":"shell","arguments":"{}"}});
+        let normal1 =
+            json!({"type":"function","id":"c1","function":{"name":"cat","arguments":"{}"}});
+        let normal2 =
+            json!({"type":"function","id":"c2","function":{"name":"shell","arguments":"{}"}});
         let allowed = make_allowed(&["cat", "shell"]);
         let result = unwrap_multi_tool_use_parallel(&[normal1.clone(), normal2.clone()], &allowed);
         assert_eq!(result.len(), 2);
@@ -756,7 +763,10 @@ mod tests {
         let content = "I'll run the new stress test and then type-check to make sure it integrates cleanly.\u{0580}\u{0581}assistant to=functions.shell \u{0574}\u{0565}\u{056F}\u{0576}\u{0561}\u{0562}\u{0561}\u{0576}\u{0578}\u{0582}\u{0569}\u{0575}\u{0578}\u{0582}\u{0576}  \u{5929}\u{5929}\u{4E2D}\u{5F69}\u{7968}\u{4E0A} JSON\n{\"command\":\"npm run test:stress && npm run types\",\"workdir\":\"/home/svakhreev/projects/smc/refact/refact-agent/gui\",\"output_filter\":\"(FAIL|PASS|Test Files|Tests|error TS|Duration|RUN|✓|✗)\",\"output_limit\":\"240\",\"timeout\":\"600\"}";
         let allowed = make_allowed(&["shell", "apply_patch", "cat", "tree"]);
         let result = recover_tool_calls_from_chatml_content(content, &allowed);
-        assert!(result.is_some(), "Failed to recover tool call from real-world garbled content");
+        assert!(
+            result.is_some(),
+            "Failed to recover tool call from real-world garbled content"
+        );
         let (clean, calls) = result.unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["function"]["name"], "shell");

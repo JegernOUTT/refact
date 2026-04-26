@@ -188,7 +188,8 @@ impl Tool for ToolHandoffToMode {
         };
 
         let sessions = gcx.read().await.chat_sessions.clone();
-        let session_arc = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+        let session_arc =
+            get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
 
         let (messages, thread, task_meta, session_state) = {
             let session = session_arc.lock().await;
@@ -226,14 +227,10 @@ impl Tool for ToolHandoffToMode {
             format!("{} — {}", mode_title, mode_config.description)
         };
 
-        let mut decisions = analyze_mode_transition(
-            gcx.clone(),
-            &messages,
-            &canonical_mode,
-            &mode_description,
-        )
-        .await
-        .map_err(|e| format!("mode transition analysis failed: {}", e))?;
+        let mut decisions =
+            analyze_mode_transition(gcx.clone(), &messages, &canonical_mode, &mode_description)
+                .await
+                .map_err(|e| format!("mode transition analysis failed: {}", e))?;
 
         apply_overrides(&mut decisions, args);
 
@@ -264,7 +261,10 @@ impl Tool for ToolHandoffToMode {
             task_meta,
             parent_id: Some(chat_id.clone()),
             link_type: Some("mode_transition".to_string()),
-            root_chat_id: thread.root_chat_id.clone().or_else(|| Some(chat_id.clone())),
+            root_chat_id: thread
+                .root_chat_id
+                .clone()
+                .or_else(|| Some(chat_id.clone())),
             reasoning_effort: thread.reasoning_effort.clone(),
             thinking_budget: thread.thinking_budget,
             temperature: thread.temperature,
@@ -273,6 +273,7 @@ impl Tool for ToolHandoffToMode {
             parallel_tool_calls: thread.parallel_tool_calls,
             previous_response_id: None,
             active_skill: None,
+            auto_enrichment_enabled: thread.auto_enrichment_enabled,
         };
 
         save_trajectory_snapshot(gcx.clone(), snapshot)

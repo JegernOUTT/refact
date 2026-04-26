@@ -8,7 +8,10 @@ use serde_json::json;
 use crate::caps::model_caps::ModelCapabilities;
 use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
-use crate::providers::traits::{AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait, merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl};
+use crate::providers::traits::{
+    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+};
 use crate::providers::pricing::google_gemini_pricing;
 
 const GEMINI_MODELS_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -44,10 +47,23 @@ impl GoogleGeminiProvider {
             return None;
         }
 
-        let display_name = model.get("displayName").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let n_ctx = model.get("inputTokenLimit").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(128_000);
-        let max_output_tokens = model.get("outputTokenLimit").and_then(|v| v.as_u64()).map(|v| v as usize);
-        let supports_thinking = model.get("thinking").and_then(|v| v.as_bool()).unwrap_or(false);
+        let display_name = model
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let n_ctx = model
+            .get("inputTokenLimit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(128_000);
+        let max_output_tokens = model
+            .get("outputTokenLimit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+        let supports_thinking = model
+            .get("thinking")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let pricing = google_gemini_pricing(&id);
 
@@ -73,7 +89,10 @@ impl GoogleGeminiProvider {
         })
     }
 
-    pub async fn check_api_key_health(&self, http_client: &reqwest::Client) -> Result<GoogleGeminiHealthInfo, String> {
+    pub async fn check_api_key_health(
+        &self,
+        http_client: &reqwest::Client,
+    ) -> Result<GoogleGeminiHealthInfo, String> {
         let api_key = resolve_env_var(&self.api_key, "", "google_gemini api_key");
         if api_key.is_empty() {
             return Err("Google Gemini API key is not configured".to_string());
@@ -91,9 +110,16 @@ impl GoogleGeminiProvider {
             let body = response.text().await.unwrap_or_default();
             let detail = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
-                .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).map(|s| s.to_string()))
+                .and_then(|v| {
+                    v.get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_else(|| body.chars().take(200).collect());
-            return Err(format!("Google Gemini API returned status {status}: {detail}"));
+            return Err(format!(
+                "Google Gemini API returned status {status}: {detail}"
+            ));
         }
 
         let json: serde_json::Value = response
@@ -195,9 +221,12 @@ available:
             enabled: self.enabled && !api_key.is_empty() && !self.enabled_models.is_empty(),
             readonly: false,
             wire_format: self.default_wire_format(),
-            chat_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions".to_string(),
+            chat_endpoint:
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                    .to_string(),
             completion_endpoint: String::new(),
-            embedding_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/embeddings".to_string(),
+            embedding_endpoint:
+                "https://generativelanguage.googleapis.com/v1beta/openai/embeddings".to_string(),
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
@@ -279,7 +308,10 @@ available:
             };
 
             if !response.status().is_success() {
-                tracing::warn!("Google Gemini: models endpoint returned status {}", response.status());
+                tracing::warn!(
+                    "Google Gemini: models endpoint returned status {}",
+                    response.status()
+                );
                 return self.get_custom_models_only();
             }
 
@@ -293,7 +325,8 @@ available:
 
             if let Some(models) = json.get("models").and_then(|v| v.as_array()) {
                 for m in models {
-                    let model_id = m.get("name")
+                    let model_id = m
+                        .get("name")
                         .and_then(|v| v.as_str())
                         .map(|name| name.strip_prefix("models/").unwrap_or(name));
 
@@ -306,7 +339,10 @@ available:
                 }
             }
 
-            page_token = json.get("nextPageToken").and_then(|v| v.as_str()).map(|s| s.to_string());
+            page_token = json
+                .get("nextPageToken")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             if page_token.is_none() {
                 break;
             }

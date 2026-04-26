@@ -2,7 +2,10 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_
 use serde_json::{json, Value};
 
 use crate::call_validation::ChatUsage;
-use crate::llm::adapter::{AdapterSettings, HttpParts, LlmWireAdapter, StreamParseError, extract_extra_fields, insert_extra_headers};
+use crate::llm::adapter::{
+    AdapterSettings, HttpParts, LlmWireAdapter, StreamParseError, extract_extra_fields,
+    insert_extra_headers,
+};
 use crate::llm::canonical::{CanonicalToolChoice, LlmRequest, LlmStreamDelta, ResponseFormat};
 
 /// Fields that cannot be overridden via extra_body for security
@@ -30,7 +33,6 @@ const ALL_INCLUDE_FIELDS: &[&str] = &[
     "file_search_call.results",
     "code_interpreter_call.outputs",
     "computer_call_output.output.image_url",
-
     // Message extras
     "message.input_image.image_url",
 ];
@@ -94,8 +96,11 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             // persisted server-side. Sending them back causes 404 "Item not found".
             if is_chatgpt_backend {
                 if let Some(arr) = input.as_array() {
-                    let filtered: Vec<_> = arr.iter()
-                        .filter(|item| item.get("type").and_then(|t| t.as_str()) != Some("reasoning"))
+                    let filtered: Vec<_> = arr
+                        .iter()
+                        .filter(|item| {
+                            item.get("type").and_then(|t| t.as_str()) != Some("reasoning")
+                        })
                         .cloned()
                         .collect();
                     body["input"] = json!(filtered);
@@ -170,17 +175,27 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         if let Some(extra) = &req.extra_body {
             // Fields the ChatGPT backend rejects — block even via extra_body.
             const CHATGPT_REJECTED: &[&str] = &[
-                "max_output_tokens", "max_tokens", "max_completion_tokens",
-                "temperature", "frequency_penalty", "stop",
+                "max_output_tokens",
+                "max_tokens",
+                "max_completion_tokens",
+                "temperature",
+                "frequency_penalty",
+                "stop",
             ];
             if let Some(obj) = body.as_object_mut() {
                 for (k, v) in extra {
                     if PROTECTED_FIELDS.contains(&k.as_str()) {
-                        tracing::warn!("extra_body attempted to override protected field '{}', ignoring", k);
+                        tracing::warn!(
+                            "extra_body attempted to override protected field '{}', ignoring",
+                            k
+                        );
                         continue;
                     }
                     if is_chatgpt_backend && CHATGPT_REJECTED.contains(&k.as_str()) {
-                        tracing::warn!("extra_body field '{}' rejected by ChatGPT backend, ignoring", k);
+                        tracing::warn!(
+                            "extra_body field '{}' rejected by ChatGPT backend, ignoring",
+                            k
+                        );
                         continue;
                     }
                     obj.insert(k.clone(), v.clone());
@@ -294,10 +309,14 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
 
             // Reasoning summary lifecycle events — content already streamed via *.delta above
             "response.reasoning_summary_part.added" => {
-                tracing::trace!("reasoning_summary_part.added (summary part opened, text arrives via delta)");
+                tracing::trace!(
+                    "reasoning_summary_part.added (summary part opened, text arrives via delta)"
+                );
             }
             "response.reasoning_summary_part.done" => {
-                tracing::trace!("reasoning_summary_part.done (redundant, text already streamed via deltas)");
+                tracing::trace!(
+                    "reasoning_summary_part.done (redundant, text already streamed via deltas)"
+                );
             }
 
             // ── Refusal streaming ──
@@ -330,7 +349,6 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             | "response.audio.transcript.done"
             | "response.code_interpreter_call_code.delta"
             | "response.code_interpreter_call_code.done"
-
             | "response.custom_tool_call_input.delta"
             | "response.custom_tool_call_input.done"
             | "response.mcp_call_arguments.delta"
@@ -382,9 +400,14 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                         // Server-executed tools: register as srvtoolu_ but no content block yet
                         // (the real content arrives in output_item.done)
-                        "web_search_call" | "file_search_call" | "code_interpreter_call"
-                        | "computer_call" | "image_generation_call" | "mcp_call" => {
-                            if let Some(tc) = extract_server_tool_call_from_output_item(item, &json) {
+                        "web_search_call"
+                        | "file_search_call"
+                        | "code_interpreter_call"
+                        | "computer_call"
+                        | "image_generation_call"
+                        | "mcp_call" => {
+                            if let Some(tc) = extract_server_tool_call_from_output_item(item, &json)
+                            {
                                 deltas.push(LlmStreamDelta::SetToolCalls {
                                     tool_calls: vec![tc],
                                 });
@@ -392,7 +415,10 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                         // reasoning, message, etc. — just "starting", no useful data yet
                         _ => {
-                            tracing::trace!("output_item.added type={} (no content yet)", item_type);
+                            tracing::trace!(
+                                "output_item.added type={} (no content yet)",
+                                item_type
+                            );
                         }
                     }
                 }
@@ -447,9 +473,14 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                             });
                         }
                         // Server-executed tools with results — emit content block
-                        Some("file_search_call") | Some("code_interpreter_call") | Some("computer_call")
-                        | Some("computer_call_output") | Some("image_generation_call") | Some("audio") => {
-                            if let Some(tc) = extract_server_tool_call_from_output_item(item, &json) {
+                        Some("file_search_call")
+                        | Some("code_interpreter_call")
+                        | Some("computer_call")
+                        | Some("computer_call_output")
+                        | Some("image_generation_call")
+                        | Some("audio") => {
+                            if let Some(tc) = extract_server_tool_call_from_output_item(item, &json)
+                            {
                                 deltas.push(LlmStreamDelta::FinalizeToolCalls {
                                     tool_calls: vec![tc],
                                 });
@@ -463,7 +494,10 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                         // message, output_text, refusal — content already streamed via deltas
                         Some("message") | Some("output_text") | Some("refusal") => {
-                            tracing::trace!("output_item.done type={:?} (redundant, content already streamed)", item_type);
+                            tracing::trace!(
+                                "output_item.done type={:?} (redundant, content already streamed)",
+                                item_type
+                            );
                         }
                         _ => {
                             deltas.push(LlmStreamDelta::AddServerContentBlock {
@@ -525,7 +559,11 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         other => other,
                     })
                     .unwrap_or("stop");
-                tracing::info!("response.completed: raw_status={:?}, finish_reason={}", raw_status, finish_reason);
+                tracing::info!(
+                    "response.completed: raw_status={:?}, finish_reason={}",
+                    raw_status,
+                    finish_reason
+                );
                 deltas.push(LlmStreamDelta::SetFinishReason {
                     reason: finish_reason.to_string(),
                 });
@@ -534,9 +572,18 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 }
                 // Safety net: extract tool calls and reasoning from response.output[]
                 // in case output_item.done events were missed during streaming.
-                if let Some(output) = json.get("response").and_then(|r| r.get("output")).and_then(|o| o.as_array()) {
-                    let output_types: Vec<_> = output.iter()
-                        .map(|item| item.get("type").and_then(|t| t.as_str()).unwrap_or("unknown"))
+                if let Some(output) = json
+                    .get("response")
+                    .and_then(|r| r.get("output"))
+                    .and_then(|o| o.as_array())
+                {
+                    let output_types: Vec<_> = output
+                        .iter()
+                        .map(|item| {
+                            item.get("type")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("unknown")
+                        })
                         .collect();
                     tracing::info!("response.completed output items: {:?}", output_types);
                     for (idx, item) in output.iter().enumerate() {
@@ -544,7 +591,8 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         match item_type {
                             Some("function_call") => {
                                 let event_wrapper = json!({"output_index": idx});
-                                if let Some(tc) = extract_tool_call_from_item(item, &event_wrapper) {
+                                if let Some(tc) = extract_tool_call_from_item(item, &event_wrapper)
+                                {
                                     deltas.push(LlmStreamDelta::FinalizeToolCalls {
                                         tool_calls: vec![tc],
                                     });
@@ -568,7 +616,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                                 | "mcp_list_tools",
                             ) => {
                                 let event_wrapper = json!({"output_index": idx});
-                                if let Some(tc) = extract_server_tool_call_from_output_item(item, &event_wrapper) {
+                                if let Some(tc) =
+                                    extract_server_tool_call_from_output_item(item, &event_wrapper)
+                                {
                                     deltas.push(LlmStreamDelta::FinalizeToolCalls {
                                         tool_calls: vec![tc],
                                     });
@@ -595,7 +645,11 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                     .and_then(|r| r.get("error"))
                     .and_then(|e| e.get("message"))
                     .and_then(|m| m.as_str())
-                    .or_else(|| json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()))
+                    .or_else(|| {
+                        json.get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                    })
                     .unwrap_or("response failed");
                 return Err(StreamParseError::FatalError(error_msg.to_string()));
             }
@@ -671,7 +725,9 @@ fn convert_to_responses_format(
                 instructions = Some(msg.content.content_text_only());
             }
             role if is_context_role(role) => {
-                let Some(text) = render_context_message(msg) else { continue };
+                let Some(text) = render_context_message(msg) else {
+                    continue;
+                };
                 // Fold into the matching function_call_output by call_id when possible
                 // so the model receives file content as part of the correct tool output.
                 // Fall back to the last function_call_output if tool_call_id is absent.
@@ -756,7 +812,8 @@ fn convert_to_responses_format(
                         "output": msg.content.content_text_only()
                     }));
 
-                    if let crate::call_validation::ChatContent::Multimodal(elements) = &msg.content {
+                    if let crate::call_validation::ChatContent::Multimodal(elements) = &msg.content
+                    {
                         for el in elements.iter().filter(|el| el.is_image()) {
                             pending_user_content.push(json!({
                                 "type": "input_image",
@@ -853,7 +910,12 @@ fn response_format_to_responses(format: &ResponseFormat) -> Value {
     match format {
         ResponseFormat::Text => json!({"format": {"type": "text"}}),
         ResponseFormat::JsonObject => json!({"format": {"type": "json_object"}}),
-        ResponseFormat::JsonSchema { name, description, schema, strict } => {
+        ResponseFormat::JsonSchema {
+            name,
+            description,
+            schema,
+            strict,
+        } => {
             let mut json_schema = json!({
                 "type": "json_schema",
                 "name": name,
@@ -934,9 +996,7 @@ fn extract_tool_call_delta(json: &Value) -> Option<Value> {
         .get("output_index")
         .and_then(|i| i.as_u64())
         .unwrap_or(0);
-    let arguments = json
-        .get("delta")
-        .map(value_to_arguments_string)?;
+    let arguments = json.get("delta").map(value_to_arguments_string)?;
     Some(json!({
         "index": output_index,
         "type": "function",
@@ -957,10 +1017,7 @@ fn extract_server_tool_call_from_output_item(item: &Value, event: &Value) -> Opt
         .and_then(|i| i.as_u64())
         .unwrap_or(0);
 
-    let item_id = item
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
     // Must start with srvtoolu_ so chat/tools.rs treats it as server-executed.
     let id = if !item_id.is_empty() {
@@ -1048,35 +1105,51 @@ mod tests {
     #[test]
     fn test_chatgpt_backend_omits_rejected_params() {
         let adapter = OpenAiResponsesAdapter;
-        let mut req = LlmRequest::new("gpt-5.3-codex".to_string(), vec![
-            ChatMessage::new("user".to_string(), "Hello".to_string()),
-        ]);
+        let mut req = LlmRequest::new(
+            "gpt-5.3-codex".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
         req.params.temperature = Some(0.5);
         req.params.frequency_penalty = Some(0.3);
         req.params.stop = vec!["STOP".to_string()];
 
-        let http = adapter.build_http(&req, &chatgpt_backend_settings()).unwrap();
+        let http = adapter
+            .build_http(&req, &chatgpt_backend_settings())
+            .unwrap();
 
-        assert!(http.body.get("max_output_tokens").is_none(),
-            "ChatGPT backend must not have max_output_tokens");
-        assert!(http.body.get("temperature").is_none(),
-            "ChatGPT backend must not have temperature");
-        assert!(http.body.get("frequency_penalty").is_none(),
-            "ChatGPT backend must not have frequency_penalty");
-        assert!(http.body.get("stop").is_none(),
-            "ChatGPT backend must not have stop");
-        assert_eq!(http.body["store"], false,
-            "ChatGPT backend must have store=false");
+        assert!(
+            http.body.get("max_output_tokens").is_none(),
+            "ChatGPT backend must not have max_output_tokens"
+        );
+        assert!(
+            http.body.get("temperature").is_none(),
+            "ChatGPT backend must not have temperature"
+        );
+        assert!(
+            http.body.get("frequency_penalty").is_none(),
+            "ChatGPT backend must not have frequency_penalty"
+        );
+        assert!(
+            http.body.get("stop").is_none(),
+            "ChatGPT backend must not have stop"
+        );
+        assert_eq!(
+            http.body["store"], false,
+            "ChatGPT backend must have store=false"
+        );
     }
 
     #[test]
     fn test_chatgpt_backend_adds_default_instructions_without_system() {
         let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new("gpt-5.3-codex".to_string(), vec![
-            ChatMessage::new("user".to_string(), "Hello".to_string()),
-        ]);
+        let req = LlmRequest::new(
+            "gpt-5.3-codex".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
 
-        let http = adapter.build_http(&req, &chatgpt_backend_settings()).unwrap();
+        let http = adapter
+            .build_http(&req, &chatgpt_backend_settings())
+            .unwrap();
 
         assert_eq!(
             http.body["instructions"],
@@ -1096,7 +1169,9 @@ mod tests {
             ],
         );
 
-        let http = adapter.build_http(&req, &chatgpt_backend_settings()).unwrap();
+        let http = adapter
+            .build_http(&req, &chatgpt_backend_settings())
+            .unwrap();
 
         assert_eq!(http.body["instructions"], json!("Be precise"));
     }
@@ -1104,64 +1179,86 @@ mod tests {
     #[test]
     fn test_chatgpt_backend_extra_body_blocked() {
         let adapter = OpenAiResponsesAdapter;
-        let mut req = LlmRequest::new("gpt-5.3-codex".to_string(), vec![
-            ChatMessage::new("user".to_string(), "Hello".to_string()),
-        ]);
+        let mut req = LlmRequest::new(
+            "gpt-5.3-codex".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
         let mut extra = serde_json::Map::new();
         extra.insert("temperature".to_string(), json!(0.7));
         extra.insert("max_output_tokens".to_string(), json!(1000));
         extra.insert("custom_field".to_string(), json!("allowed"));
         req.extra_body = Some(extra);
 
-        let http = adapter.build_http(&req, &chatgpt_backend_settings()).unwrap();
+        let http = adapter
+            .build_http(&req, &chatgpt_backend_settings())
+            .unwrap();
 
-        assert!(http.body.get("temperature").is_none(),
-            "extra_body temperature should be blocked on ChatGPT backend");
-        assert!(http.body.get("max_output_tokens").is_none(),
-            "extra_body max_output_tokens should be blocked on ChatGPT backend");
-        assert_eq!(http.body["custom_field"], "allowed",
-            "non-rejected extra_body fields should still be passed");
+        assert!(
+            http.body.get("temperature").is_none(),
+            "extra_body temperature should be blocked on ChatGPT backend"
+        );
+        assert!(
+            http.body.get("max_output_tokens").is_none(),
+            "extra_body max_output_tokens should be blocked on ChatGPT backend"
+        );
+        assert_eq!(
+            http.body["custom_field"], "allowed",
+            "non-rejected extra_body fields should still be passed"
+        );
     }
 
     #[test]
     fn test_previous_response_id_forwarded() {
         let adapter = OpenAiResponsesAdapter;
-        let mut req = LlmRequest::new("gpt-4.1".to_string(), vec![
-            ChatMessage::new("user".to_string(), "Hello".to_string()),
-        ]);
+        let mut req = LlmRequest::new(
+            "gpt-4.1".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
         req.previous_response_id = Some("resp_123".to_string());
 
         let http = adapter.build_http(&req, &default_settings()).unwrap();
 
         assert_eq!(http.body["previous_response_id"], "resp_123");
-        assert_eq!(http.body["store"], true, "Responses chaining requires store=true");
+        assert_eq!(
+            http.body["store"], true,
+            "Responses chaining requires store=true"
+        );
     }
 
     #[test]
     fn test_standard_api_store_true_by_default() {
         let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new("gpt-4.1".to_string(), vec![
-            ChatMessage::new("user".to_string(), "Hello".to_string()),
-        ]);
+        let req = LlmRequest::new(
+            "gpt-4.1".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
 
         let http = adapter.build_http(&req, &default_settings()).unwrap();
-        assert_eq!(http.body["store"], true, "Responses API should default to store=true");
+        assert_eq!(
+            http.body["store"], true,
+            "Responses API should default to store=true"
+        );
     }
 
     #[test]
     fn test_standard_api_includes_params() {
         let adapter = OpenAiResponsesAdapter;
-        let mut req = LlmRequest::new("gpt-4.1".to_string(), vec![
-            ChatMessage::new("user".to_string(), "Hello".to_string()),
-        ]);
+        let mut req = LlmRequest::new(
+            "gpt-4.1".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
         req.params.temperature = Some(0.5);
 
         let http = adapter.build_http(&req, &default_settings()).unwrap();
 
-        assert!(http.body.get("max_output_tokens").is_some(),
-            "Standard API should have max_output_tokens");
-        assert_eq!(http.body["temperature"], 0.5,
-            "Standard API should have temperature");
+        assert!(
+            http.body.get("max_output_tokens").is_some(),
+            "Standard API should have max_output_tokens"
+        );
+        assert_eq!(
+            http.body["temperature"], 0.5,
+            "Standard API should have temperature"
+        );
     }
 
     #[test]
@@ -1343,12 +1440,22 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
-            "arguments.done should emit FinalizeToolCalls");
-        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })) {
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
+            "arguments.done should emit FinalizeToolCalls"
+        );
+        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas
+            .iter()
+            .find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. }))
+        {
             assert_eq!(tool_calls.len(), 1);
             assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
-            assert_eq!(tool_calls[0]["function"]["arguments"], "{\"location\":\"Paris\"}");
+            assert_eq!(
+                tool_calls[0]["function"]["arguments"],
+                "{\"location\":\"Paris\"}"
+            );
         }
     }
 
@@ -1359,13 +1466,23 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
-            "output_item.done (function_call) should emit FinalizeToolCalls");
-        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })) {
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
+            "output_item.done (function_call) should emit FinalizeToolCalls"
+        );
+        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas
+            .iter()
+            .find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. }))
+        {
             assert_eq!(tool_calls.len(), 1);
             assert_eq!(tool_calls[0]["id"], "call_abc123");
             assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
-            assert_eq!(tool_calls[0]["function"]["arguments"], "{\"location\":\"Paris\"}");
+            assert_eq!(
+                tool_calls[0]["function"]["arguments"],
+                "{\"location\":\"Paris\"}"
+            );
         }
     }
 
@@ -1385,9 +1502,15 @@ mod tests {
             .flatten()
             .collect();
 
-        assert!(tool_calls.iter().any(|tc| tc.get("id") == Some(&json!("srvtoolu_ws_123"))),
-            "should create a srvtoolu_ tool call for web_search_call output item");
-        assert!(tool_calls.iter().any(|tc| tc["function"]["name"] == "openai_web_search_call"));
+        assert!(
+            tool_calls
+                .iter()
+                .any(|tc| tc.get("id") == Some(&json!("srvtoolu_ws_123"))),
+            "should create a srvtoolu_ tool call for web_search_call output item"
+        );
+        assert!(tool_calls
+            .iter()
+            .any(|tc| tc["function"]["name"] == "openai_web_search_call"));
     }
 
     #[test]
@@ -1434,7 +1557,10 @@ mod tests {
         assert_eq!(input_arr[1]["type"], "message");
         assert_eq!(input_arr[1]["role"], "assistant");
         // Assistant history should use simple string content, not output_text array
-        assert!(input_arr[1]["content"].is_string(), "assistant content should be a string, not an array");
+        assert!(
+            input_arr[1]["content"].is_string(),
+            "assistant content should be a string, not an array"
+        );
         assert_eq!(input_arr[1]["content"], "Hi there");
         assert_eq!(input_arr[2]["type"], "message");
         assert_eq!(input_arr[2]["role"], "user");
@@ -1465,19 +1591,31 @@ mod tests {
         let chunk = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_123","results":[{"url":"https://example.com","title":"Example","snippet":"Some content"},{"url":"https://other.com","title":"Other","snippet":"Other content"}]}}"#;
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-        let citation_count = deltas.iter().filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. })).count();
+        let citation_count = deltas
+            .iter()
+            .filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. }))
+            .count();
         assert_eq!(citation_count, 2);
 
         // Verify first citation
-        let citations: Vec<_> = deltas.iter().filter_map(|d| {
-            if let LlmStreamDelta::AddCitation { citation } = d {
-                Some(citation)
-            } else {
-                None
-            }
-        }).collect();
-        assert_eq!(citations[0].get("url").and_then(|v| v.as_str()), Some("https://example.com"));
-        assert_eq!(citations[1].get("url").and_then(|v| v.as_str()), Some("https://other.com"));
+        let citations: Vec<_> = deltas
+            .iter()
+            .filter_map(|d| {
+                if let LlmStreamDelta::AddCitation { citation } = d {
+                    Some(citation)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            citations[0].get("url").and_then(|v| v.as_str()),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            citations[1].get("url").and_then(|v| v.as_str()),
+            Some("https://other.com")
+        );
     }
 
     #[test]
@@ -1487,8 +1625,14 @@ mod tests {
         let chunk = r#"{"type":"response.completed","response":{"status":"completed","output":[{"type":"web_search_call","results":[{"url":"https://search.com","title":"Search Result"}]}]}}"#;
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-        let citation_count = deltas.iter().filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. })).count();
-        assert_eq!(citation_count, 0, "response.completed should not duplicate citations from output_item.done");
+        let citation_count = deltas
+            .iter()
+            .filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. }))
+            .count();
+        assert_eq!(
+            citation_count, 0,
+            "response.completed should not duplicate citations from output_item.done"
+        );
     }
 
     #[test]
@@ -1498,10 +1642,18 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        let has_thinking = deltas.iter().any(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }));
-        assert!(has_thinking, "Should capture reasoning item as SetThinkingBlocks");
+        let has_thinking = deltas
+            .iter()
+            .any(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }));
+        assert!(
+            has_thinking,
+            "Should capture reasoning item as SetThinkingBlocks"
+        );
 
-        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. })) {
+        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas
+            .iter()
+            .find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }))
+        {
             assert_eq!(blocks.len(), 1);
             assert_eq!(blocks[0]["type"], "reasoning");
             assert_eq!(blocks[0]["id"], "rs_abc123");
@@ -1515,7 +1667,10 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. })) {
+        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas
+            .iter()
+            .find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }))
+        {
             assert_eq!(blocks[0]["type"], "reasoning");
             assert_eq!(blocks[0]["encrypted_content"], "gAAAAABo...encrypted...");
         }
@@ -1612,16 +1767,20 @@ mod tests {
     #[test]
     fn test_include_encrypted_reasoning_in_request() {
         let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new("o4-mini".to_string(), vec![
-            ChatMessage::new("user".to_string(), "Hi".to_string()),
-        ]).with_reasoning(crate::llm::params::ReasoningIntent::Medium);
+        let req = LlmRequest::new(
+            "o4-mini".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
+        )
+        .with_reasoning(crate::llm::params::ReasoningIntent::Medium);
 
         let http = adapter.build_http(&req, &default_settings()).unwrap();
 
         // Should include reasoning.encrypted_content for multi-turn support
         let include = http.body["include"].as_array().unwrap();
-        assert!(include.contains(&json!("reasoning.encrypted_content")),
-            "Should request encrypted reasoning content");
+        assert!(
+            include.contains(&json!("reasoning.encrypted_content")),
+            "Should request encrypted reasoning content"
+        );
     }
 
     #[test]
@@ -1630,15 +1789,18 @@ mod tests {
         let mut settings = default_settings();
         settings.supports_reasoning = false;
 
-        let req = LlmRequest::new("gpt-4.1".to_string(), vec![
-            ChatMessage::new("user".to_string(), "Hi".to_string()),
-        ]);
+        let req = LlmRequest::new(
+            "gpt-4.1".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
+        );
 
         let http = adapter.build_http(&req, &settings).unwrap();
 
         let include = http.body["include"].as_array().unwrap();
-        assert!(!include.contains(&json!("reasoning.encrypted_content")),
-            "Should not request reasoning.encrypted_content when reasoning not supported");
+        assert!(
+            !include.contains(&json!("reasoning.encrypted_content")),
+            "Should not request reasoning.encrypted_content when reasoning not supported"
+        );
     }
 
     #[test]
@@ -1648,9 +1810,16 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })),
-            "reasoning_summary_text.delta should produce AppendReasoning");
-        if let Some(LlmStreamDelta::AppendReasoning { text, .. }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })) {
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })),
+            "reasoning_summary_text.delta should produce AppendReasoning"
+        );
+        if let Some(LlmStreamDelta::AppendReasoning { text, .. }) = deltas
+            .iter()
+            .find(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. }))
+        {
             assert_eq!(text, "Thinking about");
         }
     }
@@ -1662,7 +1831,10 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(deltas.is_empty(), "reasoning_summary_part.added should produce no deltas");
+        assert!(
+            deltas.is_empty(),
+            "reasoning_summary_part.added should produce no deltas"
+        );
     }
 
     #[test]
@@ -1672,7 +1844,10 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(deltas.is_empty(), "reasoning_summary_part.done should produce no deltas");
+        assert!(
+            deltas.is_empty(),
+            "reasoning_summary_part.done should produce no deltas"
+        );
     }
 
     #[test]
@@ -1682,8 +1857,12 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })),
-            "reasoning_text.delta should produce AppendReasoning");
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })),
+            "reasoning_text.delta should produce AppendReasoning"
+        );
     }
 
     #[test]
@@ -1693,8 +1872,12 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::AppendContent { .. })),
-            "refusal.delta should produce AppendContent");
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, LlmStreamDelta::AppendContent { .. })),
+            "refusal.delta should produce AppendContent"
+        );
     }
 
     #[test]
@@ -1705,7 +1888,10 @@ mod tests {
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
         assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::Done)));
-        if let Some(LlmStreamDelta::SetFinishReason { reason }) = deltas.iter().find(|d| matches!(d, LlmStreamDelta::SetFinishReason { .. })) {
+        if let Some(LlmStreamDelta::SetFinishReason { reason }) = deltas
+            .iter()
+            .find(|d| matches!(d, LlmStreamDelta::SetFinishReason { .. }))
+        {
             assert_eq!(reason, "length");
         }
     }
@@ -1726,33 +1912,35 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::AddCitation { .. })),
-            "annotation.added should produce AddCitation");
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, LlmStreamDelta::AddCitation { .. })),
+            "annotation.added should produce AddCitation"
+        );
     }
 
     #[test]
     fn test_convert_tools_to_responses_preserves_schema() {
-        let tools = vec![
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "search",
-                    "description": "Search the web",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Search query"},
-                            "limit": {"type": "integer"},
-                            "tags": {
-                                "type": "array",
-                                "items": {"type": "string"}
-                            }
-                        },
-                        "required": ["query"]
-                    }
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "limit": {"type": "integer"},
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        }
+                    },
+                    "required": ["query"]
                 }
-            }),
-        ];
+            }
+        })];
 
         let result = convert_tools_to_responses(&tools);
         let converted = result.as_array().unwrap();
@@ -1769,47 +1957,53 @@ mod tests {
         assert_eq!(params["properties"]["query"]["type"], json!("string"));
         assert_eq!(params["properties"]["limit"]["type"], json!("integer"));
         assert_eq!(params["properties"]["tags"]["type"], json!("array"));
-        assert_eq!(params["properties"]["tags"]["items"]["type"], json!("string"));
+        assert_eq!(
+            params["properties"]["tags"]["items"]["type"],
+            json!("string")
+        );
         assert_eq!(params["required"], json!(["query"]));
-        assert!(tool.get("function").is_none(), "function wrapper must not be present in responses format");
+        assert!(
+            tool.get("function").is_none(),
+            "function wrapper must not be present in responses format"
+        );
     }
 
     #[test]
     fn test_convert_tools_to_responses_strict_true_preserved() {
-        let tools = vec![
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "strict_tool",
-                    "description": "A strict tool",
-                    "strict": true,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string"}
-                        },
-                        "required": ["query"],
-                        "additionalProperties": false
-                    }
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "strict_tool",
+                "description": "A strict tool",
+                "strict": true,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
                 }
-            }),
-        ];
+            }
+        })];
 
         let result = convert_tools_to_responses(&tools);
         let converted = result.as_array().unwrap();
-        assert_eq!(converted[0]["strict"], json!(true), "strict=true must be passed through to Responses API format");
+        assert_eq!(
+            converted[0]["strict"],
+            json!(true),
+            "strict=true must be passed through to Responses API format"
+        );
     }
 
     #[test]
     fn test_convert_tools_to_responses_already_in_responses_format() {
-        let tools = vec![
-            json!({
-                "type": "function",
-                "name": "already_converted",
-                "description": "Already in responses format",
-                "parameters": {"type": "object", "properties": {}}
-            }),
-        ];
+        let tools = vec![json!({
+            "type": "function",
+            "name": "already_converted",
+            "description": "Already in responses format",
+            "parameters": {"type": "object", "properties": {}}
+        })];
 
         let result = convert_tools_to_responses(&tools);
         let converted = result.as_array().unwrap();

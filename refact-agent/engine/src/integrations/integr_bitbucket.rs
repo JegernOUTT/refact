@@ -14,7 +14,9 @@ use crate::call_validation::{ContextEnum, ChatMessage, ChatContent, ChatUsage};
 use crate::integrations::integr_abstract::{
     IntegrationCommon, IntegrationConfirmation, IntegrationTrait,
 };
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use reqwest::{Client, header};
 use thiserror::Error;
 
@@ -262,7 +264,17 @@ impl Tool for ToolBitbucket {
             experimental: false,
             allow_parallel: false,
             description: "Access to Bitbucket API, to fetch issues, review PRs.".to_string(),
-            input_schema: json_schema_from_params(&[("repo_slug", "string", "The repository slug."), ("command", "string", "Examples:\n`list_prs`\n`get_pr --id 123`")], &["repo_slug", "command"]),
+            input_schema: json_schema_from_params(
+                &[
+                    ("repo_slug", "string", "The repository slug."),
+                    (
+                        "command",
+                        "string",
+                        "Examples:\n`list_prs`\n`get_pr --id 123`",
+                    ),
+                ],
+                &["repo_slug", "command"],
+            ),
             output_schema: None,
             annotations: None,
         }

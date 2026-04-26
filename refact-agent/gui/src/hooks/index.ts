@@ -21,6 +21,7 @@ export * from "./useConfig";
 export * from "./useAppDispatch";
 export * from "./useAppSelector";
 export * from "./useChatActions";
+export * from "./useFirstSendAutoFlip";
 export * from "./useGetUserSurvey";
 export * from "./useLinksFromLsp";
 export * from "./useGoToLink";

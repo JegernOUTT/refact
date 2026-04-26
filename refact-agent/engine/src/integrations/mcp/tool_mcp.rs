@@ -16,7 +16,10 @@ use crate::scratchpads::multimodality::MultimodalElement;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation};
-use super::session_mcp::{McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup, redact_sensitive_json};
+use super::session_mcp::{
+    McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup,
+    redact_sensitive_json,
+};
 
 /// Truncates `text` so that the running `total_bytes` counter does not exceed `limit`.
 /// Appends a truncation notice when cutting. Returns the (possibly truncated) text.
@@ -37,7 +40,11 @@ fn truncate_to_byte_limit(text: String, limit: usize, total_bytes: &mut usize) -
             .last()
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
-        format!("{}\n...(truncated, {} bytes omitted)", &text[..boundary], text.len() - boundary)
+        format!(
+            "{}\n...(truncated, {} bytes omitted)",
+            &text[..boundary],
+            text.len() - boundary
+        )
     }
 }
 
@@ -87,7 +94,12 @@ impl Tool for ToolMCP {
             let session_downcasted = session_locked
                 .as_any_mut()
                 .downcast_mut::<super::session_mcp::SessionMCP>()
-                .ok_or_else(|| format!("Internal error: session is not an MCP session for '{}'", self.mcp_tool.name))?;
+                .ok_or_else(|| {
+                    format!(
+                        "Internal error: session is not an MCP session for '{}'",
+                        self.mcp_tool.name
+                    )
+                })?;
             match &session_downcasted.connection_status {
                 MCPConnectionStatus::Reconnecting { .. } => {
                     return Err(format!(
@@ -118,8 +130,16 @@ impl Tool for ToolMCP {
             let session_downcasted = session_locked
                 .as_any_mut()
                 .downcast_mut::<super::session_mcp::SessionMCP>()
-                .ok_or_else(|| format!("Internal error: session is not an MCP session for '{}'", self.mcp_tool.name))?;
-            (session_downcasted.logs.clone(), session_downcasted.metrics.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "Internal error: session is not an MCP session for '{}'",
+                        self.mcp_tool.name
+                    )
+                })?;
+            (
+                session_downcasted.logs.clone(),
+                session_downcasted.metrics.clone(),
+            )
         };
 
         add_log_entry(
@@ -176,7 +196,11 @@ impl Tool for ToolMCP {
                 for content in result.content {
                     match content.raw {
                         RawContent::Text(text_content) => {
-                            let text = truncate_to_byte_limit(text_content.text, MAX_TOOL_OUTPUT_BYTES, &mut total_text_bytes);
+                            let text = truncate_to_byte_limit(
+                                text_content.text,
+                                MAX_TOOL_OUTPUT_BYTES,
+                                &mut total_text_bytes,
+                            );
                             elements.push(MultimodalElement {
                                 m_type: "text".to_string(),
                                 m_content: text,
@@ -210,7 +234,12 @@ impl Tool for ToolMCP {
                         }),
                         RawContent::Resource(embedded) => {
                             let raw_text = match &embedded.resource {
-                                rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, text, .. } => {
+                                rmcp::model::ResourceContents::TextResourceContents {
+                                    uri,
+                                    mime_type,
+                                    text,
+                                    ..
+                                } => {
                                     format!(
                                         "[Resource: {} ({}) - {}]\n{}",
                                         uri,
@@ -219,7 +248,12 @@ impl Tool for ToolMCP {
                                         text,
                                     )
                                 }
-                                rmcp::model::ResourceContents::BlobResourceContents { uri, mime_type, blob, .. } => {
+                                rmcp::model::ResourceContents::BlobResourceContents {
+                                    uri,
+                                    mime_type,
+                                    blob,
+                                    ..
+                                } => {
                                     format!(
                                         "[Resource: {} ({}) - {} bytes blob]",
                                         uri,
@@ -228,7 +262,11 @@ impl Tool for ToolMCP {
                                     )
                                 }
                             };
-                            let text = truncate_to_byte_limit(raw_text, MAX_TOOL_OUTPUT_BYTES, &mut total_text_bytes);
+                            let text = truncate_to_byte_limit(
+                                raw_text,
+                                MAX_TOOL_OUTPUT_BYTES,
+                                &mut total_text_bytes,
+                            );
                             elements.push(MultimodalElement {
                                 m_type: "text".to_string(),
                                 m_content: text,
@@ -307,7 +345,10 @@ impl Tool for ToolMCP {
                 .collect::<String>()
         };
 
-        let annotations = self.mcp_tool.annotations.as_ref()
+        let annotations = self
+            .mcp_tool
+            .annotations
+            .as_ref()
             .and_then(|a| serde_json::to_value(a).ok());
 
         ToolDesc {
@@ -319,7 +360,12 @@ impl Tool for ToolMCP {
             },
             experimental: false,
             allow_parallel: false,
-            description: self.mcp_tool.description.to_owned().unwrap_or_default().to_string(),
+            description: self
+                .mcp_tool
+                .description
+                .to_owned()
+                .unwrap_or_default()
+                .to_string(),
             input_schema,
             output_schema: None,
             annotations,
@@ -358,7 +404,8 @@ mod tests {
             "name": "test_tool",
             "description": "A test tool",
             "inputSchema": schema
-        })).expect("failed to deserialize McpTool");
+        }))
+        .expect("failed to deserialize McpTool");
         ToolMCP {
             common: crate::integrations::integr_abstract::IntegrationCommon::default(),
             config_path: "mcp_stdio_server.yaml".to_string(),
@@ -368,13 +415,17 @@ mod tests {
         }
     }
 
-    fn make_tool_mcp_with_annotations(schema: serde_json::Value, annotations: serde_json::Value) -> ToolMCP {
+    fn make_tool_mcp_with_annotations(
+        schema: serde_json::Value,
+        annotations: serde_json::Value,
+    ) -> ToolMCP {
         let mcp_tool: McpTool = serde_json::from_value(json!({
             "name": "test_tool",
             "description": "A test tool",
             "inputSchema": schema,
             "annotations": annotations
-        })).expect("failed to deserialize McpTool");
+        }))
+        .expect("failed to deserialize McpTool");
         ToolMCP {
             common: crate::integrations::integr_abstract::IntegrationCommon::default(),
             config_path: "mcp_stdio_server.yaml".to_string(),
@@ -413,10 +464,22 @@ mod tests {
         let desc = tool.tool_description();
 
         assert_eq!(desc.input_schema["type"], json!("object"));
-        assert_eq!(desc.input_schema["properties"]["items"]["type"], json!("array"));
-        assert_eq!(desc.input_schema["properties"]["items"]["items"]["type"], json!("string"));
-        assert_eq!(desc.input_schema["properties"]["config"]["type"], json!("object"));
-        assert_eq!(desc.input_schema["properties"]["mode"]["enum"], json!(["fast", "slow", "medium"]));
+        assert_eq!(
+            desc.input_schema["properties"]["items"]["type"],
+            json!("array")
+        );
+        assert_eq!(
+            desc.input_schema["properties"]["items"]["items"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            desc.input_schema["properties"]["config"]["type"],
+            json!("object")
+        );
+        assert_eq!(
+            desc.input_schema["properties"]["mode"]["enum"],
+            json!(["fast", "slow", "medium"])
+        );
         assert_eq!(desc.input_schema["required"], json!(["items"]));
         assert_eq!(desc.name, "mcp_server_test_tool");
     }
@@ -435,7 +498,10 @@ mod tests {
         let desc = tool.tool_description();
 
         assert_eq!(desc.input_schema["type"], json!("object"));
-        assert_eq!(desc.input_schema["properties"]["a"]["type"], json!("integer"));
+        assert_eq!(
+            desc.input_schema["properties"]["a"]["type"],
+            json!("integer")
+        );
     }
 
     #[test]
@@ -499,7 +565,12 @@ mod tests {
         ));
         let text = match resource {
             RawContent::Resource(embedded) => match &embedded.resource {
-                ResourceContents::TextResourceContents { uri, mime_type, text, .. } => {
+                ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type,
+                    text,
+                    ..
+                } => {
                     format!(
                         "[Resource: {} ({}) - {}]\n{}",
                         uri,
@@ -530,7 +601,12 @@ mod tests {
         ));
         let text = match resource {
             RawContent::Resource(embedded) => match &embedded.resource {
-                ResourceContents::BlobResourceContents { uri, mime_type, blob, .. } => {
+                ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } => {
                     format!(
                         "[Resource: {} ({}) - {} bytes blob]",
                         uri,

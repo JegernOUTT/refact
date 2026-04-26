@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskMeta {
     #[serde(default = "default_schema_version")]

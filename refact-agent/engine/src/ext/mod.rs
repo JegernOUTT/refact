@@ -1,4 +1,5 @@
 pub mod config_dirs;
+pub mod extensions_marketplace;
 pub mod hooks;
 pub mod hooks_runner;
 pub mod plugins;

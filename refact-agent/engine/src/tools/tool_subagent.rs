@@ -4,7 +4,9 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::subchat::run_subchat;
@@ -124,7 +126,14 @@ impl Tool for ToolSubagent {
         };
         let max_steps = max_steps.min(50).max(1);
 
-        let (gcx, parent_chat_id, parent_root_chat_id, parent_subchat_tx, parent_abort_flag, current_depth) = {
+        let (
+            gcx,
+            parent_chat_id,
+            parent_root_chat_id,
+            parent_subchat_tx,
+            parent_abort_flag,
+            current_depth,
+        ) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.global_context.clone(),
@@ -205,9 +214,16 @@ impl Tool for ToolSubagent {
             .await
             .ok_or_else(|| format!("subagent config '{}' not found", config_name))?;
 
-        let system_prompt = subagent_config.messages.system_prompt
+        let system_prompt = subagent_config
+            .messages
+            .system_prompt
             .as_ref()
-            .ok_or_else(|| format!("messages.system_prompt not defined for subagent '{}'", config_name))?;
+            .ok_or_else(|| {
+                format!(
+                    "messages.system_prompt not defined for subagent '{}'",
+                    config_name
+                )
+            })?;
 
         let messages = vec![
             ChatMessage {
@@ -254,7 +270,12 @@ impl Tool for ToolSubagent {
                     user_prompt: None,
                     extra,
                 };
-                crate::ext::hooks_runner::run_hooks(gcx_hook, crate::ext::hooks::HookEvent::SubagentStop, payload).await;
+                crate::ext::hooks_runner::run_hooks(
+                    gcx_hook,
+                    crate::ext::hooks::HookEvent::SubagentStop,
+                    payload,
+                )
+                .await;
             });
         }
 
@@ -300,8 +321,9 @@ impl Tool for ToolSubagent {
         // - retrieve related cards by filenames from in-memory index
         let related_section = {
             let combined = format!("{}\n{}", task, expected_result);
-            let path_re = Regex::new(r"(?:^|[\s`])((?:[a-zA-Z0-9_-]+/)+[a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)")
-                .unwrap();
+            let path_re =
+                Regex::new(r"(?:^|[\s`])((?:[a-zA-Z0-9_-]+/)+[a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)")
+                    .unwrap();
             let mut files: Vec<String> = path_re
                 .captures_iter(&combined)
                 .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
@@ -316,7 +338,11 @@ impl Tool for ToolSubagent {
             if cards.is_empty() {
                 // Fall back to tag-based lookup if we have no file signals.
                 cards = idx_guard.related_for_tags(
-                    &vec!["subagent".to_string(), "report".to_string(), "task-report".to_string()],
+                    &vec![
+                        "subagent".to_string(),
+                        "report".to_string(),
+                        "task-report".to_string(),
+                    ],
                     5,
                 );
             }
@@ -326,11 +352,7 @@ impl Tool for ToolSubagent {
         let result_message = if related_section.trim().is_empty() {
             result_message
         } else {
-            format!(
-                "{}{}",
-                result_message,
-                related_section
-            )
+            format!("{}{}", result_message, related_section)
         };
 
         Ok((

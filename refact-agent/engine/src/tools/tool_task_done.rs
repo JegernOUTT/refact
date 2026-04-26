@@ -8,7 +8,9 @@ use tracing::error;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::memories::{memories_add_enriched, EnrichmentParams};
 use crate::http::routers::v1::sidebar::NotificationEvent;
 
@@ -30,10 +32,7 @@ fn spawn_memory_enrichment_task(
 
         match memories_add_enriched(ccx, &report, enrichment_params).await {
             Ok(knowledge_path) => {
-                tracing::info!(
-                    "task_done: knowledge saved to {}",
-                    knowledge_path.display()
-                );
+                tracing::info!("task_done: knowledge saved to {}", knowledge_path.display());
                 tracing::info!(
                     "task_done: to load full content later, use cat(paths=\"{}\")",
                     knowledge_path.display()

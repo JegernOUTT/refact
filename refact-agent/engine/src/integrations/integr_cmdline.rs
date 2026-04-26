@@ -39,7 +39,9 @@ pub struct CmdlineParam {
 }
 
 impl CmdlineParam {
-    fn default_type() -> String { "string".to_string() }
+    fn default_type() -> String {
+        "string".to_string()
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]
@@ -354,15 +356,20 @@ impl Tool for ToolCmdline {
     }
 
     fn tool_description(&self) -> ToolDesc {
-        let required: Vec<String> = self.cfg.parameters_required.clone().unwrap_or_else(|| {
-            self.cfg.parameters.iter().map(|p| p.name.clone()).collect()
-        });
+        let required: Vec<String> = self
+            .cfg
+            .parameters_required
+            .clone()
+            .unwrap_or_else(|| self.cfg.parameters.iter().map(|p| p.name.clone()).collect());
         let mut properties = serde_json::Map::new();
         for p in &self.cfg.parameters {
-            properties.insert(p.name.clone(), json!({
-                "type": p.param_type,
-                "description": p.description
-            }));
+            properties.insert(
+                p.name.clone(),
+                json!({
+                    "type": p.param_type,
+                    "description": p.description
+                }),
+            );
         }
         let input_schema = json!({
             "type": "object",

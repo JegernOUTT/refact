@@ -57,7 +57,10 @@ impl ModelPricing {
     pub fn is_valid(&self) -> bool {
         let valid_price = |p: f64| p.is_finite() && p >= 0.0;
         let valid_opt = |p: Option<f64>| p.map_or(true, valid_price);
-        valid_price(self.prompt) && valid_price(self.generated) && valid_opt(self.cache_read) && valid_opt(self.cache_creation)
+        valid_price(self.prompt)
+            && valid_price(self.generated)
+            && valid_opt(self.cache_read)
+            && valid_opt(self.cache_creation)
     }
 }
 
@@ -143,7 +146,12 @@ pub struct AvailableModel {
 }
 
 impl AvailableModel {
-    pub fn from_caps(id: &str, caps: &ModelCapabilities, enabled: bool, pricing: Option<ModelPricing>) -> Self {
+    pub fn from_caps(
+        id: &str,
+        caps: &ModelCapabilities,
+        enabled: bool,
+        pricing: Option<ModelPricing>,
+    ) -> Self {
         Self {
             id: id.to_string(),
             display_name: None,
@@ -155,7 +163,11 @@ impl AvailableModel {
             reasoning_effort_options: caps.reasoning_effort_options.clone(),
             supports_thinking_budget: caps.supports_thinking_budget,
             supports_adaptive_thinking_budget: caps.supports_adaptive_thinking_budget,
-            tokenizer: if caps.tokenizer.is_empty() { None } else { Some(caps.tokenizer.clone()) },
+            tokenizer: if caps.tokenizer.is_empty() {
+                None
+            } else {
+                Some(caps.tokenizer.clone())
+            },
             enabled,
             is_custom: false,
             pricing,
@@ -177,7 +189,9 @@ impl AvailableModel {
             supports_multimodality: config.supports_multimodality.unwrap_or(false),
             reasoning_effort_options: config.reasoning_effort_options.clone(),
             supports_thinking_budget: config.supports_thinking_budget.unwrap_or(false),
-            supports_adaptive_thinking_budget: config.supports_adaptive_thinking_budget.unwrap_or(false),
+            supports_adaptive_thinking_budget: config
+                .supports_adaptive_thinking_budget
+                .unwrap_or(false),
             tokenizer: config.tokenizer.clone(),
             enabled,
             is_custom: true,
@@ -206,7 +220,9 @@ pub struct ProviderModel {
     pub removable: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderRuntime {
@@ -247,9 +263,21 @@ pub struct ProviderRuntime {
 impl ProviderRuntime {
     pub fn redacted(&self) -> Self {
         Self {
-            api_key: if self.api_key.is_empty() { String::new() } else { "***".to_string() },
-            auth_token: if self.auth_token.is_empty() { String::new() } else { "***".to_string() },
-            tokenizer_api_key: if self.tokenizer_api_key.is_empty() { String::new() } else { "***".to_string() },
+            api_key: if self.api_key.is_empty() {
+                String::new()
+            } else {
+                "***".to_string()
+            },
+            auth_token: if self.auth_token.is_empty() {
+                String::new()
+            } else {
+                "***".to_string()
+            },
+            tokenizer_api_key: if self.tokenizer_api_key.is_empty() {
+                String::new()
+            } else {
+                "***".to_string()
+            },
             extra_headers: HashMap::new(),
             ..self.clone()
         }
@@ -400,9 +428,16 @@ pub trait ProviderTrait: Send + Sync {
             };
             if matches {
                 let disabled = self.disabled_models().contains(&name.to_string());
-                let enabled = if disabled { false } else { enabled_set.contains(name.as_str()) };
+                let enabled = if disabled {
+                    false
+                } else {
+                    enabled_set.contains(name.as_str())
+                };
                 let pricing = self.model_pricing(name);
-                models_map.insert(name.clone(), AvailableModel::from_caps(name, caps, enabled, pricing));
+                models_map.insert(
+                    name.clone(),
+                    AvailableModel::from_caps(name, caps, enabled, pricing),
+                );
             }
         }
 
@@ -416,7 +451,8 @@ pub trait ProviderTrait: Send + Sync {
         let enabled_set: std::collections::HashSet<_> =
             self.enabled_models().iter().map(|s| s.as_str()).collect();
 
-        let mut models: Vec<AvailableModel> = self.custom_models()
+        let mut models: Vec<AvailableModel> = self
+            .custom_models()
             .iter()
             .map(|(id, config)| {
                 let enabled = enabled_set.contains(id.as_str());
@@ -450,18 +486,42 @@ pub fn merge_custom_models(
                 || config.supports_adaptive_thinking_budget.is_some()
                 || config.tokenizer.is_some()
                 || config.max_output_tokens.is_some();
-            if let Some(n_ctx) = config.n_ctx { existing.n_ctx = n_ctx; }
-            if let Some(v) = config.supports_tools { existing.supports_tools = v; }
-            if let Some(v) = config.supports_parallel_tools { existing.supports_parallel_tools = v; }
-            if let Some(v) = config.supports_strict_tools { existing.supports_strict_tools = v; }
-            if let Some(v) = config.supports_multimodality { existing.supports_multimodality = v; }
-            if config.reasoning_effort_options.is_some() { existing.reasoning_effort_options = config.reasoning_effort_options.clone(); }
-            if let Some(v) = config.supports_thinking_budget { existing.supports_thinking_budget = v; }
-            if let Some(v) = config.supports_adaptive_thinking_budget { existing.supports_adaptive_thinking_budget = v; }
-            if config.tokenizer.is_some() { existing.tokenizer = config.tokenizer.clone(); }
-            if config.pricing.is_some() { existing.pricing = config.pricing.clone(); }
-            if config.max_output_tokens.is_some() { existing.max_output_tokens = config.max_output_tokens; }
-            if has_capability_overrides { existing.is_custom = true; }
+            if let Some(n_ctx) = config.n_ctx {
+                existing.n_ctx = n_ctx;
+            }
+            if let Some(v) = config.supports_tools {
+                existing.supports_tools = v;
+            }
+            if let Some(v) = config.supports_parallel_tools {
+                existing.supports_parallel_tools = v;
+            }
+            if let Some(v) = config.supports_strict_tools {
+                existing.supports_strict_tools = v;
+            }
+            if let Some(v) = config.supports_multimodality {
+                existing.supports_multimodality = v;
+            }
+            if config.reasoning_effort_options.is_some() {
+                existing.reasoning_effort_options = config.reasoning_effort_options.clone();
+            }
+            if let Some(v) = config.supports_thinking_budget {
+                existing.supports_thinking_budget = v;
+            }
+            if let Some(v) = config.supports_adaptive_thinking_budget {
+                existing.supports_adaptive_thinking_budget = v;
+            }
+            if config.tokenizer.is_some() {
+                existing.tokenizer = config.tokenizer.clone();
+            }
+            if config.pricing.is_some() {
+                existing.pricing = config.pricing.clone();
+            }
+            if config.max_output_tokens.is_some() {
+                existing.max_output_tokens = config.max_output_tokens;
+            }
+            if has_capability_overrides {
+                existing.is_custom = true;
+            }
         } else {
             models.push(AvailableModel::from_custom(id, config, enabled));
         }
@@ -476,7 +536,12 @@ pub fn normalize_endpoint(endpoint: &str) -> String {
 
 pub fn derive_endpoint_from_chat_url(chat_endpoint: &str) -> Option<String> {
     let s = chat_endpoint.trim().trim_end_matches('/');
-    for suffix in &["/v1/chat/completions", "/chat/completions", "/v1/completions", "/completions"] {
+    for suffix in &[
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/v1/completions",
+        "/completions",
+    ] {
         if let Some(base) = s.strip_suffix(suffix) {
             if !base.is_empty() {
                 return Some(base.to_string());
@@ -490,14 +555,15 @@ pub fn derive_endpoint_from_chat_url(chat_endpoint: &str) -> Option<String> {
 pub fn parse_enabled_models(yaml: &serde_yaml::Value, enabled_models: &mut Vec<String>) {
     if let Some(models) = yaml.get("enabled_models").and_then(|v| v.as_sequence()) {
         enabled_models.clear();
-        enabled_models.extend(
-            models.iter().filter_map(|v| v.as_str().map(String::from))
-        );
+        enabled_models.extend(models.iter().filter_map(|v| v.as_str().map(String::from)));
     }
 }
 
 /// Parse custom_models from YAML, replacing the existing map
-pub fn parse_custom_models(yaml: &serde_yaml::Value, custom_models: &mut HashMap<String, CustomModelConfig>) {
+pub fn parse_custom_models(
+    yaml: &serde_yaml::Value,
+    custom_models: &mut HashMap<String, CustomModelConfig>,
+) {
     if let Some(custom) = yaml.get("custom_models").and_then(|v| v.as_mapping()) {
         custom_models.clear();
         for (key, value) in custom {
@@ -537,8 +603,6 @@ pub fn set_model_disabled_impl(disabled_models: &mut Vec<String>, model_id: &str
 pub fn parse_disabled_models(yaml: &serde_yaml::Value, disabled_models: &mut Vec<String>) {
     if let Some(models) = yaml.get("disabled_models").and_then(|v| v.as_sequence()) {
         disabled_models.clear();
-        disabled_models.extend(
-            models.iter().filter_map(|v| v.as_str().map(String::from))
-        );
+        disabled_models.extend(models.iter().filter_map(|v| v.as_str().map(String::from)));
     }
 }

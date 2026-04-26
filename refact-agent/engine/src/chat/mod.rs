@@ -1,14 +1,12 @@
-pub mod config;
 pub mod browser_context;
 pub mod cache_guard;
+pub mod config;
 mod content;
 mod generation;
 mod handlers;
 pub mod history_limit;
 mod openai_merge;
 pub mod prepare;
-mod tool_call_recovery;
-mod tool_call_recovery_oss;
 pub mod prompt_snippets;
 pub mod prompts;
 mod queue;
@@ -18,6 +16,8 @@ pub mod system_context;
 pub mod task_agent_monitor;
 #[cfg(test)]
 mod tests;
+mod tool_call_recovery;
+mod tool_call_recovery_oss;
 pub mod tools;
 pub mod trajectories;
 pub mod trajectory_ops;

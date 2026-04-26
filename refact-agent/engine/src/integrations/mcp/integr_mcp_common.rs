@@ -15,8 +15,14 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationCommon;
 use crate::integrations::utils::{serialize_num_to_str, deserialize_str_to_num};
 use rmcp::transport::auth::AuthClient;
-use super::session_mcp::{SessionMCP, McpClientHandler, McpRunningService, MCPConnectionStatus, MCPAuthStatus, add_log_entry, cancel_mcp_client, redact_sensitive_value};
-use super::mcp_auth::{MCPAuthSettings, MCPTokenManager, AuthType, create_auth_manager_from_tokens, load_tokens_from_config, mcp_oauth_refresh_task};
+use super::session_mcp::{
+    SessionMCP, McpClientHandler, McpRunningService, MCPConnectionStatus, MCPAuthStatus,
+    add_log_entry, cancel_mcp_client, redact_sensitive_value,
+};
+use super::mcp_auth::{
+    MCPAuthSettings, MCPTokenManager, AuthType, create_auth_manager_from_tokens,
+    load_tokens_from_config, mcp_oauth_refresh_task,
+};
 use super::mcp_metrics::new_shared_metrics;
 use super::tool_mcp::ToolMCP;
 
@@ -134,16 +140,17 @@ pub async fn mcp_integr_tools(
     let mut result: Vec<Box<dyn crate::tools::tools_description::Tool + Send>> = vec![];
     {
         let mut session_locked = session.lock().await;
-        let session_downcasted: &mut SessionMCP = match session_locked
-            .as_any_mut()
-            .downcast_mut::<SessionMCP>()
-        {
-            Some(s) => s,
-            None => {
-                tracing::error!("Session for {:?} is not a SessionMCP, strange (3)", session_key);
-                return vec![];
-            }
-        };
+        let session_downcasted: &mut SessionMCP =
+            match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                Some(s) => s,
+                None => {
+                    tracing::error!(
+                        "Session for {:?} is not a SessionMCP, strange (3)",
+                        session_key
+                    );
+                    return vec![];
+                }
+            };
         if session_downcasted.mcp_client.is_none() {
             tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
             return vec![];
@@ -205,7 +212,10 @@ pub(crate) async fn build_reqwest_client_for_mcp(
         }
     }
 
-    match reqwest::Client::builder().default_headers(header_map).build() {
+    match reqwest::Client::builder()
+        .default_headers(header_map)
+        .build()
+    {
         Ok(client) => Some(client),
         Err(e) => {
             let msg = format!("Failed to build reqwest client: {}", e);
@@ -229,7 +239,10 @@ pub(crate) async fn build_auth_client_for_mcp(
     let tokens = match tokens {
         Some(t) if !t.access_token.is_empty() => t,
         _ => {
-            let msg = format!("No OAuth tokens found for {} transport; re-authentication required", transport_name);
+            let msg = format!(
+                "No OAuth tokens found for {} transport; re-authentication required",
+                transport_name
+            );
             tracing::warn!("{msg} for {debug_name}");
             add_log_entry(logs, msg).await;
             {
@@ -237,7 +250,9 @@ pub(crate) async fn build_auth_client_for_mcp(
                 let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
                     Some(s) => s,
                     None => {
-                        tracing::error!("Session for {debug_name} is not a SessionMCP, cannot set auth status");
+                        tracing::error!(
+                            "Session for {debug_name} is not a SessionMCP, cannot set auth status"
+                        );
                         return None;
                     }
                 };
@@ -251,7 +266,10 @@ pub(crate) async fn build_auth_client_for_mcp(
     let auth_manager = match create_auth_manager_from_tokens(url, &tokens).await {
         Ok(m) => m,
         Err(e) => {
-            let msg = format!("Failed to restore OAuth session for {} transport: {}", transport_name, e);
+            let msg = format!(
+                "Failed to restore OAuth session for {} transport: {}",
+                transport_name, e
+            );
             tracing::error!("{msg} for {debug_name}");
             add_log_entry(logs, msg).await;
             return None;
@@ -275,7 +293,10 @@ pub(crate) async fn build_auth_client_for_mcp(
         }
     }
 
-    let base_client = match reqwest::Client::builder().default_headers(header_map).build() {
+    let base_client = match reqwest::Client::builder()
+        .default_headers(header_map)
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             let msg = format!("Failed to build reqwest client: {}", e);
@@ -292,7 +313,9 @@ pub(crate) async fn build_auth_client_for_mcp(
         let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
             Some(s) => s,
             None => {
-                tracing::error!("Session for {debug_name} is not a SessionMCP, cannot set auth manager");
+                tracing::error!(
+                    "Session for {debug_name} is not a SessionMCP, cannot set auth manager"
+                );
                 return None;
             }
         };
@@ -443,13 +466,13 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
     {
         let mut session_locked = session_arc.lock().await;
-        let session_downcasted = match session_locked
-            .as_any_mut()
-            .downcast_mut::<SessionMCP>()
-        {
+        let session_downcasted = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
             Some(s) => s,
             None => {
-                tracing::error!("Session for {:?} is not a SessionMCP, cannot setup MCP", config_path);
+                tracing::error!(
+                    "Session for {:?} is not a SessionMCP, cannot setup MCP",
+                    config_path
+                );
                 return;
             }
         };
@@ -472,10 +495,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
         let startup_task_join_handle = tokio::spawn(async move {
             let (mcp_client, logs, debug_name, stderr_file) = {
                 let mut session_locked = session_arc_clone.lock().await;
-                let mcp_session = match session_locked
-                    .as_any_mut()
-                    .downcast_mut::<SessionMCP>()
-                {
+                let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
                     Some(s) => s,
                     None => {
                         tracing::error!("Session is not a SessionMCP, cannot start MCP client");
@@ -506,7 +526,10 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
             if let Some(mcp_client) = mcp_client {
                 cancel_mcp_client(&debug_name, mcp_client, logs.clone()).await;
-                tokio::spawn(super::mcp_resources::remove_indexed_resources(gcx_weak.clone(), config_path.clone()));
+                tokio::spawn(super::mcp_resources::remove_indexed_resources(
+                    gcx_weak.clone(),
+                    config_path.clone(),
+                ));
             }
             if let Some(stderr_file) = &stderr_file {
                 if let Err(e) = tokio::fs::remove_file(stderr_file).await {
@@ -544,11 +567,15 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 Some(client) => client,
                 None => {
                     let mut session_locked = session_arc_clone.lock().await;
-                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                    {
                         Some(s) => s,
                         None => return,
                     };
-                    if !matches!(mcp_session.connection_status, MCPConnectionStatus::NeedsAuth) {
+                    if !matches!(
+                        mcp_session.connection_status,
+                        MCPConnectionStatus::NeedsAuth
+                    ) {
                         mcp_session.connection_status = MCPConnectionStatus::Failed {
                             message: "Transport initialization failed".to_string(),
                         };
@@ -573,7 +600,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     )
                     .await;
                     let mut session_locked = session_arc_clone.lock().await;
-                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                    {
                         Some(s) => s,
                         None => return,
                     };
@@ -589,7 +617,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     )
                     .await;
                     let mut session_locked = session_arc_clone.lock().await;
-                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                    {
                         Some(s) => s,
                         None => return,
                     };
@@ -605,13 +634,22 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             let server_info = client.peer_info().cloned();
             *peer_arc.lock().await = Some(peer.clone());
 
-            let capabilities = server_info.as_ref().map(|s| s.capabilities.clone()).unwrap_or_default();
+            let capabilities = server_info
+                .as_ref()
+                .map(|s| s.capabilities.clone())
+                .unwrap_or_default();
 
             let resources = if capabilities.resources.is_some() {
-                match timeout(Duration::from_secs(request_timeout), client.list_all_resources()).await {
+                match timeout(
+                    Duration::from_secs(request_timeout),
+                    client.list_all_resources(),
+                )
+                .await
+                {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => {
-                        add_log_entry(logs.clone(), format!("Failed to list resources: {:?}", e)).await;
+                        add_log_entry(logs.clone(), format!("Failed to list resources: {:?}", e))
+                            .await;
                         vec![]
                     }
                     Err(_) => {
@@ -624,10 +662,16 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             };
 
             let prompts = if capabilities.prompts.is_some() {
-                match timeout(Duration::from_secs(request_timeout), client.list_all_prompts()).await {
+                match timeout(
+                    Duration::from_secs(request_timeout),
+                    client.list_all_prompts(),
+                )
+                .await
+                {
                     Ok(Ok(p)) => p,
                     Ok(Err(e)) => {
-                        add_log_entry(logs.clone(), format!("Failed to list prompts: {:?}", e)).await;
+                        add_log_entry(logs.clone(), format!("Failed to list prompts: {:?}", e))
+                            .await;
                         vec![]
                     }
                     Err(_) => {
@@ -641,16 +685,16 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
             let client_arc = {
                 let mut session_locked = session_arc_clone.lock().await;
-                let session_downcasted = match session_locked
-                    .as_any_mut()
-                    .downcast_mut::<SessionMCP>()
-                {
-                    Some(s) => s,
-                    None => {
-                        tracing::error!("Session is not a SessionMCP, cannot store connected MCP client");
-                        return;
-                    }
-                };
+                let session_downcasted =
+                    match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                        Some(s) => s,
+                        None => {
+                            tracing::error!(
+                                "Session is not a SessionMCP, cannot store connected MCP client"
+                            );
+                            return;
+                        }
+                    };
 
                 let arc = Arc::new(AMutex::new(Some(client)));
                 session_downcasted.mcp_client = Some(arc.clone());
@@ -717,7 +761,10 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                         session_arc_clone.clone(),
                         config_path.clone(),
                     ));
-                    if let Some(old) = mcp_session.oauth_refresh_task_handle.replace(refresh_task.abort_handle()) {
+                    if let Some(old) = mcp_session
+                        .oauth_refresh_task_handle
+                        .replace(refresh_task.abort_handle())
+                    {
                         old.abort();
                     }
                 }
@@ -787,7 +834,11 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
 
         if !is_alive {
             tracing::info!("MCP health monitor: connection lost for {}", debug_name);
-            add_log_entry(logs.clone(), "Health monitor: connection lost, starting reconnect".to_string()).await;
+            add_log_entry(
+                logs.clone(),
+                "Health monitor: connection lost, starting reconnect".to_string(),
+            )
+            .await;
 
             let reconnected = reconnect_with_backoff(
                 session_arc.clone(),
@@ -800,7 +851,8 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
                 reconnect_max_attempts,
                 &backoff_delays,
                 gcx_weak.clone(),
-            ).await;
+            )
+            .await;
 
             if !reconnected {
                 let mut session_locked = session_arc.lock().await;
@@ -811,7 +863,11 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
                 mcp_session.connection_status = MCPConnectionStatus::Failed {
                     message: "Max reconnect attempts reached".to_string(),
                 };
-                add_log_entry(logs.clone(), "Health monitor: max reconnect attempts reached, giving up".to_string()).await;
+                add_log_entry(
+                    logs.clone(),
+                    "Health monitor: max reconnect attempts reached, giving up".to_string(),
+                )
+                .await;
                 return;
             }
         }
@@ -838,7 +894,10 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
             None => Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            tracing::info!("MCP reconnect: shutdown detected, aborting reconnect for {}", debug_name);
+            tracing::info!(
+                "MCP reconnect: shutdown detected, aborting reconnect for {}",
+                debug_name
+            );
             return false;
         }
 
@@ -850,10 +909,18 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
                 Some(s) => s,
                 None => continue,
             };
-            mcp_session.connection_status = MCPConnectionStatus::Reconnecting { attempt: attempt as u32 };
+            mcp_session.connection_status = MCPConnectionStatus::Reconnecting {
+                attempt: attempt as u32,
+            };
         }
 
-        let msg = format!("Reconnecting to {} (attempt {}/{}), waiting {}s", debug_name, attempt + 1, max_attempts, delay);
+        let msg = format!(
+            "Reconnecting to {} (attempt {}/{}), waiting {}s",
+            debug_name,
+            attempt + 1,
+            max_attempts,
+            delay
+        );
         tracing::info!("{}", msg);
         add_log_entry(logs.clone(), msg).await;
 
@@ -896,7 +963,11 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
         let new_client = match new_client {
             Some(c) => c,
             None => {
-                tracing::warn!("Reconnect attempt {} failed for {}", attempt + 1, debug_name);
+                tracing::warn!(
+                    "Reconnect attempt {} failed for {}",
+                    attempt + 1,
+                    debug_name
+                );
                 continue;
             }
         };
@@ -909,7 +980,11 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
         {
             Ok(Ok(t)) => t,
             Ok(Err(e)) => {
-                add_log_entry(logs.clone(), format!("Reconnect: failed to list tools: {:?}", e)).await;
+                add_log_entry(
+                    logs.clone(),
+                    format!("Reconnect: failed to list tools: {:?}", e),
+                )
+                .await;
                 continue;
             }
             Err(_) => {
@@ -942,7 +1017,10 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
             m.record_connected();
         }
 
-        let msg = format!("Reconnected to {} successfully with {} tools", debug_name, tools_len);
+        let msg = format!(
+            "Reconnected to {} successfully with {} tools",
+            debug_name, tools_len
+        );
         tracing::info!("{}", msg);
         add_log_entry(logs.clone(), msg).await;
         return true;
@@ -958,27 +1036,29 @@ mod tests {
     use crate::integrations::sessions::IntegrationSession;
 
     fn make_session_arc(status: MCPConnectionStatus) -> Arc<AMutex<Box<dyn IntegrationSession>>> {
-        Arc::new(AMutex::new(Box::new(super::super::session_mcp::SessionMCP {
-            debug_name: "test".to_string(),
-            config_path: "/tmp/test.yaml".to_string(),
-            launched_cfg: serde_json::Value::Null,
-            mcp_client: None,
-            mcp_tools: Vec::new(),
-            mcp_resources: Vec::new(),
-            mcp_prompts: Vec::new(),
-            server_info: None,
-            startup_task_handles: None,
-            health_task_handle: None,
-            logs: Arc::new(AMutex::new(Vec::new())),
-            stderr_file_path: None,
-            stderr_cursor: Arc::new(AMutex::new(0)),
-            connection_status: status,
-            last_successful_connection: None,
-            metrics: super::super::mcp_metrics::new_shared_metrics(),
-            auth_manager: None,
-            auth_status: super::super::session_mcp::MCPAuthStatus::NotApplicable,
-            oauth_refresh_task_handle: None,
-        }) as Box<dyn IntegrationSession>))
+        Arc::new(AMutex::new(
+            Box::new(super::super::session_mcp::SessionMCP {
+                debug_name: "test".to_string(),
+                config_path: "/tmp/test.yaml".to_string(),
+                launched_cfg: serde_json::Value::Null,
+                mcp_client: None,
+                mcp_tools: Vec::new(),
+                mcp_resources: Vec::new(),
+                mcp_prompts: Vec::new(),
+                server_info: None,
+                startup_task_handles: None,
+                health_task_handle: None,
+                logs: Arc::new(AMutex::new(Vec::new())),
+                stderr_file_path: None,
+                stderr_cursor: Arc::new(AMutex::new(0)),
+                connection_status: status,
+                last_successful_connection: None,
+                metrics: super::super::mcp_metrics::new_shared_metrics(),
+                auth_manager: None,
+                auth_status: super::super::session_mcp::MCPAuthStatus::NotApplicable,
+                oauth_refresh_task_handle: None,
+            }) as Box<dyn IntegrationSession>,
+        ))
     }
 
     #[test]
@@ -1015,7 +1095,9 @@ mod tests {
             }
         }
 
-        let initializer = AlwaysFailInitializer { attempts: attempt_count.clone() };
+        let initializer = AlwaysFailInitializer {
+            attempts: attempt_count.clone(),
+        };
         let client_arc: Arc<AMutex<Option<McpRunningService>>> = Arc::new(AMutex::new(None));
         let backoff_delays = vec![0u64, 0, 0];
 
@@ -1030,15 +1112,26 @@ mod tests {
             3,
             &backoff_delays,
             std::sync::Weak::new(),
-        ).await;
+        )
+        .await;
 
         assert!(!result, "Should return false when all attempts fail");
-        assert_eq!(attempt_count.load(Ordering::SeqCst), 3, "Should attempt exactly max_attempts times");
+        assert_eq!(
+            attempt_count.load(Ordering::SeqCst),
+            3,
+            "Should attempt exactly max_attempts times"
+        );
 
         let mut session_locked = session_arc.lock().await;
-        let mcp_session = session_locked.as_any_mut().downcast_mut::<super::super::session_mcp::SessionMCP>().unwrap();
+        let mcp_session = session_locked
+            .as_any_mut()
+            .downcast_mut::<super::super::session_mcp::SessionMCP>()
+            .unwrap();
         assert!(
-            matches!(mcp_session.connection_status, MCPConnectionStatus::Reconnecting { attempt: 2 }),
+            matches!(
+                mcp_session.connection_status,
+                MCPConnectionStatus::Reconnecting { attempt: 2 }
+            ),
             "Final status should be Reconnecting with last attempt index"
         );
     }
@@ -1069,7 +1162,9 @@ mod tests {
             }
         }
 
-        let initializer = CountingInitializer { attempts: attempt_count.clone() };
+        let initializer = CountingInitializer {
+            attempts: attempt_count.clone(),
+        };
         let client_arc: Arc<AMutex<Option<McpRunningService>>> = Arc::new(AMutex::new(None));
         let backoff_delays = vec![0u64, 0];
 
@@ -1084,10 +1179,12 @@ mod tests {
             100,
             &backoff_delays,
             std::sync::Weak::new(),
-        ).await;
+        )
+        .await;
 
         assert_eq!(
-            attempt_count.load(Ordering::SeqCst), 2,
+            attempt_count.load(Ordering::SeqCst),
+            2,
             "Should be capped by backoff_delays length, not reconnect_max_attempts"
         );
     }
@@ -1102,7 +1199,8 @@ mod tests {
         //
         // Full functional verification requires a real MCP transport (tested in integration tests).
         // This test validates the structural requirement is documented and the code compiles correctly.
-        let peer_arc: Arc<AMutex<Option<rmcp::service::Peer<rmcp::RoleClient>>>> = Arc::new(AMutex::new(None));
+        let peer_arc: Arc<AMutex<Option<rmcp::service::Peer<rmcp::RoleClient>>>> =
+            Arc::new(AMutex::new(None));
         assert!(peer_arc.try_lock().is_ok());
     }
 
@@ -1110,10 +1208,18 @@ mod tests {
     fn test_mcp_connection_status_reconnecting_flag() {
         let reconnecting = MCPConnectionStatus::Reconnecting { attempt: 2 };
         let connected = MCPConnectionStatus::Connected;
-        let failed = MCPConnectionStatus::Failed { message: "oops".to_string() };
+        let failed = MCPConnectionStatus::Failed {
+            message: "oops".to_string(),
+        };
 
-        assert!(matches!(&reconnecting, MCPConnectionStatus::Reconnecting { .. }));
-        assert!(!matches!(&connected, MCPConnectionStatus::Reconnecting { .. }));
+        assert!(matches!(
+            &reconnecting,
+            MCPConnectionStatus::Reconnecting { .. }
+        ));
+        assert!(!matches!(
+            &connected,
+            MCPConnectionStatus::Reconnecting { .. }
+        ));
         assert!(!matches!(&failed, MCPConnectionStatus::Reconnecting { .. }));
     }
 
@@ -1158,7 +1264,8 @@ mod tests {
             logs,
             "test_server",
             session_arc.clone(),
-        ).await;
+        )
+        .await;
 
         assert!(result.is_none(), "Should return None when no tokens");
 
@@ -1168,7 +1275,10 @@ mod tests {
             .downcast_mut::<SessionMCP>()
             .unwrap();
         assert!(
-            matches!(mcp_session.connection_status, MCPConnectionStatus::NeedsAuth),
+            matches!(
+                mcp_session.connection_status,
+                MCPConnectionStatus::NeedsAuth
+            ),
             "Status should be NeedsAuth when no tokens, got {:?}",
             mcp_session.connection_status
         );
@@ -1190,7 +1300,9 @@ mod tests {
         let json2 = serde_json::to_value(&connected).unwrap();
         assert_eq!(json2["status"], "connected");
 
-        let failed = MCPConnectionStatus::Failed { message: "err".to_string() };
+        let failed = MCPConnectionStatus::Failed {
+            message: "err".to_string(),
+        };
         let json3 = serde_json::to_value(&failed).unwrap();
         assert_eq!(json3["status"], "failed");
         assert_eq!(json3["message"], "err");

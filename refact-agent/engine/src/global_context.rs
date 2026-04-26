@@ -297,7 +297,9 @@ pub struct GlobalContext {
     pub task_events_tx:
         Option<tokio::sync::broadcast::Sender<crate::tasks::events::TaskEventEnvelope>>,
     pub task_events_seq: Option<Arc<std::sync::atomic::AtomicU64>>,
-    pub notification_events_tx: Option<tokio::sync::broadcast::Sender<crate::http::routers::v1::sidebar::NotificationEvent>>,
+    pub notification_events_tx: Option<
+        tokio::sync::broadcast::Sender<crate::http::routers::v1::sidebar::NotificationEvent>,
+    >,
     pub chat_sessions: crate::chat::SessionsMap,
     pub voice_service: SharedVoiceService,
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
@@ -598,9 +600,14 @@ pub async fn create_global_context(
         voice_service: crate::voice::VoiceService::new(),
         project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
         providers: Arc::new(ARwLock::new(
-            load_providers_from_config(&config_dir, &cmdline.address_url, &cmdline.api_key, &http_client)
-                .await
-                .unwrap_or_default()
+            load_providers_from_config(
+                &config_dir,
+                &cmdline.address_url,
+                &cmdline.api_key,
+                &http_client,
+            )
+            .await
+            .unwrap_or_default(),
         )),
         knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
         llm_stats_sender: None,

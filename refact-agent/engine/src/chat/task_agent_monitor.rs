@@ -127,8 +127,12 @@ async fn mark_agent_as_failed(
     if let Some(card) = board.get_card(card_id) {
         if let (Some(ref wt), Some(ref branch)) = (&card.agent_worktree, &card.agent_branch) {
             let diff_report = cleanup_failed_agent_worktree(
-                gcx.clone(), wt, branch, card.agent_worktree_name.as_deref()
-            ).await;
+                gcx.clone(),
+                wt,
+                branch,
+                card.agent_worktree_name.as_deref(),
+            )
+            .await;
             let card_id_for_cleanup = card_id.to_string();
             let _ = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
                 if let Some(c) = board.get_card_mut(&card_id_for_cleanup) {
@@ -141,7 +145,8 @@ async fn mark_agent_as_failed(
                     c.agent_branch = None;
                 }
                 Ok(())
-            }).await;
+            })
+            .await;
         }
     }
 
@@ -233,6 +238,8 @@ async fn notify_planner_all_agents_done(
         command: ChatCommand::UserMessage {
             content: serde_json::Value::String(planner_message),
             attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
         },
     };
 
@@ -325,7 +332,11 @@ pub(crate) async fn cleanup_failed_agent_worktree(
         }
     }
 
-    crate::files_in_workspace::remove_folder(gcx.clone(), &std::path::PathBuf::from(agent_worktree)).await;
+    crate::files_in_workspace::remove_folder(
+        gcx.clone(),
+        &std::path::PathBuf::from(agent_worktree),
+    )
+    .await;
 
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     if let Some(workspace_root) = project_dirs.first() {
@@ -342,7 +353,11 @@ pub(crate) async fn cleanup_failed_agent_worktree(
 
     let parent = Path::new(agent_worktree).parent();
     if let Some(p) = parent {
-        if p.exists() && p.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false) {
+        if p.exists()
+            && p.read_dir()
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false)
+        {
             let _ = std::fs::remove_dir(p);
         }
     }

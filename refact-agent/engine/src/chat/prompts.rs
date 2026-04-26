@@ -11,7 +11,10 @@ use super::system_context::{
     self, create_instruction_files_message, create_memories_message, gather_system_context,
     generate_git_info_prompt, gather_git_info, PROJECT_CONTEXT_MARKER,
 };
-use crate::ext::skills_context::{build_skills_context_messages_tracked, build_skills_prompt_text, SkillsTrackingInfo, SKILLS_CONTEXT_MARKER};
+use crate::ext::skills_context::{
+    build_skills_context_messages_tracked, build_skills_prompt_text, SkillsTrackingInfo,
+    SKILLS_CONTEXT_MARKER,
+};
 use crate::yaml_configs::project_information::load_project_information_config;
 use crate::call_validation::{ChatMessage, ChatContent, ContextFile, canonical_mode_id};
 use crate::tasks::storage::infer_task_id_from_chat_id;
@@ -77,8 +80,6 @@ async fn _workspace_info(workspace_dirs: &[String], active_file_path: &Option<Pa
     info
 }
 
-
-
 pub async fn system_prompt_add_extra_instructions(
     gcx: Arc<ARwLock<GlobalContext>>,
     system_prompt: String,
@@ -141,7 +142,8 @@ pub async fn system_prompt_add_extra_instructions(
         if include_project_info && config.sections.environment_instructions.enabled {
             let project_dirs = get_project_dirs(gcx.clone()).await;
             let environments = system_context::detect_environments(&project_dirs).await;
-            let mut env_instructions = system_context::generate_environment_instructions(&environments);
+            let mut env_instructions =
+                system_context::generate_environment_instructions(&environments);
             if let Some(max_chars) = config.sections.environment_instructions.max_chars {
                 env_instructions = truncate_to_chars(&env_instructions, max_chars);
             }
@@ -260,7 +262,8 @@ pub async fn system_prompt_add_extra_instructions(
         let has_activate = tool_names.contains("activate_skill");
         let has_deactivate = tool_names.contains("deactivate_skill");
         if has_activate || has_deactivate {
-            let skills_text = build_skills_prompt_text(gcx.clone(), has_activate, has_deactivate).await;
+            let skills_text =
+                build_skills_prompt_text(gcx.clone(), has_activate, has_deactivate).await;
             system_prompt = system_prompt.replace("%SKILLS_INSTRUCTIONS%", &skills_text);
         } else {
             system_prompt = system_prompt.replace("%SKILLS_INSTRUCTIONS%", "");
@@ -281,7 +284,7 @@ pub async fn system_prompt_add_extra_instructions(
     if system_prompt.contains("%AGENT_EXPLORATION_INSTRUCTIONS%") {
         system_prompt = system_prompt.replace(
             "%AGENT_EXPLORATION_INSTRUCTIONS%",
-            super::prompt_snippets::AGENT_EXPLORATION_INSTRUCTIONS
+            super::prompt_snippets::AGENT_EXPLORATION_INSTRUCTIONS,
         );
     }
 
@@ -297,16 +300,14 @@ pub async fn system_prompt_add_extra_instructions(
     }
 
     if system_prompt.contains("%CD_INSTRUCTIONS%") {
-        system_prompt = system_prompt.replace(
-            "%CD_INSTRUCTIONS%",
-            super::prompt_snippets::CD_INSTRUCTIONS
-        );
+        system_prompt =
+            system_prompt.replace("%CD_INSTRUCTIONS%", super::prompt_snippets::CD_INSTRUCTIONS);
     }
 
     if system_prompt.contains("%SHELL_INSTRUCTIONS%") {
         system_prompt = system_prompt.replace(
             "%SHELL_INSTRUCTIONS%",
-            super::prompt_snippets::SHELL_INSTRUCTIONS
+            super::prompt_snippets::SHELL_INSTRUCTIONS,
         );
     }
 
@@ -327,7 +328,7 @@ pub async fn system_prompt_add_extra_instructions(
     if system_prompt.contains("%RICH_CONTENT_INSTRUCTIONS%") {
         system_prompt = system_prompt.replace(
             "%RICH_CONTENT_INSTRUCTIONS%",
-            super::prompt_snippets::RICH_CONTENT_INSTRUCTIONS
+            super::prompt_snippets::RICH_CONTENT_INSTRUCTIONS,
         );
     }
 
@@ -358,7 +359,8 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         .any(|m| m.role == "context_file" && m.tool_call_id == PROJECT_CONTEXT_MARKER);
 
     if !have_system {
-        let canonical_mode = canonical_mode_id(&chat_meta.chat_mode).unwrap_or_else(|_| "agent".to_string());
+        let canonical_mode =
+            canonical_mode_id(&chat_meta.chat_mode).unwrap_or_else(|_| "agent".to_string());
         match canonical_mode.as_str() {
             "configurator" => {
                 crate::integrations::config_chat::mix_config_messages(
@@ -379,7 +381,8 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
                 .await;
             }
             _ => {
-                let base_prompt = get_mode_system_prompt(gcx.clone(), mode_id, Some(model_id)).await;
+                let base_prompt =
+                    get_mode_system_prompt(gcx.clone(), mode_id, Some(model_id)).await;
                 let system_message_content = system_prompt_add_extra_instructions(
                     gcx.clone(),
                     base_prompt,
@@ -402,7 +405,9 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
     let mut skills_tracking = SkillsTrackingInfo::default();
     if chat_meta.include_project_info && !have_project_context {
         match gather_and_inject_system_context(&gcx, &mut messages, stream_back_to_user).await {
-            Ok(info) => { skills_tracking = info; }
+            Ok(info) => {
+                skills_tracking = info;
+            }
             Err(e) => {
                 tracing::warn!("Failed to gather system context: {}", e);
             }
@@ -411,13 +416,14 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         tracing::info!("Skipping project/system context injection (include_project_info=false)");
     }
 
-    let canonical_chat_mode = canonical_mode_id(&chat_meta.chat_mode).unwrap_or_else(|_| "agent".to_string());
+    let canonical_chat_mode =
+        canonical_mode_id(&chat_meta.chat_mode).unwrap_or_else(|_| "agent".to_string());
     if matches!(canonical_chat_mode.as_str(), "task_planner" | "task_agent") {
-        let task_id_opt = task_meta.as_ref().map(|m| m.task_id.clone())
+        let task_id_opt = task_meta
+            .as_ref()
+            .map(|m| m.task_id.clone())
             .or_else(|| infer_task_id_from_chat_id(&chat_meta.chat_id));
-        match inject_task_memories(&gcx, &mut messages, stream_back_to_user, task_id_opt)
-            .await
-        {
+        match inject_task_memories(&gcx, &mut messages, stream_back_to_user, task_id_opt).await {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!("Failed to inject task memories: {}", e);
@@ -425,7 +431,10 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         }
     }
 
-    tracing::info!("\n\nSYSTEM PROMPT MIXER chat_mode={:?}", chat_meta.chat_mode);
+    tracing::info!(
+        "\n\nSYSTEM PROMPT MIXER chat_mode={:?}",
+        chat_meta.chat_mode
+    );
     (messages, skills_tracking)
 }
 
@@ -511,7 +520,8 @@ async fn gather_and_inject_system_context(
                 _ => None,
             })
             .unwrap_or_default();
-        let (skills_msgs, tracking) = build_skills_context_messages_tracked(gcx.clone(), &last_user_text, None).await;
+        let (skills_msgs, tracking) =
+            build_skills_context_messages_tracked(gcx.clone(), &last_user_text, None).await;
         for skills_msg in skills_msgs {
             let insert_pos = messages
                 .iter()
@@ -631,5 +641,3 @@ pub async fn inject_task_memories(
 
     Ok(())
 }
-
-

@@ -34,7 +34,10 @@ mod tests {
         );
         assert_eq!(schema["type"], json!("object"));
         assert_eq!(schema["properties"]["path"]["type"], json!("string"));
-        assert_eq!(schema["properties"]["path"]["description"], json!("File path"));
+        assert_eq!(
+            schema["properties"]["path"]["description"],
+            json!("File path")
+        );
         assert_eq!(schema["properties"]["content"]["type"], json!("string"));
         assert_eq!(schema["required"], json!(["path"]));
     }
@@ -42,10 +45,7 @@ mod tests {
     #[test]
     fn test_json_schema_from_params_all_required() {
         let schema = json_schema_from_params(
-            &[
-                ("a", "string", "First"),
-                ("b", "integer", "Second"),
-            ],
+            &[("a", "string", "First"), ("b", "integer", "Second")],
             &["a", "b"],
         );
         assert_eq!(schema["type"], json!("object"));
@@ -91,7 +91,10 @@ mod tests {
         let desc = make_tool_desc(schema);
         let openai = desc.into_openai_style(true);
         assert_eq!(openai["function"]["strict"], json!(true));
-        assert_eq!(openai["function"]["parameters"]["additionalProperties"], json!(false));
+        assert_eq!(
+            openai["function"]["parameters"]["additionalProperties"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -101,13 +104,11 @@ mod tests {
             "properties": {},
             "additionalProperties": true
         });
-        let openai = make_openai_tool_value(
-            "test".to_string(),
-            "A tool".to_string(),
-            schema,
-            true,
+        let openai = make_openai_tool_value("test".to_string(), "A tool".to_string(), schema, true);
+        assert_eq!(
+            openai["function"]["parameters"]["additionalProperties"],
+            json!(true)
         );
-        assert_eq!(openai["function"]["parameters"]["additionalProperties"], json!(true));
     }
 
     #[test]
@@ -117,13 +118,11 @@ mod tests {
             "properties": {},
             "additionalProperties": false
         });
-        let openai = make_openai_tool_value(
-            "test".to_string(),
-            "A tool".to_string(),
-            schema,
-            true,
+        let openai = make_openai_tool_value("test".to_string(), "A tool".to_string(), schema, true);
+        assert_eq!(
+            openai["function"]["parameters"]["additionalProperties"],
+            json!(false)
         );
-        assert_eq!(openai["function"]["parameters"]["additionalProperties"], json!(false));
     }
 
     #[test]
@@ -145,8 +144,14 @@ mod tests {
         let openai = desc.into_openai_style(false);
         let params = &openai["function"]["parameters"];
         assert_eq!(params["properties"]["config"]["type"], json!("object"));
-        assert_eq!(params["properties"]["config"]["properties"]["name"]["type"], json!("string"));
-        assert_eq!(params["properties"]["config"]["properties"]["value"]["type"], json!("number"));
+        assert_eq!(
+            params["properties"]["config"]["properties"]["name"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            params["properties"]["config"]["properties"]["value"]["type"],
+            json!("number")
+        );
     }
 
     #[test]
@@ -166,7 +171,10 @@ mod tests {
         let openai = desc.into_openai_style(false);
         let params = &openai["function"]["parameters"];
         assert_eq!(params["properties"]["tags"]["type"], json!("array"));
-        assert_eq!(params["properties"]["tags"]["items"]["type"], json!("string"));
+        assert_eq!(
+            params["properties"]["tags"]["items"]["type"],
+            json!("string")
+        );
     }
 
     #[test]
@@ -188,7 +196,13 @@ mod tests {
             params["properties"]["mode"]["enum"],
             json!(["fast", "slow", "auto"])
         );
-        assert_eq!(params["properties"]["mode"]["enum"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            params["properties"]["mode"]["enum"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -219,9 +233,15 @@ mod tests {
         let openai = desc.into_openai_style(false);
         let params = &openai["function"]["parameters"];
         assert_eq!(params["properties"]["config"]["type"], json!("object"));
-        assert_eq!(params["properties"]["tags"]["items"]["type"], json!("string"));
         assert_eq!(
-            params["properties"]["mode"]["enum"].as_array().unwrap().len(),
+            params["properties"]["tags"]["items"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            params["properties"]["mode"]["enum"]
+                .as_array()
+                .unwrap()
+                .len(),
             3
         );
     }
@@ -245,24 +265,60 @@ mod tests {
         };
         let openai = desc.into_openai_style(false);
         assert_eq!(openai["function"]["name"], json!("my_custom_tool"));
-        assert_eq!(openai["function"]["description"], json!("Does something useful"));
+        assert_eq!(
+            openai["function"]["description"],
+            json!("Does something useful")
+        );
     }
 
     #[test]
     fn test_all_builtin_tools_have_valid_schema() {
         let tools: Vec<Box<dyn Tool + Send>> = vec![
-            Box::new(crate::tools::tool_cat::ToolCat { config_path: "".to_string() }),
-            Box::new(crate::tools::tool_tree::ToolTree { config_path: "".to_string() }),
-            Box::new(crate::tools::tool_regex_search::ToolRegexSearch { config_path: "".to_string() }),
-            Box::new(crate::tools::tool_mv::ToolMv { config_path: "".to_string() }),
-            Box::new(crate::tools::tool_rm::ToolRm { config_path: "".to_string() }),
-            Box::new(crate::tools::tool_web::ToolWeb { config_path: "".to_string() }),
-            Box::new(crate::tools::tool_web_search::ToolWebSearch { config_path: "".to_string() }),
-            Box::new(crate::tools::tool_shell::ToolShell { cfg: Default::default(), config_path: "".to_string() }),
-            Box::new(crate::tools::file_edit::tool_create_textdoc::ToolCreateTextDoc { config_path: "".to_string() }),
-            Box::new(crate::tools::file_edit::tool_update_textdoc::ToolUpdateTextDoc { config_path: "".to_string() }),
-            Box::new(crate::tools::file_edit::tool_update_textdoc_by_lines::ToolUpdateTextDocByLines { config_path: "".to_string() }),
-            Box::new(crate::tools::file_edit::tool_update_textdoc_regex::ToolUpdateTextDocRegex { config_path: "".to_string() }),
+            Box::new(crate::tools::tool_cat::ToolCat {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_tree::ToolTree {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_regex_search::ToolRegexSearch {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_mv::ToolMv {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_rm::ToolRm {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_web::ToolWeb {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_web_search::ToolWebSearch {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_shell::ToolShell {
+                cfg: Default::default(),
+                config_path: "".to_string(),
+            }),
+            Box::new(
+                crate::tools::file_edit::tool_create_textdoc::ToolCreateTextDoc {
+                    config_path: "".to_string(),
+                },
+            ),
+            Box::new(
+                crate::tools::file_edit::tool_update_textdoc::ToolUpdateTextDoc {
+                    config_path: "".to_string(),
+                },
+            ),
+            Box::new(
+                crate::tools::file_edit::tool_update_textdoc_by_lines::ToolUpdateTextDocByLines {
+                    config_path: "".to_string(),
+                },
+            ),
+            Box::new(
+                crate::tools::file_edit::tool_update_textdoc_regex::ToolUpdateTextDocRegex {
+                    config_path: "".to_string(),
+                },
+            ),
         ];
 
         for tool in &tools {
@@ -280,7 +336,9 @@ mod tests {
                 desc.name
             );
             let openai = desc.clone().into_openai_style(false);
-            assert_eq!(openai["type"], json!("function"),
+            assert_eq!(
+                openai["type"],
+                json!("function"),
                 "Tool '{}' into_openai_style must produce type=function",
                 desc.name
             );
@@ -330,7 +388,10 @@ mod tests {
 
         assert_eq!(anthropic["name"], json!("test_tool"));
         assert_eq!(anthropic["input_schema"]["type"], json!("object"));
-        assert_eq!(anthropic["input_schema"]["properties"]["query"]["type"], json!("string"));
+        assert_eq!(
+            anthropic["input_schema"]["properties"]["query"]["type"],
+            json!("string")
+        );
         assert_eq!(anthropic["input_schema"]["required"], json!(["query"]));
         assert!(anthropic.get("parameters").is_none());
     }

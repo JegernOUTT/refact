@@ -216,7 +216,9 @@ pub async fn create_workspace_checkpoint(
             skipped += stage_changes(&nested_repo, &changes, &abort_flag)?;
         }
         if skipped > 0 {
-            tracing::warn!("checkpoint for chat {chat_id}: {skipped} large file(s) not snapshotted");
+            tracing::warn!(
+                "checkpoint for chat {chat_id}: {skipped} large file(s) not snapshotted"
+            );
         }
 
         Checkpoint {
@@ -242,27 +244,33 @@ pub async fn preview_changes_for_workspace_checkpoint(
         Oid::from_str(&checkpoint_to_restore.commit_hash).map_err_to_string()?;
     let reverted_to = match get_commit_datetime(&repo, &commit_to_restore_oid) {
         Ok(dt) => dt,
-        Err(_) => return Err("This checkpoint has expired (checkpoints older than 3 days are removed automatically)".to_string()),
+        Err(_) => return Err(
+            "This checkpoint has expired (checkpoints older than 3 days are removed automatically)"
+                .to_string(),
+        ),
     };
 
-    let mut files_changed =
-        match get_diff_statuses_index_to_commit(&repo, &commit_to_restore_oid, true) {
-            Ok(files_changed) => files_changed,
-            Err(e) => {
-                let recent_cutoff_timestamp = SystemTime::now()
-                    .checked_sub(RECENT_COMMITS_DURATION)
-                    .unwrap()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+    let mut files_changed = match get_diff_statuses_index_to_commit(
+        &repo,
+        &commit_to_restore_oid,
+        true,
+    ) {
+        Ok(files_changed) => files_changed,
+        Err(e) => {
+            let recent_cutoff_timestamp = SystemTime::now()
+                .checked_sub(RECENT_COMMITS_DURATION)
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
 
-                if reverted_to.timestamp() < recent_cutoff_timestamp as i64 {
-                    return Err("This checkpoint has expired (checkpoints older than 3 days are removed automatically)".to_string());
-                } else {
-                    return Err(e);
-                }
+            if reverted_to.timestamp() < recent_cutoff_timestamp as i64 {
+                return Err("This checkpoint has expired (checkpoints older than 3 days are removed automatically)".to_string());
+            } else {
+                return Err(e);
             }
-        };
+        }
+    };
 
     // Invert status since we got changes in reverse order so that if it fails it does not update the workspace
     for change in &mut files_changed {
@@ -326,7 +334,10 @@ pub async fn restore_workspace_checkpoint(
             index.write()
         });
         if let Err(e) = reset_index_result {
-            tracing::error!("Failed to reset index for {}: {e}", nested_workdir.display());
+            tracing::error!(
+                "Failed to reset index for {}: {e}",
+                nested_workdir.display()
+            );
         }
     }
 

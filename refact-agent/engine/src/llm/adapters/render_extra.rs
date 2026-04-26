@@ -26,7 +26,12 @@ pub fn render_context_file_content(content: &ChatContent) -> String {
     match content {
         ChatContent::ContextFiles(files) => files
             .iter()
-            .map(|f| format!("📄 {}:{}-{}\n{}", f.file_name, f.line1, f.line2, f.file_content))
+            .map(|f| {
+                format!(
+                    "📄 {}:{}-{}\n{}",
+                    f.file_name, f.line1, f.line2, f.file_content
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n\n"),
         _ => content.content_text_only(),
@@ -42,7 +47,11 @@ pub fn render_context_message(msg: &ChatMessage) -> Option<String> {
         _ => return None,
     };
     let trimmed = text.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Append `text` to the `"content"` field of a JSON tool message object,

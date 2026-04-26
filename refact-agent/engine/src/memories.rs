@@ -81,7 +81,9 @@ async fn load_parent_id_from_trajectory(
 ) -> Option<String> {
     let text = get_file_text_from_memory_or_disk(gcx, path).await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("parent_id").and_then(|x| x.as_str()).map(|s| s.to_string())
+    v.get("parent_id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
 }
 
 async fn load_root_chat_id_from_trajectory(
@@ -90,7 +92,9 @@ async fn load_root_chat_id_from_trajectory(
 ) -> Option<String> {
     let text = get_file_text_from_memory_or_disk(gcx, path).await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("root_chat_id").and_then(|x| x.as_str()).map(|s| s.to_string())
+    v.get("root_chat_id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
 }
 
 async fn resolve_root_chat_id(
@@ -192,43 +196,89 @@ fn compute_content_hash_hex(content: &str) -> String {
     hex::encode(h.finalize())
 }
 
-fn extract_fallback_tags(content: &str, detected_files: &[String], detected_entities: &[String]) -> Vec<String> {
+fn extract_fallback_tags(
+    content: &str,
+    detected_files: &[String],
+    detected_entities: &[String],
+) -> Vec<String> {
     let content_lower = content.to_lowercase();
     let mut tags = Vec::new();
-    
+
     let languages = [
-        "rust", "python", "typescript", "javascript", "java", "kotlin", 
-        "cpp", "c++", "go", "swift", "ruby", "php", "csharp", "c#"
+        "rust",
+        "python",
+        "typescript",
+        "javascript",
+        "java",
+        "kotlin",
+        "cpp",
+        "c++",
+        "go",
+        "swift",
+        "ruby",
+        "php",
+        "csharp",
+        "c#",
     ];
     for lang in &languages {
         if content_lower.contains(lang) {
             tags.push(lang.to_string());
         }
     }
-    
+
     let domains = [
-        "frontend", "backend", "database", "testing", "performance", 
-        "security", "api", "ui", "ux", "devops", "deployment", 
-        "refactoring", "debugging", "optimization", "architecture",
-        "react", "vue", "angular", "node", "express", "django",
-        "postgres", "mysql", "redis", "docker", "kubernetes"
+        "frontend",
+        "backend",
+        "database",
+        "testing",
+        "performance",
+        "security",
+        "api",
+        "ui",
+        "ux",
+        "devops",
+        "deployment",
+        "refactoring",
+        "debugging",
+        "optimization",
+        "architecture",
+        "react",
+        "vue",
+        "angular",
+        "node",
+        "express",
+        "django",
+        "postgres",
+        "mysql",
+        "redis",
+        "docker",
+        "kubernetes",
     ];
     for domain in &domains {
         if content_lower.contains(domain) {
             tags.push(domain.to_string());
         }
     }
-    
+
     let actions = [
-        "fix", "bug", "error", "implement", "add", "remove", 
-        "refactor", "optimize", "improve", "update", "migrate"
+        "fix",
+        "bug",
+        "error",
+        "implement",
+        "add",
+        "remove",
+        "refactor",
+        "optimize",
+        "improve",
+        "update",
+        "migrate",
     ];
     for action in &actions {
         if content_lower.contains(action) {
             tags.push(action.to_string());
         }
     }
-    
+
     for file in detected_files.iter().take(5) {
         if let Some(ext) = std::path::Path::new(file).extension() {
             if let Some(ext_str) = ext.to_str() {
@@ -236,13 +286,13 @@ fn extract_fallback_tags(content: &str, detected_files: &[String], detected_enti
             }
         }
     }
-    
+
     for entity in detected_entities.iter().take(3) {
         if entity.len() >= 4 && entity.len() <= 30 {
             tags.push(entity.to_lowercase());
         }
     }
-    
+
     tags.sort();
     tags.dedup();
     tags.truncate(10);
@@ -455,7 +505,14 @@ pub async fn memories_search(
     let vecdb_guard = vecdb_arc.lock().await;
     if vecdb_guard.is_none() {
         drop(vecdb_guard);
-        return memories_search_fallback(gcx, query, top_n_memories, &knowledge_dirs, exclude_root.as_deref()).await;
+        return memories_search_fallback(
+            gcx,
+            query,
+            top_n_memories,
+            &knowledge_dirs,
+            exclude_root.as_deref(),
+        )
+        .await;
     }
 
     let vecdb = vecdb_guard.as_ref().unwrap();
@@ -538,7 +595,11 @@ pub async fn memories_search(
         let is_knowledge = knowledge_dirs.iter().any(|d| rec.file_path.starts_with(d))
             && !path_contains_component(&rec.file_path, "archive");
         let is_trajectory = trajectory_dirs.iter().any(|d| rec.file_path.starts_with(d))
-            && rec.file_path.extension().map(|e| e == "json").unwrap_or(false);
+            && rec
+                .file_path
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false);
 
         if is_knowledge {
             knowledge_matches
@@ -560,7 +621,9 @@ pub async fn memories_search(
                 if !traj_id.is_empty() {
                     let candidate_root = if let Some(cached) = root_cache.get(&traj_id) {
                         cached.clone()
-                    } else if let Some(stored_root) = load_root_chat_id_from_trajectory(gcx.clone(), &rec.file_path).await {
+                    } else if let Some(stored_root) =
+                        load_root_chat_id_from_trajectory(gcx.clone(), &rec.file_path).await
+                    {
                         root_cache.insert(traj_id.clone(), stored_root.clone());
                         stored_root
                     } else {
@@ -608,9 +671,14 @@ pub async fn memories_search(
             continue;
         }
 
-        if let (Some(ref ex_root), Some(ref source_id)) = (&exclude_root, &frontmatter.source_chat_id) {
+        if let (Some(ref ex_root), Some(ref source_id)) =
+            (&exclude_root, &frontmatter.source_chat_id)
+        {
             if source_id == ex_root {
-                tracing::debug!("Excluding knowledge created by current chat: {:?}", file_path);
+                tracing::debug!(
+                    "Excluding knowledge created by current chat: {:?}",
+                    file_path
+                );
                 continue;
             }
         }
@@ -739,7 +807,14 @@ pub async fn memories_search(
         return Ok(records);
     }
 
-    memories_search_fallback(gcx, query, top_n_memories, &knowledge_dirs, exclude_root.as_deref()).await
+    memories_search_fallback(
+        gcx,
+        query,
+        top_n_memories,
+        &knowledge_dirs,
+        exclude_root.as_deref(),
+    )
+    .await
 }
 
 async fn memories_search_fallback(
@@ -797,9 +872,14 @@ async fn memories_search_fallback(
                 continue;
             }
 
-            if let (Some(ex_root), Some(ref source_id)) = (exclude_root, &frontmatter.source_chat_id) {
+            if let (Some(ex_root), Some(ref source_id)) =
+                (exclude_root, &frontmatter.source_chat_id)
+            {
                 if source_id == ex_root {
-                    tracing::debug!("Fallback: excluding knowledge created by current chat: {:?}", path);
+                    tracing::debug!(
+                        "Fallback: excluding knowledge created by current chat: {:?}",
+                        path
+                    );
                     continue;
                 }
             }
@@ -1032,20 +1112,23 @@ pub async fn memories_add_enriched(
                 )
             }
             Err(e) => {
-                warn!("Enrichment failed, using defaults with fallback tags: {}", e);
+                warn!(
+                    "Enrichment failed, using defaults with fallback tags: {}",
+                    e
+                );
                 let mut tags = params.base_tags.clone();
-                
+
                 let fallback_tags = extract_fallback_tags(content, &detected_paths, &entities);
                 tags.extend(fallback_tags);
-                
+
                 if tags.is_empty() {
                     tags.push(params.base_kind.clone());
                 }
-                
+
                 tags.sort();
                 tags.dedup();
                 tags.truncate(15);
-                
+
                 (
                     params.base_title.or_else(|| {
                         content
@@ -1130,14 +1213,20 @@ pub async fn memories_add_enriched(
     let new_doc_id = frontmatter.id.clone().unwrap();
 
     let mut updated_frontmatter = frontmatter.clone();
-    if let Err(e) = auto_link_memory(gcx.clone(), &mut updated_frontmatter, content, &file_path).await {
+    if let Err(e) =
+        auto_link_memory(gcx.clone(), &mut updated_frontmatter, content, &file_path).await
+    {
         warn!("Auto-linking failed for new memory: {}", e);
     } else if updated_frontmatter.links != frontmatter.links {
         let md_content = format!("{}\n\n{}", updated_frontmatter.to_yaml(), content);
         if let Err(e) = fs::write(&file_path, &md_content).await {
             warn!("Failed to update memory with auto-links: {}", e);
         } else {
-            info!("Auto-linked {} docs to {}", updated_frontmatter.links.len(), file_path.display());
+            info!(
+                "Auto-linked {} docs to {}",
+                updated_frontmatter.links.len(),
+                file_path.display()
+            );
         }
     }
 

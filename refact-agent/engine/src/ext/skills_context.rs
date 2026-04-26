@@ -87,7 +87,10 @@ fn build_skills_prompt_markdown(
             if has_deactivate_skill {
                 lines.push("When skills are available, use `activate_skill(name)` to load them, work with them, then call `deactivate_skill(report=\"...\")` with a completion summary.".to_string());
             } else {
-                lines.push("When skills are available, use `activate_skill(name)` to load them.".to_string());
+                lines.push(
+                    "When skills are available, use `activate_skill(name)` to load them."
+                        .to_string(),
+                );
             }
         }
         return lines.join("\n");
@@ -95,7 +98,8 @@ fn build_skills_prompt_markdown(
     let available_skills_intro = if has_activate_skill {
         "The following skills are available. Use `activate_skill(name)` to load a skill's full instructions when relevant. Users can also invoke skills with `/skill-name`.".to_string()
     } else {
-        "The following skills are available. Users can invoke skills with `/skill-name`.".to_string()
+        "The following skills are available. Users can invoke skills with `/skill-name`."
+            .to_string()
     };
     let mut lines = vec![
         "## Skills".to_string(),
@@ -131,7 +135,9 @@ fn build_skills_prompt_markdown(
         }
     } else {
         lines.push("### How Skills Work".to_string());
-        lines.push("- Skills with `disable-model-invocation` are user-only (not listed above)".to_string());
+        lines.push(
+            "- Skills with `disable-model-invocation` are user-only (not listed above)".to_string(),
+        );
     }
     lines.join("\n")
 }
@@ -147,7 +153,8 @@ pub async fn build_skills_prompt_text(
     }
     let ext_dirs = get_ext_dirs(gcx).await;
     let indices = load_skill_indices(&ext_dirs).await;
-    let displayable: Vec<_> = indices.iter()
+    let displayable: Vec<_> = indices
+        .iter()
         .filter(|s| s.user_invocable && !s.disable_model_invocation)
         .collect();
     build_skills_prompt_markdown(&displayable, has_activate_skill, has_deactivate_skill)
@@ -172,9 +179,16 @@ async fn build_context_messages_from_dirs(
         vec![]
     } else if let Some(name) = explicit_skill {
         match load_skill_full(ext_dirs, name).await {
-            Some(full) if full.index.user_invocable && !full.index.disable_model_invocation => vec![full],
+            Some(full) if full.index.user_invocable && !full.index.disable_model_invocation => {
+                vec![full]
+            }
             Some(full) => {
-                tracing::warn!("Skipping explicit skill '{}': user_invocable={}, disable_model_invocation={}", full.index.name, full.index.user_invocable, full.index.disable_model_invocation);
+                tracing::warn!(
+                    "Skipping explicit skill '{}': user_invocable={}, disable_model_invocation={}",
+                    full.index.name,
+                    full.index.user_invocable,
+                    full.index.disable_model_invocation
+                );
                 vec![]
             }
             None => vec![],
@@ -190,7 +204,10 @@ async fn build_context_messages_from_dirs(
         result
     };
 
-    let included_names: Vec<String> = skills_to_load.iter().map(|s| s.index.name.clone()).collect();
+    let included_names: Vec<String> = skills_to_load
+        .iter()
+        .map(|s| s.index.name.clone())
+        .collect();
 
     for skill in &skills_to_load {
         let body = expand_skill_includes(&skill.body, &skill.skill_dir).await;
@@ -208,20 +225,25 @@ async fn build_context_messages_from_dirs(
         });
     }
 
-    let tracking = SkillsTrackingInfo { available_count, included_names };
+    let tracking = SkillsTrackingInfo {
+        available_count,
+        included_names,
+    };
 
     if context_files.is_empty() {
         return (Vec::new(), tracking);
     }
 
-    (vec![ChatMessage {
-        role: "context_file".to_string(),
-        content: ChatContent::ContextFiles(context_files),
-        tool_call_id: SKILLS_CONTEXT_MARKER.to_string(),
-        ..Default::default()
-    }], tracking)
+    (
+        vec![ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(context_files),
+            tool_call_id: SKILLS_CONTEXT_MARKER.to_string(),
+            ..Default::default()
+        }],
+        tracking,
+    )
 }
-
 
 pub async fn build_skills_context_messages_tracked(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -230,7 +252,8 @@ pub async fn build_skills_context_messages_tracked(
 ) -> (Vec<ChatMessage>, SkillsTrackingInfo) {
     let config = load_skills_config(gcx.clone()).await;
     let ext_dirs = get_ext_dirs(gcx).await;
-    build_context_messages_from_dirs(&ext_dirs, user_message, explicit_skill, config.auto_trigger).await
+    build_context_messages_from_dirs(&ext_dirs, user_message, explicit_skill, config.auto_trigger)
+        .await
 }
 
 #[cfg(test)]
@@ -251,7 +274,9 @@ mod tests {
         let skill_dir = root.join("skills").join(name);
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         let content = format!("---\n{}\n---\n{}", frontmatter, body);
-        tokio::fs::write(skill_dir.join("SKILL.md"), content).await.unwrap();
+        tokio::fs::write(skill_dir.join("SKILL.md"), content)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -274,7 +299,10 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let displayable: Vec<_> = indices.iter().filter(|s| s.user_invocable && !s.disable_model_invocation).collect();
+        let displayable: Vec<_> = indices
+            .iter()
+            .filter(|s| s.user_invocable && !s.disable_model_invocation)
+            .collect();
         let text = build_skills_prompt_markdown(&displayable, true, false);
 
         assert!(text.contains("### Available Skills"));
@@ -305,11 +333,17 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let displayable: Vec<_> = indices.iter().filter(|s| s.user_invocable && !s.disable_model_invocation).collect();
+        let displayable: Vec<_> = indices
+            .iter()
+            .filter(|s| s.user_invocable && !s.disable_model_invocation)
+            .collect();
         let text = build_skills_prompt_markdown(&displayable, true, false);
 
         assert!(text.contains("visible-skill"));
-        assert!(!text.contains("hidden-skill"), "Non-user-invocable skills must not appear in index");
+        assert!(
+            !text.contains("hidden-skill"),
+            "Non-user-invocable skills must not appear in index"
+        );
     }
 
     #[tokio::test]
@@ -333,10 +367,16 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let displayable: Vec<_> = indices.iter().filter(|s| s.user_invocable && !s.disable_model_invocation).collect();
+        let displayable: Vec<_> = indices
+            .iter()
+            .filter(|s| s.user_invocable && !s.disable_model_invocation)
+            .collect();
         let text = build_skills_prompt_markdown(&displayable, true, false);
         assert!(!text.is_empty());
-        assert!(!text.contains("hidden"), "Non-invocable skill must not appear in output");
+        assert!(
+            !text.contains("hidden"),
+            "Non-invocable skill must not appear in output"
+        );
     }
 
     #[tokio::test]
@@ -359,8 +399,16 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let selected = crate::ext::skills_matcher::select_relevant_skills(&indices, "security vulnerabilities auditing code review", 2, 0.5);
-        assert!(selected.contains(&"security-review".to_string()), "Security skill should be auto-triggered");
+        let selected = crate::ext::skills_matcher::select_relevant_skills(
+            &indices,
+            "security vulnerabilities auditing code review",
+            2,
+            0.5,
+        );
+        assert!(
+            selected.contains(&"security-review".to_string()),
+            "Security skill should be auto-triggered"
+        );
     }
 
     #[tokio::test]
@@ -376,8 +424,16 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let selected = crate::ext::skills_matcher::select_relevant_skills(&indices, "breakfast cereal recipes", 2, 0.5);
-        assert!(selected.is_empty(), "Unrelated message should not trigger skills");
+        let selected = crate::ext::skills_matcher::select_relevant_skills(
+            &indices,
+            "breakfast cereal recipes",
+            2,
+            0.5,
+        );
+        assert!(
+            selected.is_empty(),
+            "Unrelated message should not trigger skills"
+        );
     }
 
     #[tokio::test]
@@ -393,8 +449,16 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let selected = crate::ext::skills_matcher::select_relevant_skills(&indices, "security review vulnerabilities", 2, 0.1);
-        assert!(selected.is_empty(), "disable-model-invocation must prevent auto-trigger");
+        let selected = crate::ext::skills_matcher::select_relevant_skills(
+            &indices,
+            "security review vulnerabilities",
+            2,
+            0.1,
+        );
+        assert!(
+            selected.is_empty(),
+            "disable-model-invocation must prevent auto-trigger"
+        );
     }
 
     #[tokio::test]
@@ -409,8 +473,17 @@ mod tests {
         .await;
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("my-skill"), SkillsAutoTrigger::InjectFull).await;
-        assert!(!msgs.is_empty(), "Should return messages for explicit skill invocation");
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "anything",
+            Some("my-skill"),
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
+        assert!(
+            !msgs.is_empty(),
+            "Should return messages for explicit skill invocation"
+        );
 
         let files = match &msgs[0].content {
             crate::call_validation::ChatContent::ContextFiles(f) => f,
@@ -418,7 +491,10 @@ mod tests {
         };
         let skill_file = files.iter().find(|f| f.file_name == "skill://my-skill");
         assert!(skill_file.is_some(), "Should include skill body");
-        assert!(skill_file.unwrap().file_content.contains("Do something with $ARGUMENTS in detail"));
+        assert!(skill_file
+            .unwrap()
+            .file_content
+            .contains("Do something with $ARGUMENTS in detail"));
     }
 
     #[tokio::test]
@@ -426,7 +502,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("skills").join("with-include");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(skill_dir.join("context.md"), "Included file content").await.unwrap();
+        tokio::fs::write(skill_dir.join("context.md"), "Included file content")
+            .await
+            .unwrap();
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: with-include\ndescription: Skill with includes\nuser-invocable: true\n---\nBefore include\n@include context.md\nAfter include",
@@ -435,19 +513,31 @@ mod tests {
         .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("with-include"), SkillsAutoTrigger::InjectFull).await;
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "anything",
+            Some("with-include"),
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
         assert!(!msgs.is_empty());
 
         let files = match &msgs[0].content {
             crate::call_validation::ChatContent::ContextFiles(f) => f,
             _ => panic!("Expected ContextFiles"),
         };
-        let skill_file = files.iter().find(|f| f.file_name == "skill://with-include").unwrap();
+        let skill_file = files
+            .iter()
+            .find(|f| f.file_name == "skill://with-include")
+            .unwrap();
         assert!(
             skill_file.file_content.contains("Included file content"),
             "Include should be resolved"
         );
-        assert!(!skill_file.file_content.contains("@include"), "@include directive should be replaced");
+        assert!(
+            !skill_file.file_content.contains("@include"),
+            "@include directive should be replaced"
+        );
     }
 
     #[tokio::test]
@@ -457,7 +547,9 @@ mod tests {
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
 
         let big_content = "x".repeat(50 * 1024 + 1);
-        tokio::fs::write(skill_dir.join("big.md"), &big_content).await.unwrap();
+        tokio::fs::write(skill_dir.join("big.md"), &big_content)
+            .await
+            .unwrap();
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: big-include\ndescription: Skill with big include\nuser-invocable: true\n---\nBefore\n@include big.md\nAfter",
@@ -466,19 +558,31 @@ mod tests {
         .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("big-include"), SkillsAutoTrigger::InjectFull).await;
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "anything",
+            Some("big-include"),
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
         assert!(!msgs.is_empty());
 
         let files = match &msgs[0].content {
             crate::call_validation::ChatContent::ContextFiles(f) => f,
             _ => panic!("Expected ContextFiles"),
         };
-        let skill_file = files.iter().find(|f| f.file_name == "skill://big-include").unwrap();
+        let skill_file = files
+            .iter()
+            .find(|f| f.file_name == "skill://big-include")
+            .unwrap();
         assert!(
             !skill_file.file_content.contains(&big_content[..100]),
             "Oversized included file should be skipped"
         );
-        assert!(skill_file.file_content.contains("@include big.md"), "@include directive should remain if file too large");
+        assert!(
+            skill_file.file_content.contains("@include big.md"),
+            "@include directive should remain if file too large"
+        );
     }
 
     #[tokio::test]
@@ -490,7 +594,9 @@ mod tests {
         let mut body = String::new();
         for i in 0..=MAX_INCLUDES {
             let fname = format!("file{}.md", i);
-            tokio::fs::write(skill_dir.join(&fname), format!("Content {}", i)).await.unwrap();
+            tokio::fs::write(skill_dir.join(&fname), format!("Content {}", i))
+                .await
+                .unwrap();
             body.push_str(&format!("@include {}\n", fname));
         }
 
@@ -502,14 +608,23 @@ mod tests {
         .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("many-includes"), SkillsAutoTrigger::InjectFull).await;
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "anything",
+            Some("many-includes"),
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
         assert!(!msgs.is_empty());
 
         let files = match &msgs[0].content {
             crate::call_validation::ChatContent::ContextFiles(f) => f,
             _ => panic!("Expected ContextFiles"),
         };
-        let skill_file = files.iter().find(|f| f.file_name == "skill://many-includes").unwrap();
+        let skill_file = files
+            .iter()
+            .find(|f| f.file_name == "skill://many-includes")
+            .unwrap();
         let included_count = (0..=MAX_INCLUDES)
             .filter(|i| skill_file.file_content.contains(&format!("Content {}", i)))
             .count();
@@ -528,7 +643,13 @@ mod tests {
             installed_dirs: vec![],
             project_dirs: vec![],
         };
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "any message", None, SkillsAutoTrigger::InjectFull).await;
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "any message",
+            None,
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
         assert!(msgs.is_empty(), "No skills = no messages");
     }
 
@@ -544,7 +665,13 @@ mod tests {
         .await;
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "unrelated message", None, SkillsAutoTrigger::InjectFull).await;
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "unrelated message",
+            None,
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
         for msg in &msgs {
             if let crate::call_validation::ChatContent::ContextFiles(files) = &msg.content {
                 let index_file = files.iter().find(|f| f.file_name == "skills://index");
@@ -566,8 +693,17 @@ mod tests {
         .unwrap();
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("empty-body"), SkillsAutoTrigger::InjectFull).await;
-        assert!(!msgs.is_empty(), "Should return skill body ContextFile for explicit invocation");
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "anything",
+            Some("empty-body"),
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
+        assert!(
+            !msgs.is_empty(),
+            "Should return skill body ContextFile for explicit invocation"
+        );
     }
 
     #[tokio::test]
@@ -582,7 +718,13 @@ mod tests {
         .await;
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, tracking) = build_context_messages_from_dirs(&ext_dirs, "test-skill anything", None, SkillsAutoTrigger::Off).await;
+        let (msgs, tracking) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "test-skill anything",
+            None,
+            SkillsAutoTrigger::Off,
+        )
+        .await;
         assert!(msgs.is_empty(), "Off mode must inject nothing");
         assert_eq!(tracking.available_count, 0);
         assert!(tracking.included_names.is_empty());
@@ -608,9 +750,18 @@ mod tests {
         )
         .await;
 
-        assert!(msgs.is_empty(), "IndexOnly must not inject any ContextFiles (index is in system prompt)");
-        assert!(tracking.included_names.is_empty(), "No skills included in index_only mode");
-        assert!(tracking.available_count > 0, "Tracking must still report available skills");
+        assert!(
+            msgs.is_empty(),
+            "IndexOnly must not inject any ContextFiles (index is in system prompt)"
+        );
+        assert!(
+            tracking.included_names.is_empty(),
+            "No skills included in index_only mode"
+        );
+        assert!(
+            tracking.available_count > 0,
+            "Tracking must still report available skills"
+        );
     }
 
     #[tokio::test]
@@ -640,7 +791,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(msgs_default.len(), msgs_explicit.len(), "Default mode must equal IndexOnly");
+        assert_eq!(
+            msgs_default.len(),
+            msgs_explicit.len(),
+            "Default mode must equal IndexOnly"
+        );
     }
 
     #[tokio::test]
@@ -663,10 +818,19 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let displayable: Vec<_> = indices.iter().filter(|s| s.user_invocable && !s.disable_model_invocation).collect();
+        let displayable: Vec<_> = indices
+            .iter()
+            .filter(|s| s.user_invocable && !s.disable_model_invocation)
+            .collect();
         let text = build_skills_prompt_markdown(&displayable, true, false);
-        assert!(text.contains("user-skill"), "user-invocable skill must appear in index");
-        assert!(!text.contains("model-disabled"), "disable-model-invocation skill must not appear in index");
+        assert!(
+            text.contains("user-skill"),
+            "user-invocable skill must appear in index"
+        );
+        assert!(
+            !text.contains("model-disabled"),
+            "disable-model-invocation skill must not appear in index"
+        );
     }
 
     #[tokio::test]
@@ -681,12 +845,21 @@ mod tests {
         .await;
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", None, SkillsAutoTrigger::InjectFull).await;
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "anything",
+            None,
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
 
         for msg in &msgs {
             if let crate::call_validation::ChatContent::ContextFiles(files) = &msg.content {
                 let index_file = files.iter().find(|f| f.file_name == "skills://index");
-                assert!(index_file.is_none(), "skills://index must not be emitted as ContextFile");
+                assert!(
+                    index_file.is_none(),
+                    "skills://index must not be emitted as ContextFile"
+                );
             }
         }
     }
@@ -711,10 +884,14 @@ mod tests {
 
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let displayable: Vec<_> = indices.iter()
+        let displayable: Vec<_> = indices
+            .iter()
             .filter(|s| s.user_invocable && !s.disable_model_invocation)
             .collect();
-        assert!(!displayable.is_empty(), "Expected at least one displayable skill");
+        assert!(
+            !displayable.is_empty(),
+            "Expected at least one displayable skill"
+        );
 
         let text = build_skills_prompt_markdown(&displayable, true, true);
 
@@ -723,7 +900,10 @@ mod tests {
         assert!(text.contains("### Skill Lifecycle"));
         assert!(text.contains("**my-skill**"));
         assert!(text.contains("Does something useful"));
-        assert!(!text.contains("hidden-skill"), "disable-model-invocation skills must not appear");
+        assert!(
+            !text.contains("hidden-skill"),
+            "disable-model-invocation skills must not appear"
+        );
         assert!(text.contains("activate_skill"));
     }
 
@@ -747,15 +927,28 @@ mod tests {
         )
         .await;
 
-        assert!(!msgs.is_empty(), "Skill bodies must still be emitted as ContextFiles");
+        assert!(
+            !msgs.is_empty(),
+            "Skill bodies must still be emitted as ContextFiles"
+        );
         let files = match &msgs[0].content {
             crate::call_validation::ChatContent::ContextFiles(f) => f,
             _ => panic!("Expected ContextFiles"),
         };
-        let skill_body = files.iter().find(|f| f.file_name == "skill://security-review");
-        assert!(skill_body.is_some(), "Skill body ContextFile must be present");
-        assert!(skill_body.unwrap().file_content.contains("Full security review body content"));
-        assert!(tracking.included_names.contains(&"security-review".to_string()));
+        let skill_body = files
+            .iter()
+            .find(|f| f.file_name == "skill://security-review");
+        assert!(
+            skill_body.is_some(),
+            "Skill body ContextFile must be present"
+        );
+        assert!(skill_body
+            .unwrap()
+            .file_content
+            .contains("Full security review body content"));
+        assert!(tracking
+            .included_names
+            .contains(&"security-review".to_string()));
     }
 
     #[test]
@@ -800,8 +993,14 @@ mod tests {
         let skill = make_skill_index("my-skill", "Does something useful");
         let displayable = vec![&skill];
         let text = build_skills_prompt_markdown(&displayable, true, false);
-        assert!(text.contains("activate_skill"), "activate_skill must be mentioned when has_activate_skill=true");
-        assert!(text.contains("activate_skill(name="), "activate_skill call syntax must be present");
+        assert!(
+            text.contains("activate_skill"),
+            "activate_skill must be mentioned when has_activate_skill=true"
+        );
+        assert!(
+            text.contains("activate_skill(name="),
+            "activate_skill call syntax must be present"
+        );
         assert!(text.contains("**my-skill**"));
     }
 
@@ -810,8 +1009,14 @@ mod tests {
         let skill = make_skill_index("my-skill", "Does something useful");
         let displayable = vec![&skill];
         let text = build_skills_prompt_markdown(&displayable, false, false);
-        assert!(!text.contains("activate_skill"), "activate_skill must not be mentioned when has_activate_skill=false");
-        assert!(text.contains("/skill-name"), "slash syntax must still be mentioned");
+        assert!(
+            !text.contains("activate_skill"),
+            "activate_skill must not be mentioned when has_activate_skill=false"
+        );
+        assert!(
+            text.contains("/skill-name"),
+            "slash syntax must still be mentioned"
+        );
         assert!(text.contains("**my-skill**"));
     }
 
@@ -821,9 +1026,18 @@ mod tests {
         let displayable = vec![&skill];
         let text_with = build_skills_prompt_markdown(&displayable, true, true);
         let text_without = build_skills_prompt_markdown(&displayable, true, false);
-        assert!(text_with.contains("deactivate_skill"), "deactivate_skill must appear when has_deactivate_skill=true");
-        assert!(text_with.contains("report="), "report parameter must appear when has_deactivate_skill=true");
-        assert!(!text_without.contains("deactivate_skill"), "deactivate_skill must not appear when has_deactivate_skill=false");
+        assert!(
+            text_with.contains("deactivate_skill"),
+            "deactivate_skill must appear when has_deactivate_skill=true"
+        );
+        assert!(
+            text_with.contains("report="),
+            "report parameter must appear when has_deactivate_skill=true"
+        );
+        assert!(
+            !text_without.contains("deactivate_skill"),
+            "deactivate_skill must not appear when has_deactivate_skill=false"
+        );
     }
 
     #[tokio::test]
@@ -838,8 +1052,17 @@ mod tests {
         .await;
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "security vulnerabilities review", None, SkillsAutoTrigger::InjectFull).await;
-        assert!(msgs.is_empty(), "user_invocable=false skill must not be auto-injected");
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "security vulnerabilities review",
+            None,
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
+        assert!(
+            msgs.is_empty(),
+            "user_invocable=false skill must not be auto-injected"
+        );
     }
 
     #[tokio::test]
@@ -854,8 +1077,17 @@ mod tests {
         .await;
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("locked-skill"), SkillsAutoTrigger::InjectFull).await;
-        assert!(msgs.is_empty(), "disable_model_invocation=true must block explicit injection");
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "anything",
+            Some("locked-skill"),
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
+        assert!(
+            msgs.is_empty(),
+            "disable_model_invocation=true must block explicit injection"
+        );
     }
 
     #[tokio::test]
@@ -870,8 +1102,17 @@ mod tests {
         .await;
 
         let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(&ext_dirs, "anything", Some("non-invocable-skill"), SkillsAutoTrigger::InjectFull).await;
-        assert!(msgs.is_empty(), "user_invocable=false must block explicit injection");
+        let (msgs, _) = build_context_messages_from_dirs(
+            &ext_dirs,
+            "anything",
+            Some("non-invocable-skill"),
+            SkillsAutoTrigger::InjectFull,
+        )
+        .await;
+        assert!(
+            msgs.is_empty(),
+            "user_invocable=false must block explicit injection"
+        );
     }
 
     #[tokio::test]
@@ -882,7 +1123,8 @@ mod tests {
             "normal-skill",
             "name: normal-skill\ndescription: reviews security vulnerabilities code auditing",
             "Body",
-        ).await;
+        )
+        .await;
         write_skill(
             tmp.path(),
             "disabled-skill",
@@ -899,7 +1141,8 @@ mod tests {
         let ext_dirs = make_ext_dirs(tmp.path());
         let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
 
-        let displayable: Vec<_> = indices.iter()
+        let displayable: Vec<_> = indices
+            .iter()
             .filter(|s| s.user_invocable && !s.disable_model_invocation)
             .collect();
         let prompt_names: std::collections::HashSet<&str> =
@@ -920,12 +1163,30 @@ mod tests {
                 prompt_names
             );
         }
-        assert!(prompt_names.contains("normal-skill"), "normal-skill must be in prompt");
-        assert!(!prompt_names.contains("disabled-skill"), "disabled-skill must not be in prompt");
-        assert!(!prompt_names.contains("noninvocable-skill"), "noninvocable-skill must not be in prompt");
-        assert!(triggered.contains(&"normal-skill".to_string()), "normal-skill must be auto-triggered");
-        assert!(!triggered.contains(&"disabled-skill".to_string()), "disabled-skill must not be auto-triggered");
-        assert!(!triggered.contains(&"noninvocable-skill".to_string()), "noninvocable-skill must not be auto-triggered");
+        assert!(
+            prompt_names.contains("normal-skill"),
+            "normal-skill must be in prompt"
+        );
+        assert!(
+            !prompt_names.contains("disabled-skill"),
+            "disabled-skill must not be in prompt"
+        );
+        assert!(
+            !prompt_names.contains("noninvocable-skill"),
+            "noninvocable-skill must not be in prompt"
+        );
+        assert!(
+            triggered.contains(&"normal-skill".to_string()),
+            "normal-skill must be auto-triggered"
+        );
+        assert!(
+            !triggered.contains(&"disabled-skill".to_string()),
+            "disabled-skill must not be auto-triggered"
+        );
+        assert!(
+            !triggered.contains(&"noninvocable-skill".to_string()),
+            "noninvocable-skill must not be auto-triggered"
+        );
     }
 
     #[test]
@@ -949,9 +1210,18 @@ mod tests {
         let skill = make_skill_index("my-skill", "Does something useful");
         let displayable = vec![&skill];
         let text = build_skills_prompt_markdown(&displayable, true, true);
-        assert!(text.contains("deactivate_skill"), "lifecycle must mention deactivate_skill");
-        assert!(text.contains("report"), "lifecycle must mention report parameter");
-        assert!(text.contains("compacts"), "lifecycle must mention that report compacts history");
+        assert!(
+            text.contains("deactivate_skill"),
+            "lifecycle must mention deactivate_skill"
+        );
+        assert!(
+            text.contains("report"),
+            "lifecycle must mention report parameter"
+        );
+        assert!(
+            text.contains("compacts"),
+            "lifecycle must mention that report compacts history"
+        );
     }
 
     #[test]
@@ -960,7 +1230,13 @@ mod tests {
         assert!(!text.is_empty());
         assert!(text.contains("## Skills"));
         assert!(text.contains("No skills are currently installed"));
-        assert!(text.contains("activate_skill"), "empty state must mention activate_skill when tool available");
-        assert!(text.contains("deactivate_skill"), "empty state must mention deactivate_skill when tool available");
+        assert!(
+            text.contains("activate_skill"),
+            "empty state must mention activate_skill when tool available"
+        );
+        assert!(
+            text.contains("deactivate_skill"),
+            "empty state must mention deactivate_skill when tool available"
+        );
     }
 }

@@ -4,7 +4,9 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::tools::tool_task_check_agents::{get_task_id, get_agent_statuses, format_agent_status};
@@ -51,9 +53,11 @@ impl Tool for ToolTaskWaitForAgents {
             .unwrap_or(false);
 
         if !is_planner {
-            return Err("task_wait_for_agents can only be called by the task planner. \
+            return Err(
+                "task_wait_for_agents can only be called by the task planner. \
                  Switch to the planner chat to check agent status."
-                .to_string());
+                    .to_string(),
+            );
         }
 
         drop(ccx_lock);
@@ -68,7 +72,9 @@ impl Tool for ToolTaskWaitForAgents {
 
             {
                 let ccx_lock = ccx.lock().await;
-                ccx_lock.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                ccx_lock
+                    .abort_flag
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
 
             return Ok((
@@ -128,7 +134,9 @@ impl Tool for ToolTaskWaitForAgents {
 
         {
             let ccx_lock = ccx.lock().await;
-            ccx_lock.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            ccx_lock
+                .abort_flag
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         Ok((

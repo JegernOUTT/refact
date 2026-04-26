@@ -60,7 +60,11 @@ impl MCPMetricsCollector {
     }
 
     pub fn record_connected(&mut self) {
-        self.metrics.connected_since = Some(chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string());
+        self.metrics.connected_since = Some(
+            chrono::Local::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3f")
+                .to_string(),
+        );
         self.process_start = Some(Instant::now());
     }
 
@@ -80,13 +84,19 @@ impl MCPMetricsCollector {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         self.metrics.total_tool_calls += 1;
         self.metrics.successful_calls += 1;
-        let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now_str = chrono::Local::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
         self.metrics.last_call_at = Some(now_str.clone());
 
         self.push_response_time(elapsed_ms);
         self.update_aggregates();
 
-        let entry = self.metrics.tool_stats.entry(tool_name.to_string()).or_default();
+        let entry = self
+            .metrics
+            .tool_stats
+            .entry(tool_name.to_string())
+            .or_default();
         let n = entry.call_count as f64;
         entry.avg_response_ms = (entry.avg_response_ms * n + elapsed_ms) / (n + 1.0);
         entry.call_count += 1;
@@ -97,13 +107,19 @@ impl MCPMetricsCollector {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         self.metrics.total_tool_calls += 1;
         self.metrics.failed_calls += 1;
-        let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now_str = chrono::Local::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
         self.metrics.last_call_at = Some(now_str.clone());
 
         self.push_response_time(elapsed_ms);
         self.update_aggregates();
 
-        let entry = self.metrics.tool_stats.entry(tool_name.to_string()).or_default();
+        let entry = self
+            .metrics
+            .tool_stats
+            .entry(tool_name.to_string())
+            .or_default();
         entry.call_count += 1;
         entry.error_count += 1;
         entry.last_called_at = Some(now_str);
@@ -197,14 +213,22 @@ fn read_proc_rss(pid: u32) -> Option<u64> {
 #[cfg(target_os = "linux")]
 unsafe fn libc_page_size() -> u64 {
     let sz = libc::sysconf(libc::_SC_PAGESIZE);
-    if sz > 0 { sz as u64 } else { 4096 }
+    if sz > 0 {
+        sz as u64
+    } else {
+        4096
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn get_clock_ticks_per_sec() -> f64 {
     // Safety: sysconf is always safe to call with _SC_CLK_TCK
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if ticks <= 0 { 100.0 } else { ticks as f64 }
+    if ticks <= 0 {
+        100.0
+    } else {
+        ticks as f64
+    }
 }
 
 #[cfg(target_os = "linux")]

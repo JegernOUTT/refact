@@ -30,15 +30,20 @@ pub async fn handle_list_marketplaces(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let _ = ensure_default_marketplaces(gcx.clone()).await;
     let config_dir = gcx.read().await.config_dir.clone();
-    let db = load_plugins_db(&config_dir).await
+    let db = load_plugins_db(&config_dir)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let summaries: Vec<Value> = db.marketplaces.iter().map(|m| {
-        json!({
-            "name": m.name,
-            "source": m.source,
-            "added_at": m.added_at,
+    let summaries: Vec<Value> = db
+        .marketplaces
+        .iter()
+        .map(|m| {
+            json!({
+                "name": m.name,
+                "source": m.source,
+                "added_at": m.added_at,
+            })
         })
-    }).collect();
+        .collect();
     Ok(Json(json!({ "marketplaces": summaries })))
 }
 
@@ -48,14 +53,13 @@ pub async fn handle_add_marketplace(
 ) -> Result<Json<Value>, ScratchError> {
     let req = serde_json::from_slice::<AddMarketplaceRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
-    let mj = add_marketplace(gcx, &req.source).await
-        .map_err(|e| {
-            if e.contains("invalid") || e.contains("cannot") || e.contains("must match") {
-                ScratchError::new(StatusCode::BAD_REQUEST, e)
-            } else {
-                ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e)
-            }
-        })?;
+    let mj = add_marketplace(gcx, &req.source).await.map_err(|e| {
+        if e.contains("invalid") || e.contains("cannot") || e.contains("must match") {
+            ScratchError::new(StatusCode::BAD_REQUEST, e)
+        } else {
+            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e)
+        }
+    })?;
     Ok(Json(json!({
         "name": mj.name,
         "plugin_count": mj.plugins.len(),
@@ -69,7 +73,8 @@ pub async fn handle_delete_marketplace(
     if let Err(e) = validate_plugin_name(&name) {
         return Err((StatusCode::BAD_REQUEST, e));
     }
-    remove_marketplace(gcx, &name).await
+    remove_marketplace(gcx, &name)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({ "deleted": true })))
 }
@@ -81,21 +86,25 @@ pub async fn handle_list_marketplace_plugins(
     if let Err(e) = validate_plugin_name(&name) {
         return Err((StatusCode::BAD_REQUEST, e));
     }
-    let plugins = list_marketplace_plugins(gcx, &name).await
-        .map_err(|e| {
-            if e.contains("not found") {
-                (StatusCode::NOT_FOUND, e)
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e)
-            }
-        })?;
-    let plugins_json: Vec<Value> = plugins.iter().map(|p| json!({
-        "name": p.name,
-        "description": p.description,
-        "version": p.version,
-        "tags": p.tags,
-        "marketplace": name,
-    })).collect();
+    let plugins = list_marketplace_plugins(gcx, &name).await.map_err(|e| {
+        if e.contains("not found") {
+            (StatusCode::NOT_FOUND, e)
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, e)
+        }
+    })?;
+    let plugins_json: Vec<Value> = plugins
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "description": p.description,
+                "version": p.version,
+                "tags": p.tags,
+                "marketplace": name,
+            })
+        })
+        .collect();
     Ok(Json(json!({ "plugins": plugins_json })))
 }
 
@@ -111,7 +120,8 @@ pub async fn handle_install_plugin(
     if let Err(e) = validate_plugin_name(&req.marketplace) {
         return Err(ScratchError::new(StatusCode::BAD_REQUEST, e));
     }
-    let entry = install_plugin(gcx, &req.plugin, &req.marketplace).await
+    let entry = install_plugin(gcx, &req.plugin, &req.marketplace)
+        .await
         .map_err(|e| {
             if e.contains("not found") {
                 ScratchError::new(StatusCode::NOT_FOUND, e)
@@ -136,7 +146,8 @@ pub async fn handle_list_installed(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let config_dir = gcx.read().await.config_dir.clone();
-    let db = load_plugins_db(&config_dir).await
+    let db = load_plugins_db(&config_dir)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({ "installed": db.installed })))
 }
@@ -148,7 +159,8 @@ pub async fn handle_uninstall_plugin(
     if let Err(e) = validate_plugin_name(&name) {
         return Err((StatusCode::BAD_REQUEST, e));
     }
-    uninstall_plugin(gcx, &name).await
+    uninstall_plugin(gcx, &name)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({ "deleted": true })))
 }

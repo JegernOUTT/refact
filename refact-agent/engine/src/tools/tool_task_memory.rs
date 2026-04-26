@@ -16,7 +16,9 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tasks::storage::find_task_dir;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use tokio::sync::RwLock as ARwLock;
 
 const MEMORIES_DIR: &str = "memories";
@@ -207,7 +209,6 @@ impl ToolTaskMemoriesGet {
 
 #[async_trait]
 impl Tool for ToolTaskMemoriesGet {
-
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
             name: "task_memories_get".to_string(),

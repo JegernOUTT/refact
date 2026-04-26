@@ -7,7 +7,9 @@ use chrono::Utc;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params};
+use crate::tools::tools_description::{
+    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+};
 use crate::tasks::storage;
 use crate::tasks::types::StatusUpdate;
 use crate::tasks::events::{TaskEvent, emit_task_event};
@@ -76,11 +78,15 @@ impl Tool for ToolTaskAgentUpdate {
         board.rev += 1;
 
         storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(gcx, TaskEvent::BoardChanged {
-            task_id: task_id.to_string(),
-            rev: board.rev,
-            board: board.clone(),
-        }).await;
+        emit_task_event(
+            gcx,
+            TaskEvent::BoardChanged {
+                task_id: task_id.to_string(),
+                rev: board.rev,
+                board: board.clone(),
+            },
+        )
+        .await;
 
         let result = format!("Added status update to card {}", card_id);
         Ok((
@@ -107,7 +113,13 @@ impl Tool for ToolTaskAgentUpdate {
             experimental: false,
             allow_parallel: false,
             description: "Add a progress update to the assigned card.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID"), ("message", "string", "Progress message")], &["card_id", "message"]),
+            input_schema: json_schema_from_params(
+                &[
+                    ("card_id", "string", "Card ID"),
+                    ("message", "string", "Progress message"),
+                ],
+                &["card_id", "message"],
+            ),
             output_schema: None,
             annotations: None,
         }
@@ -151,11 +163,15 @@ impl Tool for ToolTaskAgentComplete {
         board.rev += 1;
 
         storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(gcx.clone(), TaskEvent::BoardChanged {
-            task_id: task_id.to_string(),
-            rev: board.rev,
-            board: board.clone(),
-        }).await;
+        emit_task_event(
+            gcx.clone(),
+            TaskEvent::BoardChanged {
+                task_id: task_id.to_string(),
+                rev: board.rev,
+                board: board.clone(),
+            },
+        )
+        .await;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!("Completed card {} and moved to Done", card_id);
@@ -183,7 +199,17 @@ impl Tool for ToolTaskAgentComplete {
             experimental: false,
             allow_parallel: false,
             description: "Mark the assigned card as complete with a final report.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID"), ("final_report", "string", "Summary of what was done, decisions made, files modified")], &["card_id", "final_report"]),
+            input_schema: json_schema_from_params(
+                &[
+                    ("card_id", "string", "Card ID"),
+                    (
+                        "final_report",
+                        "string",
+                        "Summary of what was done, decisions made, files modified",
+                    ),
+                ],
+                &["card_id", "final_report"],
+            ),
             output_schema: None,
             annotations: None,
         }
@@ -198,7 +224,6 @@ impl ToolTaskAgentFail {
 
 #[async_trait]
 impl Tool for ToolTaskAgentFail {
-
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -228,11 +253,15 @@ impl Tool for ToolTaskAgentFail {
         board.rev += 1;
 
         storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(gcx.clone(), TaskEvent::BoardChanged {
-            task_id: task_id.to_string(),
-            rev: board.rev,
-            board: board.clone(),
-        }).await;
+        emit_task_event(
+            gcx.clone(),
+            TaskEvent::BoardChanged {
+                task_id: task_id.to_string(),
+                rev: board.rev,
+                board: board.clone(),
+            },
+        )
+        .await;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!(
@@ -263,7 +292,13 @@ impl Tool for ToolTaskAgentFail {
             experimental: false,
             allow_parallel: false,
             description: "Mark the assigned card as failed with an explanation.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID"), ("reason", "string", "Why the task failed")], &["card_id", "reason"]),
+            input_schema: json_schema_from_params(
+                &[
+                    ("card_id", "string", "Card ID"),
+                    ("reason", "string", "Why the task failed"),
+                ],
+                &["card_id", "reason"],
+            ),
             output_schema: None,
             annotations: None,
         }
@@ -316,11 +351,15 @@ impl Tool for ToolTaskAssignAgent {
         board.rev += 1;
 
         storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(gcx.clone(), TaskEvent::BoardChanged {
-            task_id: task_id.to_string(),
-            rev: board.rev,
-            board: board.clone(),
-        }).await;
+        emit_task_event(
+            gcx.clone(),
+            TaskEvent::BoardChanged {
+                task_id: task_id.to_string(),
+                rev: board.rev,
+                board: board.clone(),
+            },
+        )
+        .await;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!(
@@ -351,7 +390,14 @@ impl Tool for ToolTaskAssignAgent {
             experimental: false,
             allow_parallel: false,
             description: "Assign an agent to a card and move it to Doing.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID to assign"), ("agent_id", "string", "Agent UUID"), ("agent_chat_id", "string", "Agent chat/trajectory ID")], &["card_id", "agent_id", "agent_chat_id"]),
+            input_schema: json_schema_from_params(
+                &[
+                    ("card_id", "string", "Card ID to assign"),
+                    ("agent_id", "string", "Agent UUID"),
+                    ("agent_chat_id", "string", "Agent chat/trajectory ID"),
+                ],
+                &["card_id", "agent_id", "agent_chat_id"],
+            ),
             output_schema: None,
             annotations: None,
         }

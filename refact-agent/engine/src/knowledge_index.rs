@@ -64,10 +64,7 @@ fn kind_priority(kind: Option<&str>) -> i32 {
 
 fn recency_key(created_at: Option<&str>, created: Option<&str>) -> String {
     // Lexicographic sort works for RFC3339 and YYYY-MM-DD.
-    created_at
-        .or(created)
-        .unwrap_or("")
-        .to_string()
+    created_at.or(created).unwrap_or("").to_string()
 }
 
 fn rank_cards(mut cards: Vec<KnowledgeCard>, max_items: usize) -> Vec<KnowledgeCard> {
@@ -195,7 +192,11 @@ impl KnowledgeIndex {
         rank_cards(out, max_items)
     }
 
-    pub fn related_for_related_files(&self, filenames: &[String], max_items: usize) -> Vec<KnowledgeCard> {
+    pub fn related_for_related_files(
+        &self,
+        filenames: &[String],
+        max_items: usize,
+    ) -> Vec<KnowledgeCard> {
         let mut seen = HashSet::<String>::new();
         let mut out = Vec::new();
         for f in filenames {
@@ -210,7 +211,11 @@ impl KnowledgeIndex {
         rank_cards(out, max_items)
     }
 
-    pub fn related_for_entities(&self, entities: &[String], max_items: usize) -> Vec<KnowledgeCard> {
+    pub fn related_for_entities(
+        &self,
+        entities: &[String],
+        max_items: usize,
+    ) -> Vec<KnowledgeCard> {
         let mut seen = HashSet::<String>::new();
         let mut out = Vec::new();
         for e in entities {
@@ -225,7 +230,11 @@ impl KnowledgeIndex {
         rank_cards(out, max_items)
     }
 
-    pub fn related_for_related_entities(&self, entities: &[String], max_items: usize) -> Vec<KnowledgeCard> {
+    pub fn related_for_related_entities(
+        &self,
+        entities: &[String],
+        max_items: usize,
+    ) -> Vec<KnowledgeCard> {
         let mut seen = HashSet::<String>::new();
         let mut out = Vec::new();
         for e in entities {
@@ -257,7 +266,10 @@ impl KnowledgeIndex {
     }
 }
 
-pub fn format_related_memories_section(cards: &[KnowledgeCard], exclude_path: Option<&Path>) -> String {
+pub fn format_related_memories_section(
+    cards: &[KnowledgeCard],
+    exclude_path: Option<&Path>,
+) -> String {
     let mut shown = Vec::new();
     for c in cards {
         if let Some(ex) = exclude_path {
@@ -319,7 +331,10 @@ pub async fn build_knowledge_index(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
     }
 
     for dir in knowledge_dirs {
-        for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             let path = entry.path();
             if !path.is_file() {
                 continue;
@@ -332,10 +347,11 @@ pub async fn build_knowledge_index(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
                 continue;
             }
 
-            let text = match get_file_text_from_memory_or_disk(gcx.clone(), &path.to_path_buf()).await {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
+            let text =
+                match get_file_text_from_memory_or_disk(gcx.clone(), &path.to_path_buf()).await {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
             let (fm, content_start) = KnowledgeFrontmatter::parse(&text);
             if fm.is_archived() || fm.is_deprecated() {
                 continue;
@@ -348,4 +364,3 @@ pub async fn build_knowledge_index(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
 
     index
 }
-

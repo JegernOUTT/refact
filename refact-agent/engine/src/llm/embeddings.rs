@@ -45,9 +45,7 @@ pub async fn get_embedding_openai_style(
     // Clone the client under the lock, then drop the lock before await
     let client_clone = client.lock().await.clone();
 
-    let mut request = client_clone
-        .post(&model_rec.base.endpoint)
-        .json(&payload);
+    let mut request = client_clone.post(&model_rec.base.endpoint).json(&payload);
 
     // Only add bearer auth if api_key is non-empty
     if !model_rec.base.api_key.is_empty() {

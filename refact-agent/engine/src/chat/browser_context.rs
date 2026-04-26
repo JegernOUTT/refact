@@ -20,59 +20,53 @@ pub struct BrowserContextSnapshot {
     pub page_changed: bool,
 }
 
-
-
 pub fn format_browser_context(snapshot: &BrowserContextSnapshot) -> String {
-    let mut parts = Vec::new();
-
-    parts.push(format!("[Browser Context]\nURL: {}\nTitle: {}", snapshot.url, snapshot.title));
+    let mut out = format!(
+        "[Browser Context]\nURL: {}\nTitle: {}",
+        snapshot.url, snapshot.title
+    );
 
     if !snapshot.actions.is_empty() {
-        let mut lines = Vec::new();
-        lines.push("\n## User Actions (since last message)".to_string());
+        out.push_str("\n\n## User Actions (since last message)");
         for action in &snapshot.actions {
-            lines.push(format_action(action));
+            out.push('\n');
+            out.push_str(&format_action(action));
         }
-        parts.push(lines.join("\n"));
     }
 
     if !snapshot.console.is_empty() {
-        let mut lines = Vec::new();
-        lines.push("\n## Console (since last message)".to_string());
+        out.push_str("\n\n## Console (since last message)");
         for entry in &snapshot.console {
-            lines.push(format_console_entry(entry));
+            out.push('\n');
+            out.push_str(&format_console_entry(entry));
         }
-        parts.push(lines.join("\n"));
     }
 
     if !snapshot.network.is_empty() {
-        let mut lines = Vec::new();
-        lines.push("\n## Network (since last message)".to_string());
+        out.push_str("\n\n## Network (since last message)");
         for entry in &snapshot.network {
-            lines.push(format_network_entry(entry));
+            out.push('\n');
+            out.push_str(&format_network_entry(entry));
         }
-        parts.push(lines.join("\n"));
     }
 
     if !snapshot.mutations.is_empty() {
-        let mut lines = Vec::new();
-        lines.push("\n## DOM Changes (since last message)".to_string());
+        out.push_str("\n\n## DOM Changes (since last message)");
         let total_added: u32 = snapshot.mutations.iter().map(|m| m.added).sum();
         let total_removed: u32 = snapshot.mutations.iter().map(|m| m.removed).sum();
         let total_changed: u32 = snapshot.mutations.iter().map(|m| m.changed).sum();
         if total_added > 0 {
-            lines.push(format!("Added: {} elements", total_added));
+            out.push_str(&format!("\nAdded: {} elements", total_added));
         }
         if total_removed > 0 {
-            lines.push(format!("Removed: {} elements", total_removed));
+            out.push_str(&format!("\nRemoved: {} elements", total_removed));
         }
         if total_changed > 0 {
-            lines.push(format!("Changed: {} elements", total_changed));
+            out.push_str(&format!("\nChanged: {} elements", total_changed));
         }
-        parts.push(lines.join("\n"));
     }
 
-    parts.join("\n")
+    out
 }
 
 fn format_timestamp(ts: f64) -> String {
@@ -88,31 +82,110 @@ fn format_action(action: &RecorderEvent) -> String {
         RecorderEvent::Navigation { url, timestamp, .. } => {
             format!("[{}] navigate → {}", format_timestamp(*timestamp), url)
         }
-        RecorderEvent::Click { selector, text, x, y, timestamp } => {
-            let label = if text.is_empty() { selector.clone() } else { format!("{} \"{}\"", selector, text) };
-            format!("[{}] click → {} (x:{}, y:{})", format_timestamp(*timestamp), label, *x as i32, *y as i32)
+        RecorderEvent::Click {
+            selector,
+            text,
+            x,
+            y,
+            timestamp,
+        } => {
+            let label = if text.is_empty() {
+                selector.clone()
+            } else {
+                format!("{} \"{}\"", selector, text)
+            };
+            format!(
+                "[{}] click → {} (x:{}, y:{})",
+                format_timestamp(*timestamp),
+                label,
+                *x as i32,
+                *y as i32
+            )
         }
-        RecorderEvent::Input { selector, value, timestamp, tag, input_type, placeholder, .. } => {
-            let field_desc = match (tag.as_deref(), input_type.as_deref(), placeholder.as_deref()) {
-                (Some(t), Some(it), Some(ph)) => format!("<{}[type={}] placeholder=\"{}\">", t, it, ph),
+        RecorderEvent::Input {
+            selector,
+            value,
+            timestamp,
+            tag,
+            input_type,
+            placeholder,
+            ..
+        } => {
+            let field_desc = match (
+                tag.as_deref(),
+                input_type.as_deref(),
+                placeholder.as_deref(),
+            ) {
+                (Some(t), Some(it), Some(ph)) => {
+                    format!("<{}[type={}] placeholder=\"{}\">", t, it, ph)
+                }
                 (Some(t), Some(it), None) => format!("<{}[type={}]>", t, it),
                 (Some(t), None, Some(ph)) => format!("<{} placeholder=\"{}\">", t, ph),
                 _ => selector.clone(),
             };
-            format!("[{}] input → {} \"{}\"", format_timestamp(*timestamp), field_desc, value)
+            format!(
+                "[{}] input → {} \"{}\"",
+                format_timestamp(*timestamp),
+                field_desc,
+                value
+            )
         }
-        RecorderEvent::Keypress { key, modifiers, timestamp } => {
-            let mods = if modifiers.is_empty() { String::new() } else { format!("{}+", modifiers.join("+")) };
-            format!("[{}] keypress → {}{}", format_timestamp(*timestamp), mods, key)
+        RecorderEvent::Keypress {
+            key,
+            modifiers,
+            timestamp,
+        } => {
+            let mods = if modifiers.is_empty() {
+                String::new()
+            } else {
+                format!("{}+", modifiers.join("+"))
+            };
+            format!(
+                "[{}] keypress → {}{}",
+                format_timestamp(*timestamp),
+                mods,
+                key
+            )
         }
-        RecorderEvent::Submit { selector, method, action, timestamp } => {
-            format!("[{}] submit → {} {} {}", format_timestamp(*timestamp), selector, method, action)
+        RecorderEvent::Submit {
+            selector,
+            method,
+            action,
+            timestamp,
+        } => {
+            format!(
+                "[{}] submit → {} {} {}",
+                format_timestamp(*timestamp),
+                selector,
+                method,
+                action
+            )
         }
-        RecorderEvent::Scroll { scroll_x, scroll_y, timestamp } => {
-            format!("[{}] scroll → ({}, {})", format_timestamp(*timestamp), *scroll_x as i32, *scroll_y as i32)
+        RecorderEvent::Scroll {
+            scroll_x,
+            scroll_y,
+            timestamp,
+        } => {
+            format!(
+                "[{}] scroll → ({}, {})",
+                format_timestamp(*timestamp),
+                *scroll_x as i32,
+                *scroll_y as i32
+            )
         }
-        RecorderEvent::MutationSummary { added, removed, changed, timestamp } => {
-            format!("[{}] dom-change → +{} -{} ~{}", format_timestamp(*timestamp), added, removed, changed)
+        RecorderEvent::MutationSummary {
+            added,
+            removed,
+            changed,
+            timestamp,
+        } => {
+            format!(
+                "[{}] dom-change → +{} -{} ~{}",
+                format_timestamp(*timestamp),
+                added,
+                removed,
+                changed
+            )
         }
         RecorderEvent::ToolbarAction { action, timestamp } => {
             format!("[{}] toolbar → {}", format_timestamp(*timestamp), action)
@@ -121,12 +194,26 @@ fn format_action(action: &RecorderEvent) -> String {
 }
 
 fn format_console_entry(entry: &ConsoleEntry) -> String {
-    format!("[{}] [{}] {}", format_timestamp(entry.timestamp), entry.level, entry.text)
+    format!(
+        "[{}] [{}] {}",
+        format_timestamp(entry.timestamp),
+        entry.level,
+        entry.text
+    )
 }
 
 fn format_network_entry(entry: &NetworkEntry) -> String {
-    let status_str = entry.status.map(|s| format!(" → {}", s)).unwrap_or_default();
-    format!("[{}] {} {}{}", format_timestamp(entry.timestamp), entry.method, entry.url, status_str)
+    let status_str = entry
+        .status
+        .map(|s| format!(" → {}", s))
+        .unwrap_or_default();
+    format!(
+        "[{}] {} {}{}",
+        format_timestamp(entry.timestamp),
+        entry.method,
+        entry.url,
+        status_str
+    )
 }
 
 pub fn compute_context_size(
@@ -145,7 +232,8 @@ pub async fn get_browser_context_for_chat(
     gcx: Arc<ARwLock<GlobalContext>>,
     chat_id: &str,
 ) -> Option<BrowserContextSnapshot> {
-    let (_, runtime_arc) = crate::integrations::browser_runtime::find_runtime_by_chat_id(gcx, chat_id).await?;
+    let (_, runtime_arc) =
+        crate::integrations::browser_runtime::find_runtime_by_chat_id(gcx, chat_id).await?;
     let rt = runtime_arc.lock().await;
 
     if !rt.is_connected {
@@ -185,11 +273,10 @@ pub async fn get_browser_context_for_chat(
     })
 }
 
-pub async fn commit_browser_cursors(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    chat_id: &str,
-) {
-    if let Some((_, runtime_arc)) = crate::integrations::browser_runtime::find_runtime_by_chat_id(gcx, chat_id).await {
+pub async fn commit_browser_cursors(gcx: Arc<ARwLock<GlobalContext>>, chat_id: &str) {
+    if let Some((_, runtime_arc)) =
+        crate::integrations::browser_runtime::find_runtime_by_chat_id(gcx, chat_id).await
+    {
         let mut rt = runtime_arc.lock().await;
         rt.commit_cursors();
     }
@@ -213,7 +300,13 @@ pub async fn maybe_insert_browser_context(
 
     commit_browser_cursors(gcx, chat_id).await;
 
-    Some((make_context_message(&snapshot, attach_screenshot_on_send && snapshot.page_changed), false))
+    Some((
+        make_context_message(
+            &snapshot,
+            attach_screenshot_on_send && snapshot.page_changed,
+        ),
+        false,
+    ))
 }
 
 pub fn apply_decision_to_snapshot(
@@ -261,7 +354,10 @@ pub fn apply_decision_to_snapshot(
     );
 }
 
-pub fn make_context_message(snapshot: &BrowserContextSnapshot, _attach_screenshot: bool) -> ChatMessage {
+pub fn make_context_message(
+    snapshot: &BrowserContextSnapshot,
+    _attach_screenshot: bool,
+) -> ChatMessage {
     let text = format_browser_context(snapshot);
     ChatMessage {
         message_id: uuid::Uuid::new_v4().to_string(),
@@ -298,35 +394,33 @@ mod tests {
                     value: "user@example.com".to_string(),
                     masked: false,
                     timestamp: 45250000.0,
-                    tag: None, input_type: None, field_name: None,
-                    placeholder: None, aria_label: None, role: None,
+                    tag: None,
+                    input_type: None,
+                    field_name: None,
+                    placeholder: None,
+                    aria_label: None,
+                    role: None,
                 },
             ],
-            console: vec![
-                ConsoleEntry {
-                    timestamp: 45246000.0,
-                    level: "error".to_string(),
-                    text: "Uncaught TypeError: Cannot read property 'x' of null".to_string(),
-                },
-            ],
-            network: vec![
-                NetworkEntry {
-                    timestamp: 45245000.0,
-                    method: "GET".to_string(),
-                    url: "https://example.com".to_string(),
-                    resource_type: "Document".to_string(),
-                    status: Some(200),
-                },
-            ],
-            mutations: vec![
-                MutationSummaryEntry {
-                    timestamp: 45247000.0,
-                    added: 3,
-                    removed: 1,
-                    changed: 2,
-                    descriptions: vec![],
-                },
-            ],
+            console: vec![ConsoleEntry {
+                timestamp: 45246000.0,
+                level: "error".to_string(),
+                text: "Uncaught TypeError: Cannot read property 'x' of null".to_string(),
+            }],
+            network: vec![NetworkEntry {
+                timestamp: 45245000.0,
+                method: "GET".to_string(),
+                url: "https://example.com".to_string(),
+                resource_type: "Document".to_string(),
+                status: Some(200),
+            }],
+            mutations: vec![MutationSummaryEntry {
+                timestamp: 45247000.0,
+                added: 3,
+                removed: 1,
+                changed: 2,
+                descriptions: vec![],
+            }],
             total_bytes: 500,
             page_changed: true,
         };
@@ -543,16 +637,68 @@ mod tests {
     #[test]
     fn test_oversize_detection() {
         let large_text = "x".repeat(200);
-        let actions: Vec<RecorderEvent> = (0..1000).map(|i| RecorderEvent::Input {
-            selector: format!("#field-{}", i),
-            value: large_text.clone(),
-            masked: false,
-            timestamp: i as f64 * 1000.0,
-            tag: None, input_type: None, field_name: None,
-            placeholder: None, aria_label: None, role: None,
-        }).collect();
+        let actions: Vec<RecorderEvent> = (0..1000)
+            .map(|i| RecorderEvent::Input {
+                selector: format!("#field-{}", i),
+                value: large_text.clone(),
+                masked: false,
+                timestamp: i as f64 * 1000.0,
+                tag: None,
+                input_type: None,
+                field_name: None,
+                placeholder: None,
+                aria_label: None,
+                role: None,
+            })
+            .collect();
 
         let size = compute_context_size(&actions, &[], &[], &[]);
         assert!(size > OVERSIZE_THRESHOLD);
+    }
+
+    #[test]
+    fn test_format_browser_context_sections_present() {
+        let snapshot = BrowserContextSnapshot {
+            url: "https://example.com".to_string(),
+            title: "Test".to_string(),
+            actions: vec![RecorderEvent::Navigation {
+                url: "https://example.com".to_string(),
+                title: "Test".to_string(),
+                timestamp: 1000.0,
+            }],
+            console: vec![ConsoleEntry {
+                timestamp: 1000.0,
+                level: "warn".to_string(),
+                text: "test log".to_string(),
+            }],
+            network: vec![NetworkEntry {
+                timestamp: 1000.0,
+                method: "GET".to_string(),
+                url: "https://example.com".to_string(),
+                resource_type: "Document".to_string(),
+                status: Some(200),
+            }],
+            mutations: vec![MutationSummaryEntry {
+                timestamp: 1000.0,
+                added: 1,
+                removed: 0,
+                changed: 2,
+                descriptions: vec![],
+            }],
+            total_bytes: 100,
+            page_changed: false,
+        };
+        let out = format_browser_context(&snapshot);
+        assert!(out.contains("[Browser Context]"));
+        assert!(out.contains("## User Actions (since last message)"));
+        assert!(out.contains("navigate →"));
+        assert!(out.contains("## Console (since last message)"));
+        assert!(out.contains("[warn] test log"));
+        assert!(out.contains("## Network (since last message)"));
+        assert!(out.contains("GET https://example.com → 200"));
+        assert!(out.contains("## DOM Changes (since last message)"));
+        assert!(out.contains("Added: 1 elements"));
+        assert!(out.contains("Changed: 2 elements"));
+        assert!(!out.contains("Removed:"));
     }
 }

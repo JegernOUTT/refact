@@ -191,19 +191,41 @@ mod tests {
         use serde_json::json;
 
         let deltas = vec![
-            LlmStreamDelta::AppendContent { text: "hello".to_string(), block_index: None },
-            LlmStreamDelta::AppendReasoning { text: "thinking".to_string(), block_index: None },
-            LlmStreamDelta::SetToolCalls { tool_calls: vec![json!({"id": "1"})] },
-            LlmStreamDelta::SetThinkingBlocks { blocks: vec![json!({"type": "thinking", "text": "..."})] },
-            LlmStreamDelta::AddCitation { citation: json!({"url": "https://example.com", "title": "Example"}) },
-            LlmStreamDelta::SetUsage { usage: ChatUsage::default() },
-            LlmStreamDelta::SetFinishReason { reason: "stop".to_string() },
-            LlmStreamDelta::MergeExtra { extra: serde_json::Map::new() },
+            LlmStreamDelta::AppendContent {
+                text: "hello".to_string(),
+                block_index: None,
+            },
+            LlmStreamDelta::AppendReasoning {
+                text: "thinking".to_string(),
+                block_index: None,
+            },
+            LlmStreamDelta::SetToolCalls {
+                tool_calls: vec![json!({"id": "1"})],
+            },
+            LlmStreamDelta::SetThinkingBlocks {
+                blocks: vec![json!({"type": "thinking", "text": "..."})],
+            },
+            LlmStreamDelta::AddCitation {
+                citation: json!({"url": "https://example.com", "title": "Example"}),
+            },
+            LlmStreamDelta::SetUsage {
+                usage: ChatUsage::default(),
+            },
+            LlmStreamDelta::SetFinishReason {
+                reason: "stop".to_string(),
+            },
+            LlmStreamDelta::MergeExtra {
+                extra: serde_json::Map::new(),
+            },
             LlmStreamDelta::Done,
         ];
 
         assert_eq!(deltas.len(), 9);
-        assert!(matches!(&deltas[3], LlmStreamDelta::SetThinkingBlocks { blocks } if blocks.len() == 1));
-        assert!(matches!(&deltas[4], LlmStreamDelta::AddCitation { citation } if citation.get("url").is_some()));
+        assert!(
+            matches!(&deltas[3], LlmStreamDelta::SetThinkingBlocks { blocks } if blocks.len() == 1)
+        );
+        assert!(
+            matches!(&deltas[4], LlmStreamDelta::AddCitation { citation } if citation.get("url").is_some())
+        );
     }
 }

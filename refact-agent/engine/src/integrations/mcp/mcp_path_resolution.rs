@@ -33,7 +33,10 @@ const PATH_SEPARATOR: char = ';';
 
 fn dedup_path_entries(entries: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    entries.into_iter().filter(|e| seen.insert(e.clone())).collect()
+    entries
+        .into_iter()
+        .filter(|e| seen.insert(e.clone()))
+        .collect()
 }
 
 /// Common directories where CLI tools are installed.
@@ -105,7 +108,10 @@ pub fn resolve_command(
         .filter(|d| d.exists())
         .map(|d| {
             if let Some(ref home) = home::home_dir() {
-                let rel = d.strip_prefix(home).ok().map(|r| format!("~/{}", r.display()));
+                let rel = d
+                    .strip_prefix(home)
+                    .ok()
+                    .map(|r| format!("~/{}", r.display()));
                 rel.unwrap_or_else(|| d.display().to_string())
             } else {
                 d.display().to_string()
@@ -116,7 +122,10 @@ pub fn resolve_command(
     if Path::new(argv0).components().count() > 1 {
         let p = PathBuf::from(argv0);
         if p.exists() {
-            return Ok(ResolvedCommand { program: p, effective_path });
+            return Ok(ResolvedCommand {
+                program: p,
+                effective_path,
+            });
         }
         return Err(CommandNotFoundError {
             command: argv0.to_string(),
@@ -127,7 +136,10 @@ pub fn resolve_command(
     }
 
     match which::which_in(argv0, Some(&effective_path), ".") {
-        Ok(path) => Ok(ResolvedCommand { program: path, effective_path }),
+        Ok(path) => Ok(ResolvedCommand {
+            program: path,
+            effective_path,
+        }),
         Err(_) => Err(CommandNotFoundError {
             command: argv0.to_string(),
             full_command: full_command.to_string(),
@@ -229,7 +241,11 @@ mod tests {
 
     #[test]
     fn test_resolve_command_not_found_message() {
-        let result = resolve_command("uvx_not_here", "uvx_not_here mcp-server-fetch", Some("/tmp"));
+        let result = resolve_command(
+            "uvx_not_here",
+            "uvx_not_here mcp-server-fetch",
+            Some("/tmp"),
+        );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_user_message();
         assert!(msg.contains("uvx_not_here"));

@@ -97,8 +97,20 @@ async fn load_command_from_file(path: &Path, source: CommandSource) -> Option<Sl
     let description = yaml_str(&fm, "description");
     let argument_hint = yaml_str(&fm, "argument-hint");
     let allowed_tools = yaml_str_list(&fm, "allowed-tools");
-    let model = fm.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
-    Some(SlashCommand { name, description, argument_hint, allowed_tools, model, body, source, file_path: path.to_path_buf() })
+    let model = fm
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some(SlashCommand {
+        name,
+        description,
+        argument_hint,
+        allowed_tools,
+        model,
+        body,
+        source,
+        file_path: path.to_path_buf(),
+    })
 }
 
 pub async fn load_slash_commands(ext_dirs: &ExtDirs) -> Vec<SlashCommand> {
@@ -259,7 +271,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let subdir = tmp.path().join("commands").join("docs");
         tokio::fs::create_dir_all(&subdir).await.unwrap();
-        tokio::fs::write(subdir.join("format.md"), "Format the code").await.unwrap();
+        tokio::fs::write(subdir.join("format.md"), "Format the code")
+            .await
+            .unwrap();
 
         let ext_dirs = crate::ext::config_dirs::ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],

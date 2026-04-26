@@ -54,8 +54,6 @@ pub struct ParsedDecisions {
     pub handoff_message: String,
 }
 
-
-
 pub fn extract_conversation_metadata(messages: &[ChatMessage]) -> ConversationMetadata {
     let mut metadata = ConversationMetadata::default();
     let mut seen_files: HashSet<String> = HashSet::new();
@@ -63,7 +61,9 @@ pub fn extract_conversation_metadata(messages: &[ChatMessage]) -> ConversationMe
 
     for (idx, msg) in messages.iter().enumerate() {
         let msg_id = format!("MSG_ID:{}", idx);
-        metadata.annotated_messages.push((msg_id.clone(), msg.clone()));
+        metadata
+            .annotated_messages
+            .push((msg_id.clone(), msg.clone()));
 
         if msg.role == "context_file" {
             match &msg.content {
@@ -110,7 +110,9 @@ pub fn extract_conversation_metadata(messages: &[ChatMessage]) -> ConversationMe
                     }
                 }
                 for cap in DIFF_GIT_REGEX.captures_iter(text) {
-                    let path_str = cap.get(1).or_else(|| cap.get(2))
+                    let path_str = cap
+                        .get(1)
+                        .or_else(|| cap.get(2))
                         .map(|m| clean_path_string(m.as_str()))
                         .unwrap_or_default();
                     if !path_str.is_empty() && seen_files.insert(path_str.clone()) {
@@ -149,9 +151,9 @@ fn clean_path_string(s: &str) -> String {
 fn is_diff_content(content: &ChatContent) -> bool {
     match content {
         ChatContent::SimpleText(text) => {
-            text.contains("+++") && text.contains("---") ||
-            text.contains("@@ ") ||
-            text.starts_with("diff ")
+            text.contains("+++") && text.contains("---")
+                || text.contains("@@ ")
+                || text.starts_with("diff ")
         }
         _ => false,
     }
@@ -182,7 +184,11 @@ fn normalize_list_item(item: &str) -> String {
             s = after.trim_start();
         }
     }
-    let s = s.trim_matches('`').trim_matches('"').trim_matches('\'').trim();
+    let s = s
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
     s.to_string()
 }
 
@@ -215,14 +221,20 @@ fn format_annotated_messages(metadata: &ConversationMetadata) -> String {
     for (msg_id, msg) in &metadata.annotated_messages {
         let role = &msg.role;
         let content_preview = match &msg.content {
-            ChatContent::SimpleText(text) => {
-                truncate_utf8(text, 500)
-            }
+            ChatContent::SimpleText(text) => truncate_utf8(text, 500),
             ChatContent::ContextFiles(files) => {
-                format!("[Context files: {}]", files.iter().map(|f| f.file_name.as_str()).collect::<Vec<_>>().join(", "))
+                format!(
+                    "[Context files: {}]",
+                    files
+                        .iter()
+                        .map(|f| f.file_name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
             ChatContent::Multimodal(elements) => {
-                let text_parts: Vec<String> = elements.iter()
+                let text_parts: Vec<String> = elements
+                    .iter()
                     .filter(|el| el.is_text())
                     .map(|el| truncate_utf8(&el.m_content, 200))
                     .collect();
@@ -242,8 +254,15 @@ fn format_annotated_messages(metadata: &ConversationMetadata) -> String {
 
         let tool_info = if let Some(tool_calls) = &msg.tool_calls {
             if !tool_calls.is_empty() {
-                let tools: Vec<String> = tool_calls.iter()
-                    .map(|tc| format!("{}({})", tc.function.name, truncate_utf8(&tc.function.arguments, 100)))
+                let tools: Vec<String> = tool_calls
+                    .iter()
+                    .map(|tc| {
+                        format!(
+                            "{}({})",
+                            tc.function.name,
+                            truncate_utf8(&tc.function.arguments, 100)
+                        )
+                    })
                     .collect();
                 format!("\n[tool_calls: {}]", tools.join(", "))
             } else {
@@ -253,7 +272,10 @@ fn format_annotated_messages(metadata: &ConversationMetadata) -> String {
             String::new()
         };
 
-        result.push_str(&format!("[{}] [{}]\n{}{}\n\n", msg_id, role, content_preview, tool_info));
+        result.push_str(&format!(
+            "[{}] [{}]\n{}{}\n\n",
+            msg_id, role, content_preview, tool_info
+        ));
     }
 
     result
@@ -263,11 +285,17 @@ fn format_file_list(metadata: &ConversationMetadata) -> String {
     let mut lines = Vec::new();
 
     for file_ref in &metadata.context_files {
-        lines.push(format!("- {} (from {}, {})", file_ref.path, file_ref.source, file_ref.msg_id));
+        lines.push(format!(
+            "- {} (from {}, {})",
+            file_ref.path, file_ref.source, file_ref.msg_id
+        ));
     }
 
     for file_ref in &metadata.edited_files {
-        lines.push(format!("- {} (edited, from {}, {})", file_ref.path, file_ref.source, file_ref.msg_id));
+        lines.push(format!(
+            "- {} (edited, from {}, {})",
+            file_ref.path, file_ref.source, file_ref.msg_id
+        ));
     }
 
     if lines.is_empty() {
@@ -281,7 +309,9 @@ fn format_memory_list(metadata: &ConversationMetadata) -> String {
     if metadata.memory_paths.is_empty() {
         "No memory/knowledge files found".to_string()
     } else {
-        metadata.memory_paths.iter()
+        metadata
+            .memory_paths
+            .iter()
             .map(|p| format!("- {}", p))
             .collect::<Vec<_>>()
             .join("\n")
@@ -312,9 +342,16 @@ pub async fn analyze_mode_transition(
         .await
         .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
 
-    let user_template = subagent_config.messages.user_template
+    let user_template = subagent_config
+        .messages
+        .user_template
         .as_ref()
-        .ok_or_else(|| format!("messages.user_template not defined for subagent '{}'", SUBAGENT_ID))?;
+        .ok_or_else(|| {
+            format!(
+                "messages.user_template not defined for subagent '{}'",
+                SUBAGENT_ID
+            )
+        })?;
 
     let metadata = extract_conversation_metadata(messages);
 
@@ -329,13 +366,11 @@ pub async fn analyze_mode_transition(
         .replace("{file_list}", &file_list)
         .replace("{memory_list}", &memory_list);
 
-    let analysis_messages = vec![
-        ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText(user_prompt),
-            ..Default::default()
-        },
-    ];
+    let analysis_messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: ChatContent::SimpleText(user_prompt),
+        ..Default::default()
+    }];
 
     let result = run_subchat_once(gcx, SUBAGENT_ID, analysis_messages)
         .await
@@ -379,7 +414,8 @@ fn find_task_done_report(messages: &[ChatMessage]) -> Option<String> {
                 if let Ok(obj) = serde_json::from_str::<serde_json::Value>(text) {
                     let summary = obj.get("summary").and_then(|v| v.as_str()).unwrap_or("");
                     let report = obj.get("report").and_then(|v| v.as_str()).unwrap_or("");
-                    let files_changed: Vec<&str> = obj.get("files_changed")
+                    let files_changed: Vec<&str> = obj
+                        .get("files_changed")
                         .and_then(|v| v.as_array())
                         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
                         .unwrap_or_default();
@@ -439,7 +475,8 @@ fn format_conversation_entry(msg: &ChatMessage, metadata: &ConversationMetadata)
             let text = extract_text_content(&msg.content);
             let tool_calls_md = if let Some(tool_calls) = &msg.tool_calls {
                 if !tool_calls.is_empty() {
-                    let calls: Vec<String> = tool_calls.iter()
+                    let calls: Vec<String> = tool_calls
+                        .iter()
                         .map(|tc| {
                             let args_preview = truncate_utf8(&tc.function.arguments, 120);
                             format!("- `{}({})`", tc.function.name, args_preview)
@@ -485,14 +522,17 @@ fn format_conversation_entry(msg: &ChatMessage, metadata: &ConversationMetadata)
 fn extract_text_content(content: &ChatContent) -> String {
     match content {
         ChatContent::SimpleText(text) => text.clone(),
-        ChatContent::Multimodal(elements) => {
-            elements.iter()
-                .filter_map(|el| {
-                    if el.is_text() { Some(el.m_content.clone()) } else { None }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        ChatContent::Multimodal(elements) => elements
+            .iter()
+            .filter_map(|el| {
+                if el.is_text() {
+                    Some(el.m_content.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         ChatContent::ContextFiles(_) => String::new(),
     }
 }
@@ -506,13 +546,14 @@ pub async fn assemble_new_chat(
     let mut new_messages: Vec<ChatMessage> = Vec::new();
     let workspace_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
 
-    let allowed_files: HashSet<&str> = metadata.context_files.iter()
+    let allowed_files: HashSet<&str> = metadata
+        .context_files
+        .iter()
         .map(|f| f.path.as_str())
         .chain(metadata.edited_files.iter().map(|f| f.path.as_str()))
         .collect();
-    let allowed_memories: HashSet<&str> = metadata.memory_paths.iter()
-        .map(|s| s.as_str())
-        .collect();
+    let allowed_memories: HashSet<&str> =
+        metadata.memory_paths.iter().map(|s| s.as_str()).collect();
 
     // 1. All files batched in a single context_file message
     let mut file_contents: Vec<ContextFile> = Vec::new();
@@ -548,7 +589,10 @@ pub async fn assemble_new_chat(
     let mut memory_contents: Vec<ContextFile> = Vec::new();
     for memory_path in &decisions.memories_to_include {
         if !allowed_memories.contains(memory_path.as_str()) {
-            tracing::warn!("Skipping memory {} - not in conversation allowlist", memory_path);
+            tracing::warn!(
+                "Skipping memory {} - not in conversation allowlist",
+                memory_path
+            );
             continue;
         }
         match read_file_content_safe(gcx.clone(), memory_path, &workspace_dirs).await {
@@ -575,14 +619,16 @@ pub async fn assemble_new_chat(
     }
 
     // 3. "Previous Conversation" message: preserved messages + tool outputs interleaved in order, summary at end
-    let mut preserved_indices: HashSet<usize> = decisions.messages_to_preserve
+    let mut preserved_indices: HashSet<usize> = decisions
+        .messages_to_preserve
         .iter()
         .filter_map(|msg_id_ref| {
             let id = msg_id_ref.trim_start_matches("MSG_ID:");
             id.parse::<usize>().ok()
         })
         .collect();
-    let tool_output_indices: HashSet<usize> = decisions.tool_outputs_to_include
+    let tool_output_indices: HashSet<usize> = decisions
+        .tool_outputs_to_include
         .iter()
         .filter_map(|msg_id_ref| {
             let id = msg_id_ref.trim_start_matches("MSG_ID:");
@@ -596,7 +642,8 @@ pub async fn assemble_new_chat(
     all_indices.dedup();
 
     let mut conversation_parts: Vec<String> = Vec::new();
-    let mut preserved_images: Vec<crate::scratchpads::multimodality::MultimodalElement> = Vec::new();
+    let mut preserved_images: Vec<crate::scratchpads::multimodality::MultimodalElement> =
+        Vec::new();
     for idx in &all_indices {
         if let Some((_, msg)) = metadata.annotated_messages.get(*idx) {
             let formatted = format_conversation_entry(msg, &metadata);
@@ -634,7 +681,10 @@ pub async fn assemble_new_chat(
                 ..Default::default()
             });
         } else {
-            match crate::scratchpads::multimodality::MultimodalElement::new("text".to_string(), conversation_text.clone()) {
+            match crate::scratchpads::multimodality::MultimodalElement::new(
+                "text".to_string(),
+                conversation_text.clone(),
+            ) {
                 Ok(text_element) => {
                     let mut elements = vec![text_element];
                     elements.extend(preserved_images);
@@ -668,7 +718,9 @@ pub async fn assemble_new_chat(
     // 5. Handoff message (with pending tasks only if no task_done report)
     let mut handoff_text = String::new();
     if task_done_report.is_none() && !decisions.pending_tasks.is_empty() {
-        let tasks = decisions.pending_tasks.iter()
+        let tasks = decisions
+            .pending_tasks
+            .iter()
             .map(|t| format!("- {}", t))
             .collect::<Vec<_>>()
             .join("\n");
@@ -688,8 +740,6 @@ pub async fn assemble_new_chat(
     Ok(new_messages)
 }
 
-
-
 async fn read_file_content_safe(
     _gcx: Arc<ARwLock<GlobalContext>>,
     path: &str,
@@ -703,7 +753,8 @@ async fn read_file_content_safe(
         return Err("No workspace directory available".to_string());
     };
 
-    let canonical_path = full_path.canonicalize()
+    let canonical_path = full_path
+        .canonicalize()
         .map_err(|e| format!("Failed to canonicalize path {}: {}", full_path.display(), e))?;
 
     let is_in_workspace = workspace_dirs.iter().any(|ws| {
@@ -723,9 +774,13 @@ async fn read_file_content_safe(
         ));
     }
 
-    let metadata = tokio::fs::metadata(&canonical_path)
-        .await
-        .map_err(|e| format!("Failed to get metadata for {}: {}", canonical_path.display(), e))?;
+    let metadata = tokio::fs::metadata(&canonical_path).await.map_err(|e| {
+        format!(
+            "Failed to get metadata for {}: {}",
+            canonical_path.display(),
+            e
+        )
+    })?;
 
     if metadata.len() > MAX_FILE_SIZE as u64 {
         return Err(format!(
@@ -740,8 +795,6 @@ async fn read_file_content_safe(
         .await
         .map_err(|e| format!("Failed to read file {}: {}", canonical_path.display(), e))
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -864,21 +917,17 @@ Continue with refresh token implementation.
 
     #[test]
     fn test_extract_conversation_metadata_with_context_files() {
-        let messages = vec![
-            ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(vec![
-                    ContextFile {
-                        file_name: "/src/main.rs".to_string(),
-                        file_content: "fn main() {}".to_string(),
-                        line1: 1,
-                        line2: 1,
-                        ..Default::default()
-                    },
-                ]),
+        let messages = vec![ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(vec![ContextFile {
+                file_name: "/src/main.rs".to_string(),
+                file_content: "fn main() {}".to_string(),
+                line1: 1,
+                line2: 1,
                 ..Default::default()
-            },
-        ];
+            }]),
+            ..Default::default()
+        }];
 
         let metadata = extract_conversation_metadata(&messages);
         assert_eq!(metadata.context_files.len(), 1);
@@ -887,9 +936,8 @@ Continue with refresh token implementation.
 
     #[test]
     fn test_is_diff_content() {
-        let diff_content = ChatContent::SimpleText(
-            "--- a/file.rs\n+++ b/file.rs\n@@ -1,3 +1,4 @@".to_string()
-        );
+        let diff_content =
+            ChatContent::SimpleText("--- a/file.rs\n+++ b/file.rs\n@@ -1,3 +1,4 @@".to_string());
         assert!(is_diff_content(&diff_content));
 
         let non_diff = ChatContent::SimpleText("Just some text".to_string());
@@ -954,13 +1002,11 @@ Memory saved successfully.
 File: /project/.refact/tasks/task-123/memories/2024-01-15_abc123_jwt-decision.md
 Task: task-123
 "#;
-        let messages = vec![
-            ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(tool_output.to_string()),
-                ..Default::default()
-            },
-        ];
+        let messages = vec![ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(tool_output.to_string()),
+            ..Default::default()
+        }];
 
         let metadata = extract_conversation_metadata(&messages);
         assert_eq!(metadata.memory_paths.len(), 1);
@@ -971,13 +1017,11 @@ Task: task-123
     #[test]
     fn test_memory_path_extraction_knowledge() {
         let tool_output = "Loaded: /home/user/project/.refact/knowledge/2024-01-15_design.md";
-        let messages = vec![
-            ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(tool_output.to_string()),
-                ..Default::default()
-            },
-        ];
+        let messages = vec![ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(tool_output.to_string()),
+            ..Default::default()
+        }];
 
         let metadata = extract_conversation_metadata(&messages);
         assert_eq!(metadata.memory_paths.len(), 1);
@@ -994,17 +1038,18 @@ index 1234567..abcdefg 100644
 @@ -1,3 +1,4 @@
 +use jwt::Token;
 "#;
-        let messages = vec![
-            ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(diff_content.to_string()),
-                ..Default::default()
-            },
-        ];
+        let messages = vec![ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(diff_content.to_string()),
+            ..Default::default()
+        }];
 
         let metadata = extract_conversation_metadata(&messages);
         assert!(!metadata.edited_files.is_empty());
-        assert!(metadata.edited_files.iter().any(|f| f.path.contains("auth.rs")));
+        assert!(metadata
+            .edited_files
+            .iter()
+            .any(|f| f.path.contains("auth.rs")));
     }
 
     #[test]
@@ -1105,27 +1150,33 @@ index 1234567..abcdefg 100644
         use crate::call_validation::{ChatToolCall, ChatToolFunction};
         let metadata = ConversationMetadata {
             annotated_messages: vec![
-                ("MSG_ID:0".to_string(), ChatMessage {
-                    role: "assistant".to_string(),
-                    content: ChatContent::SimpleText("Let me search.".to_string()),
-                    tool_calls: Some(vec![ChatToolCall {
-                        id: "call_abc".to_string(),
-                        index: None,
-                        function: ChatToolFunction {
-                            name: "grep".to_string(),
-                            arguments: r#"{"query":"test"}"#.to_string(),
-                        },
-                        tool_type: "function".to_string(),
-                        extra_content: None,
-                    }]),
-                    ..Default::default()
-                }),
-                ("MSG_ID:1".to_string(), ChatMessage {
-                    role: "tool".to_string(),
-                    tool_call_id: "call_abc".to_string(),
-                    content: ChatContent::SimpleText("Found 3 results".to_string()),
-                    ..Default::default()
-                }),
+                (
+                    "MSG_ID:0".to_string(),
+                    ChatMessage {
+                        role: "assistant".to_string(),
+                        content: ChatContent::SimpleText("Let me search.".to_string()),
+                        tool_calls: Some(vec![ChatToolCall {
+                            id: "call_abc".to_string(),
+                            index: None,
+                            function: ChatToolFunction {
+                                name: "grep".to_string(),
+                                arguments: r#"{"query":"test"}"#.to_string(),
+                            },
+                            tool_type: "function".to_string(),
+                            extra_content: None,
+                        }]),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "MSG_ID:1".to_string(),
+                    ChatMessage {
+                        role: "tool".to_string(),
+                        tool_call_id: "call_abc".to_string(),
+                        content: ChatContent::SimpleText("Found 3 results".to_string()),
+                        ..Default::default()
+                    },
+                ),
             ],
             ..Default::default()
         };
@@ -1137,7 +1188,8 @@ index 1234567..abcdefg 100644
 
     #[test]
     fn test_messages_to_preserve_sorted_by_index() {
-        let decisions = parse_llm_response(r#"
+        let decisions = parse_llm_response(
+            r#"
 <summary>Test summary</summary>
 <files_to_open></files_to_open>
 <messages_to_preserve>
@@ -1150,8 +1202,12 @@ MSG_ID:2
 <tool_outputs_to_include></tool_outputs_to_include>
 <pending_tasks></pending_tasks>
 <handoff_message>Continue</handoff_message>
-"#);
-        assert_eq!(decisions.messages_to_preserve, vec!["MSG_ID:10", "MSG_ID:2", "MSG_ID:5", "MSG_ID:2"]);
+"#,
+        );
+        assert_eq!(
+            decisions.messages_to_preserve,
+            vec!["MSG_ID:10", "MSG_ID:2", "MSG_ID:5", "MSG_ID:2"]
+        );
     }
 
     #[test]

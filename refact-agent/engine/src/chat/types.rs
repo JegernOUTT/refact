@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -36,7 +36,9 @@ pub struct TimelineEntry {
     pub details: Option<serde_json::Value>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowBounds {
@@ -170,6 +172,9 @@ pub struct ThreadParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skill: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_enrichment_enabled: Option<bool>,
 }
 
 impl Default for ThreadParams {
@@ -200,6 +205,7 @@ impl Default for ThreadParams {
             previous_response_id: None,
             browser_meta: None,
             active_skill: None,
+            auto_enrichment_enabled: None,
         }
     }
 }
@@ -433,6 +439,10 @@ pub enum ChatCommand {
         content: serde_json::Value,
         #[serde(default)]
         attachments: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context_files: Vec<serde_json::Value>,
+        #[serde(default)]
+        suppress_auto_enrichment: bool,
     },
     RetryFromIndex {
         index: usize,
@@ -517,9 +527,16 @@ pub struct CommandRequest {
 impl CommandRequest {
     pub fn to_queued_item(&self) -> QueuedItem {
         let (command_type, preview, content) = match &self.command {
-            ChatCommand::UserMessage { content, .. } => {
+            ChatCommand::UserMessage {
+                content,
+                context_files,
+                ..
+            } => {
                 let full = extract_full_text_capped(content);
-                let preview = extract_preview(content);
+                let mut preview = extract_preview(content);
+                if !context_files.is_empty() {
+                    preview = format!("[+{} ctx] {}", context_files.len(), preview);
+                }
                 ("user_message".to_string(), preview, full)
             }
             ChatCommand::RetryFromIndex { content, index, .. } => (
@@ -529,7 +546,11 @@ impl CommandRequest {
             ),
             ChatCommand::SetParams { patch } => {
                 let model = patch.get("model").and_then(|v| v.as_str()).unwrap_or("");
-                ("set_params".to_string(), format!("model={}", model), String::new())
+                (
+                    "set_params".to_string(),
+                    format!("model={}", model),
+                    String::new(),
+                )
             }
             ChatCommand::Abort {} => ("abort".to_string(), String::new(), String::new()),
             ChatCommand::ToolDecision {
@@ -545,15 +566,21 @@ impl CommandRequest {
                 format!("{} decisions", decisions.len()),
                 String::new(),
             ),
-            ChatCommand::IdeToolResult { tool_call_id, .. } => {
-                ("ide_tool_result".to_string(), tool_call_id.clone(), String::new())
-            }
-            ChatCommand::UpdateMessage { message_id, .. } => {
-                ("update_message".to_string(), message_id.clone(), String::new())
-            }
-            ChatCommand::RemoveMessage { message_id, .. } => {
-                ("remove_message".to_string(), message_id.clone(), String::new())
-            }
+            ChatCommand::IdeToolResult { tool_call_id, .. } => (
+                "ide_tool_result".to_string(),
+                tool_call_id.clone(),
+                String::new(),
+            ),
+            ChatCommand::UpdateMessage { message_id, .. } => (
+                "update_message".to_string(),
+                message_id.clone(),
+                String::new(),
+            ),
+            ChatCommand::RemoveMessage { message_id, .. } => (
+                "remove_message".to_string(),
+                message_id.clone(),
+                String::new(),
+            ),
             ChatCommand::Regenerate {} => ("regenerate".to_string(), String::new(), String::new()),
             ChatCommand::RestoreMessages { messages } => (
                 "restore_messages".to_string(),
@@ -565,7 +592,9 @@ impl CommandRequest {
                 source_chat_id.clone(),
                 String::new(),
             ),
-            ChatCommand::BrowserContextDecision { pending_message_id, .. } => (
+            ChatCommand::BrowserContextDecision {
+                pending_message_id, ..
+            } => (
                 "browser_context_decision".to_string(),
                 pending_message_id.clone(),
                 String::new(),
@@ -605,7 +634,10 @@ fn extract_full_text(content: &serde_json::Value) -> String {
 fn extract_full_text_capped(content: &serde_json::Value) -> String {
     let text = extract_full_text(content);
     if text.chars().count() > MAX_CONTENT_CHARS {
-        format!("{}…", text.chars().take(MAX_CONTENT_CHARS).collect::<String>())
+        format!(
+            "{}…",
+            text.chars().take(MAX_CONTENT_CHARS).collect::<String>()
+        )
     } else {
         text
     }
@@ -644,9 +676,10 @@ pub struct ChatSession {
     pub draft_usage: Option<ChatUsage>,
     pub command_queue: VecDeque<CommandRequest>,
     pub event_seq: u64,
-    pub event_tx: broadcast::Sender<EventEnvelope>,
+    pub event_tx: broadcast::Sender<Arc<String>>,
     pub trajectory_events_tx: Option<broadcast::Sender<super::trajectories::TrajectoryEvent>>,
     pub recent_request_ids: VecDeque<String>,
+    pub recent_request_ids_set: HashSet<String>,
     pub abort_flag: Arc<AtomicBool>,
     pub queue_processor_running: Arc<AtomicBool>,
     pub queue_notify: Arc<Notify>,
@@ -669,6 +702,7 @@ pub struct ChatSession {
     pub skills_included: Vec<String>,
     pub pending_skill_deactivation: Option<PendingSkillDeactivation>,
     pub stop_hook_handle: Option<tokio::task::JoinHandle<()>>,
+    pub suppress_auto_enrichment_for_next_turn: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -695,6 +729,10 @@ pub struct PendingBrowserMessage {
     pub content: serde_json::Value,
     pub attachments: Vec<serde_json::Value>,
     pub checkpoints: Vec<Checkpoint>,
+    pub context_files: Vec<serde_json::Value>,
+    pub suppress_auto_enrichment: bool,
+    pub skill_activation_name: Option<String>,
+    pub skill_context_msg: Option<ChatMessage>,
 }
 
 #[cfg(test)]
@@ -781,9 +819,12 @@ mod tests {
             ChatCommand::UserMessage {
                 content,
                 attachments,
+                context_files,
+                suppress_auto_enrichment: _,
             } => {
                 assert_eq!(content, json!("hello"));
                 assert!(attachments.is_empty());
+                assert!(context_files.is_empty());
             }
             _ => panic!("Wrong variant"),
         }
@@ -979,9 +1020,17 @@ mod tests {
         let meta = BrowserMeta {
             browser_runtime_id: Some("rt-123".to_string()),
             profile_dir: Some("/tmp/chrome-profile".to_string()),
-            tab_urls: vec!["https://example.com".to_string(), "https://test.com".to_string()],
+            tab_urls: vec![
+                "https://example.com".to_string(),
+                "https://test.com".to_string(),
+            ],
             active_tab_id: Some("tab-1".to_string()),
-            window_bounds: Some(WindowBounds { x: 100, y: 200, width: 1920, height: 1080 }),
+            window_bounds: Some(WindowBounds {
+                x: 100,
+                y: 200,
+                width: 1920,
+                height: 1080,
+            }),
             attach_screenshot_on_send: true,
             mask_passwords: false,
         };
@@ -1061,7 +1110,12 @@ mod tests {
             tab_id: "tab-1".to_string(),
             mime: "image/jpeg".to_string(),
             data: "base64data".to_string(),
-            diff_boxes: vec![DiffBox { x: 10, y: 20, width: 100, height: 50 }],
+            diff_boxes: vec![DiffBox {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 50,
+            }],
             changed_text: Some("button clicked".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -1074,7 +1128,13 @@ mod tests {
         assert_eq!(json["changed_text"], "button clicked");
         let parsed: ChatEvent = serde_json::from_value(json).unwrap();
         match parsed {
-            ChatEvent::BrowserFrame { tab_id, mime, diff_boxes, changed_text, .. } => {
+            ChatEvent::BrowserFrame {
+                tab_id,
+                mime,
+                diff_boxes,
+                changed_text,
+                ..
+            } => {
                 assert_eq!(tab_id, "tab-1");
                 assert_eq!(mime, "image/jpeg");
                 assert_eq!(diff_boxes.len(), 1);
@@ -1121,7 +1181,12 @@ mod tests {
         assert_eq!(json["tabs"][0]["tab_id"], "tab-1");
         let parsed: ChatEvent = serde_json::from_value(json).unwrap();
         match parsed {
-            ChatEvent::BrowserStatus { runtime_id, connected, tabs, .. } => {
+            ChatEvent::BrowserStatus {
+                runtime_id,
+                connected,
+                tabs,
+                ..
+            } => {
                 assert_eq!(runtime_id, "rt-1");
                 assert!(connected);
                 assert_eq!(tabs.len(), 1);
@@ -1205,7 +1270,12 @@ mod tests {
 
     #[test]
     fn test_diff_box_serde() {
-        let db = DiffBox { x: 10, y: 20, width: 100, height: 50 };
+        let db = DiffBox {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        };
         let json = serde_json::to_value(&db).unwrap();
         assert_eq!(json["x"], 10);
         assert_eq!(json["y"], 20);

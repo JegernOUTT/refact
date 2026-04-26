@@ -1,8 +1,8 @@
 use std::sync::Weak;
 use tokio::sync::RwLock as ARwLock;
 use rmcp::model::{
-    CreateMessageRequestParams, CreateMessageResult, Role, SamplingMessage,
-    SamplingContent, SamplingMessageContent,
+    CreateMessageRequestParams, CreateMessageResult, Role, SamplingMessage, SamplingContent,
+    SamplingMessageContent,
 };
 use rmcp::ErrorData as McpError;
 
@@ -15,14 +15,20 @@ fn content_to_text(c: &SamplingMessageContent) -> String {
         SamplingMessageContent::Text(t) => t.text.clone(),
         SamplingMessageContent::Image(_) => "[image content not supported]".to_string(),
         SamplingMessageContent::Audio(_) => "[audio content not supported]".to_string(),
-        SamplingMessageContent::ToolResult(_) | SamplingMessageContent::ToolUse(_) => "[tool content not supported]".to_string(),
+        SamplingMessageContent::ToolResult(_) | SamplingMessageContent::ToolUse(_) => {
+            "[tool content not supported]".to_string()
+        }
     }
 }
 
 fn sampling_message_to_chat_message(msg: &SamplingMessage) -> ChatMessage {
     let text = match &msg.content {
         SamplingContent::Single(c) => content_to_text(c),
-        SamplingContent::Multiple(cs) => cs.iter().map(content_to_text).collect::<Vec<_>>().join("\n"),
+        SamplingContent::Multiple(cs) => cs
+            .iter()
+            .map(content_to_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
     };
     let role = match msg.role {
         Role::User => "user",
@@ -40,9 +46,9 @@ pub async fn mcp_sampling_create_message(
     params: CreateMessageRequestParams,
     debug_name: &str,
 ) -> Result<CreateMessageResult, McpError> {
-    let gcx = gcx_weak.upgrade().ok_or_else(|| {
-        McpError::internal_error("Refact agent is shutting down", None)
-    })?;
+    let gcx = gcx_weak
+        .upgrade()
+        .ok_or_else(|| McpError::internal_error("Refact agent is shutting down", None))?;
 
     tracing::info!(
         "MCP sampling request from {}: {} messages, max_tokens={}",
@@ -78,11 +84,7 @@ pub async fn mcp_sampling_create_message(
             )
         })?;
 
-    let last_assistant = result
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant");
+    let last_assistant = result.messages.iter().rev().find(|m| m.role == "assistant");
 
     let response_text = last_assistant
         .map(|m| m.content.content_text_only())

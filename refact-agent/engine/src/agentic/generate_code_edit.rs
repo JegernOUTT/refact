@@ -45,9 +45,16 @@ pub async fn generate_code_edit(
         .await
         .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
 
-    let system_prompt = subagent_config.messages.system_prompt
+    let system_prompt = subagent_config
+        .messages
+        .system_prompt
         .as_ref()
-        .ok_or_else(|| format!("messages.system_prompt not defined for subagent '{}'", SUBAGENT_ID))?;
+        .ok_or_else(|| {
+            format!(
+                "messages.system_prompt not defined for subagent '{}'",
+                SUBAGENT_ID
+            )
+        })?;
 
     let user_message = format!(
         "File: {} (line {})\n\nCode to edit:\n```\n{}\n```\n\nInstruction: {}",

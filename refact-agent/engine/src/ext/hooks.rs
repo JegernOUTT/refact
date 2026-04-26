@@ -171,22 +171,30 @@ hooks:
         - type: command
           command: "./format.sh"
 "#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml).await.unwrap();
+        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 2);
 
-        let pre = hooks.iter().find(|h| h.event == HookEvent::PreToolUse).unwrap();
+        let pre = hooks
+            .iter()
+            .find(|h| h.event == HookEvent::PreToolUse)
+            .unwrap();
         assert_eq!(pre.matcher, Some("Bash|Write".to_string()));
         assert_eq!(pre.command, "./check.sh");
         assert_eq!(pre.timeout, Some(30));
 
-        let post = hooks.iter().find(|h| h.event == HookEvent::PostToolUse).unwrap();
+        let post = hooks
+            .iter()
+            .find(|h| h.event == HookEvent::PostToolUse)
+            .unwrap();
         assert_eq!(post.matcher, Some("Write".to_string()));
         assert_eq!(post.command, "./format.sh");
     }
@@ -223,21 +231,29 @@ hooks:
     ]
   }
 }"#;
-        tokio::fs::write(claude_dir.join("settings.json"), settings_json).await.unwrap();
+        tokio::fs::write(claude_dir.join("settings.json"), settings_json)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![claude_dir.clone()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 2);
 
-        let session = hooks.iter().find(|h| h.event == HookEvent::SessionStart).unwrap();
+        let session = hooks
+            .iter()
+            .find(|h| h.event == HookEvent::SessionStart)
+            .unwrap();
         assert_eq!(session.command, "echo session started");
         assert!(session.matcher.is_none());
 
-        let prompt = hooks.iter().find(|h| h.event == HookEvent::UserPromptSubmit).unwrap();
+        let prompt = hooks
+            .iter()
+            .find(|h| h.event == HookEvent::UserPromptSubmit)
+            .unwrap();
         assert_eq!(prompt.command, "./on_prompt.sh");
         assert_eq!(prompt.timeout, Some(10));
         assert_eq!(prompt.matcher, Some(".*".to_string()));
@@ -248,7 +264,7 @@ hooks:
         let ext_dirs = ExtDirs {
             global_dirs: vec![PathBuf::from("/nonexistent/path")],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert!(hooks.is_empty());
@@ -257,12 +273,14 @@ hooks:
     #[tokio::test]
     async fn test_load_hooks_malformed_yaml() {
         let tmp = tempfile::tempdir().unwrap();
-        tokio::fs::write(tmp.path().join("hooks.yaml"), "not: valid: yaml: :::").await.unwrap();
+        tokio::fs::write(tmp.path().join("hooks.yaml"), "not: valid: yaml: :::")
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert!(hooks.is_empty());
@@ -273,12 +291,14 @@ hooks:
         let tmp = tempfile::tempdir().unwrap();
         let claude_dir = tmp.path().join(".claude");
         tokio::fs::create_dir_all(&claude_dir).await.unwrap();
-        tokio::fs::write(claude_dir.join("settings.json"), "{invalid json}").await.unwrap();
+        tokio::fs::write(claude_dir.join("settings.json"), "{invalid json}")
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![claude_dir.clone()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert!(hooks.is_empty());
@@ -298,12 +318,14 @@ hooks:
         - type: command
           command: "./known.sh"
 "#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml).await.unwrap();
+        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 1);
@@ -352,12 +374,14 @@ hooks:
         - type: command
           command: "cmd9"
 "#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml).await.unwrap();
+        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 9);
@@ -374,12 +398,14 @@ hooks:
           command: "./compact_hook.sh"
           timeout: 60
 "#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml).await.unwrap();
+        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 1);
@@ -408,12 +434,14 @@ hooks:
     ]
   }
 }"#;
-        tokio::fs::write(claude_dir.join("settings.json"), settings_json).await.unwrap();
+        tokio::fs::write(claude_dir.join("settings.json"), settings_json)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![claude_dir.clone()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 1);
@@ -455,18 +483,26 @@ hooks:
     ]
   }
 }"#;
-        tokio::fs::write(claude_dir.join("settings.json"), settings_json).await.unwrap();
-        tokio::fs::write(claude_dir.join("settings.local.json"), local_settings_json).await.unwrap();
+        tokio::fs::write(claude_dir.join("settings.json"), settings_json)
+            .await
+            .unwrap();
+        tokio::fs::write(claude_dir.join("settings.local.json"), local_settings_json)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![claude_dir.clone()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 2);
-        assert!(hooks.iter().any(|h| h.event == HookEvent::SessionStart && h.command == "echo from_settings"));
-        assert!(hooks.iter().any(|h| h.event == HookEvent::SessionEnd && h.command == "echo from_local_settings"));
+        assert!(hooks
+            .iter()
+            .any(|h| h.event == HookEvent::SessionStart && h.command == "echo from_settings"));
+        assert!(hooks
+            .iter()
+            .any(|h| h.event == HookEvent::SessionEnd && h.command == "echo from_local_settings"));
     }
 
     #[tokio::test]
@@ -503,23 +539,42 @@ hooks:
     ]
   }
 }"#;
-        tokio::fs::write(claude_dir.join("settings.json"), settings_json).await.unwrap();
-        tokio::fs::write(claude_dir.join("settings.local.json"), local_settings_json).await.unwrap();
+        tokio::fs::write(claude_dir.join("settings.json"), settings_json)
+            .await
+            .unwrap();
+        tokio::fs::write(claude_dir.join("settings.local.json"), local_settings_json)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![claude_dir.clone()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 2);
         assert!(hooks.iter().any(|h| h.command == "echo base_command"));
         assert!(hooks.iter().any(|h| h.command == "echo local_override"));
-        let local_hook = hooks.iter().find(|h| h.command == "echo local_override").unwrap();
-        let base_hook = hooks.iter().find(|h| h.command == "echo base_command").unwrap();
-        let local_pos = hooks.iter().position(|h| h.command == "echo local_override").unwrap();
-        let base_pos = hooks.iter().position(|h| h.command == "echo base_command").unwrap();
-        assert!(local_pos > base_pos, "local settings hooks should come after base settings hooks");
+        let local_hook = hooks
+            .iter()
+            .find(|h| h.command == "echo local_override")
+            .unwrap();
+        let base_hook = hooks
+            .iter()
+            .find(|h| h.command == "echo base_command")
+            .unwrap();
+        let local_pos = hooks
+            .iter()
+            .position(|h| h.command == "echo local_override")
+            .unwrap();
+        let base_pos = hooks
+            .iter()
+            .position(|h| h.command == "echo base_command")
+            .unwrap();
+        assert!(
+            local_pos > base_pos,
+            "local settings hooks should come after base settings hooks"
+        );
         let _ = (local_hook, base_hook);
     }
 
@@ -533,12 +588,14 @@ hooks:
         - type: command
           command: "./startup.sh"
 "#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml).await.unwrap();
+        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
+            .await
+            .unwrap();
 
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
             installed_dirs: vec![],
-        project_dirs: vec![],
+            project_dirs: vec![],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 1);
@@ -568,7 +625,7 @@ hooks:
         let ext_dirs = ExtDirs {
             global_dirs: vec![global_tmp.path().to_path_buf()],
             installed_dirs: vec![],
-        project_dirs: vec![project_tmp.path().to_path_buf()],
+            project_dirs: vec![project_tmp.path().to_path_buf()],
         };
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 2);
@@ -580,12 +637,24 @@ hooks:
     fn test_event_from_str_all_variants() {
         assert_eq!(event_from_str("PreToolUse"), Some(HookEvent::PreToolUse));
         assert_eq!(event_from_str("PostToolUse"), Some(HookEvent::PostToolUse));
-        assert_eq!(event_from_str("UserPromptSubmit"), Some(HookEvent::UserPromptSubmit));
-        assert_eq!(event_from_str("SessionStart"), Some(HookEvent::SessionStart));
+        assert_eq!(
+            event_from_str("UserPromptSubmit"),
+            Some(HookEvent::UserPromptSubmit)
+        );
+        assert_eq!(
+            event_from_str("SessionStart"),
+            Some(HookEvent::SessionStart)
+        );
         assert_eq!(event_from_str("SessionEnd"), Some(HookEvent::SessionEnd));
         assert_eq!(event_from_str("Stop"), Some(HookEvent::Stop));
-        assert_eq!(event_from_str("SubagentStop"), Some(HookEvent::SubagentStop));
-        assert_eq!(event_from_str("Notification"), Some(HookEvent::Notification));
+        assert_eq!(
+            event_from_str("SubagentStop"),
+            Some(HookEvent::SubagentStop)
+        );
+        assert_eq!(
+            event_from_str("Notification"),
+            Some(HookEvent::Notification)
+        );
         assert_eq!(event_from_str("PreCompact"), Some(HookEvent::PreCompact));
         assert_eq!(event_from_str("Unknown"), None);
         assert_eq!(event_from_str(""), None);

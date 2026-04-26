@@ -25,9 +25,16 @@ fn json_error(status: StatusCode, msg: &str) -> Result<Response<Body>, ScratchEr
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-fn json_response<T: Serialize>(status: StatusCode, data: &T) -> Result<Response<Body>, ScratchError> {
-    let body_str = serde_json::to_string(data)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e)))?;
+fn json_response<T: Serialize>(
+    status: StatusCode,
+    data: &T,
+) -> Result<Response<Body>, ScratchError> {
+    let body_str = serde_json::to_string(data).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization error: {}", e),
+        )
+    })?;
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
@@ -64,25 +71,57 @@ fn scope_str(source: &CommandSource) -> String {
 }
 
 fn is_read_only(source: &CommandSource) -> bool {
-    matches!(source, CommandSource::GlobalClaude | CommandSource::ProjectClaude(_) | CommandSource::InstalledPlugin(_))
+    matches!(
+        source,
+        CommandSource::GlobalClaude
+            | CommandSource::ProjectClaude(_)
+            | CommandSource::InstalledPlugin(_)
+    )
 }
 
 fn skill_file_path(source: &CommandSource, config_dir: &std::path::Path, name: &str) -> String {
     match source {
-        CommandSource::GlobalRefact => config_dir.join("skills").join(name).join("SKILL.md").display().to_string(),
-        CommandSource::GlobalClaude => {
-            home::home_dir()
-                .map(|h| h.join(".claude").join("skills").join(name).join("SKILL.md").display().to_string())
-                .unwrap_or_default()
-        }
-        CommandSource::ProjectRefact(root) => root.join(".refact").join("skills").join(name).join("SKILL.md").display().to_string(),
-        CommandSource::ProjectClaude(root) => root.join(".claude").join("skills").join(name).join("SKILL.md").display().to_string(),
-        CommandSource::InstalledPlugin(plugin_name) => {
-            config_dir.join("plugins").join("installed").join(plugin_name).join("skills").join(name).join("SKILL.md").display().to_string()
-        }
+        CommandSource::GlobalRefact => config_dir
+            .join("skills")
+            .join(name)
+            .join("SKILL.md")
+            .display()
+            .to_string(),
+        CommandSource::GlobalClaude => home::home_dir()
+            .map(|h| {
+                h.join(".claude")
+                    .join("skills")
+                    .join(name)
+                    .join("SKILL.md")
+                    .display()
+                    .to_string()
+            })
+            .unwrap_or_default(),
+        CommandSource::ProjectRefact(root) => root
+            .join(".refact")
+            .join("skills")
+            .join(name)
+            .join("SKILL.md")
+            .display()
+            .to_string(),
+        CommandSource::ProjectClaude(root) => root
+            .join(".claude")
+            .join("skills")
+            .join(name)
+            .join("SKILL.md")
+            .display()
+            .to_string(),
+        CommandSource::InstalledPlugin(plugin_name) => config_dir
+            .join("plugins")
+            .join("installed")
+            .join(plugin_name)
+            .join("skills")
+            .join(name)
+            .join("SKILL.md")
+            .display()
+            .to_string(),
     }
 }
-
 
 fn validate_name(name: &str) -> std::result::Result<(), String> {
     if name.is_empty() {
@@ -118,7 +157,10 @@ async fn resolve_scope_dir(
             Some(root) => Ok((root.join(".refact"), "local".to_string())),
             None => Err("no project root for local scope".to_string()),
         },
-        Some(other) => Err(format!("invalid scope: '{}'; expected 'global' or 'local'", other)),
+        Some(other) => Err(format!(
+            "invalid scope: '{}'; expected 'global' or 'local'",
+            other
+        )),
         None => {
             if require_local {
                 match project_root {
@@ -134,9 +176,17 @@ async fn resolve_scope_dir(
 
 fn make_scope_ext_dirs(base_dir: PathBuf, scope: &str) -> ExtDirs {
     if scope == "global" {
-        ExtDirs { global_dirs: vec![base_dir], project_dirs: vec![], installed_dirs: vec![] }
+        ExtDirs {
+            global_dirs: vec![base_dir],
+            project_dirs: vec![],
+            installed_dirs: vec![],
+        }
     } else {
-        ExtDirs { global_dirs: vec![], project_dirs: vec![base_dir], installed_dirs: vec![] }
+        ExtDirs {
+            global_dirs: vec![],
+            project_dirs: vec![base_dir],
+            installed_dirs: vec![],
+        }
     }
 }
 
@@ -178,9 +228,13 @@ impl From<&HookConfig> for HookConfigFlat {
 fn hooks_to_yaml_string(hooks: &[HookConfigFlat]) -> std::result::Result<String, String> {
     use serde_yaml::Value;
 
-    let mut by_event: std::collections::HashMap<String, Vec<&HookConfigFlat>> = std::collections::HashMap::new();
+    let mut by_event: std::collections::HashMap<String, Vec<&HookConfigFlat>> =
+        std::collections::HashMap::new();
     for hook in hooks {
-        by_event.entry(hook_event_to_str(&hook.event).to_string()).or_default().push(hook);
+        by_event
+            .entry(hook_event_to_str(&hook.event).to_string())
+            .or_default()
+            .push(hook);
     }
 
     if by_event.is_empty() {
@@ -195,23 +249,41 @@ fn hooks_to_yaml_string(hooks: &[HookConfigFlat]) -> std::result::Result<String,
         let mut entries = Vec::new();
         for hook in hook_list {
             let mut hook_cmd = serde_yaml::Mapping::new();
-            hook_cmd.insert(Value::String("type".to_string()), Value::String("command".to_string()));
-            hook_cmd.insert(Value::String("command".to_string()), Value::String(hook.command.clone()));
+            hook_cmd.insert(
+                Value::String("type".to_string()),
+                Value::String("command".to_string()),
+            );
+            hook_cmd.insert(
+                Value::String("command".to_string()),
+                Value::String(hook.command.clone()),
+            );
             if let Some(t) = hook.timeout {
-                hook_cmd.insert(Value::String("timeout".to_string()), Value::Number(serde_yaml::Number::from(t)));
+                hook_cmd.insert(
+                    Value::String("timeout".to_string()),
+                    Value::Number(serde_yaml::Number::from(t)),
+                );
             }
             let mut entry = serde_yaml::Mapping::new();
             if let Some(m) = &hook.matcher {
-                entry.insert(Value::String("matcher".to_string()), Value::String(m.clone()));
+                entry.insert(
+                    Value::String("matcher".to_string()),
+                    Value::String(m.clone()),
+                );
             }
-            entry.insert(Value::String("hooks".to_string()), Value::Sequence(vec![Value::Mapping(hook_cmd)]));
+            entry.insert(
+                Value::String("hooks".to_string()),
+                Value::Sequence(vec![Value::Mapping(hook_cmd)]),
+            );
             entries.push(Value::Mapping(entry));
         }
         hooks_map.insert(Value::String(event_str), Value::Sequence(entries));
     }
 
     let mut root = serde_yaml::Mapping::new();
-    root.insert(Value::String("hooks".to_string()), Value::Mapping(hooks_map));
+    root.insert(
+        Value::String("hooks".to_string()),
+        Value::Mapping(hooks_map),
+    );
     serde_yaml::to_string(&Value::Mapping(root)).map_err(|e| e.to_string())
 }
 
@@ -231,47 +303,89 @@ fn build_skill_frontmatter(
         serde_yaml::Value::Mapping(m) => m,
         _ => serde_yaml::Mapping::new(),
     };
-    map.insert(serde_yaml::Value::String("name".to_string()), serde_yaml::Value::String(name.to_string()));
+    map.insert(
+        serde_yaml::Value::String("name".to_string()),
+        serde_yaml::Value::String(name.to_string()),
+    );
     if let Some(d) = description {
-        map.insert(serde_yaml::Value::String("description".to_string()), serde_yaml::Value::String(d.to_string()));
+        map.insert(
+            serde_yaml::Value::String("description".to_string()),
+            serde_yaml::Value::String(d.to_string()),
+        );
     }
     if let Some(ui) = user_invocable {
-        map.insert(serde_yaml::Value::String("user-invocable".to_string()), serde_yaml::Value::Bool(ui));
+        map.insert(
+            serde_yaml::Value::String("user-invocable".to_string()),
+            serde_yaml::Value::Bool(ui),
+        );
     }
     if let Some(dmi) = disable_model_invocation {
-        map.insert(serde_yaml::Value::String("disable-model-invocation".to_string()), serde_yaml::Value::Bool(dmi));
+        map.insert(
+            serde_yaml::Value::String("disable-model-invocation".to_string()),
+            serde_yaml::Value::Bool(dmi),
+        );
     }
     if let Some(ah) = argument_hint {
         if ah.is_empty() {
             map.remove(serde_yaml::Value::String("argument-hint".to_string()));
         } else {
-            map.insert(serde_yaml::Value::String("argument-hint".to_string()), serde_yaml::Value::String(ah.to_string()));
+            map.insert(
+                serde_yaml::Value::String("argument-hint".to_string()),
+                serde_yaml::Value::String(ah.to_string()),
+            );
         }
     }
     if let Some(tools) = allowed_tools {
         if tools.is_empty() {
             map.remove(serde_yaml::Value::String("allowed-tools".to_string()));
         } else {
-            let seq = tools.iter().map(|t| serde_yaml::Value::String(t.clone())).collect();
-            map.insert(serde_yaml::Value::String("allowed-tools".to_string()), serde_yaml::Value::Sequence(seq));
+            let seq = tools
+                .iter()
+                .map(|t| serde_yaml::Value::String(t.clone()))
+                .collect();
+            map.insert(
+                serde_yaml::Value::String("allowed-tools".to_string()),
+                serde_yaml::Value::Sequence(seq),
+            );
         }
     }
     if let Some(m_opt) = model {
         match m_opt {
-            Some(m) => { map.insert(serde_yaml::Value::String("model".to_string()), serde_yaml::Value::String(m.to_string())); }
-            None => { map.remove(serde_yaml::Value::String("model".to_string())); }
+            Some(m) => {
+                map.insert(
+                    serde_yaml::Value::String("model".to_string()),
+                    serde_yaml::Value::String(m.to_string()),
+                );
+            }
+            None => {
+                map.remove(serde_yaml::Value::String("model".to_string()));
+            }
         }
     }
     if let Some(c_opt) = context {
         match c_opt {
-            Some(c) => { map.insert(serde_yaml::Value::String("context".to_string()), serde_yaml::Value::String(c.to_string())); }
-            None => { map.remove(serde_yaml::Value::String("context".to_string())); }
+            Some(c) => {
+                map.insert(
+                    serde_yaml::Value::String("context".to_string()),
+                    serde_yaml::Value::String(c.to_string()),
+                );
+            }
+            None => {
+                map.remove(serde_yaml::Value::String("context".to_string()));
+            }
         }
     }
     if let Some(a_opt) = agent {
         match a_opt {
-            Some(a) => { map.insert(serde_yaml::Value::String("agent".to_string()), serde_yaml::Value::String(a.to_string())); }
-            None => { map.remove(serde_yaml::Value::String("agent".to_string())); }
+            Some(a) => {
+                map.insert(
+                    serde_yaml::Value::String("agent".to_string()),
+                    serde_yaml::Value::String(a.to_string()),
+                );
+            }
+            None => {
+                map.remove(serde_yaml::Value::String("agent".to_string()));
+            }
         }
     }
     serde_yaml::Value::Mapping(map)
@@ -289,27 +403,46 @@ fn build_command_frontmatter(
         _ => serde_yaml::Mapping::new(),
     };
     if let Some(d) = description {
-        map.insert(serde_yaml::Value::String("description".to_string()), serde_yaml::Value::String(d.to_string()));
+        map.insert(
+            serde_yaml::Value::String("description".to_string()),
+            serde_yaml::Value::String(d.to_string()),
+        );
     }
     if let Some(ah) = argument_hint {
         if ah.is_empty() {
             map.remove(serde_yaml::Value::String("argument-hint".to_string()));
         } else {
-            map.insert(serde_yaml::Value::String("argument-hint".to_string()), serde_yaml::Value::String(ah.to_string()));
+            map.insert(
+                serde_yaml::Value::String("argument-hint".to_string()),
+                serde_yaml::Value::String(ah.to_string()),
+            );
         }
     }
     if let Some(tools) = allowed_tools {
         if tools.is_empty() {
             map.remove(serde_yaml::Value::String("allowed-tools".to_string()));
         } else {
-            let seq = tools.iter().map(|t| serde_yaml::Value::String(t.clone())).collect();
-            map.insert(serde_yaml::Value::String("allowed-tools".to_string()), serde_yaml::Value::Sequence(seq));
+            let seq = tools
+                .iter()
+                .map(|t| serde_yaml::Value::String(t.clone()))
+                .collect();
+            map.insert(
+                serde_yaml::Value::String("allowed-tools".to_string()),
+                serde_yaml::Value::Sequence(seq),
+            );
         }
     }
     if let Some(m_opt) = model {
         match m_opt {
-            Some(m) => { map.insert(serde_yaml::Value::String("model".to_string()), serde_yaml::Value::String(m.to_string())); }
-            None => { map.remove(serde_yaml::Value::String("model".to_string())); }
+            Some(m) => {
+                map.insert(
+                    serde_yaml::Value::String("model".to_string()),
+                    serde_yaml::Value::String(m.to_string()),
+                );
+            }
+            None => {
+                map.remove(serde_yaml::Value::String("model".to_string()));
+            }
         }
     }
     serde_yaml::Value::Mapping(map)
@@ -363,6 +496,7 @@ pub struct ExtRegistryResponse {
     pub skills: Vec<RegistrySkillEntry>,
     pub slash_commands: Vec<RegistryCommandEntry>,
     pub hooks: Vec<RegistryHookEntry>,
+    pub has_project_root: bool,
 }
 
 pub async fn handle_v1_ext_registry(
@@ -374,9 +508,16 @@ pub async fn handle_v1_ext_registry(
     let skill_indices = load_skill_indices(&ext_dirs).await;
     let commands = load_slash_commands(&ext_dirs).await;
     let hooks = load_hooks(&ext_dirs).await;
+    let has_project_root = !get_project_dirs(gcx.clone()).await.is_empty();
 
-    let skills: Vec<RegistrySkillEntry> = skill_indices.iter()
-        .filter(|s| !matches!(s.source, CommandSource::GlobalClaude | CommandSource::ProjectClaude(_)))
+    let skills: Vec<RegistrySkillEntry> = skill_indices
+        .iter()
+        .filter(|s| {
+            !matches!(
+                s.source,
+                CommandSource::GlobalClaude | CommandSource::ProjectClaude(_)
+            )
+        })
         .map(|s| RegistrySkillEntry {
             name: s.name.clone(),
             description: s.description.clone(),
@@ -385,10 +526,17 @@ pub async fn handle_v1_ext_registry(
             scope: scope_str(&s.source),
             read_only: is_read_only(&s.source),
             file_path: skill_file_path(&s.source, &config_dir, &s.name),
-        }).collect();
+        })
+        .collect();
 
-    let slash_commands: Vec<RegistryCommandEntry> = commands.iter()
-        .filter(|c| !matches!(c.source, CommandSource::GlobalClaude | CommandSource::ProjectClaude(_)))
+    let slash_commands: Vec<RegistryCommandEntry> = commands
+        .iter()
+        .filter(|c| {
+            !matches!(
+                c.source,
+                CommandSource::GlobalClaude | CommandSource::ProjectClaude(_)
+            )
+        })
         .map(|c| RegistryCommandEntry {
             name: c.name.clone(),
             description: c.description.clone(),
@@ -397,20 +545,32 @@ pub async fn handle_v1_ext_registry(
             scope: scope_str(&c.source),
             read_only: is_read_only(&c.source),
             file_path: c.file_path.display().to_string(),
-        }).collect();
+        })
+        .collect();
 
-    let hooks_entries: Vec<RegistryHookEntry> = hooks.iter().map(|h| RegistryHookEntry {
-        event: h.event.clone(),
-        matcher: h.matcher.clone(),
-        command: h.command.clone(),
-        timeout: h.timeout,
-        source: source_str(&h.source),
-        source_label: source_label_str(&h.source),
-        scope: scope_str(&h.source),
-        read_only: is_read_only(&h.source),
-    }).collect();
+    let hooks_entries: Vec<RegistryHookEntry> = hooks
+        .iter()
+        .map(|h| RegistryHookEntry {
+            event: h.event.clone(),
+            matcher: h.matcher.clone(),
+            command: h.command.clone(),
+            timeout: h.timeout,
+            source: source_str(&h.source),
+            source_label: source_label_str(&h.source),
+            scope: scope_str(&h.source),
+            read_only: is_read_only(&h.source),
+        })
+        .collect();
 
-    json_response(StatusCode::OK, &ExtRegistryResponse { skills, slash_commands, hooks: hooks_entries })
+    json_response(
+        StatusCode::OK,
+        &ExtRegistryResponse {
+            skills,
+            slash_commands,
+            hooks: hooks_entries,
+            has_project_root,
+        },
+    )
 }
 
 #[derive(Deserialize)]
@@ -460,22 +620,27 @@ pub async fn handle_v1_ext_skill_get(
         None => json_error(StatusCode::NOT_FOUND, "skill not found"),
         Some(full) => {
             let file_path = full.skill_dir.join("SKILL.md");
-            let raw_content = tokio::fs::read_to_string(&file_path).await.unwrap_or_default();
-            json_response(StatusCode::OK, &SkillDetailResponse {
-                name: full.index.name.clone(),
-                description: full.index.description.clone(),
-                user_invocable: full.index.user_invocable,
-                disable_model_invocation: full.index.disable_model_invocation,
-                allowed_tools: full.allowed_tools.clone(),
-                model: full.model.clone(),
-                context: full.context.clone(),
-                agent: full.agent.clone(),
-                argument_hint: full.argument_hint.clone(),
-                body: full.body.clone(),
-                raw_content,
-                source: source_str(&full.index.source),
-                file_path: skill_file_path(&full.index.source, &config_dir, &full.index.name),
-            })
+            let raw_content = tokio::fs::read_to_string(&file_path)
+                .await
+                .unwrap_or_default();
+            json_response(
+                StatusCode::OK,
+                &SkillDetailResponse {
+                    name: full.index.name.clone(),
+                    description: full.index.description.clone(),
+                    user_invocable: full.index.user_invocable,
+                    disable_model_invocation: full.index.disable_model_invocation,
+                    allowed_tools: full.allowed_tools.clone(),
+                    model: full.model.clone(),
+                    context: full.context.clone(),
+                    agent: full.agent.clone(),
+                    argument_hint: full.argument_hint.clone(),
+                    body: full.body.clone(),
+                    raw_content,
+                    source: source_str(&full.index.source),
+                    file_path: skill_file_path(&full.index.source, &config_dir, &full.index.name),
+                },
+            )
         }
     }
 }
@@ -520,10 +685,11 @@ pub async fn handle_v1_ext_skill_put(
     };
 
     let scope_str_val = req.scope.as_deref().unwrap_or("local");
-    let (base_dir, scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let skill_dir = base_dir.join("skills").join(&name);
     let file_path = skill_dir.join("SKILL.md");
@@ -533,15 +699,38 @@ pub async fn handle_v1_ext_skill_put(
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         if let Err(e) = write_file_atomic(&file_path, raw).await {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("write error: {}", e),
+            );
         }
     } else {
-        let existing_content = tokio::fs::read_to_string(&file_path).await.unwrap_or_default();
+        let existing_content = tokio::fs::read_to_string(&file_path)
+            .await
+            .unwrap_or_default();
         let (existing_fm, existing_body) = parse_frontmatter_and_body(&existing_content);
         let body = req.body.as_deref().unwrap_or(&existing_body);
-        let model_opt = req.model.as_ref().map(|v| if v.is_null() { None } else { v.as_str().map(|s| s) });
-        let context_opt = req.context.as_ref().map(|v| if v.is_null() { None } else { v.as_str().map(|s| s) });
-        let agent_opt = req.agent.as_ref().map(|v| if v.is_null() { None } else { v.as_str().map(|s| s) });
+        let model_opt = req.model.as_ref().map(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s)
+            }
+        });
+        let context_opt = req.context.as_ref().map(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s)
+            }
+        });
+        let agent_opt = req.agent.as_ref().map(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s)
+            }
+        });
         let fm = build_skill_frontmatter(
             existing_fm,
             &name,
@@ -562,12 +751,18 @@ pub async fn handle_v1_ext_skill_put(
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         if let Err(e) = write_file_atomic(&file_path, &content).await {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("write error: {}", e),
+            );
         }
     }
 
     invalidate_slash_cache().await;
-    json_response(StatusCode::OK, &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}))
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -610,10 +805,11 @@ pub async fn handle_v1_ext_skill_post(
     }
 
     let scope_str_val = req.scope.as_deref().unwrap_or("local");
-    let (base_dir, scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let skill_dir = base_dir.join("skills").join(&req.name);
     let file_path = skill_dir.join("SKILL.md");
@@ -640,14 +836,23 @@ pub async fn handle_v1_ext_skill_post(
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
     if let Err(e) = tokio::fs::create_dir_all(&skill_dir).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("mkdir error: {}", e),
+        );
     }
     if let Err(e) = write_file_atomic(&file_path, &content).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write error: {}", e),
+        );
     }
 
     invalidate_slash_cache().await;
-    json_response(StatusCode::CREATED, &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}))
+    json_response(
+        StatusCode::CREATED,
+        &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}),
+    )
 }
 
 pub async fn handle_v1_ext_skill_delete(
@@ -660,19 +865,28 @@ pub async fn handle_v1_ext_skill_delete(
     }
     let scope_str_val = match query.scope.as_deref() {
         Some(s) => s,
-        None => return json_error(StatusCode::BAD_REQUEST, "scope parameter required for delete"),
+        None => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "scope parameter required for delete",
+            )
+        }
     };
-    let (base_dir, _scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, _scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let skill_dir = base_dir.join("skills").join(&name);
     if !skill_dir.exists() {
         return json_error(StatusCode::NOT_FOUND, "skill not found");
     }
     if let Err(e) = tokio::fs::remove_dir_all(&skill_dir).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("delete error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("delete error: {}", e),
+        );
     }
 
     invalidate_slash_cache().await;
@@ -716,17 +930,20 @@ pub async fn handle_v1_ext_command_get(
         Some(cmd) => {
             let fp = cmd.file_path.clone();
             let raw_content = tokio::fs::read_to_string(&fp).await.unwrap_or_default();
-            json_response(StatusCode::OK, &CommandDetailResponse {
-                name: cmd.name.clone(),
-                description: cmd.description.clone(),
-                argument_hint: cmd.argument_hint.clone(),
-                allowed_tools: cmd.allowed_tools.clone(),
-                model: cmd.model.clone(),
-                body: cmd.body.clone(),
-                raw_content,
-                source: source_str(&cmd.source),
-                file_path: fp.display().to_string(),
-            })
+            json_response(
+                StatusCode::OK,
+                &CommandDetailResponse {
+                    name: cmd.name.clone(),
+                    description: cmd.description.clone(),
+                    argument_hint: cmd.argument_hint.clone(),
+                    allowed_tools: cmd.allowed_tools.clone(),
+                    model: cmd.model.clone(),
+                    body: cmd.body.clone(),
+                    raw_content,
+                    source: source_str(&cmd.source),
+                    file_path: fp.display().to_string(),
+                },
+            )
         }
     }
 }
@@ -763,10 +980,11 @@ pub async fn handle_v1_ext_command_put(
     };
 
     let scope_str_val = req.scope.as_deref().unwrap_or("local");
-    let (base_dir, scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let file_path = base_dir.join("commands").join(format!("{}.md", name));
 
@@ -775,13 +993,24 @@ pub async fn handle_v1_ext_command_put(
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         if let Err(e) = write_file_atomic(&file_path, raw).await {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("write error: {}", e),
+            );
         }
     } else {
-        let existing_content = tokio::fs::read_to_string(&file_path).await.unwrap_or_default();
+        let existing_content = tokio::fs::read_to_string(&file_path)
+            .await
+            .unwrap_or_default();
         let (existing_fm, existing_body) = parse_frontmatter_and_body(&existing_content);
         let body = req.body.as_deref().unwrap_or(&existing_body);
-        let model_opt = req.model.as_ref().map(|v| if v.is_null() { None } else { v.as_str().map(|s| s) });
+        let model_opt = req.model.as_ref().map(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s)
+            }
+        });
         let fm = build_command_frontmatter(
             existing_fm,
             req.description.as_deref(),
@@ -797,12 +1026,18 @@ pub async fn handle_v1_ext_command_put(
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         if let Err(e) = write_file_atomic(&file_path, &content).await {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("write error: {}", e),
+            );
         }
     }
 
     invalidate_slash_cache().await;
-    json_response(StatusCode::OK, &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}))
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -835,10 +1070,11 @@ pub async fn handle_v1_ext_command_post(
     }
 
     let scope_str_val = req.scope.as_deref().unwrap_or("local");
-    let (base_dir, scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let file_path = base_dir.join("commands").join(format!("{}.md", req.name));
     if file_path.exists() {
@@ -861,11 +1097,17 @@ pub async fn handle_v1_ext_command_post(
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     if let Err(e) = write_file_atomic(&file_path, &content).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write error: {}", e),
+        );
     }
 
     invalidate_slash_cache().await;
-    json_response(StatusCode::CREATED, &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}))
+    json_response(
+        StatusCode::CREATED,
+        &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}),
+    )
 }
 
 pub async fn handle_v1_ext_command_delete(
@@ -878,19 +1120,28 @@ pub async fn handle_v1_ext_command_delete(
     }
     let scope_str_val = match query.scope.as_deref() {
         Some(s) => s,
-        None => return json_error(StatusCode::BAD_REQUEST, "scope parameter required for delete"),
+        None => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "scope parameter required for delete",
+            )
+        }
     };
-    let (base_dir, _scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, _scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let file_path = base_dir.join("commands").join(format!("{}.md", name));
     if !file_path.exists() {
         return json_error(StatusCode::NOT_FOUND, "command not found");
     }
     if let Err(e) = tokio::fs::remove_file(&file_path).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("delete error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("delete error: {}", e),
+        );
     }
 
     invalidate_slash_cache().await;
@@ -909,23 +1160,29 @@ pub async fn handle_v1_ext_hooks_get(
     Query(query): Query<ScopeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
     let scope_str_val = query.scope.as_deref().unwrap_or("local");
-    let (base_dir, scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let file_path = base_dir.join("hooks.yaml");
-    let raw_content = tokio::fs::read_to_string(&file_path).await.unwrap_or_default();
+    let raw_content = tokio::fs::read_to_string(&file_path)
+        .await
+        .unwrap_or_default();
 
     let ext_dirs = make_scope_ext_dirs(base_dir, &scope_name);
     let hooks = load_hooks(&ext_dirs).await;
     let flat_hooks: Vec<HookConfigFlat> = hooks.iter().map(HookConfigFlat::from).collect();
 
-    json_response(StatusCode::OK, &HooksResponse {
-        hooks: flat_hooks,
-        raw_content,
-        file_path: file_path.display().to_string(),
-    })
+    json_response(
+        StatusCode::OK,
+        &HooksResponse {
+            hooks: flat_hooks,
+            raw_content,
+            file_path: file_path.display().to_string(),
+        },
+    )
 }
 
 #[derive(Deserialize)]
@@ -947,10 +1204,11 @@ pub async fn handle_v1_ext_hooks_put(
     };
 
     let scope_str_val = query.scope.as_deref().unwrap_or("local");
-    let (base_dir, scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let file_path = base_dir.join("hooks.yaml");
 
@@ -967,17 +1225,26 @@ pub async fn handle_v1_ext_hooks_put(
             Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
         }
     } else {
-        return json_error(StatusCode::BAD_REQUEST, "either raw_content or hooks must be provided");
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "either raw_content or hooks must be provided",
+        );
     };
 
     if let Some(parent) = file_path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     if let Err(e) = write_file_atomic(&file_path, &content).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write error: {}", e),
+        );
     }
 
-    json_response(StatusCode::OK, &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}))
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({"ok": true, "scope": scope_name, "file_path": file_path.display().to_string()}),
+    )
 }
 
 pub async fn handle_v1_ext_hooks_delete_by_index(
@@ -987,16 +1254,26 @@ pub async fn handle_v1_ext_hooks_delete_by_index(
 ) -> Result<Response<Body>, ScratchError> {
     let scope_str_val = match query.scope.as_deref() {
         Some(s) => s,
-        None => return json_error(StatusCode::BAD_REQUEST, "scope parameter required for delete"),
+        None => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "scope parameter required for delete",
+            )
+        }
     };
-    let (base_dir, scope_name) = match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let (base_dir, scope_name) =
+        match resolve_scope_dir(gcx.clone(), Some(scope_str_val), true).await {
+            Ok(d) => d,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        };
 
     let file_path = base_dir.join("hooks.yaml");
     let ext_dirs = make_scope_ext_dirs(base_dir, &scope_name);
-    let mut hooks: Vec<HookConfigFlat> = load_hooks(&ext_dirs).await.iter().map(HookConfigFlat::from).collect();
+    let mut hooks: Vec<HookConfigFlat> = load_hooks(&ext_dirs)
+        .await
+        .iter()
+        .map(HookConfigFlat::from)
+        .collect();
 
     if index >= hooks.len() {
         return json_error(StatusCode::NOT_FOUND, "hook index out of bounds");
@@ -1011,7 +1288,10 @@ pub async fn handle_v1_ext_hooks_delete_by_index(
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     if let Err(e) = write_file_atomic(&file_path, &content).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("write error: {}", e));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write error: {}", e),
+        );
     }
 
     json_response(StatusCode::OK, &serde_json::json!({"ok": true}))
@@ -1032,8 +1312,14 @@ mod tests {
 
     fn build_skill_roundtrip(name: &str, description: &str, body: &str) -> String {
         let mut map = serde_yaml::Mapping::new();
-        map.insert(serde_yaml::Value::String("name".to_string()), serde_yaml::Value::String(name.to_string()));
-        map.insert(serde_yaml::Value::String("description".to_string()), serde_yaml::Value::String(description.to_string()));
+        map.insert(
+            serde_yaml::Value::String("name".to_string()),
+            serde_yaml::Value::String(name.to_string()),
+        );
+        map.insert(
+            serde_yaml::Value::String("description".to_string()),
+            serde_yaml::Value::String(description.to_string()),
+        );
         let fm = serde_yaml::Value::Mapping(map);
         serialize_md_content(&fm, body).unwrap_or_default()
     }
@@ -1082,7 +1368,10 @@ mod tests {
 
         let (fm, body) = parse_frontmatter_and_body(&content);
         assert_eq!(fm.get("name").and_then(|v| v.as_str()), Some("my-skill"));
-        assert_eq!(fm.get("description").and_then(|v| v.as_str()), Some("A useful skill"));
+        assert_eq!(
+            fm.get("description").and_then(|v| v.as_str()),
+            Some("A useful skill")
+        );
         assert_eq!(body.trim(), "Do something");
     }
 
@@ -1152,24 +1441,42 @@ mod tests {
         );
         let map = fm.as_mapping().unwrap();
         assert_eq!(map.get("name").and_then(|v| v.as_str()), Some("new-name"));
-        assert_eq!(map.get("description").and_then(|v| v.as_str()), Some("new desc"));
-        assert_eq!(map.get("custom-field").and_then(|v| v.as_str()), Some("preserved"));
+        assert_eq!(
+            map.get("description").and_then(|v| v.as_str()),
+            Some("new desc")
+        );
+        assert_eq!(
+            map.get("custom-field").and_then(|v| v.as_str()),
+            Some("preserved")
+        );
     }
 
     #[test]
     fn test_source_str_values() {
         assert_eq!(source_str(&CommandSource::GlobalRefact), "global_refact");
         assert_eq!(source_str(&CommandSource::GlobalClaude), "global_claude");
-        assert_eq!(source_str(&CommandSource::ProjectRefact(PathBuf::new())), "project_refact");
-        assert_eq!(source_str(&CommandSource::ProjectClaude(PathBuf::new())), "project_claude");
+        assert_eq!(
+            source_str(&CommandSource::ProjectRefact(PathBuf::new())),
+            "project_refact"
+        );
+        assert_eq!(
+            source_str(&CommandSource::ProjectClaude(PathBuf::new())),
+            "project_claude"
+        );
     }
 
     #[test]
     fn test_scope_str_values() {
         assert_eq!(scope_str(&CommandSource::GlobalRefact), "global");
         assert_eq!(scope_str(&CommandSource::GlobalClaude), "global");
-        assert_eq!(scope_str(&CommandSource::ProjectRefact(PathBuf::new())), "local");
-        assert_eq!(scope_str(&CommandSource::ProjectClaude(PathBuf::new())), "local");
+        assert_eq!(
+            scope_str(&CommandSource::ProjectRefact(PathBuf::new())),
+            "local"
+        );
+        assert_eq!(
+            scope_str(&CommandSource::ProjectClaude(PathBuf::new())),
+            "local"
+        );
     }
 
     #[test]
@@ -1191,7 +1498,9 @@ mod tests {
           command: "./check.sh"
           timeout: 30
 "#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml).await.unwrap();
+        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
+            .await
+            .unwrap();
         let ext_dirs = ExtDirs {
             global_dirs: vec![tmp.path().to_path_buf()],
             project_dirs: vec![],

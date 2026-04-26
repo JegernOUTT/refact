@@ -348,6 +348,43 @@ export const historySlice = createSlice({
       }
     },
 
+    replaceSnapshotHistory: (
+      state,
+      action: PayloadAction<TrajectoryMeta[]>,
+    ) => {
+      const snapshotIds = new Set(action.payload.map((m) => m.id));
+      state.chats = Object.fromEntries(
+        Object.entries(state.chats).filter(([id]) => snapshotIds.has(id)),
+      );
+      for (const meta of action.payload) {
+        if (!(meta.id in state.chats)) {
+          state.chats[meta.id] = trajectoryMetaToHistoryItem(meta);
+        } else {
+          const existing = state.chats[meta.id];
+          existing.title = meta.title;
+          existing.updatedAt = meta.updated_at;
+          existing.model = meta.model;
+          existing.mode = meta.mode as ChatHistoryItem["mode"];
+          existing.parent_id = meta.parent_id;
+          existing.link_type = meta.link_type;
+          existing.task_id = meta.task_id;
+          existing.task_role = meta.task_role;
+          existing.agent_id = meta.agent_id;
+          existing.card_id = meta.card_id;
+          existing.session_state = meta.session_state;
+          existing.message_count = meta.message_count;
+          existing.root_chat_id = meta.root_chat_id;
+          existing.total_coins = meta.total_coins;
+          existing.total_lines_added = meta.total_lines_added;
+          existing.total_lines_removed = meta.total_lines_removed;
+          existing.tasks_total = meta.tasks_total;
+          existing.tasks_done = meta.tasks_done;
+          existing.tasks_failed = meta.tasks_failed;
+        }
+      }
+      state.pagination = { cursor: null, hasMore: false };
+    },
+
     setPagination: (
       state,
       action: PayloadAction<{ cursor: string | null; hasMore: boolean }>,
@@ -538,6 +575,7 @@ export const {
   saveChat,
   hydrateHistory,
   hydrateHistoryFromMeta,
+  replaceSnapshotHistory,
   setPagination,
   deleteChatById,
   upsertChatStub,
