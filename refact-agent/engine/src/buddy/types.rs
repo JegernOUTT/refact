@@ -1,0 +1,76 @@
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddyIdentity {
+    pub name: String,
+    pub created_at: String,
+    pub palette_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddyProgression {
+    pub stage: u32,
+    pub stage_name: String,
+    pub level: u32,
+    pub xp: u64,
+    pub xp_next: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddySkillLedger {
+    pub unlocked: Vec<String>,
+    pub locked: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddyWorkflowSummary {
+    pub workflow_id: String,
+    pub last_run: Option<String>,
+    pub run_count: u64,
+    pub last_outcome: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddySemanticSnapshot {
+    pub mood: String,
+    pub focus: String,
+    pub headline: String,
+    pub last_active: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddyActivity {
+    pub icon: String,
+    pub title: String,
+    pub description: String,
+    pub timestamp: String,
+    pub activity_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddySuggestion {
+    pub id: String,
+    pub suggestion_type: String,
+    pub title: String,
+    pub description: String,
+    pub created_at: String,
+    pub dismissed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddyState {
+    pub identity: BuddyIdentity,
+    pub progression: BuddyProgression,
+    pub skills: BuddySkillLedger,
+    pub workflow_summaries: Vec<BuddyWorkflowSummary>,
+    pub semantic: BuddySemanticSnapshot,
+    pub recent_activities: Vec<BuddyActivity>,
+    pub suggestion_state: Vec<BuddySuggestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddyThreadMeta {
+    pub is_buddy_chat: bool,
+    pub buddy_chat_kind: String,
+    pub workflow_id: Option<String>,
+}
