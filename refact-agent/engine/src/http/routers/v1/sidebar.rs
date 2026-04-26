@@ -6,6 +6,7 @@ use hyper::{Body, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock as ARwLock};
 
+use crate::buddy::events::BuddyEvent;
 use crate::chat::{TrajectoryEvent, TrajectoryMeta, list_all_trajectories_meta};
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
@@ -46,10 +47,12 @@ pub enum SidebarEvent {
     Snapshot {
         trajectories: Vec<TrajectoryMeta>,
         tasks: Vec<TaskMeta>,
+        buddy: serde_json::Value,
     },
     Trajectory(TrajectoryEvent),
     Task(TaskEvent),
     Notification(NotificationEvent),
+    Buddy { buddy_event: BuddyEvent },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,10 +72,20 @@ async fn fetch_snapshot(
     Ok((trajectories, tasks))
 }
 
+async fn fetch_buddy_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> serde_json::Value {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let locked = buddy_arc.lock().await;
+    match locked.as_ref() {
+        Some(svc) => serde_json::to_value(&svc.snapshot())
+            .unwrap_or(serde_json::json!({"enabled": false})),
+        None => serde_json::json!({"enabled": false}),
+    }
+}
+
 pub async fn handle_sidebar_subscribe(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Response<Body>, ScratchError> {
-    let (trajectory_rx, workspace_changed_rx, task_rx, notification_rx, seq_counter) = {
+    let (trajectory_rx, workspace_changed_rx, task_rx, notification_rx, buddy_rx, seq_counter) = {
         let gcx_locked = gcx.read().await;
 
         let trajectory_rx = gcx_locked
@@ -92,6 +105,11 @@ pub async fn handle_sidebar_subscribe(
             .as_ref()
             .map(|tx| tx.subscribe());
 
+        let buddy_rx = gcx_locked
+            .buddy_events_tx
+            .as_ref()
+            .map(|tx| tx.subscribe());
+
         if trajectory_rx.is_none() && task_rx.is_none() && notification_rx.is_none() {
             return Err(ScratchError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -105,6 +123,7 @@ pub async fn handle_sidebar_subscribe(
             workspace_changed_rx,
             task_rx,
             notification_rx,
+            buddy_rx,
             seq_counter,
         )
     };
@@ -113,12 +132,14 @@ pub async fn handle_sidebar_subscribe(
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    let buddy_snap = fetch_buddy_snapshot(gcx.clone()).await;
+
     let gcx_for_stream = gcx.clone();
     let stream = async_stream::stream! {
         let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
         let envelope = SidebarEventEnvelope {
             seq,
-            event: SidebarEvent::Snapshot { trajectories, tasks },
+            event: SidebarEvent::Snapshot { trajectories, tasks, buddy: buddy_snap },
         };
         if let Ok(json) = serde_json::to_string(&envelope) {
             yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
@@ -128,6 +149,7 @@ pub async fn handle_sidebar_subscribe(
         let mut workspace_changed_rx = workspace_changed_rx;
         let mut task_rx = task_rx;
         let mut notification_rx = notification_rx;
+        let mut buddy_rx = buddy_rx;
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -152,10 +174,11 @@ pub async fn handle_sidebar_subscribe(
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             if let Ok((trajectories, tasks)) = fetch_snapshot(gcx_for_stream.clone()).await {
+                                let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
                                 let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
                                 let envelope = SidebarEventEnvelope {
                                     seq,
-                                    event: SidebarEvent::Snapshot { trajectories, tasks },
+                                    event: SidebarEvent::Snapshot { trajectories, tasks, buddy },
                                 };
                                 if let Ok(json) = serde_json::to_string(&envelope) {
                                     yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
@@ -182,10 +205,11 @@ pub async fn handle_sidebar_subscribe(
                     match result {
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
                             if let Ok((trajectories, tasks)) = fetch_snapshot(gcx_for_stream.clone()).await {
+                                let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
                                 let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
                                 let envelope = SidebarEventEnvelope {
                                     seq,
-                                    event: SidebarEvent::Snapshot { trajectories, tasks },
+                                    event: SidebarEvent::Snapshot { trajectories, tasks, buddy },
                                 };
                                 if let Ok(json) = serde_json::to_string(&envelope) {
                                     yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
@@ -217,10 +241,11 @@ pub async fn handle_sidebar_subscribe(
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             if let Ok((trajectories, tasks)) = fetch_snapshot(gcx_for_stream.clone()).await {
+                                let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
                                 let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
                                 let envelope = SidebarEventEnvelope {
                                     seq,
-                                    event: SidebarEvent::Snapshot { trajectories, tasks },
+                                    event: SidebarEvent::Snapshot { trajectories, tasks, buddy },
                                 };
                                 if let Ok(json) = serde_json::to_string(&envelope) {
                                     yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
@@ -262,6 +287,31 @@ pub async fn handle_sidebar_subscribe(
                             if trajectory_rx.is_none() && task_rx.is_none() {
                                 break;
                             }
+                        }
+                    }
+                }
+
+                result = async {
+                    match &mut buddy_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Ok(event) => {
+                            let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
+                            let envelope = SidebarEventEnvelope {
+                                seq,
+                                event: SidebarEvent::Buddy { buddy_event: event },
+                            };
+                            if let Ok(json) = serde_json::to_string(&envelope) {
+                                yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            buddy_rx = None;
                         }
                     }
                 }
