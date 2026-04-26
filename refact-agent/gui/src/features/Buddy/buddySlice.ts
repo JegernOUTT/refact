@@ -5,7 +5,7 @@ import type {
   BuddyActivityEntry,
   BuddySuggestion,
   BuddySettings,
-  BuddyConversationMeta,
+  BuddyConversationEntry,
   DiagnosticContext,
   BuddyRuntimeEvent,
   BuddySpeechItem,
@@ -19,7 +19,7 @@ interface BuddySignalQueueItem {
 interface BuddySliceState {
   snapshot: BuddySnapshot | null;
   loading: boolean;
-  conversations: BuddyConversationMeta[];
+  conversations: BuddyConversationEntry[];
   recentDiagnostics: DiagnosticContext[];
   signalQueue: BuddySignalQueueItem[];
   runtimeQueue: BuddyRuntimeEvent[];
@@ -78,7 +78,7 @@ export const buddySlice = createSlice({
     },
     setBuddyConversations: (
       state,
-      action: PayloadAction<BuddyConversationMeta[]>,
+      action: PayloadAction<BuddyConversationEntry[]>,
     ) => {
       state.conversations = action.payload;
     },

@@ -1,0 +1,93 @@
+.sectionLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.filterTabs {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.filterTab {
+  padding: 2px 8px;
+  border-radius: var(--radius-2);
+  border: 1px solid var(--gray-a4);
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.12s;
+  color: var(--gray-11);
+}
+
+.filterTab:hover {
+  background: var(--gray-a3);
+}
+
+.filterTab[data-active] {
+  background: var(--gray-a4);
+  border-color: var(--gray-a6);
+  color: var(--gray-12);
+}
+
+.entryRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius-2);
+  border: none;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  cursor: default;
+  transition: background 0.12s;
+}
+
+.entryRow[data-clickable] {
+  cursor: pointer;
+}
+
+.entryRow[data-clickable]:hover {
+  background: var(--gray-a3);
+}
+
+.entryIcon {
+  font-size: 14px;
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+}
+
+.entryTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+.entryMeta {
+  font-size: var(--font-size-1);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: var(--radius-1);
+  background: var(--accent-a3);
+  color: var(--accent-11);
+  font-size: 10px;
+  font-weight: 500;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-2);
+  color: var(--gray-9);
+}

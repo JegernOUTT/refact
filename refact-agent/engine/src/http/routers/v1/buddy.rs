@@ -9,7 +9,7 @@ use tokio::sync::RwLock as ARwLock;
 use crate::buddy::diagnostics::DiagnosticContext;
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::settings::MAX_PALETTE_INDEX;
-use crate::buddy::types::BuddyActivity;
+use crate::buddy::types::{BuddyActivity, BuddyConversationEntry};
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 
@@ -112,43 +112,24 @@ pub async fn handle_v1_buddy_activities(
     Ok(axum::Json(activities))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ConversationsListQuery {
+    pub kind: Option<String>,
+}
+
 pub async fn handle_v1_buddy_conversations_list(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
-) -> Result<axum::Json<Vec<BuddyConversationMeta>>, ScratchError> {
+    axum::extract::Query(query): axum::extract::Query<ConversationsListQuery>,
+) -> Result<axum::Json<Vec<BuddyConversationEntry>>, ScratchError> {
     let project_root = crate::files_correction::get_project_dirs(gcx.clone())
         .await
         .into_iter()
         .next()
         .ok_or_else(|| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, "no project root".to_string()))?;
 
-    let paths = crate::buddy::storage::list_buddy_conversations(&project_root).await;
-    let mut metas = Vec::new();
-    for path in paths {
-        let chat_id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        if chat_id.is_empty() {
-            continue;
-        }
-        let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-        let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-        if !val.is_object() {
-            continue;
-        }
-        let title = val.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
-        let created_at = val.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let last_message_at = val.get("last_message_at").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let message_count = val.get("messages").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-        metas.push(BuddyConversationMeta { chat_id, title, created_at, last_message_at, message_count });
-    }
-    metas.sort_by(|a, b| {
-        let a_time = a.last_message_at.as_deref().unwrap_or(&a.created_at);
-        let b_time = b.last_message_at.as_deref().unwrap_or(&b.created_at);
-        b_time.cmp(a_time)
-    });
-    Ok(axum::Json(metas))
+    let kind_filter = query.kind.map(|k| k.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
+    let entries = crate::buddy::conversation_ledger::list_all_buddy_conversations(&project_root, kind_filter).await;
+    Ok(axum::Json(entries))
 }
 
 pub async fn handle_v1_buddy_conversations_create(
@@ -183,6 +164,73 @@ pub async fn handle_v1_buddy_conversations_create(
         message_count: 0,
     };
     Ok(axum::Json(serde_json::to_value(meta).map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSetupRequest {
+    pub flow: String,
+    pub title: Option<String>,
+}
+
+pub async fn handle_v1_buddy_conversations_create_setup(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    axum::Json(req): axum::Json<CreateSetupRequest>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let project_root = crate::files_correction::get_project_dirs(gcx.clone())
+        .await
+        .into_iter()
+        .next()
+        .ok_or_else(|| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, "no project root".to_string()))?;
+
+    let valid_flows = ["setup", "setup_mcp", "setup_skills", "setup_commands", "setup_agents_md", "setup_subagents"];
+    if !valid_flows.contains(&req.flow.as_str()) {
+        return Err(ScratchError::new(StatusCode::BAD_REQUEST, format!("unknown flow: {}", req.flow)));
+    }
+
+    let chat_id = uuid::Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let title = req.title.unwrap_or_else(|| {
+        match req.flow.as_str() {
+            "setup_mcp" => "MCP Setup".to_string(),
+            "setup_skills" => "Skills Setup".to_string(),
+            "setup_commands" => "Commands Setup".to_string(),
+            "setup_agents_md" => "AGENTS.md Setup".to_string(),
+            "setup_subagents" => "Subagents Setup".to_string(),
+            _ => "Project Setup".to_string(),
+        }
+    });
+    let badge = match req.flow.as_str() {
+        "setup_mcp" => "MCP Setup",
+        "setup_skills" => "Skills",
+        "setup_commands" => "Commands",
+        "setup_agents_md" => "AGENTS.md",
+        "setup_subagents" => "Subagents",
+        _ => "Setup",
+    };
+    let conv = serde_json::json!({
+        "chat_id": chat_id,
+        "title": title,
+        "kind": "setup",
+        "flow": req.flow,
+        "badge": badge,
+        "created_at": created_at,
+        "last_message_at": null,
+        "messages": []
+    });
+
+    let path = project_root.join(format!(".refact/buddy/chats/conversations/{}.json", chat_id));
+    crate::buddy::storage::atomic_write_json(&path, &conv)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(axum::Json(serde_json::json!({
+        "chat_id": chat_id,
+        "title": title,
+        "kind": "setup",
+        "flow": req.flow,
+        "badge": badge,
+        "created_at": created_at
+    })))
 }
 
 pub async fn handle_v1_buddy_suggestion_dismiss(

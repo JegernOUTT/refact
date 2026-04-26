@@ -717,6 +717,7 @@ pub fn make_v1_router() -> Router {
         .route("/buddy/activities", get(buddy::handle_v1_buddy_activities))
         .route("/buddy/conversations", get(buddy::handle_v1_buddy_conversations_list))
         .route("/buddy/conversations", post(buddy::handle_v1_buddy_conversations_create))
+        .route("/buddy/conversations/setup", post(buddy::handle_v1_buddy_conversations_create_setup))
         .route("/buddy/suggestions/:id/dismiss", post(buddy::handle_v1_buddy_suggestion_dismiss))
         .route("/buddy/diagnostics", get(buddy::handle_v1_buddy_diagnostics_list))
         .route("/buddy/diagnostics/collect", post(buddy::handle_v1_buddy_diagnostics_collect))

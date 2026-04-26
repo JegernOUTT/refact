@@ -1,4 +1,5 @@
 pub mod actor;
+pub mod conversation_ledger;
 pub mod diagnostics;
 pub mod events;
 pub mod issues;

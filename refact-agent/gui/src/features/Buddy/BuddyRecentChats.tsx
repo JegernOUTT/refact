@@ -1,4 +1,4 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useState } from "react";
 import { Flex, Text, Button, Spinner } from "@radix-ui/themes";
 import { ChatBubbleIcon, PlusIcon } from "@radix-ui/react-icons";
 import { useAppDispatch } from "../../hooks";
@@ -8,20 +8,107 @@ import {
   useGetBuddyConversationsQuery,
   useCreateBuddyConversationMutation,
 } from "../../services/refact/buddy";
-import styles from "./BuddyHome.module.css";
+import type { BuddyConversationEntry } from "./types";
+import styles from "./BuddyRecentChats.module.css";
 
-export const BuddyRecentChats: React.FC = () => {
+type FilterKind = "all" | "chat" | "setup" | "system";
+
+const FILTER_LABELS: { kind: FilterKind; label: string }[] = [
+  { kind: "all", label: "All" },
+  { kind: "chat", label: "Chats" },
+  { kind: "setup", label: "Setup" },
+  { kind: "system", label: "System" },
+];
+
+function relativeTime(ts: string): string {
+  if (!ts) return "";
+  const diff = Date.now() - new Date(ts).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+interface EntryRowProps {
+  entry: BuddyConversationEntry;
+  onClick: (entry: BuddyConversationEntry) => void;
+}
+
+const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
+  const clickable = entry.kind === "chat" || entry.kind === "setup";
+  return (
+    <button
+      type="button"
+      className={styles.entryRow}
+      onClick={clickable ? () => onClick(entry) : undefined}
+      data-clickable={clickable || undefined}
+    >
+      <span className={styles.entryIcon}>{entry.icon}</span>
+      <Flex direction="column" gap="0" style={{ flex: 1, minWidth: 0 }}>
+        <Flex align="center" gap="1" style={{ minWidth: 0 }}>
+          <Text size="1" weight="medium" className={styles.entryTitle} truncate>
+            {entry.title || "Untitled"}
+          </Text>
+          {entry.badge && (
+            <span className={styles.badge}>{entry.badge}</span>
+          )}
+        </Flex>
+        <Flex align="center" gap="1">
+          <Text size="1" color="gray" className={styles.entryMeta}>
+            {entry.message_count > 0 ? `${entry.message_count} entries` : entry.status}
+          </Text>
+          {entry.updated_at && (
+            <>
+              <Text size="1" color="gray">·</Text>
+              <Text size="1" color="gray" className={styles.entryMeta}>
+                {relativeTime(entry.updated_at)}
+              </Text>
+            </>
+          )}
+        </Flex>
+      </Flex>
+    </button>
+  );
+};
+
+interface BuddyRecentChatsProps {
+  compact?: boolean;
+  maxItems?: number;
+  showFilters?: boolean;
+  onViewAll?: () => void;
+}
+
+export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
+  compact = false,
+  maxItems,
+  showFilters = true,
+  onViewAll,
+}) => {
   const dispatch = useAppDispatch();
-  const { data: conversations, isLoading } = useGetBuddyConversationsQuery(
+  const [filter, setFilter] = useState<FilterKind>("all");
+
+  const { data: allConversations, isLoading } = useGetBuddyConversationsQuery(
     undefined,
     { refetchOnMountOrArgChange: true },
   );
   const [createConversation, { isLoading: isCreating }] =
     useCreateBuddyConversationMutation();
 
+  const conversations = React.useMemo(() => {
+    if (!allConversations) return [];
+    const filtered = filter === "all"
+      ? allConversations
+      : filter === "system"
+        ? allConversations.filter((e) => e.kind === "system" || e.kind === "workflow")
+        : allConversations.filter((e) => e.kind === filter);
+    return maxItems ? filtered.slice(0, maxItems) : filtered;
+  }, [allConversations, filter, maxItems]);
+
   const handleOpen = useCallback(
-    (chatId: string, title: string) => {
-      dispatch(openBuddyChat({ chat_id: chatId, title }));
+    (entry: BuddyConversationEntry) => {
+      dispatch(openBuddyChat({ chat_id: entry.id, title: entry.title }));
       dispatch(push({ name: "chat" }));
     },
     [dispatch],
@@ -41,22 +128,47 @@ export const BuddyRecentChats: React.FC = () => {
     <Flex direction="column" gap="2">
       <Flex align="center" justify="between">
         <Text size="1" weight="bold" color="gray" className={styles.sectionLabel}>
-          RECENT CHATS
+          {compact ? "RECENT ACTIVITY" : "CONVERSATIONS"}
         </Text>
-        <Button
-          size="1"
-          variant="ghost"
-          onClick={handleNew}
-          disabled={isCreating}
-        >
-          {isCreating ? (
-            <Spinner size="1" />
-          ) : (
-            <PlusIcon width={12} height={12} />
+        <Flex align="center" gap="1">
+          {onViewAll && (
+            <Button size="1" variant="ghost" onClick={onViewAll}>
+              View All →
+            </Button>
           )}
-          New Chat
-        </Button>
+          {!compact && (
+            <Button
+              size="1"
+              variant="ghost"
+              onClick={handleNew}
+              disabled={isCreating}
+            >
+              {isCreating ? (
+                <Spinner size="1" />
+              ) : (
+                <PlusIcon width={12} height={12} />
+              )}
+              New Chat
+            </Button>
+          )}
+        </Flex>
       </Flex>
+
+      {showFilters && !compact && (
+        <Flex gap="1" className={styles.filterTabs}>
+          {FILTER_LABELS.map(({ kind, label }) => (
+            <button
+              key={kind}
+              type="button"
+              className={styles.filterTab}
+              data-active={filter === kind || undefined}
+              onClick={() => setFilter(kind)}
+            >
+              <Text size="1">{label}</Text>
+            </button>
+          ))}
+        </Flex>
+      )}
 
       {isLoading && (
         <Flex align="center" justify="center" py="3">
@@ -64,60 +176,30 @@ export const BuddyRecentChats: React.FC = () => {
         </Flex>
       )}
 
-      {!isLoading && (!conversations || conversations.length === 0) && (
+      {!isLoading && conversations.length === 0 && (
         <Flex
           direction="column"
           align="center"
           justify="center"
           gap="2"
           py="4"
-          className={styles.emptyChats}
+          className={styles.empty}
         >
           <ChatBubbleIcon width={20} height={20} />
           <Text size="1" color="gray">
-            No buddy chats yet
+            {filter === "all" ? "No conversations yet" : `No ${filter} entries`}
           </Text>
-          <Button size="1" variant="soft" onClick={handleNew}>
-            Start a conversation
-          </Button>
+          {filter === "all" && (
+            <Button size="1" variant="soft" onClick={handleNew}>
+              Start a conversation
+            </Button>
+          )}
         </Flex>
       )}
 
-      {conversations &&
-        conversations.map((conv) => (
-          <button
-            key={conv.chat_id}
-            type="button"
-            className={styles.chatItem}
-            onClick={() => handleOpen(conv.chat_id, conv.title)}
-          >
-            <Flex align="center" gap="2">
-              <ChatBubbleIcon
-                width={13}
-                height={13}
-                style={{ flexShrink: 0, opacity: 0.6 }}
-              />
-              <Flex direction="column" gap="0" style={{ flex: 1, minWidth: 0 }}>
-                <Text
-                  size="1"
-                  weight="medium"
-                  className={styles.chatTitle}
-                  truncate
-                >
-                  {conv.title || "Buddy Chat"}
-                </Text>
-                {conv.last_message_at && (
-                  <Text size="1" color="gray" className={styles.chatTime}>
-                    {new Date(conv.last_message_at).toLocaleDateString()}
-                  </Text>
-                )}
-              </Flex>
-              <Text size="1" color="gray" style={{ flexShrink: 0 }}>
-                {conv.message_count > 0 ? `${conv.message_count}` : ""}
-              </Text>
-            </Flex>
-          </button>
-        ))}
+      {conversations.map((entry) => (
+        <EntryRow key={`${entry.kind}-${entry.id}`} entry={entry} onClick={handleOpen} />
+      ))}
     </Flex>
   );
 };

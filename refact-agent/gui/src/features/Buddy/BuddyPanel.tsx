@@ -6,6 +6,7 @@ import { push } from "../Pages/pagesSlice";
 import { openBuddyChat, newBuddyChatAction } from "../Chat/Thread";
 import { BuddyCanvas } from "./BuddyCanvas";
 import { BuddySpeechCloud } from "./BuddySpeechCloud";
+import { BuddyRecentChats } from "./BuddyRecentChats";
 import { useBuddyState } from "./hooks/useBuddyState";
 import {
   selectBuddySnapshot,
@@ -127,6 +128,9 @@ export const BuddyPanel: React.FC = () => {
             </Tooltip>
           </div>
         </div>
+      </div>
+      <div className={styles.recentChats}>
+        <BuddyRecentChats compact maxItems={4} showFilters={false} onViewAll={handleOpen} />
       </div>
     </div>
   );

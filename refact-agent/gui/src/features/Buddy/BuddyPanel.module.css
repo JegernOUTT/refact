@@ -132,3 +132,9 @@
   background: var(--accent-9);
   transition: width 0.3s ease;
 }
+
+.recentChats {
+  padding: 0 var(--space-2) var(--space-2);
+  border-top: 1px solid var(--gray-a3);
+  padding-top: var(--space-2);
+}

@@ -167,3 +167,16 @@ fn default_scope() -> String {
 fn default_ttl() -> u64 {
     10
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddyConversationEntry {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+    pub message_count: u32,
+    pub icon: String,
+    pub badge: Option<String>,
+}

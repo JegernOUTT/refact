@@ -465,6 +465,18 @@ export interface BuddyConversationMeta {
   message_count: number;
 }
 
+export interface BuddyConversationEntry {
+  id: string;
+  kind: "chat" | "setup" | "workflow" | "system";
+  title: string;
+  created_at: string;
+  updated_at: string;
+  status: "active" | "completed" | "failed";
+  message_count: number;
+  icon: string;
+  badge: string | null;
+}
+
 export interface BuddyThreadMeta {
   is_buddy_chat: boolean;
   buddy_chat_kind: string;

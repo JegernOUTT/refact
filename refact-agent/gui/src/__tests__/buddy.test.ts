@@ -440,3 +440,67 @@ describe("scene animation system", () => {
 
   });
 });
+
+describe("conversation ledger", () => {
+  function makeEntry(overrides?: Partial<import("../features/Buddy/types").BuddyConversationEntry>): import("../features/Buddy/types").BuddyConversationEntry {
+    return {
+      id: "c1",
+      kind: "chat",
+      title: "Test Chat",
+      created_at: "2024-01-01T00:00:00Z",
+      updated_at: "2024-01-01T00:00:00Z",
+      status: "active",
+      message_count: 0,
+      icon: "💬",
+      badge: null,
+      ...overrides,
+    };
+  }
+
+  test("setBuddyConversations stores unified ledger entries", () => {
+    const entries = [
+      makeEntry({ id: "c1", kind: "chat", icon: "💬" }),
+      makeEntry({ id: "w1", kind: "workflow", icon: "📦", badge: "Commit Msg" }),
+      makeEntry({ id: "s1", kind: "system", icon: "🗜", badge: "Compress" }),
+    ];
+    const state = reducer(undefined, setBuddyConversations(entries));
+    expect(state.conversations).toHaveLength(3);
+    expect(state.conversations[0].kind).toBe("chat");
+    expect(state.conversations[1].kind).toBe("workflow");
+    expect(state.conversations[2].kind).toBe("system");
+  });
+
+  test("chat entry has correct icon and no badge by default", () => {
+    const entry = makeEntry({ kind: "chat", icon: "💬", badge: null });
+    expect(entry.icon).toBe("💬");
+    expect(entry.badge).toBeNull();
+  });
+
+  test("setup entry has badge and gear icon", () => {
+    const entry = makeEntry({ kind: "setup", icon: "⚙️", badge: "MCP Setup" });
+    expect(entry.icon).toBe("⚙️");
+    expect(entry.badge).toBe("MCP Setup");
+  });
+
+  test("workflow entry has badge and workflow icon", () => {
+    const entry = makeEntry({ kind: "workflow", icon: "📦", badge: "Commit Msg" });
+    expect(entry.kind).toBe("workflow");
+    expect(entry.badge).toBe("Commit Msg");
+  });
+
+  test("system entry has system icon", () => {
+    const entry = makeEntry({ kind: "system", icon: "🗜", badge: "Compress" });
+    expect(entry.kind).toBe("system");
+    expect(entry.icon).toBe("🗜");
+  });
+
+  test("setBuddyConversations replaces existing conversations", () => {
+    const initial = [makeEntry({ id: "old" })];
+    let state = reducer(undefined, setBuddyConversations(initial));
+    expect(state.conversations).toHaveLength(1);
+    const updated = [makeEntry({ id: "new1" }), makeEntry({ id: "new2" })];
+    state = reducer(state, setBuddyConversations(updated));
+    expect(state.conversations).toHaveLength(2);
+    expect(state.conversations[0].id).toBe("new1");
+  });
+});

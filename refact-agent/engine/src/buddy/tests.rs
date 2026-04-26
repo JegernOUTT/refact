@@ -378,6 +378,96 @@ fn test_persistent_event_fields_coalesced() {
     assert_eq!(queue.items[0].status, "progress");
 }
 
+#[tokio::test]
+async fn test_unified_listing_mixed_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let conv_path = root.join(".refact/buddy/chats/conversations/abc123.json");
+    let conv_json = serde_json::json!({
+        "chat_id": "abc123", "title": "Test Chat", "kind": "chat",
+        "created_at": "2024-01-02T00:00:00Z", "last_message_at": null, "messages": []
+    });
+    super::storage::atomic_write_json(&conv_path, &conv_json).await.unwrap();
+
+    let wf_path = root.join(".refact/buddy/chats/workflows/commit_message.json");
+    let wf_json = serde_json::json!({
+        "entries": [{ "timestamp": "2024-01-01T00:00:00Z", "input_summary": "", "output_summary": "done", "success": true }]
+    });
+    super::storage::atomic_write_json(&wf_path, &wf_json).await.unwrap();
+
+    let entries = super::conversation_ledger::list_all_buddy_conversations(root, None).await;
+    assert_eq!(entries.len(), 2);
+    let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+    assert!(kinds.contains(&"chat"));
+    assert!(kinds.contains(&"workflow"));
+}
+
+#[tokio::test]
+async fn test_setup_kind_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let path = root.join(".refact/buddy/chats/conversations/setup1.json");
+    let json = serde_json::json!({
+        "chat_id": "setup1", "title": "MCP Setup", "kind": "setup", "badge": "MCP Setup",
+        "created_at": "2024-01-01T00:00:00Z", "last_message_at": null, "messages": []
+    });
+    super::storage::atomic_write_json(&path, &json).await.unwrap();
+
+    let entries = super::conversation_ledger::list_all_buddy_conversations(root, None).await;
+    let setup = entries.iter().find(|e| e.id == "setup1").unwrap();
+    assert_eq!(setup.kind, "setup");
+    assert_eq!(setup.badge.as_deref(), Some("MCP Setup"));
+    assert_eq!(setup.icon, "⚙️");
+}
+
+#[tokio::test]
+async fn test_kind_filter_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let conv_path = root.join(".refact/buddy/chats/conversations/c1.json");
+    let conv_json = serde_json::json!({
+        "chat_id": "c1", "title": "Chat", "created_at": "2024-01-01T00:00:00Z", "messages": []
+    });
+    super::storage::atomic_write_json(&conv_path, &conv_json).await.unwrap();
+
+    let wf_path = root.join(".refact/buddy/chats/workflows/commit_message.json");
+    let wf_json = serde_json::json!({ "entries": [] });
+    super::storage::atomic_write_json(&wf_path, &wf_json).await.unwrap();
+
+    let chat_only = super::conversation_ledger::list_all_buddy_conversations(root, Some(vec!["chat".to_string()])).await;
+    assert!(chat_only.iter().all(|e| e.kind == "chat"));
+
+    let wf_only = super::conversation_ledger::list_all_buddy_conversations(root, Some(vec!["workflow".to_string()])).await;
+    assert!(wf_only.iter().all(|e| e.kind == "workflow"));
+}
+
+#[tokio::test]
+async fn test_sorting_by_updated_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let p1 = root.join(".refact/buddy/chats/conversations/old.json");
+    super::storage::atomic_write_json(&p1, &serde_json::json!({
+        "chat_id": "old", "title": "Old", "created_at": "2024-01-01T00:00:00Z", "messages": []
+    })).await.unwrap();
+
+    let p2 = root.join(".refact/buddy/chats/conversations/new.json");
+    super::storage::atomic_write_json(&p2, &serde_json::json!({
+        "chat_id": "new", "title": "New", "created_at": "2024-06-01T00:00:00Z",
+        "last_message_at": "2024-06-02T00:00:00Z", "messages": []
+    })).await.unwrap();
+
+    let entries = super::conversation_ledger::list_all_buddy_conversations(root, None).await;
+    assert_eq!(entries[0].id, "new");
+}
+
 #[test]
 fn test_runtime_event_controls_preserved() {
     use super::runtime_queue::RuntimeQueue;

@@ -5,6 +5,7 @@ import type {
   BuddySettings,
   BuddyActivityEntry,
   BuddyConversationMeta,
+  BuddyConversationEntry,
 } from "../../features/Buddy/types";
 
 export const buddyApi = createApi({
@@ -66,15 +67,17 @@ export const buddyApi = createApi({
         return { data: result.data as BuddyActivityEntry[] };
       },
     }),
-    getBuddyConversations: builder.query<BuddyConversationMeta[], undefined>({
-      queryFn: async (_args, api, _opts, baseQuery) => {
+    getBuddyConversations: builder.query<BuddyConversationEntry[], { kind?: string } | undefined>({
+      queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
-        const result = await baseQuery(
-          `http://127.0.0.1:${port}/v1/buddy/conversations`,
-        );
+        const kind = args?.kind;
+        const url = kind
+          ? `http://127.0.0.1:${port}/v1/buddy/conversations?kind=${encodeURIComponent(kind)}`
+          : `http://127.0.0.1:${port}/v1/buddy/conversations`;
+        const result = await baseQuery(url);
         if (result.error) return { error: result.error };
-        return { data: result.data as BuddyConversationMeta[] };
+        return { data: result.data as BuddyConversationEntry[] };
       },
     }),
     createBuddyConversation: builder.mutation<BuddyConversationMeta, undefined>(
@@ -91,6 +94,22 @@ export const buddyApi = createApi({
         },
       },
     ),
+    createSetupConversation: builder.mutation<
+      { chat_id: string; title: string; kind: string; flow: string; badge: string; created_at: string },
+      { flow: string; title?: string }
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: `http://127.0.0.1:${port}/v1/buddy/conversations/setup`,
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as { chat_id: string; title: string; kind: string; flow: string; badge: string; created_at: string } };
+      },
+    }),
     dismissBuddySuggestion: builder.mutation<{ dismissed: boolean }, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
@@ -134,6 +153,7 @@ export const {
   useGetBuddyActivitiesQuery,
   useGetBuddyConversationsQuery,
   useCreateBuddyConversationMutation,
+  useCreateSetupConversationMutation,
   useDismissBuddySuggestionMutation,
   useReportErrorMutation,
 } = buddyApi;
