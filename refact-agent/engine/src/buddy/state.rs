@@ -1,5 +1,6 @@
 use std::path::Path;
 use chrono::Utc;
+use rand::Rng;
 use tokio::fs;
 use tracing::warn;
 
@@ -8,13 +9,21 @@ use super::types::{
     BuddySkillLedger, BuddyState,
 };
 
+const BUDDY_NAMES: &[&str] = &[
+    "Pixel", "Byte", "Spark", "Nova", "Echo",
+    "Chip", "Flux", "Glow", "Dash", "Zen",
+];
+
 pub fn default_buddy_state() -> BuddyState {
     let now = Utc::now().to_rfc3339();
+    let mut rng = rand::thread_rng();
+    let name = BUDDY_NAMES[rng.gen_range(0..BUDDY_NAMES.len())].to_string();
+    let palette_index = rng.gen_range(0..7usize);
     BuddyState {
         identity: BuddyIdentity {
-            name: "Pixel".to_string(),
+            name,
             created_at: now.clone(),
-            palette_index: 0,
+            palette_index,
         },
         progression: BuddyProgression {
             stage: 1,

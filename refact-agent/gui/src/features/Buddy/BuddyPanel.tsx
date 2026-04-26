@@ -1,6 +1,5 @@
 import React, { useCallback, useMemo } from "react";
 import { Text, Button } from "@radix-ui/themes";
-import { ChevronDownIcon, ChevronUpIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
 import { openBuddyChat, newBuddyChatAction } from "../Chat/Thread";
@@ -11,19 +10,10 @@ import {
   selectIsBuddyEnabled,
 } from "./buddySlice";
 import { PALETTES, STAGES } from "./constants";
-import { CollapsePanel } from "../../components/shared/CollapsePanel";
 import { useCreateBuddyConversationMutation } from "../../services/refact/buddy";
 import styles from "./BuddyPanel.module.css";
 
-interface BuddyPanelProps {
-  collapsed: boolean;
-  onToggleCollapsed: () => void;
-}
-
-export const BuddyPanel: React.FC<BuddyPanelProps> = ({
-  collapsed,
-  onToggleCollapsed,
-}) => {
+export const BuddyPanel: React.FC = () => {
   const dispatch = useAppDispatch();
   const snapshot = useAppSelector(selectBuddySnapshot);
   const enabled = useAppSelector(selectIsBuddyEnabled);
@@ -72,103 +62,63 @@ export const BuddyPanel: React.FC<BuddyPanelProps> = ({
   if (!enabled && snapshot !== null) return null;
 
   return (
-    <div
-      className={styles.block}
-      data-collapsed={collapsed || undefined}
-    >
-      <button
-        type="button"
-        className={styles.header}
-        onClick={onToggleCollapsed}
-        aria-expanded={!collapsed}
-      >
-        <Text
-          size="1"
-          weight="bold"
-          color="gray"
-          className={styles.headerLabel}
-        >
-          BUDDY
-        </Text>
-        {collapsed ? (
-          <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
-        ) : (
-          <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
-        )}
-      </button>
+    <div className={styles.block}>
+      <div className={styles.body}>
+        <div className={styles.glowWrap}>
+          <div
+            className={styles.glow}
+            style={{ backgroundColor: palette.body }}
+          />
+          <BuddyCanvas
+            state={state}
+            onEvent={buddy.handleCanvasEvent}
+            style={{ width: 280, height: 280 }}
+          />
+        </div>
 
-      <CollapsePanel collapsed={collapsed}>
-        <div className={styles.body}>
-          <div className={styles.glowWrap}>
-            <div
-              className={styles.glow}
-              style={{ backgroundColor: palette.body }}
-            />
-            <BuddyCanvas
-              state={state}
-              onEvent={buddy.handleCanvasEvent}
-              style={{ width: 96, height: 96 }}
-            />
+        <div className={styles.info}>
+          <div className={styles.nameRow}>
+            <Text size="2" weight="bold">
+              {name}
+            </Text>
+            <span
+              className={styles.stageBadge}
+              style={{
+                backgroundColor: palette.body + "33",
+                color: palette.body,
+              }}
+            >
+              {stage.emoji} {stage.name}
+            </span>
           </div>
 
-          <div className={styles.info}>
-            <div className={styles.nameRow}>
-              <Text size="2" weight="bold">
-                {name}
-              </Text>
-              <span
-                className={styles.stageBadge}
-                style={{
-                  backgroundColor: palette.body + "33",
-                  color: palette.body,
-                }}
-              >
-                {stage.emoji} {stage.name}
-              </span>
-            </div>
+          {statusText && (
+            <div className={styles.statusText}>{statusText}</div>
+          )}
 
-            {statusText && (
-              <div className={styles.statusText}>{statusText}</div>
+          <div className={styles.xpRow}>
+            <span className={styles.xpLabel}>{xp} XP</span>
+            <div className={styles.xpBar}>
+              <div
+                className={styles.xpFill}
+                style={{ width: `${xpFill}%` }}
+              />
+            </div>
+            {xpNext && (
+              <span className={styles.xpLabel}>{xpNext}</span>
             )}
+          </div>
 
-            <div className={styles.xpRow}>
-              <span className={styles.xpLabel}>{xp} XP</span>
-              <div className={styles.xpBar}>
-                <div
-                  className={styles.xpFill}
-                  style={{ width: `${xpFill}%` }}
-                />
-              </div>
-              {xpNext && (
-                <span className={styles.xpLabel}>{xpNext}</span>
-              )}
-            </div>
-
-            <div className={styles.palettePicker}>
-              {PALETTES.map((p, i) => (
-                <div
-                  key={p.name}
-                  className={[
-                    styles.paletteDot,
-                    i === paletteIndex ? styles.paletteDotActive : "",
-                  ].join(" ")}
-                  style={{ backgroundColor: p.body }}
-                  title={p.name}
-                />
-              ))}
-            </div>
-
-            <div className={styles.actions}>
-              <Button size="1" variant="soft" onClick={handleOpen}>
-                Open →
-              </Button>
-              <Button size="1" variant="soft" onClick={handleNewChat}>
-                New Chat
-              </Button>
-            </div>
+          <div className={styles.actions}>
+            <Button size="1" variant="soft" onClick={handleOpen}>
+              Open →
+            </Button>
+            <Button size="1" variant="soft" onClick={handleNewChat}>
+              New Chat
+            </Button>
           </div>
         </div>
-      </CollapsePanel>
+      </div>
     </div>
   );
 };

@@ -11,15 +11,12 @@ import {
   selectBuddyActivities,
 } from "./buddySlice";
 import { PALETTES, STAGES, SKILLS } from "./constants";
-import { useUpdateBuddySettingsMutation } from "../../services/refact/buddy";
 import styles from "./BuddyHome.module.css";
 
 export const BuddyHome: React.FC = () => {
   const dispatch = useAppDispatch();
   const snapshot = useAppSelector(selectBuddySnapshot);
   const activities = useAppSelector(selectBuddyActivities);
-  const [updateSettings] = useUpdateBuddySettingsMutation();
-
   const buddy = useBuddyState();
   const { state } = buddy;
 
@@ -52,14 +49,6 @@ export const BuddyHome: React.FC = () => {
   const handleSettings = useCallback(() => {
     dispatch(push({ name: "customization" }));
   }, [dispatch]);
-
-  const handlePaletteSelect = useCallback(
-    async (idx: number) => {
-      buddy.state.paletteIndex !== idx &&
-        (await updateSettings({ palette_index: idx }));
-    },
-    [buddy.state.paletteIndex, updateSettings],
-  );
 
   const unlockedSkills = skills?.unlocked ?? state.skills;
 
@@ -97,7 +86,7 @@ export const BuddyHome: React.FC = () => {
           <BuddyCanvas
             state={state}
             onEvent={buddy.handleCanvasEvent}
-            style={{ width: 160, height: 160 }}
+            style={{ width: 300, height: 300 }}
           />
         </div>
 
@@ -115,21 +104,6 @@ export const BuddyHome: React.FC = () => {
           <div className={styles.statusText}>{statusText}</div>
         )}
 
-        <div className={styles.palettePicker}>
-          {PALETTES.map((p, i) => (
-            <button
-              key={p.name}
-              type="button"
-              className={[
-                styles.paletteDot,
-                i === paletteIndex ? styles.paletteDotActive : "",
-              ].join(" ")}
-              style={{ backgroundColor: p.body }}
-              onClick={() => void handlePaletteSelect(i)}
-              title={p.name}
-            />
-          ))}
-        </div>
       </div>
 
       <div className={styles.infoGrid}>

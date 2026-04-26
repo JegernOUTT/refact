@@ -5,39 +5,12 @@
   flex-shrink: 0;
 }
 
-.block[data-collapsed] {
-  gap: 0;
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  padding: var(--space-1) 0;
-  width: 100%;
-  text-align: left;
-  gap: var(--space-2);
-}
-
-.header:hover {
-  opacity: 0.8;
-}
-
-.headerLabel {
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  flex: 1;
-}
-
 .body {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) 0;
+  padding: var(--space-3) 0 var(--space-2);
 }
 
 .glowWrap {
@@ -47,10 +20,10 @@
 
 .glow {
   position: absolute;
-  inset: -8px;
+  inset: -20px;
   border-radius: 50%;
   opacity: 0.2;
-  filter: blur(14px);
+  filter: blur(28px);
   pointer-events: none;
 }
 
@@ -112,33 +85,6 @@
   border-radius: 2px;
   background: linear-gradient(90deg, var(--accent-9), var(--accent-11));
   transition: width 0.5s ease;
-}
-
-.palettePicker {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: center;
-}
-
-.paletteDot {
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-  transition: transform 0.15s, border-color 0.15s;
-  flex-shrink: 0;
-}
-
-.paletteDot:hover {
-  transform: scale(1.2);
-}
-
-.paletteDotActive {
-  border-color: var(--gray-12);
-  transform: scale(1.2);
 }
 
 .actions {
