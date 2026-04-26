@@ -134,12 +134,20 @@ export function renderFrame(
   }
 
   ctx.save();
+  const scale = 1.8;
+  const scx = CANVAS_CENTER_X + anim.walkOffsetX;
+  const scy = CANVAS_CENTER_Y;
+  ctx.translate(scx, scy);
+  ctx.scale(scale, scale);
+  ctx.translate(-scx, -scy);
+  ctx.save();
   const centerX = ox + spriteW / 2;
   const centerY = oy + spriteH / 2;
   ctx.translate(centerX, centerY);
   ctx.scale(anim.squashX, anim.squashY);
   ctx.translate(-centerX, -centerY);
   drawStageCharacter(ctx, stage, ox, oy, m, anim, semantic.paletteIndex);
+  ctx.restore();
   ctx.restore();
 
   renderWalkingFeet(ctx, ox, oy, spriteW, spriteH, m, anim);
