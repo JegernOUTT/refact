@@ -20,11 +20,14 @@ pub struct BuddyService {
     pub settings: BuddySettings,
     pub events_tx: broadcast::Sender<BuddyEvent>,
     pub last_suggestion_at: Option<Instant>,
+    pub recent_diagnostics: Vec<super::diagnostics::DiagnosticContext>,
+    pub last_issue_at: Option<Instant>,
+    pub recent_issue_errors: Vec<(String, chrono::DateTime<chrono::Utc>)>,
 }
 
 impl BuddyService {
     pub fn new(state: BuddyState, settings: BuddySettings, events_tx: broadcast::Sender<BuddyEvent>) -> Self {
-        Self { state, settings, events_tx, last_suggestion_at: None }
+        Self { state, settings, events_tx, last_suggestion_at: None, recent_diagnostics: Vec::new(), last_issue_at: None, recent_issue_errors: Vec::new() }
     }
 
     pub fn snapshot(&self) -> BuddySnapshot {
@@ -100,6 +103,21 @@ impl BuddyService {
                 run_count: 1,
                 last_outcome: Some("failed".to_string()),
             });
+        }
+    }
+
+    pub fn add_diagnostic(&mut self, ctx: super::diagnostics::DiagnosticContext) {
+        self.recent_diagnostics.push(ctx);
+        if self.recent_diagnostics.len() > 100 {
+            self.recent_diagnostics.remove(0);
+        }
+    }
+
+    pub fn record_issue_created(&mut self, error_message: String) {
+        self.last_issue_at = Some(Instant::now());
+        self.recent_issue_errors.push((error_message, chrono::Utc::now()));
+        if self.recent_issue_errors.len() > 200 {
+            self.recent_issue_errors.remove(0);
         }
     }
 

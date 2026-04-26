@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 
+use crate::buddy::diagnostics::DiagnosticContext;
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::settings::BuddySettings;
 use crate::buddy::types::BuddyActivity;
@@ -158,4 +159,96 @@ pub async fn handle_v1_buddy_suggestion_dismiss(
         }
         None => Err(ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, "buddy service not initialized".to_string())),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiagnosticsCollectRequest {
+    pub error: String,
+    pub source_file: Option<String>,
+    pub tool_name: Option<String>,
+    pub chat_id: Option<String>,
+}
+
+pub async fn handle_v1_buddy_diagnostics_collect(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    axum::Json(req): axum::Json<DiagnosticsCollectRequest>,
+) -> Result<axum::Json<DiagnosticContext>, ScratchError> {
+    let mut ctx = crate::buddy::diagnostics::collect_diagnostics(gcx.clone(), &req.error).await;
+    ctx.source_file = req.source_file;
+    ctx.tool_name = req.tool_name;
+    ctx.chat_id = req.chat_id;
+
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    if let Some(svc) = lock.as_mut() {
+        svc.add_diagnostic(ctx.clone());
+    }
+
+    Ok(axum::Json(ctx))
+}
+
+pub async fn handle_v1_buddy_diagnostics_list(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<axum::Json<Vec<DiagnosticContext>>, ScratchError> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let diags = lock
+        .as_ref()
+        .map(|s| s.recent_diagnostics.clone())
+        .unwrap_or_default();
+    Ok(axum::Json(diags))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IssueCreateRequest {
+    pub diagnostic_index: Option<usize>,
+    pub error: Option<String>,
+}
+
+pub async fn handle_v1_buddy_issues_create(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    axum::Json(req): axum::Json<IssueCreateRequest>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let (ctx, auto_enabled, last_issue_at, recent_errors) = {
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        let svc = lock.as_ref().ok_or_else(|| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, "buddy service not initialized".to_string()))?;
+
+        let ctx = if let Some(idx) = req.diagnostic_index {
+            svc.recent_diagnostics.get(idx).cloned().ok_or_else(|| ScratchError::new(StatusCode::BAD_REQUEST, "diagnostic index out of range".to_string()))?
+        } else if let Some(ref err) = req.error {
+            let mut c = crate::buddy::diagnostics::DiagnosticContext {
+                error_type: "generic".to_string(),
+                error_message: err.clone(),
+                source_file: None,
+                tool_name: None,
+                chat_id: None,
+                collected_at: chrono::Utc::now().to_rfc3339(),
+                severity: crate::buddy::diagnostics::DiagnosticSeverity::Medium,
+            };
+            c.error_type = crate::buddy::diagnostics::collect_diagnostics(gcx.clone(), err).await.error_type;
+            c
+        } else {
+            return Err(ScratchError::new(StatusCode::BAD_REQUEST, "provide diagnostic_index or error".to_string()));
+        };
+
+        (ctx, svc.settings.auto_issue_creation, svc.last_issue_at, svc.recent_issue_errors.clone())
+    };
+
+    let result = crate::buddy::issues::create_issue(
+        gcx.clone(), &ctx, auto_enabled, last_issue_at, &recent_errors,
+    ).await.map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+
+    let (url, activity) = result;
+
+    {
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let mut lock = buddy_arc.lock().await;
+        if let Some(svc) = lock.as_mut() {
+            svc.record_issue_created(ctx.error_message.clone());
+            svc.add_activity(activity);
+        }
+    }
+
+    Ok(axum::Json(serde_json::json!({"url": url})))
 }

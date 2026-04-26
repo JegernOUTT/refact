@@ -717,7 +717,10 @@ pub fn make_v1_router() -> Router {
         .route("/buddy/activities", get(buddy::handle_v1_buddy_activities))
         .route("/buddy/conversations", get(buddy::handle_v1_buddy_conversations_list))
         .route("/buddy/conversations", post(buddy::handle_v1_buddy_conversations_create))
-        .route("/buddy/suggestions/:id/dismiss", post(buddy::handle_v1_buddy_suggestion_dismiss));
+        .route("/buddy/suggestions/:id/dismiss", post(buddy::handle_v1_buddy_suggestion_dismiss))
+        .route("/buddy/diagnostics", get(buddy::handle_v1_buddy_diagnostics_list))
+        .route("/buddy/diagnostics/collect", post(buddy::handle_v1_buddy_diagnostics_collect))
+        .route("/buddy/issues/create", post(buddy::handle_v1_buddy_issues_create));
 
     builder.layer(axum::middleware::from_fn(telemetry_middleware))
 }
