@@ -9,11 +9,17 @@ import type {
   DiagnosticContext,
 } from "./types";
 
+interface BuddySignalQueueItem {
+  signalType: string;
+  timestamp: number;
+}
+
 interface BuddySliceState {
   snapshot: BuddySnapshot | null;
   loading: boolean;
   conversations: BuddyConversationMeta[];
   recentDiagnostics: DiagnosticContext[];
+  signalQueue: BuddySignalQueueItem[];
 }
 
 const initialState: BuddySliceState = {
@@ -21,6 +27,7 @@ const initialState: BuddySliceState = {
   loading: false,
   conversations: [],
   recentDiagnostics: [],
+  signalQueue: [],
 };
 
 export const buddySlice = createSlice({
@@ -72,6 +79,13 @@ export const buddySlice = createSlice({
         state.recentDiagnostics.splice(100);
       }
     },
+    enqueueBuddySignal: (state, action: PayloadAction<string>) => {
+      state.signalQueue.push({ signalType: action.payload, timestamp: Date.now() });
+      if (state.signalQueue.length > 50) state.signalQueue.shift();
+    },
+    consumeBuddySignal: (state) => {
+      state.signalQueue.shift();
+    },
   },
   selectors: {
     selectBuddySnapshot: (state) => state.snapshot,
@@ -84,6 +98,7 @@ export const buddySlice = createSlice({
     selectBuddyConversations: (state) => state.conversations,
     selectIsBuddyEnabled: (state) => state.snapshot?.enabled ?? false,
     selectBuddyDiagnostics: (state) => state.recentDiagnostics,
+    selectBuddySignalQueue: (state) => state.signalQueue,
   },
 });
 
@@ -96,6 +111,8 @@ export const {
   updateBuddySettings,
   setBuddyConversations,
   addBuddyDiagnostic,
+  enqueueBuddySignal,
+  consumeBuddySignal,
 } = buddySlice.actions;
 
 export const {
@@ -107,4 +124,5 @@ export const {
   selectBuddyConversations,
   selectIsBuddyEnabled,
   selectBuddyDiagnostics,
+  selectBuddySignalQueue,
 } = buddySlice.selectors;

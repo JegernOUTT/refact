@@ -1,9 +1,15 @@
-import { useCallback, useReducer } from "react";
+import { useCallback, useEffect, useReducer } from "react";
+import { useAppDispatch, useAppSelector } from "../../../hooks";
 import {
   createInitialSemanticState,
   reduceSemanticState,
   type SemanticAction,
 } from "../state";
+import {
+  selectBuddySnapshot,
+  selectBuddySignalQueue,
+  consumeBuddySignal,
+} from "../buddySlice";
 import type { BuddySemanticState, BuddyEvent } from "../types";
 
 export interface BuddyStateHandle {
@@ -24,6 +30,29 @@ export function useBuddyState(
     (s: BuddySemanticState, a: SemanticAction) => reduceSemanticState(s, a),
     initialState ?? createInitialSemanticState(),
   );
+
+  const reduxDispatch = useAppDispatch();
+  const reduxSnapshot = useAppSelector(selectBuddySnapshot);
+  const signalQueue = useAppSelector(selectBuddySignalQueue);
+
+  useEffect(() => {
+    if (!reduxSnapshot) return;
+    const { identity } = reduxSnapshot.state;
+    dispatch({
+      kind: "patch",
+      patch: {
+        name: identity.name,
+        paletteIndex: reduxSnapshot.settings.palette_index,
+      },
+    });
+  }, [reduxSnapshot?.state.identity.name, reduxSnapshot?.settings.palette_index]);
+
+  useEffect(() => {
+    if (signalQueue.length === 0) return;
+    const next = signalQueue[0];
+    dispatch({ kind: "signal", signalType: next.signalType });
+    reduxDispatch(consumeBuddySignal());
+  }, [signalQueue, reduxDispatch]);
 
   const signal = useCallback(
     (signalType: string) => dispatch({ kind: "signal", signalType }),

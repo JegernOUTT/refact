@@ -30,7 +30,22 @@ import {
   dismissBuddySuggestion,
   updateBuddySettings,
   addBuddyDiagnostic,
+  enqueueBuddySignal,
 } from "../features/Buddy/buddySlice";
+import type { BuddySSEEvent } from "../features/Buddy/types";
+
+function mapBuddyEventToSignal(event: BuddySSEEvent): string | null {
+  if (event.event_type === "ActivityAdded") {
+    const { activity_type } = event.activity;
+    if (activity_type === "workflow") return "tool_used";
+    if (activity_type === "error") return "chat_error";
+    if (activity_type === "issue_created") return "edit_applied";
+    return "generating";
+  }
+  if (event.event_type === "StateUpdated") return "generating";
+  if (event.event_type === "DiagnosticAdded") return "chat_error";
+  return null;
+}
 
 import {
   trajectoriesApi,
@@ -396,6 +411,8 @@ export function useSidebarSubscription() {
           dispatch(addBuddyDiagnostic(buddy_event.diagnostic));
           break;
       }
+      const signal = mapBuddyEventToSignal(buddy_event);
+      if (signal !== null) dispatch(enqueueBuddySignal(signal));
     },
     [dispatch],
   );
