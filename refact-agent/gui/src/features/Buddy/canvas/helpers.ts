@@ -1,7 +1,9 @@
 let pixelFontReady = false;
-void document.fonts.load('8px "Press Start 2P"').then(() => {
-  pixelFontReady = true;
-});
+if (typeof document !== "undefined" && document.fonts) {
+  void document.fonts.load('8px "Press Start 2P"').then(() => {
+    pixelFontReady = true;
+  });
+}
 
 export function fillPixel(
   ctx: CanvasRenderingContext2D,

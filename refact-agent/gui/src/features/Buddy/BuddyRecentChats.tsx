@@ -29,7 +29,7 @@ export const BuddyRecentChats: React.FC = () => {
 
   const handleNew = useCallback(async () => {
     const result = await createConversation(undefined);
-    if ("data" in result) {
+    if ("data" in result && result.data) {
       const meta = result.data;
       dispatch(newBuddyChatAction({ chat_id: meta.chat_id }));
       dispatch(openBuddyChat({ chat_id: meta.chat_id, title: meta.title }));
