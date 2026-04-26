@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Flex, Text, Button, Spinner } from "@radix-ui/themes";
 import { ArrowLeftIcon, GearIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -11,6 +11,9 @@ import {
   selectBuddyActivities,
 } from "./buddySlice";
 import { PALETTES, STAGES, SKILLS } from "./constants";
+import { useGetStatsSummaryQuery } from "../../services/refact/stats";
+import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
+import { openChatInModeAndStart } from "../Chat/Thread/actions";
 import styles from "./BuddyHome.module.css";
 
 export const BuddyHome: React.FC = () => {
@@ -19,6 +22,13 @@ export const BuddyHome: React.FC = () => {
   const activities = useAppSelector(selectBuddyActivities);
   const buddy = useBuddyState();
   const { state } = buddy;
+  const [setupDismissed, setSetupDismissed] = useState(false);
+
+  const { data: statsData } = useGetStatsSummaryQuery({});
+  const { data: setupData } = useGetSetupStatusQuery(undefined, {
+    refetchOnMountOrArgChange: true,
+  });
+  const setupNeeded = !setupData?.configured && !setupDismissed;
 
   const paletteIndex = snapshot?.settings.palette_index ?? state.paletteIndex;
   const palette = PALETTES[paletteIndex] ?? PALETTES[0];
@@ -49,6 +59,18 @@ export const BuddyHome: React.FC = () => {
   const handleSettings = useCallback(() => {
     dispatch(push({ name: "customization" }));
   }, [dispatch]);
+
+  const handleViewStats = useCallback(() => {
+    dispatch(push({ name: "stats dashboard" }));
+  }, [dispatch]);
+
+  const handleRunSetup = useCallback(() => {
+    void dispatch(openChatInModeAndStart({ mode: "setup" }));
+  }, [dispatch]);
+
+  const handleDismissSetup = useCallback(() => {
+    setSetupDismissed(true);
+  }, []);
 
   const unlockedSkills = skills?.unlocked ?? state.skills;
 
@@ -104,7 +126,61 @@ export const BuddyHome: React.FC = () => {
           <div className={styles.statusText}>{statusText}</div>
         )}
 
+        {setupNeeded && (
+          <div className={styles.setupChips}>
+            <Button size="1" variant="soft" onClick={handleRunSetup}>
+              ⚙ Run Setup
+            </Button>
+            <Button
+              size="1"
+              variant="ghost"
+              color="gray"
+              onClick={handleDismissSetup}
+            >
+              Dismiss
+            </Button>
+          </div>
+        )}
       </div>
+
+      {statsData && (
+        <div className={styles.statsSummary}>
+          <div className={styles.statItem}>
+            <Text size="1" color="gray">
+              Messages
+            </Text>
+            <Text size="2" weight="bold">
+              {statsData.totals.total_calls.toLocaleString()}
+            </Text>
+          </div>
+          <div className={styles.statItem}>
+            <Text size="1" color="gray">
+              Tokens
+            </Text>
+            <Text size="2" weight="bold">
+              {(statsData.totals.total_tokens / 1000).toFixed(1)}k
+            </Text>
+          </div>
+          <div className={styles.statItem}>
+            <Text size="1" color="gray">
+              Success
+            </Text>
+            <Text size="2" weight="bold">
+              {statsData.totals.total_calls > 0
+                ? Math.round(
+                    (statsData.totals.successful_calls /
+                      statsData.totals.total_calls) *
+                      100,
+                  )
+                : 0}
+              %
+            </Text>
+          </div>
+          <Button size="1" variant="ghost" onClick={handleViewStats}>
+            View Full Stats →
+          </Button>
+        </div>
+      )}
 
       <div className={styles.infoGrid}>
         <div className={styles.infoPanel}>

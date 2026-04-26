@@ -165,6 +165,34 @@
   color: var(--gray-9);
 }
 
+.setupChips {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.statsSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  margin: 0 var(--space-3) var(--space-2);
+  background: var(--gray-a2);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  flex-shrink: 0;
+}
+
+.statItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
 .chatsSection {
   padding: 0 var(--space-3) var(--space-4);
   flex: 1;

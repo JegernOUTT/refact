@@ -11,6 +11,7 @@ import {
 } from "./buddySlice";
 import { PALETTES, STAGES } from "./constants";
 import { useCreateBuddyConversationMutation } from "../../services/refact/buddy";
+import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
 import styles from "./BuddyPanel.module.css";
 
 export const BuddyPanel: React.FC = () => {
@@ -18,6 +19,10 @@ export const BuddyPanel: React.FC = () => {
   const snapshot = useAppSelector(selectBuddySnapshot);
   const enabled = useAppSelector(selectIsBuddyEnabled);
   const [createConversation] = useCreateBuddyConversationMutation();
+  const { data: setupData } = useGetSetupStatusQuery(undefined, {
+    refetchOnMountOrArgChange: true,
+  });
+  const setupNeeded = setupData !== undefined && !setupData.configured;
 
   const buddy = useBuddyState();
   const { state } = buddy;
@@ -116,6 +121,9 @@ export const BuddyPanel: React.FC = () => {
             <Button size="1" variant="soft" onClick={handleNewChat}>
               New Chat
             </Button>
+            {setupNeeded && (
+              <span className={styles.setupChip}>⚙ Setup needed</span>
+            )}
           </div>
         </div>
       </div>

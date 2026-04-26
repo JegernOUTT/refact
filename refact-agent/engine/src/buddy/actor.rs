@@ -120,6 +120,26 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     let buddy_arc = gcx.read().await.buddy.clone();
     *buddy_arc.lock().await = Some(service);
 
+    let agents_md = project_root.join("AGENTS.md");
+    let setup_done = tokio::fs::try_exists(&agents_md).await.unwrap_or(false);
+    if !setup_done {
+        let mut guard = buddy_arc.lock().await;
+        if let Some(svc) = guard.as_mut() {
+            let already = svc.state.suggestion_state.iter().any(|s| s.suggestion_type == "setup");
+            if !already {
+                let suggestion = BuddySuggestion {
+                    id: "setup".to_string(),
+                    suggestion_type: "setup".to_string(),
+                    title: "Set up this project".to_string(),
+                    description: "Run setup to generate guidelines, integrations, and toolbox commands.".to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    dismissed: false,
+                };
+                svc.add_suggestion(suggestion);
+            }
+        }
+    }
+
     info!("buddy: service started for {:?}", project_root);
 
     let shutdown_flag = gcx.read().await.shutdown_flag.clone();
