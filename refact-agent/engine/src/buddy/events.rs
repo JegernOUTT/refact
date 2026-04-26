@@ -10,4 +10,5 @@ pub enum BuddyEvent {
     SuggestionDismissed { suggestion_id: String },
     SettingsChanged { settings: super::settings::BuddySettings },
     DiagnosticAdded { diagnostic: super::diagnostics::DiagnosticContext },
+    RuntimeEvent { event: BuddyRuntimeEvent },
 }

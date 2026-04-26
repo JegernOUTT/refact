@@ -1,6 +1,21 @@
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuddyRuntimeEvent {
+    pub id: String,
+    pub signal_type: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub source: String,
+    pub status: String,
+    pub progress: Option<u8>,
+    pub dedupe_key: Option<String>,
+    pub priority: String,
+    pub created_at: String,
+    pub ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuddyIdentity {
     pub name: String,
     pub created_at: String,
