@@ -1,10 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use chrono::Utc;
 use tokio::sync::{broadcast, RwLock as ARwLock};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::global_context::GlobalContext;
 use super::events::BuddyEvent;
@@ -25,13 +25,12 @@ pub struct BuddyService {
     pub recent_diagnostics: Vec<super::diagnostics::DiagnosticContext>,
     pub last_issue_at: Option<Instant>,
     pub recent_issue_errors: Vec<(String, chrono::DateTime<chrono::Utc>)>,
-    pub last_bg_event_at: HashMap<String, Instant>,
     pub runtime_queue: RuntimeQueue,
 }
 
 impl BuddyService {
     pub fn new(state: BuddyState, settings: BuddySettings, events_tx: broadcast::Sender<BuddyEvent>) -> Self {
-        Self { state, settings, events_tx, last_suggestion_at: None, recent_diagnostics: Vec::new(), last_issue_at: None, recent_issue_errors: Vec::new(), last_bg_event_at: HashMap::new(), runtime_queue: RuntimeQueue::new() }
+        Self { state, settings, events_tx, last_suggestion_at: None, recent_diagnostics: Vec::new(), last_issue_at: None, recent_issue_errors: Vec::new(), runtime_queue: RuntimeQueue::new() }
     }
 
     pub fn snapshot(&self) -> BuddySnapshot {
@@ -204,23 +203,6 @@ impl BuddyService {
         });
     }
 
-    pub fn report_background_event(&mut self, event_type: &str, icon: &str, title: &str, description: &str) {
-        let now = Instant::now();
-        if let Some(last) = self.last_bg_event_at.get(event_type) {
-            if last.elapsed().as_secs() < 10 {
-                return;
-            }
-        }
-        self.last_bg_event_at.insert(event_type.to_string(), now);
-        self.add_activity(BuddyActivity {
-            icon: icon.to_string(),
-            title: title.to_string(),
-            description: description.to_string(),
-            timestamp: Utc::now().to_rfc3339(),
-            activity_type: event_type.to_string(),
-        });
-    }
-
     pub fn expire_suggestions(&mut self) {
         let now = chrono::Utc::now();
         let mut changed = false;
@@ -253,11 +235,39 @@ impl BuddyService {
     }
 }
 
-pub async fn buddy_report_bg(gcx: Arc<ARwLock<GlobalContext>>, event_type: &str, icon: &str, title: &str, description: &str) {
+pub fn make_runtime_event(
+    signal_type: &str,
+    title: &str,
+    source: &str,
+    dedupe_key: &str,
+    status: &str,
+    priority: Option<&str>,
+) -> BuddyRuntimeEvent {
+    BuddyRuntimeEvent {
+        id: Uuid::new_v4().to_string(),
+        signal_type: signal_type.to_string(),
+        title: title.to_string(),
+        description: None,
+        source: source.to_string(),
+        status: status.to_string(),
+        progress: None,
+        dedupe_key: Some(dedupe_key.to_string()),
+        priority: priority.unwrap_or("normal").to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        ttl_ms: None,
+    }
+}
+
+pub async fn buddy_report_bg(gcx: Arc<ARwLock<GlobalContext>>, signal_type: &str, _icon: &str, title: &str, _description: &str) {
+    let event = make_runtime_event(signal_type, title, "system", signal_type, "completed", None);
+    buddy_enqueue_event(gcx, event).await;
+}
+
+pub async fn buddy_complete_event(gcx: Arc<ARwLock<GlobalContext>>, dedupe_key: &str, status: &str) {
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     if let Some(svc) = lock.as_mut() {
-        svc.report_background_event(event_type, icon, title, description);
+        svc.complete_runtime_event(dedupe_key, status);
     }
 }
 

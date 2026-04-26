@@ -165,6 +165,10 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
                 backoff_factor: 2.0,
                 test_search_after_init: true,
             };
+            {
+                let ev = crate::buddy::actor::make_runtime_event("vecdb_building", "Building vector embeddings...", "indexer", "vecdb", "started", None);
+                crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+            }
             match crate::vecdb::vdb_init::initialize_vecdb_with_context(
                 gcx.clone(),
                 consts.unwrap(),
@@ -175,7 +179,8 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
                 Ok(_) => {
                     gcx.write().await.vec_db_error = "".to_string();
                     info!("vecdb: initialization successful");
-                    crate::buddy::actor::buddy_report_bg(gcx.clone(), "vecdb_ready", "🔎", "VecDB ready", "Vector database initialized").await;
+                    let ev = crate::buddy::actor::make_runtime_event("vecdb_building", "VecDB ready", "indexer", "vecdb", "completed", None);
+                    crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
                 }
                 Err(crate::vecdb::vdb_init::VecDbInitError::ShutdownRequested) => break,
                 Err(err) => {

@@ -342,7 +342,13 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
         },
     )
     .await;
-    crate::buddy::actor::buddy_report_bg(gcx, "task_created", "📋", &format!("Task created: {}", meta.name), &meta.name).await;
+    {
+        let ev = crate::buddy::actor::make_runtime_event(
+            "task_created", &format!("Task created: {}", meta.name), "task",
+            &format!("task_{}", task_id), "completed", None,
+        );
+        crate::buddy::actor::buddy_enqueue_event(gcx, ev).await;
+    }
 
     Ok(meta)
 }

@@ -29,6 +29,7 @@ async fn ast_indexer_thread(
     let t0 = tokio::time::Instant::now();
     let mut reported_parse_stats = true;
     let mut reported_connect_stats = true;
+    let mut reported_ast_started = false;
     let mut stats_parsed_cnt = 0;
     let mut stats_symbols_cnt = 0;
     let mut stats_t0 = std::time::Instant::now();
@@ -84,6 +85,11 @@ async fn ast_indexer_thread(
                     break;
                 }
             };
+            if !reported_ast_started {
+                reported_ast_started = true;
+                let ev = crate::buddy::actor::make_runtime_event("ast_parsing", "Parsing AST symbols...", "indexer", "ast", "started", None);
+                crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+            }
             let mut doc = Document {
                 doc_path: cpath.clone().into(),
                 doc_text: None,
@@ -312,7 +318,8 @@ async fn ast_indexer_thread(
             info!("{msg}"); // you can see stderr sometimes faster vs logs
             reported_connect_stats = true;
             if let Some(gcx) = gcx_weak.upgrade() {
-                crate::buddy::actor::buddy_report_bg(gcx, "ast_complete", "🔍", "AST indexing complete", &msg).await;
+                let ev = crate::buddy::actor::make_runtime_event("ast_parsing", &msg, "indexer", "ast", "completed", None);
+                crate::buddy::actor::buddy_enqueue_event(gcx, ev).await;
             }
         }
 

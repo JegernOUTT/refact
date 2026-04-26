@@ -188,6 +188,7 @@ async fn vectorize_thread(
 
     let shutdown_flag = gcx.read().await.shutdown_flag.clone();
     let mut last_updated: HashMap<String, SystemTime> = HashMap::new();
+    let mut reported_vecdb_started = false;
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::info!("VecDB thread: shutdown detected, stopping");
@@ -315,7 +316,8 @@ async fn vectorize_thread(
                         // }
                         let _ = write!(std::io::stderr(), "VECDB COMPLETE\n");
                         info!("VECDB COMPLETE"); // you can see stderr "VECDB COMPLETE" sometimes faster vs logs
-                        crate::buddy::actor::buddy_report_bg(gcx.clone(), "vecdb_complete", "🔎", "VecDB indexing complete", "Vector embeddings built successfully").await;
+                        let ev = crate::buddy::actor::make_runtime_event("vecdb_building", "VecDB indexing complete", "indexer", "vecdb", "completed", None);
+                        crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
                         vstatus_notify.notify_waiters();
                         {
                             let vstatus_locked = vstatus.lock().await;
@@ -333,6 +335,12 @@ async fn vectorize_thread(
                 _ => continue,
             }
         };
+        if !reported_vecdb_started {
+            reported_vecdb_started = true;
+            let ev = crate::buddy::actor::make_runtime_event("vecdb_building", "Building vector embeddings...", "indexer", "vecdb", "started", None);
+            crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+        }
+
         let last_30_chars = crate::nicer_logs::last_n_chars(&cpath, 30);
 
         // Not from memory, vecdb works on files from disk, because they change less

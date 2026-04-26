@@ -1721,11 +1721,28 @@ pub async fn execute_tools(
     let gcx2 = gcx.clone();
     let is_buddy = thread.buddy_meta.as_ref().map(|m| m.is_buddy_chat).unwrap_or(false);
     let first_tool_name = tool_calls.first().map(|tc| tc.function.name.clone()).unwrap_or_default();
+    let chat_id = thread.id.clone();
+    let tool_meta: Vec<(String, String)> = tool_calls.iter()
+        .map(|tc| (tc.id.clone(), format!("tool_{}_{}", chat_id, tc.function.name)))
+        .collect();
+    for (tc, (_, dedupe_key)) in tool_calls.iter().zip(tool_meta.iter()) {
+        let ev = crate::buddy::actor::make_runtime_event(
+            "tool_used", &format!("Running tool: {}", tc.function.name), "tool",
+            dedupe_key, "started", None,
+        );
+        crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+    }
 
     let (result_msgs, had_corrections) = execute_tools_inner(
         gcx, ccx, tool_calls, mode_id, model_id, budget, options, messages,
     )
     .await;
+
+    for (tool_call_id, dedupe_key) in &tool_meta {
+        let failed = result_msgs.iter()
+            .any(|m| &m.tool_call_id == tool_call_id && m.tool_failed == Some(true));
+        crate::buddy::actor::buddy_complete_event(gcx2.clone(), dedupe_key, if failed { "failed" } else { "completed" }).await;
+    }
 
     if !is_buddy && result_msgs.iter().any(|m| m.tool_failed == Some(true)) {
         let buddy_arc = gcx2.read().await.buddy.clone();

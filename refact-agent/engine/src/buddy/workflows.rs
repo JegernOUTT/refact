@@ -35,6 +35,12 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, String>>,
 {
+    let dedupe_key = format!("workflow_{}", workflow_id);
+    let started = crate::buddy::actor::make_runtime_event(
+        workflow_id, &format!("Running {}...", workflow_id), "system", &dedupe_key, "started", None,
+    );
+    crate::buddy::actor::buddy_enqueue_event(gcx.clone(), started).await;
+
     let result = workflow_fn().await;
 
     let (success, summary) = match &result {
@@ -59,6 +65,8 @@ where
 
         let mut buddy = buddy_arc.lock().await;
         if let Some(svc) = buddy.as_mut() {
+            let status = if success { "completed" } else { "failed" };
+            svc.complete_runtime_event(&dedupe_key, status);
             if success {
                 svc.workflow_completed(&workflow_id_owned, xp, activity);
             } else {

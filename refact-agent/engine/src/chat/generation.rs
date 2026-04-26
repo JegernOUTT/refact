@@ -567,6 +567,19 @@ pub fn start_generation(
                 }
             };
 
+            {
+                let ev = crate::buddy::actor::make_runtime_event(
+                    "chat_started", "Chat started", "chat",
+                    &format!("chat_{}", chat_id), "started", None,
+                );
+                crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+                let ev = crate::buddy::actor::make_runtime_event(
+                    "streaming", "Streaming response...", "chat",
+                    &format!("chat_{}", chat_id), "streaming", None,
+                );
+                crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+            }
+
             let generation_result = run_llm_generation(
                 gcx.clone(),
                 session_arc.clone(),
@@ -588,6 +601,11 @@ pub fn start_generation(
                             let mut lock = buddy_arc.lock().await;
                             if let Some(svc) = lock.as_mut() {
                                 svc.report_error("llm_error", &err_clone, Some("chat/generation.rs"), Some(&chat_id2));
+                                let ev = crate::buddy::actor::make_runtime_event(
+                                    "chat_error", "Chat error", "chat",
+                                    &format!("chat_{}", chat_id2), "failed", Some("high"),
+                                );
+                                svc.enqueue_runtime_event(ev);
                             }
                         });
                         session.finish_stream_with_error(e);
@@ -694,10 +712,31 @@ pub fn start_generation(
                         run_hooks(gcx_stop, HookEvent::Stop, payload).await;
                     });
                     session_arc.lock().await.stop_hook_handle = Some(handle);
+                    {
+                        let ev = crate::buddy::actor::make_runtime_event(
+                            "chat_completed", "Chat complete", "chat",
+                            &format!("chat_{}", chat_id), "completed", None,
+                        );
+                        crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+                    }
                     break;
                 }
-                ToolStepOutcome::Paused => break,
-                ToolStepOutcome::Stop => break,
+                ToolStepOutcome::Paused => {
+                    let ev = crate::buddy::actor::make_runtime_event(
+                        "chat_completed", "Chat paused", "chat",
+                        &format!("chat_{}", chat_id), "completed", None,
+                    );
+                    crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+                    break;
+                }
+                ToolStepOutcome::Stop => {
+                    let ev = crate::buddy::actor::make_runtime_event(
+                        "chat_completed", "Chat complete", "chat",
+                        &format!("chat_{}", chat_id), "completed", None,
+                    );
+                    crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
+                    break;
+                }
                 ToolStepOutcome::Continue => {
                     inject_priority_messages_if_any(gcx.clone(), session_arc.clone()).await;
                 }
