@@ -52,6 +52,10 @@ pub async fn handle_v1_buddy_settings_update(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     axum::Json(new_settings): axum::Json<BuddySettings>,
 ) -> Result<StatusCode, ScratchError> {
+    if new_settings.palette_index > crate::buddy::settings::MAX_PALETTE_INDEX {
+        return Err(ScratchError::new(StatusCode::BAD_REQUEST, "palette_index must be 0-7".to_string()));
+    }
+
     let project_root = crate::files_correction::get_project_dirs(gcx.clone())
         .await
         .into_iter()

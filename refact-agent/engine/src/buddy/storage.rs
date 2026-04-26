@@ -3,7 +3,6 @@ use serde::Serialize;
 use tokio::fs;
 use tracing::warn;
 
-use super::settings::BuddySettings;
 use super::state::default_buddy_state;
 
 const DEFAULT_MAIN_PROMPT: &str = "You are Buddy, a persistent project companion inside Refact.\nYou help with code tasks, project setup, diagnostics, and keeping things running smoothly.\nYou are friendly, concise, and focused on being genuinely useful.\n";
@@ -42,11 +41,6 @@ pub async fn bootstrap_buddy_storage(project_root: &Path) -> Result<(), String> 
     if !state_path.exists() {
         let state = default_buddy_state();
         atomic_write_json(&state_path, &state).await?;
-    }
-    let settings_path = buddy_dir.join("settings.json");
-    if !settings_path.exists() {
-        let settings = BuddySettings::default();
-        atomic_write_json(&settings_path, &settings).await?;
     }
     let prompt_path = buddy_dir.join("main_prompt.md");
     if !prompt_path.exists() {

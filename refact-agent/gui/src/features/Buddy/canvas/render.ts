@@ -29,7 +29,7 @@ export function renderFrame(
   ctx.imageSmoothingEnabled = false;
 
   const stage = semantic.progress.stage;
-  const pal = PALETTES[semantic.paletteIndex];
+  const pal = PALETTES[semantic.paletteIndex] ?? PALETTES[0];
   const m = buildColorMap(semantic.paletteIndex);
   const [spriteW, spriteH] = STAGE_SIZES[stage] ?? [28, 18];
 

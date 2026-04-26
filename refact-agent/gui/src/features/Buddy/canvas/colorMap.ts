@@ -2,7 +2,7 @@ import { PALETTES } from "../constants";
 import type { ColorMap } from "../types";
 
 export function buildColorMap(paletteIndex: number): ColorMap {
-  const p = PALETTES[paletteIndex];
+  const p = PALETTES[paletteIndex] ?? PALETTES[0];
   return {
     body: p.body,
     light: p.light,

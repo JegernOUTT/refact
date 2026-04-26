@@ -3,6 +3,8 @@ use serde::{Serialize, Deserialize};
 use tokio::fs;
 use tracing::warn;
 
+pub const MAX_PALETTE_INDEX: usize = 7;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuddySettings {
     pub enabled: bool,
@@ -26,7 +28,7 @@ impl Default for BuddySettings {
 
 pub async fn load_settings(project_root: &Path) -> BuddySettings {
     let path = project_root.join(".refact/buddy/settings.json");
-    match fs::read_to_string(&path).await {
+    let mut settings = match fs::read_to_string(&path).await {
         Ok(content) => match serde_json::from_str(&content) {
             Ok(s) => s,
             Err(e) => {
@@ -35,7 +37,9 @@ pub async fn load_settings(project_root: &Path) -> BuddySettings {
             }
         },
         Err(_) => BuddySettings::default(),
-    }
+    };
+    settings.palette_index = settings.palette_index.min(MAX_PALETTE_INDEX);
+    settings
 }
 
 pub async fn save_settings(project_root: &Path, settings: &BuddySettings) -> Result<(), String> {

@@ -161,11 +161,14 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
 
     let state = super::state::load_state(&project_root).await;
     let settings_path = project_root.join(".refact/buddy/settings.json");
-    let settings_existed = tokio::fs::metadata(&settings_path).await.is_ok();
-    let mut settings = super::settings::load_settings(&project_root).await;
-    if !settings_existed {
-        settings.palette_index = state.identity.palette_index;
-    }
+    let settings = if tokio::fs::metadata(&settings_path).await.is_ok() {
+        super::settings::load_settings(&project_root).await
+    } else {
+        let mut s = BuddySettings::default();
+        s.palette_index = state.identity.palette_index;
+        super::settings::save_settings(&project_root, &s).await.ok();
+        s
+    };
 
     let events_tx = gcx.read().await.buddy_events_tx.clone().expect("buddy_events_tx must be set");
     let service = BuddyService::new(state, settings, events_tx);
