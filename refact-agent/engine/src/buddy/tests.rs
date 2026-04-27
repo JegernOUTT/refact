@@ -3284,5 +3284,8 @@ fn ext_skill_save_consumes_draft() {
     let consumed = svc.consume_draft(&id);
     assert!(consumed.is_some(), "skill draft must be consumable");
     assert_eq!(consumed.unwrap().kind, DraftKind::Skill);
-    assert!(svc.draft_store.get(&id).is_none(), "draft must be gone after consume");
+    assert!(
+        svc.draft_store.get(&id).is_none(),
+        "draft must be gone after consume"
+    );
 }

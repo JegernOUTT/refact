@@ -309,22 +309,27 @@ pub async fn handle_v1_customization_get(
             Some((did, dkind, title, explanation, expires_at, yaml_or_json)) => {
                 let data: serde_json::Value = match serde_yaml::from_str(&yaml_or_json) {
                     Ok(v) => v,
-                    Err(e) => return json_error(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        &format!("draft_parse_failed: {}", e),
-                    ),
+                    Err(e) => {
+                        return json_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            &format!("draft_parse_failed: {}", e),
+                        )
+                    }
                 };
-                json_response(StatusCode::OK, &DraftConfigResponse {
-                    data,
-                    draft_metadata: DraftMetadata {
-                        draft_id: did,
-                        kind: draft_kind_str(&dkind).to_string(),
-                        title,
-                        explanation,
-                        source_opportunity_id: None,
-                        expires_at: expires_at.to_rfc3339(),
+                json_response(
+                    StatusCode::OK,
+                    &DraftConfigResponse {
+                        data,
+                        draft_metadata: DraftMetadata {
+                            draft_id: did,
+                            kind: draft_kind_str(&dkind).to_string(),
+                            title,
+                            explanation,
+                            source_opportunity_id: None,
+                            expires_at: expires_at.to_rfc3339(),
+                        },
                     },
-                })
+                )
             }
         };
     }

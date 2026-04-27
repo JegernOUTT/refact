@@ -650,7 +650,14 @@ pub async fn handle_v1_ext_skill_get(
                 if draft.kind != DraftKind::Skill {
                     return None;
                 }
-                Some((draft.id.clone(), draft.kind.clone(), draft.title.clone(), draft.explanation.clone(), draft.expires_at, draft.yaml_or_json.clone()))
+                Some((
+                    draft.id.clone(),
+                    draft.kind.clone(),
+                    draft.title.clone(),
+                    draft.explanation.clone(),
+                    draft.expires_at,
+                    draft.yaml_or_json.clone(),
+                ))
             })
         };
         return match draft_data {
@@ -658,19 +665,27 @@ pub async fn handle_v1_ext_skill_get(
             Some((did, dkind, title, explanation, expires_at, yaml_or_json)) => {
                 let data: serde_json::Value = match serde_yaml::from_str(&yaml_or_json) {
                     Ok(v) => v,
-                    Err(e) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, &format!("draft_parse_failed: {}", e)),
+                    Err(e) => {
+                        return json_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            &format!("draft_parse_failed: {}", e),
+                        )
+                    }
                 };
-                json_response(StatusCode::OK, &DraftExtResponse {
-                    data,
-                    draft_metadata: DraftMetadata {
-                        draft_id: did,
-                        kind: draft_kind_str(&dkind).to_string(),
-                        title,
-                        explanation,
-                        source_opportunity_id: None,
-                        expires_at: expires_at.to_rfc3339(),
+                json_response(
+                    StatusCode::OK,
+                    &DraftExtResponse {
+                        data,
+                        draft_metadata: DraftMetadata {
+                            draft_id: did,
+                            kind: draft_kind_str(&dkind).to_string(),
+                            title,
+                            explanation,
+                            source_opportunity_id: None,
+                            expires_at: expires_at.to_rfc3339(),
+                        },
                     },
-                })
+                )
             }
         };
     }
@@ -1007,7 +1022,14 @@ pub async fn handle_v1_ext_command_get(
                 if draft.kind != DraftKind::Command {
                     return None;
                 }
-                Some((draft.id.clone(), draft.kind.clone(), draft.title.clone(), draft.explanation.clone(), draft.expires_at, draft.yaml_or_json.clone()))
+                Some((
+                    draft.id.clone(),
+                    draft.kind.clone(),
+                    draft.title.clone(),
+                    draft.explanation.clone(),
+                    draft.expires_at,
+                    draft.yaml_or_json.clone(),
+                ))
             })
         };
         return match draft_data {
@@ -1015,19 +1037,27 @@ pub async fn handle_v1_ext_command_get(
             Some((did, dkind, title, explanation, expires_at, yaml_or_json)) => {
                 let data: serde_json::Value = match serde_yaml::from_str(&yaml_or_json) {
                     Ok(v) => v,
-                    Err(e) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, &format!("draft_parse_failed: {}", e)),
+                    Err(e) => {
+                        return json_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            &format!("draft_parse_failed: {}", e),
+                        )
+                    }
                 };
-                json_response(StatusCode::OK, &DraftExtResponse {
-                    data,
-                    draft_metadata: DraftMetadata {
-                        draft_id: did,
-                        kind: draft_kind_str(&dkind).to_string(),
-                        title,
-                        explanation,
-                        source_opportunity_id: None,
-                        expires_at: expires_at.to_rfc3339(),
+                json_response(
+                    StatusCode::OK,
+                    &DraftExtResponse {
+                        data,
+                        draft_metadata: DraftMetadata {
+                            draft_id: did,
+                            kind: draft_kind_str(&dkind).to_string(),
+                            title,
+                            explanation,
+                            source_opportunity_id: None,
+                            expires_at: expires_at.to_rfc3339(),
+                        },
                     },
-                })
+                )
             }
         };
     }
@@ -1298,7 +1328,14 @@ pub async fn handle_v1_ext_hooks_get(
                 if draft.kind != DraftKind::Hook {
                     return None;
                 }
-                Some((draft.id.clone(), draft.kind.clone(), draft.title.clone(), draft.explanation.clone(), draft.expires_at, draft.yaml_or_json.clone()))
+                Some((
+                    draft.id.clone(),
+                    draft.kind.clone(),
+                    draft.title.clone(),
+                    draft.explanation.clone(),
+                    draft.expires_at,
+                    draft.yaml_or_json.clone(),
+                ))
             })
         };
         return match draft_data {
@@ -1306,19 +1343,27 @@ pub async fn handle_v1_ext_hooks_get(
             Some((did, dkind, title, explanation, expires_at, yaml_or_json)) => {
                 let data: serde_json::Value = match serde_yaml::from_str(&yaml_or_json) {
                     Ok(v) => v,
-                    Err(e) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, &format!("draft_parse_failed: {}", e)),
+                    Err(e) => {
+                        return json_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            &format!("draft_parse_failed: {}", e),
+                        )
+                    }
                 };
-                json_response(StatusCode::OK, &DraftExtResponse {
-                    data,
-                    draft_metadata: DraftMetadata {
-                        draft_id: did,
-                        kind: draft_kind_str(&dkind).to_string(),
-                        title,
-                        explanation,
-                        source_opportunity_id: None,
-                        expires_at: expires_at.to_rfc3339(),
+                json_response(
+                    StatusCode::OK,
+                    &DraftExtResponse {
+                        data,
+                        draft_metadata: DraftMetadata {
+                            draft_id: did,
+                            kind: draft_kind_str(&dkind).to_string(),
+                            title,
+                            explanation,
+                            source_opportunity_id: None,
+                            expires_at: expires_at.to_rfc3339(),
+                        },
                     },
-                })
+                )
             }
         };
     }
