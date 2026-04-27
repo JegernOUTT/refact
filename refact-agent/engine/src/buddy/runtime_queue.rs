@@ -33,6 +33,13 @@ impl RuntimeQueue {
                 existing.duration_hint = event.duration_hint;
                 existing.persistent = event.persistent;
                 existing.controls = event.controls;
+                // Sticky dismissal: once the user dismissed an event, any
+                // subsequent re-emission with the same dedupe_key (e.g.
+                // because the same window error fired again) stays hidden.
+                // We OR the flags so an explicit dismiss flag on the new
+                // event also takes effect, but a fresh (undismissed)
+                // event can never silently un-dismiss the existing one.
+                existing.dismissed = existing.dismissed || event.dismissed;
                 return;
             }
         }

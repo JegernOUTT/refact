@@ -58,7 +58,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
   disabled,
 }) => {
   const dispatch = useAppDispatch();
-  const { data, isLoading, isError } = useGetChatModesQuery(undefined);
+  const { data, isLoading } = useGetChatModesQuery(undefined);
   const messages = useAppSelector(selectMessages);
   const currentChatId = useAppSelector(selectCurrentThreadId);
   const currentPage = useAppSelector(selectCurrentPage);
@@ -80,7 +80,10 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
     return withTp;
   }, [rawModes, taskId]);
 
-  const effectiveMode = selectedMode || DEFAULT_MODE;
+  // Thread state can carry the mode id in either case (e.g. "TASK_PLANNER" from
+  // task chats vs "task_planner" from the chat-modes API). Normalise to lowercase
+  // for menu-item comparisons.
+  const effectiveMode = (selectedMode || DEFAULT_MODE).toLowerCase();
   const currentMode = effectiveModes.find((m) => m.id === effectiveMode);
   const currentTitle = currentMode?.title ?? effectiveMode;
   const toolsCount = currentMode?.tools_count ?? 0;
@@ -163,11 +166,11 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
     );
   }
 
-  if (isError || effectiveModes.length === 0) {
+  if (effectiveModes.length === 0) {
     return (
       <div className={`${styles.trigger} ${styles.disabled}`}>
         <Text size="1" color="gray">
-          {isError ? "Error" : "No modes"}
+          No modes
         </Text>
       </div>
     );
@@ -263,6 +266,9 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
         open={taskPlannerDialogOpen}
         onOpenChange={setTaskPlannerDialogOpen}
         taskId={taskId}
+        targetModeDescription={
+          effectiveModes.find((m) => m.id === "task_planner")?.description ?? ""
+        }
       />
     </>
   );

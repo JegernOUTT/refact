@@ -553,6 +553,26 @@ pub async fn handle_v1_buddy_suggestion_dismiss(
     }
 }
 
+/// Dismiss a runtime event (e.g. a frontend window_error) by its id.
+/// Persists `dismissed: true` on the event so it stays hidden across reloads.
+pub async fn handle_v1_buddy_runtime_dismiss(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    match lock.as_mut() {
+        Some(service) => {
+            let dismissed = service.dismiss_runtime_event_by_id(&id);
+            Ok(axum::Json(serde_json::json!({ "dismissed": dismissed })))
+        }
+        None => Err(ScratchError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "buddy service not initialized".to_string(),
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DiagnosticsCollectRequest {
     pub error: String,

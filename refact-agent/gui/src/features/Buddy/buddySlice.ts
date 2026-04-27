@@ -266,11 +266,15 @@ export const buddySlice = createSlice({
           (e) => e.dedupe_key === event.dedupe_key,
         );
         if (idx >= 0) {
-          state.runtimeQueue[idx] = event;
+          // Sticky dismissal on coalesce — see runtime_queue.rs::enqueue.
+          const wasDismissed =
+            state.runtimeQueue[idx].dismissed || event.dismissed;
+          state.runtimeQueue[idx] = { ...event, dismissed: wasDismissed };
           return;
         }
         if (state.nowPlaying?.dedupe_key === event.dedupe_key) {
-          state.nowPlaying = event;
+          const wasDismissed = state.nowPlaying.dismissed || event.dismissed;
+          state.nowPlaying = { ...event, dismissed: wasDismissed };
           return;
         }
       }
@@ -309,6 +313,15 @@ export const buddySlice = createSlice({
     clearActiveSpeech: (state) => {
       state.activeSpeech = null;
     },
+    /** Mark a runtime event as dismissed by id (optimistic; server confirms via SSE). */
+    dismissRuntimeEvent: (state, action: PayloadAction<string>) => {
+      const id = action.payload;
+      const item = state.runtimeQueue.find((e) => e.id === id);
+      if (item) item.dismissed = true;
+      if (state.nowPlaying?.id === id) {
+        state.nowPlaying = { ...state.nowPlaying, dismissed: true };
+      }
+    },
   },
   selectors: {
     selectBuddySnapshot: (state) => state.snapshot,
@@ -345,6 +358,7 @@ export const {
   updateRuntimeProgress,
   setActiveSpeech,
   clearActiveSpeech,
+  dismissRuntimeEvent,
 } = buddySlice.actions;
 
 export const {

@@ -19,10 +19,18 @@ import {
   setTaskActiveChat,
 } from "../../features/Tasks/tasksSlice";
 import { push } from "../../features/Pages/pagesSlice";
-import { useAppDispatch } from "../../hooks";
+import { useAppDispatch, useAppSelector } from "../../hooks";
+import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
+import {
+  selectMessages,
+  selectCurrentThreadId,
+} from "../../features/Chat/Thread";
+import { regenerate } from "../../services/refact/chatCommands";
 import {
   useCreateTaskMutation,
+  useDeleteTaskMutation,
   useCreatePlannerChatMutation,
+  useCreatePlannerChatFromTransitionMutation,
 } from "../../services/refact/tasks";
 import styles from "./ModeTransitionDialog.module.css";
 
@@ -43,102 +51,169 @@ function extractErrorMessage(err: unknown): string {
 type TaskPlannerDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Present when opened from inside a task workspace — adds planner to that task */
+  /** Present when opened from inside a task workspace; otherwise a new task is created */
   taskId?: string;
+  /** Description of the task_planner mode, used for context-transfer analysis */
+  targetModeDescription?: string;
 };
+
+type PendingTask = { id: string; name: string };
 
 export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
   open,
   onOpenChange,
   taskId,
+  targetModeDescription,
 }) => {
   const dispatch = useAppDispatch();
+  const port = useAppSelector(selectLspPort);
+  const apiKey = useAppSelector(selectApiKey);
+  const messages = useAppSelector(selectMessages);
+  const sourceChatId = useAppSelector(selectCurrentThreadId);
+
   const [error, setError] = useState<string | null>(null);
+  // Cache the created task so retries after a planner-creation failure don't
+  // create more tasks. Persists across cancel/reopen so we don't leak tasks
+  // that the user gave up on; cleared only on success or explicit rollback.
+  const [pendingTask, setPendingTask] = useState<PendingTask | null>(null);
 
   const [createTask, { isLoading: isCreatingTask }] = useCreateTaskMutation();
+  const [deleteTask] = useDeleteTaskMutation();
   const [createPlannerChat, { isLoading: isCreatingPlanner }] =
     useCreatePlannerChatMutation();
+  const [createFromTransition, { isLoading: isTransitioning }] =
+    useCreatePlannerChatFromTransitionMutation();
 
   const isInTaskWorkspace = taskId !== undefined;
-  const isLoading = isCreatingTask || isCreatingPlanner;
+  const hasMessages = messages.length > 0 && Boolean(sourceChatId);
+  const isLoading = isCreatingTask || isCreatingPlanner || isTransitioning;
 
   const handleApply = useCallback(async () => {
     setError(null);
     const now = new Date().toISOString();
     try {
-      let resolvedTaskId: string;
-
+      // Resolve / lazily create the target task. We track whether we just
+      // created it here so the success path can register it with the UI exactly
+      // once — including on retries after a previous planner failure.
+      let resolved: PendingTask;
+      let createdHere = false;
       if (isInTaskWorkspace && taskId) {
-        resolvedTaskId = taskId;
+        resolved = { id: taskId, name: "" };
+      } else if (pendingTask) {
+        resolved = pendingTask;
+        createdHere = true;
       } else {
-        // Create new task first
         const task = await createTask({ name: "New Task" }).unwrap();
-        resolvedTaskId = task.id;
-        dispatch(openTask({ id: resolvedTaskId, name: task.name }));
+        resolved = { id: task.id, name: task.name };
+        setPendingTask(resolved);
+        createdHere = true;
       }
 
-      // Always use the task-owned planner endpoint — this is the only correct way
-      // to create a backend trajectory that belongs to the task
-      const result = await createPlannerChat(resolvedTaskId).unwrap();
-      const newChatId = result.chat_id;
+      // Create the planner chat — task-owned, with context if available
+      let newChatId: string;
+      if (hasMessages && sourceChatId) {
+        const result = await createFromTransition({
+          taskId: resolved.id,
+          sourceChatId,
+          targetModeDescription: targetModeDescription ?? "",
+        }).unwrap();
+        newChatId = result.new_chat_id;
+      } else {
+        const result = await createPlannerChat(resolved.id).unwrap();
+        newChatId = result.chat_id;
+      }
 
-      // Wire up the Redux thread with full task metadata — same as TaskWorkspace.handleNewPlanner
+      // Wire up Redux thread with full task metadata — same as TaskWorkspace.handleNewPlanner
       dispatch(
         createChatWithId({
           id: newChatId,
           title: "",
           isTaskChat: true,
           mode: "TASK_PLANNER",
-          taskMeta: { task_id: resolvedTaskId, role: "planner" },
+          taskMeta: { task_id: resolved.id, role: "planner" },
         }),
       );
       dispatch(requestSseRefresh({ chatId: newChatId }));
+
+      // Always openTask before addPlannerChat so the planner registration
+      // hits an existing entry in the slice — necessary on retry too.
+      if (createdHere) {
+        dispatch(openTask({ id: resolved.id, name: resolved.name }));
+      }
       dispatch(
         addPlannerChat({
-          taskId: resolvedTaskId,
+          taskId: resolved.id,
           planner: { id: newChatId, title: "", createdAt: now, updatedAt: now },
         }),
       );
       dispatch(
         setTaskActiveChat({
-          taskId: resolvedTaskId,
+          taskId: resolved.id,
           activeChat: { type: "planner", chatId: newChatId },
         }),
       );
 
       if (!isInTaskWorkspace) {
-        dispatch(push({ name: "task workspace", taskId: resolvedTaskId }));
+        dispatch(push({ name: "task workspace", taskId: resolved.id }));
       }
 
+      // Successful — clear the pending task so a subsequent open creates fresh
+      setPendingTask(null);
       onOpenChange(false);
+
+      // Kick off generation if context was transferred
+      if (hasMessages && sourceChatId) {
+        void regenerate(newChatId, port, apiKey ?? undefined);
+      }
     } catch (err) {
       setError(extractErrorMessage(err));
     }
   }, [
     isInTaskWorkspace,
     taskId,
+    pendingTask,
+    hasMessages,
+    sourceChatId,
+    targetModeDescription,
     createTask,
     createPlannerChat,
+    createFromTransition,
     dispatch,
     onOpenChange,
+    port,
+    apiKey,
   ]);
 
   const handleOpenChange = useCallback(
     (newOpen: boolean) => {
-      if (!newOpen) setError(null);
+      if (!newOpen) {
+        // If the user is closing after a failed attempt with a half-created
+        // task, roll it back so we don't leak orphan tasks.
+        if (pendingTask) {
+          void deleteTask(pendingTask.id);
+        }
+        setError(null);
+        setPendingTask(null);
+      }
       onOpenChange(newOpen);
     },
-    [onOpenChange],
+    [onOpenChange, pendingTask, deleteTask],
   );
 
   const title = isInTaskWorkspace ? "New Planner" : "Switch to Task Planner";
   const description = isInTaskWorkspace
-    ? "Create a new planner chat in this task."
-    : "Create a new task and open the Task Planner.";
+    ? hasMessages
+      ? "The assistant will analyze the current chat and create a new planner chat with the relevant context."
+      : "Create a new planner chat in this task."
+    : hasMessages
+      ? "The assistant will analyze your conversation, create a new task, and start a planner chat with the relevant context."
+      : "Create a new task and open the Task Planner.";
   const buttonLabel = isInTaskWorkspace ? "Create Planner" : "Create Task";
   const loadingLabel = isCreatingTask
     ? "Creating task..."
-    : "Creating planner...";
+    : isTransitioning
+      ? "Analyzing conversation..."
+      : "Creating planner...";
 
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>

@@ -34,6 +34,10 @@ pub struct BuddyRuntimeEvent {
     pub controls: Vec<BuddyControl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
+    /// Whether the user has explicitly dismissed this runtime event.
+    /// Persisted across sessions; dismissed events are kept in the queue but hidden by the UI.
+    #[serde(default)]
+    pub dismissed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -88,7 +88,7 @@ use crate::http::routers::v1::tasks::{
 };
 use crate::http::routers::v1::trajectory_ops::{
     handle_transform_preview, handle_transform_apply, handle_handoff_preview, handle_handoff_apply,
-    handle_mode_transition_apply,
+    handle_mode_transition_apply, handle_planner_from_transition,
 };
 use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_get, handle_v1_project_configs_rescan,
@@ -461,6 +461,10 @@ pub fn make_v1_router() -> Router {
             post(handle_create_planner_chat),
         )
         .route(
+            "/tasks/:task_id/planner-chats/from-transition",
+            post(handle_planner_from_transition),
+        )
+        .route(
             "/chats/:chat_id/trajectory/transform/preview",
             post(handle_transform_preview),
         )
@@ -740,6 +744,10 @@ pub fn make_v1_router() -> Router {
         .route(
             "/buddy/suggestions/:id/dismiss",
             post(buddy::handle_v1_buddy_suggestion_dismiss),
+        )
+        .route(
+            "/buddy/runtime/:id/dismiss",
+            post(buddy::handle_v1_buddy_runtime_dismiss),
         )
         .route(
             "/buddy/diagnostics",

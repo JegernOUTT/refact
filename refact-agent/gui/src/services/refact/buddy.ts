@@ -297,6 +297,21 @@ export const buddyApi = createApi({
         return { data: { dismissed: true } };
       },
     }),
+    dismissBuddyRuntimeEvent: builder.mutation<{ dismissed: boolean }, string>({
+      queryFn: async (id, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: `http://127.0.0.1:${port}/v1/buddy/runtime/${encodeURIComponent(
+            id,
+          )}/dismiss`,
+          method: "POST",
+        });
+        if (result.error) return { error: result.error };
+        const data = result.data as { dismissed?: boolean } | undefined;
+        return { data: { dismissed: data?.dismissed ?? true } };
+      },
+    }),
     reportError: builder.mutation<undefined, BuddyErrorReport>({
       queryFn: async (body, api) => {
         const state = api.getState() as BuddyApiState;
@@ -330,5 +345,6 @@ export const {
   useCreateBuddyConversationMutation,
   useCreateSetupConversationMutation,
   useDismissBuddySuggestionMutation,
+  useDismissBuddyRuntimeEventMutation,
   useReportErrorMutation,
 } = buddyApi;

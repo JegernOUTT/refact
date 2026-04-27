@@ -430,6 +430,24 @@ pub fn get_task_trajectory_dir(task_dir: &PathBuf, role: &str, agent_id: Option<
     }
 }
 
+/// Compute the next planner chat id in the standard `planner-{task_id}-{n}` format.
+///
+/// NOTE: this is not strictly atomic — concurrent callers can pick the same
+/// number. Callers that care about uniqueness must serialize themselves.
+pub async fn next_planner_chat_id(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    task_id: &str,
+) -> Result<String, String> {
+    let existing = list_task_trajectories(gcx, task_id, "planner", None).await?;
+    let prefix = format!("planner-{}-", task_id);
+    let max_num = existing
+        .iter()
+        .filter_map(|t| t.id.strip_prefix(&prefix).and_then(|s| s.parse::<u32>().ok()))
+        .max()
+        .unwrap_or(0);
+    Ok(format!("planner-{}-{}", task_id, max_num + 1))
+}
+
 pub async fn list_task_trajectories(
     gcx: Arc<ARwLock<GlobalContext>>,
     task_id: &str,

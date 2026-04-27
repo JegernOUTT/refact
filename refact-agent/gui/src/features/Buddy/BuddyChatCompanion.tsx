@@ -13,11 +13,15 @@ import {
   selectRuntimeQueue,
   selectBuddySuggestions,
   dismissBuddySuggestion,
+  dismissRuntimeEvent,
 } from "./buddySlice";
 import { selectChatErrorById } from "../Chat/Thread";
 import { startBuddyInvestigation } from "../Chat/Thread";
 import { push } from "../Pages/pagesSlice";
-import { useDismissBuddySuggestionMutation } from "../../services/refact/buddy";
+import {
+  useDismissBuddySuggestionMutation,
+  useDismissBuddyRuntimeEventMutation,
+} from "../../services/refact/buddy";
 import { useBuddyState } from "./hooks/useBuddyState";
 import { BuddyCanvas } from "./BuddyCanvas";
 import type { BuddyControl, BuddySuggestion, DiagnosticContext } from "./types";
@@ -53,6 +57,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
   const buddy = useBuddyState();
   const [dismissMutation] = useDismissBuddySuggestionMutation();
+  const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
 
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState(false);
@@ -101,21 +106,6 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     [],
   );
 
-  const careControls: BuddyControl[] = useMemo(
-    () => [
-      { id: "feed", label: "Feed", action: "care_feed", style: "primary" },
-      {
-        id: "play",
-        label: "Play",
-        action: "care_play",
-        action_param: "bug",
-        style: "secondary",
-      },
-      { id: "pet", label: "Pet", action: "care_pet", style: "secondary" },
-    ],
-    [],
-  );
-
   const notification: NotificationItem | null = useMemo(() => {
     const chatDiagnostic =
       diagnostics.find((d) => d.chat_id === chatId) ?? null;
@@ -137,10 +127,13 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     }
 
     const runtimeError =
-      nowPlaying?.chat_id === chatId && nowPlaying?.status === "failed"
+      nowPlaying?.chat_id === chatId &&
+      nowPlaying?.status === "failed" &&
+      !nowPlaying?.dismissed
         ? nowPlaying
         : runtimeQueue.find(
-            (e) => e.chat_id === chatId && e.status === "failed",
+            (e) =>
+              e.chat_id === chatId && e.status === "failed" && !e.dismissed,
           ) ?? null;
     if (runtimeError) {
       if (isBuddyOverlaySuppressedIssue(runtimeError.title, chatDiagnostic)) {
@@ -193,22 +186,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       };
     }
 
-    const needsCare =
-      (snapshot?.state?.pet?.condition?.hungry ?? false) ||
-      (snapshot?.state?.pet?.condition?.bored ?? false) ||
-      (snapshot?.state?.pet?.condition?.lonely ?? false);
-    if (!needsCare) {
-      return null;
-    }
-
-    return {
-      id: `care-${chatId}`,
-      text: "Need a quick check-in? Feed, play, or pet me.",
-      source: "runtime",
-      controls: careControls,
-      timestamp: Date.now(),
-      diagnostic: null,
-    };
+    return null;
   }, [
     threadError,
     chatId,
@@ -219,7 +197,6 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     snapshot,
     errorControls,
     suggestionControls,
-    careControls,
   ]);
 
   const isDismissed = notification ? dismissedIds.has(notification.id) : false;
@@ -240,6 +217,16 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         if (notification.source === "suggestion") {
           await dismissMutation(notification.id);
           dispatch(dismissBuddySuggestion(notification.id));
+        } else if (notification.source === "runtime") {
+          // Optimistically mark dismissed so the bubble disappears immediately,
+          // then persist to the backend so it stays dismissed across reloads/SSE.
+          dispatch(dismissRuntimeEvent(notification.id));
+          try {
+            await dismissRuntimeMutation(notification.id).unwrap();
+          } catch {
+            // Server unavailable: local-state fallback below still hides it
+            // for this session.
+          }
         }
         setDismissedIds((prev) => new Set(prev).add(notification.id));
         return;
@@ -278,6 +265,16 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           if (notification.source === "suggestion") {
             await dismissMutation(notification.id);
             dispatch(dismissBuddySuggestion(notification.id));
+          } else if (notification.source === "runtime") {
+            // Investigating an error implicitly resolves it — persist
+            // dismissal so the bubble doesn't reappear after the
+            // investigation chat opens.
+            dispatch(dismissRuntimeEvent(notification.id));
+            try {
+              await dismissRuntimeMutation(notification.id).unwrap();
+            } catch {
+              // Non-fatal: local dismiss still hides it for this session.
+            }
           }
           await dispatch(
             startBuddyInvestigation({
@@ -293,7 +290,14 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         }
       }
     },
-    [notification, pending, dismissMutation, dispatch, chatId],
+    [
+      notification,
+      pending,
+      dismissMutation,
+      dismissRuntimeMutation,
+      dispatch,
+      chatId,
+    ],
   );
 
   if (!enabled || !notification || isDismissed) return null;

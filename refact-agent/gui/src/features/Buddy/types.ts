@@ -642,6 +642,8 @@ export interface BuddyRuntimeEvent {
   persistent?: boolean;
   controls?: BuddyControl[];
   chat_id?: string;
+  /** True when the user has explicitly dismissed this event. Persisted server-side. */
+  dismissed?: boolean;
 }
 
 export type BuddySSEEvent =

@@ -159,6 +159,33 @@ impl BuddyService {
         }
     }
 
+    /// Mark a runtime event as dismissed by its `id` (frontend-visible identifier).
+    /// The event stays in the queue with `dismissed: true` so the dismissal
+    /// persists across snapshot reloads. Emits a RuntimeEvent so all clients
+    /// see the updated flag immediately.
+    /// Returns true if a matching event was found and updated.
+    pub fn dismiss_runtime_event_by_id(&mut self, id: &str) -> bool {
+        let mut found = false;
+        let mut updated_event: Option<BuddyRuntimeEvent> = None;
+        if let Some(e) = self.runtime_queue.items.iter_mut().find(|e| e.id == id) {
+            e.dismissed = true;
+            updated_event = Some(e.clone());
+            found = true;
+        }
+        if let Some(ref mut np) = self.runtime_queue.now_playing {
+            if np.id == id {
+                np.dismissed = true;
+                updated_event = Some(np.clone());
+                found = true;
+            }
+        }
+        if let Some(event) = updated_event {
+            self.dirty = true;
+            let _ = self.events_tx.send(BuddyEvent::RuntimeEvent { event });
+        }
+        found
+    }
+
     pub fn add_activity(&mut self, activity: BuddyActivity) {
         super::state::add_activity(&mut self.state, activity.clone());
         self.dirty = true;
@@ -578,6 +605,7 @@ pub fn make_runtime_event(
         persistent: false,
         controls: Vec::new(),
         chat_id: None,
+        dismissed: false,
     }
 }
 

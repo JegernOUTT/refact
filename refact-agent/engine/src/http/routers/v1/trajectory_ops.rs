@@ -69,6 +69,13 @@ pub struct ModeTransitionApplyResponse {
     pub messages_count: usize,
 }
 
+#[derive(Deserialize)]
+pub struct PlannerFromTransitionRequest {
+    pub source_chat_id: String,
+    #[serde(default)]
+    pub target_mode_description: String,
+}
+
 fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
     let mut actions = Vec::new();
     if opts.drop_all_context {
@@ -506,6 +513,134 @@ pub async fn handle_mode_transition_apply(
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "mode_transition")
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let response = ModeTransitionApplyResponse {
+        new_chat_id,
+        messages_count: new_messages.len(),
+    };
+
+    let body = serde_json::to_vec(&response)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body))
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+pub async fn handle_planner_from_transition(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Path(task_id): Path<String>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let req: PlannerFromTransitionRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+
+    // Verify the task exists before doing any work
+    crate::tasks::storage::load_task_meta(gcx.clone(), &task_id)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::NOT_FOUND, e))?;
+
+    let sessions = gcx.read().await.chat_sessions.clone();
+    let session_arc =
+        get_or_create_session_with_trajectory(gcx.clone(), &sessions, &req.source_chat_id).await;
+
+    let (messages, thread, session_state) = {
+        let session = session_arc.lock().await;
+        (
+            session.messages.clone(),
+            session.thread.clone(),
+            session.runtime.state.clone(),
+        )
+    };
+
+    if matches!(session_state, SessionState::Generating) {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "Cannot transition chat while generating, please wait or abort first".to_string(),
+        ));
+    }
+
+    if messages.is_empty() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Cannot transition an empty chat".to_string(),
+        ));
+    }
+
+    let target_mode = "task_planner".to_string();
+
+    let decisions = analyze_mode_transition(
+        gcx.clone(),
+        &messages,
+        &target_mode,
+        &req.target_mode_description,
+    )
+    .await
+    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let new_messages = assemble_new_chat(gcx.clone(), &messages, &decisions)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let new_messages = sanitize_messages_for_new_thread(&new_messages);
+
+    let new_chat_id = crate::tasks::storage::next_planner_chat_id(gcx.clone(), &task_id)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let task_meta = crate::chat::types::TaskMeta {
+        task_id: task_id.clone(),
+        role: "planner".to_string(),
+        agent_id: None,
+        card_id: None,
+    };
+
+    let snapshot = TrajectorySnapshot {
+        chat_id: new_chat_id.clone(),
+        title: String::new(),
+        model: thread.model.clone(),
+        mode: target_mode,
+        tool_use: thread.tool_use.clone(),
+        messages: new_messages.clone(),
+        created_at: now,
+        boost_reasoning: thread.boost_reasoning.unwrap_or(false),
+        checkpoints_enabled: thread.checkpoints_enabled,
+        context_tokens_cap: thread.context_tokens_cap,
+        include_project_info: thread.include_project_info,
+        is_title_generated: false,
+        auto_approve_editing_tools: thread.auto_approve_editing_tools,
+        auto_approve_dangerous_commands: thread.auto_approve_dangerous_commands,
+        version: 1,
+        task_meta: Some(task_meta),
+        parent_id: Some(req.source_chat_id.clone()),
+        link_type: Some("mode_transition".to_string()),
+        root_chat_id: thread
+            .root_chat_id
+            .clone()
+            .or_else(|| Some(req.source_chat_id.clone())),
+        reasoning_effort: thread.reasoning_effort.clone(),
+        thinking_budget: thread.thinking_budget,
+        temperature: thread.temperature,
+        frequency_penalty: thread.frequency_penalty,
+        max_tokens: thread.max_tokens,
+        parallel_tool_calls: thread.parallel_tool_calls,
+        previous_response_id: None,
+        active_skill: None,
+        auto_enrichment_enabled: thread.auto_enrichment_enabled,
+        buddy_meta: None,
+    };
+
+    // task_meta is set, so this saves into the task's planner directory
+    save_trajectory_snapshot_with_parent(
+        gcx.clone(),
+        snapshot,
+        &req.source_chat_id,
+        "mode_transition",
+    )
+    .await
+    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = ModeTransitionApplyResponse {
         new_chat_id,
