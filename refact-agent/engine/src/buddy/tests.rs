@@ -696,3 +696,34 @@ async fn test_proactive_disabled_still_allows_greeting() {
     let gcx = crate::global_context::tests::make_test_gcx().await;
     assert!(job.should_run(gcx, &ctx).await, "greeting must run even when proactive_enabled=false");
 }
+
+#[test]
+fn test_workflow_id_rejects_path_traversal() {
+    assert!(!super::actor::validate_workflow_id("../evil"));
+}
+
+#[test]
+fn test_workflow_id_rejects_slashes() {
+    assert!(!super::actor::validate_workflow_id("a/b"));
+}
+
+#[test]
+fn test_workflow_id_accepts_valid() {
+    assert!(super::actor::validate_workflow_id("commit_message"));
+    assert!(super::actor::validate_workflow_id("follow-up"));
+    assert!(super::actor::validate_workflow_id("kg_enrich"));
+}
+
+#[test]
+fn test_report_error_unicode_safe() {
+    let mut svc = make_service();
+    svc.report_error("test", "emoji 🎉 and CJK 你好 text", None, None);
+    assert!(!svc.state.recent_activities.is_empty());
+}
+
+#[test]
+fn test_error_redaction_strips_tokens() {
+    let output = super::actor::redact_sensitive("Error: Bearer sk-abc123xyz failed");
+    assert!(output.contains("[REDACTED]"), "must contain [REDACTED]");
+    assert!(!output.contains("sk-abc123xyz"), "must not contain raw token");
+}

@@ -17,6 +17,28 @@ const SAVE_INTERVAL_SECS: u64 = 60;
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
 const SUGGESTION_EXPIRY_SECS: i64 = 300;
 
+pub(crate) fn validate_workflow_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+pub(crate) fn redact_sensitive(text: &str) -> String {
+    let mut result = text.to_string();
+    let patterns = ["sk-", "Bearer ", "token=", "api_key=", "apikey=", "Authorization: "];
+    for pat in &patterns {
+        if let Some(pos) = result.find(pat) {
+            let start = pos + pat.len();
+            let end = result[start..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',')
+                .map(|e| start + e)
+                .unwrap_or(result.len());
+            let redacted = format!("{}[REDACTED]", pat);
+            result = format!("{}{}{}", &result[..pos], redacted, &result[end..]);
+        }
+    }
+    result
+}
+
 pub struct BuddyService {
     pub state: BuddyState,
     pub settings: BuddySettings,
@@ -194,6 +216,10 @@ impl BuddyService {
         output_summary: &str,
         success: bool,
     ) {
+        if !validate_workflow_id(workflow_id) {
+            warn!("buddy: rejecting invalid workflow_id: {:?}", workflow_id);
+            return;
+        }
         let path = project_root.join(format!(".refact/buddy/chats/workflows/{}.json", workflow_id));
         super::workflows::append_workflow_entry(&path, output_summary, success).await;
     }
@@ -219,12 +245,12 @@ impl BuddyService {
             severity,
         };
         self.add_diagnostic(ctx);
-        let end = 80.min(error_msg.len());
-        let truncated = &error_msg[..end];
+        let truncated: String = error_msg.chars().take(80).collect();
+        let redacted = redact_sensitive(error_msg);
         self.add_activity(BuddyActivity {
             icon: "⚠️".to_string(),
             title: format!("{}: {}", error_type, truncated),
-            description: error_msg.to_string(),
+            description: redacted,
             timestamp: Utc::now().to_rfc3339(),
             activity_type: "error".to_string(),
         });
