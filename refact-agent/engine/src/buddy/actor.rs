@@ -14,18 +14,15 @@ use super::events::BuddyEvent;
 use super::facts::FactStore;
 use super::humor::HumorService;
 use super::observers::{build_observer_registry, BuddyObserver, ObserverContext};
-use super::opportunities::{
-    primary_fact_kind_for_opportunity, OpportunityDetector, OpportunityQueue,
-};
+use super::opportunities::{primary_fact_kind_for_opportunity, OpportunityDetector, OpportunityQueue};
 use super::policy::{evaluate, PolicyDecision};
 use super::runtime_queue::RuntimeQueue;
 use super::settings::BuddySettings;
 use super::snapshot::BuddySnapshot;
 use super::storage::RuntimeQueueRecord;
 use super::types::{
-    BuddyActivity, BuddyCareAction, BuddyDraft, BuddyFact, BuddyOpportunity, BuddyPage,
-    BuddyPulse, BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem, BuddyState, BuddySuggestion,
-    OpportunityStatus,
+    BuddyActivity, BuddyCareAction, BuddyDraft, BuddyFact, BuddyOpportunity, BuddyPage, BuddyPulse,
+    BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem, BuddyState, BuddySuggestion, OpportunityStatus,
 };
 
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
@@ -240,7 +237,9 @@ impl BuddyService {
         self.opportunity_queue.push(opp.clone());
         self.state.opportunities = self.opportunity_queue.snapshot();
         self.dirty = true;
-        let _ = self.events_tx.send(BuddyEvent::OpportunityProduced { opportunity: opp });
+        let _ = self
+            .events_tx
+            .send(BuddyEvent::OpportunityProduced { opportunity: opp });
     }
 
     pub fn resolve_opportunity(&mut self, id: &str, status: OpportunityStatus) {
@@ -265,7 +264,9 @@ impl BuddyService {
 
     pub fn consume_draft(&mut self, id: &str) -> Option<BuddyDraft> {
         let draft = self.draft_store.consume(id)?;
-        let _ = self.events_tx.send(BuddyEvent::DraftConsumed { draft_id: id.to_string() });
+        let _ = self.events_tx.send(BuddyEvent::DraftConsumed {
+            draft_id: id.to_string(),
+        });
         Some(draft)
     }
 
@@ -1174,7 +1175,9 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
             let now = Utc::now();
             let fact_snap = {
                 let buddy = buddy_arc.lock().await;
-                buddy.as_ref().map(|svc| svc.fact_store.iter().cloned().collect::<Vec<_>>())
+                buddy
+                    .as_ref()
+                    .map(|svc| svc.fact_store.iter().cloned().collect::<Vec<_>>())
             };
             if let Some(facts) = fact_snap {
                 let mut tmp_store = FactStore::new();
@@ -1258,10 +1261,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                     for opp in candidates {
                         match evaluate(&opp, &svc.settings, &svc.opportunity_queue) {
                             PolicyDecision::Drop { reason } => {
-                                tracing::debug!(
-                                    "buddy: opp dropped by policy: {}",
-                                    reason
-                                );
+                                tracing::debug!("buddy: opp dropped by policy: {}", reason);
                             }
                             PolicyDecision::Surface { humor_allowed } => {
                                 let mut o = opp;

@@ -2703,7 +2703,11 @@ fn detector_dedupes_via_cooldown_key() {
     let pulse = BuddyPulse::default();
     let queue = OpportunityQueue::new();
     let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
-    assert_eq!(opps.len(), 1, "same cooldown_key must dedupe to 1 opportunity");
+    assert_eq!(
+        opps.len(),
+        1,
+        "same cooldown_key must dedupe to 1 opportunity"
+    );
 }
 
 #[test]
@@ -2723,7 +2727,10 @@ fn detector_skips_when_queue_cooldown_active() {
     let pulse = BuddyPulse::default();
     let mut queue = OpportunityQueue::new();
     // Push an opp with the same cooldown_key to activate cooldown
-    queue.push(make_opportunity("existing-opp", "task_health:stuck:cd-task"));
+    queue.push(make_opportunity(
+        "existing-opp",
+        "task_health:stuck:cd-task",
+    ));
     assert!(queue.cooldown_active("task_health:stuck:cd-task"));
     let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
     assert!(opps.is_empty(), "must skip when queue cooldown is active");
@@ -2766,8 +2773,14 @@ async fn actor_observer_tick_pipeline() {
         confidence: 0.9,
     });
     svc.detect_and_surface();
-    assert_eq!(svc.opportunity_queue.iter().count(), 1, "must have 1 opportunity");
-    let event = rx.try_recv().expect("must receive OpportunityProduced event");
+    assert_eq!(
+        svc.opportunity_queue.iter().count(),
+        1,
+        "must have 1 opportunity"
+    );
+    let event = rx
+        .try_recv()
+        .expect("must receive OpportunityProduced event");
     assert!(
         matches!(event, super::events::BuddyEvent::OpportunityProduced { .. }),
         "event must be OpportunityProduced"
@@ -2834,13 +2847,19 @@ async fn actor_persistence_round_trip() {
     let root = dir.path();
     super::storage::bootstrap_buddy_storage(root).await.unwrap();
     let mut svc = make_service();
-    svc.opportunity_queue.push(make_opportunity("opp-persist-1", "ck-persist-1"));
-    svc.opportunity_queue.push(make_opportunity("opp-persist-2", "ck-persist-2"));
+    svc.opportunity_queue
+        .push(make_opportunity("opp-persist-1", "ck-persist-1"));
+    svc.opportunity_queue
+        .push(make_opportunity("opp-persist-2", "ck-persist-2"));
     let mut state = svc.state.clone();
     state.opportunities = svc.opportunity_queue.snapshot();
     super::state::save_state(root, &state).await.unwrap();
     let loaded = super::state::load_state(root).await;
     assert_eq!(loaded.opportunities.len(), 2, "opportunities must persist");
     let queue = super::opportunities::OpportunityQueue::from_state(loaded.opportunities);
-    assert_eq!(queue.iter().count(), 2, "queue must be reconstructed from state");
+    assert_eq!(
+        queue.iter().count(),
+        2,
+        "queue must be reconstructed from state"
+    );
 }

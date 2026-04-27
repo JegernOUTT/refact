@@ -158,25 +158,101 @@ struct Rule {
 }
 
 const RULES: &[Rule] = &[
-    Rule { name: "task_stuck", cooldown_secs: 3600, build: rules::task_stuck },
-    Rule { name: "task_abandoned", cooldown_secs: 21600, build: rules::task_abandoned },
-    Rule { name: "trajectory_clutter", cooldown_secs: 43200, build: rules::trajectory_cleanup },
-    Rule { name: "workflow_distill", cooldown_secs: 86400, build: rules::workflow_distill },
-    Rule { name: "default_model_missing", cooldown_secs: 7200, build: rules::provider_tuning_missing },
-    Rule { name: "broken_model_ref", cooldown_secs: 7200, build: rules::provider_tuning_broken_ref },
-    Rule { name: "memory_garden", cooldown_secs: 43200, build: rules::memory_garden },
-    Rule { name: "diagnostic_cluster", cooldown_secs: 1800, build: rules::diagnostic_investigation },
-    Rule { name: "frontend_error_burst", cooldown_secs: 900, build: rules::diagnostic_investigation_frontend },
-    Rule { name: "git_pressure", cooldown_secs: 14400, build: rules::git_hygiene },
-    Rule { name: "git_widening", cooldown_secs: 7200, build: rules::git_hygiene_widening },
-    Rule { name: "mode_prompt_overlap", cooldown_secs: 86400, build: rules::config_drift_mode_overlap },
-    Rule { name: "skill_underused", cooldown_secs: 172800, build: rules::config_drift_skill_underused },
-    Rule { name: "skill_trigger_weak", cooldown_secs: 172800, build: rules::config_drift_skill_trigger },
-    Rule { name: "agents_md_gap", cooldown_secs: 259200, build: rules::agents_md_gap },
-    Rule { name: "mcp_auth_expired", cooldown_secs: 7200, build: rules::integration_mcp_auth },
-    Rule { name: "integration_failing", cooldown_secs: 7200, build: rules::integration_failing },
-    Rule { name: "smartlink_match", cooldown_secs: 3600, build: rules::integration_smartlink },
-    Rule { name: "chat_recap", cooldown_secs: 14400, build: rules::chat_recap_retry_streak },
+    Rule {
+        name: "task_stuck",
+        cooldown_secs: 3600,
+        build: rules::task_stuck,
+    },
+    Rule {
+        name: "task_abandoned",
+        cooldown_secs: 21600,
+        build: rules::task_abandoned,
+    },
+    Rule {
+        name: "trajectory_clutter",
+        cooldown_secs: 43200,
+        build: rules::trajectory_cleanup,
+    },
+    Rule {
+        name: "workflow_distill",
+        cooldown_secs: 86400,
+        build: rules::workflow_distill,
+    },
+    Rule {
+        name: "default_model_missing",
+        cooldown_secs: 7200,
+        build: rules::provider_tuning_missing,
+    },
+    Rule {
+        name: "broken_model_ref",
+        cooldown_secs: 7200,
+        build: rules::provider_tuning_broken_ref,
+    },
+    Rule {
+        name: "memory_garden",
+        cooldown_secs: 43200,
+        build: rules::memory_garden,
+    },
+    Rule {
+        name: "diagnostic_cluster",
+        cooldown_secs: 1800,
+        build: rules::diagnostic_investigation,
+    },
+    Rule {
+        name: "frontend_error_burst",
+        cooldown_secs: 900,
+        build: rules::diagnostic_investigation_frontend,
+    },
+    Rule {
+        name: "git_pressure",
+        cooldown_secs: 14400,
+        build: rules::git_hygiene,
+    },
+    Rule {
+        name: "git_widening",
+        cooldown_secs: 7200,
+        build: rules::git_hygiene_widening,
+    },
+    Rule {
+        name: "mode_prompt_overlap",
+        cooldown_secs: 86400,
+        build: rules::config_drift_mode_overlap,
+    },
+    Rule {
+        name: "skill_underused",
+        cooldown_secs: 172800,
+        build: rules::config_drift_skill_underused,
+    },
+    Rule {
+        name: "skill_trigger_weak",
+        cooldown_secs: 172800,
+        build: rules::config_drift_skill_trigger,
+    },
+    Rule {
+        name: "agents_md_gap",
+        cooldown_secs: 259200,
+        build: rules::agents_md_gap,
+    },
+    Rule {
+        name: "mcp_auth_expired",
+        cooldown_secs: 7200,
+        build: rules::integration_mcp_auth,
+    },
+    Rule {
+        name: "integration_failing",
+        cooldown_secs: 7200,
+        build: rules::integration_failing,
+    },
+    Rule {
+        name: "smartlink_match",
+        cooldown_secs: 3600,
+        build: rules::integration_smartlink,
+    },
+    Rule {
+        name: "chat_recap",
+        cooldown_secs: 14400,
+        build: rules::chat_recap_retry_streak,
+    },
 ];
 
 mod rules {
@@ -270,7 +346,10 @@ mod rules {
                     vec![fact.key.clone()],
                     format!("task_health:abandoned:{}", task_id),
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::TasksList, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::TasksList,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -297,7 +376,9 @@ mod rules {
                     vec![fact.key.clone()],
                     format!("trajectory:cleanup:{}", &fact.key),
                     vec![
-                        BuddyAction::CreatePulseReport { scope: PulseScope::Trajectories },
+                        BuddyAction::CreatePulseReport {
+                            scope: PulseScope::Trajectories,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -313,7 +394,10 @@ mod rules {
         now: DateTime<Utc>,
     ) -> Vec<BuddyOpportunity> {
         store
-            .recent(BuddyFactKind::RecurringWorkflowCandidate, Duration::hours(24))
+            .recent(
+                BuddyFactKind::RecurringWorkflowCandidate,
+                Duration::hours(24),
+            )
             .into_iter()
             .map(|fact| {
                 opp(
@@ -363,7 +447,10 @@ mod rules {
                     vec![fact.key.clone()],
                     "provider:default_model_missing",
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::DefaultModels, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::DefaultModels,
+                            params: None,
+                        },
                         BuddyAction::DraftDefaultsChange {
                             defaults_kind: DefaultsKind::ChatModel,
                             patch: serde_json::json!({}),
@@ -401,7 +488,10 @@ mod rules {
                     vec![fact.key.clone()],
                     format!("provider:broken_ref:{}", model),
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::DefaultModels, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::DefaultModels,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -437,8 +527,13 @@ mod rules {
             fact_keys,
             "memory:garden:global",
             vec![
-                BuddyAction::OpenPage { page: BuddyPage::KnowledgeGraph, params: None },
-                BuddyAction::CreatePulseReport { scope: PulseScope::Memory },
+                BuddyAction::OpenPage {
+                    page: BuddyPage::KnowledgeGraph,
+                    params: None,
+                },
+                BuddyAction::CreatePulseReport {
+                    scope: PulseScope::Memory,
+                },
                 BuddyAction::Dismiss,
             ],
             now,
@@ -481,7 +576,10 @@ mod rules {
                                 ),
                             },
                         },
-                        BuddyAction::OpenPage { page: BuddyPage::Buddy, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Buddy,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -519,7 +617,10 @@ mod rules {
                                     .to_string(),
                             },
                         },
-                        BuddyAction::OpenPage { page: BuddyPage::Buddy, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Buddy,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -547,7 +648,10 @@ mod rules {
                     vec![fact.key.clone()],
                     "git:uncommitted:global",
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::Stats, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Stats,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -575,7 +679,10 @@ mod rules {
                     vec![fact.key.clone()],
                     "git:widening:global",
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::Stats, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Stats,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -609,7 +716,10 @@ mod rules {
                     vec![fact.key.clone()],
                     format!("config_drift:mode_overlap:{}", id),
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::Customization, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Customization,
+                            params: None,
+                        },
                         BuddyAction::DraftCustomizationChange {
                             customization_kind: CustomizationKind::Mode,
                             id: id.clone(),
@@ -642,7 +752,10 @@ mod rules {
                     vec![fact.key.clone()],
                     format!("config_drift:skill_underused:{}", &fact.key),
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::Customization, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Customization,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -676,7 +789,10 @@ mod rules {
                     vec![fact.key.clone()],
                     format!("config_drift:skill_trigger:{}", id),
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::Customization, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Customization,
+                            params: None,
+                        },
                         BuddyAction::DraftCustomizationChange {
                             customization_kind: CustomizationKind::Skill,
                             id,
@@ -709,7 +825,9 @@ mod rules {
                     vec![fact.key.clone()],
                     "agents_md:gap:global",
                     vec![
-                        BuddyAction::DraftAgentsMdPatch { diff: String::new() },
+                        BuddyAction::DraftAgentsMdPatch {
+                            diff: String::new(),
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -742,7 +860,10 @@ mod rules {
                     vec![fact.key.clone()],
                     format!("integration:mcp_auth:{}", id),
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::Integrations, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Integrations,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -775,7 +896,10 @@ mod rules {
                     vec![fact.key.clone()],
                     format!("integration:failing:{}", id),
                     vec![
-                        BuddyAction::OpenPage { page: BuddyPage::Integrations, params: None },
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Integrations,
+                            params: None,
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,

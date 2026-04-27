@@ -50,15 +50,21 @@ async fn build_trajectories_pulse(project_root: &std::path::Path) -> TrajectoryP
     }
     let (total, untitled, oldest) =
         crate::buddy::observers::trajectory_clutter::scan_trajectories_dir(&traj_dir).await;
-    TrajectoryPulse { total, untitled, oldest_age_days: oldest }
+    TrajectoryPulse {
+        total,
+        untitled,
+        oldest_age_days: oldest,
+    }
 }
 
 fn build_memory_pulse(project_root: &std::path::Path, fact_store: &FactStore) -> MemoryPulse {
     let mut pulse = MemoryPulse::default();
     let orphan_facts = fact_store.recent(BuddyFactKind::MemoryOrphan, chrono::Duration::hours(24));
     pulse.orphan = orphan_facts.len() as u32;
-    let stale_facts =
-        fact_store.recent(BuddyFactKind::MemoryStaleConflict, chrono::Duration::hours(24));
+    let stale_facts = fact_store.recent(
+        BuddyFactKind::MemoryStaleConflict,
+        chrono::Duration::hours(24),
+    );
     pulse.stale_conflicts = stale_facts.len() as u32;
     let knowledge_dir = project_root.join(".refact").join("knowledge");
     if knowledge_dir.exists() {
@@ -93,7 +99,10 @@ async fn build_providers_pulse(gcx: Arc<RwLock<GlobalContext>>) -> ProviderPulse
 
 fn build_mcp_pulse(fact_store: &FactStore) -> McpPulse {
     let mut pulse = McpPulse::default();
-    let failing = fact_store.recent(BuddyFactKind::IntegrationFailing, chrono::Duration::hours(4));
+    let failing = fact_store.recent(
+        BuddyFactKind::IntegrationFailing,
+        chrono::Duration::hours(4),
+    );
     pulse.failing = failing.len() as u32;
     let expiring = fact_store.recent(BuddyFactKind::McpAuthExpired, chrono::Duration::hours(24));
     pulse.auth_expiring = expiring.len() as u32;
@@ -103,11 +112,10 @@ fn build_mcp_pulse(fact_store: &FactStore) -> McpPulse {
 
 async fn build_customization_pulse(gcx: Arc<RwLock<GlobalContext>>) -> CustomizationPulse {
     let mut pulse = CustomizationPulse::default();
-    let reg =
-        match crate::yaml_configs::customization_registry::get_project_registry(gcx).await {
-            Some(r) => r,
-            None => return pulse,
-        };
+    let reg = match crate::yaml_configs::customization_registry::get_project_registry(gcx).await {
+        Some(r) => r,
+        None => return pulse,
+    };
     pulse.modes = reg.modes.len() as u32;
     pulse.subagents = reg.subagents.len() as u32;
     pulse.commands = reg.toolbox_commands.len() as u32;
