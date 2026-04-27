@@ -1,0 +1,17 @@
+schema_version: 2
+id: buddy_humor
+title: Buddy Humor
+description: Generate short situational one-liners for Buddy opportunity cards
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: bare
+  stateful: false
+  model_type: buddy
+  n_ctx: 8000
+  max_new_tokens: 256
+  temperature: 0.8
+  tokens_for_rag: 0
+
+tools: []

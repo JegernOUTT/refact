@@ -1907,3 +1907,276 @@ fn humor_level_and_autonomy_serde() {
     assert_eq!(settings.humor_level, HumorLevel::Light);
     assert_eq!(settings.autonomy_level, AutonomyLevel::Suggest);
 }
+
+// =============================================================================
+// Policy tests
+// =============================================================================
+
+fn make_opp_with_priority(id: &str, priority: BuddyPriority) -> BuddyOpportunity {
+    let mut opp = make_opportunity(id, id);
+    opp.priority = priority;
+    opp
+}
+
+#[test]
+fn policy_drops_when_proactive_disabled() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let mut settings = BuddySettings::default();
+    settings.proactive_enabled = false;
+    let opp = make_opp_with_priority("opp1", BuddyPriority::Normal);
+    let queue = OpportunityQueue::new();
+    let result = evaluate(&opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Drop { reason: "proactive_disabled" }));
+}
+
+#[test]
+fn policy_quiet_mode_drops_non_critical() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let mut settings = BuddySettings::default();
+    settings.quiet_mode = true;
+    let queue = OpportunityQueue::new();
+
+    let normal_opp = make_opp_with_priority("opp-normal", BuddyPriority::Normal);
+    let result = evaluate(&normal_opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Drop { reason: "quiet_mode" }));
+
+    let critical_opp = make_opp_with_priority("opp-critical", BuddyPriority::Critical);
+    let result = evaluate(&critical_opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Surface { .. }));
+}
+
+#[test]
+fn policy_unread_cap_drops() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::{OpportunityQueue, MAX_UNREAD};
+    let settings = BuddySettings::default();
+    let mut queue = OpportunityQueue::new();
+    for i in 0..MAX_UNREAD {
+        queue.push(make_opportunity(&format!("pre-{}", i), &format!("ck-pre-{}", i)));
+    }
+    assert_eq!(queue.unread_count(), MAX_UNREAD);
+    let opp = make_opp_with_priority("new-opp", BuddyPriority::Normal);
+    let result = evaluate(&opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Drop { reason: "unread_cap" }));
+}
+
+#[test]
+fn policy_dismissed_24h_drops() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let settings = BuddySettings::default();
+    let mut queue = OpportunityQueue::new();
+    let opp = make_opportunity("opp-dm", "key-dm");
+    queue.push(opp.clone());
+    queue.dismiss("opp-dm");
+    let new_opp = make_opportunity("opp-new", "key-dm");
+    let result = evaluate(&new_opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Drop { reason: "dismissed_24h" }));
+}
+
+#[test]
+fn policy_cooldown_drops() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let settings = BuddySettings::default();
+    let mut queue = OpportunityQueue::new();
+    queue.push(make_opportunity("opp-cd", "cooldown-key"));
+    assert!(queue.cooldown_active("cooldown-key"));
+    let new_opp = make_opportunity("opp-cd2", "cooldown-key");
+    let result = evaluate(&new_opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Drop { reason: "cooldown" }));
+}
+
+#[test]
+fn policy_humor_blocked_by_keyword() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let settings = BuddySettings::default();
+    let queue = OpportunityQueue::new();
+    let mut opp = make_opp_with_priority("opp-auth", BuddyPriority::Normal);
+    opp.summary = "auth token expired".to_string();
+    let result = evaluate(&opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Surface { humor_allowed: false }));
+}
+
+#[test]
+fn policy_humor_blocked_by_priority() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let settings = BuddySettings::default();
+    let queue = OpportunityQueue::new();
+    let opp = make_opp_with_priority("opp-high", BuddyPriority::High);
+    let result = evaluate(&opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Surface { humor_allowed: false }));
+}
+
+#[test]
+fn policy_humor_off_setting() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let mut settings = BuddySettings::default();
+    settings.humor_level = HumorLevel::Off;
+    let queue = OpportunityQueue::new();
+    let opp = make_opp_with_priority("opp-off", BuddyPriority::Normal);
+    let result = evaluate(&opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Surface { humor_allowed: false }));
+}
+
+#[test]
+fn policy_default_surfaces() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let settings = BuddySettings::default();
+    let queue = OpportunityQueue::new();
+    let opp = make_opp_with_priority("opp-ok", BuddyPriority::Normal);
+    let result = evaluate(&opp, &settings, &queue);
+    assert!(matches!(result, PolicyDecision::Surface { humor_allowed: true }));
+}
+
+// =============================================================================
+// Humor tests
+// =============================================================================
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+struct CountingGenerator {
+    count: std::sync::Arc<AtomicU32>,
+    lines: Vec<String>,
+}
+
+#[async_trait::async_trait]
+impl super::humor::HumorGenerator for CountingGenerator {
+    async fn generate(
+        &self,
+        _kind: BuddyFactKind,
+        _summary: String,
+        _gcx: std::sync::Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    ) -> Vec<String> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.lines.clone()
+    }
+}
+
+struct EmptyGenerator;
+
+#[async_trait::async_trait]
+impl super::humor::HumorGenerator for EmptyGenerator {
+    async fn generate(
+        &self,
+        _kind: BuddyFactKind,
+        _summary: String,
+        _gcx: std::sync::Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    ) -> Vec<String> {
+        vec![]
+    }
+}
+
+#[tokio::test]
+async fn humor_uses_cache_before_calling_generator() {
+    use super::humor::HumorService;
+    let count = std::sync::Arc::new(AtomicU32::new(0));
+    let gen = std::sync::Arc::new(CountingGenerator {
+        count: count.clone(),
+        lines: vec![
+            "line1".to_string(),
+            "line2".to_string(),
+            "line3".to_string(),
+            "line4".to_string(),
+        ],
+    });
+    let mut svc = HumorService::new_with_generator(gen);
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let pulse = BuddyPulse::default();
+    let kind = BuddyFactKind::TaskStuck;
+
+    for i in 0..4 {
+        let mut opp = make_opportunity(&format!("opp-h{}", i), &format!("ck-h{}", i));
+        svc.attach_humor(&mut opp, kind, &pulse, gcx.clone()).await;
+        assert!(opp.humor.is_some(), "call {} must have humor", i);
+    }
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "generator must be called exactly once for 4 calls with 4-line batch"
+    );
+}
+
+#[tokio::test]
+async fn humor_budget_enforced() {
+    use super::humor::HumorService;
+    let gen = std::sync::Arc::new(CountingGenerator {
+        count: std::sync::Arc::new(AtomicU32::new(0)),
+        lines: vec!["ha".to_string()],
+    });
+    let mut svc = HumorService::new_with_generator(gen);
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let pulse = BuddyPulse::default();
+
+    let kinds = [
+        BuddyFactKind::TaskStuck,
+        BuddyFactKind::TrajectoryClutter,
+        BuddyFactKind::ChatRetryStreak,
+        BuddyFactKind::MemoryOrphan,
+    ];
+
+    for (i, &kind) in kinds.iter().enumerate() {
+        let mut opp = make_opportunity(&format!("opp-b{}", i), &format!("ck-b{}", i));
+        svc.attach_humor(&mut opp, kind, &pulse, gcx.clone()).await;
+        if i < 3 {
+            assert!(opp.humor.is_some(), "call {} should have humor", i);
+        } else {
+            assert!(
+                opp.humor.is_none(),
+                "4th distinct kind must be blocked by budget"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn humor_no_fallback_on_empty_lines() {
+    use super::humor::HumorService;
+    let mut svc = HumorService::new_with_generator(std::sync::Arc::new(EmptyGenerator));
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let pulse = BuddyPulse::default();
+    let mut opp = make_opportunity("opp-nf", "ck-nf");
+    svc.attach_humor(&mut opp, BuddyFactKind::TaskStuck, &pulse, gcx.clone())
+        .await;
+    assert!(
+        opp.humor.is_none(),
+        "humor must remain None when generator returns empty — no fallback"
+    );
+}
+
+#[tokio::test]
+async fn humor_cache_expiry() {
+    use super::humor::HumorService;
+    let count = std::sync::Arc::new(AtomicU32::new(0));
+    let gen = std::sync::Arc::new(CountingGenerator {
+        count: count.clone(),
+        lines: vec!["line1".to_string(), "line2".to_string()],
+    });
+    let mut svc = HumorService::new_with_generator(gen);
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let pulse = BuddyPulse::default();
+    let kind = BuddyFactKind::TaskStuck;
+
+    let mut opp1 = make_opportunity("opp-ex1", "ck-ex1");
+    svc.attach_humor(&mut opp1, kind, &pulse, gcx.clone()).await;
+    assert!(opp1.humor.is_some());
+    assert_eq!(count.load(Ordering::SeqCst), 1, "one generation so far");
+
+    let future = chrono::Utc::now() + Duration::hours(2);
+    svc.cache_purge_expired(future);
+
+    let mut opp2 = make_opportunity("opp-ex2", "ck-ex2");
+    svc.attach_humor(&mut opp2, kind, &pulse, gcx.clone()).await;
+    assert!(opp2.humor.is_some());
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        2,
+        "cache expiry must trigger a fresh generation"
+    );
+}
