@@ -2372,3 +2372,132 @@ fn ephemeral_debug_renders_placeholder() {
     assert_eq!(format!("{:?}", e), "<ephemeral>");
     assert_eq!(e.as_ref(), "secret");
 }
+
+#[test]
+fn provider_health_default_missing() {
+    use super::observers::provider_health::detect_provider_health_facts;
+    use crate::caps::DefaultModels;
+    let now = chrono::Utc::now();
+    let defaults = DefaultModels {
+        completion_default_model: String::new(),
+        chat_default_model: "openai/gpt-4o".to_string(),
+        chat_thinking_model: String::new(),
+        chat_light_model: String::new(),
+        chat_buddy_model: String::new(),
+    };
+    let facts = detect_provider_health_facts(&defaults, &["openai/gpt-4o".to_string()], now);
+    assert!(
+        facts.iter().any(|f| f.kind == BuddyFactKind::DefaultModelMissing),
+        "must emit DefaultModelMissing when chat_buddy_model is empty"
+    );
+}
+
+#[test]
+fn provider_health_broken_ref() {
+    use super::observers::provider_health::detect_provider_health_facts;
+    use crate::caps::DefaultModels;
+    let now = chrono::Utc::now();
+    let defaults = DefaultModels {
+        completion_default_model: String::new(),
+        chat_default_model: "openai/gpt-4o".to_string(),
+        chat_thinking_model: String::new(),
+        chat_light_model: String::new(),
+        chat_buddy_model: String::new(),
+    };
+    let facts = detect_provider_health_facts(&defaults, &[], now);
+    assert!(
+        facts.iter().any(|f| f.kind == BuddyFactKind::BrokenModelReference),
+        "must emit BrokenModelReference when default model is not in available list"
+    );
+}
+
+#[test]
+fn provider_health_no_emit_when_ok() {
+    use super::observers::provider_health::detect_provider_health_facts;
+    use crate::caps::DefaultModels;
+    let now = chrono::Utc::now();
+    let defaults = DefaultModels {
+        completion_default_model: String::new(),
+        chat_default_model: "openai/gpt-4o".to_string(),
+        chat_thinking_model: "openai/o1".to_string(),
+        chat_light_model: String::new(),
+        chat_buddy_model: "openai/gpt-4o-mini".to_string(),
+    };
+    let available = vec![
+        "openai/gpt-4o".to_string(),
+        "openai/o1".to_string(),
+        "openai/gpt-4o-mini".to_string(),
+    ];
+    let facts = detect_provider_health_facts(&defaults, &available, now);
+    let interesting: Vec<_> = facts
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.kind,
+                BuddyFactKind::DefaultModelMissing | BuddyFactKind::BrokenModelReference
+            )
+        })
+        .collect();
+    assert!(
+        interesting.is_empty(),
+        "must emit no model facts when all defaults are set and present in available list"
+    );
+}
+
+#[test]
+fn mcp_auth_expiring_within_24h() {
+    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
+    let now = chrono::Utc::now();
+    let expires_12h = now.timestamp_millis() + 12 * 3600 * 1000;
+    let snaps = vec![McpSessionSnapshot {
+        id: "github-mcp".to_string(),
+        auth_status: MCPAuthStatus::Authenticated,
+        failed_calls: 0,
+        expires_at_ms: Some(expires_12h),
+        smartlink_id: None,
+    }];
+    let facts = detect_mcp_auth_facts(&snaps, now);
+    assert!(
+        facts.iter().any(|f| f.kind == BuddyFactKind::McpAuthExpired),
+        "must emit McpAuthExpired when token expires in 12h"
+    );
+}
+
+#[test]
+fn mcp_auth_failure_count() {
+    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
+    let now = chrono::Utc::now();
+    let snaps = vec![McpSessionSnapshot {
+        id: "github-mcp".to_string(),
+        auth_status: MCPAuthStatus::NotApplicable,
+        failed_calls: 3,
+        expires_at_ms: None,
+        smartlink_id: None,
+    }];
+    let facts = detect_mcp_auth_facts(&snaps, now);
+    assert!(
+        facts.iter().any(|f| f.kind == BuddyFactKind::IntegrationFailing),
+        "must emit IntegrationFailing when failure_count >= 3"
+    );
+}
+
+#[test]
+fn mcp_smartlink_match() {
+    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
+    let now = chrono::Utc::now();
+    let snaps = vec![McpSessionSnapshot {
+        id: "github-mcp".to_string(),
+        auth_status: MCPAuthStatus::NotApplicable,
+        failed_calls: 3,
+        expires_at_ms: None,
+        smartlink_id: Some("https://github.com/github/mcp".to_string()),
+    }];
+    let facts = detect_mcp_auth_facts(&snaps, now);
+    assert!(
+        facts.iter().any(|f| f.kind == BuddyFactKind::IntegrationSmartlinkMatch),
+        "must emit IntegrationSmartlinkMatch when failing integration has a smartlink"
+    );
+}

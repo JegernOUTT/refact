@@ -1,5 +1,7 @@
 pub mod diagnostic_cluster;
 pub mod git_pressure;
+pub mod mcp_auth;
+pub mod provider_health;
 pub mod task_health;
 pub mod trajectory_clutter;
 
@@ -62,5 +64,7 @@ pub fn build_observer_registry() -> Vec<Arc<dyn BuddyObserver>> {
         Arc::new(trajectory_clutter::TrajectoryClutterObserver),
         Arc::new(git_pressure::GitPressureObserver),
         Arc::new(diagnostic_cluster::DiagnosticClusterObserver),
+        Arc::new(provider_health::ProviderHealthObserver),
+        Arc::new(mcp_auth::McpAuthObserver),
     ]
 }
