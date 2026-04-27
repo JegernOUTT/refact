@@ -503,7 +503,6 @@ fn make_job_context(onboarding: BuddyOnboarding, diagnostics_count: usize, job_s
         identity_name: "Pixel".to_string(),
         onboarding,
         recent_diagnostics: diags,
-        suggestion_unread_count: 0,
         project_root: std::path::PathBuf::from("/tmp/test-project"),
         job_state,
     }
@@ -726,4 +725,48 @@ fn test_error_redaction_strips_tokens() {
     let output = super::actor::redact_sensitive("Error: Bearer sk-abc123xyz failed");
     assert!(output.contains("[REDACTED]"), "must contain [REDACTED]");
     assert!(!output.contains("sk-abc123xyz"), "must not contain raw token");
+}
+
+#[test]
+fn test_queue_eviction_drops_oldest_low_priority() {
+    use super::runtime_queue::RuntimeQueue;
+    use super::actor::make_runtime_event;
+    let mut queue = RuntimeQueue::new();
+    for i in 0..50 {
+        let mut ev = make_runtime_event("signal", &format!("low-{}", i), "src", &format!("low-key-{}", i), "started", None);
+        ev.priority = "low".to_string();
+        queue.enqueue(ev);
+    }
+    for i in 0..55 {
+        let ev = make_runtime_event("signal", &format!("normal-{}", i), "src", &format!("normal-key-{}", i), "started", Some("normal"));
+        queue.enqueue(ev);
+    }
+    assert!(queue.items.len() <= 100);
+    assert!(!queue.items.iter().any(|e| e.title == "low-0"), "oldest low-priority item must be evicted first");
+    assert!(queue.items.iter().any(|e| e.title == "low-49"), "newest low-priority items should survive");
+}
+
+#[tokio::test]
+async fn test_ledger_skips_empty_chat_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let bad_path = root.join(".refact/buddy/chats/conversations/no_id.json");
+    let bad_json = serde_json::json!({
+        "title": "Missing ID", "kind": "chat",
+        "created_at": "2024-01-01T00:00:00Z", "messages": []
+    });
+    super::storage::atomic_write_json(&bad_path, &bad_json).await.unwrap();
+
+    let good_path = root.join(".refact/buddy/chats/conversations/has_id.json");
+    let good_json = serde_json::json!({
+        "chat_id": "has_id", "title": "Good Chat", "kind": "chat",
+        "created_at": "2024-01-02T00:00:00Z", "messages": []
+    });
+    super::storage::atomic_write_json(&good_path, &good_json).await.unwrap();
+
+    let entries = super::conversation_ledger::list_all_buddy_conversations(root, None).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "has_id");
 }

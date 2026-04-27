@@ -11,7 +11,6 @@ pub struct BuddyJobContext {
     pub identity_name: String,
     pub onboarding: BuddyOnboarding,
     pub recent_diagnostics: Vec<DiagnosticContext>,
-    pub suggestion_unread_count: usize,
     pub project_root: std::path::PathBuf,
     pub job_state: BuddyJobState,
 }
@@ -96,7 +95,7 @@ impl BuddyScheduler {
                 identity_name: state.identity.name.clone(),
                 onboarding: state.onboarding.clone(),
                 recent_diagnostics: diags.clone(),
-                suggestion_unread_count: unread,
+
                 project_root: project_root.to_path_buf(),
                 job_state: job_state.clone(),
             };

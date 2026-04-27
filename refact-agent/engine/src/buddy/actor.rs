@@ -13,7 +13,6 @@ use super::settings::BuddySettings;
 use super::snapshot::BuddySnapshot;
 use super::types::{BuddyActivity, BuddyRuntimeEvent, BuddySpeechItem, BuddyState, BuddySuggestion};
 
-const SAVE_INTERVAL_SECS: u64 = 60;
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
 const SUGGESTION_EXPIRY_SECS: i64 = 300;
 
@@ -91,6 +90,7 @@ impl BuddyService {
         self.runtime_queue.enqueue(event);
     }
 
+    #[allow(dead_code)]
     pub fn update_runtime_progress(&mut self, dedupe_key: &str, progress: u8, title: Option<&str>) {
         self.runtime_queue.update_progress(dedupe_key, progress, title);
         if let Some(e) = self.runtime_queue.items.iter().find(|e| e.dedupe_key.as_deref() == Some(dedupe_key)) {
@@ -111,6 +111,7 @@ impl BuddyService {
         let _ = self.events_tx.send(BuddyEvent::ActivityAdded { activity });
     }
 
+    #[allow(dead_code)]
     pub fn grant_xp(&mut self, amount: u64) {
         super::state::grant_xp(&mut self.state, amount);
         self.dirty = true;
@@ -318,11 +319,6 @@ pub fn make_runtime_event(
     }
 }
 
-pub async fn buddy_report_bg(gcx: Arc<ARwLock<GlobalContext>>, signal_type: &str, _icon: &str, title: &str, _description: &str) {
-    let event = make_runtime_event(signal_type, title, "system", signal_type, "completed", None);
-    buddy_enqueue_event(gcx, event).await;
-}
-
 pub async fn buddy_complete_event(gcx: Arc<ARwLock<GlobalContext>>, dedupe_key: &str, status: &str) {
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
@@ -389,7 +385,6 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
 
     let scheduler = super::scheduler::BuddyScheduler::new();
     let shutdown_flag = gcx.read().await.shutdown_flag.clone();
-    let mut last_save = Instant::now();
     let mut expiry_tick: u64 = 0;
 
     loop {
@@ -410,7 +405,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
         let state_to_save = {
             let mut buddy = buddy_arc.lock().await;
             buddy.as_mut().and_then(|svc| {
-                if svc.dirty || last_save.elapsed().as_secs() >= SAVE_INTERVAL_SECS {
+                if svc.dirty {
                     svc.dirty = false;
                     Some(svc.state.clone())
                 } else {
@@ -424,8 +419,6 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                 if let Some(svc) = buddy_arc.lock().await.as_mut() {
                     svc.dirty = true;
                 }
-            } else {
-                last_save = Instant::now();
             }
         }
     }

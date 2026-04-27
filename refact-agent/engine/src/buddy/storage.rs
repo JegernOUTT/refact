@@ -1,7 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use serde::Serialize;
 use tokio::fs;
-use tracing::warn;
 
 use super::state::default_buddy_state;
 
@@ -56,34 +55,3 @@ pub async fn bootstrap_buddy_storage(project_root: &Path) -> Result<(), String> 
     Ok(())
 }
 
-pub async fn list_buddy_conversations(project_root: &Path) -> Vec<PathBuf> {
-    list_json_files(&project_root.join(".refact/buddy/chats/conversations")).await
-}
-
-pub async fn list_buddy_workflows(project_root: &Path) -> Vec<PathBuf> {
-    list_json_files(&project_root.join(".refact/buddy/chats/workflows")).await
-}
-
-async fn list_json_files(dir: &Path) -> Vec<PathBuf> {
-    let mut entries = match fs::read_dir(dir).await {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
-    let mut files = vec![];
-    loop {
-        match entries.next_entry().await {
-            Ok(Some(entry)) => {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                    files.push(path);
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                warn!("Error reading buddy dir entry: {}", e);
-                break;
-            }
-        }
-    }
-    files
-}

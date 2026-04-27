@@ -43,7 +43,7 @@ impl RuntimeQueue {
 
         // Cap queue size, drop oldest low-priority first
         while self.items.len() > MAX_QUEUE_SIZE {
-            if let Some(pos) = self.items.iter().rposition(|e| e.priority == "low") {
+            if let Some(pos) = self.items.iter().position(|e| e.priority == "low") {
                 self.items.remove(pos);
             } else {
                 self.items.pop_back();
@@ -51,6 +51,7 @@ impl RuntimeQueue {
         }
     }
 
+    #[allow(dead_code)]
     pub fn update_progress(&mut self, dedupe_key: &str, progress: u8, title: Option<&str>) {
         if let Some(e) = self.items.iter_mut().find(|e| e.dedupe_key.as_deref() == Some(dedupe_key)) {
             e.progress = Some(progress);
