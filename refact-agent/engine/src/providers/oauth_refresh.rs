@@ -8,6 +8,7 @@ const REFRESH_CHECK_INTERVAL_SECS: u64 = 60;
 const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000; // 5 minutes before expiry
 
 pub async fn oauth_token_refresh_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
+    let _ = try_refresh_all_providers(&gcx).await;
     loop {
         let shutdown_flag = gcx.read().await.shutdown_flag.clone();
         tokio::select! {
