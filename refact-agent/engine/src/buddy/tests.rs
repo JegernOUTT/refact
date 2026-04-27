@@ -13,7 +13,8 @@ use super::state::{
     apply_care_action, apply_pet_tick, default_buddy_state, grant_xp, reroll_personality,
 };
 use super::types::{
-    BuddyAction, BuddyCareAction, BuddyJobState, BuddyOnboarding, BuddyPage, BuddyPriority,
+    BuddyAction, BuddyCareAction, BuddyFact, BuddyFactKind, BuddyJobState, BuddyOnboarding,
+    BuddyOpportunity, BuddyOpportunityKind, BuddyOpportunityLinks, BuddyPage, BuddyPriority,
     BuddyPulse, BuddySuggestion, BuddyState, CustomizationKind, DefaultsKind, DraftKind,
     InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
 };
@@ -1537,6 +1538,180 @@ fn test_redact_handles_multiple_secrets_and_case() {
         redactions,
         output
     );
+}
+
+// =============================================================================
+// FactStore tests
+// =============================================================================
+
+fn make_fact(key: &str, kind: BuddyFactKind, seen_at: chrono::DateTime<chrono::Utc>) -> BuddyFact {
+    BuddyFact {
+        kind,
+        key: key.to_string(),
+        source: "test",
+        payload: serde_json::json!({"k": key}),
+        seen_at,
+        confidence: 1.0,
+    }
+}
+
+fn make_opportunity(id: &str, cooldown_key: &str) -> BuddyOpportunity {
+    let now = chrono::Utc::now();
+    BuddyOpportunity {
+        id: id.to_string(),
+        kind: BuddyOpportunityKind::TaskHealth,
+        summary: "test".to_string(),
+        priority: BuddyPriority::Normal,
+        confidence: 0.9,
+        fact_keys: vec![],
+        cooldown_key: cooldown_key.to_string(),
+        status: OpportunityStatus::New,
+        proposed_actions: vec![],
+        humor: None,
+        humor_allowed: false,
+        related: BuddyOpportunityLinks::default(),
+        created_at: now,
+        expires_at: now + Duration::hours(1),
+    }
+}
+
+#[test]
+fn fact_store_dedup_by_key() {
+    use super::facts::FactStore;
+    let mut store = FactStore::new();
+    let now = chrono::Utc::now();
+    let f1 = BuddyFact {
+        payload: serde_json::json!({"v": 1}),
+        ..make_fact("k1", BuddyFactKind::TaskStuck, now)
+    };
+    let f2 = BuddyFact {
+        payload: serde_json::json!({"v": 2}),
+        ..make_fact("k1", BuddyFactKind::TaskStuck, now)
+    };
+    store.ingest(f1);
+    store.ingest(f2);
+    assert_eq!(store.len(), 1);
+    assert_eq!(store.iter().next().unwrap().payload["v"], 2);
+}
+
+#[test]
+fn fact_store_ring_evicts_oldest() {
+    use super::facts::{FactStore, FACT_RING_CAPACITY};
+    let mut store = FactStore::new();
+    let now = chrono::Utc::now();
+    for i in 0..=FACT_RING_CAPACITY {
+        store.ingest(make_fact(&format!("key-{}", i), BuddyFactKind::TaskStuck, now));
+    }
+    assert_eq!(store.len(), FACT_RING_CAPACITY);
+    assert!(!store.iter().any(|f| f.key == "key-0"), "first key must be evicted");
+}
+
+#[test]
+fn fact_store_count_within() {
+    use super::facts::FactStore;
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(make_fact("old", BuddyFactKind::DiagnosticCluster, now - Duration::hours(2)));
+    store.ingest(make_fact("recent", BuddyFactKind::DiagnosticCluster, now - Duration::minutes(5)));
+    assert_eq!(store.count_within(BuddyFactKind::DiagnosticCluster, Duration::hours(1)), 1);
+    assert_eq!(store.count_within(BuddyFactKind::DiagnosticCluster, Duration::hours(3)), 2);
+}
+
+// =============================================================================
+// OpportunityQueue tests
+// =============================================================================
+
+#[test]
+fn opportunity_queue_unread_cap_state() {
+    use super::opportunities::OpportunityQueue;
+    let mut q = OpportunityQueue::new();
+    q.push(make_opportunity("opp1", "ck1"));
+    assert_eq!(q.unread_count(), 1);
+    q.mark_status("opp1", OpportunityStatus::Dismissed);
+    assert_eq!(q.unread_count(), 0);
+}
+
+#[test]
+fn opportunity_queue_cooldown_blocks_dup() {
+    use super::opportunities::OpportunityQueue;
+    let mut q = OpportunityQueue::new();
+    q.push(make_opportunity("opp1", "ck1"));
+    assert!(q.cooldown_active("ck1"));
+}
+
+#[test]
+fn opportunity_queue_dismissed_24h() {
+    use super::opportunities::OpportunityQueue;
+    let mut q = OpportunityQueue::new();
+    q.push(make_opportunity("opp1", "ck1"));
+    q.dismiss("opp1");
+    assert!(q.recently_dismissed("ck1", Duration::hours(24)));
+    assert!(!q.recently_dismissed("ck1", Duration::zero()));
+}
+
+#[test]
+fn opportunity_queue_expire_old() {
+    use super::opportunities::OpportunityQueue;
+    let now = chrono::Utc::now();
+    let mut q = OpportunityQueue::new();
+    let mut opp = make_opportunity("opp1", "ck1");
+    opp.expires_at = now - Duration::hours(1);
+    opp.created_at = now - Duration::minutes(5);
+    q.push(opp);
+    q.expire_old(now);
+    assert_eq!(q.get("opp1").map(|o| o.status), Some(OpportunityStatus::Expired));
+    q.expire_old(now + Duration::hours(25));
+    assert!(q.get("opp1").is_none(), "must be removed after 24h");
+}
+
+#[test]
+fn opportunity_queue_cap() {
+    use super::opportunities::{OpportunityQueue, MAX_OPPORTUNITIES};
+    let mut q = OpportunityQueue::new();
+    for i in 0..=MAX_OPPORTUNITIES {
+        q.push(make_opportunity(&format!("opp-{}", i), &format!("ck-{}", i)));
+    }
+    assert!(q.iter().count() <= MAX_OPPORTUNITIES);
+}
+
+// =============================================================================
+// DraftStore tests
+// =============================================================================
+
+#[test]
+fn draft_store_create_get_consume() {
+    use super::drafts::DraftStore;
+    let mut store = DraftStore::new();
+    let draft = store.create(DraftKind::Skill, "My Skill".to_string(), "yaml: {}".to_string(), "exp".to_string());
+    let id = draft.id.clone();
+    assert!(store.get(&id).is_some());
+    let consumed = store.consume(&id);
+    assert!(consumed.is_some());
+    assert!(store.get(&id).is_none());
+}
+
+#[test]
+fn draft_store_ttl() {
+    use super::drafts::DraftStore;
+    let mut store = DraftStore::new();
+    let draft = store.create(DraftKind::Command, "Cmd".to_string(), "{}".to_string(), "".to_string());
+    let id = draft.id.clone();
+    store.expire_old(chrono::Utc::now() + Duration::hours(3));
+    assert!(store.get(&id).is_none(), "draft must be removed after TTL");
+}
+
+// =============================================================================
+// PulseBuilder tests
+// =============================================================================
+
+#[tokio::test]
+async fn pulse_build_skeleton_sets_generated_at() {
+    use super::facts::FactStore;
+    use super::pulse::build_pulse;
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let store = FactStore::new();
+    let pulse = build_pulse(gcx, std::path::Path::new("/tmp"), &store).await;
+    assert!(pulse.generated_at.is_some());
 }
 
 #[test]
