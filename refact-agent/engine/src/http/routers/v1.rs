@@ -99,6 +99,11 @@ mod ast;
 pub mod at_commands;
 pub mod at_tools;
 pub mod buddy;
+pub mod buddy_drafts;
+pub mod buddy_frontend_error;
+pub mod buddy_investigation;
+pub mod buddy_opportunities;
+pub mod buddy_pulse;
 pub mod caps;
 pub mod chat_based_handlers;
 mod chat_modes;
@@ -770,7 +775,63 @@ pub fn make_v1_router() -> Router {
         .route(
             "/buddy/issues/create",
             post(buddy::handle_v1_buddy_issues_create),
+        )
+        .route(
+            "/buddy/opportunities",
+            get(buddy_opportunities::handle_v1_buddy_opportunities_list),
+        )
+        .route(
+            "/buddy/opportunities/:id/accept",
+            post(buddy_opportunities::handle_v1_buddy_opportunity_accept),
+        )
+        .route(
+            "/buddy/opportunities/:id/dismiss",
+            post(buddy_opportunities::handle_v1_buddy_opportunity_dismiss),
+        )
+        .route("/buddy/pulse", get(buddy_pulse::handle_v1_buddy_pulse))
+        .route(
+            "/buddy/drafts/skill",
+            post(buddy_drafts::handle_v1_buddy_draft_create_skill),
+        )
+        .route(
+            "/buddy/drafts/command",
+            post(buddy_drafts::handle_v1_buddy_draft_create_command),
+        )
+        .route(
+            "/buddy/drafts/subagent",
+            post(buddy_drafts::handle_v1_buddy_draft_create_subagent),
+        )
+        .route(
+            "/buddy/drafts/mode",
+            post(buddy_drafts::handle_v1_buddy_draft_create_mode),
+        )
+        .route(
+            "/buddy/drafts/agents_md",
+            post(buddy_drafts::handle_v1_buddy_draft_create_agents_md),
+        )
+        .route(
+            "/buddy/drafts/defaults",
+            post(buddy_drafts::handle_v1_buddy_draft_create_defaults),
+        )
+        .route(
+            "/buddy/drafts/:id",
+            get(buddy_drafts::handle_v1_buddy_draft_get),
+        )
+        .route(
+            "/buddy/drafts/:id",
+            delete(buddy_drafts::handle_v1_buddy_draft_delete),
+        )
+        .route(
+            "/buddy/investigations",
+            post(buddy_investigation::handle_v1_buddy_investigations),
+        )
+        .route(
+            "/buddy/frontend-error",
+            post(buddy_frontend_error::handle_v1_buddy_frontend_error),
         );
 
-    builder.layer(axum::middleware::from_fn(telemetry_middleware))
+    let rl = buddy_frontend_error::FrontendErrorRateLimiter::new();
+    builder
+        .layer(axum::Extension(rl))
+        .layer(axum::middleware::from_fn(telemetry_middleware))
 }

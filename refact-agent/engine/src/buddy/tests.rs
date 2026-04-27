@@ -2863,3 +2863,105 @@ async fn actor_persistence_round_trip() {
         "queue must be reconstructed from state"
     );
 }
+
+// =============================================================================
+// T-8: HTTP routes unit tests
+// =============================================================================
+
+#[tokio::test]
+async fn accept_action_dispatch() {
+    let (tx, mut rx) = broadcast::channel(32);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+    let mut opp = make_opportunity("opp-nav", "ck-nav");
+    opp.proposed_actions = vec![BuddyAction::OpenPage {
+        page: BuddyPage::Buddy,
+        params: None,
+    }];
+    svc.add_opportunity(opp);
+    let _ = rx.try_recv();
+    svc.send_navigation(BuddyPage::Buddy);
+    let event = rx.try_recv().expect("must receive NavigationRequest event");
+    assert!(
+        matches!(event, super::events::BuddyEvent::NavigationRequest { .. }),
+        "must receive NavigationRequest after OpenPage action dispatch"
+    );
+}
+
+#[test]
+fn dismiss_marks_history() {
+    use super::opportunities::OpportunityQueue;
+    let mut q = OpportunityQueue::new();
+    q.push(make_opportunity("opp-dm2", "key-dm2"));
+    q.dismiss("opp-dm2");
+    assert!(
+        q.recently_dismissed("key-dm2", Duration::hours(24)),
+        "recently_dismissed must be true after dismiss"
+    );
+}
+
+#[test]
+fn draft_create_get_consume_roundtrip() {
+    use super::drafts::DraftStore;
+    let mut store = DraftStore::new();
+    let draft = store.create(
+        DraftKind::Skill,
+        "Test Skill".to_string(),
+        "name: test".to_string(),
+        "A test skill".to_string(),
+    );
+    let id = draft.id.clone();
+    assert!(store.get(&id).is_some(), "draft must exist after create");
+    let consumed = store.consume(&id);
+    assert!(consumed.is_some(), "draft must be consumable");
+    assert_eq!(consumed.unwrap().title, "Test Skill");
+    assert!(store.get(&id).is_none(), "draft must be gone after consume");
+}
+
+#[test]
+fn frontend_error_rate_limit() {
+    use crate::http::routers::v1::buddy_frontend_error::FrontendErrorRateLimiter;
+    let rl = FrontendErrorRateLimiter::new();
+    for i in 0..60 {
+        assert!(rl.check_and_record("test_ip"), "call {} should succeed", i);
+    }
+    assert!(
+        !rl.check_and_record("test_ip"),
+        "61st call must be blocked by rate limit"
+    );
+}
+
+#[tokio::test]
+async fn pulse_returns_current_state() {
+    let (tx, _rx) = broadcast::channel(32);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+    let new_pulse = BuddyPulse {
+        generated_at: Some(chrono::Utc::now()),
+        tasks: super::types::TaskPulse {
+            total: 7,
+            ..Default::default()
+        },
+        ..BuddyPulse::default()
+    };
+    svc.set_pulse(new_pulse);
+    assert_eq!(svc.pulse.tasks.total, 7, "pulse tasks.total must be 7");
+    assert!(svc.pulse.generated_at.is_some(), "pulse generated_at must be set");
+    let json = serde_json::to_value(&svc.pulse).expect("must serialize");
+    assert!(json.get("tasks").is_some(), "pulse JSON must have tasks sub-pulse");
+    assert!(json.get("generated_at").is_some(), "pulse JSON must have generated_at");
+}
