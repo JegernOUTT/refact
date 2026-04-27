@@ -2651,3 +2651,196 @@ fn observer_registry_has_9_entries() {
     assert!(ids.contains(&"mcp_auth"));
     assert!(ids.contains(&"provider_health"));
 }
+
+// =============================================================================
+// T-7: Detector rules + Actor wiring + Pulse aggregation
+// =============================================================================
+
+#[test]
+fn detector_emits_task_health_for_stuck() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::TaskStuck,
+        key: "task:stuck:t1".to_string(),
+        source: "test",
+        payload: serde_json::json!({"task_id": "t1"}),
+        seen_at: now,
+        confidence: 0.9,
+    });
+    let pulse = BuddyPulse::default();
+    let queue = OpportunityQueue::new();
+    let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
+    assert_eq!(opps.len(), 1, "must emit 1 TaskHealth opportunity");
+    assert_eq!(opps[0].kind, BuddyOpportunityKind::TaskHealth);
+}
+
+#[test]
+fn detector_dedupes_via_cooldown_key() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    // Two facts with different keys but same task_id → same cooldown_key → 1 opportunity
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::TaskStuck,
+        key: "task:stuck:dup-a".to_string(),
+        source: "test",
+        payload: serde_json::json!({"task_id": "dup-task"}),
+        seen_at: now,
+        confidence: 1.0,
+    });
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::TaskStuck,
+        key: "task:stuck:dup-b".to_string(),
+        source: "test",
+        payload: serde_json::json!({"task_id": "dup-task"}),
+        seen_at: now,
+        confidence: 1.0,
+    });
+    let pulse = BuddyPulse::default();
+    let queue = OpportunityQueue::new();
+    let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
+    assert_eq!(opps.len(), 1, "same cooldown_key must dedupe to 1 opportunity");
+}
+
+#[test]
+fn detector_skips_when_queue_cooldown_active() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::TaskStuck,
+        key: "task:stuck:cd-task".to_string(),
+        source: "test",
+        payload: serde_json::json!({"task_id": "cd-task"}),
+        seen_at: now,
+        confidence: 1.0,
+    });
+    let pulse = BuddyPulse::default();
+    let mut queue = OpportunityQueue::new();
+    // Push an opp with the same cooldown_key to activate cooldown
+    queue.push(make_opportunity("existing-opp", "task_health:stuck:cd-task"));
+    assert!(queue.cooldown_active("task_health:stuck:cd-task"));
+    let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
+    assert!(opps.is_empty(), "must skip when queue cooldown is active");
+}
+
+#[tokio::test]
+async fn pulse_builds_all_subpulses() {
+    use super::facts::FactStore;
+    use super::pulse::build_pulse;
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let store = FactStore::new();
+    let pulse = build_pulse(gcx, std::path::Path::new("/tmp"), &store).await;
+    assert!(pulse.generated_at.is_some(), "generated_at must be set");
+    let _ = pulse.tasks.total;
+    let _ = pulse.trajectories.total;
+    let _ = pulse.providers.defaults_ok;
+    let _ = pulse.customization.modes;
+    let _ = pulse.diagnostics.last_hour;
+}
+
+#[tokio::test]
+async fn actor_observer_tick_pipeline() {
+    let (tx, mut rx) = broadcast::channel(32);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+    let now = chrono::Utc::now();
+    svc.fact_store.ingest(BuddyFact {
+        kind: BuddyFactKind::TaskStuck,
+        key: "task:stuck:test-task".to_string(),
+        source: "test",
+        payload: serde_json::json!({"task_id": "test-task"}),
+        seen_at: now,
+        confidence: 0.9,
+    });
+    svc.detect_and_surface();
+    assert_eq!(svc.opportunity_queue.iter().count(), 1, "must have 1 opportunity");
+    let event = rx.try_recv().expect("must receive OpportunityProduced event");
+    assert!(
+        matches!(event, super::events::BuddyEvent::OpportunityProduced { .. }),
+        "event must be OpportunityProduced"
+    );
+}
+
+#[tokio::test]
+async fn actor_pulse_broadcast_60s() {
+    let (tx, mut rx) = broadcast::channel(32);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+    let new_pulse = BuddyPulse {
+        generated_at: Some(chrono::Utc::now()),
+        ..BuddyPulse::default()
+    };
+    svc.set_pulse(new_pulse);
+    let event = rx.try_recv().expect("must receive PulseUpdated event");
+    assert!(
+        matches!(event, super::events::BuddyEvent::PulseUpdated { .. }),
+        "event must be PulseUpdated"
+    );
+}
+
+#[tokio::test]
+async fn actor_humor_attached_when_allowed() {
+    use super::humor::{HumorGenerator, HumorService};
+    struct MockGen;
+    #[async_trait::async_trait]
+    impl HumorGenerator for MockGen {
+        async fn generate(
+            &self,
+            _kind: BuddyFactKind,
+            _summary: String,
+            _gcx: std::sync::Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+        ) -> Vec<String> {
+            vec!["Test joke".to_string()]
+        }
+    }
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    svc.humor_service = HumorService::new_with_generator(std::sync::Arc::new(MockGen));
+    let mut opp = make_opportunity("humor-opp", "humor-opp-key");
+    opp.humor_allowed = true;
+    opp.priority = BuddyPriority::Normal;
+    opp.summary = "test summary".to_string();
+    let pulse = BuddyPulse::default();
+    svc.humor_service
+        .attach_humor(&mut opp, BuddyFactKind::TaskStuck, &pulse, gcx)
+        .await;
+    assert!(opp.humor.is_some(), "humor must be attached when allowed");
+    assert_eq!(opp.humor.as_deref(), Some("Test joke"));
+}
+
+#[tokio::test]
+async fn actor_persistence_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+    let mut svc = make_service();
+    svc.opportunity_queue.push(make_opportunity("opp-persist-1", "ck-persist-1"));
+    svc.opportunity_queue.push(make_opportunity("opp-persist-2", "ck-persist-2"));
+    let mut state = svc.state.clone();
+    state.opportunities = svc.opportunity_queue.snapshot();
+    super::state::save_state(root, &state).await.unwrap();
+    let loaded = super::state::load_state(root).await;
+    assert_eq!(loaded.opportunities.len(), 2, "opportunities must persist");
+    let queue = super::opportunities::OpportunityQueue::from_state(loaded.opportunities);
+    assert_eq!(queue.iter().count(), 2, "queue must be reconstructed from state");
+}

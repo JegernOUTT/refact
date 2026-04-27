@@ -50,6 +50,11 @@ impl DraftStore {
         self.drafts.remove(id)
     }
 
+    /// Insert an already-constructed draft (used when the id is pre-assigned).
+    pub fn insert(&mut self, draft: BuddyDraft) {
+        self.drafts.insert(draft.id.clone(), draft);
+    }
+
     /// Consume (delete and return) a draft by id.
     pub fn consume(&mut self, id: &str) -> Option<BuddyDraft> {
         self.drafts.remove(id)

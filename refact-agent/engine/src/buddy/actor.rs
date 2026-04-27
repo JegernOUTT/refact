@@ -1,21 +1,31 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::path::Path;
 use std::time::Instant;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, mpsc, RwLock as ARwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::global_context::GlobalContext;
+use super::drafts::DraftStore;
 use super::events::BuddyEvent;
+use super::facts::FactStore;
+use super::humor::HumorService;
+use super::observers::{build_observer_registry, BuddyObserver, ObserverContext};
+use super::opportunities::{
+    primary_fact_kind_for_opportunity, OpportunityDetector, OpportunityQueue,
+};
+use super::policy::{evaluate, PolicyDecision};
 use super::runtime_queue::RuntimeQueue;
 use super::settings::BuddySettings;
 use super::snapshot::BuddySnapshot;
 use super::storage::RuntimeQueueRecord;
 use super::types::{
-    BuddyActivity, BuddyCareAction, BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem, BuddyState,
-    BuddySuggestion,
+    BuddyActivity, BuddyCareAction, BuddyDraft, BuddyFact, BuddyOpportunity, BuddyPage,
+    BuddyPulse, BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem, BuddyState, BuddySuggestion,
+    OpportunityStatus,
 };
 
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
@@ -120,14 +130,18 @@ pub struct BuddyService {
     pub last_suggestion_at: Option<Instant>,
     pub recent_diagnostics: Vec<super::diagnostics::DiagnosticContext>,
     pub last_issue_at: Option<Instant>,
-    pub recent_issue_errors: Vec<(String, chrono::DateTime<chrono::Utc>)>,
+    pub recent_issue_errors: Vec<(String, DateTime<Utc>)>,
     pub runtime_queue: RuntimeQueue,
     pub dirty: bool,
     pub active_speech: Option<BuddySpeechItem>,
-    /// Sink for ordered JSONL writes. `None` in unit tests where the writer
-    /// task isn't running; production code (`buddy_background_task`) always
-    /// supplies a real sender.
     pub queue_writer: Option<mpsc::UnboundedSender<RuntimeQueueWriteOp>>,
+    pub fact_store: FactStore,
+    pub opportunity_queue: OpportunityQueue,
+    pub humor_service: HumorService,
+    pub pulse: BuddyPulse,
+    pub draft_store: DraftStore,
+    pub last_observer_tick: HashMap<&'static str, DateTime<Utc>>,
+    pub observers: Vec<Arc<dyn BuddyObserver>>,
 }
 
 impl BuddyService {
@@ -140,6 +154,7 @@ impl BuddyService {
         events_tx: broadcast::Sender<BuddyEvent>,
         queue_writer: Option<mpsc::UnboundedSender<RuntimeQueueWriteOp>>,
     ) -> Self {
+        let opportunity_queue = OpportunityQueue::from_state(state.opportunities.clone());
         Self {
             project_root,
             state,
@@ -153,6 +168,13 @@ impl BuddyService {
             dirty: false,
             active_speech: None,
             queue_writer,
+            fact_store: FactStore::new(),
+            opportunity_queue,
+            humor_service: HumorService::new(),
+            pulse: BuddyPulse::default(),
+            draft_store: DraftStore::new(),
+            last_observer_tick: HashMap::new(),
+            observers: build_observer_registry(),
         }
     }
 
@@ -187,9 +209,83 @@ impl BuddyService {
             runtime_queue: self.runtime_queue.items.iter().cloned().collect(),
             now_playing: self.runtime_queue.now_playing.clone(),
             active_speech: self.active_speech.clone(),
-            pulse: super::types::BuddyPulse::default(),
-            opportunities: self.state.opportunities.clone(),
-            active_drafts: vec![],
+            pulse: self.pulse.clone(),
+            opportunities: self.opportunity_queue.snapshot(),
+            active_drafts: self.draft_store.snapshot(),
+        }
+    }
+
+    pub fn expire_opportunities(&mut self) {
+        let now = Utc::now();
+        let expiring: Vec<String> = self
+            .opportunity_queue
+            .iter()
+            .filter(|o| {
+                o.expires_at <= now
+                    && matches!(o.status, OpportunityStatus::New | OpportunityStatus::Shown)
+            })
+            .map(|o| o.id.clone())
+            .collect();
+        self.opportunity_queue.expire_old(now);
+        for id in expiring {
+            let _ = self.events_tx.send(BuddyEvent::OpportunityResolved {
+                opportunity_id: id,
+                status: OpportunityStatus::Expired,
+            });
+        }
+        self.state.opportunities = self.opportunity_queue.snapshot();
+    }
+
+    pub fn add_opportunity(&mut self, opp: BuddyOpportunity) {
+        self.opportunity_queue.push(opp.clone());
+        self.state.opportunities = self.opportunity_queue.snapshot();
+        self.dirty = true;
+        let _ = self.events_tx.send(BuddyEvent::OpportunityProduced { opportunity: opp });
+    }
+
+    pub fn resolve_opportunity(&mut self, id: &str, status: OpportunityStatus) {
+        self.opportunity_queue.mark_status(id, status);
+        self.state.opportunities = self.opportunity_queue.snapshot();
+        self.dirty = true;
+        let _ = self.events_tx.send(BuddyEvent::OpportunityResolved {
+            opportunity_id: id.to_string(),
+            status,
+        });
+    }
+
+    pub fn set_pulse(&mut self, pulse: BuddyPulse) {
+        self.pulse = pulse.clone();
+        let _ = self.events_tx.send(BuddyEvent::PulseUpdated { pulse });
+    }
+
+    pub fn add_draft(&mut self, draft: BuddyDraft) {
+        self.draft_store.insert(draft.clone());
+        let _ = self.events_tx.send(BuddyEvent::DraftCreated { draft });
+    }
+
+    pub fn consume_draft(&mut self, id: &str) -> Option<BuddyDraft> {
+        let draft = self.draft_store.consume(id)?;
+        let _ = self.events_tx.send(BuddyEvent::DraftConsumed { draft_id: id.to_string() });
+        Some(draft)
+    }
+
+    pub fn detect_and_surface(&mut self) {
+        let candidates = OpportunityDetector::new().detect(
+            &self.fact_store,
+            &self.pulse,
+            &self.opportunity_queue,
+        );
+        for opp in candidates {
+            match evaluate(&opp, &self.settings, &self.opportunity_queue) {
+                PolicyDecision::Drop { reason } => {
+                    tracing::debug!("buddy: opportunity dropped by policy: {}", reason);
+                }
+                PolicyDecision::Surface { humor_allowed } => {
+                    let mut o = opp;
+                    o.humor_allowed = humor_allowed;
+                    self.add_opportunity(o);
+                }
+            }
         }
     }
 
@@ -1071,6 +1167,121 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
             let mut buddy = buddy_arc.lock().await;
             if let Some(svc) = buddy.as_mut() {
                 svc.expire_suggestions();
+            }
+        }
+        // Pulse refresh + opportunity expiry every 60s
+        if expiry_tick % 60 == 0 {
+            let now = Utc::now();
+            let fact_snap = {
+                let buddy = buddy_arc.lock().await;
+                buddy.as_ref().map(|svc| svc.fact_store.iter().cloned().collect::<Vec<_>>())
+            };
+            if let Some(facts) = fact_snap {
+                let mut tmp_store = FactStore::new();
+                for f in facts {
+                    tmp_store.ingest(f);
+                }
+                let new_pulse =
+                    super::pulse::build_pulse(gcx.clone(), &project_root, &tmp_store).await;
+                let mut buddy = buddy_arc.lock().await;
+                if let Some(svc) = buddy.as_mut() {
+                    svc.set_pulse(new_pulse);
+                    svc.expire_opportunities();
+                    svc.opportunity_queue.refresh_cooldowns(now);
+                    svc.draft_store.expire_old(now);
+                }
+            }
+        }
+        // Observer ticking — each observer respects its own cadence
+        {
+            let now = Utc::now();
+            let (due_observers, pulse_snap, last_ticks_snap) = {
+                let buddy = buddy_arc.lock().await;
+                match buddy.as_ref() {
+                    Some(svc) => {
+                        let s = svc.settings.clone();
+                        let p = svc.pulse.clone();
+                        let lt = svc.last_observer_tick.clone();
+                        let due: Vec<Arc<dyn BuddyObserver>> = svc
+                            .observers
+                            .iter()
+                            .filter(|obs| {
+                                if !obs.requires_setting(&s) {
+                                    return false;
+                                }
+                                match lt.get(obs.id()) {
+                                    Some(t) => {
+                                        (now - *t).num_seconds() as u64 >= obs.cadence_seconds()
+                                    }
+                                    None => true,
+                                }
+                            })
+                            .cloned()
+                            .collect();
+                        (due, p, lt)
+                    }
+                    None => (vec![], BuddyPulse::default(), HashMap::new()),
+                }
+            };
+            if !due_observers.is_empty() {
+                // Run observers without holding buddy lock (prevents deadlock with
+                // DiagnosticClusterObserver which also locks buddy).
+                let mut all_facts: Vec<BuddyFact> = vec![];
+                for obs in &due_observers {
+                    let ctx = ObserverContext {
+                        project_root: project_root.clone(),
+                        last_tick: last_ticks_snap.get(obs.id()).copied(),
+                        now,
+                        current_pulse: pulse_snap.clone(),
+                    };
+                    let facts = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(5),
+                        obs.observe(gcx.clone(), &ctx),
+                    )
+                    .await
+                    .unwrap_or_default();
+                    all_facts.extend(facts);
+                }
+                // Lock once to ingest facts, update ticks, detect, and surface opportunities.
+                let mut buddy = buddy_arc.lock().await;
+                if let Some(svc) = buddy.as_mut() {
+                    for obs in &due_observers {
+                        svc.last_observer_tick.insert(obs.id(), now);
+                    }
+                    svc.fact_store.ingest_many(all_facts);
+                    let candidates = OpportunityDetector::new().detect(
+                        &svc.fact_store,
+                        &svc.pulse,
+                        &svc.opportunity_queue,
+                    );
+                    let mut to_add: Vec<(BuddyOpportunity, bool)> = vec![];
+                    for opp in candidates {
+                        match evaluate(&opp, &svc.settings, &svc.opportunity_queue) {
+                            PolicyDecision::Drop { reason } => {
+                                tracing::debug!(
+                                    "buddy: opp dropped by policy: {}",
+                                    reason
+                                );
+                            }
+                            PolicyDecision::Surface { humor_allowed } => {
+                                let mut o = opp;
+                                o.humor_allowed = humor_allowed;
+                                to_add.push((o, humor_allowed));
+                            }
+                        }
+                    }
+                    // Attach humor and add (still inside lock; LLM calls don't re-lock buddy)
+                    let pulse = svc.pulse.clone();
+                    for (mut opp, humor_allowed) in to_add {
+                        if humor_allowed {
+                            let primary_kind = primary_fact_kind_for_opportunity(&opp);
+                            svc.humor_service
+                                .attach_humor(&mut opp, primary_kind, &pulse, gcx.clone())
+                                .await;
+                        }
+                        svc.add_opportunity(opp);
+                    }
+                }
             }
         }
         if expiry_tick % 30 == 0 {
