@@ -1722,15 +1722,19 @@ pub async fn execute_tools(
     let is_buddy = thread.buddy_meta.as_ref().map(|m| m.is_buddy_chat).unwrap_or(false);
     let first_tool_name = tool_calls.first().map(|tc| tc.function.name.clone()).unwrap_or_default();
     let chat_id = thread.id.clone();
+    let chat_label = {
+        let t = thread.title.trim().to_string();
+        if t.is_empty() || t == "New Chat" { "Untitled chat".to_string() } else { t.chars().take(60).collect() }
+    };
     let tool_meta: Vec<(String, String)> = tool_calls.iter()
         .map(|tc| (tc.id.clone(), format!("tool_{}_{}", chat_id, tc.function.name)))
         .collect();
     for (tc, (_, dedupe_key)) in tool_calls.iter().zip(tool_meta.iter()) {
         let mut ev = crate::buddy::actor::make_runtime_event(
-            "tool_used", &format!("Running tool: {}", tc.function.name), "tool",
+            "tool_used", &format!("Running {} in '{}'", tc.function.name, chat_label), "tool",
             dedupe_key, "started", None,
         );
-        ev.speech_text = Some(format!("Running {}...", tc.function.name));
+        ev.speech_text = Some(format!("Using {} to help with '{}'...", tc.function.name, chat_label));
         ev.scene = Some("working".to_string());
         crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
     }

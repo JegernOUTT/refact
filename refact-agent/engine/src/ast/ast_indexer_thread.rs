@@ -318,7 +318,8 @@ async fn ast_indexer_thread(
             info!("{msg}"); // you can see stderr sometimes faster vs logs
             reported_connect_stats = true;
             if let Some(gcx) = gcx_weak.upgrade() {
-                let ev = crate::buddy::actor::make_runtime_event("ast_parsing", &msg, "indexer", "ast", "completed", None);
+                let buddy_msg = format!("AST complete: {} files, {} symbols in {:.1}s", counters.counter_docs, counters.counter_defs, t0.elapsed().as_secs_f32());
+                let ev = crate::buddy::actor::make_runtime_event("ast_parsing", &buddy_msg, "indexer", "ast", "completed", None);
                 crate::buddy::actor::buddy_enqueue_event(gcx, ev).await;
             }
         }

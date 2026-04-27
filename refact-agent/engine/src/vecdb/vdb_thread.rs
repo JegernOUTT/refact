@@ -316,7 +316,16 @@ async fn vectorize_thread(
                         // }
                         let _ = write!(std::io::stderr(), "VECDB COMPLETE\n");
                         info!("VECDB COMPLETE"); // you can see stderr "VECDB COMPLETE" sometimes faster vs logs
-                        let ev = crate::buddy::actor::make_runtime_event("vecdb_building", "VecDB indexing complete", "indexer", "vecdb", "completed", None);
+                        let vectors_count = {
+                            let vstatus_locked = vstatus.lock().await;
+                            vstatus_locked.vectors_made_since_start
+                        };
+                        let vecdb_msg = if vectors_count > 0 {
+                            format!("VecDB complete: {} vectors indexed", vectors_count)
+                        } else {
+                            "VecDB indexing complete".to_string()
+                        };
+                        let ev = crate::buddy::actor::make_runtime_event("vecdb_building", &vecdb_msg, "indexer", "vecdb", "completed", None);
                         crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
                         vstatus_notify.notify_waiters();
                         {

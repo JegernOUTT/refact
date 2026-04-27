@@ -496,6 +496,11 @@ pub fn start_generation(
                 }
             }
 
+            let chat_label = {
+                let t = thread.title.trim().to_string();
+                if t.is_empty() || t == "New Chat" { "Untitled chat".to_string() } else { t.chars().take(60).collect() }
+            };
+
             let fork_agent_name = {
                 let session = session_arc.lock().await;
                 session.active_command.context_fork.clone()
@@ -569,15 +574,15 @@ pub fn start_generation(
 
             {
                 let ev = crate::buddy::actor::make_runtime_event(
-                    "chat_started", "Chat started", "chat",
+                    "chat_started", &format!("Started: {}", chat_label), "chat",
                     &format!("chat_{}", chat_id), "started", None,
                 );
                 crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
                 let mut ev = crate::buddy::actor::make_runtime_event(
-                    "streaming", "Streaming response...", "chat",
+                    "streaming", &format!("Generating reply in '{}'", chat_label), "chat",
                     &format!("chat_{}", chat_id), "streaming", None,
                 );
-                ev.speech_text = Some("Working on your request...".to_string());
+                ev.speech_text = Some(format!("Working on your request in '{}'...", chat_label));
                 ev.scene = Some("working".to_string());
                 ev.persistent = true;
                 crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
@@ -599,13 +604,15 @@ pub fn start_generation(
                         let gcx2 = gcx.clone();
                         let err_clone = e.clone();
                         let chat_id2 = chat_id.clone();
+                        let chat_label2 = chat_label.clone();
                         tokio::spawn(async move {
                             let buddy_arc = gcx2.read().await.buddy.clone();
                             let mut lock = buddy_arc.lock().await;
                             if let Some(svc) = lock.as_mut() {
                                 svc.report_error("llm_error", &err_clone, Some("chat/generation.rs"), Some(&chat_id2));
+                                let short_err: String = err_clone.chars().take(60).collect();
                                 let ev = crate::buddy::actor::make_runtime_event(
-                                    "chat_error", "Chat error", "chat",
+                                    "chat_error", &format!("Error in '{}': {}", chat_label2, short_err), "chat",
                                     &format!("chat_{}", chat_id2), "failed", Some("high"),
                                 );
                                 svc.enqueue_runtime_event(ev);
@@ -717,7 +724,7 @@ pub fn start_generation(
                     session_arc.lock().await.stop_hook_handle = Some(handle);
                     {
                         let ev = crate::buddy::actor::make_runtime_event(
-                            "chat_completed", "Chat complete", "chat",
+                            "chat_completed", &format!("Completed: {}", chat_label), "chat",
                             &format!("chat_{}", chat_id), "completed", None,
                         );
                         crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
@@ -726,7 +733,7 @@ pub fn start_generation(
                 }
                 ToolStepOutcome::Paused => {
                     let ev = crate::buddy::actor::make_runtime_event(
-                        "chat_completed", "Chat paused", "chat",
+                        "chat_completed", &format!("Paused: {}", chat_label), "chat",
                         &format!("chat_{}", chat_id), "completed", None,
                     );
                     crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
@@ -734,7 +741,7 @@ pub fn start_generation(
                 }
                 ToolStepOutcome::Stop => {
                     let ev = crate::buddy::actor::make_runtime_event(
-                        "chat_completed", "Chat complete", "chat",
+                        "chat_completed", &format!("Completed: {}", chat_label), "chat",
                         &format!("chat_{}", chat_id), "completed", None,
                     );
                     crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;

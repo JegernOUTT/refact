@@ -8,6 +8,19 @@ use tracing::warn;
 use crate::global_context::GlobalContext;
 use super::types::BuddyActivity;
 
+pub fn workflow_label(workflow_id: &str) -> &str {
+    match workflow_id {
+        "commit_message" => "commit message generation",
+        "follow_up" => "follow-up suggestions",
+        "compress_trajectory" => "chat compression",
+        "memo_extraction" => "memo extraction",
+        "kg_enrich" => "knowledge graph enrichment",
+        "kg_deprecate" => "knowledge cleanup",
+        "title_generating" => "title generation",
+        _ => workflow_id,
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct WorkflowEntry {
     timestamp: String,
@@ -35,10 +48,12 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, String>>,
 {
+    let label = workflow_label(workflow_id);
     let dedupe_key = format!("workflow_{}", workflow_id);
-    let started = crate::buddy::actor::make_runtime_event(
-        workflow_id, &format!("Running {}...", workflow_id), "system", &dedupe_key, "started", None,
+    let mut started = crate::buddy::actor::make_runtime_event(
+        workflow_id, &format!("Running {}...", label), "system", &dedupe_key, "started", None,
     );
+    started.speech_text = Some(format!("I'm working on {}...", label));
     crate::buddy::actor::buddy_enqueue_event(gcx.clone(), started).await;
 
     let result = workflow_fn().await;

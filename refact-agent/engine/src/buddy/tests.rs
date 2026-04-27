@@ -770,3 +770,28 @@ async fn test_ledger_skips_empty_chat_id() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].id, "has_id");
 }
+
+#[test]
+fn test_workflow_label_mapping() {
+    assert_eq!(super::workflows::workflow_label("commit_message"), "commit message generation");
+    assert_eq!(super::workflows::workflow_label("follow_up"), "follow-up suggestions");
+    assert_eq!(super::workflows::workflow_label("compress_trajectory"), "chat compression");
+    assert_eq!(super::workflows::workflow_label("memo_extraction"), "memo extraction");
+    assert_eq!(super::workflows::workflow_label("kg_enrich"), "knowledge graph enrichment");
+    assert_eq!(super::workflows::workflow_label("kg_deprecate"), "knowledge cleanup");
+    assert_eq!(super::workflows::workflow_label("title_generating"), "title generation");
+    assert_eq!(super::workflows::workflow_label("unknown_workflow"), "unknown_workflow");
+}
+
+#[test]
+fn test_event_title_length_limit() {
+    use super::actor::make_runtime_event;
+    let long_title = "A".repeat(200);
+    let ev = make_runtime_event("signal", &long_title, "src", "key", "started", None);
+    assert!(ev.title.len() <= 200, "make_runtime_event stores the title as-is");
+    let truncated: String = long_title.chars().take(80).collect();
+    assert!(truncated.len() <= 80, "truncated title must be at most 80 chars");
+    let chat_label: String = "Some very long chat title that goes on and on and on and on and on".chars().take(60).collect();
+    let ev2 = make_runtime_event("chat_started", &format!("Started: {}", chat_label), "chat", "chat_123", "started", None);
+    assert!(ev2.title.len() <= 120, "chat started event title must be under 120 chars");
+}

@@ -1147,9 +1147,9 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
 pub async fn files_in_workspace_init_task(gcx: Arc<ARwLock<GlobalContext>>) {
     let ev = crate::buddy::actor::make_runtime_event("indexing", "Indexing project files...", "indexer", "indexing", "started", None);
     crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
-    enqueue_all_files_from_workspace_folders(gcx.clone(), true, false).await;
+    let file_count = enqueue_all_files_from_workspace_folders(gcx.clone(), true, false).await;
     enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), true, false).await;
     crate::git::checkpoints::enqueue_init_shadow_repos(gcx.clone()).await;
-    let ev = crate::buddy::actor::make_runtime_event("indexing", "Workspace indexed", "indexer", "indexing", "completed", None);
+    let ev = crate::buddy::actor::make_runtime_event("indexing", &format!("Workspace indexed: {} files", file_count), "indexer", "indexing", "completed", None);
     crate::buddy::actor::buddy_enqueue_event(gcx, ev).await;
 }
