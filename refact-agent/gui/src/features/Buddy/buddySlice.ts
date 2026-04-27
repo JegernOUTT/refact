@@ -91,7 +91,10 @@ export const buddySlice = createSlice({
       }
     },
     enqueueBuddySignal: (state, action: PayloadAction<string>) => {
-      state.signalQueue.push({ signalType: action.payload, timestamp: Date.now() });
+      state.signalQueue.push({
+        signalType: action.payload,
+        timestamp: Date.now(),
+      });
       if (state.signalQueue.length > 50) state.signalQueue.shift();
     },
     consumeBuddySignal: (state) => {

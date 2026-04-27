@@ -421,7 +421,8 @@ export function useSidebarSubscription() {
           break;
         case "NavigationRequest":
           if (buddy_event.view === "buddy") dispatch(push({ name: "buddy" }));
-          else if (buddy_event.view === "stats") dispatch(push({ name: "stats dashboard" }));
+          else if (buddy_event.view === "stats")
+            dispatch(push({ name: "stats dashboard" }));
           break;
       }
       const signal = mapBuddyEventToSignal(buddy_event);

@@ -67,13 +67,18 @@ export const buddyApi = createApi({
         return { data: result.data as BuddyActivityEntry[] };
       },
     }),
-    getBuddyConversations: builder.query<BuddyConversationEntry[], { kind?: string } | undefined>({
+    getBuddyConversations: builder.query<
+      BuddyConversationEntry[],
+      { kind?: string } | undefined
+    >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;
         const kind = args?.kind;
         const url = kind
-          ? `http://127.0.0.1:${port}/v1/buddy/conversations?kind=${encodeURIComponent(kind)}`
+          ? `http://127.0.0.1:${port}/v1/buddy/conversations?kind=${encodeURIComponent(
+              kind,
+            )}`
           : `http://127.0.0.1:${port}/v1/buddy/conversations`;
         const result = await baseQuery(url);
         if (result.error) return { error: result.error };
@@ -95,7 +100,14 @@ export const buddyApi = createApi({
       },
     ),
     createSetupConversation: builder.mutation<
-      { chat_id: string; title: string; kind: string; flow: string; badge: string; created_at: string },
+      {
+        chat_id: string;
+        title: string;
+        kind: string;
+        flow: string;
+        badge: string;
+        created_at: string;
+      },
       { flow: string; title?: string }
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
@@ -107,7 +119,16 @@ export const buddyApi = createApi({
           body,
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as { chat_id: string; title: string; kind: string; flow: string; badge: string; created_at: string } };
+        return {
+          data: result.data as {
+            chat_id: string;
+            title: string;
+            kind: string;
+            flow: string;
+            badge: string;
+            created_at: string;
+          },
+        };
       },
     }),
     dismissBuddySuggestion: builder.mutation<{ dismissed: boolean }, string>({

@@ -501,7 +501,13 @@ export interface BuddyRuntimeEvent {
   title: string;
   description?: string;
   source: string;
-  status: "started" | "progress" | "completed" | "failed" | "info" | "streaming";
+  status:
+    | "started"
+    | "progress"
+    | "completed"
+    | "failed"
+    | "info"
+    | "streaming";
   progress?: number;
   dedupe_key?: string;
   priority: string;

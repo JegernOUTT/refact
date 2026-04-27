@@ -51,17 +51,19 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
           <Text size="1" weight="medium" className={styles.entryTitle} truncate>
             {entry.title || "Untitled"}
           </Text>
-          {entry.badge && (
-            <span className={styles.badge}>{entry.badge}</span>
-          )}
+          {entry.badge && <span className={styles.badge}>{entry.badge}</span>}
         </Flex>
         <Flex align="center" gap="1">
           <Text size="1" color="gray" className={styles.entryMeta}>
-            {entry.message_count > 0 ? `${entry.message_count} entries` : entry.status}
+            {entry.message_count > 0
+              ? `${entry.message_count} entries`
+              : entry.status}
           </Text>
           {entry.updated_at && (
             <>
-              <Text size="1" color="gray">·</Text>
+              <Text size="1" color="gray">
+                ·
+              </Text>
               <Text size="1" color="gray" className={styles.entryMeta}>
                 {relativeTime(entry.updated_at)}
               </Text>
@@ -98,11 +100,14 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
 
   const conversations = React.useMemo(() => {
     if (!allConversations) return [];
-    const filtered = filter === "all"
-      ? allConversations
-      : filter === "system"
-        ? allConversations.filter((e) => e.kind === "system" || e.kind === "workflow")
-        : allConversations.filter((e) => e.kind === filter);
+    const filtered =
+      filter === "all"
+        ? allConversations
+        : filter === "system"
+          ? allConversations.filter(
+              (e) => e.kind === "system" || e.kind === "workflow",
+            )
+          : allConversations.filter((e) => e.kind === filter);
     return maxItems ? filtered.slice(0, maxItems) : filtered;
   }, [allConversations, filter, maxItems]);
 
@@ -127,7 +132,12 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
   return (
     <Flex direction="column" gap="2">
       <Flex align="center" justify="between">
-        <Text size="1" weight="bold" color="gray" className={styles.sectionLabel}>
+        <Text
+          size="1"
+          weight="bold"
+          color="gray"
+          className={styles.sectionLabel}
+        >
           {compact ? "RECENT ACTIVITY" : "CONVERSATIONS"}
         </Text>
         <Flex align="center" gap="1">
@@ -198,7 +208,11 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
       )}
 
       {conversations.map((entry) => (
-        <EntryRow key={`${entry.kind}-${entry.id}`} entry={entry} onClick={handleOpen} />
+        <EntryRow
+          key={`${entry.kind}-${entry.id}`}
+          entry={entry}
+          onClick={handleOpen}
+        />
       ))}
     </Flex>
   );

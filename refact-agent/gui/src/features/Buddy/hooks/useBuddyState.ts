@@ -52,7 +52,10 @@ export function useBuddyState(
         paletteIndex: identity.palette_index,
       },
     });
-  }, [reduxSnapshot?.state.identity.name, reduxSnapshot?.state.identity.palette_index]);
+  }, [
+    reduxSnapshot?.state.identity.name,
+    reduxSnapshot?.state.identity.palette_index,
+  ]);
 
   useEffect(() => {
     if (signalQueue.length === 0) return;
@@ -72,13 +75,16 @@ export function useBuddyState(
     dispatch({ kind: "signal", signalType: nowPlaying.signal_type });
     const signalDef = SIGNALS[nowPlaying.signal_type];
     const isActive = signalDef?.category === "active";
-    const isCompleted = nowPlaying.status === "completed" || nowPlaying.status === "failed";
+    const isCompleted =
+      nowPlaying.status === "completed" || nowPlaying.status === "failed";
     if (isActive && !isCompleted) {
       return;
     }
     const ttl = nowPlaying.persistent
       ? undefined
-      : nowPlaying.ttl_ms ?? signalDef?.duration ?? (nowPlaying.status === "progress" ? 8000 : 4000);
+      : nowPlaying.ttl_ms ??
+        signalDef?.duration ??
+        (nowPlaying.status === "progress" ? 8000 : 4000);
     if (ttl === undefined) return;
     const timer = setTimeout(() => reduxDispatch(clearNowPlaying()), ttl);
     return () => clearTimeout(timer);

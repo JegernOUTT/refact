@@ -35,11 +35,20 @@ const reducer = buddySlice.reducer;
 
 function makeState(): BuddyState {
   return {
-    identity: { name: "Pixel", created_at: "2024-01-01T00:00:00Z", palette_index: 0 },
+    identity: {
+      name: "Pixel",
+      created_at: "2024-01-01T00:00:00Z",
+      palette_index: 0,
+    },
     progression: { stage: 0, stage_name: "Egg", level: 1, xp: 0, xp_next: 30 },
     skills: { unlocked: [], locked: [] },
     workflow_summaries: [],
-    semantic: { mood: "idle", focus: "none", headline: "", last_active: "2024-01-01T00:00:00Z" },
+    semantic: {
+      mood: "idle",
+      focus: "none",
+      headline: "",
+      last_active: "2024-01-01T00:00:00Z",
+    },
     recent_activities: [],
     suggestion_state: [],
   };
@@ -48,13 +57,20 @@ function makeState(): BuddyState {
 function makeSnapshot(overrides?: Partial<BuddySnapshot>): BuddySnapshot {
   return {
     state: makeState(),
-    settings: { enabled: true, auto_diagnostics: true, auto_issue_creation: false, personality_prompt: null },
+    settings: {
+      enabled: true,
+      auto_diagnostics: true,
+      auto_issue_creation: false,
+      personality_prompt: null,
+    },
     enabled: true,
     ...overrides,
   };
 }
 
-function makeActivity(overrides?: Partial<BuddyActivityEntry>): BuddyActivityEntry {
+function makeActivity(
+  overrides?: Partial<BuddyActivityEntry>,
+): BuddyActivityEntry {
   return {
     icon: "🔧",
     title: "Test Activity",
@@ -76,7 +92,9 @@ function makeSuggestion(id: string): BuddySuggestion {
   };
 }
 
-function makeDiagnostic(overrides?: Partial<DiagnosticContext>): DiagnosticContext {
+function makeDiagnostic(
+  overrides?: Partial<DiagnosticContext>,
+): DiagnosticContext {
   return {
     error_type: "model_not_found",
     error_message: "Model not found",
@@ -100,7 +118,15 @@ describe("buddySlice reducers", () => {
   test("updateBuddyState patches existing state", () => {
     const snap = makeSnapshot();
     const initial = reducer(undefined, setBuddySnapshot(snap));
-    const updated = { ...makeState(), semantic: { mood: "happy", focus: "work", headline: "Working!", last_active: "2024-06-01T00:00:00Z" } };
+    const updated = {
+      ...makeState(),
+      semantic: {
+        mood: "happy",
+        focus: "work",
+        headline: "Working!",
+        last_active: "2024-06-01T00:00:00Z",
+      },
+    };
     const next = reducer(initial, updateBuddyState(updated));
     expect(next.snapshot?.state.semantic.headline).toBe("Working!");
   });
@@ -132,11 +158,18 @@ describe("buddySlice reducers", () => {
 
   test("dismissBuddySuggestion marks as dismissed", () => {
     const snap = makeSnapshot();
-    snap.state.suggestion_state = [makeSuggestion("s-1"), makeSuggestion("s-2")];
+    snap.state.suggestion_state = [
+      makeSuggestion("s-1"),
+      makeSuggestion("s-2"),
+    ];
     const initial = reducer(undefined, setBuddySnapshot(snap));
     const state = reducer(initial, dismissBuddySuggestion("s-1"));
-    const s1 = state.snapshot?.state.suggestion_state.find((s) => s.id === "s-1");
-    const s2 = state.snapshot?.state.suggestion_state.find((s) => s.id === "s-2");
+    const s1 = state.snapshot?.state.suggestion_state.find(
+      (s) => s.id === "s-1",
+    );
+    const s2 = state.snapshot?.state.suggestion_state.find(
+      (s) => s.id === "s-2",
+    );
     expect(s1?.dismissed).toBe(true);
     expect(s2?.dismissed).toBe(false);
   });
@@ -151,7 +184,10 @@ describe("buddySlice reducers", () => {
   test("addBuddyDiagnostic caps at 100 entries", () => {
     let state = reducer(undefined, { type: "@@INIT" });
     for (let i = 0; i < 105; i++) {
-      state = reducer(state, addBuddyDiagnostic(makeDiagnostic({ error_message: `err-${i}` })));
+      state = reducer(
+        state,
+        addBuddyDiagnostic(makeDiagnostic({ error_message: `err-${i}` })),
+      );
     }
     expect(state.recentDiagnostics).toHaveLength(100);
   });
@@ -198,7 +234,10 @@ describe("stage fallback", () => {
 });
 
 describe("recent chats", () => {
-  function makeConversation(id: string, lastMessageAt: string | null): BuddyConversationMeta {
+  function makeConversation(
+    id: string,
+    lastMessageAt: string | null,
+  ): BuddyConversationMeta {
     return {
       chat_id: id,
       title: `Chat ${id}`,
@@ -260,7 +299,9 @@ describe("loading state and identity hydration", () => {
 });
 
 describe("snapshot hydration", () => {
-  function makeRuntimeEvent(overrides?: Partial<BuddyRuntimeEvent>): BuddyRuntimeEvent {
+  function makeRuntimeEvent(
+    overrides?: Partial<BuddyRuntimeEvent>,
+  ): BuddyRuntimeEvent {
     return {
       id: "ev1",
       signal_type: "indexing",
@@ -274,14 +315,22 @@ describe("snapshot hydration", () => {
   }
 
   test("setBuddySnapshot hydrates runtimeQueue from snapshot", () => {
-    const snap = makeSnapshot({ runtime_queue: [makeRuntimeEvent({ id: "ev1" })] });
+    const snap = makeSnapshot({
+      runtime_queue: [makeRuntimeEvent({ id: "ev1" })],
+    });
     const state = reducer(undefined, setBuddySnapshot(snap));
     expect(state.runtimeQueue).toHaveLength(1);
     expect(state.runtimeQueue[0].id).toBe("ev1");
   });
 
   test("setBuddySnapshot hydrates nowPlaying from snapshot", () => {
-    const snap = makeSnapshot({ now_playing: makeRuntimeEvent({ id: "np1", signal_type: "working", title: "Working" }) });
+    const snap = makeSnapshot({
+      now_playing: makeRuntimeEvent({
+        id: "np1",
+        signal_type: "working",
+        title: "Working",
+      }),
+    });
     const state = reducer(undefined, setBuddySnapshot(snap));
     expect(state.nowPlaying).not.toBeNull();
     expect(state.nowPlaying?.id).toBe("np1");
@@ -318,7 +367,13 @@ describe("BuddyChatCompanion triggers", () => {
 
 describe("BuddyCanvas displaySize", () => {
   test("SIGNALS has isError flag for error types", () => {
-    const errorTypes = ["chat_error", "tool_failed", "balance_low", "connection_lost", "task_failed"];
+    const errorTypes = [
+      "chat_error",
+      "tool_failed",
+      "balance_low",
+      "connection_lost",
+      "task_failed",
+    ];
     for (const t of errorTypes) {
       expect(SIGNALS[t]?.isError, `${t} should be error`).toBe(true);
     }
@@ -366,7 +421,9 @@ describe("speech cloud state", () => {
 
   test("setActiveSpeech with controls stores controls", () => {
     const speech = makeSpeech({
-      controls: [{ id: "btn1", label: "Fix", action: "open_chat", style: "primary" }],
+      controls: [
+        { id: "btn1", label: "Fix", action: "open_chat", style: "primary" },
+      ],
     });
     const state = reducer(undefined, setActiveSpeech(speech));
     expect(state.activeSpeech?.controls).toHaveLength(1);
@@ -390,7 +447,9 @@ describe("speech cloud state", () => {
 });
 
 describe("runtime event new fields", () => {
-  function makeEvent(overrides?: Partial<BuddyRuntimeEvent>): BuddyRuntimeEvent {
+  function makeEvent(
+    overrides?: Partial<BuddyRuntimeEvent>,
+  ): BuddyRuntimeEvent {
     return {
       id: "evt-1",
       signal_type: "streaming",
@@ -404,7 +463,11 @@ describe("runtime event new fields", () => {
   }
 
   test("runtime event stores speech_text and scene", () => {
-    const evt = makeEvent({ speech_text: "Thinking...", scene: "working", persistent: true });
+    const evt = makeEvent({
+      speech_text: "Thinking...",
+      scene: "working",
+      persistent: true,
+    });
     const state = reducer(undefined, enqueueRuntimeEvent(evt));
     const queue = state.runtimeQueue;
     expect(queue[0].speech_text).toBe("Thinking...");
@@ -414,7 +477,9 @@ describe("runtime event new fields", () => {
 
   test("runtime event with controls stores controls", () => {
     const evt = makeEvent({
-      controls: [{ id: "c1", label: "Fix", action: "open_chat", style: "primary" }],
+      controls: [
+        { id: "c1", label: "Fix", action: "open_chat", style: "primary" },
+      ],
     });
     const state = reducer(undefined, enqueueRuntimeEvent(evt));
     expect(state.runtimeQueue[0].controls).toHaveLength(1);
@@ -478,12 +543,15 @@ describe("scene animation system", () => {
     const heatBefore = anim.heat;
     updateSceneAnimation(anim, "", "");
     expect(anim.heat).toBe(heatBefore);
-
   });
 });
 
 describe("conversation ledger", () => {
-  function makeEntry(overrides?: Partial<import("../features/Buddy/types").BuddyConversationEntry>): import("../features/Buddy/types").BuddyConversationEntry {
+  function makeEntry(
+    overrides?: Partial<
+      import("../features/Buddy/types").BuddyConversationEntry
+    >,
+  ): import("../features/Buddy/types").BuddyConversationEntry {
     return {
       id: "c1",
       kind: "chat",
@@ -501,7 +569,12 @@ describe("conversation ledger", () => {
   test("setBuddyConversations stores unified ledger entries", () => {
     const entries = [
       makeEntry({ id: "c1", kind: "chat", icon: "💬" }),
-      makeEntry({ id: "w1", kind: "workflow", icon: "📦", badge: "Commit Msg" }),
+      makeEntry({
+        id: "w1",
+        kind: "workflow",
+        icon: "📦",
+        badge: "Commit Msg",
+      }),
       makeEntry({ id: "s1", kind: "system", icon: "🗜", badge: "Compress" }),
     ];
     const state = reducer(undefined, setBuddyConversations(entries));
@@ -524,7 +597,11 @@ describe("conversation ledger", () => {
   });
 
   test("workflow entry has badge and workflow icon", () => {
-    const entry = makeEntry({ kind: "workflow", icon: "📦", badge: "Commit Msg" });
+    const entry = makeEntry({
+      kind: "workflow",
+      icon: "📦",
+      badge: "Commit Msg",
+    });
     expect(entry.kind).toBe("workflow");
     expect(entry.badge).toBe("Commit Msg");
   });
@@ -555,7 +632,10 @@ describe("BuddyPanel hero layout", () => {
   });
 
   test("BuddySpeechCloud accepts variant overlay prop", () => {
-    const src = fs.readFileSync(path.join(buddyDir, "BuddySpeechCloud.tsx"), "utf8");
+    const src = fs.readFileSync(
+      path.join(buddyDir, "BuddySpeechCloud.tsx"),
+      "utf8",
+    );
     expect(src).toContain("variant");
     expect(src).toContain("overlay");
   });

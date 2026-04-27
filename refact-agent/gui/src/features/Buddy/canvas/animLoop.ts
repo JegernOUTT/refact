@@ -438,7 +438,11 @@ export function updateSceneAnimation(
       anim.squashTargetY = 1.04 - Math.sin(anim.frame * 0.025) * 0.03;
       break;
     case "celebrate":
-      if (variant === "confetti" && anim.frame % 15 === 0 && anim.celebrationTimer > 0) {
+      if (
+        variant === "confetti" &&
+        anim.frame % 15 === 0 &&
+        anim.celebrationTimer > 0
+      ) {
         anim.squashTargetX = 1.1 + Math.sin(anim.frame * 0.4) * 0.08;
         anim.squashTargetY = 0.9 - Math.sin(anim.frame * 0.4) * 0.08;
       }

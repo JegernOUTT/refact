@@ -34,7 +34,8 @@ export const BuddyHome: React.FC = () => {
   });
   const setupNeeded = !setupData?.configured && !setupDismissed;
 
-  const paletteIndex = snapshot?.state.identity.palette_index ?? state.paletteIndex;
+  const paletteIndex =
+    snapshot?.state.identity.palette_index ?? state.paletteIndex;
   const palette = PALETTES[paletteIndex] ?? PALETTES[0];
 
   const progression = snapshot?.state.progression;
@@ -128,9 +129,7 @@ export const BuddyHome: React.FC = () => {
           {stage.emoji} {stage.name}
         </div>
 
-        {statusText && (
-          <div className={styles.statusText}>{statusText}</div>
-        )}
+        {statusText && <div className={styles.statusText}>{statusText}</div>}
 
         {nowPlaying && (
           <div className={styles.statusBubble}>
@@ -233,10 +232,7 @@ export const BuddyHome: React.FC = () => {
             </Flex>
           </Flex>
           <div className={styles.xpBar}>
-            <div
-              className={styles.xpFill}
-              style={{ width: `${xpFill}%` }}
-            />
+            <div className={styles.xpFill} style={{ width: `${xpFill}%` }} />
           </div>
           <Text
             size="1"

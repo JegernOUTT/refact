@@ -1,11 +1,11 @@
 import React, { useCallback } from "react";
 import { Flex, Text, Button } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { useDismissBuddySuggestionMutation, useCreateBuddyConversationMutation } from "../../services/refact/buddy";
 import {
-  selectBuddySuggestions,
-  dismissBuddySuggestion,
-} from "./buddySlice";
+  useDismissBuddySuggestionMutation,
+  useCreateBuddyConversationMutation,
+} from "../../services/refact/buddy";
+import { selectBuddySuggestions, dismissBuddySuggestion } from "./buddySlice";
 import { openBuddyChat, newBuddyChatAction } from "../Chat/Thread";
 import { push } from "../Pages/pagesSlice";
 import { useBuddyState } from "./hooks/useBuddyState";

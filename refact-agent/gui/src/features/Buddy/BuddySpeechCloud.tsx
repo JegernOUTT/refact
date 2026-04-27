@@ -46,7 +46,9 @@ export const BuddySpeechCloud: React.FC<Props> = ({ variant = "block" }) => {
 
   return (
     <div className={isOverlay ? styles.cloudOverlay : styles.cloud}>
-      <p className={isOverlay ? styles.overlayText : styles.text}>{speech.text}</p>
+      <p className={isOverlay ? styles.overlayText : styles.text}>
+        {speech.text}
+      </p>
       <div className={styles.controls}>
         {speech.controls.map((ctrl) => (
           <Button
