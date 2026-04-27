@@ -236,6 +236,14 @@ impl BuddyService {
         }
     }
 
+    pub fn dismiss_quest(&mut self) {
+        super::state::clear_active_quest(&mut self.state);
+        self.dirty = true;
+        let _ = self.events_tx.send(BuddyEvent::StateUpdated {
+            state: self.state.clone(),
+        });
+    }
+
     pub fn accept_quest(&mut self, quest: BuddyQuest) {
         let title = quest.title.clone();
         super::state::activate_quest(&mut self.state, quest.clone());
@@ -701,11 +709,8 @@ pub fn same_day_log_filter(line: &str, collected_at: &str) -> bool {
         return false;
     };
     let candidate = target.date_naive().and_time(time).and_utc();
-    target
-        .signed_duration_since(candidate)
-        .num_seconds()
-        .abs()
-        <= 24 * 3600
+    let diff = target.signed_duration_since(candidate).num_seconds();
+    diff >= 0 && diff <= 24 * 3600
 }
 
 

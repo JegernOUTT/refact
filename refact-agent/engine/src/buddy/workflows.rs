@@ -20,7 +20,7 @@ pub fn workflow_label(workflow_id: &str) -> &str {
         "commit_message" => "commit message generation",
         "compress_trajectory" => "chat compression",
         "memo_extraction" => "memo extraction",
-        "kg_enrich" => "knowledge graph update",
+        "kg_enrich" => "knowledge graph enrichment",
         "kg_deprecate" => "knowledge cleanup",
         _ => workflow_id,
     }

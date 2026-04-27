@@ -258,7 +258,14 @@ fn build_chat_messages(messages: &[Value]) -> Vec<ChatMessage> {
         .iter()
         .position(|m| m.role == "user")
         .unwrap_or(msgs.len());
-    msgs[start..].to_vec()
+    let trimmed = msgs[start..].to_vec();
+    match crate::chat::history_limit::validate_chat_history(&trimmed) {
+        Ok(valid) => valid,
+        Err(e) => {
+            warn!("trajectory_memos: skipping invalid chat history: {}", e);
+            vec![]
+        }
+    }
 }
 
 struct ExtractedMemo {

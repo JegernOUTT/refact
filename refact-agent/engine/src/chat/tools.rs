@@ -1810,6 +1810,8 @@ pub async fn execute_tools(
                 ),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 dismissed: false,
+                controls: vec![],
+                quest: None,
             };
             svc.maybe_add_suggestion(suggestion);
         }

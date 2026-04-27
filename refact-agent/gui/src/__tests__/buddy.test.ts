@@ -1014,6 +1014,43 @@ describe("Buddy frontend error reporting helpers", () => {
     expect(left).not.toBe(right);
   });
 
+  test("reportBuddyFrontendError drops well-known browser noise", async () => {
+    const post = makePostMock().mockResolvedValue(undefined);
+    const deps = {
+      getState: () => ({ config: { apiKey: "key", lspPort: 8001 } }),
+      post,
+      now: () => 100,
+    };
+
+    const noisySamples = [
+      "ResizeObserver loop completed with undelivered notifications.",
+      "ResizeObserver loop limit exceeded",
+      "Script error.",
+      "AbortError: The user aborted a request.",
+      "Non-Error promise rejection captured with value: undefined",
+    ];
+
+    for (const sample of noisySamples) {
+      await reportBuddyFrontendError(
+        { source: "window_error", error: sample, chatId: "chat-a" },
+        deps,
+      );
+    }
+
+    expect(post).not.toHaveBeenCalled();
+
+    // Real errors must still be reported.
+    await reportBuddyFrontendError(
+      {
+        source: "window_error",
+        error: new Error("genuine failure"),
+        chatId: "chat-a",
+      },
+      deps,
+    );
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
   test("reportBuddyFrontendError swallows reporter failures", async () => {
     const post = makePostMock().mockRejectedValue(new Error("offline"));
 

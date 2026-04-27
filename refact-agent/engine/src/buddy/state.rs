@@ -518,7 +518,7 @@ pub fn clear_active_quest(state: &mut BuddyState) {
 }
 
 pub fn refresh_active_quest_progress(state: &mut BuddyState) -> bool {
-    let Some(quest_kind) = (state.active_quest.as_ref().map(|quest| {
+    let Some(quest_kind) = state.active_quest.as_ref().map(|quest| {
         (
             quest.quest_type.clone(),
             quest.status.clone(),
@@ -526,7 +526,7 @@ pub fn refresh_active_quest_progress(state: &mut BuddyState) -> bool {
             quest.progress,
             quest.goal,
         )
-    })) else {
+    }) else {
         return false;
     };
 
@@ -583,10 +583,10 @@ pub fn apply_pet_tick(state: &mut BuddyState, elapsed_seconds: u64) -> bool {
     let sleeping = state.pet.condition.sleeping;
     let traits = state.personality.traits.clone();
 
-    let hunger_loss = 1 + u64::from(traits.playfulness > 80);
+    let hunger_loss = 1 + u64::from(traits.playfulness > 40);
     let energy_loss = 1 + u64::from(traits.chaos > 70 && !sleeping);
     let hygiene_loss = 1 + u64::from(traits.chaos > 85);
-    let boredom_gain = 1 + u64::from(traits.playfulness > 60) + u64::from(traits.curiosity > 70);
+    let boredom_gain = 1 + u64::from(traits.playfulness > 40) + u64::from(traits.curiosity > 70);
     let affection_loss = 1 + u64::from(traits.sociability > 70);
 
     state.pet.evolution.open_seconds = state

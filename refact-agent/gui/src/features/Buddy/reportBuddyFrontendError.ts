@@ -27,6 +27,21 @@ const SECRET_PATTERNS: [RegExp, string][] = [
   [/\/(?:Users|home)\/[^\s)\]]+/g, "[REDACTED_PATH]"],
 ];
 
+export const BUDDY_FRONTEND_ERROR_NOISE_PATTERNS: RegExp[] = [
+  /ResizeObserver loop (?:completed with undelivered notifications|limit exceeded)/i,
+  /^Script error\.?$/i,
+  /^AbortError:/i,
+  /The (?:user aborted|operation was aborted)/i,
+  /^Non-Error promise rejection captured with value: undefined$/i,
+];
+
+export function isBuddyFrontendErrorNoise(text: string): boolean {
+  if (!text) return false;
+  return BUDDY_FRONTEND_ERROR_NOISE_PATTERNS.some((pattern) =>
+    pattern.test(text),
+  );
+}
+
 export type BuddyFrontendErrorSource =
   | "window_error"
   | "unhandledrejection"
@@ -471,8 +486,10 @@ export async function reportBuddyFrontendError(
   if (!port) return;
 
   const apiKey = state.config.apiKey ?? undefined;
+  const rawText = errorToText(args.error).trim();
+  if (isBuddyFrontendErrorNoise(rawText)) return;
   const normalized = clipText(
-    redactBuddyFrontendErrorText(errorToText(args.error)).trim(),
+    redactBuddyFrontendErrorText(rawText),
     REPORT_TRIM_LEN,
   );
   if (!normalized) return;

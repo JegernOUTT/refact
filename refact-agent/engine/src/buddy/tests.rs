@@ -225,6 +225,8 @@ async fn test_save_on_mutate_writes_file() {
 #[test]
 fn test_pet_tick_decays_needs_while_awake() {
     let mut state = default_buddy_state();
+    // Pin personality so trait thresholds are deterministic (all traits = 50)
+    state.personality = super::types::BuddyPersonalityProfile::default();
     let changed = apply_pet_tick(&mut state, 15);
     assert!(changed);
     assert_eq!(state.pet.needs.hunger, 78);
@@ -443,8 +445,8 @@ fn test_sanitize_body_truncation() {
     assert!(result.chars().count() <= 4000);
 }
 
-#[test]
-fn test_diagnostic_cap() {
+#[tokio::test]
+async fn test_diagnostic_cap() {
     let mut svc = make_service();
     for i in 0..150 {
         let ctx = DiagnosticContext {
@@ -770,6 +772,9 @@ fn make_job_context(
         project_root: std::path::PathBuf::from("/tmp/test-project"),
         job_state,
         total_workflow_runs: 0,
+        suggestion_state: vec![],
+        pet: Default::default(),
+        active_quest: None,
     }
 }
 
@@ -1042,8 +1047,8 @@ fn test_workflow_id_accepts_valid() {
     assert!(super::actor::validate_workflow_id("kg_enrich"));
 }
 
-#[test]
-fn test_report_error_unicode_safe() {
+#[tokio::test]
+async fn test_report_error_unicode_safe() {
     let mut svc = make_service();
     svc.report_error("test", "emoji 🎉 and CJK 你好 text", None, None);
     assert!(!svc.state.recent_activities.is_empty());

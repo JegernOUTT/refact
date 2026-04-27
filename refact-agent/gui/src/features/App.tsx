@@ -413,7 +413,10 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         )}
         {!pageSwitching && renderedPage.name === "tasks list" && <TaskList />}
         {!pageSwitching && renderedPage.name === "task workspace" && (
-          <TaskWorkspace taskId={renderedPage.taskId} />
+          <TaskWorkspace
+            key={renderedPage.taskId}
+            taskId={renderedPage.taskId}
+          />
         )}
         {!pageSwitching && renderedPage.name === "knowledge graph" && (
           <KnowledgeWorkspace />

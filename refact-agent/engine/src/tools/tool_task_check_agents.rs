@@ -114,8 +114,8 @@ pub(crate) fn format_agent_status(status: &AgentStatus) -> String {
     };
 
     let mut result = format!(
-        "### {} {} ({})\n**Status:** {} | **Column:** {}\n",
-        state_emoji, status.card_title, status.card_id, state_text, status.column
+        "### {} {} ({})\n**Status:** {} | **Column:** {} | **Chat:** `{}`\n",
+        state_emoji, status.card_title, status.card_id, state_text, status.column, status.agent_chat_id
     );
 
     if let Some(report) = &status.final_report {

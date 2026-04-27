@@ -245,6 +245,23 @@ pub async fn handle_v1_buddy_personality_reroll(
     })))
 }
 
+pub async fn handle_v1_buddy_quest_dismiss(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+) -> Result<StatusCode, ScratchError> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    match lock.as_mut() {
+        Some(svc) => {
+            svc.dismiss_quest();
+            Ok(StatusCode::OK)
+        }
+        None => Err(ScratchError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "buddy service not initialized".to_string(),
+        )),
+    }
+}
+
 pub async fn handle_v1_buddy_quest_accept(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     axum::Json(req): axum::Json<BuddyQuestAcceptRequest>,

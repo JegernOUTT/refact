@@ -9,12 +9,9 @@ import {
   Spinner,
 } from "@radix-ui/themes";
 import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
-import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";
-import { trajectoriesApi } from "../../services/refact/trajectories";
 import {
   createChatWithId,
   requestSseRefresh,
-  closeThread,
 } from "../../features/Chat/Thread/actions";
 import {
   openTask,
@@ -22,9 +19,7 @@ import {
   setTaskActiveChat,
 } from "../../features/Tasks/tasksSlice";
 import { push } from "../../features/Pages/pagesSlice";
-import { useAppDispatch, useAppSelector } from "../../hooks";
-import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
-import { regenerate } from "../../services/refact/chatCommands";
+import { useAppDispatch } from "../../hooks";
 import {
   useCreateTaskMutation,
   useCreatePlannerChatMutation,
@@ -48,167 +43,84 @@ function extractErrorMessage(err: unknown): string {
 type TaskPlannerDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  chatId: string;
-  hasMessages: boolean;
+  /** Present when opened from inside a task workspace — adds planner to that task */
   taskId?: string;
 };
 
 export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
   open,
   onOpenChange,
-  chatId,
-  hasMessages,
   taskId,
 }) => {
   const dispatch = useAppDispatch();
-  const port = useAppSelector(selectLspPort);
-  const apiKey = useAppSelector(selectApiKey);
   const [error, setError] = useState<string | null>(null);
 
-  const [applyMutation, { isLoading: isApplying }] =
-    useApplyModeTransitionMutation();
   const [createTask, { isLoading: isCreatingTask }] = useCreateTaskMutation();
   const [createPlannerChat, { isLoading: isCreatingPlanner }] =
     useCreatePlannerChatMutation();
 
   const isInTaskWorkspace = taskId !== undefined;
-  const isLoading = isApplying || isCreatingTask || isCreatingPlanner;
+  const isLoading = isCreatingTask || isCreatingPlanner;
 
   const handleApply = useCallback(async () => {
     setError(null);
     const now = new Date().toISOString();
     try {
+      let resolvedTaskId: string;
+
       if (isInTaskWorkspace && taskId) {
-        let newChatId: string;
-
-        if (hasMessages && chatId) {
-          const result = await applyMutation({
-            chatId,
-            targetMode: "task_planner",
-            targetModeDescription:
-              "Create and manage tasks with structured planning",
-          }).unwrap();
-          newChatId = result.new_chat_id;
-
-          await dispatch(
-            trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, {
-              forceRefetch: true,
-            }),
-          ).unwrap();
-
-          dispatch(
-            createChatWithId({
-              id: newChatId,
-              mode: "task_planner",
-              parentId: chatId,
-              linkType: "mode_transition",
-            }),
-          );
-        } else {
-          const result = await createPlannerChat(taskId).unwrap();
-          newChatId = result.chat_id;
-          dispatch(createChatWithId({ id: newChatId, mode: "task_planner" }));
-        }
-
-        dispatch(requestSseRefresh({ chatId: newChatId }));
-        dispatch(
-          addPlannerChat({
-            taskId,
-            planner: {
-              id: newChatId,
-              title: "",
-              createdAt: now,
-              updatedAt: now,
-            },
-          }),
-        );
-        dispatch(
-          setTaskActiveChat({
-            taskId,
-            activeChat: { type: "planner", chatId: newChatId },
-          }),
-        );
-        onOpenChange(false);
-
-        if (hasMessages && chatId) {
-          void regenerate(newChatId, port, apiKey ?? undefined);
-        }
+        resolvedTaskId = taskId;
       } else {
+        // Create new task first
         const task = await createTask({ name: "New Task" }).unwrap();
-        const newTaskId = task.id;
-        let newChatId: string;
-
-        if (hasMessages && chatId) {
-          const result = await applyMutation({
-            chatId,
-            targetMode: "task_planner",
-            targetModeDescription:
-              "Create and manage tasks with structured planning",
-          }).unwrap();
-          newChatId = result.new_chat_id;
-
-          await dispatch(
-            trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, {
-              forceRefetch: true,
-            }),
-          ).unwrap();
-
-          dispatch(closeThread({ id: chatId, force: true }));
-          dispatch(
-            createChatWithId({
-              id: newChatId,
-              mode: "task_planner",
-              parentId: chatId,
-              linkType: "mode_transition",
-            }),
-          );
-        } else {
-          const result = await createPlannerChat(newTaskId).unwrap();
-          newChatId = result.chat_id;
-          dispatch(createChatWithId({ id: newChatId, mode: "task_planner" }));
-        }
-
-        dispatch(requestSseRefresh({ chatId: newChatId }));
-        dispatch(openTask({ id: newTaskId, name: task.name }));
-        dispatch(
-          addPlannerChat({
-            taskId: newTaskId,
-            planner: {
-              id: newChatId,
-              title: "",
-              createdAt: now,
-              updatedAt: now,
-            },
-          }),
-        );
-        dispatch(
-          setTaskActiveChat({
-            taskId: newTaskId,
-            activeChat: { type: "planner", chatId: newChatId },
-          }),
-        );
-        dispatch(push({ name: "task workspace", taskId: newTaskId }));
-        onOpenChange(false);
-
-        if (hasMessages && chatId) {
-          void regenerate(newChatId, port, apiKey ?? undefined);
-        }
+        resolvedTaskId = task.id;
+        dispatch(openTask({ id: resolvedTaskId, name: task.name }));
       }
+
+      // Always use the task-owned planner endpoint — this is the only correct way
+      // to create a backend trajectory that belongs to the task
+      const result = await createPlannerChat(resolvedTaskId).unwrap();
+      const newChatId = result.chat_id;
+
+      // Wire up the Redux thread with full task metadata — same as TaskWorkspace.handleNewPlanner
+      dispatch(
+        createChatWithId({
+          id: newChatId,
+          title: "",
+          isTaskChat: true,
+          mode: "TASK_PLANNER",
+          taskMeta: { task_id: resolvedTaskId, role: "planner" },
+        }),
+      );
+      dispatch(requestSseRefresh({ chatId: newChatId }));
+      dispatch(
+        addPlannerChat({
+          taskId: resolvedTaskId,
+          planner: { id: newChatId, title: "", createdAt: now, updatedAt: now },
+        }),
+      );
+      dispatch(
+        setTaskActiveChat({
+          taskId: resolvedTaskId,
+          activeChat: { type: "planner", chatId: newChatId },
+        }),
+      );
+
+      if (!isInTaskWorkspace) {
+        dispatch(push({ name: "task workspace", taskId: resolvedTaskId }));
+      }
+
+      onOpenChange(false);
     } catch (err) {
       setError(extractErrorMessage(err));
     }
   }, [
     isInTaskWorkspace,
     taskId,
-    chatId,
-    hasMessages,
-    applyMutation,
     createTask,
     createPlannerChat,
     dispatch,
     onOpenChange,
-    port,
-    apiKey,
   ]);
 
   const handleOpenChange = useCallback(
@@ -221,18 +133,12 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
 
   const title = isInTaskWorkspace ? "New Planner" : "Switch to Task Planner";
   const description = isInTaskWorkspace
-    ? hasMessages
-      ? "The assistant will analyze the current planner and create a new planner chat with the relevant context."
-      : "Create a new planner chat in this task."
-    : hasMessages
-      ? "The assistant will analyze your conversation, create a new task, and start a planner chat with the relevant context."
-      : "Create a new task and open the Task Planner.";
+    ? "Create a new planner chat in this task."
+    : "Create a new task and open the Task Planner.";
   const buttonLabel = isInTaskWorkspace ? "Create Planner" : "Create Task";
-  const loadingLabel = isApplying
-    ? "Analyzing..."
-    : isCreatingTask
-      ? "Creating task..."
-      : "Creating planner...";
+  const loadingLabel = isCreatingTask
+    ? "Creating task..."
+    : "Creating planner...";
 
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>

@@ -163,7 +163,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
     );
   }
 
-  if (isError || rawModes.length === 0) {
+  if (isError || effectiveModes.length === 0) {
     return (
       <div className={`${styles.trigger} ${styles.disabled}`}>
         <Text size="1" color="gray">
@@ -262,8 +262,6 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
       <TaskPlannerDialog
         open={taskPlannerDialogOpen}
         onOpenChange={setTaskPlannerDialogOpen}
-        chatId={currentChatId}
-        hasMessages={hasMessages}
         taskId={taskId}
       />
     </>

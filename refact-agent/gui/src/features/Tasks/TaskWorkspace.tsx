@@ -453,7 +453,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const [selectedCard, setSelectedCard] = useState<BoardCard | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
   const [chatExpanded, setChatExpanded] = useState(false);
-  const plannersRestoredRef = React.useRef(false);
   const prevTaskStatusRef = React.useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -462,12 +461,19 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     }
   }, [dispatch, taskId, task]);
 
+  // Restore saved planner trajectories into Redux once the OpenTask entry
+  // exists. This effect is intentionally idempotent: the per-planner dedup
+  // check below guards against duplicate dispatches, so it can safely re-run
+  // when `savedPlanners` or `currentTaskUI` updates. We must wait for
+  // `currentTaskUI` (created by `openTask` after `task` loads) — without it,
+  // `addPlannerChat`/`setTaskActiveChat` reducers silently no-op and the
+  // restore is permanently lost (race condition: savedPlanners can arrive
+  // before task).
   useEffect(() => {
-    if (!savedPlanners || plannersRestoredRef.current) return;
-    plannersRestoredRef.current = true;
+    if (!savedPlanners || !currentTaskUI) return;
 
     for (const traj of savedPlanners) {
-      if (plannerChats.some((p) => p.id === traj.id)) continue;
+      if (currentTaskUI.plannerChats.some((p) => p.id === traj.id)) continue;
 
       dispatch(
         createChatWithId({
@@ -503,7 +509,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         }),
       );
     }
-  }, [dispatch, taskId, savedPlanners, plannerChats, activeChat]);
+  }, [dispatch, taskId, savedPlanners, currentTaskUI, activeChat]);
 
   useEffect(() => {
     if (
