@@ -1600,10 +1600,17 @@ fn fact_store_ring_evicts_oldest() {
     let mut store = FactStore::new();
     let now = chrono::Utc::now();
     for i in 0..=FACT_RING_CAPACITY {
-        store.ingest(make_fact(&format!("key-{}", i), BuddyFactKind::TaskStuck, now));
+        store.ingest(make_fact(
+            &format!("key-{}", i),
+            BuddyFactKind::TaskStuck,
+            now,
+        ));
     }
     assert_eq!(store.len(), FACT_RING_CAPACITY);
-    assert!(!store.iter().any(|f| f.key == "key-0"), "first key must be evicted");
+    assert!(
+        !store.iter().any(|f| f.key == "key-0"),
+        "first key must be evicted"
+    );
 }
 
 #[test]
@@ -1611,10 +1618,24 @@ fn fact_store_count_within() {
     use super::facts::FactStore;
     let now = chrono::Utc::now();
     let mut store = FactStore::new();
-    store.ingest(make_fact("old", BuddyFactKind::DiagnosticCluster, now - Duration::hours(2)));
-    store.ingest(make_fact("recent", BuddyFactKind::DiagnosticCluster, now - Duration::minutes(5)));
-    assert_eq!(store.count_within(BuddyFactKind::DiagnosticCluster, Duration::hours(1)), 1);
-    assert_eq!(store.count_within(BuddyFactKind::DiagnosticCluster, Duration::hours(3)), 2);
+    store.ingest(make_fact(
+        "old",
+        BuddyFactKind::DiagnosticCluster,
+        now - Duration::hours(2),
+    ));
+    store.ingest(make_fact(
+        "recent",
+        BuddyFactKind::DiagnosticCluster,
+        now - Duration::minutes(5),
+    ));
+    assert_eq!(
+        store.count_within(BuddyFactKind::DiagnosticCluster, Duration::hours(1)),
+        1
+    );
+    assert_eq!(
+        store.count_within(BuddyFactKind::DiagnosticCluster, Duration::hours(3)),
+        2
+    );
 }
 
 // =============================================================================
@@ -1659,7 +1680,10 @@ fn opportunity_queue_expire_old() {
     opp.created_at = now - Duration::minutes(5);
     q.push(opp);
     q.expire_old(now);
-    assert_eq!(q.get("opp1").map(|o| o.status), Some(OpportunityStatus::Expired));
+    assert_eq!(
+        q.get("opp1").map(|o| o.status),
+        Some(OpportunityStatus::Expired)
+    );
     q.expire_old(now + Duration::hours(25));
     assert!(q.get("opp1").is_none(), "must be removed after 24h");
 }
@@ -1669,7 +1693,10 @@ fn opportunity_queue_cap() {
     use super::opportunities::{OpportunityQueue, MAX_OPPORTUNITIES};
     let mut q = OpportunityQueue::new();
     for i in 0..=MAX_OPPORTUNITIES {
-        q.push(make_opportunity(&format!("opp-{}", i), &format!("ck-{}", i)));
+        q.push(make_opportunity(
+            &format!("opp-{}", i),
+            &format!("ck-{}", i),
+        ));
     }
     assert!(q.iter().count() <= MAX_OPPORTUNITIES);
 }
@@ -1682,7 +1709,12 @@ fn opportunity_queue_cap() {
 fn draft_store_create_get_consume() {
     use super::drafts::DraftStore;
     let mut store = DraftStore::new();
-    let draft = store.create(DraftKind::Skill, "My Skill".to_string(), "yaml: {}".to_string(), "exp".to_string());
+    let draft = store.create(
+        DraftKind::Skill,
+        "My Skill".to_string(),
+        "yaml: {}".to_string(),
+        "exp".to_string(),
+    );
     let id = draft.id.clone();
     assert!(store.get(&id).is_some());
     let consumed = store.consume(&id);
@@ -1694,7 +1726,12 @@ fn draft_store_create_get_consume() {
 fn draft_store_ttl() {
     use super::drafts::DraftStore;
     let mut store = DraftStore::new();
-    let draft = store.create(DraftKind::Command, "Cmd".to_string(), "{}".to_string(), "".to_string());
+    let draft = store.create(
+        DraftKind::Command,
+        "Cmd".to_string(),
+        "{}".to_string(),
+        "".to_string(),
+    );
     let id = draft.id.clone();
     store.expire_old(chrono::Utc::now() + Duration::hours(3));
     assert!(store.get(&id).is_none(), "draft must be removed after TTL");

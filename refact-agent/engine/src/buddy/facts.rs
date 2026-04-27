@@ -30,7 +30,12 @@ impl FactStore {
         let existing_pos: Option<usize> = {
             let hint = self.by_key.get(&fact.key).copied();
             if let Some(idx) = hint {
-                if self.ring.get(idx).map(|f| f.key == fact.key).unwrap_or(false) {
+                if self
+                    .ring
+                    .get(idx)
+                    .map(|f| f.key == fact.key)
+                    .unwrap_or(false)
+                {
                     Some(idx)
                 } else {
                     self.ring.iter().position(|f| f.key == fact.key)
