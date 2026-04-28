@@ -1573,6 +1573,7 @@ fn make_opportunity(id: &str, cooldown_key: &str) -> BuddyOpportunity {
         related: BuddyOpportunityLinks::default(),
         created_at: now,
         expires_at: now + Duration::hours(1),
+        resolved_at: None,
     }
 }
 
@@ -2674,7 +2675,7 @@ fn detector_emits_task_health_for_stuck() {
     let queue = OpportunityQueue::new();
     let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
     assert_eq!(opps.len(), 1, "must emit 1 TaskHealth opportunity");
-    assert_eq!(opps[0].kind, BuddyOpportunityKind::TaskHealth);
+    assert_eq!(opps[0].0.kind, BuddyOpportunityKind::TaskHealth);
 }
 
 #[test]
@@ -2856,7 +2857,7 @@ async fn actor_persistence_round_trip() {
     super::state::save_state(root, &state).await.unwrap();
     let loaded = super::state::load_state(root).await;
     assert_eq!(loaded.opportunities.len(), 2, "opportunities must persist");
-    let queue = super::opportunities::OpportunityQueue::from_state(loaded.opportunities);
+    let queue = super::opportunities::OpportunityQueue::from_state(loaded.opportunities, loaded.dismissed_history);
     assert_eq!(
         queue.iter().count(),
         2,
@@ -3288,4 +3289,137 @@ fn ext_skill_save_consumes_draft() {
         svc.draft_store.get(&id).is_none(),
         "draft must be gone after consume"
     );
+}
+
+// =============================================================================
+// T-19: Privacy hardening + Opportunity lifecycle correctness
+// =============================================================================
+
+#[test]
+fn chat_pattern_no_message_clone_in_observe() {
+    use super::observers::chat_pattern::run_chat_pattern_observer_sync;
+    let messages = vec![
+        chat_msg("user", "token Bearer sk-VERY_SECRET_KEY_DONT_LEAK"),
+        chat_msg("user", "actually undo that"),
+        chat_msg("user", "wait try again"),
+        chat_msg("user", "sorry revert"),
+    ];
+    let ptr_before = messages.as_ptr();
+    let facts = run_chat_pattern_observer_sync(&messages, "chat-ptr-test");
+    let ptr_after = messages.as_ptr();
+    assert_eq!(ptr_before, ptr_after, "caller slice must not be moved");
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(!json.contains("VERY_SECRET_KEY"), "secret must not appear in facts");
+    assert!(!json.contains("Bearer"), "Bearer token must not appear in facts");
+    assert!(facts.iter().any(|f| matches!(f.kind, BuddyFactKind::ChatRetryStreak)));
+}
+
+#[tokio::test]
+async fn diagnostic_persisted_jsonl_is_redacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+    let (tx, _rx) = broadcast::channel(16);
+    let mut svc = BuddyService::new(
+        root.to_path_buf(),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+    svc.report_error("test", "connection failed: Bearer sk-LEAK_THIS_TOKEN", None, None);
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    let content = tokio::fs::read_to_string(root.join(".refact/buddy/diagnostics.jsonl"))
+        .await
+        .unwrap_or_default();
+    assert!(!content.contains("sk-LEAK_THIS_TOKEN"), "secret must not be in jsonl: {}", content);
+    assert!(content.contains("[REDACTED"), "redaction marker must be in jsonl");
+}
+
+#[tokio::test]
+async fn dismissed_history_survives_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+    let mut svc = make_service();
+    let opp = make_opportunity("opp-dm-rt", "ck-dm-rt");
+    svc.add_opportunity(opp);
+    svc.resolve_opportunity("opp-dm-rt", OpportunityStatus::Dismissed);
+    assert!(
+        svc.opportunity_queue.recently_dismissed("ck-dm-rt", Duration::hours(24)),
+        "must be recently dismissed before save"
+    );
+    let state = svc.state.clone();
+    super::state::save_state(root, &state).await.unwrap();
+    let loaded = super::state::load_state(root).await;
+    let queue = super::opportunities::OpportunityQueue::from_state(
+        loaded.opportunities,
+        loaded.dismissed_history,
+    );
+    assert!(
+        queue.recently_dismissed("ck-dm-rt", Duration::hours(24)),
+        "dismissed history must survive save/load round-trip"
+    );
+}
+
+#[test]
+fn per_rule_cooldown_honored() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::TaskStuck,
+        key: "task:stuck:cooldown-test".to_string(),
+        source: "test",
+        payload: serde_json::json!({"task_id": "cooldown-test"}),
+        seen_at: now,
+        confidence: 1.0,
+    });
+    let pulse = BuddyPulse::default();
+    let queue = OpportunityQueue::new();
+    let results = OpportunityDetector::new().detect(&store, &pulse, &queue);
+    assert!(!results.is_empty(), "must produce at least one opportunity");
+    let (_, cooldown_secs) = &results[0];
+    assert_eq!(*cooldown_secs, 3600, "task_stuck rule must use 3600s cooldown");
+
+    let mut q = OpportunityQueue::new();
+    q.push_with_cooldown(make_opportunity("opp-zero", "ck-zero-cd"), 0);
+    assert!(!q.cooldown_active("ck-zero-cd"), "0s cooldown must not block");
+
+    let mut q2 = OpportunityQueue::new();
+    q2.push_with_cooldown(make_opportunity("opp-long", "ck-long-cd"), 3600);
+    assert!(q2.cooldown_active("ck-long-cd"), "1h cooldown must block");
+}
+
+#[test]
+fn terminal_opp_retention_uses_resolved_at() {
+    use super::opportunities::OpportunityQueue;
+    let now = chrono::Utc::now();
+
+    // Opp with old created_at but resolved recently — must NOT be evicted at now+23h
+    let mut opp1 = make_opportunity("opp-rt1", "ck-rt1");
+    opp1.created_at = now - Duration::hours(48);
+    opp1.expires_at = now - Duration::hours(47);
+    opp1.status = OpportunityStatus::Dismissed;
+    opp1.resolved_at = Some(now);
+
+    let mut q1 = OpportunityQueue::new();
+    q1.items.push(opp1);
+    q1.expire_old(now + Duration::minutes(23 * 60 + 59));
+    assert!(q1.get("opp-rt1").is_some(), "opp resolved now must survive at now+23h59m");
+
+    // Same opp — must be evicted at now+24h01m
+    let mut opp2 = make_opportunity("opp-rt2", "ck-rt2");
+    opp2.created_at = now - Duration::hours(48);
+    opp2.expires_at = now - Duration::hours(47);
+    opp2.status = OpportunityStatus::Completed;
+    opp2.resolved_at = Some(now);
+
+    let mut q2 = OpportunityQueue::new();
+    q2.items.push(opp2);
+    q2.expire_old(now + Duration::minutes(24 * 60 + 1));
+    assert!(q2.get("opp-rt2").is_none(), "opp resolved now must be evicted at now+24h01m");
 }

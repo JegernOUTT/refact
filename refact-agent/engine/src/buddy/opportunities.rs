@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::buddy::types::{
     BuddyAction, BuddyFactKind, BuddyOpportunity, BuddyOpportunityKind, BuddyOpportunityLinks,
-    BuddyPage, BuddyPriority, BuddyPulse, CustomizationKind, DefaultsKind, InvestigationContext,
-    MarketKind, OpportunityStatus, PulseScope,
+    BuddyPage, BuddyPriority, BuddyPulse, CustomizationKind, DefaultsKind, DismissEntry,
+    InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
 };
 
 pub const MAX_OPPORTUNITIES: usize = 200;
@@ -15,9 +15,9 @@ pub const DEFAULT_COOLDOWN: Duration = Duration::minutes(30);
 
 /// Priority-ordered queue of `BuddyOpportunity` values with cooldown and dismissal tracking.
 pub struct OpportunityQueue {
-    items: Vec<BuddyOpportunity>,
-    cooldowns: HashMap<String, DateTime<Utc>>,
-    dismissed_history: HashMap<String, DateTime<Utc>>,
+    pub(crate) items: Vec<BuddyOpportunity>,
+    pub(crate) cooldowns: HashMap<String, DateTime<Utc>>,
+    pub(crate) dismissed_history: HashMap<String, DateTime<Utc>>,
 }
 
 impl OpportunityQueue {
@@ -29,9 +29,12 @@ impl OpportunityQueue {
         }
     }
 
-    pub fn from_state(opps: Vec<BuddyOpportunity>) -> Self {
+    pub fn from_state(opps: Vec<BuddyOpportunity>, dismissed: Vec<DismissEntry>) -> Self {
         let mut q = Self::new();
         let now = Utc::now();
+        for entry in dismissed {
+            q.dismissed_history.insert(entry.cooldown_key, entry.dismissed_at);
+        }
         for opp in opps {
             let expires = opp.created_at + DEFAULT_COOLDOWN;
             if expires > now {
@@ -42,11 +45,7 @@ impl OpportunityQueue {
         q
     }
 
-    pub fn push(&mut self, opp: BuddyOpportunity) {
-        let expires = Utc::now() + DEFAULT_COOLDOWN;
-        self.cooldowns.insert(opp.cooldown_key.clone(), expires);
-        self.items.push(opp);
-
+    fn cap_items(&mut self) {
         if self.items.len() > MAX_OPPORTUNITIES {
             let terminal = [
                 OpportunityStatus::Expired,
@@ -65,6 +64,17 @@ impl OpportunityQueue {
                 self.items.remove(pos);
             }
         }
+    }
+
+    pub fn push_with_cooldown(&mut self, opp: BuddyOpportunity, cooldown_secs: u64) {
+        let expires = Utc::now() + Duration::seconds(cooldown_secs as i64);
+        self.cooldowns.insert(opp.cooldown_key.clone(), expires);
+        self.items.push(opp);
+        self.cap_items();
+    }
+
+    pub fn push(&mut self, opp: BuddyOpportunity) {
+        self.push_with_cooldown(opp, DEFAULT_COOLDOWN.num_seconds() as u64);
     }
 
     pub fn unread_count(&self) -> usize {
@@ -92,14 +102,23 @@ impl OpportunityQueue {
     pub fn mark_status(&mut self, id: &str, status: OpportunityStatus) {
         if let Some(opp) = self.items.iter_mut().find(|o| o.id == id) {
             opp.status = status;
+            let terminal = [
+                OpportunityStatus::Expired,
+                OpportunityStatus::Completed,
+                OpportunityStatus::Dismissed,
+            ];
+            if terminal.contains(&status) {
+                opp.resolved_at.get_or_insert_with(Utc::now);
+            }
         }
     }
 
     pub fn dismiss(&mut self, id: &str) {
         if let Some(opp) = self.items.iter_mut().find(|o| o.id == id) {
+            let now = Utc::now();
             opp.status = OpportunityStatus::Dismissed;
-            self.dismissed_history
-                .insert(opp.cooldown_key.clone(), Utc::now());
+            opp.resolved_at.get_or_insert(now);
+            self.dismissed_history.insert(opp.cooldown_key.clone(), now);
         }
     }
 
@@ -112,11 +131,17 @@ impl OpportunityQueue {
         for opp in self.items.iter_mut() {
             if opp.expires_at <= now && !terminal.contains(&opp.status) {
                 opp.status = OpportunityStatus::Expired;
+                opp.resolved_at.get_or_insert(now);
             }
         }
         let cutoff = now - Duration::hours(24);
-        self.items
-            .retain(|o| !(terminal.contains(&o.status) && o.created_at < cutoff));
+        self.items.retain(|o| {
+            if !terminal.contains(&o.status) {
+                return true;
+            }
+            let terminal_since = o.resolved_at.unwrap_or(o.created_at);
+            terminal_since >= cutoff
+        });
     }
 
     pub fn refresh_cooldowns(&mut self, now: DateTime<Utc>) {
@@ -137,6 +162,16 @@ impl OpportunityQueue {
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut BuddyOpportunity> {
         self.items.iter_mut().find(|o| o.id == id)
+    }
+
+    pub fn dismissed_history_snapshot(&self) -> Vec<DismissEntry> {
+        self.dismissed_history
+            .iter()
+            .map(|(k, v)| DismissEntry {
+                cooldown_key: k.clone(),
+                dismissed_at: *v,
+            })
+            .collect()
     }
 }
 
@@ -283,6 +318,7 @@ mod rules {
             related: BuddyOpportunityLinks::default(),
             created_at: now,
             expires_at: now + Duration::hours(24),
+            resolved_at: None,
         }
     }
 
@@ -999,14 +1035,12 @@ impl OpportunityDetector {
         fact_store: &crate::buddy::facts::FactStore,
         pulse: &BuddyPulse,
         queue: &OpportunityQueue,
-    ) -> Vec<BuddyOpportunity> {
+    ) -> Vec<(BuddyOpportunity, u64)> {
         let now = Utc::now();
         let mut seen: HashSet<String> = HashSet::new();
         let mut result = vec![];
 
         for rule in RULES {
-            let _ = rule.name;
-            let _ = rule.cooldown_secs;
             let candidates = (rule.build)(fact_store, pulse, queue, now);
             for opp in candidates {
                 if seen.contains(&opp.cooldown_key) {
@@ -1016,7 +1050,7 @@ impl OpportunityDetector {
                     continue;
                 }
                 seen.insert(opp.cooldown_key.clone());
-                result.push(opp);
+                result.push((opp, rule.cooldown_secs));
             }
         }
 

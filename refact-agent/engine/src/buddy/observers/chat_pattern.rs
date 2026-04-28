@@ -136,19 +136,6 @@ fn detect_chat_pattern_facts(
     facts
 }
 
-async fn read_active_chats(gcx: Arc<RwLock<GlobalContext>>) -> Vec<(String, Vec<ChatMessage>)> {
-    let sessions_map = gcx.read().await.chat_sessions.clone();
-    let sessions_read = sessions_map.read().await;
-    let mut result = Vec::new();
-    for (chat_id, session_arc) in sessions_read.iter() {
-        if let Ok(session) = session_arc.try_lock() {
-            let msgs = session.messages.clone();
-            result.push((chat_id.clone(), msgs));
-        }
-    }
-    result
-}
-
 #[async_trait::async_trait]
 impl BuddyObserver for ChatPatternObserver {
     fn id(&self) -> &'static str {
@@ -174,12 +161,14 @@ impl BuddyObserver for ChatPatternObserver {
         gcx: Arc<RwLock<GlobalContext>>,
         ctx: &ObserverContext,
     ) -> Vec<BuddyFact> {
-        let chats = read_active_chats(gcx).await;
+        let sessions_map = gcx.read().await.chat_sessions.clone();
+        let sessions_read = sessions_map.read().await;
         let mut facts = vec![];
-        for (chat_id, messages) in chats {
-            // SECURITY: do not copy message content
-            let view = Ephemeral::new(messages);
-            facts.extend(detect_chat_pattern_facts(view.as_ref(), &chat_id, ctx.now));
+        for (chat_id, session_arc) in sessions_read.iter() {
+            if let Ok(session) = session_arc.try_lock() {
+                // Run detection on borrowed slice — messages never leave this scope
+                facts.extend(detect_chat_pattern_facts(&session.messages, chat_id, ctx.now));
+            }
         }
         facts
     }

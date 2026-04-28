@@ -293,6 +293,14 @@ pub struct BuddyState {
     pub active_quest: Option<BuddyQuest>,
     #[serde(default)]
     pub opportunities: Vec<BuddyOpportunity>,
+    #[serde(default)]
+    pub dismissed_history: Vec<DismissEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DismissEntry {
+    pub cooldown_key: String,
+    pub dismissed_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,6 +429,8 @@ pub struct BuddyOpportunity {
     pub related: BuddyOpportunityLinks,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

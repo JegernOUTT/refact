@@ -151,7 +151,10 @@ impl BuddyService {
         events_tx: broadcast::Sender<BuddyEvent>,
         queue_writer: Option<mpsc::UnboundedSender<RuntimeQueueWriteOp>>,
     ) -> Self {
-        let opportunity_queue = OpportunityQueue::from_state(state.opportunities.clone());
+        let opportunity_queue = OpportunityQueue::from_state(
+            state.opportunities.clone(),
+            state.dismissed_history.clone(),
+        );
         Self {
             project_root,
             state,
@@ -231,11 +234,17 @@ impl BuddyService {
             });
         }
         self.state.opportunities = self.opportunity_queue.snapshot();
+        self.state.dismissed_history = self.opportunity_queue.dismissed_history_snapshot();
     }
 
     pub fn add_opportunity(&mut self, opp: BuddyOpportunity) {
-        self.opportunity_queue.push(opp.clone());
+        self.add_opportunity_with_cooldown(opp, super::opportunities::DEFAULT_COOLDOWN.num_seconds() as u64);
+    }
+
+    pub fn add_opportunity_with_cooldown(&mut self, opp: BuddyOpportunity, cooldown_secs: u64) {
+        self.opportunity_queue.push_with_cooldown(opp.clone(), cooldown_secs);
         self.state.opportunities = self.opportunity_queue.snapshot();
+        self.state.dismissed_history = self.opportunity_queue.dismissed_history_snapshot();
         self.dirty = true;
         let _ = self
             .events_tx
@@ -243,8 +252,13 @@ impl BuddyService {
     }
 
     pub fn resolve_opportunity(&mut self, id: &str, status: OpportunityStatus) {
-        self.opportunity_queue.mark_status(id, status);
+        if matches!(status, OpportunityStatus::Dismissed) {
+            self.opportunity_queue.dismiss(id);
+        } else {
+            self.opportunity_queue.mark_status(id, status);
+        }
         self.state.opportunities = self.opportunity_queue.snapshot();
+        self.state.dismissed_history = self.opportunity_queue.dismissed_history_snapshot();
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::OpportunityResolved {
             opportunity_id: id.to_string(),
@@ -276,7 +290,7 @@ impl BuddyService {
             &self.pulse,
             &self.opportunity_queue,
         );
-        for opp in candidates {
+        for (opp, cooldown_secs) in candidates {
             match evaluate(&opp, &self.settings, &self.opportunity_queue) {
                 PolicyDecision::Drop { reason } => {
                     tracing::debug!("buddy: opportunity dropped by policy: {}", reason);
@@ -284,7 +298,7 @@ impl BuddyService {
                 PolicyDecision::Surface { humor_allowed } => {
                     let mut o = opp;
                     o.humor_allowed = humor_allowed;
-                    self.add_opportunity(o);
+                    self.add_opportunity_with_cooldown(o, cooldown_secs);
                 }
             }
         }
@@ -689,7 +703,8 @@ impl BuddyService {
         });
     }
 
-    pub fn add_diagnostic(&mut self, ctx: super::diagnostics::DiagnosticContext) {
+    pub fn add_diagnostic(&mut self, mut ctx: super::diagnostics::DiagnosticContext) {
+        ctx.error_message = redact_sensitive(&ctx.error_message);
         self.recent_diagnostics.push(ctx.clone());
         if self.recent_diagnostics.len() > 100 {
             self.recent_diagnostics.remove(0);
@@ -1257,8 +1272,8 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                         &svc.pulse,
                         &svc.opportunity_queue,
                     );
-                    let mut to_add: Vec<(BuddyOpportunity, bool)> = vec![];
-                    for opp in candidates {
+                    let mut to_add: Vec<(BuddyOpportunity, bool, u64)> = vec![];
+                    for (opp, cooldown_secs) in candidates {
                         match evaluate(&opp, &svc.settings, &svc.opportunity_queue) {
                             PolicyDecision::Drop { reason } => {
                                 tracing::debug!("buddy: opp dropped by policy: {}", reason);
@@ -1266,20 +1281,20 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                             PolicyDecision::Surface { humor_allowed } => {
                                 let mut o = opp;
                                 o.humor_allowed = humor_allowed;
-                                to_add.push((o, humor_allowed));
+                                to_add.push((o, humor_allowed, cooldown_secs));
                             }
                         }
                     }
                     // Attach humor and add (still inside lock; LLM calls don't re-lock buddy)
                     let pulse = svc.pulse.clone();
-                    for (mut opp, humor_allowed) in to_add {
+                    for (mut opp, humor_allowed, cooldown_secs) in to_add {
                         if humor_allowed {
                             let primary_kind = primary_fact_kind_for_opportunity(&opp);
                             svc.humor_service
                                 .attach_humor(&mut opp, primary_kind, &pulse, gcx.clone())
                                 .await;
                         }
-                        svc.add_opportunity(opp);
+                        svc.add_opportunity_with_cooldown(opp, cooldown_secs);
                     }
                 }
             }
