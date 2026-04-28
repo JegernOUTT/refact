@@ -54,11 +54,13 @@ import {
   buildBuddyCrashRecoveryError,
   closeBuddyCrashSession,
   buildBuddyFrontendErrorDedupeKey,
+  installBuddyErrorReporter,
   redactBuddyFrontendErrorText,
   reportBuddyFrontendError,
   resetBuddyFrontendErrorReportCache,
   setBuddyCrashHotSlot,
 } from "../features/Buddy/reportBuddyFrontendError";
+import { BuddyErrorBoundary } from "../features/Buddy/BuddyErrorBoundary";
 
 const reducer = buddySlice.reducer;
 
@@ -1542,5 +1544,34 @@ describe("pagesSlice handles new page entries", () => {
   test("push subagents marketplace stores page name", () => {
     const state = reducer(undefined, push({ name: "subagents marketplace" }));
     expect(state[state.length - 1].name).toBe("subagents marketplace");
+  });
+});
+
+describe("installBuddyErrorReporter and BuddyErrorBoundary integration", () => {
+  test("installBuddyErrorReporter_registers_handlers", () => {
+    const spy = vi.spyOn(window, "addEventListener");
+    const cleanup = installBuddyErrorReporter();
+    const registered = spy.mock.calls.map((c) => c[0]);
+    expect(registered).toContain("error");
+    expect(registered).toContain("unhandledrejection");
+    cleanup();
+    spy.mockRestore();
+  });
+
+  test("BuddyErrorBoundary_calls_reporter", async () => {
+    const mod = await import("../features/Buddy/reportBuddyFrontendError");
+    const spy = vi
+      .spyOn(mod, "reportBuddyFrontendError")
+      .mockResolvedValue(undefined);
+
+    const instance = new BuddyErrorBoundary({ children: null });
+    instance.componentDidCatch(new Error("test boundary error"), {
+      componentStack: "\n  at Foo",
+    });
+
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "react_error_boundary" }),
+    );
+    spy.mockRestore();
   });
 });

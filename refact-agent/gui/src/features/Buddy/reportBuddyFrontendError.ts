@@ -471,6 +471,29 @@ const defaultDeps: BuddyFrontendErrorDeps = {
   now: () => Date.now(),
 };
 
+export function installBuddyErrorReporter(): () => void {
+  const onError = (e: ErrorEvent) => {
+    void reportBuddyFrontendError({
+      source: "window_error",
+      error: e.error ?? e.message,
+      sourceFile: e.filename || "frontend/window_error",
+    });
+  };
+  const onRejection = (e: PromiseRejectionEvent) => {
+    void reportBuddyFrontendError({
+      source: "unhandledrejection",
+      error: e.reason,
+      sourceFile: "frontend/unhandledrejection",
+    });
+  };
+  window.addEventListener("error", onError);
+  window.addEventListener("unhandledrejection", onRejection);
+  return () => {
+    window.removeEventListener("error", onError);
+    window.removeEventListener("unhandledrejection", onRejection);
+  };
+}
+
 export async function reportBuddyFrontendError(
   args: {
     source: BuddyFrontendErrorSource;
