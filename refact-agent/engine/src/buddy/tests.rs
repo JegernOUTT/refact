@@ -4320,6 +4320,8 @@ fn provider_tuning_unknown_field_falls_back_to_chat_model() {
             "unknown field must fall back to ChatModel"
         );
     }
+}
+
 // =============================================================================
 // G-C: Task health cleanup — heartbeat persistence, investigation safety,
 //      pulse completeness, ChatTopicPivot removal

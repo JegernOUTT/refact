@@ -152,6 +152,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             if let Some(effort) = req.reasoning.to_openai_effort() {
                 body["reasoning"] = json!({"effort": effort, "summary": "auto"});
             }
+            body.as_object_mut().map(|obj| obj.remove("temperature"));
         }
 
         // Ask server to include extra fields we rely on for rich tool cards.
@@ -1283,13 +1284,18 @@ mod tests {
     #[test]
     fn test_build_http_with_reasoning() {
         let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new("gpt-4.1".to_string(), vec![])
+        let mut req = LlmRequest::new("gpt-4.1".to_string(), vec![])
             .with_reasoning(crate::llm::params::ReasoningIntent::Medium);
+        req.params.temperature = Some(0.5);
         let settings = default_settings();
 
         let http = adapter.build_http(&req, &settings).unwrap();
 
         assert_eq!(http.body["reasoning"]["effort"], "medium");
+        assert!(
+            http.body.get("temperature").is_none(),
+            "Responses reasoning requests must omit temperature"
+        );
     }
 
     #[test]
