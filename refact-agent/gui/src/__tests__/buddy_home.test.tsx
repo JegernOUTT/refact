@@ -399,8 +399,8 @@ describe("useExecuteBuddyAction_open_page", () => {
   });
 });
 
-describe("BuddyPanel_unread_badge_appears", () => {
-  it("badge is visible when there are unread opportunities", async () => {
+describe("BuddyPanel_opportunity_notifications", () => {
+  it("renders unread opportunities as Buddy speech controls without a badge", async () => {
     server.use(
       http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
         HttpResponse.json([]),
@@ -409,18 +409,26 @@ describe("BuddyPanel_unread_badge_appears", () => {
 
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
-    store.dispatch(addOpportunity(makeOpportunity({ status: "new" })));
+    store.dispatch(
+      addOpportunity(
+        makeOpportunity({
+          status: "new",
+          proposed_actions: [{ kind: "dismiss" }],
+        }),
+      ),
+    );
 
     render(<BuddyPanel />, {
       preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
     });
 
+    expect(screen.queryByTestId("buddy-unread-badge")).not.toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByTestId("buddy-unread-badge")).toBeInTheDocument();
+      expect(screen.getByText("Dismiss")).toBeInTheDocument();
     });
   });
 
-  it("badge is not visible when no unread opportunities", async () => {
+  it("does not render badge chrome when no unread opportunities", () => {
     server.use(
       http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
         HttpResponse.json([]),
@@ -434,10 +442,6 @@ describe("BuddyPanel_unread_badge_appears", () => {
       preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
     });
 
-    await waitFor(() => {
-      expect(
-        screen.queryByTestId("buddy-unread-badge"),
-      ).not.toBeInTheDocument();
-    });
+    expect(screen.queryByTestId("buddy-unread-badge")).not.toBeInTheDocument();
   });
 });

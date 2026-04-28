@@ -69,7 +69,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
   const buddy = useBuddyState();
   const { unread } = useBuddyOpportunities();
-  const [showTopOpp, setShowTopOpp] = useState(false);
+  const [opportunityIndex, setOpportunityIndex] = useState(0);
+  const [chatCooldownActive, setChatCooldownActive] = useState(true);
   const executeOpportunityAction = useExecuteBuddyAction();
   const [dismissMutation] = useDismissBuddySuggestionMutation();
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
@@ -82,7 +83,16 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     if (prevChatIdRef.current !== chatId) {
       prevChatIdRef.current = chatId;
       setDismissedIds(new Set());
+      setOpportunityIndex(0);
     }
+  }, [chatId]);
+
+  useEffect(() => {
+    setChatCooldownActive(true);
+    const timer = window.setTimeout(() => {
+      setChatCooldownActive(false);
+    }, 60_000);
+    return () => window.clearTimeout(timer);
   }, [chatId]);
 
   const errorControls: BuddyControl[] = useMemo(
@@ -213,8 +223,28 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     suggestionControls,
   ]);
 
+  const activeOpportunities = useMemo(
+    () => unread.filter((opp) => !dismissedIds.has(`opportunity-${opp.id}`)),
+    [dismissedIds, unread],
+  );
+
+  useEffect(() => {
+    if (activeOpportunities.length <= 1) return;
+    const timer = window.setInterval(() => {
+      setOpportunityIndex((index) => (index + 1) % activeOpportunities.length);
+    }, 12_000);
+    return () => window.clearInterval(timer);
+  }, [activeOpportunities.length]);
+
+  useEffect(() => {
+    if (opportunityIndex < activeOpportunities.length) return;
+    setOpportunityIndex(0);
+  }, [activeOpportunities.length, opportunityIndex]);
+
   const topOpportunity =
-    showTopOpp || baseNotification === null ? unread[0] ?? null : null;
+    baseNotification === null
+      ? activeOpportunities[opportunityIndex] ?? activeOpportunities[0] ?? null
+      : null;
 
   const notification: NotificationItem | null = useMemo(() => {
     if (!topOpportunity) return baseNotification;
@@ -233,12 +263,12 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const isDismissed = notification ? dismissedIds.has(notification.id) : false;
 
   useEffect(() => {
-    if (!notification || isDismissed) return;
+    if (chatCooldownActive || !notification || isDismissed) return;
     const t = setTimeout(() => {
       setDismissedIds((prev) => new Set(prev).add(notification.id));
     }, 15000);
     return () => clearTimeout(t);
-  }, [notification, isDismissed]);
+  }, [chatCooldownActive, notification, isDismissed]);
 
   const handleControl = useCallback(
     async (ctrl: BuddyControl) => {
@@ -252,9 +282,26 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         );
         if (!action) return;
 
+        if (action.kind === "dismiss") {
+          setDismissedIds((prev) => {
+            const next = new Set(prev);
+            for (const opp of activeOpportunities) {
+              next.add(`opportunity-${opp.id}`);
+            }
+            return next;
+          });
+          await Promise.all(
+            activeOpportunities.map((opp) =>
+              executeOpportunityAction(action, opp),
+            ),
+          );
+          setOpportunityIndex(0);
+          return;
+        }
+
         await executeOpportunityAction(action, notification.opportunity);
         setDismissedIds((prev) => new Set(prev).add(notification.id));
-        setShowTopOpp(false);
+        setOpportunityIndex((index) => index + 1);
         return;
       }
 
@@ -339,6 +386,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       notification,
       pending,
       executeOpportunityAction,
+      activeOpportunities,
       dismissMutation,
       dismissRuntimeMutation,
       dispatch,
@@ -346,77 +394,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     ],
   );
 
-  const badgeCount = unread.length;
-  const badgeLabel = badgeCount > 9 ? "9+" : String(badgeCount);
-  const handleBadgeClick = useCallback(() => {
-    const firstOpportunity = unread[0];
-    if (firstOpportunity) {
-      setDismissedIds((prev) => {
-        const next = new Set(prev);
-        next.delete(`opportunity-${firstOpportunity.id}`);
-        return next;
-      });
-    }
-    setShowTopOpp((v) => !v);
-  }, [unread]);
-
-  if (!enabled) return null;
-  if (!notification || isDismissed) {
-    if (badgeCount === 0) return null;
-    return (
-      <div className={styles.companion}>
-        <button
-          type="button"
-          data-testid="buddy-companion-unread-badge"
-          aria-label={`${badgeCount} unread opportunities`}
-          style={{
-            background: "var(--accent-9)",
-            color: "var(--accent-contrast)",
-            border: "none",
-            borderRadius: "9999px",
-            padding: "1px 5px",
-            fontSize: "10px",
-            fontWeight: 700,
-            cursor: "pointer",
-            lineHeight: 1.4,
-          }}
-          onClick={handleBadgeClick}
-        >
-          {badgeLabel}
-        </button>
-        <BuddyCanvas
-          state={buddy.state}
-          onEvent={buddy.handleCanvasEvent}
-          displaySize={160}
-          bubblePosition="left"
-        />
-      </div>
-    );
-  }
+  if (!enabled || chatCooldownActive) return null;
+  if (!notification || isDismissed) return null;
 
   return (
     <div className={styles.companion}>
-      {badgeCount > 0 && (
-        <button
-          type="button"
-          data-testid="buddy-companion-unread-badge"
-          aria-label={`${badgeCount} unread opportunities`}
-          style={{
-            background: "var(--accent-9)",
-            color: "var(--accent-contrast)",
-            border: "none",
-            borderRadius: "9999px",
-            padding: "1px 5px",
-            fontSize: "10px",
-            fontWeight: 700,
-            cursor: "pointer",
-            lineHeight: 1.4,
-          }}
-          onClick={handleBadgeClick}
-        >
-          {badgeLabel}
-        </button>
-      )}
       <BuddyCanvas
         state={buddy.state}
         onEvent={buddy.handleCanvasEvent}
