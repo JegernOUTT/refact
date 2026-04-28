@@ -3992,3 +3992,173 @@ async fn pulse_populates_all_subpulse_counts() {
         "abandoned count must reflect injected fact"
     );
 }
+
+// =============================================================================
+// F-C: Opportunity resolution correctness
+// =============================================================================
+
+#[tokio::test]
+async fn accept_dismiss_action_via_accept_route_is_single_resolution() {
+    use crate::http::routers::v1::buddy_opportunities::dispatch_action;
+
+    let (tx, mut rx) = broadcast::channel(32);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+
+    let mut opp = make_opportunity("opp-acc-dm", "ck-acc-dm");
+    opp.proposed_actions = vec![BuddyAction::Dismiss];
+    svc.add_opportunity(opp);
+    let _ = rx.try_recv();
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let outcome = dispatch_action(gcx, "opp-acc-dm", &BuddyAction::Dismiss)
+        .await
+        .unwrap();
+
+    assert!(outcome.handled, "Dismiss must be handled");
+    assert_eq!(
+        outcome.status,
+        OpportunityStatus::Dismissed,
+        "Dismiss action must produce Dismissed status"
+    );
+
+    svc.resolve_opportunity("opp-acc-dm", outcome.status);
+
+    let resolved = svc.opportunity_queue.get("opp-acc-dm").unwrap();
+    assert_eq!(
+        resolved.status,
+        OpportunityStatus::Dismissed,
+        "opp must be Dismissed, not Accepted"
+    );
+    assert!(
+        svc.opportunity_queue
+            .recently_dismissed("ck-acc-dm", Duration::hours(24)),
+        "dismissed_history must contain the cooldown key"
+    );
+
+    let event = rx.try_recv().expect("must have OpportunityResolved event");
+    assert!(
+        matches!(event, super::events::BuddyEvent::OpportunityResolved { .. }),
+        "event must be OpportunityResolved"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "must be exactly one OpportunityResolved event"
+    );
+}
+
+#[tokio::test]
+async fn accept_unimplemented_action_returns_501_and_does_not_resolve() {
+    use crate::http::routers::v1::buddy_opportunities::dispatch_action;
+
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-unimpl", "ck-unimpl");
+    opp.proposed_actions = vec![BuddyAction::DraftCustomizationChange {
+        customization_kind: CustomizationKind::Mode,
+        id: "mode-x".to_string(),
+        patch: serde_json::json!({}),
+    }];
+    svc.add_opportunity(opp);
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let outcome = dispatch_action(
+        gcx,
+        "opp-unimpl",
+        &BuddyAction::DraftCustomizationChange {
+            customization_kind: CustomizationKind::Mode,
+            id: "mode-x".to_string(),
+            patch: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(!outcome.handled, "DraftCustomizationChange must not be handled");
+
+    let status = svc.opportunity_queue.get("opp-unimpl").unwrap().status;
+    assert_eq!(
+        status,
+        OpportunityStatus::New,
+        "opp status must remain New — handler must not resolve unimplemented actions"
+    );
+}
+
+#[tokio::test]
+async fn direct_dismiss_persists_dismissed_history_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let mut svc = make_service();
+    let opp = make_opportunity("opp-dm-persist", "ck-dm-persist");
+    svc.add_opportunity(opp);
+
+    svc.resolve_opportunity("opp-dm-persist", OpportunityStatus::Dismissed);
+
+    let state = svc.state.clone();
+    super::state::save_state(root, &state).await.unwrap();
+
+    let loaded = super::state::load_state(root).await;
+    let queue = super::opportunities::OpportunityQueue::from_state(
+        loaded.opportunities,
+        loaded.dismissed_history,
+    );
+
+    assert!(
+        queue.recently_dismissed("ck-dm-persist", Duration::hours(24)),
+        "dismissed history must survive save/load round-trip"
+    );
+}
+
+#[tokio::test]
+async fn accept_route_response_shape_for_defaults_draft() {
+    use crate::http::routers::v1::buddy_opportunities::dispatch_action;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    {
+        let (etx, _) = broadcast::channel(16);
+        let buddy_svc = BuddyService::new(
+            std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+            default_buddy_state(),
+            BuddySettings::default(),
+            Vec::new(),
+            super::runtime_queue::RuntimeQueue::new(),
+            etx,
+            None,
+        );
+        *gcx.read().await.buddy.lock().await = Some(buddy_svc);
+    }
+
+    let action = BuddyAction::DraftDefaultsChange {
+        defaults_kind: DefaultsKind::ChatBuddyModel,
+        patch: serde_json::json!({}),
+    };
+
+    let outcome = dispatch_action(gcx, "irrelevant-id", &action).await.unwrap();
+
+    assert!(outcome.handled, "DraftDefaultsChange must be handled");
+    assert_eq!(outcome.status, OpportunityStatus::Accepted);
+
+    let result = &outcome.result;
+    assert_eq!(
+        result.get("draft_kind").and_then(|v| v.as_str()),
+        Some("defaults_model"),
+        "draft_kind must always be the DraftKind value"
+    );
+    assert_eq!(
+        result.get("defaults_kind").and_then(|v| v.as_str()),
+        Some("chat_buddy_model"),
+        "defaults_kind must be a separate field with the DefaultsKind value"
+    );
+    assert!(
+        result.get("draft_id").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
+        "draft_id must be present and non-empty"
+    );
+}

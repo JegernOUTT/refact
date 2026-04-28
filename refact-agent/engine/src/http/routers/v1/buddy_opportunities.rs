@@ -18,10 +18,16 @@ pub struct OpportunitiesQuery {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct AcceptRequest {
+    #[serde(default)]
     pub action_index: usize,
-    pub params: Option<serde_json::Value>,
+}
+
+pub(crate) struct ActionOutcome {
+    pub result: serde_json::Value,
+    pub status: OpportunityStatus,
+    pub handled: bool,
 }
 
 pub async fn handle_v1_buddy_opportunities_list(
@@ -50,8 +56,10 @@ pub async fn handle_v1_buddy_opportunities_list(
 pub async fn handle_v1_buddy_opportunity_accept(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     Path(id): Path<String>,
-    axum::Json(req): axum::Json<AcceptRequest>,
+    body: Option<axum::extract::Json<AcceptRequest>>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+
     let opp = {
         let buddy_arc = gcx.read().await.buddy.clone();
         let lock = buddy_arc.lock().await;
@@ -80,7 +88,19 @@ pub async fn handle_v1_buddy_opportunity_accept(
         })?
         .clone();
 
-    let action_result = dispatch_action(gcx.clone(), &id, &action).await?;
+    let outcome = dispatch_action(gcx.clone(), &id, &action).await?;
+
+    if !outcome.handled {
+        let action_kind = outcome.result
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        return Err(ScratchError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            format!("action_not_implemented: {}", action_kind),
+        ));
+    }
 
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
@@ -90,21 +110,21 @@ pub async fn handle_v1_buddy_opportunity_accept(
             "buddy not initialized".into(),
         )
     })?;
-    svc.resolve_opportunity(&id, OpportunityStatus::Accepted);
+    svc.resolve_opportunity(&id, outcome.status);
     let snap = serde_json::to_value(svc.snapshot())
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(axum::Json(serde_json::json!({
         "snapshot": snap,
-        "action_result": action_result
+        "action_result": outcome.result
     })))
 }
 
-async fn dispatch_action(
+pub(crate) async fn dispatch_action(
     gcx: Arc<ARwLock<GlobalContext>>,
-    opp_id: &str,
+    _opp_id: &str,
     action: &BuddyAction,
-) -> Result<serde_json::Value, ScratchError> {
+) -> Result<ActionOutcome, ScratchError> {
     match action {
         BuddyAction::OpenPage { page, .. } => {
             let buddy_arc = gcx.read().await.buddy.clone();
@@ -114,17 +134,25 @@ async fn dispatch_action(
             }
             let nav_page = serde_json::to_value(page)
                 .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            Ok(serde_json::json!({
-                "kind": "open_page",
-                "navigate_to": nav_page
-            }))
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "open_page",
+                    "navigate_to": nav_page
+                }),
+                status: OpportunityStatus::Accepted,
+                handled: true,
+            })
         }
         BuddyAction::LaunchInvestigationChat { preload } => {
             let chat_id = create_investigation_chat(gcx.clone(), preload).await?;
-            Ok(serde_json::json!({
-                "kind": "launch_investigation_chat",
-                "chat_id": chat_id
-            }))
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "launch_investigation_chat",
+                    "chat_id": chat_id
+                }),
+                status: OpportunityStatus::Accepted,
+                handled: true,
+            })
         }
         BuddyAction::DraftSkill { draft_id, label }
         | BuddyAction::DraftCommand { draft_id, label }
@@ -151,12 +179,16 @@ async fn dispatch_action(
                 };
                 (dk, draft_id.clone())
             };
-            Ok(serde_json::json!({
-                "kind": "draft",
-                "draft_kind": serde_json::to_value(kind).unwrap_or_default(),
-                "draft_id": final_id,
-                "label": label
-            }))
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "draft",
+                    "draft_kind": serde_json::to_value(kind).unwrap_or_default(),
+                    "draft_id": final_id,
+                    "label": label
+                }),
+                status: OpportunityStatus::Accepted,
+                handled: true,
+            })
         }
         BuddyAction::DraftAgentsMdPatch { diff } => {
             let content = if diff.is_empty() {
@@ -171,11 +203,15 @@ async fn dispatch_action(
                 content.to_string(),
             )
             .await?;
-            Ok(serde_json::json!({
-                "kind": "draft",
-                "draft_kind": "agents_md",
-                "draft_id": draft.id
-            }))
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "draft",
+                    "draft_kind": "agents_md",
+                    "draft_id": draft.id
+                }),
+                status: OpportunityStatus::Accepted,
+                handled: true,
+            })
         }
         BuddyAction::DraftDefaultsChange {
             defaults_kind,
@@ -193,21 +229,35 @@ async fn dispatch_action(
                 content,
             )
             .await?;
-            Ok(serde_json::json!({
-                "kind": "draft",
-                "draft_kind": serde_json::to_value(defaults_kind).unwrap_or_default(),
-                "draft_id": draft.id
-            }))
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "draft",
+                    "draft_kind": "defaults_model",
+                    "defaults_kind": serde_json::to_value(defaults_kind).unwrap_or_default(),
+                    "draft_id": draft.id
+                }),
+                status: OpportunityStatus::Accepted,
+                handled: true,
+            })
         }
-        BuddyAction::Dismiss => {
-            let buddy_arc = gcx.read().await.buddy.clone();
-            let mut lock = buddy_arc.lock().await;
-            if let Some(svc) = lock.as_mut() {
-                svc.resolve_opportunity(opp_id, OpportunityStatus::Dismissed);
-            }
-            Ok(serde_json::json!({ "kind": "dismiss" }))
+        BuddyAction::Dismiss => Ok(ActionOutcome {
+            result: serde_json::json!({ "kind": "dismiss" }),
+            status: OpportunityStatus::Dismissed,
+            handled: true,
+        }),
+        _ => {
+            let variant_name = match action {
+                BuddyAction::DraftCustomizationChange { .. } => "draft_customization_change",
+                BuddyAction::CreatePulseReport { .. } => "create_pulse_report",
+                BuddyAction::OfferMarketplaceInstall { .. } => "offer_marketplace_install",
+                _ => "unknown",
+            };
+            Ok(ActionOutcome {
+                result: serde_json::json!({ "kind": "unimplemented", "action": variant_name }),
+                status: OpportunityStatus::Accepted,
+                handled: false,
+            })
         }
-        _ => Ok(serde_json::json!({ "kind": "no_op" })),
     }
 }
 
@@ -332,13 +382,7 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
             format!("opportunity not found: {}", id),
         ));
     }
-    svc.opportunity_queue.dismiss(&id);
-    let _ = svc.events_tx.send(BuddyEvent::OpportunityResolved {
-        opportunity_id: id,
-        status: OpportunityStatus::Dismissed,
-    });
-    svc.state.opportunities = svc.opportunity_queue.snapshot();
-    svc.dirty = true;
+    svc.resolve_opportunity(&id, OpportunityStatus::Dismissed);
     let snap = serde_json::to_value(svc.snapshot())
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(axum::Json(serde_json::json!({ "snapshot": snap })))
