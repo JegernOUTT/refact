@@ -19,7 +19,7 @@ fn path_hash(p: &std::path::Path) -> String {
 
 pub fn count_uncommitted(project_root: &std::path::Path) -> Option<usize> {
     use git2::{Repository, StatusOptions, StatusShow};
-    let repo = Repository::open(project_root).ok()?;
+    let repo = Repository::discover(project_root).ok()?;
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(true)
@@ -33,7 +33,7 @@ fn git_diff_widening(
     project_root: &std::path::Path,
     now: DateTime<Utc>,
 ) -> Option<(u32, Vec<String>)> {
-    let repo = git2::Repository::open(project_root).ok()?;
+    let repo = git2::Repository::discover(project_root).ok()?;
     let head = repo.head().ok()?.peel_to_commit().ok()?;
     let cutoff_ts = (now - chrono::Duration::hours(4)).timestamp();
 

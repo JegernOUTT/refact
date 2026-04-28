@@ -12,7 +12,7 @@ use crate::global_context::GlobalContext;
 use super::drafts::DraftStore;
 use super::events::BuddyEvent;
 use super::facts::FactStore;
-use super::humor::HumorService;
+use super::humor::{HumorPlan, HumorService};
 use super::observers::{build_observer_registry, BuddyObserver, ObserverContext};
 use super::opportunities::{primary_fact_kind_for_opportunity, OpportunityDetector, OpportunityQueue};
 use super::policy::{evaluate, PolicyDecision};
@@ -29,6 +29,38 @@ use super::types::{
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
 const SUGGESTION_EXPIRY_SECS: i64 = 300;
 const PET_DECAY_INTERVAL_SECS: u64 = 15;
+const OBSERVER_CONCURRENCY: usize = 4;
+
+pub(crate) async fn observe_buddy_facts_parallel(
+    due_observers: Vec<Arc<dyn BuddyObserver>>,
+    gcx: Arc<ARwLock<GlobalContext>>,
+    project_root: std::path::PathBuf,
+    now: DateTime<Utc>,
+) -> Vec<BuddyFact> {
+    use futures::stream::{FuturesUnordered, StreamExt};
+
+    let mut pending = FuturesUnordered::new();
+    let mut all_facts = Vec::new();
+    for obs in due_observers {
+        let gcx = gcx.clone();
+        let project_root = project_root.clone();
+        pending.push(async move {
+            let ctx = ObserverContext { project_root, now };
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), obs.observe(gcx, &ctx))
+                .await
+                .unwrap_or_default()
+        });
+        if pending.len() >= OBSERVER_CONCURRENCY {
+            if let Some(facts) = pending.next().await {
+                all_facts.extend(facts);
+            }
+        }
+    }
+    while let Some(facts) = pending.next().await {
+        all_facts.extend(facts);
+    }
+    all_facts
+}
 
 pub(crate) fn validate_workflow_id(id: &str) -> bool {
     !id.is_empty()
@@ -1254,20 +1286,13 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
             if !due_observers.is_empty() {
                 // Run observers without holding buddy lock (prevents deadlock with
                 // DiagnosticClusterObserver which also locks buddy).
-                let mut all_facts: Vec<BuddyFact> = vec![];
-                for obs in &due_observers {
-                    let ctx = ObserverContext {
-                        project_root: project_root.clone(),
-                        now,
-                    };
-                    let facts = tokio::time::timeout(
-                        tokio::time::Duration::from_secs(5),
-                        obs.observe(gcx.clone(), &ctx),
-                    )
-                    .await
-                    .unwrap_or_default();
-                    all_facts.extend(facts);
-                }
+                let all_facts = observe_buddy_facts_parallel(
+                    due_observers.clone(),
+                    gcx.clone(),
+                    project_root.clone(),
+                    now,
+                )
+                .await;
                 // Phase 1: ingest facts, detect candidates, add non-humor opps — all under buddy lock.
                 let (humor_tasks, pulse_for_humor, humor_arc) = {
                     let mut buddy = buddy_arc.lock().await;
@@ -1320,14 +1345,28 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
 
                 // Phase 2: attach humor outside the buddy lock.
                 let mut ready: Vec<(BuddyOpportunity, u64)> = Vec::with_capacity(humor_tasks.len());
-                if !humor_tasks.is_empty() {
-                    let mut humor = humor_arc.lock().await;
-                    for (mut opp, kind, cooldown_secs) in humor_tasks {
-                        humor
-                            .attach_humor(&mut opp, kind, &pulse_for_humor, gcx.clone())
-                            .await;
-                        ready.push((opp, cooldown_secs));
+                for (mut opp, kind, cooldown_secs) in humor_tasks {
+                    let plan = {
+                        let mut humor = humor_arc.lock().await;
+                        humor.plan_humor(kind, &pulse_for_humor)
+                    };
+                    match plan {
+                        HumorPlan::Ready(line) => {
+                            opp.humor = Some(line);
+                        }
+                        HumorPlan::Generate(reservation) => {
+                            let lines = reservation.generate(gcx.clone()).await;
+                            let line = {
+                                let mut humor = humor_arc.lock().await;
+                                humor.complete_humor(reservation, lines)
+                            };
+                            if let Some(line) = line {
+                                opp.humor = Some(line);
+                            }
+                        }
+                        HumorPlan::Skip => {}
                     }
+                    ready.push((opp, cooldown_secs));
                 }
 
                 // Phase 3: re-acquire buddy lock to add humor-processed opps.

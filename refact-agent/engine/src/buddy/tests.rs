@@ -2743,9 +2743,99 @@ async fn humor_cache_expiry() {
     );
 }
 
+struct SlowTimeoutGenerator;
+
+#[async_trait::async_trait]
+impl super::humor::HumorGenerator for SlowTimeoutGenerator {
+    async fn generate(
+        &self,
+        _kind: BuddyFactKind,
+        _summary: String,
+        _gcx: std::sync::Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    ) -> Vec<String> {
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        vec!["too late".to_string()]
+    }
+}
+
+#[tokio::test]
+async fn humor_timeout_returns_none_quickly() {
+    use super::humor::{HumorService, HUMOR_TIMEOUT_SECS};
+    let mut svc = HumorService::new_with_generator(std::sync::Arc::new(SlowTimeoutGenerator));
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let pulse = BuddyPulse::default();
+    let mut opp = make_opportunity("opp-timeout", "ck-timeout");
+    let start = std::time::Instant::now();
+    svc.attach_humor(&mut opp, BuddyFactKind::TaskStuck, &pulse, gcx)
+        .await;
+    let elapsed = start.elapsed();
+    assert!(opp.humor.is_none(), "timed out humor must remain None");
+    assert!(
+        elapsed < tokio::time::Duration::from_secs(HUMOR_TIMEOUT_SECS + 2),
+        "humor timeout took too long: {:?}",
+        elapsed
+    );
+}
+
 // =============================================================================
 // Observer tests
 // =============================================================================
+
+struct SleepObserver {
+    id: &'static str,
+}
+
+#[async_trait::async_trait]
+impl super::observers::BuddyObserver for SleepObserver {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn cadence_seconds(&self) -> u64 {
+        1
+    }
+
+    fn requires_setting(&self, _settings: &BuddySettings) -> bool {
+        true
+    }
+
+    async fn observe(
+        &self,
+        _gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+        _ctx: &super::observers::ObserverContext,
+    ) -> Vec<BuddyFact> {
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        vec![make_fact(
+            self.id,
+            BuddyFactKind::TaskStuck,
+            chrono::Utc::now(),
+        )]
+    }
+}
+
+#[tokio::test]
+async fn parallel_observer_execution_not_sequentially_additive() {
+    let observers: Vec<Arc<dyn super::observers::BuddyObserver>> = vec![
+        Arc::new(SleepObserver { id: "sleep-a" }),
+        Arc::new(SleepObserver { id: "sleep-b" }),
+    ];
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let start = std::time::Instant::now();
+    let facts = super::actor::observe_buddy_facts_parallel(
+        observers,
+        gcx,
+        std::env::temp_dir(),
+        chrono::Utc::now(),
+    )
+    .await;
+    let elapsed = start.elapsed();
+    assert_eq!(facts.len(), 2);
+    assert!(
+        elapsed < tokio::time::Duration::from_millis(1700),
+        "parallel observers took too long: {:?}",
+        elapsed
+    );
+}
 
 fn make_task_meta(id: &str, name: &str, status: TaskStatus, created_at: &str) -> TaskMeta {
     TaskMeta {
@@ -2896,6 +2986,49 @@ fn git_pressure_uncommitted() {
             .any(|f| f.kind == BuddyFactKind::UncommittedPressure),
         "uncommitted pressure fact must be emitted"
     );
+}
+
+#[tokio::test]
+async fn memory_garden_caps_file_count() {
+    use super::observers::memory_garden::scan_knowledge_dir_count_for_test;
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..600 {
+        std::fs::write(dir.path().join(format!("memory_{:03}.md", i)), "# Memory\n").unwrap();
+    }
+    let count = scan_knowledge_dir_count_for_test(dir.path().to_path_buf()).await;
+    assert!(count <= 500, "scanned too many memory files: {}", count);
+}
+
+#[tokio::test]
+async fn memory_garden_skips_large_files() {
+    use super::observers::memory_garden::scan_knowledge_dir_count_for_test;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("large.md"), vec![b'x'; 300 * 1024]).unwrap();
+    let count = scan_knowledge_dir_count_for_test(dir.path().to_path_buf()).await;
+    assert_eq!(count, 0, "large memory file must be ignored");
+}
+
+#[test]
+fn git_pressure_discover_works_from_subdir() {
+    use super::observers::git_pressure::count_uncommitted;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    {
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let mut index = repo.index().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+    }
+    drop(repo);
+    let nested = dir.path().join("a").join("b");
+    std::fs::create_dir_all(&nested).unwrap();
+    for i in 0..30 {
+        std::fs::write(nested.join(format!("file_{}.rs", i)), b"fn foo() {}").unwrap();
+    }
+    let count = count_uncommitted(&nested).unwrap_or(0);
+    assert!(count > 25, "discover from subdir saw {} files", count);
 }
 
 #[test]

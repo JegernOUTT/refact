@@ -14,6 +14,8 @@ use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 pub struct MemoryGardenObserver;
 
 const MAX_ORPHAN_IDS: usize = 50;
+const MAX_MEMORY_FILES: usize = 500;
+const MAX_FILE_BYTES: u64 = 256 * 1024;
 
 struct KnowledgeEntry {
     id: String,
@@ -36,7 +38,11 @@ async fn scan_knowledge_dirs(gcx: Arc<RwLock<GlobalContext>>) -> Vec<KnowledgeEn
     if global_dir.exists() {
         dirs.push(global_dir);
     }
-    let mut entries = Vec::new();
+    scan_knowledge_dirs_from_paths(dirs).await
+}
+
+async fn scan_knowledge_dirs_from_paths(dirs: Vec<PathBuf>) -> Vec<KnowledgeEntry> {
+    let mut candidates = Vec::new();
     for dir in dirs {
         for entry in walkdir::WalkDir::new(&dir)
             .into_iter()
@@ -50,31 +56,52 @@ async fn scan_knowledge_dirs(gcx: Arc<RwLock<GlobalContext>>) -> Vec<KnowledgeEn
             if ext != "md" && ext != "mdx" {
                 continue;
             }
-            let text = match tokio::fs::read_to_string(path).await {
-                Ok(t) => t,
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
                 Err(_) => continue,
             };
-            let (fm, _) = KnowledgeFrontmatter::parse(&text);
-            if fm.is_archived() || fm.is_deprecated() {
+            if metadata.len() > MAX_FILE_BYTES {
                 continue;
             }
-            let id = fm
-                .id
-                .clone()
-                .unwrap_or_else(|| path.to_string_lossy().to_string());
-            let title = fm.title.clone().unwrap_or_default();
-            entries.push(KnowledgeEntry {
-                id,
-                title,
-                tags: fm.tags.clone(),
-                related_files: fm.related_files.clone(),
-                file_path: path.to_path_buf(),
-                created_at: fm.created_at.clone().or_else(|| fm.created.clone()),
-                status: fm.status.clone(),
-            });
+            let modified = metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            candidates.push((modified, path.to_path_buf()));
         }
     }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut entries = Vec::new();
+    for (_, path) in candidates.into_iter().take(MAX_MEMORY_FILES) {
+        let text = match tokio::fs::read_to_string(&path).await {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let (fm, _) = KnowledgeFrontmatter::parse(&text);
+        if fm.is_archived() || fm.is_deprecated() {
+            continue;
+        }
+        let id = fm
+            .id
+            .clone()
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+        let title = fm.title.clone().unwrap_or_default();
+        entries.push(KnowledgeEntry {
+            id,
+            title,
+            tags: fm.tags.clone(),
+            related_files: fm.related_files.clone(),
+            file_path: path,
+            created_at: fm.created_at.clone().or_else(|| fm.created.clone()),
+            status: fm.status.clone(),
+        });
+    }
     entries
+}
+
+#[cfg(test)]
+pub(crate) async fn scan_knowledge_dir_count_for_test(dir: PathBuf) -> usize {
+    scan_knowledge_dirs_from_paths(vec![dir]).await.len()
 }
 
 fn age_days(created_at: Option<&str>, now: DateTime<Utc>) -> u32 {
@@ -192,40 +219,51 @@ async fn detect_memory_garden(
         });
     }
 
-    let n = entries.len();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let a = &entries[i];
-            let b = &entries[j];
-            let same_title = !a.title.is_empty() && a.title.eq_ignore_ascii_case(&b.title);
-            let same_tags = {
-                let sa: HashSet<String> = a.tags.iter().cloned().collect();
-                let sb: HashSet<String> = b.tags.iter().cloned().collect();
-                !sa.is_empty() && sa == sb
-            };
-            let conflict_summary = if same_title || same_tags {
-                has_negation_conflict(&a.title, &b.title)
-            } else {
-                None
-            };
-            if let Some(summary) = conflict_summary {
+    let mut conflict_groups: HashMap<String, Vec<&KnowledgeEntry>> = HashMap::new();
+    for entry in &entries {
+        let normalized_title = entry.title.trim().to_lowercase();
+        if !normalized_title.is_empty() {
+            conflict_groups
+                .entry(format!("title:{}", normalized_title))
+                .or_default()
+                .push(entry);
+        }
+        if !entry.tags.is_empty() {
+            conflict_groups
+                .entry(format!("tags:{}", tags_hash(&entry.tags)))
+                .or_default()
+                .push(entry);
+        }
+    }
+    let mut seen_conflicts = HashSet::new();
+    for group in conflict_groups.values() {
+        for i in 0..group.len() {
+            for j in (i + 1)..group.len() {
+                let a = group[i];
+                let b = group[j];
                 let (id_a, id_b) = if a.id <= b.id {
                     (&a.id, &b.id)
                 } else {
                     (&b.id, &a.id)
                 };
-                tracing::debug!("memory_garden: conflict {}~{}", id_a, id_b);
-                facts.push(BuddyFact {
-                    kind: BuddyFactKind::MemoryStaleConflict,
-                    key: format!("memory:conflict:{}:{}", id_a, id_b),
-                    source: "memory_garden",
-                    payload: serde_json::json!({
-                        "doc_ids": [id_a, id_b],
-                        "conflict_summary": summary,
-                    }),
-                    seen_at: now,
-                    confidence: 0.65,
-                });
+                let key = format!("memory:conflict:{}:{}", id_a, id_b);
+                if !seen_conflicts.insert(key.clone()) {
+                    continue;
+                }
+                if let Some(summary) = has_negation_conflict(&a.title, &b.title) {
+                    tracing::debug!("memory_garden: conflict {}~{}", id_a, id_b);
+                    facts.push(BuddyFact {
+                        kind: BuddyFactKind::MemoryStaleConflict,
+                        key,
+                        source: "memory_garden",
+                        payload: serde_json::json!({
+                            "doc_ids": [id_a, id_b],
+                            "conflict_summary": summary,
+                        }),
+                        seen_at: now,
+                        confidence: 0.65,
+                    });
+                }
             }
         }
     }

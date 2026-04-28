@@ -11,6 +11,7 @@ use crate::global_context::GlobalContext;
 
 pub const HUMOR_BUDGET_PER_HOUR: u32 = 3;
 pub const HUMOR_BATCH_TTL: Duration = Duration::hours(1);
+pub const HUMOR_TIMEOUT_SECS: u64 = 8;
 
 /// A cached batch of LLM-generated one-liners for a specific fact kind.
 #[derive(Debug, Clone)]
@@ -54,6 +55,30 @@ pub struct HumorService {
     generator: Arc<dyn HumorGenerator>,
 }
 
+pub struct HumorReservation {
+    primary_kind: BuddyFactKind,
+    pulse_summary: String,
+    generator: Arc<dyn HumorGenerator>,
+}
+
+pub enum HumorPlan {
+    Ready(String),
+    Generate(HumorReservation),
+    Skip,
+}
+
+impl HumorReservation {
+    pub async fn generate(&self, gcx: Arc<RwLock<GlobalContext>>) -> Vec<String> {
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(HUMOR_TIMEOUT_SECS),
+            self.generator
+                .generate(self.primary_kind, self.pulse_summary.clone(), gcx),
+        )
+        .await
+        .unwrap_or_default()
+    }
+}
+
 impl HumorService {
     /// Create a new service wired to the production LLM generator.
     pub fn new() -> Self {
@@ -85,17 +110,29 @@ impl HumorService {
         pulse: &BuddyPulse,
         gcx: Arc<RwLock<GlobalContext>>,
     ) {
+        match self.plan_humor(primary_kind, pulse) {
+            HumorPlan::Ready(line) => opp.humor = Some(line),
+            HumorPlan::Generate(reservation) => {
+                let lines = reservation.generate(gcx).await;
+                if let Some(line) = self.complete_humor(reservation, lines) {
+                    opp.humor = Some(line);
+                }
+            }
+            HumorPlan::Skip => {}
+        }
+    }
+
+    pub fn plan_humor(&mut self, primary_kind: BuddyFactKind, pulse: &BuddyPulse) -> HumorPlan {
         let now = Utc::now();
         self.reset_hour_if_needed(now);
         self.cache_purge_expired(now);
 
         if let Some(line) = self.cache_pop_line(primary_kind) {
-            opp.humor = Some(line);
-            return;
+            return HumorPlan::Ready(line);
         }
 
         if self.used_this_hour >= HUMOR_BUDGET_PER_HOUR {
-            return;
+            return HumorPlan::Skip;
         }
 
         let pulse_summary = format!(
@@ -109,16 +146,32 @@ impl HumorService {
             pulse.providers.defaults_ok,
         );
 
-        let lines = self
-            .generator
-            .generate(primary_kind, pulse_summary, gcx)
-            .await;
+        HumorPlan::Generate(HumorReservation {
+            primary_kind,
+            pulse_summary,
+            generator: self.generator.clone(),
+        })
+    }
+
+    pub fn complete_humor(
+        &mut self,
+        reservation: HumorReservation,
+        lines: Vec<String>,
+    ) -> Option<String> {
+        let now = Utc::now();
+        self.reset_hour_if_needed(now);
+        self.cache_purge_expired(now);
+
         if lines.is_empty() {
             debug!(
                 "buddy humor: generator returned no lines for {:?}",
-                primary_kind
+                reservation.primary_kind
             );
-            return;
+            return None;
+        }
+
+        if self.used_this_hour >= HUMOR_BUDGET_PER_HOUR {
+            return None;
         }
 
         let batch = HumorBatch {
@@ -126,12 +179,10 @@ impl HumorService {
             used: 0,
             expires_at: now + HUMOR_BATCH_TTL,
         };
-        self.cache.insert(primary_kind, batch);
+        self.cache.insert(reservation.primary_kind, batch);
         self.used_this_hour += 1;
 
-        if let Some(line) = self.cache_pop_line(primary_kind) {
-            opp.humor = Some(line);
-        }
+        self.cache_pop_line(reservation.primary_kind)
     }
 
     fn reset_hour_if_needed(&mut self, now: DateTime<Utc>) {
