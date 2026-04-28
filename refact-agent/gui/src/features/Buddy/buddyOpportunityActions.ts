@@ -51,14 +51,23 @@ export function opportunityActionControls(
   }));
 }
 
-export function getOpportunityActionFromControl(
+export function getOpportunityActionIndexFromControl(
   control: BuddyControl,
-  opportunity: BuddyOpportunity,
-): BuddyAction | null {
+): number | null {
   if (!control.action.startsWith(OPPORTUNITY_ACTION_PREFIX)) return null;
 
   const index = Number(control.action.slice(OPPORTUNITY_ACTION_PREFIX.length));
   if (!Number.isInteger(index)) return null;
+
+  return index;
+}
+
+export function getOpportunityActionFromControl(
+  control: BuddyControl,
+  opportunity: BuddyOpportunity,
+): BuddyAction | null {
+  const index = getOpportunityActionIndexFromControl(control);
+  if (index == null) return null;
 
   return opportunity.proposed_actions[index] ?? null;
 }

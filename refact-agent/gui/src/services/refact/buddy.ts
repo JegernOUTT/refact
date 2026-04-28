@@ -13,6 +13,7 @@ import type {
   OpportunityStatus,
   BuddyPulse,
   BuddyDraft,
+  BuddyOpportunityAcceptResponse,
   InvestigationContext,
 } from "../../features/Buddy/types";
 
@@ -137,6 +138,7 @@ export async function fetchBuddyInvestigationContextRequest(
 
 export const buddyApi = createApi({
   reducerPath: "buddyApi",
+  tagTypes: ["BuddyOpportunities", "BuddySnapshot"],
   baseQuery: fetchBaseQuery({
     prepareHeaders: (headers, { getState }) => {
       const token = (getState() as BuddyApiState).config.apiKey;
@@ -369,8 +371,11 @@ export const buddyApi = createApi({
         return { data: result.data as BuddyOpportunity[] };
       },
     }),
-    acceptOpportunity: builder.mutation<{ accepted: boolean }, string>({
-      queryFn: async (id, api, _opts, baseQuery) => {
+    acceptOpportunity: builder.mutation<
+      BuddyOpportunityAcceptResponse,
+      { id: string; action_index: number }
+    >({
+      queryFn: async ({ id, action_index }, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
         const port = state.config.lspPort;
         const result = await baseQuery({
@@ -378,10 +383,12 @@ export const buddyApi = createApi({
             id,
           )}/accept`,
           method: "POST",
+          body: { action_index },
         });
         if (result.error) return { error: result.error };
-        return { data: { accepted: true } };
+        return { data: result.data as BuddyOpportunityAcceptResponse };
       },
+      invalidatesTags: ["BuddyOpportunities", "BuddySnapshot"],
     }),
     dismissOpportunity: builder.mutation<{ dismissed: boolean }, string>({
       queryFn: async (id, api, _opts, baseQuery) => {

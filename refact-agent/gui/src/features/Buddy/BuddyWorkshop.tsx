@@ -62,7 +62,7 @@ export const BuddyWorkshop: React.FC = () => {
           type="button"
           className={styles.navButton}
           aria-label={item.label}
-          onClick={() => void executeAction(item.action, null)}
+          onClick={() => void executeAction(item.action, null, -1)}
         >
           <span className={styles.icon}>{item.icon}</span>
           <Text size="1" className={styles.label}>

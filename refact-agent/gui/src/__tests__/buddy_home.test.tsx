@@ -390,8 +390,9 @@ describe("useExecuteBuddyAction_open_page", () => {
     const execFn = result.current as unknown as (
       a: unknown,
       b: unknown,
+      c: number,
     ) => Promise<void>;
-    await execFn({ kind: "open_page", page: { type: "buddy" } }, null);
+    await execFn({ kind: "open_page", page: { type: "buddy" } }, null, -1);
 
     const pages = store.getState().pages;
     const last = pages[pages.length - 1];

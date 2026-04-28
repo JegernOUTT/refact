@@ -4935,6 +4935,63 @@ async fn dismiss_action_through_accept_route_results_in_dismissed_not_accepted()
         .recently_dismissed("ck-accept-dismiss-action", Duration::hours(24)));
 }
 
+#[tokio::test]
+async fn accept_route_with_action_index_1_dispatches_second_action() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::buddy::events::BuddyEvent;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, AcceptRequest,
+    };
+
+    let (tx, mut rx) = broadcast::channel(16);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+    let mut opp = make_opportunity("opp-action-index", "ck-action-index");
+    opp.proposed_actions = vec![
+        BuddyAction::OpenPage {
+            page: BuddyPage::Buddy,
+            params: None,
+        },
+        BuddyAction::OpenPage {
+            page: BuddyPage::Stats,
+            params: None,
+        },
+    ];
+    svc.add_opportunity(opp);
+    while rx.try_recv().is_ok() {}
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    let response = handle_v1_buddy_opportunity_accept(
+        Extension(gcx),
+        Path("opp-action-index".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 1 })),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.0["action_result"]["kind"], "open_page");
+    assert_eq!(response.0["action_result"]["navigate_to"]["type"], "stats");
+
+    let mut saw_stats_navigation = false;
+    while let Ok(event) = rx.try_recv() {
+        if let BuddyEvent::NavigationRequest { page } = event {
+            assert_eq!(page, BuddyPage::Stats);
+            saw_stats_navigation = true;
+        }
+    }
+    assert!(saw_stats_navigation);
+}
+
 // =============================================================================
 // G-B: Per-rule cooldown persistence + provider-tuning DefaultsKind correctness
 // =============================================================================

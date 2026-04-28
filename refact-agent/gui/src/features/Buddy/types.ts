@@ -716,6 +716,25 @@ export interface BuddyOpportunity {
   expires_at: string;
 }
 
+export type BuddyActionResult =
+  | { kind: "open_page"; navigate_to: BuddyPage }
+  | { kind: "launch_investigation_chat"; chat_id: string }
+  | {
+      kind: "draft";
+      draft_kind: DraftKind;
+      draft_id: string;
+      label?: string;
+      defaults_kind?: DefaultsKind;
+    }
+  | { kind: "dismiss" }
+  | { kind: "marketplace_install"; market_kind: MarketKind; item_id: string }
+  | { kind: "unimplemented"; action: string };
+
+export interface BuddyOpportunityAcceptResponse {
+  snapshot: BuddySnapshot;
+  action_result: BuddyActionResult;
+}
+
 export interface TaskPulse {
   total: number;
   stuck: number;

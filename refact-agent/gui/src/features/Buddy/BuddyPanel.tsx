@@ -18,6 +18,7 @@ import { PALETTES, SIGNALS } from "./constants";
 import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
 import {
   getOpportunityActionFromControl,
+  getOpportunityActionIndexFromControl,
   opportunityActionControls,
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
@@ -100,6 +101,8 @@ export const BuddyPanel: React.FC = () => {
       }
     : topOpportunity
       ? async (ctrl: BuddyControl) => {
+          const actionIndex = getOpportunityActionIndexFromControl(ctrl);
+          if (actionIndex == null) return;
           const action = getOpportunityActionFromControl(ctrl, topOpportunity);
           if (!action) return;
 
@@ -113,14 +116,14 @@ export const BuddyPanel: React.FC = () => {
             });
             await Promise.all(
               activeOpportunities.map((opp) =>
-                executeOpportunityAction(action, opp),
+                executeOpportunityAction(action, opp, actionIndex),
               ),
             );
             setOpportunityIndex(0);
             return;
           }
 
-          await executeOpportunityAction(action, topOpportunity);
+          await executeOpportunityAction(action, topOpportunity, actionIndex);
           setDismissedOpportunityIds((prev) =>
             new Set(prev).add(`opportunity-${topOpportunity.id}`),
           );

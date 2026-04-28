@@ -54,7 +54,7 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
               )}
               disabled={!isActive}
               aria-label={actionLabel(action)}
-              onClick={() => void executeAction(action, opportunity)}
+              onClick={() => void executeAction(action, opportunity, idx)}
             >
               {actionLabel(action)}
             </button>

@@ -36,6 +36,7 @@ import { isBuddyOverlaySuppressedIssue } from "./investigation";
 import { executeBuddyAction } from "./executeBuddyAction";
 import {
   getOpportunityActionFromControl,
+  getOpportunityActionIndexFromControl,
   opportunityActionControls,
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
@@ -276,6 +277,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
       if (notification.source === "opportunity") {
         if (!notification.opportunity) return;
+        const actionIndex = getOpportunityActionIndexFromControl(ctrl);
+        if (actionIndex == null) return;
         const action = getOpportunityActionFromControl(
           ctrl,
           notification.opportunity,
@@ -292,14 +295,18 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           });
           await Promise.all(
             activeOpportunities.map((opp) =>
-              executeOpportunityAction(action, opp),
+              executeOpportunityAction(action, opp, actionIndex),
             ),
           );
           setOpportunityIndex(0);
           return;
         }
 
-        await executeOpportunityAction(action, notification.opportunity);
+        await executeOpportunityAction(
+          action,
+          notification.opportunity,
+          actionIndex,
+        );
         setDismissedIds((prev) => new Set(prev).add(notification.id));
         setOpportunityIndex((index) => index + 1);
         return;
