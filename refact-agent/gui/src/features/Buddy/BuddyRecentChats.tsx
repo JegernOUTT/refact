@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, Button, Spinner } from "@radix-ui/themes";
+import { Flex, Text, Spinner } from "@radix-ui/themes";
 import { ChatBubbleIcon, PlusIcon } from "@radix-ui/react-icons";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
@@ -146,14 +146,18 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
         </Text>
         <Flex align="center" gap="1">
           {onViewAll && (
-            <Button size="1" variant="ghost" onClick={onViewAll}>
+            <button
+              type="button"
+              className={styles.headerChip}
+              onClick={onViewAll}
+            >
               View All →
-            </Button>
+            </button>
           )}
           {!compact && (
-            <Button
-              size="1"
-              variant="ghost"
+            <button
+              type="button"
+              className={styles.headerChip}
               onClick={() => void handleNew()}
               disabled={isCreating}
             >
@@ -163,7 +167,7 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
                 <PlusIcon width={12} height={12} />
               )}
               New Chat
-            </Button>
+            </button>
           )}
         </Flex>
       </Flex>
@@ -204,9 +208,13 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
             {filter === "all" ? "No conversations yet" : `No ${filter} entries`}
           </Text>
           {filter === "all" && (
-            <Button size="1" variant="soft" onClick={() => void handleNew()}>
+            <button
+              type="button"
+              className={styles.emptyChip}
+              onClick={() => void handleNew()}
+            >
               Start a conversation
-            </Button>
+            </button>
           )}
         </Flex>
       )}

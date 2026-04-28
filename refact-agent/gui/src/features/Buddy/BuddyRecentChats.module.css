@@ -5,28 +5,38 @@
 
 .filterTabs {
   display: flex;
-  gap: var(--space-1);
+  gap: 4px;
   flex-wrap: wrap;
 }
 
+/* Filter tabs reuse the shared chip pill so the header controls match
+ * the rest of the page. The active state cannot use `composes` (postcss
+ * disallows composes on attribute selectors), so the accent treatment
+ * is duplicated inline below. */
 .filterTab {
-  padding: 2px 8px;
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a4);
-  background: transparent;
-  cursor: pointer;
-  transition: background 0.12s;
-  color: var(--gray-11);
-}
-
-.filterTab:hover {
-  background: var(--gray-a3);
+  composes: chip from "./BuddyHome.module.css";
 }
 
 .filterTab[data-active] {
-  background: var(--gray-a4);
-  border-color: var(--gray-a6);
-  color: var(--gray-12);
+  background: var(--accent-a3);
+  border-color: var(--accent-a6);
+  color: var(--accent-11);
+  font-weight: 600;
+}
+
+.filterTab[data-active]:hover {
+  background: var(--accent-a4);
+  border-color: var(--accent-a7);
+}
+
+/* Header chips: + New Chat, View All — same pill shape as everything
+ * else on the page. */
+.headerChip {
+  composes: chipGhost from "./BuddyHome.module.css";
+}
+
+.emptyChip {
+  composes: chipPrimary from "./BuddyHome.module.css";
 }
 
 .entryRow {

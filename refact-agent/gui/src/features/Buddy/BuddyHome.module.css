@@ -15,6 +15,68 @@
   background: transparent;
 }
 
+/* ---------- Shared action chip (declared early so composes can reach
+ * it from .careButton / .setupChip below). Unified pill shape used by
+ * every clickable Buddy-home action: care, project setup, persona
+ * footer, recent-error actions, view-stats, etc. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--gray-a4);
+  background: var(--gray-a2);
+  color: var(--gray-12);
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.chip:hover {
+  background: var(--gray-a3);
+  border-color: var(--gray-a6);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: 1px;
+}
+
+.chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chipPrimary {
+  background: var(--accent-a3);
+  border-color: var(--accent-a6);
+  color: var(--accent-11);
+  font-weight: 600;
+}
+
+.chipPrimary:hover {
+  background: var(--accent-a4);
+  border-color: var(--accent-a7);
+}
+
+.chipGhost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--gray-11);
+}
+
+.chipGhost:hover {
+  background: var(--gray-a3);
+  border-color: var(--gray-a4);
+}
+
 .topBar {
   display: flex;
   align-items: center;
@@ -36,8 +98,8 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: var(--space-2) var(--space-3) var(--space-2);
-  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3) var(--space-2);
+  gap: 4px;
   flex-shrink: 0;
 }
 
@@ -94,25 +156,10 @@
   justify-content: center;
 }
 
+/* Care actions reuse the shared .chip class via composes — kept as an
+ * alias so the existing JSX (.careButton) keeps working. */
 .careButton {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 9999px;
-  border: 1px solid var(--gray-a4);
-  background: var(--gray-a2);
-  color: var(--gray-12);
-  font-size: 11px;
-  cursor: pointer;
-  transition:
-    background 0.12s,
-    border-color 0.12s;
-}
-
-.careButton:hover {
-  background: var(--gray-a3);
-  border-color: var(--gray-a6);
+  composes: chip;
 }
 
 /* ---------- Now-playing status bubble ---------- */
@@ -171,9 +218,9 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-3);
-  row-gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  margin: 0 var(--space-3) var(--space-3);
+  row-gap: var(--space-1);
+  padding: 6px var(--space-3);
+  margin: 0 var(--space-3) var(--space-2);
   background: var(--gray-a2);
   border: 1px solid var(--gray-a4);
   border-radius: var(--radius-3);
@@ -201,6 +248,15 @@
   width: 100%;
 }
 
+/* Inline value + bar used by the Growth stat so its baseline sits on the
+ * same row as the other stat values (Care, Neglect, Messages, …). */
+.statItemValueRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
 .statItemDivider {
   width: 1px;
   align-self: stretch;
@@ -219,11 +275,23 @@
   /* minmax(0, 1fr) lets columns shrink below their intrinsic min-content
    * size so long titles/chips never push the grid wider than the page. */
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-3);
-  padding: 0 var(--space-3) var(--space-3);
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-2);
   flex-shrink: 0;
   min-height: 0;
   min-width: 0;
+}
+
+/* Three-column row: PULSE | OPPORTUNITIES | WORKSHOP and ACTIVITY |
+ * RECENT ERRORS | RECENT CHATS. Falls back to two columns mid-narrow
+ * widths and one column on very narrow viewports (handled below). */
+.row3 {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+
+/* Single full-width row used by the unified PERSONALITY panel. */
+.rowSingle {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* Stretching row: takes the remaining vertical space and lets its
@@ -233,16 +301,35 @@
   min-height: 0;
 }
 
+/* Slim chip strip used for project-setup quick actions placed inline
+ * below the summary; intentionally has no panel chrome of its own. */
+.chipStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 var(--space-3) var(--space-2);
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.chipStripLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  color: var(--gray-10);
+  margin-right: var(--space-1);
+}
+
 /* ---------- Shared panel (used by every card on the page) ---------- */
 
 .panel {
   background: var(--gray-a2);
   border: 1px solid var(--gray-a4);
   border-radius: var(--radius-3);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 6px;
   min-width: 0;
   min-height: 0;
 }
@@ -270,13 +357,21 @@
   gap: 2px;
 }
 
+/* Mid-narrow widths: drop 3-col rows back to 2 columns. */
+@media (max-width: 980px) {
+  .row3 {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
 /* Narrow IDE/webview widths: stack pairs into one column and let the page
  * scroll naturally so nothing gets clipped. */
 @media (max-width: 720px) {
   .page {
     overflow-y: auto;
   }
-  .row {
+  .row,
+  .row3 {
     grid-template-columns: minmax(0, 1fr);
   }
   .rowFlex {
@@ -312,12 +407,50 @@
   font-size: 10px;
 }
 
+/* ---------- Unified personality + care panel ---------- */
+
+/* Three-column inner grid that lays out NEEDS, TRAITS, SKILLS side by
+ * side inside a single panel. Collapses to one column on narrow IDEs. */
+.personaGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.personaSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+@media (max-width: 980px) {
+  .personaGrid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .personaGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.personaPanel {
+  gap: var(--space-2);
+}
+
 /* ---------- Care loop card content ---------- */
 
+/* Single-column list inside the narrow personaGrid section. With 5
+ * items, a 2-column grid produces an awkward orphan row; a single
+ * column keeps the rhythm consistent with SKILLS and lets the bars
+ * breathe across the full available width. */
 .needsGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .needRow {
@@ -407,25 +540,33 @@
   flex-wrap: wrap;
 }
 
+/* Traits share the exact same row layout as needs (label on top, numeric
+ * value on the right, progress bar underneath) so the two sections read
+ * as one consistent stat block. */
+/* Traits mirror the needs layout — single column keeps the visual
+ * cadence of label/value/bar stacked vertically and avoids leaving the
+ * 5th item alone on its own row. */
 .traitsGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .traitRow {
   display: flex;
-  justify-content: space-between;
-  gap: var(--space-1);
-  padding: 4px 8px;
-  background: var(--gray-a3);
-  border-radius: var(--radius-2);
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
 }
 
-.traitName {
+.traitHeader {
+  display: flex;
+  justify-content: space-between;
   font-size: 11px;
   color: var(--gray-11);
+}
+
+.traitName {
   text-transform: capitalize;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -433,7 +574,6 @@
 }
 
 .traitValue {
-  font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -458,6 +598,18 @@
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
+}
+
+/* Footer button strip used by the unified persona panel and quest card.
+ * Pinning to the bottom (margin-top: auto) keeps controls aligned even
+ * when the surrounding content varies in length. */
+.actionRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--gray-a3);
 }
 
 /* ---------- XP bar (used in summary strip) ---------- */
@@ -485,38 +637,14 @@
   gap: 6px;
 }
 
+/* Project-setup chip reuses the shared .chip class for visual parity
+ * with care/persona/error actions. */
 .setupChip {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 10px;
-  border-radius: 9999px;
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  cursor: pointer;
-  font-size: 11px;
-  color: var(--gray-12);
-  transition:
-    background 0.12s,
-    border-color 0.12s;
-  white-space: nowrap;
-  text-align: left;
-}
-
-.setupChip:hover {
-  background: var(--gray-a3);
-  border-color: var(--gray-a6);
+  composes: chip;
 }
 
 .setupChipPrimary {
-  background: var(--accent-a3);
-  border-color: var(--accent-a6);
-  color: var(--accent-11);
-  font-weight: 600;
-}
-
-.setupChipPrimary:hover {
-  background: var(--accent-a4);
-  border-color: var(--accent-a7);
+  composes: chipPrimary;
 }
 
 /* ---------- Shared list rows (activity / workflows) ---------- */
@@ -629,6 +757,22 @@
   text-transform: uppercase;
   color: var(--gray-11);
   background: var(--gray-a3);
+  border-radius: var(--radius-2);
+  vertical-align: 1px;
+}
+
+/* Occurrence count badge for deduplicated errors. Sits flush against
+ * the title with a tabular feel — "TypeError ×4" — and uses the
+ * accent palette so the eye lands on the multiplier first. */
+.countBadge {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-11);
+  background: var(--accent-a3);
   border-radius: var(--radius-2);
   vertical-align: 1px;
 }

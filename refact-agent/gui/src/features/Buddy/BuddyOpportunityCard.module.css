@@ -1,11 +1,12 @@
+/* Opportunity cards live inside the OPPORTUNITIES panel which already
+ * provides the panel chrome (background, border, padding). Adding a
+ * second card-shaped frame here produced a "card-in-card" look. Strip
+ * the chrome and let the parent .list gap separate sibling cards. */
 .card {
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  padding: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 4px;
+  padding: 0;
 }
 
 .header {
@@ -60,4 +61,19 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
+}
+
+/* Action buttons reuse the page-wide chip pill so every clickable
+ * control on the Buddy home — care, project setup, persona footer,
+ * recent errors, opportunity cards — shares one visual language. */
+.actionButton {
+  composes: chip from "./BuddyHome.module.css";
+}
+
+.actionButtonPrimary {
+  composes: chipPrimary from "./BuddyHome.module.css";
+}
+
+.actionButtonGhost {
+  composes: chipGhost from "./BuddyHome.module.css";
 }

@@ -1,59 +1,75 @@
 import React from "react";
 import { Text } from "@radix-ui/themes";
+import {
+  GearIcon,
+  CubeIcon,
+  EraserIcon,
+  ListBulletIcon,
+  RocketIcon,
+} from "@radix-ui/react-icons";
 import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
 import type { BuddyAction } from "./types";
 import styles from "./BuddyWorkshop.module.css";
 
-const WORKSHOP_ITEMS: { label: string; icon: string; action: BuddyAction }[] = [
+const ICON_SIZE = 15;
+
+const WORKSHOP_ITEMS: {
+  label: string;
+  icon: React.ReactNode;
+  action: BuddyAction;
+}[] = [
   {
-    label: "Open Customization",
-    icon: "⚙️",
+    label: "Customize",
+    icon: <GearIcon width={ICON_SIZE} height={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "customization" } },
   },
   {
-    label: "Tune Models",
-    icon: "🤖",
+    label: "Models",
+    icon: <RocketIcon width={ICON_SIZE} height={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "default_models" } },
   },
   {
-    label: "Clean Memories",
-    icon: "🧹",
+    label: "Memories",
+    icon: <EraserIcon width={ICON_SIZE} height={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "knowledge_graph" } },
   },
   {
-    label: "Open Tasks",
-    icon: "📋",
+    label: "Tasks",
+    icon: <ListBulletIcon width={ICON_SIZE} height={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "tasks_list" } },
   },
   {
-    label: "Open Marketplaces",
-    icon: "🛒",
+    label: "Marketplace",
+    icon: <CubeIcon width={ICON_SIZE} height={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "marketplace_hub" } },
   },
 ];
 
+/**
+ * Bottom NavBar-style toolbar mirroring the dashboard home NavBar
+ * (icon-on-top, label-below, full-width row with a top divider). Lives at
+ * the bottom of the Buddy home so the actions stay reachable without
+ * occupying a card slot in the main grid.
+ */
 export const BuddyWorkshop: React.FC = () => {
   const executeAction = useExecuteBuddyAction();
 
   return (
-    <div className={styles.workshop} data-testid="buddy-workshop">
-      <Text size="1" weight="bold" color="gray" className={styles.label}>
-        WORKSHOP
-      </Text>
-      <div className={styles.grid}>
-        {WORKSHOP_ITEMS.map((item) => (
-          <button
-            key={item.label}
-            type="button"
-            className={styles.btn}
-            aria-label={item.label}
-            onClick={() => void executeAction(item.action, null)}
-          >
-            <span className={styles.btnIcon}>{item.icon}</span>
-            <span>{item.label}</span>
-          </button>
-        ))}
-      </div>
-    </div>
+    <nav className={styles.workshop} data-testid="buddy-workshop">
+      {WORKSHOP_ITEMS.map((item) => (
+        <button
+          key={item.label}
+          type="button"
+          className={styles.navButton}
+          aria-label={item.label}
+          onClick={() => void executeAction(item.action, null)}
+        >
+          <span className={styles.icon}>{item.icon}</span>
+          <Text size="1" className={styles.label}>
+            {item.label}
+          </Text>
+        </button>
+      ))}
+    </nav>
   );
 };

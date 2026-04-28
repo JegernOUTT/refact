@@ -1,5 +1,5 @@
 import React from "react";
-import { Text, Button } from "@radix-ui/themes";
+import { Text } from "@radix-ui/themes";
 import classNames from "classnames";
 import type { BuddyOpportunity, BuddyAction, BuddyPage } from "./types";
 import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
@@ -103,16 +103,21 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
       {opportunity.proposed_actions.length > 0 && (
         <div className={styles.actions}>
           {opportunity.proposed_actions.map((action, idx) => (
-            <Button
+            <button
               key={idx}
-              size="1"
-              variant={action.kind === "dismiss" ? "ghost" : "soft"}
+              type="button"
+              className={classNames(
+                styles.actionButton,
+                action.kind === "dismiss"
+                  ? styles.actionButtonGhost
+                  : styles.actionButtonPrimary,
+              )}
               disabled={!isActive}
               aria-label={actionLabel(action)}
               onClick={() => void executeAction(action, opportunity)}
             >
               {actionLabel(action)}
-            </Button>
+            </button>
           ))}
         </div>
       )}

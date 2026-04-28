@@ -35,7 +35,7 @@ import type {
   BuddyRuntimeEvent,
 } from "./types";
 import { PALETTES, STAGES, SKILLS, SIGNALS } from "./constants";
-import { computeXpFill } from "./buddyUtils";
+import { computeXpFill, formatCompactNumber } from "./buddyUtils";
 import { useGetStatsSummaryQuery } from "../../services/refact/stats";
 import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
 import { SETUP_MODES } from "../Setup/setupModes";
@@ -237,19 +237,22 @@ export const BuddyHome: React.FC = () => {
 
   const unlockedSkills = skills?.unlocked ?? state.skills;
 
-  // All buddy-collected runtime errors, ordered newest-first. Includes
-  // dismissed/acknowledged entries so the user can see the full history of
-  // what Buddy has noticed. The "Investigate" button per card opens a fresh
-  // Buddy chat scoped to that error, the "Dismiss" button persists the ack.
+  // All buddy-collected runtime errors, ordered newest-first and
+  // deduplicated by signature so a single repeating error (e.g. a
+  // useBuddyState crash firing on every render) does not flood the
+  // panel with identical rows. We keep the most recent representative
+  // per signature and surface the duplicate count via `occurrences`.
+  // Includes dismissed/acknowledged entries so the user can see the
+  // full history of what Buddy has noticed.
   const recentErrors = useMemo(() => {
-    const items: BuddyRuntimeEvent[] = [];
+    const collected: BuddyRuntimeEvent[] = [];
     if (
       nowPlaying &&
       (nowPlaying.status === "failed" ||
         nowPlaying.priority === "critical" ||
         nowPlaying.priority === "high")
     ) {
-      items.push(nowPlaying);
+      collected.push(nowPlaying);
     }
     for (const e of runtimeQueue) {
       if (
@@ -257,15 +260,38 @@ export const BuddyHome: React.FC = () => {
         e.priority === "critical" ||
         e.priority === "high"
       ) {
-        if (!items.find((x) => x.id === e.id)) items.push(e);
+        if (!collected.find((x) => x.id === e.id)) collected.push(e);
       }
     }
-    items.sort((a, b) => {
+    collected.sort((a, b) => {
       const ta = new Date(a.created_at).getTime() || 0;
       const tb = new Date(b.created_at).getTime() || 0;
       return tb - ta;
     });
-    return items.slice(0, 25);
+
+    // Dedupe by (source|title|description). Keep first (newest)
+    // representative per signature; track occurrence count and whether
+    // any of the merged entries was already dismissed.
+    type ErrWithCount = BuddyRuntimeEvent & {
+      occurrences: number;
+      dismissedAny: boolean;
+    };
+    const sigMap = new Map<string, ErrWithCount>();
+    for (const e of collected) {
+      const sig = `${e.source ?? ""}|${e.title}|${e.description ?? ""}`;
+      const existing = sigMap.get(sig);
+      if (existing) {
+        existing.occurrences += 1;
+        existing.dismissedAny = existing.dismissedAny || Boolean(e.dismissed);
+      } else {
+        sigMap.set(sig, {
+          ...e,
+          occurrences: 1,
+          dismissedAny: Boolean(e.dismissed),
+        });
+      }
+    }
+    return Array.from(sigMap.values()).slice(0, 25);
   }, [nowPlaying, runtimeQueue]);
 
   const handleInvestigateError = useCallback(
@@ -366,7 +392,7 @@ export const BuddyHome: React.FC = () => {
             <BuddyCanvas
               state={state}
               onEvent={buddy.handleCanvasEvent}
-              displaySize={320}
+              displaySize={200}
               speechOverride={
                 activeSpeech
                   ? activeSpeech.text
@@ -395,7 +421,7 @@ export const BuddyHome: React.FC = () => {
         {nowPlaying?.progress != null && (
           <div className={styles.statusBubble}>
             <span className={styles.statusIcon}>
-              {SIGNALS[nowPlaying.signal_type].icon}
+              {SIGNALS[nowPlaying.signal_type]?.icon ?? "•"}
             </span>
             <div className={styles.statusContent}>
               <div className={styles.progressBar}>
@@ -408,23 +434,24 @@ export const BuddyHome: React.FC = () => {
         {setupNeeded && (
           <div className={styles.setupChips}>
             {SETUP_MODES.map((m) => (
-              <Button
+              <button
                 key={m.mode}
-                size="1"
-                variant={m.mode === "setup" ? "soft" : "outline"}
+                type="button"
+                className={classNames(styles.chip, {
+                  [styles.chipPrimary]: m.mode === "setup",
+                })}
                 onClick={() => handleRunMode(m.mode)}
               >
                 {m.label}
-              </Button>
+              </button>
             ))}
-            <Button
-              size="1"
-              variant="ghost"
-              color="gray"
+            <button
+              type="button"
+              className={classNames(styles.chip, styles.chipGhost)}
               onClick={handleDismissSetup}
             >
               Dismiss
-            </Button>
+            </button>
           </div>
         )}
 
@@ -454,17 +481,20 @@ export const BuddyHome: React.FC = () => {
           </Text>
         </div>
         <div className={classNames(styles.statItem, styles.statItemGrow)}>
-          <div className={styles.statItemHeader}>
-            <Text size="1" color="gray">
-              Growth
+          <Text size="1" color="gray">
+            Growth
+          </Text>
+          <div className={styles.statItemValueRow}>
+            <Text size="2" weight="bold">
+              {xpNext
+                ? xp >= xpNext
+                  ? `${xpNext} / ${xpNext} · MAX`
+                  : `${xp} / ${xpNext}`
+                : `${xp} · MAX`}
             </Text>
-            <Text size="1" weight="bold">
-              {xp}
-              {xpNext ? ` / ${xpNext}` : " (max)"}
-            </Text>
-          </div>
-          <div className={styles.xpBar}>
-            <div className={styles.xpFill} style={{ width: `${xpFill}%` }} />
+            <div className={styles.xpBar}>
+              <div className={styles.xpFill} style={{ width: `${xpFill}%` }} />
+            </div>
           </div>
         </div>
         {pet && (
@@ -495,7 +525,7 @@ export const BuddyHome: React.FC = () => {
                 Messages
               </Text>
               <Text size="2" weight="bold">
-                {statsData.totals.total_calls.toLocaleString()}
+                {formatCompactNumber(statsData.totals.total_calls)}
               </Text>
             </div>
             <div className={styles.statItem}>
@@ -503,7 +533,7 @@ export const BuddyHome: React.FC = () => {
                 Tokens
               </Text>
               <Text size="2" weight="bold">
-                {(statsData.totals.total_tokens / 1000).toFixed(1)}k
+                {formatCompactNumber(statsData.totals.total_tokens)}
               </Text>
             </div>
             <div className={styles.statItem}>
@@ -518,9 +548,13 @@ export const BuddyHome: React.FC = () => {
         )}
         <div className={styles.statSpacer} aria-hidden />
         {statsData && (
-          <Button size="1" variant="ghost" onClick={handleViewStats}>
+          <button
+            type="button"
+            className={classNames(styles.chip, styles.chipGhost)}
+            onClick={handleViewStats}
+          >
             View Full Stats →
-          </Button>
+          </button>
         )}
       </div>
 
@@ -530,47 +564,35 @@ export const BuddyHome: React.FC = () => {
         </div>
       )}
 
-      {/* Pulse + Opportunities + Workshop */}
+      {/* Slim project-setup chip strip — replaces the bulky PROJECT SETUP
+          panel and stays out of the way of the main grid. */}
+      <div className={styles.chipStrip}>
+        <span className={styles.chipStripLabel}>Project setup</span>
+        {SETUP_MODES.map((m) => (
+          <button
+            key={m.mode}
+            type="button"
+            className={classNames(styles.setupChip, {
+              [styles.setupChipPrimary]: m.mode === "setup",
+            })}
+            onClick={() => handleRunMode(m.mode)}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Pulse + Opportunities */}
       <div className={styles.row} data-testid="buddy-home-new-sections">
         <BuddyPulseCard />
         <BuddyOpportunitiesFeed />
       </div>
-      <div style={{ padding: "0 var(--space-3) var(--space-3)" }}>
-        <BuddyWorkshop />
-      </div>
 
-      {/* Row 1 — Care loop + Personality */}
-      <div className={styles.row}>
-        <div className={styles.panel}>
-          <div className={styles.panelHeader}>
-            <Text
-              size="1"
-              weight="bold"
-              color="gray"
-              className={styles.sectionLabel}
-            >
-              CARE LOOP
-            </Text>
-          </div>
-          <div className={styles.needsGrid}>
-            {needRows.map((item) => (
-              <div key={item.key} className={styles.needRow}>
-                <div className={styles.needHeader}>
-                  <span>{item.label}</span>
-                  <span>{item.value}</span>
-                </div>
-                <div className={styles.needBar}>
-                  <div
-                    className={styles.needFill}
-                    style={{ width: `${item.fill}%` }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className={styles.panel}>
+      {/* Unified Personality + Care panel — one card with consistent
+          subsection labels (NEEDS, TRAITS, SKILLS) and a single button
+          row at the bottom for proactive/vibe + reroll controls. */}
+      <div className={classNames(styles.row, styles.rowSingle)}>
+        <div className={classNames(styles.panel, styles.personaPanel)}>
           <div className={styles.panelHeader}>
             <div className={styles.panelTitleGroup}>
               <Text
@@ -588,9 +610,6 @@ export const BuddyHome: React.FC = () => {
                 {personality?.vibe ?? "Playful, quirky, helpful"}
               </Text>
             </div>
-            <Button size="1" variant="soft" onClick={() => void handleReroll()}>
-              Reroll
-            </Button>
           </div>
 
           {personality?.summary && (
@@ -599,66 +618,91 @@ export const BuddyHome: React.FC = () => {
             </Text>
           )}
 
-          <div className={styles.traitsGrid}>
-            {Object.entries(personality?.traits ?? {}).map(([key, value]) => (
-              <div key={key} className={styles.traitRow}>
-                <span className={styles.traitName}>{key}</span>
-                <span className={styles.traitValue}>{value}</span>
+          <div className={styles.personaGrid}>
+            <div className={styles.personaSection}>
+              <Text
+                size="1"
+                weight="bold"
+                color="gray"
+                className={styles.sectionLabel}
+              >
+                NEEDS
+              </Text>
+              <div className={styles.needsGrid}>
+                {needRows.map((item) => (
+                  <div key={item.key} className={styles.needRow}>
+                    <div className={styles.needHeader}>
+                      <span>{item.label}</span>
+                      <span>{item.value}</span>
+                    </div>
+                    <div className={styles.needBar}>
+                      <div
+                        className={styles.needFill}
+                        style={{ width: `${item.fill}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-
-          <Flex direction="column" gap="1">
-            <Text
-              size="1"
-              weight="bold"
-              color="gray"
-              className={styles.sectionLabel}
-            >
-              SKILLS
-            </Text>
-            <div className={styles.skillsRow}>
-              {unlockedSkills.length === 0 && (
-                <Text size="1" color="gray">
-                  None yet
-                </Text>
-              )}
-              {unlockedSkills.map((id) => {
-                const skill = SKILLS.find((s) => s.id === id);
-                return skill ? (
-                  <span key={id} className={styles.skillChip}>
-                    {skill.icon} {skill.name}
-                  </span>
-                ) : null;
-              })}
             </div>
-          </Flex>
 
-          <div className={styles.settingsRow}>
-            <Button
-              size="1"
-              variant={settings?.proactive_enabled ? "soft" : "outline"}
-              onClick={handleSettings}
-              disabled={isSavingSettings}
-            >
-              {settings?.proactive_enabled ? "Proactive On" : "Proactive Off"}
-            </Button>
-            <Button
-              size="1"
-              variant="outline"
-              onClick={() =>
-                void handlePromptChange(
-                  settings?.personality_prompt
-                    ? null
-                    : personality?.prompt ?? null,
-                )
-              }
-              disabled={isSavingSettings}
-            >
-              {settings?.personality_prompt
-                ? "Use Random Vibe"
-                : "Use Current Vibe"}
-            </Button>
+            <div className={styles.personaSection}>
+              <Text
+                size="1"
+                weight="bold"
+                color="gray"
+                className={styles.sectionLabel}
+              >
+                TRAITS
+              </Text>
+              <div className={styles.traitsGrid}>
+                {Object.entries(personality?.traits ?? {}).map(
+                  ([key, value]) => {
+                    const fill = Math.max(0, Math.min(100, Number(value) || 0));
+                    return (
+                      <div key={key} className={styles.traitRow}>
+                        <div className={styles.traitHeader}>
+                          <span className={styles.traitName}>{key}</span>
+                          <span className={styles.traitValue}>{value}</span>
+                        </div>
+                        <div className={styles.needBar}>
+                          <div
+                            className={styles.needFill}
+                            style={{ width: `${fill}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  },
+                )}
+              </div>
+            </div>
+
+            <div className={styles.personaSection}>
+              <Text
+                size="1"
+                weight="bold"
+                color="gray"
+                className={styles.sectionLabel}
+              >
+                SKILLS
+              </Text>
+              <div className={styles.skillsRow}>
+                {unlockedSkills.length === 0 && (
+                  <Text size="1" color="gray">
+                    None yet
+                  </Text>
+                )}
+                {unlockedSkills.map((id) => {
+                  const skill = SKILLS.find((s) => s.id === id);
+                  return skill ? (
+                    <span key={id} className={styles.skillChip}>
+                      {skill.icon} {skill.name}
+                    </span>
+                  ) : null;
+                })}
+              </div>
+            </div>
           </div>
 
           {activeQuest && (
@@ -711,50 +755,71 @@ export const BuddyHome: React.FC = () => {
 
               <div className={styles.questControls}>
                 {activeQuest.controls.map((ctrl) => (
-                  <Button
+                  <button
                     key={ctrl.id}
-                    size="1"
-                    variant={ctrl.style === "primary" ? "soft" : "outline"}
+                    type="button"
+                    className={classNames(styles.chip, {
+                      [styles.chipPrimary]: ctrl.style === "primary",
+                    })}
                     onClick={() => void handleQuestControl(ctrl)}
                   >
                     {ctrl.label}
-                  </Button>
+                  </button>
                 ))}
               </div>
             </div>
           )}
+
+          {/* Footer action row — chip-styled buttons so every clickable
+              control on the page shares one consistent pill shape.
+              Buttons start in the neutral outline state; toggles light
+              up primary only when they're "on", so the user can read
+              the current state at a glance instead of guessing which
+              of two highlighted chips is active. */}
+          <div className={styles.actionRow}>
+            <button
+              type="button"
+              className={styles.chip}
+              onClick={() => void handleReroll()}
+            >
+              Reroll personality
+            </button>
+            <button
+              type="button"
+              className={classNames(styles.chip, {
+                [styles.chipPrimary]: settings?.proactive_enabled,
+              })}
+              onClick={handleSettings}
+              disabled={isSavingSettings}
+              aria-pressed={settings?.proactive_enabled}
+            >
+              Proactive {settings?.proactive_enabled ? "on" : "off"}
+            </button>
+            <button
+              type="button"
+              className={classNames(styles.chip, {
+                [styles.chipPrimary]: !!settings?.personality_prompt,
+              })}
+              onClick={() =>
+                void handlePromptChange(
+                  settings?.personality_prompt
+                    ? null
+                    : personality?.prompt ?? null,
+                )
+              }
+              disabled={isSavingSettings}
+              aria-pressed={!!settings?.personality_prompt}
+            >
+              Pin current vibe
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Row 2 — Project setup + Activity (activity scrolls internally) */}
-      <div className={classNames(styles.row, styles.rowFlex)}>
-        <div className={styles.panel}>
-          <div className={styles.panelHeader}>
-            <Text
-              size="1"
-              weight="bold"
-              color="gray"
-              className={styles.sectionLabel}
-            >
-              PROJECT SETUP
-            </Text>
-          </div>
-          <div className={styles.setupChipsList}>
-            {SETUP_MODES.map((m) => (
-              <button
-                key={m.mode}
-                type="button"
-                className={classNames(styles.setupChip, {
-                  [styles.setupChipPrimary]: m.mode === "setup",
-                })}
-                onClick={() => handleRunMode(m.mode)}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
+      {/* Bottom row — Activity, Recent errors, Recent chats. All three
+          scroll internally and share the remaining vertical space so the
+          page stays inside the IDE viewport. */}
+      <div className={classNames(styles.row, styles.row3, styles.rowFlex)}>
         <div className={classNames(styles.panel, styles.panelScroll)}>
           <div className={styles.panelHeader}>
             <Text
@@ -799,10 +864,7 @@ export const BuddyHome: React.FC = () => {
             })}
           </div>
         </div>
-      </div>
 
-      {/* Row 3 — Recent errors + Recent chats (both scroll internally) */}
-      <div className={classNames(styles.row, styles.rowFlex)}>
         <div className={classNames(styles.panel, styles.panelScroll)}>
           <div className={styles.panelHeader}>
             <Text
@@ -845,6 +907,12 @@ export const BuddyHome: React.FC = () => {
                   <div className={styles.listContent}>
                     <span className={styles.listTitle}>
                       {e.title}
+                      {"occurrences" in e &&
+                        (e as { occurrences: number }).occurrences > 1 && (
+                          <span className={styles.countBadge}>
+                            ×{(e as { occurrences: number }).occurrences}
+                          </span>
+                        )}
                       {e.dismissed && (
                         <span className={styles.ackBadge}>acknowledged</span>
                       )}
@@ -858,24 +926,23 @@ export const BuddyHome: React.FC = () => {
                   </div>
                   <div className={styles.errorActions}>
                     <Tooltip content="Open a Buddy chat to investigate this error">
-                      <Button
-                        size="1"
-                        variant="soft"
+                      <button
+                        type="button"
+                        className={classNames(styles.chip, styles.chipPrimary)}
                         onClick={() => handleInvestigateError(e)}
                       >
                         Investigate
-                      </Button>
+                      </button>
                     </Tooltip>
                     {!e.dismissed && (
                       <Tooltip content="Mark as acknowledged">
-                        <Button
-                          size="1"
-                          variant="ghost"
-                          color="gray"
+                        <button
+                          type="button"
+                          className={classNames(styles.chip, styles.chipGhost)}
                           onClick={() => handleDismissError(e)}
                         >
                           Dismiss
-                        </Button>
+                        </button>
                       </Tooltip>
                     )}
                   </div>
@@ -893,6 +960,10 @@ export const BuddyHome: React.FC = () => {
           title="RECENT CHATS"
         />
       </div>
+
+      {/* Persistent NavBar-style toolbar at the bottom of the page,
+          mirroring the dashboard home NavBar. */}
+      <BuddyWorkshop />
     </div>
   );
 };

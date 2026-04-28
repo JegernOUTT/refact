@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Text, Button } from "@radix-ui/themes";
+import { Text } from "@radix-ui/themes";
 import { BuddyOpportunityCard } from "./BuddyOpportunityCard";
 import { useBuddyOpportunities } from "./hooks/useBuddyOpportunities";
 import styles from "./BuddyOpportunitiesFeed.module.css";
@@ -32,9 +32,13 @@ export const BuddyOpportunitiesFeed: React.FC = () => {
             </div>
           ))}
           {hasMore && (
-            <Button size="1" variant="ghost" onClick={() => setShowAll(true)}>
+            <button
+              type="button"
+              className={styles.showMoreChip}
+              onClick={() => setShowAll(true)}
+            >
               Show {unread.length - PAGE_SIZE} more
-            </Button>
+            </button>
           )}
         </div>
       )}

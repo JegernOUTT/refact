@@ -222,8 +222,13 @@ export function useBuddyState(
       dispatch({ kind: "signal", signalType: nowPlaying.signal_type });
     }
 
-    const signalDef = SIGNALS[nowPlaying.signal_type];
-    const isActive = signalDef.category === "active";
+    // Backend may emit signal_type values not present in the local SIGNALS
+    // map (e.g. newly-added or experimental types). Look up defensively so
+    // an unknown type degrades gracefully instead of crashing the panel.
+    const signalDef = SIGNALS[nowPlaying.signal_type] as
+      | (typeof SIGNALS)[keyof typeof SIGNALS]
+      | undefined;
+    const isActive = signalDef?.category === "active";
     const isCompleted =
       nowPlaying.status === "completed" || nowPlaying.status === "failed";
     if (isActive && !isCompleted) {
@@ -232,7 +237,7 @@ export function useBuddyState(
     const ttl = nowPlaying.persistent
       ? undefined
       : nowPlaying.ttl_ms ??
-        signalDef.duration ??
+        signalDef?.duration ??
         (nowPlaying.status === "progress" ? 8000 : 4000);
     if (ttl === undefined) return;
     const timer = setTimeout(() => reduxDispatch(clearNowPlaying()), ttl);

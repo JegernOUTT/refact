@@ -133,7 +133,14 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         if (bubbleRef.current) {
           const anim = animRef.current;
           const overrideText = speechOverrideRef.current ?? "";
-          const text = overrideText || anim.statusText || "";
+          const rawText = overrideText || anim.statusText || "";
+          // Cap speech-bubble text length so a runaway error message or
+          // a long backend speech_text cannot blow out the hero layout.
+          // 140 chars matches roughly two short lines at our default size.
+          const text =
+            rawText.length > 140
+              ? `${rawText.slice(0, 137).trimEnd()}…`
+              : rawText;
           const opacity = overrideText ? 1 : anim.statusOpacity;
           if (text !== bubbleTextRef.current) {
             bubbleTextRef.current = text;
