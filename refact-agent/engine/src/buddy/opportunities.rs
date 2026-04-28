@@ -13,6 +13,16 @@ pub const MAX_UNREAD: usize = 3;
 pub const DISMISS_MEMORY: Duration = Duration::hours(24);
 pub const DEFAULT_COOLDOWN: Duration = Duration::minutes(30);
 
+pub fn is_terminal_status(status: OpportunityStatus) -> bool {
+    matches!(
+        status,
+        OpportunityStatus::Dismissed
+            | OpportunityStatus::Accepted
+            | OpportunityStatus::Completed
+            | OpportunityStatus::Expired
+    )
+}
+
 /// Priority-ordered queue of `BuddyOpportunity` values with cooldown and dismissal tracking.
 pub struct OpportunityQueue {
     pub(crate) items: Vec<BuddyOpportunity>,
@@ -48,12 +58,7 @@ impl OpportunityQueue {
 
     fn cap_items(&mut self) {
         if self.items.len() > MAX_OPPORTUNITIES {
-            let terminal = [
-                OpportunityStatus::Expired,
-                OpportunityStatus::Completed,
-                OpportunityStatus::Dismissed,
-            ];
-            if let Some(pos) = self.items.iter().position(|o| terminal.contains(&o.status)) {
+            if let Some(pos) = self.items.iter().position(|o| is_terminal_status(o.status)) {
                 self.items.remove(pos);
             } else if let Some(pos) = self
                 .items
@@ -104,12 +109,7 @@ impl OpportunityQueue {
     pub fn mark_status(&mut self, id: &str, status: OpportunityStatus) {
         if let Some(opp) = self.items.iter_mut().find(|o| o.id == id) {
             opp.status = status;
-            let terminal = [
-                OpportunityStatus::Expired,
-                OpportunityStatus::Completed,
-                OpportunityStatus::Dismissed,
-            ];
-            if terminal.contains(&status) {
+            if is_terminal_status(status) {
                 opp.resolved_at.get_or_insert_with(Utc::now);
             }
         }
@@ -125,20 +125,15 @@ impl OpportunityQueue {
     }
 
     pub fn expire_old(&mut self, now: DateTime<Utc>) {
-        let terminal = [
-            OpportunityStatus::Expired,
-            OpportunityStatus::Completed,
-            OpportunityStatus::Dismissed,
-        ];
         for opp in self.items.iter_mut() {
-            if opp.expires_at <= now && !terminal.contains(&opp.status) {
+            if opp.expires_at <= now && !is_terminal_status(opp.status) {
                 opp.status = OpportunityStatus::Expired;
                 opp.resolved_at.get_or_insert(now);
             }
         }
         let cutoff = now - Duration::hours(24);
         self.items.retain(|o| {
-            if !terminal.contains(&o.status) {
+            if !is_terminal_status(o.status) {
                 return true;
             }
             let terminal_since = o.resolved_at.unwrap_or(o.created_at);

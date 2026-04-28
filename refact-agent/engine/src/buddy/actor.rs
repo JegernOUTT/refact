@@ -257,7 +257,10 @@ impl BuddyService {
             .send(BuddyEvent::OpportunityProduced { opportunity: opp });
     }
 
-    pub fn resolve_opportunity(&mut self, id: &str, status: OpportunityStatus) {
+    pub fn resolve_opportunity(&mut self, id: &str, status: OpportunityStatus) -> bool {
+        if self.opportunity_queue.get(id).is_none() {
+            return false;
+        }
         if matches!(status, OpportunityStatus::Dismissed) {
             self.opportunity_queue.dismiss(id);
         } else {
@@ -270,6 +273,7 @@ impl BuddyService {
             opportunity_id: id.to_string(),
             status,
         });
+        true
     }
 
     pub fn set_pulse(&mut self, pulse: BuddyPulse) {

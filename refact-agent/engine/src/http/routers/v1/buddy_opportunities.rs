@@ -9,6 +9,7 @@ use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
 use crate::buddy::events::BuddyEvent;
+use crate::buddy::opportunities::is_terminal_status;
 use crate::buddy::types::{BuddyAction, BuddyDraft, DraftKind, InvestigationContext, OpportunityStatus};
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
@@ -60,33 +61,45 @@ pub async fn handle_v1_buddy_opportunity_accept(
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
     let req = body.map(|b| b.0).unwrap_or_default();
 
-    let opp = {
-        let buddy_arc = gcx.read().await.buddy.clone();
-        let lock = buddy_arc.lock().await;
-        let svc = lock.as_ref().ok_or_else(|| {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let action = {
+        let mut lock = buddy_arc.lock().await;
+        let svc = lock.as_mut().ok_or_else(|| {
             ScratchError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "buddy not initialized".into(),
             )
         })?;
-        svc.opportunity_queue.get(&id).cloned().ok_or_else(|| {
+        let opp = svc.opportunity_queue.get(&id).cloned().ok_or_else(|| {
             ScratchError::new(
                 StatusCode::NOT_FOUND,
                 format!("opportunity not found: {}", id),
             )
-        })?
+        })?;
+        if is_terminal_status(opp.status) {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                format!("opportunity already resolved: {:?}", opp.status),
+            ));
+        }
+        let action = opp
+            .proposed_actions
+            .get(req.action_index)
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("action_index {} out of range", req.action_index),
+                )
+            })?
+            .clone();
+        if !matches!(action, BuddyAction::Dismiss) {
+            svc.opportunity_queue
+                .mark_status(&id, OpportunityStatus::Accepted);
+            svc.state.opportunities = svc.opportunity_queue.snapshot();
+            svc.dirty = true;
+        }
+        action
     };
-
-    let action = opp
-        .proposed_actions
-        .get(req.action_index)
-        .ok_or_else(|| {
-            ScratchError::new(
-                StatusCode::BAD_REQUEST,
-                format!("action_index {} out of range", req.action_index),
-            )
-        })?
-        .clone();
 
     let outcome = dispatch_action(gcx.clone(), &id, &action).await?;
 
@@ -394,10 +407,16 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
             "buddy not initialized".into(),
         )
     })?;
-    if svc.opportunity_queue.get(&id).is_none() {
-        return Err(ScratchError::new(
+    let opp = svc.opportunity_queue.get(&id).cloned().ok_or_else(|| {
+        ScratchError::new(
             StatusCode::NOT_FOUND,
             format!("opportunity not found: {}", id),
+        )
+    })?;
+    if is_terminal_status(opp.status) {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            format!("opportunity already resolved: {:?}", opp.status),
         ));
     }
     svc.resolve_opportunity(&id, OpportunityStatus::Dismissed);

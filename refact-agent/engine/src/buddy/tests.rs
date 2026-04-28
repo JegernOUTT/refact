@@ -4690,6 +4690,251 @@ async fn accept_route_response_shape_for_defaults_draft() {
     );
 }
 
+#[test]
+fn accepted_opportunity_does_not_become_expired() {
+    use super::opportunities::OpportunityQueue;
+    let now = chrono::Utc::now();
+    let mut q = OpportunityQueue::new();
+    let mut opp = make_opportunity("opp-accepted-expire", "ck-accepted-expire");
+    opp.created_at = now - Duration::hours(25);
+    opp.expires_at = now - Duration::hours(24);
+    q.push(opp);
+    q.mark_status("opp-accepted-expire", OpportunityStatus::Accepted);
+    q.expire_old(now);
+    assert_eq!(
+        q.get("opp-accepted-expire").map(|o| o.status),
+        Some(OpportunityStatus::Accepted)
+    );
+}
+
+#[test]
+fn accepted_opportunity_has_resolved_at() {
+    use super::opportunities::OpportunityQueue;
+    let mut q = OpportunityQueue::new();
+    q.push(make_opportunity(
+        "opp-accepted-resolved",
+        "ck-accepted-resolved",
+    ));
+    q.mark_status("opp-accepted-resolved", OpportunityStatus::Accepted);
+    assert!(q
+        .get("opp-accepted-resolved")
+        .and_then(|o| o.resolved_at)
+        .is_some());
+}
+
+#[tokio::test]
+async fn accept_route_terminal_status_returns_409() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, AcceptRequest,
+    };
+    use hyper::StatusCode;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-terminal-accept", "ck-terminal-accept");
+    opp.status = OpportunityStatus::Dismissed;
+    opp.resolved_at = Some(chrono::Utc::now());
+    opp.proposed_actions = vec![BuddyAction::OpenPage {
+        page: BuddyPage::Buddy,
+        params: None,
+    }];
+    svc.opportunity_queue.push(opp);
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    let err = handle_v1_buddy_opportunity_accept(
+        Extension(gcx),
+        Path("opp-terminal-accept".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn accept_after_dismiss_returns_409() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, handle_v1_buddy_opportunity_dismiss, AcceptRequest,
+    };
+    use hyper::StatusCode;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-dismiss-then-accept", "ck-dismiss-then-accept");
+    opp.proposed_actions = vec![BuddyAction::OpenPage {
+        page: BuddyPage::Buddy,
+        params: None,
+    }];
+    svc.add_opportunity(opp);
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    handle_v1_buddy_opportunity_dismiss(
+        Extension(gcx.clone()),
+        Path("opp-dismiss-then-accept".to_string()),
+    )
+    .await
+    .unwrap();
+    let accept_err = handle_v1_buddy_opportunity_accept(
+        Extension(gcx.clone()),
+        Path("opp-dismiss-then-accept".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(accept_err.status_code, StatusCode::CONFLICT);
+    let dismiss_err = handle_v1_buddy_opportunity_dismiss(
+        Extension(gcx),
+        Path("opp-dismiss-then-accept".to_string()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(dismiss_err.status_code, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn expired_opportunity_cannot_be_accepted() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, AcceptRequest,
+    };
+    use hyper::StatusCode;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-expired-accept", "ck-expired-accept");
+    opp.status = OpportunityStatus::Expired;
+    opp.resolved_at = Some(chrono::Utc::now());
+    opp.proposed_actions = vec![BuddyAction::OpenPage {
+        page: BuddyPage::Buddy,
+        params: None,
+    }];
+    svc.opportunity_queue.push(opp);
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    let err = handle_v1_buddy_opportunity_accept(
+        Extension(gcx),
+        Path("opp-expired-accept".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code, StatusCode::CONFLICT);
+}
+
+#[test]
+fn resolve_opportunity_missing_id_returns_false() {
+    let mut svc = make_service();
+    assert!(!svc.resolve_opportunity("missing-opp", OpportunityStatus::Accepted));
+}
+
+#[tokio::test]
+async fn resolve_opportunity_missing_id_emits_no_event() {
+    let (tx, mut rx) = broadcast::channel(16);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+    assert!(!svc.resolve_opportunity("missing-opp", OpportunityStatus::Accepted));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn concurrent_accepts_only_one_succeeds() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, AcceptRequest,
+    };
+    use hyper::StatusCode;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-concurrent-accept", "ck-concurrent-accept");
+    opp.proposed_actions = vec![BuddyAction::OpenPage {
+        page: BuddyPage::Buddy,
+        params: None,
+    }];
+    svc.add_opportunity(opp);
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    let gcx1 = gcx.clone();
+    let gcx2 = gcx.clone();
+    let task1 = tokio::spawn(async move {
+        match handle_v1_buddy_opportunity_accept(
+            Extension(gcx1),
+            Path("opp-concurrent-accept".to_string()),
+            Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        )
+        .await
+        {
+            Ok(_) => StatusCode::OK,
+            Err(err) => err.status_code,
+        }
+    });
+    let task2 = tokio::spawn(async move {
+        match handle_v1_buddy_opportunity_accept(
+            Extension(gcx2),
+            Path("opp-concurrent-accept".to_string()),
+            Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        )
+        .await
+        {
+            Ok(_) => StatusCode::OK,
+            Err(err) => err.status_code,
+        }
+    });
+    let (status1, status2) = tokio::join!(task1, task2);
+    let mut statuses = vec![status1.unwrap(), status2.unwrap()];
+    statuses.sort_by_key(|s| s.as_u16());
+    assert_eq!(statuses, vec![StatusCode::OK, StatusCode::CONFLICT]);
+}
+
+#[tokio::test]
+async fn dismiss_action_through_accept_route_results_in_dismissed_not_accepted() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, AcceptRequest,
+    };
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-accept-dismiss-action", "ck-accept-dismiss-action");
+    opp.proposed_actions = vec![BuddyAction::Dismiss];
+    svc.add_opportunity(opp);
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    handle_v1_buddy_opportunity_accept(
+        Extension(gcx.clone()),
+        Path("opp-accept-dismiss-action".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap();
+
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let svc = lock.as_ref().unwrap();
+    let opp = svc
+        .opportunity_queue
+        .get("opp-accept-dismiss-action")
+        .unwrap();
+    assert_eq!(opp.status, OpportunityStatus::Dismissed);
+    assert!(svc
+        .opportunity_queue
+        .recently_dismissed("ck-accept-dismiss-action", Duration::hours(24)));
+}
+
 // =============================================================================
 // G-B: Per-rule cooldown persistence + provider-tuning DefaultsKind correctness
 // =============================================================================
