@@ -11,6 +11,17 @@ use crate::tasks::types::{TaskBoard, TaskMeta, TaskStatus};
 
 pub struct TaskHealthObserver;
 
+pub struct TaskHealthEntry {
+    pub meta: TaskMeta,
+    pub board: TaskBoard,
+    /// Most recent session `last_activity` timestamp across all "doing" cards
+    /// for this task. `None` means no agent session has ever been active.
+    pub last_heartbeat: Option<DateTime<Utc>>,
+    /// Files touched by this task (for cluster-duplicate overlap check).
+    /// Empty means file metadata is unavailable; the cluster rule is skipped.
+    pub touched_files: Vec<String>,
+}
+
 fn title_hash(s: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -19,59 +30,55 @@ fn title_hash(s: &str) -> String {
     format!("{:x}", h.finish())
 }
 
-pub fn detect_task_health_facts(
-    pairs: &[(TaskMeta, TaskBoard)],
-    now: DateTime<Utc>,
-) -> Vec<BuddyFact> {
+pub fn detect_task_health_facts(entries: &[TaskHealthEntry], now: DateTime<Utc>) -> Vec<BuddyFact> {
     let mut facts = vec![];
-    let stuck_min = chrono::Duration::minutes(15);
-    let abandon_days = chrono::Duration::days(7);
+    let stuck_threshold = chrono::Duration::minutes(15);
+    let abandon_threshold = chrono::Duration::days(7);
 
-    for (meta, board) in pairs {
-        let terminal = matches!(meta.status, TaskStatus::Completed | TaskStatus::Abandoned);
+    for entry in entries {
+        let terminal = matches!(entry.meta.status, TaskStatus::Completed | TaskStatus::Abandoned);
         if terminal {
             continue;
         }
 
-        for card in &board.cards {
-            if card.column != "doing" || card.assignee.is_none() {
-                continue;
-            }
-            if let Some(started) = &card.started_at {
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(started) {
-                    if now.signed_duration_since(dt.with_timezone(&Utc)) >= stuck_min {
-                        tracing::debug!("task_health: stuck card {} in task {}", card.id, meta.id);
-                        facts.push(BuddyFact {
-                            kind: BuddyFactKind::TaskStuck,
-                            key: format!("task:stuck:{}", meta.id),
-                            source: "task_health",
-                            payload: serde_json::json!({
-                                "task_id": meta.id,
-                                "card_id": card.id,
-                                "last_seen_iso": started,
-                                "agent_id": card.assignee,
-                                "blocker_hint": "",
-                            }),
-                            seen_at: now,
-                            confidence: 0.8,
-                        });
-                        break;
-                    }
+        let has_doing_card = entry
+            .board
+            .cards
+            .iter()
+            .any(|c| c.column == "doing" && c.assignee.is_some());
+
+        if has_doing_card {
+            // TaskStuck: requires a stale heartbeat. If no heartbeat is available,
+            // do NOT emit — absence of a session means "never ran", not "stuck".
+            if let Some(heartbeat) = entry.last_heartbeat {
+                if now.signed_duration_since(heartbeat) >= stuck_threshold {
+                    tracing::debug!("task_health: stuck task {}", entry.meta.id);
+                    facts.push(BuddyFact {
+                        kind: BuddyFactKind::TaskStuck,
+                        key: format!("task:stuck:{}", entry.meta.id),
+                        source: "task_health",
+                        payload: serde_json::json!({
+                            "task_id": entry.meta.id,
+                            "last_seen_iso": heartbeat.to_rfc3339(),
+                        }),
+                        seen_at: now,
+                        confidence: 0.8,
+                    });
                 }
             }
         }
 
-        if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&meta.created_at) {
+        // TaskAbandoned: old task AND no heartbeat ever recorded (agent never ran).
+        if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&entry.meta.created_at) {
             let age = now.signed_duration_since(created.with_timezone(&Utc));
-            let no_activity = board.cards.iter().all(|c| c.started_at.is_none());
-            if age >= abandon_days && no_activity {
-                tracing::debug!("task_health: abandoned task {}", meta.id);
+            if age >= abandon_threshold && entry.last_heartbeat.is_none() {
+                tracing::debug!("task_health: abandoned task {}", entry.meta.id);
                 facts.push(BuddyFact {
                     kind: BuddyFactKind::TaskAbandoned,
-                    key: format!("task:abandoned:{}", meta.id),
+                    key: format!("task:abandoned:{}", entry.meta.id),
                     source: "task_health",
                     payload: serde_json::json!({
-                        "task_id": meta.id,
+                        "task_id": entry.meta.id,
                         "age_days": age.num_days(),
                     }),
                     seen_at: now,
@@ -81,37 +88,50 @@ pub fn detect_task_health_facts(
         }
     }
 
-    let active: Vec<&(TaskMeta, TaskBoard)> = pairs
+    let active: Vec<&TaskHealthEntry> = entries
         .iter()
-        .filter(|(m, _)| !matches!(m.status, TaskStatus::Completed | TaskStatus::Abandoned))
+        .filter(|e| !matches!(e.meta.status, TaskStatus::Completed | TaskStatus::Abandoned))
         .collect();
 
     let mut emitted: HashSet<String> = HashSet::new();
     for i in 0..active.len() {
         for j in (i + 1)..active.len() {
-            let a = active[i].0.name.to_lowercase();
+            let a = active[i].meta.name.to_lowercase();
             let a = a.trim();
-            let b = active[j].0.name.to_lowercase();
+            let b = active[j].meta.name.to_lowercase();
             let b = b.trim();
             if a.is_empty() || b.is_empty() {
                 continue;
             }
             let sim = strsim::normalized_levenshtein(a, b);
             if sim > 0.7 {
+                // Require at least one shared file when file metadata is available.
+                // Without file metadata (empty touched_files), the cluster rule is
+                // skipped to avoid false positives from title similarity alone.
+                let a_files = &active[i].touched_files;
+                let b_files = &active[j].touched_files;
+                let has_overlap = if !a_files.is_empty() && !b_files.is_empty() {
+                    a_files.iter().any(|f| b_files.contains(f))
+                } else {
+                    false
+                };
+                if !has_overlap {
+                    continue;
+                }
                 let rep = if a <= b { a } else { b };
                 let key = format!("task_cluster:{}", title_hash(rep));
                 if emitted.insert(key.clone()) {
                     tracing::debug!(
                         "task_health: cluster {} ~ {}",
-                        active[i].0.id,
-                        active[j].0.id
+                        active[i].meta.id,
+                        active[j].meta.id
                     );
                     facts.push(BuddyFact {
                         kind: BuddyFactKind::TaskClusterDuplicate,
                         key,
                         source: "task_health",
                         payload: serde_json::json!({
-                            "task_ids": [active[i].0.id, active[j].0.id],
+                            "task_ids": [active[i].meta.id, active[j].meta.id],
                             "similarity": sim,
                         }),
                         seen_at: now,
@@ -152,13 +172,37 @@ impl BuddyObserver for TaskHealthObserver {
             Ok(t) => t,
             Err(_) => return vec![],
         };
-        let mut pairs = vec![];
+        let mut entries = vec![];
         for meta in tasks {
-            match crate::tasks::storage::load_board(gcx.clone(), &meta.id).await {
-                Ok(board) => pairs.push((meta, board)),
+            let board = match crate::tasks::storage::load_board(gcx.clone(), &meta.id).await {
+                Ok(b) => b,
                 Err(_) => continue,
+            };
+            let mut latest_heartbeat: Option<chrono::DateTime<Utc>> = None;
+            for card in &board.cards {
+                if card.column == "doing" {
+                    if let Some(chat_id) = &card.agent_chat_id {
+                        if let Some(h) = crate::chat::task_agent_monitor::get_last_agent_heartbeat(
+                            gcx.clone(),
+                            chat_id,
+                        )
+                        .await
+                        {
+                            latest_heartbeat = Some(match latest_heartbeat {
+                                Some(t) if t > h => t,
+                                _ => h,
+                            });
+                        }
+                    }
+                }
             }
+            entries.push(TaskHealthEntry {
+                meta,
+                board,
+                last_heartbeat: latest_heartbeat,
+                touched_files: vec![],
+            });
         }
-        detect_task_health_facts(&pairs, ctx.now)
+        detect_task_health_facts(&entries, ctx.now)
     }
 }

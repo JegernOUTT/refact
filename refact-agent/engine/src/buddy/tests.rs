@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use chrono::Duration;
 use tokio::sync::broadcast;
 use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
@@ -2282,22 +2283,23 @@ fn make_board_card(
 
 #[test]
 fn task_health_emits_stuck_fact() {
-    use super::observers::task_health::detect_task_health_facts;
+    use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
     let now = chrono::Utc::now();
-    let started = (now - Duration::minutes(20)).to_rfc3339();
+    let heartbeat = now - Duration::minutes(20);
     let meta = make_task_meta("t1", "Fix bug", TaskStatus::Active, &now.to_rfc3339());
     let board = TaskBoard {
         schema_version: 1,
         rev: 0,
         columns: vec![],
-        cards: vec![make_board_card(
-            "c1",
-            "doing",
-            Some("agent-1"),
-            Some(&started),
-        )],
+        cards: vec![make_board_card("c1", "doing", Some("agent-1"), None)],
     };
-    let facts = detect_task_health_facts(&[(meta, board)], now);
+    let entries = vec![TaskHealthEntry {
+        meta,
+        board,
+        last_heartbeat: Some(heartbeat),
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&entries, now);
     assert!(
         facts.iter().any(|f| f.kind == BuddyFactKind::TaskStuck),
         "stuck fact must be emitted"
@@ -2306,22 +2308,23 @@ fn task_health_emits_stuck_fact() {
 
 #[test]
 fn task_health_no_fact_for_completed() {
-    use super::observers::task_health::detect_task_health_facts;
+    use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
     let now = chrono::Utc::now();
-    let started = (now - Duration::minutes(20)).to_rfc3339();
+    let heartbeat = now - Duration::minutes(20);
     let meta = make_task_meta("t1", "Done task", TaskStatus::Completed, &now.to_rfc3339());
     let board = TaskBoard {
         schema_version: 1,
         rev: 0,
         columns: vec![],
-        cards: vec![make_board_card(
-            "c1",
-            "doing",
-            Some("agent-1"),
-            Some(&started),
-        )],
+        cards: vec![make_board_card("c1", "doing", Some("agent-1"), None)],
     };
-    let facts = detect_task_health_facts(&[(meta, board)], now);
+    let entries = vec![TaskHealthEntry {
+        meta,
+        board,
+        last_heartbeat: Some(heartbeat),
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&entries, now);
     assert!(
         facts.iter().all(|f| f.kind != BuddyFactKind::TaskStuck),
         "completed task must not emit stuck fact"
@@ -2829,13 +2832,17 @@ async fn actor_humor_attached_when_allowed() {
     }
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let mut svc = make_service();
-    svc.humor_service = HumorService::new_with_generator(std::sync::Arc::new(MockGen));
+    svc.humor_service = Arc::new(tokio::sync::Mutex::new(
+        HumorService::new_with_generator(std::sync::Arc::new(MockGen)),
+    ));
     let mut opp = make_opportunity("humor-opp", "humor-opp-key");
     opp.humor_allowed = true;
     opp.priority = BuddyPriority::Normal;
     opp.summary = "test summary".to_string();
     let pulse = BuddyPulse::default();
     svc.humor_service
+        .lock()
+        .await
         .attach_humor(&mut opp, BuddyFactKind::TaskStuck, &pulse, gcx)
         .await;
     assert!(opp.humor.is_some(), "humor must be attached when allowed");
@@ -3664,4 +3671,260 @@ fn terminal_opp_retention_uses_resolved_at() {
         q2.get("opp-rt2").is_none(),
         "opp resolved now must be evicted at now+24h01m"
     );
+}
+
+// =============================================================================
+// F-A: Humor off-lock + task health semantics + pulse completeness
+// =============================================================================
+
+#[tokio::test]
+async fn humor_attach_does_not_hold_buddy_lock() {
+    use super::humor::{HumorGenerator, HumorService};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SlowGen {
+        started: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl HumorGenerator for SlowGen {
+        async fn generate(
+            &self,
+            _kind: BuddyFactKind,
+            _summary: String,
+            _gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+        ) -> Vec<String> {
+            self.started.store(true, Ordering::SeqCst);
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            vec!["slow joke".to_string()]
+        }
+    }
+
+    let started = Arc::new(AtomicBool::new(false));
+    let mut svc = make_service();
+    svc.humor_service = Arc::new(tokio::sync::Mutex::new(HumorService::new_with_generator(
+        Arc::new(SlowGen { started: started.clone() }),
+    )));
+
+    let humor_arc = svc.humor_service.clone();
+    let buddy_arc: Arc<tokio::sync::Mutex<Option<BuddyService>>> =
+        Arc::new(tokio::sync::Mutex::new(Some(svc)));
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let pulse = BuddyPulse::default();
+
+    // Simulate the background loop: extract humor_arc under buddy lock then release.
+    let _ = {
+        let guard = buddy_arc.lock().await;
+        guard.as_ref().unwrap().humor_service.clone()
+    };
+
+    // Task A: hold humor lock for 200ms (simulates attach_humor outside buddy lock).
+    let humor_clone = humor_arc.clone();
+    let gcx_clone = gcx.clone();
+    let pulse_clone = pulse.clone();
+    let humor_task = tokio::spawn(async move {
+        let mut humor = humor_clone.lock().await;
+        let mut opp = make_opportunity("h1", "ck-h1");
+        humor
+            .attach_humor(&mut opp, BuddyFactKind::TaskStuck, &pulse_clone, gcx_clone)
+            .await;
+    });
+
+    // Wait until SlowGen starts running.
+    while !started.load(Ordering::SeqCst) {
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    }
+
+    // add_activity must NOT be blocked by the humor lock — buddy lock is free.
+    let start = std::time::Instant::now();
+    {
+        let mut guard = buddy_arc.lock().await;
+        if let Some(svc) = guard.as_mut() {
+            svc.add_activity(super::types::BuddyActivity {
+                icon: "🔧".to_string(),
+                title: "test".to_string(),
+                description: "test".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                activity_type: "test".to_string(),
+            });
+        }
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_millis() < 50,
+        "add_activity must complete fast while humor runs, took {}ms",
+        elapsed.as_millis()
+    );
+    humor_task.await.unwrap();
+}
+
+#[test]
+fn task_stuck_uses_heartbeat_not_started_at() {
+    use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
+    let now = chrono::Utc::now();
+    let meta = make_task_meta("t1", "Fix bug", TaskStatus::Active, &now.to_rfc3339());
+    let board = TaskBoard {
+        schema_version: 1,
+        rev: 0,
+        columns: vec![],
+        cards: vec![make_board_card("c1", "doing", Some("agent-1"), Some(&(now - Duration::hours(1)).to_rfc3339()))],
+    };
+
+    // Fresh heartbeat (1 min ago) — no stuck fact even though started_at is 1h old.
+    let fresh = vec![TaskHealthEntry {
+        meta: meta.clone(),
+        board: board.clone(),
+        last_heartbeat: Some(now - Duration::minutes(1)),
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&fresh, now);
+    assert!(
+        facts.iter().all(|f| f.kind != BuddyFactKind::TaskStuck),
+        "fresh heartbeat must not emit TaskStuck"
+    );
+
+    // Stale heartbeat (20 min ago) — stuck fact emitted.
+    let stale = vec![TaskHealthEntry {
+        meta,
+        board,
+        last_heartbeat: Some(now - Duration::minutes(20)),
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&stale, now);
+    assert!(
+        facts.iter().any(|f| f.kind == BuddyFactKind::TaskStuck),
+        "stale heartbeat must emit TaskStuck"
+    );
+}
+
+#[test]
+fn task_abandoned_requires_no_heartbeat_ever() {
+    use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
+    let now = chrono::Utc::now();
+    let old_created = (now - Duration::days(8)).to_rfc3339();
+    let board = TaskBoard {
+        schema_version: 1,
+        rev: 0,
+        columns: vec![],
+        cards: vec![],
+    };
+
+    // Has a heartbeat — NOT abandoned even if old.
+    let with_hb = vec![TaskHealthEntry {
+        meta: make_task_meta("t1", "Old task", TaskStatus::Active, &old_created),
+        board: board.clone(),
+        last_heartbeat: Some(now - Duration::days(7)),
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&with_hb, now);
+    assert!(
+        facts.iter().all(|f| f.kind != BuddyFactKind::TaskAbandoned),
+        "task with heartbeat must not be abandoned"
+    );
+
+    // No heartbeat + old enough — Abandoned fact emitted.
+    let no_hb = vec![TaskHealthEntry {
+        meta: make_task_meta("t2", "Old task 2", TaskStatus::Active, &old_created),
+        board,
+        last_heartbeat: None,
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&no_hb, now);
+    assert!(
+        facts.iter().any(|f| f.kind == BuddyFactKind::TaskAbandoned),
+        "task with no heartbeat and age>7d must be abandoned"
+    );
+}
+
+#[test]
+fn task_cluster_requires_file_overlap() {
+    use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
+    let now = chrono::Utc::now();
+    let board = TaskBoard {
+        schema_version: 1,
+        rev: 0,
+        columns: vec![],
+        cards: vec![],
+    };
+
+    // Similar names but disjoint files — no duplicate fact.
+    let disjoint = vec![
+        TaskHealthEntry {
+            meta: make_task_meta("t1", "Fix auth bug", TaskStatus::Active, &now.to_rfc3339()),
+            board: board.clone(),
+            last_heartbeat: None,
+            touched_files: vec!["src/auth.rs".to_string()],
+        },
+        TaskHealthEntry {
+            meta: make_task_meta("t2", "Fix auth issue", TaskStatus::Active, &now.to_rfc3339()),
+            board: board.clone(),
+            last_heartbeat: None,
+            touched_files: vec!["src/session.rs".to_string()],
+        },
+    ];
+    let facts = detect_task_health_facts(&disjoint, now);
+    assert!(
+        facts.iter().all(|f| f.kind != BuddyFactKind::TaskClusterDuplicate),
+        "disjoint file sets must not produce cluster duplicate"
+    );
+
+    // Similar names with shared file — duplicate fact emitted.
+    let overlap = vec![
+        TaskHealthEntry {
+            meta: make_task_meta("t3", "Fix auth bug", TaskStatus::Active, &now.to_rfc3339()),
+            board: board.clone(),
+            last_heartbeat: None,
+            touched_files: vec!["src/auth.rs".to_string(), "src/common.rs".to_string()],
+        },
+        TaskHealthEntry {
+            meta: make_task_meta("t4", "Fix auth issue", TaskStatus::Active, &now.to_rfc3339()),
+            board,
+            last_heartbeat: None,
+            touched_files: vec!["src/common.rs".to_string(), "src/session.rs".to_string()],
+        },
+    ];
+    let facts = detect_task_health_facts(&overlap, now);
+    assert!(
+        facts.iter().any(|f| f.kind == BuddyFactKind::TaskClusterDuplicate),
+        "shared file must produce cluster duplicate for similar tasks"
+    );
+}
+
+#[tokio::test]
+async fn pulse_populates_all_subpulse_counts() {
+    use super::facts::FactStore;
+    use super::pulse::build_pulse;
+    use crate::caps::CodeAssistantCaps;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+
+    // Set up caps with all 3 required models so defaults_ok = true.
+    {
+        let mut gcx_w = gcx.write().await;
+        let mut caps = CodeAssistantCaps::default();
+        caps.defaults.chat_default_model = "openai/gpt-4o".to_string();
+        caps.defaults.chat_thinking_model = "openai/o1".to_string();
+        caps.defaults.chat_buddy_model = "openai/gpt-4o-mini".to_string();
+        gcx_w.caps = Some(Arc::new(caps));
+    }
+
+    // Inject stuck + abandoned facts into the FactStore.
+    let mut store = FactStore::new();
+    let now = chrono::Utc::now();
+    store.ingest(make_fact("task:stuck:t1", BuddyFactKind::TaskStuck, now));
+    store.ingest(make_fact("task:abandoned:t2", BuddyFactKind::TaskAbandoned, now));
+
+    let pulse = build_pulse(gcx.clone(), std::path::Path::new("/tmp"), &store).await;
+
+    assert!(pulse.generated_at.is_some(), "generated_at must be set");
+    assert!(pulse.providers.defaults_ok, "defaults_ok must be true when all 3 models set");
+    assert_eq!(
+        pulse.mcp.total,
+        gcx.read().await.integration_sessions.len() as u32,
+        "mcp.total must match integration_sessions count"
+    );
+    assert!(pulse.customization.skills >= 0, "skills must be populated");
+    assert!(pulse.customization.hooks >= 0, "hooks must be populated");
+    assert_eq!(pulse.tasks.stuck, 1, "stuck count must reflect injected fact");
+    assert_eq!(pulse.tasks.abandoned, 1, "abandoned count must reflect injected fact");
 }

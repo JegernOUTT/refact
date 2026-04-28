@@ -21,8 +21,9 @@ use super::settings::BuddySettings;
 use super::snapshot::BuddySnapshot;
 use super::storage::RuntimeQueueRecord;
 use super::types::{
-    BuddyActivity, BuddyCareAction, BuddyDraft, BuddyFact, BuddyOpportunity, BuddyPage, BuddyPulse,
-    BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem, BuddyState, BuddySuggestion, OpportunityStatus,
+    BuddyActivity, BuddyCareAction, BuddyDraft, BuddyFact, BuddyFactKind, BuddyOpportunity,
+    BuddyPage, BuddyPulse, BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem, BuddyState,
+    BuddySuggestion, OpportunityStatus,
 };
 
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
@@ -134,7 +135,7 @@ pub struct BuddyService {
     pub queue_writer: Option<mpsc::UnboundedSender<RuntimeQueueWriteOp>>,
     pub fact_store: FactStore,
     pub opportunity_queue: OpportunityQueue,
-    pub humor_service: HumorService,
+    pub humor_service: Arc<tokio::sync::Mutex<HumorService>>,
     pub pulse: BuddyPulse,
     pub draft_store: DraftStore,
     pub last_observer_tick: HashMap<&'static str, DateTime<Utc>>,
@@ -170,7 +171,7 @@ impl BuddyService {
             queue_writer,
             fact_store: FactStore::new(),
             opportunity_queue,
-            humor_service: HumorService::new(),
+            humor_service: Arc::new(tokio::sync::Mutex::new(HumorService::new())),
             pulse: BuddyPulse::default(),
             draft_store: DraftStore::new(),
             last_observer_tick: HashMap::new(),
@@ -1264,41 +1265,75 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                     .unwrap_or_default();
                     all_facts.extend(facts);
                 }
-                // Lock once to ingest facts, update ticks, detect, and surface opportunities.
-                let mut buddy = buddy_arc.lock().await;
-                if let Some(svc) = buddy.as_mut() {
-                    for obs in &due_observers {
-                        svc.last_observer_tick.insert(obs.id(), now);
-                    }
-                    svc.fact_store.ingest_many(all_facts);
-                    let candidates = OpportunityDetector::new().detect(
-                        &svc.fact_store,
-                        &svc.pulse,
-                        &svc.opportunity_queue,
-                    );
-                    let mut to_add: Vec<(BuddyOpportunity, bool, u64)> = vec![];
-                    for (opp, cooldown_secs) in candidates {
-                        match evaluate(&opp, &svc.settings, &svc.opportunity_queue) {
-                            PolicyDecision::Drop { reason } => {
-                                tracing::debug!("buddy: opp dropped by policy: {}", reason);
-                            }
-                            PolicyDecision::Surface { humor_allowed } => {
-                                let mut o = opp;
-                                o.humor_allowed = humor_allowed;
-                                to_add.push((o, humor_allowed, cooldown_secs));
+                // Phase 1: ingest facts, detect candidates, add non-humor opps — all under buddy lock.
+                let (humor_tasks, pulse_for_humor, humor_arc) = {
+                    let mut buddy = buddy_arc.lock().await;
+                    if let Some(svc) = buddy.as_mut() {
+                        for obs in &due_observers {
+                            svc.last_observer_tick.insert(obs.id(), now);
+                        }
+                        svc.fact_store.ingest_many(all_facts);
+                        let candidates = OpportunityDetector::new().detect(
+                            &svc.fact_store,
+                            &svc.pulse,
+                            &svc.opportunity_queue,
+                        );
+                        let mut to_add: Vec<(BuddyOpportunity, bool, u64)> = vec![];
+                        for (opp, cooldown_secs) in candidates {
+                            match evaluate(&opp, &svc.settings, &svc.opportunity_queue) {
+                                PolicyDecision::Drop { reason } => {
+                                    tracing::debug!("buddy: opp dropped by policy: {}", reason);
+                                }
+                                PolicyDecision::Surface { humor_allowed } => {
+                                    let mut o = opp;
+                                    o.humor_allowed = humor_allowed;
+                                    to_add.push((o, humor_allowed, cooldown_secs));
+                                }
                             }
                         }
-                    }
-                    // Attach humor and add (still inside lock; LLM calls don't re-lock buddy)
-                    let pulse = svc.pulse.clone();
-                    for (mut opp, humor_allowed, cooldown_secs) in to_add {
-                        if humor_allowed {
-                            let primary_kind = primary_fact_kind_for_opportunity(&opp);
-                            svc.humor_service
-                                .attach_humor(&mut opp, primary_kind, &pulse, gcx.clone())
-                                .await;
+                        let pulse = svc.pulse.clone();
+                        let humor_arc = svc.humor_service.clone();
+                        let (humor_needed, no_humor): (Vec<_>, Vec<_>) =
+                            to_add.into_iter().partition(|(_, ha, _)| *ha);
+                        for (opp, _, cooldown_secs) in no_humor {
+                            svc.add_opportunity_with_cooldown(opp, cooldown_secs);
                         }
-                        svc.add_opportunity_with_cooldown(opp, cooldown_secs);
+                        let tasks: Vec<(BuddyOpportunity, BuddyFactKind, u64)> = humor_needed
+                            .into_iter()
+                            .map(|(opp, _, cs)| {
+                                let kind = primary_fact_kind_for_opportunity(&opp);
+                                (opp, kind, cs)
+                            })
+                            .collect();
+                        (tasks, pulse, humor_arc)
+                    } else {
+                        (
+                            vec![],
+                            BuddyPulse::default(),
+                            Arc::new(tokio::sync::Mutex::new(HumorService::new())),
+                        )
+                    }
+                }; // buddy lock released — LLM humor calls happen outside the lock
+
+                // Phase 2: attach humor outside the buddy lock.
+                let mut ready: Vec<(BuddyOpportunity, u64)> = Vec::with_capacity(humor_tasks.len());
+                if !humor_tasks.is_empty() {
+                    let mut humor = humor_arc.lock().await;
+                    for (mut opp, kind, cooldown_secs) in humor_tasks {
+                        humor
+                            .attach_humor(&mut opp, kind, &pulse_for_humor, gcx.clone())
+                            .await;
+                        ready.push((opp, cooldown_secs));
+                    }
+                }
+
+                // Phase 3: re-acquire buddy lock to add humor-processed opps.
+                if !ready.is_empty() {
+                    let mut buddy = buddy_arc.lock().await;
+                    if let Some(svc) = buddy.as_mut() {
+                        for (opp, cooldown_secs) in ready {
+                            svc.add_opportunity_with_cooldown(opp, cooldown_secs);
+                        }
                     }
                 }
             }

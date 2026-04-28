@@ -383,6 +383,23 @@ pub(crate) async fn cleanup_failed_agent_worktree(
     diff_report
 }
 
+/// Return the wall-clock timestamp of the last recorded activity for the
+/// given agent chat session. Returns `None` when the session no longer exists.
+pub async fn get_last_agent_heartbeat(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    agent_chat_id: &str,
+) -> Option<chrono::DateTime<Utc>> {
+    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions_read = sessions.read().await;
+    let session_arc = sessions_read.get(agent_chat_id)?.clone();
+    drop(sessions_read);
+    let session = session_arc.lock().await;
+    let elapsed = session.last_activity.elapsed();
+    drop(session);
+    let heartbeat = Utc::now() - chrono::Duration::from_std(elapsed).ok()?;
+    Some(heartbeat)
+}
+
 /// Background task that monitors for stuck agents
 pub async fn start_agent_monitor(gcx: Arc<ARwLock<GlobalContext>>) {
     tracing::info!("Starting task agent monitor");

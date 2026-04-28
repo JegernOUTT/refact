@@ -17,11 +17,11 @@ pub async fn build_pulse(
     let mut p = BuddyPulse::default();
     p.generated_at = Some(Utc::now());
 
-    p.tasks = build_tasks_pulse(gcx.clone()).await;
+    p.tasks = build_tasks_pulse(fact_store);
     p.trajectories = build_trajectories_pulse(project_root).await;
     p.memory = build_memory_pulse(project_root, fact_store);
     p.providers = build_providers_pulse(gcx.clone()).await;
-    p.mcp = build_mcp_pulse(fact_store);
+    p.mcp = build_mcp_pulse(gcx.clone(), fact_store).await;
     p.customization = build_customization_pulse(gcx.clone()).await;
     p.diagnostics = build_diagnostics_pulse(gcx.clone()).await;
     p.git = build_git_pulse(project_root);
@@ -29,17 +29,12 @@ pub async fn build_pulse(
     p
 }
 
-async fn build_tasks_pulse(gcx: Arc<RwLock<GlobalContext>>) -> TaskPulse {
+fn build_tasks_pulse(fact_store: &FactStore) -> TaskPulse {
     let mut pulse = TaskPulse::default();
-    let tasks = match crate::tasks::storage::list_tasks(gcx).await {
-        Ok(t) => t,
-        Err(_) => return pulse,
-    };
-    pulse.total = tasks.len() as u32;
-    for t in &tasks {
-        let status_str = format!("{:?}", t.status).to_lowercase();
-        *pulse.by_status.entry(status_str).or_insert(0) += 1;
-    }
+    let stuck = fact_store.recent(BuddyFactKind::TaskStuck, chrono::Duration::hours(1));
+    pulse.stuck = stuck.len() as u32;
+    let abandoned = fact_store.recent(BuddyFactKind::TaskAbandoned, chrono::Duration::hours(24));
+    pulse.abandoned = abandoned.len() as u32;
     pulse
 }
 
@@ -80,7 +75,9 @@ async fn build_providers_pulse(gcx: Arc<RwLock<GlobalContext>>) -> ProviderPulse
     let gcx_r = gcx.read().await;
     if let Some(caps) = &gcx_r.caps {
         let d = &caps.defaults;
-        pulse.defaults_ok = !d.chat_default_model.is_empty();
+        pulse.defaults_ok = !d.chat_default_model.is_empty()
+            && !d.chat_thinking_model.is_empty()
+            && !d.chat_buddy_model.is_empty();
         let available: std::collections::HashSet<&str> =
             caps.chat_models.keys().map(|s| s.as_str()).collect();
         let to_check = [
@@ -97,8 +94,9 @@ async fn build_providers_pulse(gcx: Arc<RwLock<GlobalContext>>) -> ProviderPulse
     pulse
 }
 
-fn build_mcp_pulse(fact_store: &FactStore) -> McpPulse {
+async fn build_mcp_pulse(gcx: Arc<RwLock<GlobalContext>>, fact_store: &FactStore) -> McpPulse {
     let mut pulse = McpPulse::default();
+    pulse.total = gcx.read().await.integration_sessions.len() as u32;
     let failing = fact_store.recent(
         BuddyFactKind::IntegrationFailing,
         chrono::Duration::hours(4),
@@ -106,19 +104,25 @@ fn build_mcp_pulse(fact_store: &FactStore) -> McpPulse {
     pulse.failing = failing.len() as u32;
     let expiring = fact_store.recent(BuddyFactKind::McpAuthExpired, chrono::Duration::hours(24));
     pulse.auth_expiring = expiring.len() as u32;
-    pulse.total = pulse.failing + pulse.auth_expiring;
     pulse
 }
 
 async fn build_customization_pulse(gcx: Arc<RwLock<GlobalContext>>) -> CustomizationPulse {
     let mut pulse = CustomizationPulse::default();
-    let reg = match crate::yaml_configs::customization_registry::get_project_registry(gcx).await {
+    let reg = match crate::yaml_configs::customization_registry::get_project_registry(gcx.clone()).await {
         Some(r) => r,
         None => return pulse,
     };
     pulse.modes = reg.modes.len() as u32;
     pulse.subagents = reg.subagents.len() as u32;
     pulse.commands = reg.toolbox_commands.len() as u32;
+
+    let ext_dirs = crate::ext::config_dirs::get_ext_dirs(gcx).await;
+    let skills = crate::ext::skills::load_skill_indices(&ext_dirs).await;
+    pulse.skills = skills.len() as u32;
+    let hooks = crate::ext::hooks::load_hooks(&ext_dirs).await;
+    pulse.hooks = hooks.len() as u32;
+
     pulse
 }
 
@@ -160,5 +164,28 @@ fn build_git_pulse(project_root: &std::path::Path) -> GitPulse {
     if let Ok(branches) = repo.branches(None) {
         pulse.branches = branches.count() as u32;
     }
+    pulse.diff_lines_4h = compute_diff_lines_4h(&repo).unwrap_or(0);
     pulse
+}
+
+fn compute_diff_lines_4h(repo: &git2::Repository) -> Option<u32> {
+    let cutoff = (Utc::now() - chrono::Duration::hours(4)).timestamp();
+    let mut revwalk = repo.revwalk().ok()?;
+    revwalk.push_head().ok()?;
+    let mut lines = 0u32;
+    for oid_result in revwalk {
+        let oid = oid_result.ok()?;
+        let commit = repo.find_commit(oid).ok()?;
+        if commit.time().seconds() < cutoff {
+            break;
+        }
+        let tree = commit.tree().ok()?;
+        let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+        let diff = repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)
+            .ok()?;
+        let stats = diff.stats().ok()?;
+        lines = lines.saturating_add((stats.insertions() + stats.deletions()) as u32);
+    }
+    Some(lines)
 }
