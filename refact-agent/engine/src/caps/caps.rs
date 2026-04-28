@@ -511,6 +511,14 @@ fn build_chat_model_record(
         } else {
             resolve_model_caps(model_caps, &model.id)
         }
+    }).or_else(|| {
+        model.display_name.as_ref().and_then(|dn| {
+            resolve_model_caps(model_caps, dn).or_else(|| {
+                dn.rsplit('/').next().and_then(|last| {
+                    resolve_model_caps(model_caps, last)
+                })
+            })
+        })
     });
 
     let (
@@ -621,7 +629,7 @@ fn build_chat_model_record(
     ChatModelRecord {
         base: BaseModelRecord {
             n_ctx,
-            name: model.id.clone(),
+            name: model.display_name.clone().unwrap_or_else(|| model.id.clone()),
             id: model_id,
             endpoint,
             endpoint_style,
@@ -644,10 +652,11 @@ fn build_chat_model_record(
                 .as_ref()
                 .map(|r| r.caps.supports_web_search)
                 .unwrap_or(false),
-            supports_cache_control: resolved_caps
-                .as_ref()
-                .map(|r| r.caps.supports_cache_control)
-                .unwrap_or(runtime_supports_cache_control),
+            supports_cache_control: runtime_supports_cache_control
+                && resolved_caps
+                    .as_ref()
+                    .map(|r| r.caps.supports_cache_control)
+                    .unwrap_or(true),
             removable: model.is_custom,
             user_configured: model.is_custom,
         },

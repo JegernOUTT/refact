@@ -84,7 +84,7 @@ impl VLLMProvider {
 
         Some(AvailableModel {
             id,
-            display_name: None,
+            display_name: model.get("root").and_then(|v| v.as_str()).map(String::from),
             n_ctx: max_model_len.unwrap_or(32_768),
             supports_tools,
             supports_parallel_tools: supports_tools,
