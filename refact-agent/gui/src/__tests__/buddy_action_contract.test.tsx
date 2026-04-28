@@ -325,7 +325,7 @@ describe("buddy action execution contract", () => {
   it("accept_failure_surfaces_error_does_not_navigate", async () => {
     const consoleError = vi
       .spyOn(console, "error")
-      .mockImplementation(() => {});
+      .mockImplementation(() => undefined);
     server.use(
       http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
         HttpResponse.text("action_not_implemented", { status: 501 }),

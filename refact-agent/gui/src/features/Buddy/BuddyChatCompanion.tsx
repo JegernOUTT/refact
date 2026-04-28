@@ -243,8 +243,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   }, [activeOpportunities.length, opportunityIndex]);
 
   const topOpportunity =
-    baseNotification === null
-      ? activeOpportunities[opportunityIndex] ?? activeOpportunities[0] ?? null
+    baseNotification === null && activeOpportunities.length > 0
+      ? activeOpportunities[opportunityIndex % activeOpportunities.length]
       : null;
 
   const notification: NotificationItem | null = useMemo(() => {

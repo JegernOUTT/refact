@@ -77,7 +77,9 @@ export const BuddyPanel: React.FC = () => {
   }, [activeOpportunities.length, opportunityIndex]);
 
   const topOpportunity =
-    activeOpportunities[opportunityIndex] ?? activeOpportunities[0] ?? null;
+    activeOpportunities.length > 0
+      ? activeOpportunities[opportunityIndex % activeOpportunities.length]
+      : null;
   const speechText = activeSpeech
     ? activeSpeech.text
     : topOpportunity

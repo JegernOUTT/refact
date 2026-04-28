@@ -6,7 +6,7 @@ import {
   startBuddyInvestigation,
 } from "../Chat/Thread";
 import { isValidSetupMode } from "../Setup/setupModes";
-import type { BuddyControl, BuddyPage } from "./types";
+import type { BuddyControl, BuddyPage, DraftKind } from "./types";
 import type { DiagnosticContext } from "./types";
 import { buddyApi } from "../../services/refact/buddy";
 
@@ -51,12 +51,12 @@ export async function executeBuddyAction(
     }
 
     case "open_stats":
-      dispatch(push({ name: "stats dashboard" }));
+      navigateFromBuddyPage({ type: "stats" }, dispatch);
       dispatch(clearActiveSpeech());
       break;
 
     case "open_buddy":
-      dispatch(push({ name: "buddy" }));
+      navigateFromBuddyPage({ type: "buddy" }, dispatch);
       dispatch(clearActiveSpeech());
       break;
 
@@ -108,6 +108,60 @@ export async function executeBuddyAction(
 
     default:
       dispatch(clearActiveSpeech());
+  }
+}
+
+export function navigateFromBuddyPage(page: BuddyPage, dispatch: AppDispatch) {
+  executeBuddyNavigation(page, dispatch);
+}
+
+export function routeDraftByKind(
+  result: { draft_kind: DraftKind; draft_id: string },
+  dispatch: AppDispatch,
+) {
+  switch (result.draft_kind) {
+    case "skill":
+      dispatch(
+        push({ name: "extensions", tab: "skills", draftId: result.draft_id }),
+      );
+      break;
+    case "command":
+      dispatch(
+        push({ name: "extensions", tab: "commands", draftId: result.draft_id }),
+      );
+      break;
+    case "delegate":
+      dispatch(
+        push({
+          name: "customization",
+          kind: "subagents",
+          draftId: result.draft_id,
+        }),
+      );
+      break;
+    case "mode":
+      dispatch(
+        push({
+          name: "customization",
+          kind: "modes",
+          draftId: result.draft_id,
+        }),
+      );
+      break;
+    case "agents_md":
+      dispatch(push({ name: "customization" }));
+      break;
+    case "defaults_model":
+      dispatch(push({ name: "default models", draftId: result.draft_id }));
+      break;
+    case "hook":
+      dispatch(
+        push({ name: "extensions", tab: "hooks", draftId: result.draft_id }),
+      );
+      break;
+    case "pulse_report":
+      dispatch(push({ name: "buddy" }));
+      break;
   }
 }
 

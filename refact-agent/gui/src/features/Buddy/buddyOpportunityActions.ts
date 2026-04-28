@@ -3,6 +3,9 @@ import type {
   BuddyControl,
   BuddyOpportunity,
   BuddyPage,
+  CustomizationKind,
+  MarketKind,
+  PulseScope,
 } from "./types";
 
 const OPPORTUNITY_ACTION_PREFIX = "opportunity_action:";
@@ -23,11 +26,11 @@ export function actionLabel(action: BuddyAction): string {
     case "draft_defaults_change":
       return "Adjust defaults";
     case "draft_customization_change":
-      return "Edit";
+      return `Edit ${humanizeCustomizationKind(action.customization_kind)}`;
     case "offer_marketplace_install":
-      return "Browse marketplace";
+      return `Install ${humanizeMarketKind(action.market_kind)}`;
     case "create_pulse_report":
-      return "Create report";
+      return `Create ${humanizePulseScope(action.scope)} report`;
     case "dismiss":
       return "Dismiss";
   }
@@ -70,6 +73,57 @@ export function getOpportunityActionFromControl(
   if (index == null) return null;
 
   return opportunity.proposed_actions[index] ?? null;
+}
+
+export function humanizeCustomizationKind(kind: CustomizationKind): string {
+  switch (kind) {
+    case "mode":
+      return "mode";
+    case "skill":
+      return "skill";
+    case "command":
+      return "command";
+    case "delegate":
+      return "delegate";
+    case "hook":
+      return "hook";
+  }
+}
+
+export function humanizePulseScope(scope: PulseScope): string {
+  switch (scope) {
+    case "all":
+      return "system";
+    case "tasks":
+      return "tasks";
+    case "trajectories":
+      return "trajectory";
+    case "memory":
+      return "memory";
+    case "providers":
+      return "provider";
+    case "mcp":
+      return "MCP";
+    case "customization":
+      return "customization";
+    case "diagnostics":
+      return "diagnostic";
+    case "git":
+      return "git";
+  }
+}
+
+export function humanizeMarketKind(kind: MarketKind): string {
+  switch (kind) {
+    case "mcp":
+      return "MCP";
+    case "skill":
+      return "skill";
+    case "command":
+      return "command";
+    case "delegate":
+      return "delegate";
+  }
 }
 
 function humanizePage(page: BuddyPage): string {

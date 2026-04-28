@@ -1,4 +1,4 @@
-import { createSlice, PayloadAction } from "@reduxjs/toolkit";
+import { createSelector, createSlice, PayloadAction } from "@reduxjs/toolkit";
 import type {
   BuddySnapshot,
   BuddyState,
@@ -222,6 +222,10 @@ const initialState: BuddySliceState = {
   pulse: null,
   activeDrafts: [],
 };
+const selectUnreadOpportunitiesFromSlice = createSelector(
+  [(state: BuddySliceState) => state.opportunities],
+  (opportunities) => opportunities.filter((o) => o.status === "new"),
+);
 
 export const buddySlice = createSlice({
   name: "buddy",
@@ -447,10 +451,7 @@ export const buddySlice = createSlice({
     selectNowPlaying: (state) => state.nowPlaying,
     selectActiveSpeech: (state) => state.activeSpeech,
     selectOpportunities: (state) => state.opportunities,
-    selectUnreadOpportunities: (state) =>
-      state.opportunities.filter(
-        (o) => o.status === "new" || o.status === "shown",
-      ),
+    selectUnreadOpportunities: selectUnreadOpportunitiesFromSlice,
     selectPulse: (state) => state.pulse,
     selectActiveDrafts: (state) => state.activeDrafts,
   },

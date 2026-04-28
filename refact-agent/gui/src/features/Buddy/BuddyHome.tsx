@@ -1,15 +1,22 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Flex, Text, Button, Spinner, Tooltip } from "@radix-ui/themes";
+import { Button, Flex, Spinner, Text } from "@radix-ui/themes";
 import { ArrowLeftIcon, GearIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { pop, push } from "../Pages/pagesSlice";
-import { BuddyCanvas } from "./BuddyCanvas";
 import { BuddyRecentChats } from "./BuddyRecentChats";
 import { BuddyPulseCard } from "./BuddyPulseCard";
 import { BuddyOpportunitiesFeed } from "./BuddyOpportunitiesFeed";
 import { BuddyWorkshop } from "./BuddyWorkshop";
 import { BuddySettingsPanel } from "./BuddySettingsPanel";
+import { BuddyHero } from "./BuddyHero";
+import { BuddySummaryStrip } from "./BuddySummaryStrip";
+import { BuddyPersonalityPanel, type NeedRow } from "./BuddyPersonalityPanel";
+import { BuddyActivityPanel } from "./BuddyActivityPanel";
+import {
+  BuddyRecentErrorsPanel,
+  type RecentBuddyError,
+} from "./BuddyRecentErrorsPanel";
 import { useBuddyState } from "./hooks/useBuddyState";
 import {
   selectBuddySnapshot,
@@ -27,19 +34,21 @@ import {
   startBuddyInvestigation,
 } from "../Chat/Thread";
 import { executeBuddyAction } from "./executeBuddyAction";
-import { useDismissBuddyRuntimeEventMutation } from "../../services/refact/buddy";
+import {
+  useDismissBuddyRuntimeEventMutation,
+  useUpdateBuddySettingsMutation,
+} from "../../services/refact/buddy";
 import type {
-  BuddyControl,
   BuddyCareAction,
+  BuddyControl,
   BuddyNeeds,
   BuddyRuntimeEvent,
 } from "./types";
-import { PALETTES, STAGES, SKILLS, SIGNALS } from "./constants";
-import { computeXpFill, formatCompactNumber } from "./buddyUtils";
+import { PALETTES, STAGES } from "./constants";
+import { computeXpFill } from "./buddyUtils";
 import { useGetStatsSummaryQuery } from "../../services/refact/stats";
 import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
 import { SETUP_MODES } from "../Setup/setupModes";
-import { useUpdateBuddySettingsMutation } from "../../services/refact/buddy";
 import styles from "./BuddyHome.module.css";
 
 const NEED_ROWS: {
@@ -53,27 +62,6 @@ const NEED_ROWS: {
   { key: "boredom", label: "Boredom", invert: true },
   { key: "affection", label: "Affection" },
 ];
-
-const CARE_ACTIONS: {
-  action: BuddyCareAction;
-  label: string;
-  emoji: string;
-  toy?: string;
-}[] = [
-  { action: "feed", label: "Feed", emoji: "🍜" },
-  { action: "play", label: "Play", emoji: "🎾", toy: "bug" },
-  { action: "pet", label: "Pet", emoji: "💕" },
-  { action: "sleep", label: "Sleep", emoji: "😴" },
-  { action: "clean", label: "Clean", emoji: "🧼" },
-];
-
-function formatTime(ts: string): string {
-  if (!ts) return "";
-  return new Date(ts).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 export const BuddyHome: React.FC = () => {
   const dispatch = useAppDispatch();
@@ -125,7 +113,7 @@ export const BuddyHome: React.FC = () => {
 
   const name = identity?.name ?? state.name;
   const statusText = semantic?.headline ?? "";
-  const needRows = useMemo(
+  const needRows = useMemo<NeedRow[]>(
     () =>
       NEED_ROWS.map((item) => {
         const value = pet?.needs[item.key] ?? 0;
@@ -237,14 +225,7 @@ export const BuddyHome: React.FC = () => {
 
   const unlockedSkills = skills?.unlocked ?? state.skills;
 
-  // All buddy-collected runtime errors, ordered newest-first and
-  // deduplicated by signature so a single repeating error (e.g. a
-  // useBuddyState crash firing on every render) does not flood the
-  // panel with identical rows. We keep the most recent representative
-  // per signature and surface the duplicate count via `occurrences`.
-  // Includes dismissed/acknowledged entries so the user can see the
-  // full history of what Buddy has noticed.
-  const recentErrors = useMemo(() => {
+  const recentErrors = useMemo<RecentBuddyError[]>(() => {
     const collected: BuddyRuntimeEvent[] = [];
     if (
       nowPlaying &&
@@ -269,20 +250,14 @@ export const BuddyHome: React.FC = () => {
       return tb - ta;
     });
 
-    // Dedupe by (source|title|description). Keep first (newest)
-    // representative per signature; track occurrence count and whether
-    // any of the merged entries was already dismissed.
-    type ErrWithCount = BuddyRuntimeEvent & {
-      occurrences: number;
-      dismissedAny: boolean;
-    };
-    const sigMap = new Map<string, ErrWithCount>();
+    const sigMap = new Map<string, RecentBuddyError>();
     for (const e of collected) {
       const sig = `${e.source}|${e.title}|${e.description ?? ""}`;
       const existing = sigMap.get(sig);
       if (existing) {
-        existing.occurrences += 1;
-        existing.dismissedAny = existing.dismissedAny || Boolean(e.dismissed);
+        existing.occurrences = (existing.occurrences ?? 1) + 1;
+        existing.dismissedAny =
+          Boolean(existing.dismissedAny) || Boolean(e.dismissed);
       } else {
         sigMap.set(sig, {
           ...e,
@@ -311,7 +286,6 @@ export const BuddyHome: React.FC = () => {
           diagnostic,
         }),
       );
-      // Investigating implicitly acknowledges the error.
       if (!event.dismissed) {
         dispatch(dismissRuntimeEvent(event.id));
         void dismissRuntimeMutation(event.id).catch(() => undefined);
@@ -382,181 +356,31 @@ export const BuddyHome: React.FC = () => {
         </Button>
       </div>
 
-      <div className={styles.hero}>
-        <div className={styles.scene}>
-          <div className={styles.glowWrap}>
-            <div
-              className={styles.glow}
-              style={{ backgroundColor: palette.body }}
-            />
-            <BuddyCanvas
-              state={state}
-              onEvent={buddy.handleCanvasEvent}
-              displaySize={200}
-              speechOverride={
-                activeSpeech
-                  ? activeSpeech.text
-                  : nowPlaying?.speech_text ?? nowPlaying?.title ?? null
-              }
-              speechControls={activeSpeech ? activeSpeech.controls : undefined}
-              onSpeechControlClick={
-                activeSpeech ? handleSpeechControl : undefined
-              }
-            />
-          </div>
-        </div>
+      <BuddyHero
+        palette={palette}
+        stage={stage}
+        statusText={statusText}
+        state={state}
+        onCanvasEvent={buddy.handleCanvasEvent}
+        activeSpeech={activeSpeech}
+        nowPlaying={nowPlaying}
+        setupNeeded={setupNeeded}
+        onRunMode={handleRunMode}
+        onDismissSetup={handleDismissSetup}
+        onCare={(action, toy) => void handleCare(action, toy)}
+        onSpeechControl={(control) => void handleSpeechControl(control)}
+      />
 
-        <div
-          className={styles.stageBadge}
-          style={{
-            backgroundColor: palette.body + "33",
-            color: palette.body,
-          }}
-        >
-          {stage.emoji} {stage.name}
-        </div>
-
-        {statusText && <div className={styles.statusText}>{statusText}</div>}
-
-        {nowPlaying?.progress != null && (
-          <div className={styles.statusBubble}>
-            <span className={styles.statusIcon}>
-              {SIGNALS[nowPlaying.signal_type].icon}
-            </span>
-            <div className={styles.statusContent}>
-              <div className={styles.progressBar}>
-                <div style={{ width: `${nowPlaying.progress}%` }} />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {setupNeeded && (
-          <div className={styles.setupChips}>
-            {SETUP_MODES.map((m) => (
-              <button
-                key={m.mode}
-                type="button"
-                className={classNames(styles.chip, {
-                  [styles.chipPrimary]: m.mode === "setup",
-                })}
-                onClick={() => handleRunMode(m.mode)}
-              >
-                {m.label}
-              </button>
-            ))}
-            <button
-              type="button"
-              className={classNames(styles.chip, styles.chipGhost)}
-              onClick={handleDismissSetup}
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-
-        <div className={styles.careBar}>
-          {CARE_ACTIONS.map((item) => (
-            <button
-              key={item.action}
-              type="button"
-              className={styles.careButton}
-              onClick={() => void handleCare(item.action, item.toy)}
-            >
-              <span>{item.emoji}</span>
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Compact summary strip — replaces the legacy STATUS card. */}
-      <div className={styles.summaryStrip}>
-        <div className={styles.statItem}>
-          <Text size="1" color="gray">
-            Stage
-          </Text>
-          <Text size="2" weight="bold">
-            {stage.emoji} {stage.name}
-          </Text>
-        </div>
-        <div className={classNames(styles.statItem, styles.statItemGrow)}>
-          <Text size="1" color="gray">
-            Growth
-          </Text>
-          <div className={styles.statItemValueRow}>
-            <Text size="2" weight="bold">
-              {xpNext
-                ? xp >= xpNext
-                  ? `${xpNext} / ${xpNext} · MAX`
-                  : `${xp} / ${xpNext}`
-                : `${xp} · MAX`}
-            </Text>
-            <div className={styles.xpBar}>
-              <div className={styles.xpFill} style={{ width: `${xpFill}%` }} />
-            </div>
-          </div>
-        </div>
-        {pet && (
-          <div className={styles.statItem}>
-            <Text size="1" color="gray">
-              Care
-            </Text>
-            <Text size="2" weight="bold">
-              {pet.evolution.care_score}
-            </Text>
-          </div>
-        )}
-        {pet && (
-          <div className={styles.statItem}>
-            <Text size="1" color="gray">
-              Neglect
-            </Text>
-            <Text size="2" weight="bold">
-              {pet.evolution.neglect_score}
-            </Text>
-          </div>
-        )}
-        {statsData && (
-          <>
-            <div className={styles.statItemDivider} aria-hidden />
-            <div className={styles.statItem}>
-              <Text size="1" color="gray">
-                Messages
-              </Text>
-              <Text size="2" weight="bold">
-                {formatCompactNumber(statsData.totals.total_calls)}
-              </Text>
-            </div>
-            <div className={styles.statItem}>
-              <Text size="1" color="gray">
-                Tokens
-              </Text>
-              <Text size="2" weight="bold">
-                {formatCompactNumber(statsData.totals.total_tokens)}
-              </Text>
-            </div>
-            <div className={styles.statItem}>
-              <Text size="1" color="gray">
-                Success
-              </Text>
-              <Text size="2" weight="bold">
-                {successRate ?? 0}%
-              </Text>
-            </div>
-          </>
-        )}
-        <div className={styles.statSpacer} aria-hidden />
-        {statsData && (
-          <button
-            type="button"
-            className={classNames(styles.chip, styles.chipGhost)}
-            onClick={handleViewStats}
-          >
-            View Full Stats →
-          </button>
-        )}
-      </div>
+      <BuddySummaryStrip
+        stage={stage}
+        xp={xp}
+        xpNext={xpNext}
+        xpFill={xpFill}
+        pet={pet}
+        statsData={statsData}
+        successRate={successRate}
+        onViewStats={handleViewStats}
+      />
 
       {showSettings && (
         <div style={{ padding: "0 var(--space-3) var(--space-3)" }}>
@@ -564,8 +388,6 @@ export const BuddyHome: React.FC = () => {
         </div>
       )}
 
-      {/* Slim project-setup chip strip — replaces the bulky PROJECT SETUP
-          panel and stays out of the way of the main grid. */}
       <div className={styles.chipStrip}>
         <span className={styles.chipStripLabel}>Project setup</span>
         {SETUP_MODES.map((m) => (
@@ -582,387 +404,37 @@ export const BuddyHome: React.FC = () => {
         ))}
       </div>
 
-      {/* Pulse + Opportunities */}
       <div className={styles.row} data-testid="buddy-home-new-sections">
         <BuddyPulseCard />
         <BuddyOpportunitiesFeed />
       </div>
 
-      {/* Unified Personality + Care panel — one card with consistent
-          subsection labels (NEEDS, TRAITS, SKILLS) and a single button
-          row at the bottom for proactive/vibe + reroll controls. */}
-      <div className={classNames(styles.row, styles.rowSingle)}>
-        <div className={classNames(styles.panel, styles.personaPanel)}>
-          <div className={styles.panelHeader}>
-            <div className={styles.panelTitleGroup}>
-              <Text
-                size="1"
-                weight="bold"
-                color="gray"
-                className={styles.sectionLabel}
-              >
-                PERSONALITY
-              </Text>
-              <Text size="2" weight="bold">
-                {personality?.archetype_label ?? "Buddy"}
-              </Text>
-              <Text size="1" color="gray">
-                {personality?.vibe ?? "Playful, quirky, helpful"}
-              </Text>
-            </div>
-          </div>
+      <BuddyPersonalityPanel
+        personality={personality}
+        needRows={needRows}
+        unlockedSkills={unlockedSkills}
+        activeQuest={activeQuest}
+        settings={settings}
+        isSavingSettings={isSavingSettings}
+        onQuestControl={(control) => void handleQuestControl(control)}
+        onReroll={() => void handleReroll()}
+        onToggleProactive={handleSettings}
+        onPromptChange={(prompt) => void handlePromptChange(prompt)}
+      />
 
-          {personality?.summary && (
-            <Text size="1" className={styles.personalitySummary}>
-              {personality.summary}
-            </Text>
-          )}
-
-          <div className={styles.personaGrid}>
-            <div className={styles.personaSection}>
-              <Text
-                size="1"
-                weight="bold"
-                color="gray"
-                className={styles.sectionLabel}
-              >
-                NEEDS
-              </Text>
-              <div className={styles.needsGrid}>
-                {needRows.map((item) => (
-                  <div key={item.key} className={styles.needRow}>
-                    <div className={styles.needHeader}>
-                      <span>{item.label}</span>
-                      <span>{item.value}</span>
-                    </div>
-                    <div className={styles.needBar}>
-                      <div
-                        className={styles.needFill}
-                        style={{ width: `${item.fill}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className={styles.personaSection}>
-              <Text
-                size="1"
-                weight="bold"
-                color="gray"
-                className={styles.sectionLabel}
-              >
-                TRAITS
-              </Text>
-              <div className={styles.traitsGrid}>
-                {Object.entries(personality?.traits ?? {}).map(
-                  ([key, value]) => {
-                    const fill = Math.max(0, Math.min(100, Number(value) || 0));
-                    return (
-                      <div key={key} className={styles.traitRow}>
-                        <div className={styles.traitHeader}>
-                          <span className={styles.traitName}>{key}</span>
-                          <span className={styles.traitValue}>{value}</span>
-                        </div>
-                        <div className={styles.needBar}>
-                          <div
-                            className={styles.needFill}
-                            style={{ width: `${fill}%` }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  },
-                )}
-              </div>
-            </div>
-
-            <div className={styles.personaSection}>
-              <Text
-                size="1"
-                weight="bold"
-                color="gray"
-                className={styles.sectionLabel}
-              >
-                SKILLS
-              </Text>
-              <div className={styles.skillsRow}>
-                {unlockedSkills.length === 0 && (
-                  <Text size="1" color="gray">
-                    None yet
-                  </Text>
-                )}
-                {unlockedSkills.map((id) => {
-                  const skill = SKILLS.find((s) => s.id === id);
-                  return skill ? (
-                    <span key={id} className={styles.skillChip}>
-                      {skill.icon} {skill.name}
-                    </span>
-                  ) : null;
-                })}
-              </div>
-            </div>
-          </div>
-
-          {activeQuest && (
-            <div className={styles.questCard}>
-              <div className={styles.questHeader}>
-                <div>
-                  <Text
-                    size="1"
-                    weight="bold"
-                    color="gray"
-                    className={styles.sectionLabel}
-                  >
-                    ACTIVE QUEST
-                  </Text>
-                  <Text size="2" weight="bold">
-                    {activeQuest.icon} {activeQuest.title}
-                  </Text>
-                </div>
-                <Text size="1" color="gray">
-                  +{activeQuest.reward_xp} growth
-                </Text>
-              </div>
-
-              <Text size="1" className={styles.questDescription}>
-                {activeQuest.description}
-              </Text>
-
-              <div className={styles.questProgressRow}>
-                <Text size="1" color="gray">
-                  Progress
-                </Text>
-                <Text size="1" weight="bold">
-                  {Math.min(activeQuest.progress, activeQuest.goal)} /{" "}
-                  {activeQuest.goal}
-                </Text>
-              </div>
-              <div className={styles.questProgressBar}>
-                <div
-                  className={styles.questProgressFill}
-                  style={{
-                    width: `${Math.min(
-                      100,
-                      (Math.max(0, activeQuest.progress) /
-                        Math.max(1, activeQuest.goal)) *
-                        100,
-                    )}%`,
-                  }}
-                />
-              </div>
-
-              <div className={styles.questControls}>
-                {activeQuest.controls.map((ctrl) => (
-                  <button
-                    key={ctrl.id}
-                    type="button"
-                    className={classNames(styles.chip, {
-                      [styles.chipPrimary]: ctrl.style === "primary",
-                    })}
-                    onClick={() => void handleQuestControl(ctrl)}
-                  >
-                    {ctrl.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Footer action row — chip-styled buttons so every clickable
-              control on the page shares one consistent pill shape.
-              Buttons start in the neutral outline state; toggles light
-              up primary only when they're "on", so the user can read
-              the current state at a glance instead of guessing which
-              of two highlighted chips is active. */}
-          <div className={styles.actionRow}>
-            <button
-              type="button"
-              className={styles.chip}
-              onClick={() => void handleReroll()}
-            >
-              Reroll personality
-            </button>
-            <button
-              type="button"
-              className={classNames(styles.chip, {
-                [styles.chipPrimary]: settings?.proactive_enabled,
-              })}
-              onClick={handleSettings}
-              disabled={isSavingSettings}
-              aria-pressed={settings?.proactive_enabled}
-            >
-              Proactive {settings?.proactive_enabled ? "on" : "off"}
-            </button>
-            <button
-              type="button"
-              className={classNames(styles.chip, {
-                [styles.chipPrimary]: !!settings?.personality_prompt,
-              })}
-              onClick={() =>
-                void handlePromptChange(
-                  settings?.personality_prompt
-                    ? null
-                    : personality?.prompt ?? null,
-                )
-              }
-              disabled={isSavingSettings}
-              aria-pressed={!!settings?.personality_prompt}
-            >
-              Pin current vibe
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Bottom row — Activity, Recent errors, Recent chats. All three
-          scroll internally and share the remaining vertical space so the
-          page stays inside the IDE viewport. */}
       <div className={classNames(styles.row, styles.row3, styles.rowFlex)}>
-        <div className={classNames(styles.panel, styles.panelScroll)}>
-          <div className={styles.panelHeader}>
-            <Text
-              size="1"
-              weight="bold"
-              color="gray"
-              className={styles.sectionLabel}
-            >
-              ACTIVITY
-            </Text>
-          </div>
-          <div className={styles.scrollList}>
-            {activities.length === 0 && (
-              <Text size="1" className={styles.emptyText}>
-                No recent activity
-              </Text>
-            )}
-            {activities.map((a, i) => {
-              const tooltip = a.description || a.title;
-              return (
-                <Tooltip
-                  key={`${a.activity_type}-${a.timestamp}-${i}`}
-                  content={tooltip}
-                  delayDuration={150}
-                >
-                  <div
-                    className={styles.listRow}
-                    tabIndex={0}
-                    role="listitem"
-                    aria-label={tooltip}
-                  >
-                    <span className={styles.listIcon}>{a.icon}</span>
-                    <div className={styles.listContent}>
-                      <span className={styles.listTitle}>{a.title}</span>
-                    </div>
-                    <span className={styles.listMeta}>
-                      {formatTime(a.timestamp)}
-                    </span>
-                  </div>
-                </Tooltip>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className={classNames(styles.panel, styles.panelScroll)}>
-          <div className={styles.panelHeader}>
-            <Text
-              size="1"
-              weight="bold"
-              color="gray"
-              className={styles.sectionLabel}
-            >
-              RECENT ERRORS
-            </Text>
-          </div>
-          <div className={styles.scrollList}>
-            {recentErrors.length === 0 && (
-              <Text size="1" className={styles.emptyText}>
-                No errors recorded — all clear ✨
-              </Text>
-            )}
-            {recentErrors.map((e) => {
-              const icon = e.dismissed
-                ? "✅"
-                : e.priority === "critical"
-                  ? "🚨"
-                  : "❌";
-              const subtitle = [
-                e.source,
-                e.chat_id ? `chat ${e.chat_id.slice(0, 8)}` : null,
-              ]
-                .filter(Boolean)
-                .join(" · ");
-              return (
-                <div
-                  key={e.id}
-                  className={classNames(
-                    styles.listRow,
-                    styles.errorRow,
-                    e.dismissed && styles.errorRowAcknowledged,
-                  )}
-                >
-                  <span className={styles.listIcon}>{icon}</span>
-                  <div className={styles.listContent}>
-                    <span className={styles.listTitle}>
-                      {e.title}
-                      {"occurrences" in e &&
-                        (e as { occurrences: number }).occurrences > 1 && (
-                          <span className={styles.countBadge}>
-                            ×{(e as { occurrences: number }).occurrences}
-                          </span>
-                        )}
-                      {e.dismissed && (
-                        <span className={styles.ackBadge}>acknowledged</span>
-                      )}
-                    </span>
-                    {/* eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing */}
-                    {(e.description || subtitle) && (
-                      <span className={styles.listSubtitle}>
-                        {e.description ?? subtitle}
-                      </span>
-                    )}
-                  </div>
-                  <div className={styles.errorActions}>
-                    <Tooltip content="Open a Buddy chat to investigate this error">
-                      <button
-                        type="button"
-                        className={classNames(styles.chip, styles.chipPrimary)}
-                        onClick={() => handleInvestigateError(e)}
-                      >
-                        Investigate
-                      </button>
-                    </Tooltip>
-                    {!e.dismissed && (
-                      <Tooltip content="Mark as acknowledged">
-                        <button
-                          type="button"
-                          className={classNames(styles.chip, styles.chipGhost)}
-                          onClick={() => handleDismissError(e)}
-                        >
-                          Dismiss
-                        </button>
-                      </Tooltip>
-                    )}
-                  </div>
-                  <span className={styles.listMeta}>
-                    {formatTime(e.created_at)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
+        <BuddyActivityPanel activities={activities} />
+        <BuddyRecentErrorsPanel
+          recentErrors={recentErrors}
+          onInvestigate={handleInvestigateError}
+          onDismiss={handleDismissError}
+        />
         <BuddyRecentChats
           className={classNames(styles.panel, styles.panelScroll)}
           title="RECENT CHATS"
         />
       </div>
 
-      {/* Persistent NavBar-style toolbar at the bottom of the page,
-          mirroring the dashboard home NavBar. */}
       <BuddyWorkshop />
     </div>
   );

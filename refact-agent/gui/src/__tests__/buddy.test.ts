@@ -1431,9 +1431,9 @@ describe("buddy opportunities, pulse, and drafts", () => {
     );
     const rootState = { buddy: s3 };
     const unread = selectUnreadOpportunities(rootState);
-    expect(unread).toHaveLength(2);
+    expect(unread).toHaveLength(1);
     expect(unread.map((o) => o.id)).toContain("o1");
-    expect(unread.map((o) => o.id)).toContain("o2");
+    expect(unread.map((o) => o.id)).not.toContain("o2");
     expect(unread.map((o) => o.id)).not.toContain("o3");
   });
 
@@ -1444,7 +1444,6 @@ describe("buddy opportunities, pulse, and drafts", () => {
     const a2: BuddyAction = {
       kind: "open_page",
       page: { type: "buddy" },
-      params: undefined,
     };
     expect(a2.kind).toBe("open_page");
 

@@ -664,7 +664,7 @@ export interface InvestigationContext {
 }
 
 export type BuddyAction =
-  | { kind: "open_page"; page: BuddyPage; params?: unknown }
+  | { kind: "open_page"; page: BuddyPage }
   | { kind: "launch_investigation_chat"; preload: InvestigationContext }
   | { kind: "draft_skill"; draft_id: string; label: string }
   | { kind: "draft_command"; draft_id: string; label: string }
