@@ -194,6 +194,10 @@ const RULES: &[Rule] = &[
         build: rules::task_abandoned,
     },
     Rule {
+        cooldown_secs: 21600,
+        build: rules::task_cluster_duplicate,
+    },
+    Rule {
         cooldown_secs: 43200,
         build: rules::trajectory_cleanup,
     },
@@ -352,6 +356,58 @@ mod rules {
                     ],
                     now,
                 )
+            })
+            .collect()
+    }
+
+    pub fn task_cluster_duplicate(
+        store: &crate::buddy::facts::FactStore,
+        _pulse: &BuddyPulse,
+        _queue: &OpportunityQueue,
+        now: DateTime<Utc>,
+    ) -> Vec<BuddyOpportunity> {
+        store
+            .recent(BuddyFactKind::TaskClusterDuplicate, Duration::hours(12))
+            .into_iter()
+            .map(|fact| {
+                let task_a = fact
+                    .payload
+                    .get("task_a")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let task_b = fact
+                    .payload
+                    .get("task_b")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let overlap_count = fact
+                    .payload
+                    .get("overlap_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let mut o = opp(
+                    BuddyOpportunityKind::TaskHealth,
+                    format!(
+                        "Tasks {} and {} touch {} overlapping files",
+                        task_a, task_b, overlap_count
+                    ),
+                    BuddyPriority::Normal,
+                    fact.confidence,
+                    vec![fact.key.clone()],
+                    format!("task_health:cluster:{}:{}", task_a, task_b),
+                    vec![
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::TasksList,
+                            params: None,
+                        },
+                        BuddyAction::Dismiss,
+                    ],
+                    now,
+                );
+                o.related.task_ids = vec![task_a, task_b];
+                o
             })
             .collect()
     }

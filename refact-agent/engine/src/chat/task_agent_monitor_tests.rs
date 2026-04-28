@@ -20,6 +20,7 @@ mod tests {
             final_report: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             started_at: Some(chrono::Utc::now().to_rfc3339()),
+            last_heartbeat_at: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,

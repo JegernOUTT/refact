@@ -32,7 +32,7 @@ fn title_hash(s: &str) -> String {
 
 pub fn detect_task_health_facts(entries: &[TaskHealthEntry], now: DateTime<Utc>) -> Vec<BuddyFact> {
     let mut facts = vec![];
-    let stuck_threshold = chrono::Duration::minutes(15);
+    let stuck_threshold = chrono::Duration::hours(4);
     let abandon_threshold = chrono::Duration::days(7);
 
     for entry in entries {
@@ -71,10 +71,10 @@ pub fn detect_task_health_facts(entries: &[TaskHealthEntry], now: DateTime<Utc>)
             }
         }
 
-        // TaskAbandoned: old task AND no heartbeat ever recorded (agent never ran).
+        // TaskAbandoned: old task with no active doing agent and no heartbeat ever recorded.
         if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&entry.meta.created_at) {
             let age = now.signed_duration_since(created.with_timezone(&Utc));
-            if age >= abandon_threshold && entry.last_heartbeat.is_none() {
+            if age >= abandon_threshold && entry.last_heartbeat.is_none() && !has_doing_card {
                 tracing::debug!("task_health: abandoned task {}", entry.meta.id);
                 facts.push(BuddyFact {
                     kind: BuddyFactKind::TaskAbandoned,
@@ -113,12 +113,12 @@ pub fn detect_task_health_facts(entries: &[TaskHealthEntry], now: DateTime<Utc>)
                 // skipped to avoid false positives from title similarity alone.
                 let a_files = &active[i].touched_files;
                 let b_files = &active[j].touched_files;
-                let has_overlap = if !a_files.is_empty() && !b_files.is_empty() {
-                    a_files.iter().any(|f| b_files.contains(f))
+                let overlap_count = if !a_files.is_empty() && !b_files.is_empty() {
+                    a_files.iter().filter(|f| b_files.contains(*f)).count()
                 } else {
-                    false
+                    0
                 };
-                if !has_overlap {
+                if overlap_count == 0 {
                     continue;
                 }
                 let rep = if a <= b { a } else { b };
@@ -134,7 +134,9 @@ pub fn detect_task_health_facts(entries: &[TaskHealthEntry], now: DateTime<Utc>)
                         key,
                         source: "task_health",
                         payload: serde_json::json!({
-                            "task_ids": [active[i].meta.id, active[j].meta.id],
+                            "task_a": active[i].meta.id,
+                            "task_b": active[j].meta.id,
+                            "overlap_count": overlap_count,
                             "similarity": sim,
                         }),
                         seen_at: now,
@@ -190,7 +192,7 @@ impl BuddyObserver for TaskHealthObserver {
                         None
                     };
                     let hb = live.or_else(|| {
-                        card.started_at
+                        card.last_heartbeat_at
                             .as_deref()
                             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                             .map(|t| t.with_timezone(&Utc))

@@ -2791,6 +2791,7 @@ fn make_board_card(
         final_report: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         started_at: started_at.map(|s| s.to_string()),
+        last_heartbeat_at: None,
         completed_at: None,
         agent_branch: None,
         agent_worktree: None,
@@ -2803,7 +2804,7 @@ fn make_board_card(
 fn task_health_emits_stuck_fact() {
     use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
     let now = chrono::Utc::now();
-    let heartbeat = now - Duration::minutes(20);
+    let heartbeat = now - Duration::hours(5);
     let meta = make_task_meta("t1", "Fix bug", TaskStatus::Active, &now.to_rfc3339());
     let board = TaskBoard {
         schema_version: 1,
@@ -4338,11 +4339,11 @@ fn task_stuck_uses_heartbeat_not_started_at() {
         "fresh heartbeat must not emit TaskStuck"
     );
 
-    // Stale heartbeat (20 min ago) — stuck fact emitted.
+    // Stale heartbeat (5h ago) — stuck fact emitted.
     let stale = vec![TaskHealthEntry {
         meta,
         board,
-        last_heartbeat: Some(now - Duration::minutes(20)),
+        last_heartbeat: Some(now - Duration::hours(5)),
         touched_files: vec![],
     }];
     let facts = detect_task_health_facts(&stale, now);
@@ -5181,6 +5182,7 @@ async fn task_abandoned_not_emitted_when_only_session_missing() {
         final_report: None,
         created_at: started.clone(),
         started_at: Some(started),
+        last_heartbeat_at: None,
         completed_at: None,
         agent_branch: None,
         agent_worktree: None,
@@ -5200,6 +5202,10 @@ async fn task_abandoned_not_emitted_when_only_session_missing() {
     assert!(
         !facts.iter().any(|f| f.kind == BuddyFactKind::TaskAbandoned),
         "TaskAbandoned must not fire when agent has started_at (session cleaned up)"
+    );
+    assert!(
+        !facts.iter().any(|f| f.kind == BuddyFactKind::TaskStuck),
+        "TaskStuck must not fire from started_at fallback when no heartbeat exists"
     );
 }
 
@@ -5235,6 +5241,7 @@ async fn task_cluster_duplicate_emits_with_real_touched_files() {
             final_report: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             started_at: None,
+            last_heartbeat_at: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,
@@ -5253,6 +5260,257 @@ async fn task_cluster_duplicate_emits_with_real_touched_files() {
     assert!(
         facts.iter().any(|f| f.kind == BuddyFactKind::TaskClusterDuplicate),
         "TaskClusterDuplicate must be emitted for similar-named tasks with overlapping target_files"
+    );
+}
+
+#[test]
+fn task_stuck_no_started_at_fallback_when_no_heartbeat() {
+    use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
+    let now = chrono::Utc::now();
+    let board = TaskBoard {
+        schema_version: 1,
+        rev: 0,
+        columns: vec![],
+        cards: vec![make_board_card(
+            "c1",
+            "doing",
+            Some("agent-1"),
+            Some(&(now - Duration::hours(5)).to_rfc3339()),
+        )],
+    };
+    let entries = vec![TaskHealthEntry {
+        meta: make_task_meta("t1", "Old started", TaskStatus::Active, &now.to_rfc3339()),
+        board,
+        last_heartbeat: None,
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&entries, now);
+    assert!(facts.iter().all(|f| f.kind != BuddyFactKind::TaskStuck));
+}
+
+#[test]
+fn task_stuck_uses_persisted_heartbeat_when_recent() {
+    use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
+    let now = chrono::Utc::now();
+    let board = TaskBoard {
+        schema_version: 1,
+        rev: 0,
+        columns: vec![],
+        cards: vec![make_board_card("c1", "doing", Some("agent-1"), None)],
+    };
+    let entries = vec![TaskHealthEntry {
+        meta: make_task_meta(
+            "t1",
+            "Recent heartbeat",
+            TaskStatus::Active,
+            &now.to_rfc3339(),
+        ),
+        board,
+        last_heartbeat: Some(now - Duration::hours(1)),
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&entries, now);
+    assert!(facts.iter().all(|f| f.kind != BuddyFactKind::TaskStuck));
+}
+
+#[test]
+fn task_stuck_when_persisted_heartbeat_stale() {
+    use super::observers::task_health::{detect_task_health_facts, TaskHealthEntry};
+    let now = chrono::Utc::now();
+    let board = TaskBoard {
+        schema_version: 1,
+        rev: 0,
+        columns: vec![],
+        cards: vec![make_board_card("c1", "doing", Some("agent-1"), None)],
+    };
+    let entries = vec![TaskHealthEntry {
+        meta: make_task_meta(
+            "t1",
+            "Stale heartbeat",
+            TaskStatus::Active,
+            &now.to_rfc3339(),
+        ),
+        board,
+        last_heartbeat: Some(now - Duration::hours(5)),
+        touched_files: vec![],
+    }];
+    let facts = detect_task_health_facts(&entries, now);
+    assert!(facts.iter().any(|f| f.kind == BuddyFactKind::TaskStuck));
+}
+
+#[tokio::test]
+async fn task_agent_monitor_writes_heartbeat_on_message() {
+    use crate::chat::task_agent_monitor::update_card_heartbeat;
+    use crate::tasks::storage::{create_task, load_board, save_board};
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let gcx_lock = gcx.read().await;
+        *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            vec![dir.path().to_path_buf()];
+    }
+    let task = create_task(gcx.clone(), "Heartbeat task").await.unwrap();
+    let mut board = load_board(gcx.clone(), &task.id).await.unwrap();
+    board
+        .cards
+        .push(make_board_card("c1", "doing", Some("agent-1"), None));
+    save_board(gcx.clone(), &task.id, &board).await.unwrap();
+
+    update_card_heartbeat(gcx.clone(), &task.id, "c1")
+        .await
+        .unwrap();
+    let board = load_board(gcx, &task.id).await.unwrap();
+    let heartbeat = board.get_card("c1").unwrap().last_heartbeat_at.as_ref();
+    assert!(heartbeat.is_some());
+    assert!(chrono::DateTime::parse_from_rfc3339(heartbeat.unwrap()).is_ok());
+}
+
+#[test]
+fn task_cluster_duplicate_fact_becomes_opportunity() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::TaskClusterDuplicate,
+        key: "task_cluster:test".to_string(),
+        source: "test",
+        payload: serde_json::json!({"task_a":"task-a","task_b":"task-b","overlap_count":2}),
+        seen_at: now,
+        confidence: 0.9,
+    });
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
+    let opp = opps
+        .iter()
+        .find(|(o, _)| o.kind == BuddyOpportunityKind::TaskHealth)
+        .unwrap();
+    assert!(opp.0.summary.contains("task-a"));
+    assert!(opp.0.summary.contains("task-b"));
+}
+
+#[test]
+fn cluster_opportunity_links_both_task_ids() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::TaskClusterDuplicate,
+        key: "task_cluster:links".to_string(),
+        source: "test",
+        payload: serde_json::json!({"task_a":"task-a","task_b":"task-b","overlap_count":1}),
+        seen_at: now,
+        confidence: 0.9,
+    });
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
+    let opp = opps
+        .iter()
+        .find(|(o, _)| o.kind == BuddyOpportunityKind::TaskHealth)
+        .unwrap();
+    assert_eq!(
+        opp.0.related.task_ids,
+        vec!["task-a".to_string(), "task-b".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn target_files_persisted_through_api() {
+    use axum::Extension;
+    use crate::http::routers::v1::tasks::{handle_create_task, CreateTaskRequest};
+    use crate::tasks::storage::load_board;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let gcx_lock = gcx.read().await;
+        *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            vec![dir.path().to_path_buf()];
+    }
+    let meta = handle_create_task(
+        Extension(gcx.clone()),
+        axum::Json(CreateTaskRequest {
+            name: "API target files".to_string(),
+            target_files: vec!["src/foo.rs".to_string(), "src/bar.ts".to_string()],
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let board = load_board(gcx, &meta.id).await.unwrap();
+    assert_eq!(
+        board.cards[0].target_files,
+        vec!["src/foo.rs".to_string(), "src/bar.ts".to_string()]
+    );
+}
+
+#[test]
+fn agent_merge_appends_target_files_via_git_diff() {
+    use crate::chat::task_agent_monitor::git_diff_name_only;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("README.md"), "init").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let base = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    std::process::Command::new("git")
+        .args(["checkout", "-b", "agent"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::fs::write(root.join("src/foo.rs"), "fn foo() {}").unwrap();
+    std::fs::write(root.join("src/bar.ts"), "export const bar = 1;").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "agent"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    let mut files = git_diff_name_only(root, &base, "agent");
+    files.sort();
+    assert_eq!(
+        files,
+        vec!["src/bar.ts".to_string(), "src/foo.rs".to_string()]
     );
 }
 

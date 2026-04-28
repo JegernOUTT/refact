@@ -130,6 +130,11 @@ impl Tool for ToolTaskMergeAgent {
             .base_branch
             .as_ref()
             .ok_or("Task has no base branch set")?;
+        let changed_files = crate::chat::task_agent_monitor::git_diff_name_only(
+            std::path::Path::new(agent_worktree),
+            base_branch,
+            agent_branch,
+        );
 
         let run_git = |args: &[&str]| -> Result<String, String> {
             let output = Command::new("git")
@@ -444,6 +449,14 @@ Use `cat <file>` to see conflict markers in each file."#,
         };
 
         drop(_guard);
+
+        let _ = crate::chat::task_agent_monitor::append_card_target_files(
+            gcx.clone(),
+            &task_id,
+            card_id,
+            changed_files,
+        )
+        .await;
 
         if worktree_removed || branch_deleted {
             let card_id_owned = card_id.to_string();

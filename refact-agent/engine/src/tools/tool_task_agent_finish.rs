@@ -189,6 +189,10 @@ impl Tool for ToolTaskAgentFinish {
 
         let gcx = ccx.lock().await.global_context.clone();
 
+        let _ =
+            crate::chat::task_agent_monitor::update_card_heartbeat(gcx.clone(), &task_id, &card_id)
+                .await;
+
         let board_pre = storage::load_board(gcx.clone(), &task_id).await?;
         let card_pre = board_pre
             .get_card(&card_id)

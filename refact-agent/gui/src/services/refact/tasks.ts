@@ -47,8 +47,15 @@ export interface BoardCard {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  last_heartbeat_at?: string | null;
   agent_branch?: string;
   agent_worktree?: string;
+  target_files: string[];
+}
+
+export interface CreateTaskRequest {
+  name: string;
+  target_files?: string[];
 }
 
 export interface TaskBoard {
@@ -100,7 +107,7 @@ export const tasksApi = createApi({
       providesTags: ["Tasks"],
     }),
 
-    createTask: builder.mutation<TaskMeta, { name: string }>({
+    createTask: builder.mutation<TaskMeta, CreateTaskRequest>({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort;

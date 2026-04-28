@@ -114,6 +114,8 @@ pub struct BoardCard {
     pub final_report: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<String>,
     pub completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_branch: Option<String>,

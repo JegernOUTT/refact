@@ -19,6 +19,8 @@ use crate::tasks::storage;
 #[derive(Deserialize)]
 pub struct CreateTaskRequest {
     pub name: String,
+    #[serde(default)]
+    pub target_files: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -40,6 +42,8 @@ pub enum BoardPatch {
         depends_on: Vec<String>,
         #[serde(default)]
         instructions: String,
+        #[serde(default)]
+        target_files: Vec<String>,
     },
     UpdateCard {
         id: String,
@@ -51,6 +55,8 @@ pub enum BoardPatch {
         depends_on: Option<Vec<String>>,
         #[serde(default)]
         instructions: Option<String>,
+        #[serde(default)]
+        target_files: Option<Vec<String>>,
     },
     MoveCard {
         id: String,
@@ -108,9 +114,38 @@ pub async fn handle_create_task(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<Json<TaskMeta>, (StatusCode, String)> {
-    let meta = storage::create_task(gcx, &req.name)
+    let meta = storage::create_task(gcx.clone(), &req.name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !req.target_files.is_empty() {
+        let now = Utc::now().to_rfc3339();
+        let mut board = storage::load_board(gcx.clone(), &meta.id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        board.cards.push(BoardCard {
+            id: "targets".to_string(),
+            title: "Target files".to_string(),
+            column: "planned".into(),
+            priority: "P1".into(),
+            depends_on: vec![],
+            instructions: String::new(),
+            assignee: None,
+            agent_chat_id: None,
+            status_updates: vec![],
+            final_report: None,
+            created_at: now,
+            started_at: None,
+            last_heartbeat_at: None,
+            completed_at: None,
+            agent_branch: None,
+            agent_worktree: None,
+            agent_worktree_name: None,
+            target_files: req.target_files,
+        });
+        storage::save_board(gcx, &meta.id, &board)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
     Ok(Json(meta))
 }
 
@@ -184,6 +219,7 @@ pub async fn handle_patch_board(
             priority,
             depends_on,
             instructions,
+            target_files,
         } => {
             if board.cards.iter().any(|c| c.id == id) {
                 return Err((
@@ -204,11 +240,12 @@ pub async fn handle_patch_board(
                 final_report: None,
                 created_at: now.clone(),
                 started_at: None,
+                last_heartbeat_at: None,
                 completed_at: None,
                 agent_branch: None,
                 agent_worktree: None,
                 agent_worktree_name: None,
-                target_files: vec![],
+                target_files,
             });
         }
         BoardPatch::UpdateCard {
@@ -217,6 +254,7 @@ pub async fn handle_patch_board(
             priority,
             depends_on,
             instructions,
+            target_files,
         } => {
             let card = board
                 .get_card_mut(&id)
@@ -232,6 +270,9 @@ pub async fn handle_patch_board(
             }
             if let Some(i) = instructions {
                 card.instructions = i;
+            }
+            if let Some(files) = target_files {
+                card.target_files = files;
             }
         }
         BoardPatch::MoveCard { id, column } => {

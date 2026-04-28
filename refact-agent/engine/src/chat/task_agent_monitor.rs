@@ -64,6 +64,8 @@ async fn mark_agent_as_failed(
     expected_agent_id: Option<&str>,
     reason: &str,
 ) -> Result<(), String> {
+    let _ = update_card_heartbeat(gcx.clone(), task_id, card_id).await;
+
     let card_id_owned = card_id.to_string();
     let reason_clone = reason.to_string();
     let expected_agent_id_owned = expected_agent_id.map(|s| s.to_string());
@@ -383,6 +385,76 @@ pub(crate) async fn cleanup_failed_agent_worktree(
     diff_report
 }
 
+pub async fn update_card_heartbeat(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    task_id: &str,
+    card_id: &str,
+) -> Result<(), String> {
+    let card_id_owned = card_id.to_string();
+    let heartbeat = Utc::now().to_rfc3339();
+    storage::update_board_atomic(gcx, task_id, move |board| {
+        let card = board
+            .get_card_mut(&card_id_owned)
+            .ok_or_else(|| format!("Card {} not found", card_id_owned))?;
+        card.last_heartbeat_at = Some(heartbeat.clone());
+        Ok(())
+    })
+    .await
+    .map(|_| ())
+}
+
+pub fn git_diff_name_only(worktree_path: &Path, base_ref: &str, head_ref: &str) -> Vec<String> {
+    let range = format!("{}..{}", base_ref, head_ref);
+    let output = Command::new("git")
+        .args(["diff", "--name-only", &range])
+        .current_dir(worktree_path)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Ok(output) => {
+            tracing::warn!(
+                "git diff --name-only failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            vec![]
+        }
+        Err(err) => {
+            tracing::warn!("git diff --name-only failed: {}", err);
+            vec![]
+        }
+    }
+}
+
+pub async fn append_card_target_files(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    task_id: &str,
+    card_id: &str,
+    files: Vec<String>,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let card_id_owned = card_id.to_string();
+    storage::update_board_atomic(gcx, task_id, move |board| {
+        let card = board
+            .get_card_mut(&card_id_owned)
+            .ok_or_else(|| format!("Card {} not found", card_id_owned))?;
+        for file in &files {
+            if !card.target_files.contains(file) {
+                card.target_files.push(file.clone());
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map(|_| ())
+}
+
 /// Return the wall-clock timestamp of the last recorded activity for the
 /// given agent chat session. Returns `None` when the session no longer exists.
 pub async fn get_last_agent_heartbeat(
@@ -603,6 +675,7 @@ mod tests {
             final_report: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             started_at: Some(chrono::Utc::now().to_rfc3339()),
+            last_heartbeat_at: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,

@@ -7,6 +7,7 @@ import {
   Card,
   Badge,
   TextField,
+  TextArea,
   Heading,
   Spinner,
 } from "@radix-ui/themes";
@@ -214,14 +215,20 @@ export const TaskList: React.FC = () => {
   const [createTask] = useCreateTaskMutation();
   const [deleteTask] = useDeleteTaskMutation();
   const [newTaskName, setNewTaskName] = useState("");
+  const [newTaskTargetFiles, setNewTaskTargetFiles] = useState("");
   const [isCreating, setIsCreating] = useState(false);
 
   const handleCreateTask = useCallback(() => {
     if (!newTaskName.trim()) return;
-    createTask({ name: newTaskName.trim() })
+    const targetFiles = newTaskTargetFiles
+      .split(/[\n,]/)
+      .map((file) => file.trim())
+      .filter(Boolean);
+    createTask({ name: newTaskName.trim(), target_files: targetFiles })
       .unwrap()
       .then((task) => {
         setNewTaskName("");
+        setNewTaskTargetFiles("");
         setIsCreating(false);
         dispatch(openTask({ id: task.id, name: task.name }));
         dispatch(push({ name: "task workspace", taskId: task.id }));
@@ -229,7 +236,7 @@ export const TaskList: React.FC = () => {
       .catch(() => {
         // Error handling via RTK Query
       });
-  }, [createTask, dispatch, newTaskName]);
+  }, [createTask, dispatch, newTaskName, newTaskTargetFiles]);
 
   const handleTaskClick = useCallback(
     (task: TaskMeta) => {
@@ -253,6 +260,7 @@ export const TaskList: React.FC = () => {
       } else if (e.key === "Escape") {
         setIsCreating(false);
         setNewTaskName("");
+        setNewTaskTargetFiles("");
       }
     },
     [handleCreateTask],
@@ -275,28 +283,37 @@ export const TaskList: React.FC = () => {
 
       {isCreating && (
         <Card>
-          <Flex gap="2">
-            <TextField.Root
-              style={{ flex: 1 }}
-              placeholder="Task name..."
-              value={newTaskName}
-              onChange={(e) => setNewTaskName(e.target.value)}
-              onKeyDown={handleKeyDown}
-              autoFocus
+          <Flex direction="column" gap="2">
+            <Flex gap="2">
+              <TextField.Root
+                style={{ flex: 1 }}
+                placeholder="Task name..."
+                value={newTaskName}
+                onChange={(e) => setNewTaskName(e.target.value)}
+                onKeyDown={handleKeyDown}
+                autoFocus
+              />
+              <Button onClick={handleCreateTask} disabled={!newTaskName.trim()}>
+                Create
+              </Button>
+              <Button
+                variant="soft"
+                color="gray"
+                onClick={() => {
+                  setIsCreating(false);
+                  setNewTaskName("");
+                  setNewTaskTargetFiles("");
+                }}
+              >
+                Cancel
+              </Button>
+            </Flex>
+            <TextArea
+              aria-label="Target files"
+              placeholder="Target files (comma or newline separated)"
+              value={newTaskTargetFiles}
+              onChange={(e) => setNewTaskTargetFiles(e.target.value)}
             />
-            <Button onClick={handleCreateTask} disabled={!newTaskName.trim()}>
-              Create
-            </Button>
-            <Button
-              variant="soft"
-              color="gray"
-              onClick={() => {
-                setIsCreating(false);
-                setNewTaskName("");
-              }}
-            >
-              Cancel
-            </Button>
           </Flex>
         </Card>
       )}
