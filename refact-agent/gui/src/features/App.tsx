@@ -428,6 +428,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             host={config.host}
             initialKind={renderedPage.kind}
             initialConfigId={renderedPage.configId}
+            draftId={renderedPage.draftId}
           />
         )}
         {!pageSwitching && renderedPage.name === "default models" && (
@@ -435,6 +436,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             backFromDefaultModels={goBack}
             tabbed={config.tabbed}
             host={config.host}
+            draftId={renderedPage.draftId}
           />
         )}
         {!pageSwitching && renderedPage.name === "stats dashboard" && (
@@ -451,6 +453,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             host={config.host}
             initialTab={renderedPage.tab}
             initialItemId={renderedPage.itemId}
+            draftId={renderedPage.draftId}
           />
         )}
         {!pageSwitching && renderedPage.name === "mcp marketplace" && (

@@ -24,6 +24,8 @@ import {
 } from "../../services/refact/buddy";
 import { useBuddyState } from "./hooks/useBuddyState";
 import { BuddyCanvas } from "./BuddyCanvas";
+import { BuddyOpportunityCard } from "./BuddyOpportunityCard";
+import { useBuddyOpportunities } from "./hooks/useBuddyOpportunities";
 import type { BuddyControl, BuddySuggestion, DiagnosticContext } from "./types";
 import { isBuddyOverlaySuppressedIssue } from "./investigation";
 import { executeBuddyAction } from "./executeBuddyAction";
@@ -56,6 +58,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   );
 
   const buddy = useBuddyState();
+  const { unread } = useBuddyOpportunities();
+  const [showTopOpp, setShowTopOpp] = useState(false);
   const [dismissMutation] = useDismissBuddySuggestionMutation();
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
 
@@ -300,10 +304,68 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     ],
   );
 
-  if (!enabled || !notification || isDismissed) return null;
+  const badgeCount = unread.length;
+  const badgeLabel = badgeCount > 9 ? "9+" : String(badgeCount);
+
+  if (!enabled) return null;
+  if (!notification || isDismissed) {
+    if (badgeCount === 0) return null;
+    return (
+      <div className={styles.companion}>
+        {badgeCount > 0 && (
+          <button
+            type="button"
+            data-testid="buddy-companion-unread-badge"
+            aria-label={`${badgeCount} unread opportunities`}
+            style={{
+              background: "var(--accent-9)",
+              color: "var(--accent-contrast)",
+              border: "none",
+              borderRadius: "9999px",
+              padding: "1px 5px",
+              fontSize: "10px",
+              fontWeight: 700,
+              cursor: "pointer",
+              lineHeight: 1.4,
+            }}
+            onClick={() => setShowTopOpp((v) => !v)}
+          >
+            {badgeLabel}
+          </button>
+        )}
+        {showTopOpp && unread.length > 0 && (
+          <BuddyOpportunityCard opportunity={unread[0]} />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className={styles.companion}>
+      {badgeCount > 0 && (
+        <button
+          type="button"
+          data-testid="buddy-companion-unread-badge"
+          aria-label={`${badgeCount} unread opportunities`}
+          style={{
+            background: "var(--accent-9)",
+            color: "var(--accent-contrast)",
+            border: "none",
+            borderRadius: "9999px",
+            padding: "1px 5px",
+            fontSize: "10px",
+            fontWeight: 700,
+            cursor: "pointer",
+            lineHeight: 1.4,
+          }}
+          onClick={() => setShowTopOpp((v) => !v)}
+        >
+          {badgeLabel}
+        </button>
+      )}
+      {showTopOpp && unread.length > 0 && (
+        <BuddyOpportunityCard opportunity={unread[0]} />
+      )}
       <BuddyCanvas
         state={buddy.state}
         onEvent={buddy.handleCanvasEvent}

@@ -64,6 +64,7 @@ export type CustomizationProps = {
   tabbed: Config["tabbed"];
   initialKind?: ConfigKind;
   initialConfigId?: string;
+  draftId?: string;
 };
 
 const KIND_LABELS: Record<ConfigKind, string> = {
@@ -616,6 +617,7 @@ export const Customization: React.FC<CustomizationProps> = ({
   tabbed,
   initialKind = "modes",
   initialConfigId,
+  draftId,
 }) => {
   const dispatch = useAppDispatch();
   const [activeKind, setActiveKind] = useState<ConfigKind>(initialKind);
@@ -782,6 +784,7 @@ export const Customization: React.FC<CustomizationProps> = ({
                   configId={selectedConfigId}
                   configItem={selectedItem}
                   onSaved={() => void refetch()}
+                  draftId={draftId}
                 />
               </div>
             );

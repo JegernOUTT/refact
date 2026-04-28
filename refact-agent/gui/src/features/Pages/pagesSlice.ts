@@ -58,10 +58,12 @@ export interface CustomizationPage {
   name: "customization";
   kind?: "modes" | "subagents" | "toolbox_commands" | "code_lens";
   configId?: string;
+  draftId?: string;
 }
 
 export interface DefaultModelsPage {
   name: "default models";
+  draftId?: string;
 }
 
 export interface StatsDashboardPage {
@@ -72,6 +74,7 @@ export interface ExtensionsPage {
   name: "extensions";
   tab?: "skills" | "commands" | "hooks";
   itemId?: string;
+  draftId?: string;
 }
 
 export interface MCPMarketplacePage {

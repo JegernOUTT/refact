@@ -1,0 +1,49 @@
+.workshop {
+  background: var(--gray-a2);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--space-2);
+  border-radius: var(--radius-2);
+  border: 1px solid var(--gray-a4);
+  background: var(--gray-a2);
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--gray-12);
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+  text-align: left;
+  min-width: 0;
+}
+
+.btn:hover {
+  background: var(--gray-a3);
+  border-color: var(--gray-a6);
+}
+
+.btnIcon {
+  font-size: 14px;
+}

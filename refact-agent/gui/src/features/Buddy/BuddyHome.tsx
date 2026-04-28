@@ -6,6 +6,10 @@ import { useAppDispatch, useAppSelector } from "../../hooks";
 import { pop, push } from "../Pages/pagesSlice";
 import { BuddyCanvas } from "./BuddyCanvas";
 import { BuddyRecentChats } from "./BuddyRecentChats";
+import { BuddyPulseCard } from "./BuddyPulseCard";
+import { BuddyOpportunitiesFeed } from "./BuddyOpportunitiesFeed";
+import { BuddyWorkshop } from "./BuddyWorkshop";
+import { BuddySettingsPanel } from "./BuddySettingsPanel";
 import { useBuddyState } from "./hooks/useBuddyState";
 import {
   selectBuddySnapshot,
@@ -85,6 +89,7 @@ export const BuddyHome: React.FC = () => {
   const buddy = useBuddyState();
   const { state } = buddy;
   const [setupDismissed, setSetupDismissed] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [updateSettings, { isLoading: isSavingSettings }] =
     useUpdateBuddySettingsMutation();
 
@@ -341,7 +346,11 @@ export const BuddyHome: React.FC = () => {
         <Text size="2" weight="bold" className={styles.topTitle}>
           {stage.emoji} {name}
         </Text>
-        <Button variant="ghost" size="1" onClick={handleSettings}>
+        <Button
+          variant="ghost"
+          size="1"
+          onClick={() => setShowSettings((v) => !v)}
+        >
           <GearIcon width={14} height={14} />
         </Button>
       </div>
@@ -512,6 +521,21 @@ export const BuddyHome: React.FC = () => {
             View Full Stats →
           </Button>
         )}
+      </div>
+
+      {showSettings && (
+        <div style={{ padding: "0 var(--space-3) var(--space-3)" }}>
+          <BuddySettingsPanel onClose={() => setShowSettings(false)} />
+        </div>
+      )}
+
+      {/* Pulse + Opportunities + Workshop */}
+      <div className={styles.row} data-testid="buddy-home-new-sections">
+        <BuddyPulseCard />
+        <BuddyOpportunitiesFeed />
+      </div>
+      <div style={{ padding: "0 var(--space-3) var(--space-3)" }}>
+        <BuddyWorkshop />
       </div>
 
       {/* Row 1 — Care loop + Personality */}

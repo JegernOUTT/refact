@@ -1,8 +1,10 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useState } from "react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
 import { BuddyCanvas } from "./BuddyCanvas";
+import { BuddyOpportunityCard } from "./BuddyOpportunityCard";
 import { useBuddyState } from "./hooks/useBuddyState";
+import { useBuddyOpportunities } from "./hooks/useBuddyOpportunities";
 import {
   selectBuddySnapshot,
   selectIsBuddyEnabled,
@@ -22,6 +24,8 @@ export const BuddyPanel: React.FC = () => {
   const nowPlaying = useAppSelector(selectNowPlaying);
   const activeSpeech = useAppSelector(selectActiveSpeech);
   const diagnostics = useAppSelector(selectBuddyDiagnostics);
+  const { unread } = useBuddyOpportunities();
+  const [showTop, setShowTop] = useState(false);
 
   const buddy = useBuddyState();
   const { state } = buddy;
@@ -56,12 +60,56 @@ export const BuddyPanel: React.FC = () => {
   if (snapshot === null) return null;
   if (!enabled) return null;
 
+  const badgeCount = unread.length;
+  const badgeLabel = badgeCount > 9 ? "9+" : String(badgeCount);
+
   return (
     <div
       className={styles.block}
       onClick={handleOpen}
       style={{ cursor: "pointer" }}
     >
+      {badgeCount > 0 && (
+        <div
+          style={{
+            position: "relative",
+            display: "flex",
+            justifyContent: "flex-end",
+            paddingRight: "var(--space-2)",
+          }}
+        >
+          <button
+            type="button"
+            data-testid="buddy-unread-badge"
+            aria-label={`${badgeCount} unread opportunities`}
+            style={{
+              background: "var(--accent-9)",
+              color: "var(--accent-contrast)",
+              border: "none",
+              borderRadius: "9999px",
+              padding: "1px 5px",
+              fontSize: "10px",
+              fontWeight: 700,
+              cursor: "pointer",
+              lineHeight: 1.4,
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowTop((v) => !v);
+            }}
+          >
+            {badgeLabel}
+          </button>
+        </div>
+      )}
+      {showTop && unread.length > 0 && (
+        <div
+          style={{ padding: "0 var(--space-2) var(--space-2)" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <BuddyOpportunityCard opportunity={unread[0]} />
+        </div>
+      )}
       <div className={styles.body}>
         <div className={styles.scene}>
           <div className={styles.glowWrap} onClick={(e) => e.stopPropagation()}>

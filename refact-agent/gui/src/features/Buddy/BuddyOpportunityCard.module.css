@@ -1,0 +1,63 @@
+.card {
+  background: var(--gray-a2);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.priorityBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.priorityCritical {
+  background: var(--red-a3);
+  color: var(--red-11);
+}
+
+.priorityHigh {
+  background: var(--orange-a3);
+  color: var(--orange-11);
+}
+
+.priorityNormal {
+  background: var(--blue-a3);
+  color: var(--blue-11);
+}
+
+.priorityLow {
+  background: var(--gray-a3);
+  color: var(--gray-11);
+}
+
+.summary {
+  flex: 1;
+  min-width: 0;
+}
+
+.humor {
+  font-style: italic;
+  color: var(--gray-10);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}

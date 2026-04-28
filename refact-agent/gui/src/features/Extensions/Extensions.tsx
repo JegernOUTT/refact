@@ -29,6 +29,7 @@ export type ExtensionsProps = {
   tabbed: Config["tabbed"];
   initialTab?: ExtensionsTab;
   initialItemId?: string;
+  draftId?: string;
 };
 
 type DeleteTarget = {
@@ -43,6 +44,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   tabbed,
   initialTab = "skills",
   initialItemId,
+  draftId,
 }) => {
   const dispatch = useAppDispatch();
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(initialTab);
@@ -192,6 +194,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
               <SkillEditor
                 name={selectedSkill}
                 onBack={() => setSelectedSkill(null)}
+                draftId={draftId}
               />
             ) : (
               <Flex direction="column" gap="2">
@@ -217,6 +220,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
               <CommandEditor
                 name={selectedCommand}
                 onBack={() => setSelectedCommand(null)}
+                draftId={draftId}
               />
             ) : (
               <Flex direction="column" gap="2">
