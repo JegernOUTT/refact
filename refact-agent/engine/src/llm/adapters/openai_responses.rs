@@ -1246,9 +1246,9 @@ mod tests {
             http.body.get("max_output_tokens").is_some(),
             "Standard API should have max_output_tokens"
         );
-        assert_eq!(
-            http.body["temperature"], 0.5,
-            "Standard API should have temperature"
+        assert!(
+            http.body.get("temperature").is_none(),
+            "Responses requests for reasoning-capable models must omit temperature"
         );
     }
 

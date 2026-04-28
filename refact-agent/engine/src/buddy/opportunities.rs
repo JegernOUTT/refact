@@ -75,6 +75,10 @@ impl OpportunityQueue {
         self.cap_items();
     }
 
+    pub fn push(&mut self, opp: BuddyOpportunity) {
+        self.push_with_cooldown(opp, DEFAULT_COOLDOWN.num_seconds() as u64);
+    }
+
     pub fn unread_count(&self) -> usize {
         self.items
             .iter()

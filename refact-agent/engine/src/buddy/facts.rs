@@ -92,6 +92,11 @@ impl FactStore {
         self.recent(kind, within).len()
     }
 
+    /// Return the number of stored facts.
+    pub fn len(&self) -> usize {
+        self.ring.len()
+    }
+
     /// Iterate over all facts in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = &BuddyFact> {
         self.ring.iter()

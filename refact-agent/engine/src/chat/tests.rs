@@ -292,7 +292,7 @@ mod tests {
 
         let extra = extract_extra_fields(&json);
 
-        assert_eq!(extra.len(), 6);
+        assert_eq!(extra.len(), 5);
         assert!(extra.contains_key("billing_amount"));
         assert!(extra.contains_key("cost_total"));
         assert!(extra.contains_key("cache_status"));

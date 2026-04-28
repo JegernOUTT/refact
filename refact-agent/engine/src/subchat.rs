@@ -1489,7 +1489,10 @@ mod subchat_tests {
     use super::resolve_subchat_params;
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
+    use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     #[tokio::test]
     async fn test_resolve_subchat_params_normalizes_code_review_for_smaller_model() {
         let gcx = make_test_gcx().await;
