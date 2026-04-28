@@ -6,7 +6,6 @@ import { ProviderCard } from "../Providers/ProviderCard";
 import { ProviderPreview } from "../Providers/ProviderPreview";
 import type { ProviderListItem } from "../../services/refact";
 import { useGetConfiguredProvidersView } from "../Providers/ProvidersView/useConfiguredProvidersView";
-import { newChatAction } from "../Chat";
 import { push } from "../Pages/pagesSlice";
 import { hasAnyUsableActiveProvider } from "./providerAccess";
 
@@ -17,8 +16,16 @@ export const LoginPage: React.FC = () => {
   const { sortedConfiguredProviders } = useGetConfiguredProvidersView({
     configuredProviders,
   });
-  const [currentProvider, setCurrentProvider] =
-    React.useState<ProviderListItem | null>(null);
+  const [currentProviderName, setCurrentProviderName] = React.useState<
+    string | null
+  >(null);
+  const currentProvider = React.useMemo(() => {
+    return (
+      sortedConfiguredProviders.find(
+        (provider) => provider.name === currentProviderName,
+      ) ?? null
+    );
+  }, [currentProviderName, sortedConfiguredProviders]);
 
   const hasAnyActiveProvider = React.useMemo(() => {
     return hasAnyUsableActiveProvider({
@@ -50,8 +57,6 @@ export const LoginPage: React.FC = () => {
 
   const onContinue = useCallback(() => {
     dispatch(push({ name: "history" }));
-    dispatch(newChatAction());
-    dispatch(push({ name: "chat" }));
   }, [dispatch]);
 
   return (
@@ -73,7 +78,9 @@ export const LoginPage: React.FC = () => {
                   <ProviderCard
                     key={provider.name}
                     provider={provider}
-                    setCurrentProvider={setCurrentProvider}
+                    setCurrentProvider={() =>
+                      setCurrentProviderName(provider.name)
+                    }
                   />
                 ))}
               </Grid>
@@ -114,7 +121,7 @@ export const LoginPage: React.FC = () => {
                 </Heading>
                 <Button
                   variant="outline"
-                  onClick={() => setCurrentProvider(null)}
+                  onClick={() => setCurrentProviderName(null)}
                 >
                   Back to providers
                 </Button>
@@ -122,7 +129,9 @@ export const LoginPage: React.FC = () => {
               <ProviderPreview
                 configuredProviders={sortedConfiguredProviders}
                 currentProvider={currentProvider}
-                handleSetCurrentProvider={setCurrentProvider}
+                handleSetCurrentProvider={(provider: ProviderListItem | null) =>
+                  setCurrentProviderName(provider?.name ?? null)
+                }
               />
             </Card>
           )}

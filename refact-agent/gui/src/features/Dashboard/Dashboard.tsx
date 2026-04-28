@@ -1,5 +1,5 @@
 import React, { useRef } from "react";
-import { Box, Flex, Text } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
 import { TasksSection } from "./components/TasksSection/TasksSection";
 import { ChatsSection } from "./components/ChatsSection/ChatsSection";
 import { NavBar } from "./components/NavBar/NavBar";
@@ -8,13 +8,19 @@ import { useDashboardLayout } from "./hooks/useDashboardLayout";
 import { useDashboardCollapseState } from "./hooks/useDashboardCollapseState";
 import { useDashboardResize } from "./hooks/useDashboardResize";
 import { BuddyPanel } from "../Buddy/BuddyPanel";
-import { useGetPing } from "../../hooks/useGetPing";
 import styles from "./Dashboard.module.css";
-import chatLoadingStyles from "../../components/ChatContent/ChatLoading.module.css";
+import { ChatLoading } from "../../components/ChatContent/ChatLoading";
+import { useAppSelector } from "../../hooks";
+import { selectBackendStatus } from "../Connection";
 
 const OfflineState: React.FC = () => {
-  const ping = useGetPing();
-  const isConnecting = ping.isLoading || ping.isUninitialized;
+  const backendStatus = useAppSelector(selectBackendStatus);
+  const message =
+    backendStatus === "offline"
+      ? "Refact engine unavailable"
+      : backendStatus === "unknown"
+        ? "Connecting to Refact…"
+        : "Reconnecting to Refact…";
 
   return (
     <Flex
@@ -24,13 +30,9 @@ const OfflineState: React.FC = () => {
       gap="3"
       className={styles.offlineState}
     >
-      <Box className={chatLoadingStyles.dotsContainer}>
-        <Box className={chatLoadingStyles.dot} />
-        <Box className={chatLoadingStyles.dot} />
-        <Box className={chatLoadingStyles.dot} />
-      </Box>
+      <ChatLoading />
       <Text size="1" color="gray">
-        {isConnecting ? "Connecting…" : "Server unavailable"}
+        {message}
       </Text>
     </Flex>
   );
@@ -40,7 +42,7 @@ export const Dashboard: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const splitRef = useRef<HTMLDivElement>(null);
   const breakpoint = useDashboardLayout(containerRef);
-  const ping = useGetPing();
+  const backendStatus = useAppSelector(selectBackendStatus);
 
   const { collapsed, toggle } = useDashboardCollapseState();
   const {
@@ -50,7 +52,7 @@ export const Dashboard: React.FC = () => {
   } = useDashboardResize(splitRef, "dashboard:v1:split_ratio", 0.5);
 
   const showResizeDivider = !collapsed.chats && !collapsed.tasks;
-  const isOffline = !ping.data;
+  const isOffline = backendStatus !== "online";
 
   const chatsFlexStyle = collapsed.chats
     ? undefined

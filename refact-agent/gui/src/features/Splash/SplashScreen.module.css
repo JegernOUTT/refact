@@ -1,0 +1,134 @@
+.root {
+  position: relative;
+  display: flex;
+  min-height: 100vh;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: var(--space-7);
+  background: radial-gradient(
+      circle at 50% 35%,
+      var(--red-a4),
+      transparent 32rem
+    ),
+    radial-gradient(circle at 20% 80%, var(--accent-a3), transparent 24rem),
+    var(--color-background);
+}
+
+.root::before,
+.root::after {
+  position: absolute;
+  width: 22rem;
+  height: 22rem;
+  border: 1px solid var(--red-a5);
+  border-radius: 999px;
+  content: "";
+  opacity: 0.45;
+  animation: orbit 8s ease-in-out infinite;
+}
+
+.root::after {
+  width: 14rem;
+  height: 14rem;
+  border-color: var(--accent-a5);
+  animation-delay: -3s;
+}
+
+.card {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  width: min(420px, 100%);
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-7);
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-5);
+  background: color-mix(in srgb, var(--color-panel-solid) 82%, transparent);
+  box-shadow: 0 24px 80px var(--black-a7);
+  text-align: center;
+  backdrop-filter: blur(18px);
+  animation: appear 0.35s ease-out;
+}
+
+.logoWrap {
+  position: relative;
+  display: grid;
+  width: 96px;
+  height: 96px;
+  place-items: center;
+  color: var(--red-9);
+}
+
+.logoWrap::before {
+  position: absolute;
+  inset: 0;
+  border-radius: 28px;
+  background: var(--red-a3);
+  content: "";
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+.logo {
+  position: relative;
+  z-index: 1;
+  width: 64px;
+  height: 64px;
+  filter: drop-shadow(0 10px 24px var(--red-a6));
+}
+
+.animation {
+  min-height: 32px;
+}
+
+.title {
+  letter-spacing: -0.03em;
+}
+
+.caption {
+  max-width: 26rem;
+}
+
+@keyframes appear {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(0.92) rotate(0deg);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.06) rotate(6deg);
+    opacity: 0.9;
+  }
+}
+
+@keyframes orbit {
+  0%,
+  100% {
+    transform: rotate(0deg) scale(1);
+  }
+  50% {
+    transform: rotate(14deg) scale(1.08);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root::before,
+  .root::after,
+  .card,
+  .logoWrap::before {
+    animation: none;
+  }
+}

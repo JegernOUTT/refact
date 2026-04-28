@@ -6,7 +6,7 @@ import React, {
   useState,
 } from "react";
 import { Flex } from "@radix-ui/themes";
-import { Chat, newChatAction, selectChatId, selectIsStreaming } from "./Chat";
+import { Chat, selectChatId, selectIsStreaming } from "./Chat";
 
 import {
   useAppSelector,
@@ -58,6 +58,8 @@ import { Dashboard } from "./Dashboard";
 import { BuddyHome } from "./Buddy/BuddyHome";
 import { BuddyErrorBoundary } from "./Buddy/BuddyErrorBoundary";
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
+import { SplashScreen } from "./Splash";
+import { selectBackendLastOkAt, selectBackendStatus } from "./Connection";
 import {
   beginBuddyCrashSession,
   buildBuddyCrashRecoveryError,
@@ -93,8 +95,9 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const { chatPageChange, setIsChatStreaming, setIsChatReady } =
     useEventsBusForIDE();
-  const historyState = useAppSelector((state) => state.history);
   const chatId = useAppSelector(selectChatId);
+  const backendStatus = useAppSelector(selectBackendStatus);
+  const backendLastOkAt = useAppSelector(selectBackendLastOkAt);
   const providersQuery = useGetConfiguredProvidersQuery();
   useEventBusForWeb();
   useEventBusForApp();
@@ -254,32 +257,40 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   }, [providersQuery.data?.providers]);
   const canAccessApp = hasAnyActiveProvider;
   const canResolveProviderAccess = providersQuery.isSuccess;
+  const [startupResolved, setStartupResolved] = useState(false);
+
+  useEffect(() => {
+    if (providersQuery.isSuccess || providersQuery.isError) {
+      setStartupResolved(true);
+    }
+  }, [providersQuery.isError, providersQuery.isSuccess]);
+
+  const showStartupSplash =
+    !startupResolved &&
+    (backendLastOkAt === null ||
+      backendStatus !== "online" ||
+      providersQuery.isUninitialized ||
+      providersQuery.isLoading ||
+      providersQuery.isFetching);
 
   useEffect(() => {
     if (canAccessApp && !isLoggedIn) {
-      if (
-        !historyState.isLoading &&
-        Object.keys(historyState.chats).length === 0 &&
-        providersQuery.isSuccess
-      ) {
-        dispatch(push({ name: "history" }));
-        dispatch(newChatAction());
-        dispatch(push({ name: "chat" }));
-      } else {
-        dispatch(push({ name: "history" }));
-      }
+      dispatch(push({ name: "history" }));
     }
 
-    if (!canAccessApp && canResolveProviderAccess && isLoggedIn) {
+    if (
+      !canAccessApp &&
+      canResolveProviderAccess &&
+      desiredPage.name !== "login page"
+    ) {
       dispatch(popBackTo({ name: "login page" }));
     }
   }, [
     canAccessApp,
     canResolveProviderAccess,
+    desiredPage.name,
     isLoggedIn,
     dispatch,
-    historyState,
-    providersQuery.isSuccess,
   ]);
 
   useEffect(() => {
@@ -344,135 +355,150 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       })}
       data-element="app-root"
     >
-      {activeTab && <Toolbar activeTab={activeTab} />}
-      <PageWrapper
-        host={config.host}
-        style={{
-          paddingRight:
-            renderedPage.name === "integrations page" ? 0 : undefined,
-        }}
-      >
-        {renderedPage.name === "login page" && <LoginPage />}
-        {pageSwitching && <ChatLoading />}
-        {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
-        {!pageSwitching && renderedPage.name === "chat" && (
-          <Chat
+      {showStartupSplash ? (
+        <SplashScreen
+          message={
+            backendStatus === "online"
+              ? "Loading your providers…"
+              : "Starting local Refact engine…"
+          }
+        />
+      ) : (
+        <>
+          {activeTab && <Toolbar activeTab={activeTab} />}
+          <PageWrapper
             host={config.host}
-            tabbed={config.tabbed}
-            backFromChat={goBack}
-          />
-        )}
-        {!pageSwitching &&
-          renderedPage.name === "fill in the middle debug page" && (
-            <FIMDebug host={config.host} tabbed={config.tabbed} />
-          )}
-        {!pageSwitching && renderedPage.name === "integrations page" && (
-          <Integrations
-            backFromIntegrations={goBackFromIntegrations}
-            tabbed={config.tabbed}
-            host={config.host}
-            onCloseIntegrations={goBackFromIntegrations}
-            handlePaddingShift={handlePaddingShift}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "providers page" && (
-          <Providers
-            backFromProviders={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "thread history page" && (
-          <ThreadHistory
-            backFromThreadHistory={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-            onCloseThreadHistory={goBack}
-            chatId={renderedPage.chatId}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "tasks list" && <TaskList />}
-        {!pageSwitching && renderedPage.name === "task workspace" && (
-          <TaskWorkspace
-            key={renderedPage.taskId}
-            taskId={renderedPage.taskId}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "knowledge graph" && (
-          <KnowledgeWorkspace />
-        )}
-        {!pageSwitching && renderedPage.name === "customization" && (
-          <Customization
-            backFromCustomization={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-            initialKind={renderedPage.kind}
-            initialConfigId={renderedPage.configId}
-            draftId={renderedPage.draftId}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "default models" && (
-          <DefaultModels
-            backFromDefaultModels={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-            draftId={renderedPage.draftId}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "stats dashboard" && (
-          <StatsDashboard
-            backFromDashboard={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "extensions" && (
-          <Extensions
-            backFromExtensions={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-            initialTab={renderedPage.tab}
-            initialItemId={renderedPage.itemId}
-            draftId={renderedPage.draftId}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "mcp marketplace" && (
-          <MCPMarketplace
-            backFromMarketplace={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "skills marketplace" && (
-          <SkillsMarketplace
-            backFromMarketplace={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "commands marketplace" && (
-          <CommandsMarketplace
-            backFromMarketplace={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "subagents marketplace" && (
-          <SubagentsMarketplace
-            backFromMarketplace={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "marketplace hub" && (
-          <MarketplaceHub
-            back={goBack}
-            tabbed={config.tabbed}
-            host={config.host}
-          />
-        )}
-        {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
-      </PageWrapper>
+            style={{
+              paddingRight:
+                renderedPage.name === "integrations page" ? 0 : undefined,
+            }}
+          >
+            {renderedPage.name === "login page" && <LoginPage />}
+            {pageSwitching && <ChatLoading />}
+            {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
+            {!pageSwitching && renderedPage.name === "chat" && (
+              <Chat
+                host={config.host}
+                tabbed={config.tabbed}
+                backFromChat={goBack}
+              />
+            )}
+            {!pageSwitching &&
+              renderedPage.name === "fill in the middle debug page" && (
+                <FIMDebug host={config.host} tabbed={config.tabbed} />
+              )}
+            {!pageSwitching && renderedPage.name === "integrations page" && (
+              <Integrations
+                backFromIntegrations={goBackFromIntegrations}
+                tabbed={config.tabbed}
+                host={config.host}
+                onCloseIntegrations={goBackFromIntegrations}
+                handlePaddingShift={handlePaddingShift}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "providers page" && (
+              <Providers
+                backFromProviders={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "thread history page" && (
+              <ThreadHistory
+                backFromThreadHistory={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+                onCloseThreadHistory={goBack}
+                chatId={renderedPage.chatId}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "tasks list" && (
+              <TaskList />
+            )}
+            {!pageSwitching && renderedPage.name === "task workspace" && (
+              <TaskWorkspace
+                key={renderedPage.taskId}
+                taskId={renderedPage.taskId}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "knowledge graph" && (
+              <KnowledgeWorkspace />
+            )}
+            {!pageSwitching && renderedPage.name === "customization" && (
+              <Customization
+                backFromCustomization={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+                initialKind={renderedPage.kind}
+                initialConfigId={renderedPage.configId}
+                draftId={renderedPage.draftId}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "default models" && (
+              <DefaultModels
+                backFromDefaultModels={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+                draftId={renderedPage.draftId}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "stats dashboard" && (
+              <StatsDashboard
+                backFromDashboard={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "extensions" && (
+              <Extensions
+                backFromExtensions={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+                initialTab={renderedPage.tab}
+                initialItemId={renderedPage.itemId}
+                draftId={renderedPage.draftId}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "mcp marketplace" && (
+              <MCPMarketplace
+                backFromMarketplace={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "skills marketplace" && (
+              <SkillsMarketplace
+                backFromMarketplace={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "commands marketplace" && (
+              <CommandsMarketplace
+                backFromMarketplace={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+              />
+            )}
+            {!pageSwitching &&
+              renderedPage.name === "subagents marketplace" && (
+                <SubagentsMarketplace
+                  backFromMarketplace={goBack}
+                  tabbed={config.tabbed}
+                  host={config.host}
+                />
+              )}
+            {!pageSwitching && renderedPage.name === "marketplace hub" && (
+              <MarketplaceHub
+                back={goBack}
+                tabbed={config.tabbed}
+                host={config.host}
+              />
+            )}
+            {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
+          </PageWrapper>
+        </>
+      )}
     </Flex>
   );
 };
@@ -482,7 +508,16 @@ export const App = () => {
   return (
     <BuddyErrorBoundary>
       <Provider store={store}>
-        <PersistGate persistor={persistor}>
+        <PersistGate
+          persistor={persistor}
+          loading={
+            <AbortControllerProvider>
+              <Theme>
+                <SplashScreen />
+              </Theme>
+            </AbortControllerProvider>
+          }
+        >
           <Theme>
             <AbortControllerProvider>
               <BuddyErrorBoundary>
