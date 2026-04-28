@@ -18,7 +18,7 @@
 
 
 
-Refact.ai is the #1 open-source AI Agent in SWE-bench verified that handles engineering tasks end-to-end. It deeply understands your codebases and integrates with your tools, databases, and browsers to automate complex, multi-step tasks.
+Refact.ai is the open-source AI Agent that handles engineering tasks end-to-end. It deeply understands your codebases and integrates with your tools, databases, and browsers to automate complex, multi-step tasks.
 
 
 ## 🚀 Seamless Integration with Your Workflow
@@ -37,8 +37,6 @@ Refact Agent works effortlessly with the tools and databases you already use:
 - 🧠 **Access State-of-the-Art Models:** Use GPT-5, Claude 4.5, Gemini 3.0, DeepSeek, local models, and more with AI Agent or for chat queries.
 - 🔑 **Bring Your Own Key (BYOK):** Connect your API key and use any LLM: OpenAI, Anthropic, Google, DeepSeek, Qwen, and others.
 - 💬 **Integrated IDE Chat:** Integrate with GitHub, PostgreSQL, Docker, and more. Refact.ai Agent accesses your resources and handles related operations autonomously, mimicking your workflow.
-- ⚡ **Free, Unlimited, Context-Aware Auto-Completion:** Code faster with smart AI suggestions powered by Qwen2.5-Coder-1.5B with RAG.
-- 🛠️ **Supports 25+ Programming Languages:** Python, JavaScript, Java, Rust, TypeScript, PHP, C++, C#, Go, and many more!
 
 ### 🎉  Hear from our Community
 
