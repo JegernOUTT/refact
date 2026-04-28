@@ -2230,7 +2230,6 @@ fn schema_contract_buddy_opportunity_kind_variants() {
         (BuddyOpportunityKind::ChatRecap, "chat_recap"),
         (BuddyOpportunityKind::MemoryGarden, "memory_garden"),
         (BuddyOpportunityKind::ConfigDrift, "config_drift"),
-        (BuddyOpportunityKind::WorkflowDistill, "workflow_distill"),
         (BuddyOpportunityKind::AgentsMdGap, "agents_md_gap"),
         (BuddyOpportunityKind::ProviderTuning, "provider_tuning"),
         (BuddyOpportunityKind::IntegrationFix, "integration_fix"),
@@ -2239,10 +2238,6 @@ fn schema_contract_buddy_opportunity_kind_variants() {
             "diagnostic_investigation",
         ),
         (BuddyOpportunityKind::GitHygiene, "git_hygiene"),
-        (
-            BuddyOpportunityKind::MarketplaceSuggestion,
-            "marketplace_suggestion",
-        ),
     ];
     for (value, expected) in cases {
         assert_eq!(serialized_string(&value), expected);
@@ -2327,6 +2322,7 @@ fn schema_contract_draft_kind_variants() {
         (DraftKind::AgentsMd, "agents_md"),
         (DraftKind::DefaultsModel, "defaults_model"),
         (DraftKind::Hook, "hook"),
+        (DraftKind::PulseReport, "pulse_report"),
     ];
     for (value, expected) in cases {
         assert_eq!(serialized_string(&value), expected);
@@ -4574,22 +4570,16 @@ async fn accept_dismiss_action_via_accept_route_is_single_resolution() {
 }
 
 #[tokio::test]
-async fn accept_unimplemented_action_returns_501_and_does_not_resolve() {
+async fn draft_customization_change_is_handled() {
     use crate::http::routers::v1::buddy_opportunities::dispatch_action;
 
-    let mut svc = make_service();
-    let mut opp = make_opportunity("opp-unimpl", "ck-unimpl");
-    opp.proposed_actions = vec![BuddyAction::DraftCustomizationChange {
-        customization_kind: CustomizationKind::Mode,
-        id: "mode-x".to_string(),
-        patch: serde_json::json!({}),
-    }];
-    svc.add_opportunity(opp);
-
     let gcx = crate::global_context::tests::make_test_gcx().await;
+    let buddy_svc = make_service();
+    *gcx.read().await.buddy.lock().await = Some(buddy_svc);
+
     let outcome = dispatch_action(
         gcx,
-        "opp-unimpl",
+        "opp-customization",
         &BuddyAction::DraftCustomizationChange {
             customization_kind: CustomizationKind::Mode,
             id: "mode-x".to_string(),
@@ -4599,16 +4589,20 @@ async fn accept_unimplemented_action_returns_501_and_does_not_resolve() {
     .await
     .unwrap();
 
-    assert!(
-        !outcome.handled,
-        "DraftCustomizationChange must not be handled"
-    );
-
-    let status = svc.opportunity_queue.get("opp-unimpl").unwrap().status;
+    assert!(outcome.handled, "DraftCustomizationChange must be handled");
+    assert_eq!(outcome.status, OpportunityStatus::Accepted);
     assert_eq!(
-        status,
-        OpportunityStatus::New,
-        "opp status must remain New — handler must not resolve unimplemented actions"
+        outcome.result.get("draft_kind").and_then(|v| v.as_str()),
+        Some("mode")
+    );
+    assert!(
+        outcome
+            .result
+            .get("draft_id")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "draft_id must be present"
     );
 }
 

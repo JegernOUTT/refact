@@ -1002,12 +1002,10 @@ pub fn primary_fact_kind_for_opportunity(opp: &BuddyOpportunity) -> BuddyFactKin
         BuddyOpportunityKind::ChatRecap => BuddyFactKind::ChatRetryStreak,
         BuddyOpportunityKind::MemoryGarden => BuddyFactKind::MemoryOrphan,
         BuddyOpportunityKind::ConfigDrift => BuddyFactKind::ModePromptOverlap,
-        BuddyOpportunityKind::WorkflowDistill => BuddyFactKind::SkillTriggerWeak,
         BuddyOpportunityKind::AgentsMdGap => BuddyFactKind::AgentsMdGapDetected,
         BuddyOpportunityKind::ProviderTuning => BuddyFactKind::DefaultModelMissing,
         BuddyOpportunityKind::IntegrationFix => BuddyFactKind::McpAuthExpired,
         BuddyOpportunityKind::DiagnosticInvestigation => BuddyFactKind::DiagnosticCluster,
         BuddyOpportunityKind::GitHygiene => BuddyFactKind::UncommittedPressure,
-        BuddyOpportunityKind::MarketplaceSuggestion => BuddyFactKind::IntegrationSmartlinkMatch,
     }
 }

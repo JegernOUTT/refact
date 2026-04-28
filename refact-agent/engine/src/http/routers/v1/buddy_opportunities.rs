@@ -4,14 +4,24 @@ use axum::extract::Query;
 use axum::response::Result;
 use hyper::StatusCode;
 use serde::Deserialize;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::opportunities::is_terminal_status;
-use crate::buddy::types::{BuddyAction, BuddyDraft, DraftKind, InvestigationContext, OpportunityStatus};
+use crate::buddy::types::{
+    BuddyAction, BuddyDraft, BuddyPulse, CustomizationKind, DraftKind, InvestigationContext,
+    MarketKind, OpportunityStatus, PulseScope,
+};
 use crate::custom_error::ScratchError;
+use crate::ext::extensions_marketplace::{
+    install_marketplace_item, list_marketplace_items, InstallMarketplaceItemRequest,
+    MarketplaceKind,
+};
+use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 
 #[derive(Debug, Deserialize)]
@@ -260,23 +270,297 @@ pub(crate) async fn dispatch_action(
                 handled: true,
             })
         }
+        BuddyAction::DraftCustomizationChange {
+            customization_kind,
+            id,
+            patch,
+        } => {
+            let draft_kind = customization_kind_to_draft_kind(*customization_kind);
+            let existing_yaml = read_existing_customization(&gcx, *customization_kind, id)
+                .await
+                .unwrap_or_else(|| default_customization_template(*customization_kind, id));
+            let merged = merge_yaml_with_json_patch(&existing_yaml, patch)
+                .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+            let merged_yaml = serde_yaml::to_string(&merged)
+                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let url_kind = customization_url_kind(*customization_kind);
+            let draft = synthesize_draft(
+                gcx.clone(),
+                draft_kind,
+                format!("{} {}", url_kind, id),
+                merged_yaml,
+            )
+            .await?;
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "draft",
+                    "draft_kind": serde_json::to_value(draft_kind).unwrap_or_default(),
+                    "draft_id": draft.id,
+                    "label": format!("Edit {}", id)
+                }),
+                status: OpportunityStatus::Accepted,
+                handled: true,
+            })
+        }
+        BuddyAction::CreatePulseReport { scope } => {
+            let pulse = {
+                let buddy_arc = gcx.read().await.buddy.clone();
+                let lock = buddy_arc.lock().await;
+                lock.as_ref()
+                    .map(|svc| svc.pulse.clone())
+                    .unwrap_or_default()
+            };
+            let content = render_pulse_to_markdown(&pulse, *scope);
+            let draft = synthesize_draft(
+                gcx.clone(),
+                DraftKind::PulseReport,
+                format!("Pulse Report ({})", scope_label(*scope)),
+                content,
+            )
+            .await?;
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "draft",
+                    "draft_kind": "pulse_report",
+                    "draft_id": draft.id
+                }),
+                status: OpportunityStatus::Accepted,
+                handled: true,
+            })
+        }
+        BuddyAction::OfferMarketplaceInstall {
+            market_kind,
+            item_id,
+        } => {
+            let install_result =
+                install_marketplace_action(gcx.clone(), *market_kind, item_id).await;
+            let success = install_result.is_ok();
+            let error = install_result.as_ref().err().cloned();
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "marketplace_install",
+                    "market_kind": serde_json::to_value(market_kind).unwrap_or_default(),
+                    "item_id": item_id,
+                    "success": success,
+                    "error": error
+                }),
+                status: OpportunityStatus::Accepted,
+                handled: true,
+            })
+        }
         BuddyAction::Dismiss => Ok(ActionOutcome {
             result: serde_json::json!({ "kind": "dismiss" }),
             status: OpportunityStatus::Dismissed,
             handled: true,
         }),
-        _ => {
-            let variant_name = match action {
-                BuddyAction::DraftCustomizationChange { .. } => "draft_customization_change",
-                BuddyAction::CreatePulseReport { .. } => "create_pulse_report",
-                BuddyAction::OfferMarketplaceInstall { .. } => "offer_marketplace_install",
-                _ => "unknown",
+    }
+}
+
+fn customization_kind_to_draft_kind(kind: CustomizationKind) -> DraftKind {
+    match kind {
+        CustomizationKind::Mode => DraftKind::Mode,
+        CustomizationKind::Skill => DraftKind::Skill,
+        CustomizationKind::Command => DraftKind::Command,
+        CustomizationKind::Delegate => DraftKind::Delegate,
+        CustomizationKind::Hook => DraftKind::Hook,
+    }
+}
+
+fn customization_url_kind(kind: CustomizationKind) -> &'static str {
+    match kind {
+        CustomizationKind::Mode => "modes",
+        CustomizationKind::Skill => "skills",
+        CustomizationKind::Command => "commands",
+        CustomizationKind::Delegate => "delegates",
+        CustomizationKind::Hook => "hooks",
+    }
+}
+
+async fn read_existing_customization(
+    gcx: &Arc<ARwLock<GlobalContext>>,
+    kind: CustomizationKind,
+    id: &str,
+) -> Option<String> {
+    let url_kind = customization_url_kind(kind);
+    let config_dir = gcx.read().await.config_dir.clone();
+    let mut candidates = vec![config_dir.join(url_kind).join(format!("{}.yaml", id))];
+    for project_root in get_project_dirs(gcx.clone()).await {
+        candidates.push(
+            project_root
+                .join(".refact")
+                .join(url_kind)
+                .join(format!("{}.yaml", id)),
+        );
+    }
+    for path in candidates {
+        if let Ok(content) = tokio::fs::read_to_string(path).await {
+            return Some(content);
+        }
+    }
+    None
+}
+
+fn default_customization_template(kind: CustomizationKind, id: &str) -> String {
+    match kind {
+        CustomizationKind::Mode => format!(
+            "id: {}\nschema_version: 1\ntitle: {}\nprompt: Describe this mode\n",
+            id, id
+        ),
+        CustomizationKind::Skill => format!(
+            "name: {}\ndescription: Describe when to use this skill\ncontext: Add context here\n",
+            id
+        ),
+        CustomizationKind::Command => {
+            format!("description: Describe this command\ncommand: {}\n", id)
+        }
+        CustomizationKind::Delegate => format!(
+            "id: {}\nschema_version: 1\ntitle: {}\nprompt: Describe this delegate\n",
+            id, id
+        ),
+        CustomizationKind::Hook => "hooks: {}\n".to_string(),
+    }
+}
+
+fn merge_yaml_with_json_patch(existing: &str, patch: &Value) -> Result<Value, String> {
+    let mut base: Value = serde_yaml::from_str(existing).map_err(|e| e.to_string())?;
+    if patch.is_null() || patch == &serde_json::json!({}) {
+        return Ok(base);
+    }
+    let Some(patch_obj) = patch.as_object() else {
+        return Err("patch must be an object".to_string());
+    };
+    if !base.is_object() {
+        base = serde_json::json!({});
+    }
+    let base_obj = base
+        .as_object_mut()
+        .ok_or_else(|| "base customization must be an object".to_string())?;
+    for (key, value) in patch_obj {
+        if value.is_null() {
+            base_obj.remove(key);
+        } else {
+            base_obj.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(base)
+}
+
+fn scope_label(scope: PulseScope) -> &'static str {
+    match scope {
+        PulseScope::All => "all",
+        PulseScope::Tasks => "tasks",
+        PulseScope::Trajectories => "trajectories",
+        PulseScope::Memory => "memory",
+        PulseScope::Providers => "providers",
+        PulseScope::Mcp => "mcp",
+        PulseScope::Customization => "customization",
+        PulseScope::Diagnostics => "diagnostics",
+        PulseScope::Git => "git",
+    }
+}
+
+fn render_pulse_to_markdown(pulse: &BuddyPulse, scope: PulseScope) -> String {
+    let mut out = vec![format!("# Buddy Pulse Report ({})", scope_label(scope))];
+    let include = |target: PulseScope| scope == PulseScope::All || scope == target;
+    if include(PulseScope::Tasks) {
+        out.push(format!(
+            "## Tasks\n\n- Total: {}\n- Stuck: {}\n- Abandoned: {}",
+            pulse.tasks.total, pulse.tasks.stuck, pulse.tasks.abandoned
+        ));
+    }
+    if include(PulseScope::Trajectories) {
+        out.push(format!(
+            "## Trajectories\n\n- Total: {}\n- Untitled: {}\n- Oldest age days: {}",
+            pulse.trajectories.total,
+            pulse.trajectories.untitled,
+            pulse.trajectories.oldest_age_days
+        ));
+    }
+    if include(PulseScope::Memory) {
+        out.push(format!(
+            "## Memory\n\n- Total: {}\n- Orphan: {}\n- Stale conflicts: {}",
+            pulse.memory.total, pulse.memory.orphan, pulse.memory.stale_conflicts
+        ));
+    }
+    if include(PulseScope::Providers) {
+        out.push(format!(
+            "## Providers\n\n- Defaults OK: {}\n- Broken refs: {}\n- Quota warnings: {}",
+            pulse.providers.defaults_ok,
+            pulse.providers.broken_refs,
+            pulse.providers.quota_warnings
+        ));
+    }
+    if include(PulseScope::Mcp) {
+        out.push(format!(
+            "## MCP\n\n- Total: {}\n- Failing: {}\n- Auth expiring: {}",
+            pulse.mcp.total, pulse.mcp.failing, pulse.mcp.auth_expiring
+        ));
+    }
+    if include(PulseScope::Customization) {
+        out.push(format!(
+            "## Customization\n\n- Modes: {}\n- Skills: {}\n- Commands: {}\n- Delegates: {}\n- Hooks: {}",
+            pulse.customization.modes,
+            pulse.customization.skills,
+            pulse.customization.commands,
+            pulse.customization.subagents,
+            pulse.customization.hooks
+        ));
+    }
+    if include(PulseScope::Diagnostics) {
+        out.push(format!(
+            "## Diagnostics\n\n- Last hour: {}\n- Top error types: {}",
+            pulse.diagnostics.last_hour,
+            pulse.diagnostics.top_error_types.join(", ")
+        ));
+    }
+    if include(PulseScope::Git) {
+        out.push(format!(
+            "## Git\n\n- Uncommitted files: {}\n- Diff lines 4h: {}\n- Branches: {}",
+            pulse.git.uncommitted_files, pulse.git.diff_lines_4h, pulse.git.branches
+        ));
+    }
+    out.join("\n\n")
+}
+
+async fn install_marketplace_action(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    market_kind: MarketKind,
+    item_id: &str,
+) -> Result<Value, String> {
+    match market_kind {
+        MarketKind::Mcp => {
+            let body = serde_json::to_vec(&serde_json::json!({ "server_id": item_id }))
+                .map_err(|e| e.to_string())?;
+            crate::http::routers::v1::mcp_marketplace::handle_v1_mcp_marketplace_install(
+                Extension(gcx),
+                hyper::body::Bytes::from(body),
+            )
+            .await
+            .map(|json| json.0)
+            .map_err(|e| e.to_string())
+        }
+        MarketKind::Skill | MarketKind::Command | MarketKind::Delegate => {
+            let kind = match market_kind {
+                MarketKind::Skill => MarketplaceKind::Skill,
+                MarketKind::Command => MarketplaceKind::Command,
+                MarketKind::Delegate => MarketplaceKind::Subagent,
+                MarketKind::Mcp => unreachable!(),
             };
-            Ok(ActionOutcome {
-                result: serde_json::json!({ "kind": "unimplemented", "action": variant_name }),
-                status: OpportunityStatus::Accepted,
-                handled: false,
-            })
+            let (items, _) = list_marketplace_items(gcx.clone(), kind).await?;
+            let item = items
+                .into_iter()
+                .find(|item| item.id == item_id)
+                .ok_or_else(|| format!("marketplace item '{}' not found", item_id))?;
+            let req = InstallMarketplaceItemRequest {
+                source_id: item.source_id,
+                item_id: item.id,
+                scope: "global".to_string(),
+                overwrite: false,
+                params: HashMap::new(),
+            };
+            install_marketplace_item(gcx, kind, req)
+                .await
+                .and_then(|response| serde_json::to_value(response).map_err(|e| e.to_string()))
         }
     }
 }

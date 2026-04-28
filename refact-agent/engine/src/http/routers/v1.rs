@@ -798,6 +798,14 @@ pub fn make_v1_router() -> Router {
             post(buddy_drafts::handle_v1_buddy_draft_create_defaults),
         )
         .route(
+            "/buddy/drafts/hook",
+            post(buddy_drafts::handle_v1_buddy_draft_create_hook),
+        )
+        .route(
+            "/buddy/drafts/pulse_report",
+            post(buddy_drafts::handle_v1_buddy_draft_create_pulse_report),
+        )
+        .route(
             "/buddy/drafts/:id",
             get(buddy_drafts::handle_v1_buddy_draft_get),
         )

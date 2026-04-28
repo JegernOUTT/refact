@@ -443,13 +443,11 @@ pub enum BuddyOpportunityKind {
     ChatRecap,
     MemoryGarden,
     ConfigDrift,
-    WorkflowDistill,
     AgentsMdGap,
     ProviderTuning,
     IntegrationFix,
     DiagnosticInvestigation,
     GitHygiene,
-    MarketplaceSuggestion,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -689,6 +687,7 @@ pub enum DraftKind {
     AgentsMd,
     DefaultsModel,
     Hook,
+    PulseReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

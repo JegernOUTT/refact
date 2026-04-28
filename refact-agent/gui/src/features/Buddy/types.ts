@@ -595,13 +595,11 @@ export type BuddyOpportunityKind =
   | "chat_recap"
   | "memory_garden"
   | "config_drift"
-  | "workflow_distill"
   | "agents_md_gap"
   | "provider_tuning"
   | "integration_fix"
   | "diagnostic_investigation"
-  | "git_hygiene"
-  | "marketplace_suggestion";
+  | "git_hygiene";
 
 export type BuddyPriority = "low" | "normal" | "high" | "critical";
 
@@ -727,7 +725,13 @@ export type BuddyActionResult =
       defaults_kind?: DefaultsKind;
     }
   | { kind: "dismiss" }
-  | { kind: "marketplace_install"; market_kind: MarketKind; item_id: string }
+  | {
+      kind: "marketplace_install";
+      market_kind: MarketKind;
+      item_id: string;
+      success?: boolean;
+      error?: string | null;
+    }
   | { kind: "unimplemented"; action: string };
 
 export interface BuddyOpportunityAcceptResponse {
@@ -805,7 +809,8 @@ export type DraftKind =
   | "mode"
   | "agents_md"
   | "defaults_model"
-  | "hook";
+  | "hook"
+  | "pulse_report";
 
 export interface BuddyDraft {
   id: string;

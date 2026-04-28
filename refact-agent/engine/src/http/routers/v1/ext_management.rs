@@ -26,6 +26,7 @@ fn draft_kind_str(kind: &DraftKind) -> &'static str {
         DraftKind::AgentsMd => "agents_md",
         DraftKind::DefaultsModel => "defaults_model",
         DraftKind::Hook => "hook",
+        DraftKind::PulseReport => "pulse_report",
     }
 }
 

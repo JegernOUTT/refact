@@ -59,6 +59,20 @@ pub async fn handle_v1_buddy_draft_create_defaults(
     create_draft(gcx, req, DraftKind::DefaultsModel).await
 }
 
+pub async fn handle_v1_buddy_draft_create_hook(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    axum::Json(req): axum::Json<DraftCreateRequest>,
+) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    create_draft(gcx, req, DraftKind::Hook).await
+}
+
+pub async fn handle_v1_buddy_draft_create_pulse_report(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    axum::Json(req): axum::Json<DraftCreateRequest>,
+) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    create_draft(gcx, req, DraftKind::PulseReport).await
+}
+
 async fn create_draft(
     gcx: Arc<ARwLock<GlobalContext>>,
     req: DraftCreateRequest,

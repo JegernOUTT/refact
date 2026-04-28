@@ -62,7 +62,8 @@ async fn invalidate_registry_cache(gcx: Arc<ARwLock<GlobalContext>>, scope: Conf
 fn customization_kind_to_draft_kind(kind: &str) -> Option<DraftKind> {
     match kind {
         "modes" => Some(DraftKind::Mode),
-        "subagents" => Some(DraftKind::Delegate),
+        "subagents" | "delegates" => Some(DraftKind::Delegate),
+        "hooks" => Some(DraftKind::Hook),
         _ => None,
     }
 }
@@ -76,6 +77,7 @@ fn draft_kind_str(kind: &DraftKind) -> &'static str {
         DraftKind::AgentsMd => "agents_md",
         DraftKind::DefaultsModel => "defaults_model",
         DraftKind::Hook => "hook",
+        DraftKind::PulseReport => "pulse_report",
     }
 }
 
@@ -721,7 +723,9 @@ pub async fn handle_v1_customization_delete(
 
 fn validate_kind(kind: &str) -> std::result::Result<&str, String> {
     match kind {
-        "modes" | "subagents" | "toolbox_commands" | "code_lens" => Ok(kind),
+        "modes" | "subagents" | "delegates" | "hooks" | "toolbox_commands" | "code_lens" => {
+            Ok(kind)
+        }
         _ => Err(format!("invalid kind: {}", kind)),
     }
 }
