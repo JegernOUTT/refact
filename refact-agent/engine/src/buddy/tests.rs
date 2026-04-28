@@ -6,8 +6,9 @@ use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
 use super::actor::BuddyService;
 use super::diagnostics::{classify_error, DiagnosticContext, DiagnosticSeverity};
 use super::issues::{
-    check_issue_gate, check_manual_issue_gate, redact_diagnostic_text, sanitize_body,
-    sanitize_title, IssueGate,
+    check_issue_gate, check_manual_issue_gate, detect_repo_from_git, issue_title_and_body,
+    mcp_issue_args, parse_remote_url, redact_diagnostic_text, sanitize_body, sanitize_title,
+    validate_issue_binary, IssueGate, RepoHost,
 };
 use super::scheduler::BuddyJobContext;
 use super::settings::{AutonomyLevel, BuddySettings, HumorLevel, MAX_PALETTE_INDEX};
@@ -438,6 +439,174 @@ fn test_redact_api_key_pattern() {
     let output = redact_diagnostic_text(input);
     assert!(!output.contains("ghp_AbCdEfGhIj1234567890"));
     assert!(output.contains("[REDACTED"));
+}
+
+fn make_issue_ctx(message: &str) -> DiagnosticContext {
+    DiagnosticContext {
+        error_type: "test".to_string(),
+        error_message: message.to_string(),
+        source_file: Some("src/main.rs".to_string()),
+        tool_name: None,
+        chat_id: None,
+        collected_at: chrono::Utc::now().to_rfc3339(),
+        severity: DiagnosticSeverity::High,
+    }
+}
+
+#[test]
+fn issue_title_redacts_bearer_token() {
+    let ctx = make_issue_ctx("failed with Bearer xyz123");
+    let (title, _) = issue_title_and_body(&ctx);
+    assert!(title.contains("[REDACTED]"));
+    assert!(!title.contains("Bearer xyz123"));
+}
+
+#[test]
+fn issue_title_redacts_sk_ghp_glpat_tokens() {
+    let ctx =
+        make_issue_ctx("sk-abcdefghijklmnopqrst ghp_AbCdEfGhIj1234567890 glpat-abcdefghij12345");
+    let (title, _) = issue_title_and_body(&ctx);
+    assert!(!title.contains("sk-abcdefghijklmnopqrst"));
+    assert!(!title.contains("ghp_AbCdEfGhIj1234567890"));
+    assert!(!title.contains("glpat-abcdefghij12345"));
+    assert!(title.contains("[REDACTED"));
+}
+
+#[test]
+fn issue_title_redacts_api_key_password_token_secret_authorization() {
+    let ctx = make_issue_ctx(
+        "api_key=VALUEAPI apikey=VALUEAPINOSCORE token=VALUETOKEN secret=VALUESECRET password=VALUEPASSWORD Authorization: VALUEAUTH",
+    );
+    let (title, body) = issue_title_and_body(&ctx);
+    for raw in [
+        "VALUEAPI",
+        "VALUEAPINOSCORE",
+        "VALUETOKEN",
+        "VALUESECRET",
+        "VALUEPASSWORD",
+        "VALUEAUTH",
+    ] {
+        assert!(
+            !title.contains(raw),
+            "raw secret leaked in title: {}",
+            title
+        );
+        assert!(!body.contains(raw), "raw secret leaked in body: {}", body);
+    }
+    assert!(title.contains("[REDACTED]"));
+    assert!(body.contains("[REDACTED]"));
+}
+
+#[test]
+fn issue_title_and_body_use_same_redactor() {
+    let raw = "request failed token=same-secret";
+    let expected = redact_diagnostic_text(raw);
+    let ctx = make_issue_ctx(raw);
+    let (title, body) = issue_title_and_body(&ctx);
+    assert!(title.contains(&expected));
+    assert!(body.contains(&expected));
+    assert!(!title.contains("same-secret"));
+    assert!(!body.contains("same-secret"));
+}
+
+#[test]
+fn parse_remote_url_handles_ssh_https_dot_git_combinations() {
+    let fixtures = [
+        (
+            "git@github.com:owner/repo.git",
+            "owner",
+            "repo",
+            RepoHost::GitHub,
+        ),
+        (
+            "git@gitlab.com:team/project.git",
+            "team",
+            "project",
+            RepoHost::GitLab,
+        ),
+        (
+            "https://github.com/acme/tool",
+            "acme",
+            "tool",
+            RepoHost::GitHub,
+        ),
+        (
+            "https://github.com/acme/tool.git",
+            "acme",
+            "tool",
+            RepoHost::GitHub,
+        ),
+        (
+            "https://gitlab.com/group/repo.git",
+            "group",
+            "repo",
+            RepoHost::GitLab,
+        ),
+        (
+            "https://gitlab.acme.com/group/repo.git",
+            "group",
+            "repo",
+            RepoHost::GitLabSelfHosted("gitlab.acme.com".to_string()),
+        ),
+    ];
+    for (url, owner, repo, host) in fixtures {
+        let parsed = parse_remote_url(url).expect("remote URL must parse");
+        assert_eq!(parsed.owner, owner);
+        assert_eq!(parsed.repo, repo);
+        assert_eq!(parsed.host, host);
+    }
+}
+
+#[test]
+fn parse_remote_url_returns_none_for_invalid() {
+    assert!(parse_remote_url("not a remote").is_none());
+    assert!(parse_remote_url("https://github.com/only-owner").is_none());
+}
+
+#[test]
+fn mcp_issue_creation_uses_detected_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    repo.remote("origin", "git@github.com:detected/project.git")
+        .unwrap();
+    let detected = detect_repo_from_git(dir.path()).expect("repo must be detected");
+    let args = mcp_issue_args(&detected.owner, &detected.repo, "title", "body", vec![]);
+    assert_eq!(args["owner"], "detected");
+    assert_eq!(args["repo"], "project");
+}
+
+#[test]
+fn mcp_issue_creation_no_remote_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(dir.path()).unwrap();
+    assert!(detect_repo_from_git(dir.path()).is_none());
+}
+
+#[test]
+fn mcp_issue_creation_no_hardcoded_repo_in_args() {
+    let args = mcp_issue_args("other", "repo", "title", "body", vec!["bug".to_string()]);
+    let serialized = serde_json::to_string(&args).unwrap();
+    assert!(!serialized.contains("smallcloudai/refact"));
+    assert_eq!(args["owner"], "other");
+    assert_eq!(args["repo"], "repo");
+}
+
+#[test]
+fn validate_issue_binary_rejects_absolute_path() {
+    assert!(validate_issue_binary("/tmp/gh").is_err());
+    assert!(validate_issue_binary("C:\\tmp\\gh").is_err());
+}
+
+#[test]
+fn validate_issue_binary_rejects_unknown_command() {
+    assert!(validate_issue_binary("evilbin").is_err());
+    assert!(validate_issue_binary("gh.exe").is_err());
+}
+
+#[test]
+fn validate_issue_binary_accepts_gh_and_glab() {
+    assert_eq!(validate_issue_binary("gh").unwrap(), "gh");
+    assert_eq!(validate_issue_binary("glab").unwrap(), "glab");
 }
 
 #[test]

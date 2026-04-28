@@ -1,13 +1,13 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::collections::HashMap;
-use regex::Regex;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::RwLock as ARwLock;
 use tracing::info;
 use tokio::sync::Mutex as AMutex;
 
 use crate::global_context::GlobalContext;
+use super::actor::redact_sensitive;
 use super::diagnostics::DiagnosticContext;
 use super::types::BuddyActivity;
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -28,8 +28,6 @@ fn extract_tool_text(out: Vec<ContextEnum>, fallback: &str) -> String {
 
 const RATE_LIMIT_SECS: u64 = 3600;
 const DEDUP_SECS: i64 = 86400;
-const ALLOWED_GH_BINARIES: &[&str] = &["gh"];
-const ALLOWED_GLAB_BINARIES: &[&str] = &["glab"];
 
 #[derive(Debug)]
 pub struct IssueGate {
@@ -78,24 +76,43 @@ enum IssueProvider {
     GitLab { binary: String, token: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RepoHost {
+    GitHub,
+    GitLab,
+    GitLabSelfHosted(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepoInfo {
+    pub owner: String,
+    pub repo: String,
+    pub host: RepoHost,
+}
+
+impl RepoInfo {
+    fn full_name(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+}
+
 pub struct BuddyIssueCreateResult {
     pub url: String,
     pub provider: String,
     pub repo: String,
 }
 
-fn validate_binary_name(binary: &str, allowed: &[&str]) -> Result<(), String> {
-    let name = std::path::Path::new(binary)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(binary);
-    if allowed.contains(&name) {
-        Ok(())
-    } else {
-        Err(format!(
-            "binary '{}' is not in the allowed list {:?}",
-            binary, allowed
-        ))
+pub(crate) fn validate_issue_binary(configured: &str) -> Result<&'static str, String> {
+    if configured.contains('/') || configured.contains('\\') {
+        return Err(format!(
+            "issue binary must be bare command, got path: {}",
+            configured
+        ));
+    }
+    match configured {
+        "gh" => Ok("gh"),
+        "glab" => Ok("glab"),
+        other => Err(format!("unsupported issue binary: {}", other)),
     }
 }
 
@@ -113,13 +130,12 @@ async fn try_read_github(config_dir: &PathBuf) -> Result<Option<IssueProvider>, 
         Some(t) if !t.is_empty() => t.to_string(),
         _ => return Ok(None),
     };
-    let binary = val
+    let configured = val
         .get("gh_binary_path")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("gh")
-        .to_string();
-    validate_binary_name(&binary, ALLOWED_GH_BINARIES)?;
+        .unwrap_or("gh");
+    let binary = validate_issue_binary(configured)?.to_string();
     Ok(Some(IssueProvider::GitHub { binary, token }))
 }
 
@@ -137,43 +153,75 @@ async fn try_read_gitlab(config_dir: &PathBuf) -> Result<Option<IssueProvider>, 
         Some(t) if !t.is_empty() => t.to_string(),
         _ => return Ok(None),
     };
-    let binary = val
+    let configured = val
         .get("glab_binary_path")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("glab")
-        .to_string();
-    validate_binary_name(&binary, ALLOWED_GLAB_BINARIES)?;
+        .unwrap_or("glab");
+    let binary = validate_issue_binary(configured)?.to_string();
     Ok(Some(IssueProvider::GitLab { binary, token }))
 }
 
-async fn detect_remote_host(project_root: &std::path::Path) -> Option<String> {
-    let out = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(project_root)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
+pub(crate) fn parse_remote_url(url: &str) -> Option<RepoInfo> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
         return None;
     }
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if url.contains("github.com") {
-        Some("github.com".to_string())
-    } else if url.contains("gitlab") {
-        Some("gitlab.com".to_string())
-    } else {
-        None
+
+    if let Some(rest) = trimmed.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        return parse_remote_path(host, path);
     }
+
+    if let Ok(parsed) = url::Url::parse(trimmed) {
+        let host = parsed.host_str()?;
+        let path = parsed.path().trim_start_matches('/');
+        return parse_remote_path(host, path);
+    }
+
+    None
+}
+
+fn parse_remote_path(host: &str, path: &str) -> Option<RepoInfo> {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let owner = parts[parts.len() - 2].to_string();
+    let mut repo = parts[parts.len() - 1].to_string();
+    if repo.ends_with(".git") {
+        repo.truncate(repo.len() - 4);
+    }
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    let host = host.to_ascii_lowercase();
+    let host = match host.as_str() {
+        "github.com" => RepoHost::GitHub,
+        "gitlab.com" => RepoHost::GitLab,
+        _ => RepoHost::GitLabSelfHosted(host),
+    };
+    Some(RepoInfo { owner, repo, host })
+}
+
+pub(crate) fn detect_repo_from_git(project_root: &Path) -> Option<RepoInfo> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    parse_remote_url(&url)
 }
 
 async fn detect_provider(
     gcx: Arc<ARwLock<GlobalContext>>,
-    project_root: &std::path::Path,
+    repo: &RepoInfo,
 ) -> Result<Option<IssueProvider>, String> {
-    let remote_host = detect_remote_host(project_root).await;
-
     let active = crate::files_correction::get_active_project_path(gcx.clone()).await;
     let (config_dirs, global_config_dir) =
         crate::integrations::setting_up_integrations::get_config_dirs(gcx.clone(), &active).await;
@@ -192,10 +240,9 @@ async fn detect_provider(
         }
     }
 
-    Ok(match remote_host.as_deref() {
-        Some("github.com") => gh_provider.or(gl_provider),
-        Some("gitlab.com") => gl_provider.or(gh_provider),
-        _ => gh_provider.or(gl_provider),
+    Ok(match &repo.host {
+        RepoHost::GitHub => gh_provider,
+        RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => gl_provider,
     })
 }
 
@@ -303,12 +350,39 @@ pub async fn investigation_internal_context(
     ))
 }
 
+pub(crate) fn mcp_issue_args(
+    owner: &str,
+    repo: &str,
+    title: &str,
+    body: &str,
+    labels: Vec<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "owner": owner,
+        "repo": repo,
+        "title": title,
+        "body": body,
+        "labels": labels,
+    })
+}
+
 pub async fn create_issue_via_mcp(
     gcx: Arc<ARwLock<GlobalContext>>,
     title: &str,
     body: &str,
     labels: Vec<String>,
 ) -> Result<BuddyIssueCreateResult, String> {
+    let project_root = crate::files_correction::get_project_dirs(gcx.clone())
+        .await
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no project root".to_string())?;
+    let repo = detect_repo_from_git(&project_root)
+        .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
+    if !matches!(&repo.host, RepoHost::GitHub) {
+        return Err("GitHub MCP issue creation requires a GitHub origin remote".to_string());
+    }
+
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new(
             gcx.clone(),
@@ -347,13 +421,7 @@ pub async fn create_issue_via_mcp(
     args.insert("tool_name".to_string(), serde_json::json!(mcp_tool));
     args.insert(
         "args".to_string(),
-        serde_json::json!({
-            "owner": "smallcloudai",
-            "repo": "refact",
-            "title": title,
-            "body": body,
-            "labels": labels,
-        }),
+        mcp_issue_args(&repo.owner, &repo.repo, title, body, labels),
     );
     let (_, out) = tool
         .tool_execute(ccx, &"buddy_mcp_issue".to_string(), &args)
@@ -363,7 +431,7 @@ pub async fn create_issue_via_mcp(
     Ok(BuddyIssueCreateResult {
         url: text,
         provider: "github_mcp".to_string(),
-        repo: "smallcloudai/refact".to_string(),
+        repo: repo.full_name(),
     })
 }
 
@@ -409,7 +477,7 @@ pub async fn create_issue_via_native(
     };
 
     let (url, _activity) = create_issue(
-        gcx,
+        gcx.clone(),
         &ctx,
         auto_enabled,
         false,
@@ -417,27 +485,23 @@ pub async fn create_issue_via_native(
         &recent_errors,
     )
     .await?;
+    let project_root = crate::files_correction::get_project_dirs(gcx)
+        .await
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no project root".to_string())?;
+    let repo = detect_repo_from_git(&project_root)
+        .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
 
     Ok(BuddyIssueCreateResult {
         url,
         provider: "native".to_string(),
-        repo: "smallcloudai/refact".to_string(),
+        repo: repo.full_name(),
     })
 }
 
 pub(crate) fn redact_diagnostic_text(text: &str) -> String {
-    let patterns: &[(&str, &str)] = &[
-        (r"Bearer [A-Za-z0-9._\-]{8,}", "Bearer [REDACTED]"),
-        (r"ghp_[A-Za-z0-9]{10,}", "[REDACTED_GH_TOKEN]"),
-        (r"glpat-[A-Za-z0-9_\-]{10,}", "[REDACTED_GL_TOKEN]"),
-        (r"sk-[A-Za-z0-9]{20,}", "[REDACTED_SK_TOKEN]"),
-    ];
-    let mut result = text.to_string();
-    for (pattern, replacement) in patterns {
-        if let Ok(re) = Regex::new(pattern) {
-            result = re.replace_all(&result, *replacement).to_string();
-        }
-    }
+    let mut result = redact_sensitive(text);
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
             result = result.replace(&home, "~");
@@ -485,6 +549,20 @@ fn format_issue_body(ctx: &DiagnosticContext) -> String {
     body
 }
 
+pub(crate) fn issue_title_and_body(ctx: &DiagnosticContext) -> (String, String) {
+    let mut redacted = ctx.clone();
+    redacted.error_message = redact_diagnostic_text(&ctx.error_message);
+    let raw_title = format!(
+        "[Buddy] {}: {}",
+        ctx.error_type,
+        &redacted.error_message.chars().take(80).collect::<String>()
+    );
+    let title = sanitize_title(&raw_title);
+    let raw_body = format_issue_body(&redacted);
+    let body = sanitize_body(&raw_body);
+    (title, body)
+}
+
 pub async fn create_issue(
     gcx: Arc<ARwLock<GlobalContext>>,
     context: &DiagnosticContext,
@@ -499,7 +577,9 @@ pub async fn create_issue(
         .next()
         .ok_or_else(|| "no project root".to_string())?;
 
-    let provider = detect_provider(gcx.clone(), &project_root).await?;
+    let repo = detect_repo_from_git(&project_root)
+        .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
+    let provider = detect_provider(gcx.clone(), &repo).await?;
 
     let gate = IssueGate {
         has_diagnostics: !context.error_message.is_empty()
@@ -530,19 +610,9 @@ pub async fn create_issue(
         }
     }
 
-    let mut redacted = context.clone();
-    redacted.error_message = redact_diagnostic_text(&context.error_message);
+    let (title, body) = issue_title_and_body(context);
 
-    let raw_title = format!(
-        "[Buddy] {}: {}",
-        context.error_type,
-        &context.error_message.chars().take(80).collect::<String>()
-    );
-    let title = sanitize_title(&raw_title);
-    let raw_body = format_issue_body(&redacted);
-    let body = sanitize_body(&raw_body);
-
-    let url = run_issue_create(provider.unwrap(), &project_root, &title, &body).await?;
+    let url = run_issue_create(provider.unwrap(), &repo, &project_root, &title, &body).await?;
 
     info!("buddy: created issue {}", url);
 
@@ -558,14 +628,18 @@ pub async fn create_issue(
 
 async fn run_issue_create(
     provider: IssueProvider,
-    project_root: &std::path::Path,
+    repo: &RepoInfo,
+    project_root: &Path,
     title: &str,
     body: &str,
 ) -> Result<String, String> {
+    let repo_name = repo.full_name();
     match provider {
         IssueProvider::GitHub { binary, token } => {
             let out = Command::new(&binary)
-                .args(["issue", "create", "--title", title, "--body", body])
+                .args([
+                    "issue", "create", "-R", &repo_name, "--title", title, "--body", body,
+                ])
                 .current_dir(project_root)
                 .env("GH_TOKEN", &token)
                 .env("GITHUB_TOKEN", &token)
@@ -581,7 +655,16 @@ async fn run_issue_create(
         }
         IssueProvider::GitLab { binary, token } => {
             let out = Command::new(&binary)
-                .args(["issue", "create", "--title", title, "--description", body])
+                .args([
+                    "issue",
+                    "create",
+                    "-R",
+                    &repo_name,
+                    "--title",
+                    title,
+                    "--description",
+                    body,
+                ])
                 .current_dir(project_root)
                 .env("GITLAB_TOKEN", &token)
                 .stdin(std::process::Stdio::null())
