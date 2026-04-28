@@ -4080,7 +4080,10 @@ async fn accept_unimplemented_action_returns_501_and_does_not_resolve() {
     .await
     .unwrap();
 
-    assert!(!outcome.handled, "DraftCustomizationChange must not be handled");
+    assert!(
+        !outcome.handled,
+        "DraftCustomizationChange must not be handled"
+    );
 
     let status = svc.opportunity_queue.get("opp-unimpl").unwrap().status;
     assert_eq!(
@@ -4141,7 +4144,9 @@ async fn accept_route_response_shape_for_defaults_draft() {
         patch: serde_json::json!({}),
     };
 
-    let outcome = dispatch_action(gcx, "irrelevant-id", &action).await.unwrap();
+    let outcome = dispatch_action(gcx, "irrelevant-id", &action)
+        .await
+        .unwrap();
 
     assert!(outcome.handled, "DraftDefaultsChange must be handled");
     assert_eq!(outcome.status, OpportunityStatus::Accepted);
@@ -4158,7 +4163,11 @@ async fn accept_route_response_shape_for_defaults_draft() {
         "defaults_kind must be a separate field with the DefaultsKind value"
     );
     assert!(
-        result.get("draft_id").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
+        result
+            .get("draft_id")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "draft_id must be present and non-empty"
     );
 }

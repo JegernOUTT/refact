@@ -91,7 +91,8 @@ pub async fn handle_v1_buddy_opportunity_accept(
     let outcome = dispatch_action(gcx.clone(), &id, &action).await?;
 
     if !outcome.handled {
-        let action_kind = outcome.result
+        let action_kind = outcome
+            .result
             .get("action")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
