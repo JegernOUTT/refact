@@ -407,6 +407,10 @@ pub enum BuddyFactKind {
     UncommittedPressure,
 }
 
+fn default_cooldown_secs() -> u64 {
+    1800
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuddyOpportunity {
     pub id: String,
@@ -416,6 +420,8 @@ pub struct BuddyOpportunity {
     pub confidence: f32,
     pub fact_keys: Vec<String>,
     pub cooldown_key: String,
+    #[serde(default = "default_cooldown_secs")]
+    pub cooldown_secs: u64,
     pub status: OpportunityStatus,
     pub proposed_actions: Vec<BuddyAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

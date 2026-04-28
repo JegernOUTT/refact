@@ -221,7 +221,13 @@ pub(crate) async fn dispatch_action(
             let content = if patch != &serde_json::json!({}) {
                 serde_json::to_string_pretty(patch).unwrap_or_default()
             } else {
-                "{\n  \"chat_default_model\": \"your-provider/model-name\"\n}".to_string()
+                use crate::buddy::types::DefaultsKind;
+                let key = match defaults_kind {
+                    DefaultsKind::ChatBuddyModel => "chat_buddy_model",
+                    DefaultsKind::ChatThinkingModel => "chat_thinking_model",
+                    _ => "chat_default_model",
+                };
+                format!("{{\n  \"{}\": \"your-provider/model-name\"\n}}", key)
             };
             let draft = synthesize_draft(
                 gcx.clone(),

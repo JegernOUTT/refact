@@ -86,6 +86,7 @@ impl GoogleGeminiProvider {
             selected_provider: None,
             max_output_tokens,
             provider_variants: Vec::new(),
+            base_model: None,
         })
     }
 

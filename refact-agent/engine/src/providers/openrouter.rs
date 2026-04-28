@@ -279,6 +279,7 @@ impl OpenRouterProvider {
             selected_provider,
             max_output_tokens: selected_max_output.or(fallback_max_output),
             provider_variants,
+            base_model: None,
         })
     }
 

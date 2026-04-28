@@ -37,7 +37,7 @@ impl OpportunityQueue {
                 .insert(entry.cooldown_key, entry.dismissed_at);
         }
         for opp in opps {
-            let expires = opp.created_at + DEFAULT_COOLDOWN;
+            let expires = opp.created_at + Duration::seconds(opp.cooldown_secs as i64);
             if expires > now {
                 q.cooldowns.insert(opp.cooldown_key.clone(), expires);
             }
@@ -67,7 +67,8 @@ impl OpportunityQueue {
         }
     }
 
-    pub fn push_with_cooldown(&mut self, opp: BuddyOpportunity, cooldown_secs: u64) {
+    pub fn push_with_cooldown(&mut self, mut opp: BuddyOpportunity, cooldown_secs: u64) {
+        opp.cooldown_secs = cooldown_secs;
         let expires = Utc::now() + Duration::seconds(cooldown_secs as i64);
         self.cooldowns.insert(opp.cooldown_key.clone(), expires);
         self.items.push(opp);
@@ -297,6 +298,7 @@ mod rules {
             confidence,
             fact_keys,
             cooldown_key: cooldown_key.into(),
+            cooldown_secs: DEFAULT_COOLDOWN.num_seconds() as u64,
             status: OpportunityStatus::New,
             proposed_actions: actions,
             humor: None,
@@ -420,21 +422,36 @@ mod rules {
             .into_iter()
             .take(1)
             .map(|fact| {
+                let field = fact
+                    .payload
+                    .get("field")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("chat_model");
+                let (defaults_kind, patch_key) = match field {
+                    "chat_buddy_model" => (DefaultsKind::ChatBuddyModel, "chat_buddy_model"),
+                    "chat_thinking_model" => (DefaultsKind::ChatThinkingModel, "chat_thinking_model"),
+                    "chat_model" => (DefaultsKind::ChatModel, "chat_default_model"),
+                    other => {
+                        tracing::warn!("provider_tuning_missing: unknown field {}, falling back to ChatModel", other);
+                        (DefaultsKind::ChatModel, "chat_default_model")
+                    }
+                };
+                let patch = serde_json::json!({ patch_key: "your-provider/model-name" });
                 opp(
                     BuddyOpportunityKind::ProviderTuning,
                     "Default model not configured",
                     BuddyPriority::High,
                     fact.confidence,
                     vec![fact.key.clone()],
-                    "provider:default_model_missing",
+                    format!("provider:default_model_missing:{}", field),
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::DefaultModels,
                             params: None,
                         },
                         BuddyAction::DraftDefaultsChange {
-                            defaults_kind: DefaultsKind::ChatModel,
-                            patch: serde_json::json!({}),
+                            defaults_kind,
+                            patch,
                         },
                         BuddyAction::Dismiss,
                     ],

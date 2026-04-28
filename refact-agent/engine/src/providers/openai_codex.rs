@@ -692,6 +692,7 @@ impl OpenAICodexProvider {
             selected_provider: None,
             max_output_tokens: None,
             provider_variants: Vec::new(),
+            base_model: None,
         }
     }
 }

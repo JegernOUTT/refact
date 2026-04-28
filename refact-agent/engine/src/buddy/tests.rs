@@ -1567,6 +1567,7 @@ fn make_opportunity(id: &str, cooldown_key: &str) -> BuddyOpportunity {
         confidence: 0.9,
         fact_keys: vec![],
         cooldown_key: cooldown_key.to_string(),
+        cooldown_secs: 1800,
         status: OpportunityStatus::New,
         proposed_actions: vec![],
         humor: None,
@@ -4171,3 +4172,144 @@ async fn accept_route_response_shape_for_defaults_draft() {
         "draft_id must be present and non-empty"
     );
 }
+
+// =============================================================================
+// G-B: Per-rule cooldown persistence + provider-tuning DefaultsKind correctness
+// =============================================================================
+
+#[test]
+fn restart_preserves_per_rule_cooldown() {
+    use super::opportunities::OpportunityQueue;
+    let now = chrono::Utc::now();
+    let cooldown_secs = 7200u64;
+
+    let mut opp = make_opportunity("opp-cd-persist", "ck-cd-persist");
+    opp.cooldown_secs = cooldown_secs;
+    opp.created_at = now;
+
+    let opps = vec![opp];
+    let queue = OpportunityQueue::from_state(opps, vec![]);
+
+    let exp = queue
+        .cooldowns
+        .get("ck-cd-persist")
+        .copied()
+        .expect("cooldown must be present");
+    let expected_exp = now + Duration::seconds(cooldown_secs as i64);
+    let delta = (exp - expected_exp).num_seconds().abs();
+    assert!(
+        delta <= 2,
+        "cooldown expiry must be created_at + cooldown_secs (2h), got delta {}s",
+        delta
+    );
+
+    let default_exp = now + Duration::minutes(30);
+    assert!(
+        exp > default_exp + Duration::minutes(60),
+        "cooldown expiry must be ~2h from now, not ~30m"
+    );
+
+    let after_31min = now + Duration::minutes(31);
+    let still_active = exp > after_31min;
+    assert!(
+        still_active,
+        "2h cooldown must still be active 31 minutes after created_at"
+    );
+}
+
+#[test]
+fn provider_tuning_uses_field_specific_defaults_kind() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+
+    let cases: &[(&str, &str, &str)] = &[
+        ("chat_model", "chat_default_model", "chat_model"),
+        ("chat_buddy_model", "chat_buddy_model", "chat_buddy_model"),
+        ("chat_thinking_model", "chat_thinking_model", "chat_thinking_model"),
+    ];
+
+    for (field, patch_key, expected_kind_str) in cases {
+        let mut store = FactStore::new();
+        store.ingest(BuddyFact {
+            kind: BuddyFactKind::DefaultModelMissing,
+            key: format!("provider:default_missing:{}", field),
+            source: "test",
+            payload: serde_json::json!({ "field": field, "model_id": serde_json::Value::Null }),
+            seen_at: now,
+            confidence: 0.95,
+        });
+        let pulse = BuddyPulse::default();
+        let queue = OpportunityQueue::new();
+        let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
+
+        let provider_opp = opps
+            .iter()
+            .find(|(o, _)| o.kind == BuddyOpportunityKind::ProviderTuning)
+            .unwrap_or_else(|| panic!("must emit ProviderTuning for field={}", field));
+
+        let draft_action = provider_opp
+            .0
+            .proposed_actions
+            .iter()
+            .find(|a| matches!(a, BuddyAction::DraftDefaultsChange { .. }))
+            .unwrap_or_else(|| panic!("must have DraftDefaultsChange for field={}", field));
+
+        if let BuddyAction::DraftDefaultsChange { defaults_kind, patch } = draft_action {
+            let kind_json = serde_json::to_string(defaults_kind).unwrap();
+            let kind_str = kind_json.trim_matches('"');
+            assert_eq!(
+                kind_str, *expected_kind_str,
+                "field={} must map to defaults_kind={}",
+                field, expected_kind_str
+            );
+            assert!(
+                patch.get(patch_key).is_some(),
+                "field={} patch must contain key '{}', got: {}",
+                field,
+                patch_key,
+                patch
+            );
+        }
+    }
+}
+
+#[test]
+fn provider_tuning_unknown_field_falls_back_to_chat_model() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::DefaultModelMissing,
+        key: "provider:default_missing:weird_field".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "field": "weird_field", "model_id": serde_json::Value::Null }),
+        seen_at: now,
+        confidence: 0.8,
+    });
+    let pulse = BuddyPulse::default();
+    let queue = OpportunityQueue::new();
+    let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
+
+    let provider_opp = opps
+        .iter()
+        .find(|(o, _)| o.kind == BuddyOpportunityKind::ProviderTuning)
+        .expect("must emit ProviderTuning for unknown field");
+
+    let draft_action = provider_opp
+        .0
+        .proposed_actions
+        .iter()
+        .find(|a| matches!(a, BuddyAction::DraftDefaultsChange { .. }))
+        .expect("must have DraftDefaultsChange for unknown field");
+
+    if let BuddyAction::DraftDefaultsChange { defaults_kind, .. } = draft_action {
+        assert_eq!(
+            *defaults_kind,
+            DefaultsKind::ChatModel,
+            "unknown field must fall back to ChatModel"
+        );
+    }
+}
+

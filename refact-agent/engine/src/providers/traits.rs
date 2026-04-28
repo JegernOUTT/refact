@@ -143,6 +143,11 @@ pub struct AvailableModel {
     pub max_output_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_variants: Vec<ProviderVariant>,
+    /// Optional base/root model identifier (e.g. "Qwen/Qwen3.6-27B-FP8" from vLLM).
+    /// Used as a fallback for model capabilities registry resolution when the
+    /// provider-reported id is a custom alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_model: Option<String>,
 }
 
 impl AvailableModel {
@@ -175,6 +180,7 @@ impl AvailableModel {
             selected_provider: None,
             max_output_tokens: None,
             provider_variants: Vec::new(),
+            base_model: None,
         }
     }
 
@@ -200,6 +206,7 @@ impl AvailableModel {
             selected_provider: None,
             max_output_tokens: config.max_output_tokens,
             provider_variants: Vec::new(),
+            base_model: None,
         }
     }
 }
