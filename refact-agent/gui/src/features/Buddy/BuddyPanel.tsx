@@ -132,7 +132,7 @@ export const BuddyPanel: React.FC = () => {
           {nowPlaying?.progress != null && (
             <div className={styles.statusBubble}>
               <span className={styles.statusIcon}>
-                {SIGNALS[nowPlaying.signal_type]?.icon ?? "•"}
+                {SIGNALS[nowPlaying.signal_type].icon}
               </span>
               <div className={styles.progressBar}>
                 <div style={{ width: `${nowPlaying.progress}%` }} />

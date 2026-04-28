@@ -278,7 +278,7 @@ export const BuddyHome: React.FC = () => {
     };
     const sigMap = new Map<string, ErrWithCount>();
     for (const e of collected) {
-      const sig = `${e.source ?? ""}|${e.title}|${e.description ?? ""}`;
+      const sig = `${e.source}|${e.title}|${e.description ?? ""}`;
       const existing = sigMap.get(sig);
       if (existing) {
         existing.occurrences += 1;
@@ -421,7 +421,7 @@ export const BuddyHome: React.FC = () => {
         {nowPlaying?.progress != null && (
           <div className={styles.statusBubble}>
             <span className={styles.statusIcon}>
-              {SIGNALS[nowPlaying.signal_type]?.icon ?? "•"}
+              {SIGNALS[nowPlaying.signal_type].icon}
             </span>
             <div className={styles.statusContent}>
               <div className={styles.progressBar}>
