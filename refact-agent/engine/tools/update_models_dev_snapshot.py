@@ -56,26 +56,15 @@ def reject_duplicate_raw_keys(pairs: RawJsonObject, context: str) -> None:
         seen.add(key)
 
 
-def raw_values_for_key(pairs: RawJsonObject, key: str) -> list[Any]:
-    return [value for object_key, value in pairs if object_key == key]
-
-
-def validate_raw_catalog_keys(data: Any) -> None:
-    if not isinstance(data, RawJsonObject):
+def validate_raw_catalog_keys(data: Any, context: str = "JSON object") -> None:
+    if isinstance(data, RawJsonObject):
+        reject_duplicate_raw_keys(data, context)
+        for key, value in data:
+            validate_raw_catalog_keys(value, f"object {key!r}")
         return
-
-    reject_duplicate_raw_keys(data, "provider")
-    for provider_key, provider in data:
-        if not isinstance(provider, RawJsonObject):
-            continue
-        models_values = raw_values_for_key(provider, "models")
-        if len(models_values) > 1:
-            raise ValueError(f"duplicate provider {provider_key!r} key 'models'")
-        if not models_values or not isinstance(models_values[0], RawJsonObject):
-            continue
-        reject_duplicate_raw_keys(
-            models_values[0], f"model in provider {provider_key!r}"
-        )
+    if isinstance(data, list):
+        for value in data:
+            validate_raw_catalog_keys(value, context)
 
 
 def parse_catalog_json(catalog_json: str) -> dict[str, Any]:

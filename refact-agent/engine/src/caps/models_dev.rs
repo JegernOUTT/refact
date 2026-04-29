@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use reqwest::header::USER_AGENT;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
+use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use tracing::warn;
 
 use crate::global_context::GlobalContext;
@@ -29,6 +31,7 @@ const REQUIRED_MODELS_DEV_PROVIDERS: &[&str] = &[
 ];
 const REQUIRED_ZAI_PROVIDER_ALIASES: &[&str] = &["zai", "zhipuai"];
 static MODELS_DEV_CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static MODELS_DEV_CACHE_WRITE_MUTEX: OnceLock<AMutex<()>> = OnceLock::new();
 
 pub type ModelsDevCatalog = HashMap<String, ModelsDevProvider>;
 
@@ -128,14 +131,129 @@ pub struct ModelsDevModelProvider {
     pub npm: Option<String>,
 }
 
+struct NoDuplicateJson;
+
+struct NoDuplicateJsonVisitor;
+
+impl<'de> Deserialize<'de> for NoDuplicateJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(NoDuplicateJsonVisitor)
+    }
+}
+
+impl<'de> Visitor<'de> for NoDuplicateJsonVisitor {
+    type Value = NoDuplicateJson;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("any valid JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Deserialize::deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while seq.next_element::<NoDuplicateJson>()?.is_some() {}
+        Ok(NoDuplicateJson)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key.clone()) {
+                return Err(de::Error::custom(format!(
+                    "duplicate JSON object key '{key}'"
+                )));
+            }
+            let _: NoDuplicateJson = map.next_value()?;
+        }
+        Ok(NoDuplicateJson)
+    }
+}
+
 pub fn parse_catalog_json(json: &str) -> Result<ModelsDevCatalog, String> {
     validate_models_dev_body_size(json.len())?;
+    validate_catalog_raw_json_keys(json)?;
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| format!("Failed to parse models.dev catalog: {e}"))?;
     validate_catalog_value_schema(&value)?;
     let catalog: ModelsDevCatalog = serde_json::from_value(value)
         .map_err(|e| format!("Failed to parse models.dev catalog: {e}"))?;
     normalize_and_validate_catalog(catalog)
+}
+
+fn validate_catalog_raw_json_keys(json: &str) -> Result<(), String> {
+    serde_json::from_str::<NoDuplicateJson>(json)
+        .map(|_| ())
+        .map_err(|e| format!("Failed to parse models.dev catalog: {e}"))
 }
 
 fn parse_required_project_catalog_json(
@@ -305,8 +423,13 @@ pub async fn write_models_dev_cache(cache_dir: &Path, contents: &str) -> Result<
     write_models_dev_cache_atomic(cache_dir, contents).await
 }
 
+fn models_dev_cache_write_mutex() -> &'static AMutex<()> {
+    MODELS_DEV_CACHE_WRITE_MUTEX.get_or_init(|| AMutex::new(()))
+}
+
 async fn write_models_dev_cache_atomic(cache_dir: &Path, contents: &str) -> Result<(), String> {
     validate_models_dev_body_size(contents.len())?;
+    let _write_guard = models_dev_cache_write_mutex().lock().await;
     let cache_path = models_dev_cache_path(cache_dir);
     if let Some(parent) = cache_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -832,6 +955,94 @@ mod tests {
         assert!(error.contains("duplicate"));
     }
 
+    #[test]
+    fn duplicate_raw_provider_json_key_is_rejected() {
+        let error = parse_catalog_json(
+            r#"
+            {
+                "openai": {
+                    "id": "openai",
+                    "models": {
+                        "gpt-4o": { "id": "gpt-4o" }
+                    }
+                },
+                "openai": {
+                    "id": "openai-duplicate",
+                    "models": {
+                        "gpt-4.1": { "id": "gpt-4.1" }
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("duplicate JSON object key 'openai'"));
+    }
+
+    #[test]
+    fn duplicate_raw_provider_object_key_is_rejected() {
+        let error = parse_catalog_json(
+            r#"
+            {
+                "openai": {
+                    "id": "openai",
+                    "id": "openai-duplicate",
+                    "models": {
+                        "gpt-4o": { "id": "gpt-4o" }
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("duplicate JSON object key 'id'"));
+    }
+
+    #[test]
+    fn duplicate_raw_model_json_key_inside_provider_is_rejected() {
+        let error = parse_catalog_json(
+            r#"
+            {
+                "openai": {
+                    "id": "openai",
+                    "models": {
+                        "gpt-4o": { "id": "gpt-4o" },
+                        "gpt-4o": { "id": "gpt-4o-duplicate" }
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("duplicate JSON object key 'gpt-4o'"));
+    }
+
+    #[test]
+    fn duplicate_raw_model_object_key_is_rejected() {
+        let error = parse_catalog_json(
+            r#"
+            {
+                "openai": {
+                    "id": "openai",
+                    "models": {
+                        "gpt-4o": {
+                            "id": "gpt-4o",
+                            "name": "GPT-4o",
+                            "name": "GPT-4o duplicate"
+                        }
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("duplicate JSON object key 'name'"));
+    }
+
     #[tokio::test]
     async fn corrupt_cache_falls_back_to_snapshot() {
         let tempdir = tempfile::tempdir().unwrap();
@@ -1028,6 +1239,51 @@ mod tests {
             .unwrap();
         while let Some(entry) = dir.next_entry().await.unwrap() {
             let file_name = entry.file_name().to_string_lossy().to_string();
+            assert!(!file_name.contains(".backup."));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_validated_cache_writes_leave_valid_cache_and_no_artifacts() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let write_count = 8usize;
+        let barrier = Arc::new(tokio::sync::Barrier::new(write_count));
+        let mut expected_contents = Vec::new();
+        let mut handles = Vec::new();
+
+        for idx in 0..write_count {
+            let mut catalog = required_catalog();
+            let provider_id = format!("extra-{idx}");
+            catalog.insert(provider_id.clone(), provider_with_model(&provider_id));
+            catalog.get_mut("openai").unwrap().name = format!("OpenAI {idx}");
+            let contents = serde_json::to_string(&catalog).unwrap();
+            expected_contents.push(contents.clone());
+
+            let cache_dir = tempdir.path().to_path_buf();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                write_models_dev_cache(&cache_dir, &contents).await.unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let cache_path = models_dev_cache_path(tempdir.path());
+        let contents = tokio::fs::read_to_string(&cache_path).await.unwrap();
+        assert!(expected_contents.contains(&contents));
+        let catalog =
+            parse_required_project_catalog_json(&contents, "models.dev runtime cache").unwrap();
+        validate_required_project_providers(&catalog).unwrap();
+
+        let mut dir = tokio::fs::read_dir(cache_path.parent().unwrap())
+            .await
+            .unwrap();
+        while let Some(entry) = dir.next_entry().await.unwrap() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            assert!(!file_name.contains(".tmp."));
             assert!(!file_name.contains(".backup."));
         }
     }
