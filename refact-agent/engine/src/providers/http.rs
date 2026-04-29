@@ -53,6 +53,14 @@ use super::google_gemini::GoogleGeminiProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::openai_codex::OpenAICodexProvider;
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 #[derive(Serialize)]
 struct ProviderListItem {
     name: &'static str,
@@ -1849,12 +1857,20 @@ fn html_response(
 <h1 style="color: {heading_color};">{heading}</h1>
 <p>{message}</p>
 </div>
-</body></html>"#
+</body></html>"#,
+        title = html_escape(title),
+        heading = html_escape(heading),
+        heading_color = heading_color,
+        message = html_escape(message),
     );
 
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/html")
+        .header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'",
+        )
         .body(Body::from(html))
         .map_err(|e| {
             ScratchError::new(
@@ -2094,7 +2110,7 @@ pub async fn handle_v1_claude_code_usage(
 pub async fn handle_v1_openai_codex_usage(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Response<Body>, ScratchError> {
-    let (provider, http_client) = {
+    let (provider, http_client, config_dir) = {
         let gcx_locked = gcx.read().await;
         let registry = gcx_locked.providers.read().await;
         let provider = registry
@@ -2107,7 +2123,11 @@ pub async fn handle_v1_openai_codex_usage(
                     "OpenAI Codex provider is not available".to_string(),
                 )
             })?;
-        (provider, gcx_locked.http_client.clone())
+        (
+            provider,
+            gcx_locked.http_client.clone(),
+            gcx_locked.config_dir.clone(),
+        )
     };
 
     let Some(codex) = provider.as_any().downcast_ref::<OpenAICodexProvider>() else {
@@ -2116,11 +2136,44 @@ pub async fn handle_v1_openai_codex_usage(
             "Failed to resolve OpenAI Codex provider type".to_string(),
         ));
     };
+    let mut codex = codex.clone();
+    let previous_tokens = codex.oauth_tokens.clone();
 
-    match codex.fetch_usage(&http_client).await {
+    let result = codex
+        .fetch_usage_with_refresh(&http_client, &config_dir)
+        .await;
+    let tokens_changed = previous_tokens.access_token != codex.oauth_tokens.access_token
+        || previous_tokens.refresh_token != codex.oauth_tokens.refresh_token
+        || previous_tokens.expires_at != codex.oauth_tokens.expires_at
+        || previous_tokens.openai_api_key != codex.oauth_tokens.openai_api_key
+        || previous_tokens.chatgpt_account_id != codex.oauth_tokens.chatgpt_account_id;
+    {
+        let gcx_locked = gcx.read().await;
+        let mut registry = gcx_locked.providers.write().await;
+        registry.add(Box::new(codex));
+    }
+    if tokens_changed {
+        invalidate_caps(gcx.clone()).await;
+    }
+
+    match result {
         Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
         Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
     }
+}
+
+fn ensure_openai_codex_session_id(yaml_map: &mut serde_yaml::Mapping) -> String {
+    let key = serde_yaml::Value::String("session_id".to_string());
+    if let Some(session_id) = yaml_map
+        .get(&key)
+        .and_then(|value| value.as_str())
+        .filter(|session_id| !session_id.is_empty())
+    {
+        return session_id.to_string();
+    }
+    let session_id = uuid::Uuid::new_v4().to_string();
+    yaml_map.insert(key, serde_yaml::Value::String(session_id.clone()));
+    session_id
 }
 
 async fn save_provider_oauth_tokens(
@@ -2179,6 +2232,10 @@ async fn save_provider_oauth_tokens(
             serde_yaml::Value::String("OPENAI_API_KEY".to_string()),
             serde_yaml::Value::String(api_key.to_string()),
         );
+    }
+
+    if provider_name == "openai_codex" {
+        ensure_openai_codex_session_id(&mut yaml_map);
     }
 
     let content = serde_yaml::to_string(&yaml_map).map_err(|e| {
@@ -2243,4 +2300,48 @@ async fn save_provider_oauth_tokens(
 
     invalidate_caps(gcx.clone()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn openai_codex_oauth_callback_html_escapes_interpolated_values() {
+        let response = html_response(
+            "<script>title</script>",
+            "Heading & \"quoted\"",
+            "#ef4444",
+            "<script>alert('xss')</script> & \"quote\"",
+        )
+        .unwrap();
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(html.contains("&lt;script&gt;title&lt;/script&gt;"));
+        assert!(html.contains("Heading &amp; &quot;quoted&quot;"));
+        assert!(html.contains("&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"));
+        assert!(html.contains("&amp; &quot;quote&quot;"));
+        assert!(!html.contains("<script>alert"));
+    }
+
+    #[test]
+    fn openai_codex_session_id_is_created_and_preserved() {
+        let mut yaml_map = serde_yaml::Mapping::new();
+        let created = ensure_openai_codex_session_id(&mut yaml_map);
+        assert!(!created.is_empty());
+        assert_eq!(
+            yaml_map
+                .get(&serde_yaml::Value::String("session_id".to_string()))
+                .and_then(|value| value.as_str()),
+            Some(created.as_str())
+        );
+
+        yaml_map.insert(
+            serde_yaml::Value::String("session_id".to_string()),
+            serde_yaml::Value::String("existing-session".to_string()),
+        );
+        let preserved = ensure_openai_codex_session_id(&mut yaml_map);
+        assert_eq!(preserved, "existing-session");
+    }
 }

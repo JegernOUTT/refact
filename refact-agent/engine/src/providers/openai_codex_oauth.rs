@@ -89,9 +89,17 @@ struct CodexCliCredentials {
 #[derive(Debug, Deserialize)]
 struct CodexCliTokens {
     access_token: String,
+    #[serde(default)]
     refresh_token: String,
     #[allow(dead_code)]
     id_token: Option<serde_json::Value>,
+}
+
+fn json_string(value: &Option<serde_json::Value>) -> Option<&str> {
+    value
+        .as_ref()
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
 }
 
 lazy_static::lazy_static! {
@@ -159,17 +167,25 @@ pub fn read_codex_cli_credentials() -> Result<OAuthTokens, String> {
         return Err("Empty access token in Codex CLI credentials".to_string());
     }
 
+    let chatgpt_account_id = json_string(&tokens.id_token)
+        .and_then(extract_chatgpt_account_id_from_jwt)
+        .or_else(|| extract_chatgpt_account_id_from_jwt(&tokens.access_token))
+        .unwrap_or_default();
+    let expires_at = extract_expiry_from_jwt(&tokens.access_token)
+        .or_else(|| json_string(&tokens.id_token).and_then(extract_expiry_from_jwt))
+        .unwrap_or(i64::MAX);
+
     Ok(OAuthTokens {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
-        expires_at: 0,
+        expires_at,
         openai_api_key: String::new(),
-        chatgpt_account_id: String::new(),
+        chatgpt_account_id,
         api_key_exchange_error: String::new(),
     })
 }
 
-fn extract_chatgpt_account_id_from_jwt(jwt: &str) -> Option<String> {
+fn decode_jwt_payload(jwt: &str) -> Option<serde_json::Value> {
     let mut parts = jwt.split('.');
     let _header_b64 = parts.next()?;
     let payload_b64 = parts.next()?;
@@ -178,13 +194,23 @@ fn extract_chatgpt_account_id_from_jwt(jwt: &str) -> Option<String> {
     let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload_b64)
         .ok()?;
-    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    serde_json::from_slice(&payload_bytes).ok()
+}
 
-    payload
+fn extract_chatgpt_account_id_from_jwt(jwt: &str) -> Option<String> {
+    decode_jwt_payload(jwt)?
         .get("https://api.openai.com/auth")
         .and_then(|v| v.get("chatgpt_account_id"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn extract_expiry_from_jwt(jwt: &str) -> Option<i64> {
+    decode_jwt_payload(jwt)?
+        .get("exp")
+        .and_then(|v| v.as_i64())
+        .filter(|exp| *exp > 0)
+        .and_then(|exp| exp.checked_mul(1000))
 }
 
 pub fn codex_cli_credentials_exist() -> bool {
@@ -614,7 +640,8 @@ fn callback_html(success: bool, message: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace('"', "&quot;");
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;");
     format!(
         r#"<!DOCTYPE html>
 <html><head><title>{title}</title></head>
