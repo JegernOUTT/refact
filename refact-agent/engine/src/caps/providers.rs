@@ -287,6 +287,10 @@ const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
         include_str!("../yaml_configs/default_providers/groq.yaml"),
     ),
     (
+        "kimi",
+        include_str!("../yaml_configs/default_providers/kimi.yaml"),
+    ),
+    (
         "lmstudio",
         include_str!("../yaml_configs/default_providers/lmstudio.yaml"),
     ),
@@ -305,6 +309,10 @@ const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
     (
         "openrouter",
         include_str!("../yaml_configs/default_providers/openrouter.yaml"),
+    ),
+    (
+        "qwen",
+        include_str!("../yaml_configs/default_providers/qwen.yaml"),
     ),
     (
         "vllm",

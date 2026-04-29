@@ -1,0 +1,8 @@
+wire_format: openai_chat_completions
+chat_endpoint: https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions
+supports_completion: false
+
+api_key: "$DASHSCOPE_API_KEY"
+region: international
+endpoint_type: standard
+custom_models: {}

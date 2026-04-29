@@ -1,0 +1,7 @@
+wire_format: openai_chat_completions
+chat_endpoint: https://api.moonshot.ai/v1/chat/completions
+supports_completion: false
+
+api_key: "$MOONSHOT_API_KEY"
+region: international
+custom_models: {}

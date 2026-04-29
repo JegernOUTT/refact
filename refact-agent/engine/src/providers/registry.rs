@@ -6,8 +6,8 @@ use crate::providers::{
     openai_responses::OpenAIResponsesProvider, openai_codex::OpenAICodexProvider,
     openrouter::OpenRouterProvider, ollama::OllamaProvider, lmstudio::LMStudioProvider,
     vllm::VLLMProvider, groq::GroqProvider, deepseek::DeepseekProvider, xai::XAIProvider,
-    xai_responses::XAIResponsesProvider, google_gemini::GoogleGeminiProvider,
-    custom::CustomProvider, claude_code::ClaudeCodeProvider,
+    xai_responses::XAIResponsesProvider, google_gemini::GoogleGeminiProvider, qwen::QwenProvider,
+    kimi::KimiProvider, custom::CustomProvider, claude_code::ClaudeCodeProvider,
 };
 
 pub const PROVIDER_NAMES: &[&str] = &[
@@ -24,6 +24,8 @@ pub const PROVIDER_NAMES: &[&str] = &[
     "xai",
     "xai_responses",
     "google_gemini",
+    "qwen",
+    "kimi",
     "custom",
     "claude_code",
 ];
@@ -43,6 +45,8 @@ pub fn create_provider(name: &str) -> Option<Box<dyn ProviderTrait>> {
         "xai" => Some(Box::new(XAIProvider::default())),
         "xai_responses" => Some(Box::new(XAIResponsesProvider::default())),
         "google_gemini" => Some(Box::new(GoogleGeminiProvider::default())),
+        "qwen" => Some(Box::new(QwenProvider::default())),
+        "kimi" => Some(Box::new(KimiProvider::default())),
         "custom" => Some(Box::new(CustomProvider::default())),
         "claude_code" => Some(Box::new(ClaudeCodeProvider::default())),
         _ => None,
