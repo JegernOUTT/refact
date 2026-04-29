@@ -119,15 +119,23 @@ fn generate_code_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash)
 }
 
-fn codex_home_dir() -> Option<std::path::PathBuf> {
+fn codex_home_dir() -> Result<std::path::PathBuf, String> {
     if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        return Some(std::path::PathBuf::from(codex_home));
+        if codex_home.to_string_lossy().trim().is_empty() {
+            return Err(
+                "CODEX_HOME is empty or whitespace. Unset it or set it to the Codex config directory."
+                    .to_string(),
+            );
+        }
+        return Ok(std::path::PathBuf::from(codex_home));
     }
-    home::home_dir().map(|h| h.join(CODEX_HOME_DIR))
+    home::home_dir()
+        .map(|h| h.join(CODEX_HOME_DIR))
+        .ok_or_else(|| "Cannot determine Codex home directory".to_string())
 }
 
 pub fn read_codex_cli_credentials() -> Result<OAuthTokens, String> {
-    let codex_home = codex_home_dir().ok_or("Cannot determine Codex home directory")?;
+    let codex_home = codex_home_dir()?;
 
     let auth_path = codex_home.join("auth.json");
     if !auth_path.exists() {

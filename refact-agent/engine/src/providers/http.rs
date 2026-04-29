@@ -51,7 +51,7 @@ use crate::providers::traits::{
 use super::openrouter::OpenRouterProvider;
 use super::google_gemini::GoogleGeminiProvider;
 use super::claude_code::ClaudeCodeProvider;
-use super::openai_codex::OpenAICodexProvider;
+use super::openai_codex::{AuthSource, OpenAICodexProvider, UsageRequestError};
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -2110,48 +2110,163 @@ pub async fn handle_v1_claude_code_usage(
 pub async fn handle_v1_openai_codex_usage(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
 ) -> Result<Response<Body>, ScratchError> {
-    let (provider, http_client, config_dir) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
-        let provider = registry
-            .get("openai_codex")
-            .map(|p| p.clone_box())
-            .or_else(|| create_provider("openai_codex"))
-            .ok_or_else(|| {
-                ScratchError::new(
-                    StatusCode::NOT_FOUND,
-                    "OpenAI Codex provider is not available".to_string(),
-                )
-            })?;
-        (
-            provider,
-            gcx_locked.http_client.clone(),
-            gcx_locked.config_dir.clone(),
-        )
-    };
-
-    let Some(codex) = provider.as_any().downcast_ref::<OpenAICodexProvider>() else {
-        return Err(ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to resolve OpenAI Codex provider type".to_string(),
-        ));
-    };
-    let mut codex = codex.clone();
-    let previous_tokens = codex.oauth_tokens.clone();
-    let previous_session_id = codex.session_id.clone();
-
-    let result = codex
-        .fetch_usage_with_refresh(&http_client, &config_dir)
-        .await;
-    if sync_openai_codex_auth_state(gcx.clone(), &codex, &previous_tokens, &previous_session_id)
-        .await?
-    {
-        invalidate_caps(gcx.clone()).await;
-    }
+    let result = fetch_openai_codex_usage_with_refresh(gcx).await;
 
     match result {
         Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
         Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+    }
+}
+
+async fn current_openai_codex_provider(
+    gcx: &Arc<ARwLock<GlobalContext>>,
+) -> Result<(OpenAICodexProvider, reqwest::Client, std::path::PathBuf), String> {
+    let gcx_locked = gcx.read().await;
+    let registry = gcx_locked.providers.read().await;
+    let provider = registry
+        .get("openai_codex")
+        .map(|p| p.clone_box())
+        .or_else(|| create_provider("openai_codex"))
+        .ok_or_else(|| "OpenAI Codex provider is not available".to_string())?;
+    let Some(codex) = provider.as_any().downcast_ref::<OpenAICodexProvider>() else {
+        return Err("Failed to resolve OpenAI Codex provider type".to_string());
+    };
+    Ok((
+        codex.clone(),
+        gcx_locked.http_client.clone(),
+        gcx_locked.config_dir.clone(),
+    ))
+}
+
+async fn force_refresh_openai_codex_usage_for_retry(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    http_client: &reqwest::Client,
+    rejected_access_token: &str,
+    rejected_status: Option<reqwest::StatusCode>,
+) -> Result<Option<OpenAICodexProvider>, String> {
+    let _guard = OpenAICodexProvider::lock_refresh_guard().await?;
+    let (mut provider, _, config_dir) = current_openai_codex_provider(&gcx).await?;
+
+    if provider
+        .access_token_changed_since_rejection(rejected_access_token)
+        .is_some()
+    {
+        return Ok(Some(provider));
+    }
+
+    if let Some(status) = rejected_status {
+        if !OpenAICodexProvider::should_force_refresh_for_status(
+            status,
+            &provider.oauth_tokens.refresh_token,
+            false,
+        ) {
+            return Ok(None);
+        }
+    } else if provider.oauth_tokens.refresh_token.is_empty() {
+        return Ok(None);
+    }
+
+    let previous_tokens = provider.oauth_tokens.clone();
+    let previous_session_id = provider.session_id.clone();
+    let refresh_result = provider
+        .force_refresh_after_auth_rejection(http_client, &config_dir)
+        .await;
+
+    if !provider.auth_state_matches(&previous_tokens, &previous_session_id) {
+        if sync_openai_codex_auth_state(
+            gcx.clone(),
+            &provider,
+            &previous_tokens,
+            &previous_session_id,
+        )
+        .await
+        .map_err(|e| e.message)?
+        {
+            invalidate_caps(gcx.clone()).await;
+        }
+    }
+
+    refresh_result.map(|access_token| access_token.map(|_| provider))
+}
+
+async fn fetch_openai_codex_usage_with_refresh(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> Result<crate::providers::openai_codex::OpenAICodexUsage, String> {
+    let (mut request_provider, http_client, _) = current_openai_codex_provider(&gcx).await?;
+    if !request_provider.oauth_tokens.has_refresh_token() {
+        return request_provider.fetch_usage(&http_client).await;
+    }
+
+    let mut refresh_attempted = false;
+    let context = match request_provider.resolve_wham_context() {
+        Ok(context) => context,
+        Err(_) if request_provider.oauth_tokens.has_refresh_token() => {
+            refresh_attempted = true;
+            let rejected_access_token = request_provider.oauth_tokens.access_token.clone();
+            request_provider = force_refresh_openai_codex_usage_for_retry(
+                gcx.clone(),
+                &http_client,
+                &rejected_access_token,
+                None,
+            )
+            .await?
+            .ok_or_else(|| {
+                "OpenAI Codex usage access token is expired and refresh returned no access token. Log in again in OpenAI Codex provider settings."
+                    .to_string()
+            })?;
+            request_provider.resolve_wham_context()?
+        }
+        Err(error) => return Err(error),
+    };
+
+    match request_provider
+        .fetch_usage_once(
+            &http_client,
+            &context.access_token,
+            &context.chatgpt_account_id,
+        )
+        .await
+    {
+        Ok(usage) => Ok(usage),
+        Err(UsageRequestError::Status(status, _body))
+            if OpenAICodexProvider::should_force_refresh_for_status(
+                status,
+                &request_provider.oauth_tokens.refresh_token,
+                refresh_attempted,
+            ) =>
+        {
+            let Some(retry_provider) = force_refresh_openai_codex_usage_for_retry(
+                gcx,
+                &http_client,
+                &context.access_token,
+                Some(status),
+            )
+            .await?
+            else {
+                return Err(
+                    "OpenAI Codex usage API rejected the access token and refresh returned no access token. Log in again in OpenAI Codex provider settings."
+                        .to_string(),
+                );
+            };
+            let retry_context = retry_provider.resolve_wham_context()?;
+            retry_provider
+                .fetch_usage_once(
+                    &http_client,
+                    &retry_context.access_token,
+                    &retry_context.chatgpt_account_id,
+                )
+                .await
+                .map_err(|error| {
+                    OpenAICodexProvider::usage_request_error_to_string(
+                        error,
+                        AuthSource::InAppOAuth,
+                    )
+                })
+        }
+        Err(error) => Err(OpenAICodexProvider::usage_request_error_to_string(
+            error,
+            context.source,
+        )),
     }
 }
 
@@ -2480,6 +2595,33 @@ mod tests {
         assert!(!changed);
         assert_eq!(stored.enabled_models, vec!["keep-enabled".to_string()]);
         assert!(stored.custom_models.contains_key("keep-custom"));
+    }
+
+    #[tokio::test]
+    async fn openai_codex_usage_refresh_rereads_registry_and_skips_stale_token() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut current = OpenAICodexProvider::default();
+        current.oauth_tokens.access_token = "fresh-access".to_string();
+        current.oauth_tokens.refresh_token = "refresh".to_string();
+        current.oauth_tokens.expires_at = i64::MAX;
+        {
+            let gcx_locked = gcx.read().await;
+            let mut registry = gcx_locked.providers.write().await;
+            registry.add(Box::new(current));
+        }
+        let http_client = gcx.read().await.http_client.clone();
+
+        let refreshed = force_refresh_openai_codex_usage_for_retry(
+            gcx,
+            &http_client,
+            "stale-access",
+            Some(reqwest::StatusCode::UNAUTHORIZED),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(refreshed.oauth_tokens.access_token, "fresh-access");
     }
 
     #[tokio::test]

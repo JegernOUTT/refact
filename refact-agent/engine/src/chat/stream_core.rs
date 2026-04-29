@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use futures::StreamExt;
 use eventsource_stream::Eventsource;
 use serde_json::{json, Value};
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::RwLock as ARwLock;
 
 use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
@@ -102,19 +102,13 @@ fn is_openai_codex_chatgpt_backend(model_rec: &BaseModelRecord) -> bool {
         && model_rec.endpoint.contains("chatgpt.com/backend-api")
 }
 
-lazy_static::lazy_static! {
-    static ref OPENAI_CODEX_REFRESH_GUARD: AMutex<()> = AMutex::new(());
-}
-
 async fn force_refresh_openai_codex_for_retry(
     gcx: Arc<ARwLock<GlobalContext>>,
     http_client: &reqwest::Client,
     status: reqwest::StatusCode,
     current_access_token: &str,
 ) -> Result<Option<String>, String> {
-    let _guard = tokio::time::timeout(Duration::from_secs(30), OPENAI_CODEX_REFRESH_GUARD.lock())
-        .await
-        .map_err(|_| "OpenAI Codex OAuth refresh guard timed out".to_string())?;
+    let _guard = crate::providers::openai_codex::OpenAICodexProvider::lock_refresh_guard().await?;
 
     let (config_dir, provider) = {
         let gcx_locked = gcx.read().await;

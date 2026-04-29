@@ -1,10 +1,12 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::{Mutex as AMutex, MutexGuard};
 
 use crate::caps::model_caps::ModelCapabilities;
 use crate::llm::adapter::WireFormat;
@@ -19,6 +21,10 @@ const CHATGPT_CODEX_MODELS_URL: &str =
     "https://chatgpt.com/backend-api/codex/models?client_version=999.999.999";
 const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 
+lazy_static::lazy_static! {
+    static ref OPENAI_CODEX_REFRESH_GUARD: AMutex<()> = AMutex::new(());
+}
+
 fn new_codex_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -27,8 +33,23 @@ fn is_codex_model(id: &str) -> bool {
     id.to_lowercase().contains("codex")
 }
 
+fn openai_codex_catalog_model_id(capability_key: &str) -> Option<&str> {
+    ["openai/", "openai-codex/", "openai_codex/"]
+        .iter()
+        .find_map(|prefix| capability_key.strip_prefix(prefix))
+}
+
+fn resolve_openai_codex_catalog_caps<'a>(
+    model_caps: &'a HashMap<String, ModelCapabilities>,
+    model_id: &str,
+) -> Option<&'a ModelCapabilities> {
+    ["openai", "openai-codex", "openai_codex"]
+        .iter()
+        .find_map(|provider| model_caps.get(&format!("{provider}/{model_id}")))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum AuthSource {
+pub(crate) enum AuthSource {
     InAppOAuth,
     CodexCli,
     None,
@@ -101,18 +122,24 @@ pub struct OpenAICodexUsage {
     pub credits: Option<OpenAICodexCredits>,
 }
 
-enum UsageRequestError {
+pub(crate) enum UsageRequestError {
     Status(reqwest::StatusCode, String),
     Other(String),
 }
 
-struct WhamContext {
-    access_token: String,
-    chatgpt_account_id: String,
-    source: AuthSource,
+pub(crate) struct WhamContext {
+    pub(crate) access_token: String,
+    pub(crate) chatgpt_account_id: String,
+    pub(crate) source: AuthSource,
 }
 
 impl OpenAICodexProvider {
+    pub(crate) async fn lock_refresh_guard() -> Result<MutexGuard<'static, ()>, String> {
+        tokio::time::timeout(Duration::from_secs(30), OPENAI_CODEX_REFRESH_GUARD.lock())
+            .await
+            .map_err(|_| "OpenAI Codex OAuth refresh guard timed out".to_string())
+    }
+
     fn needs_refresh_on_start(expires_at: i64) -> bool {
         const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000;
         if expires_at == 0 {
@@ -255,7 +282,7 @@ impl OpenAICodexProvider {
         (AuthSource::None, CodexAuth::None)
     }
 
-    fn resolve_wham_context(&self) -> Result<WhamContext, String> {
+    pub(crate) fn resolve_wham_context(&self) -> Result<WhamContext, String> {
         if self.oauth_tokens.has_valid_access_token() {
             return Ok(WhamContext {
                 access_token: self.oauth_tokens.access_token.clone(),
@@ -286,7 +313,7 @@ impl OpenAICodexProvider {
         Err("No ChatGPT OAuth access token available for usage API. Log in in OpenAI Codex provider settings or run `codex login`.".to_string())
     }
 
-    async fn fetch_usage_once(
+    pub(crate) async fn fetch_usage_once(
         &self,
         http_client: &reqwest::Client,
         token: &str,
@@ -319,7 +346,10 @@ impl OpenAICodexProvider {
         Ok(Self::parse_usage_payload(&root))
     }
 
-    fn usage_request_error_to_string(error: UsageRequestError, source: AuthSource) -> String {
+    pub(crate) fn usage_request_error_to_string(
+        error: UsageRequestError,
+        source: AuthSource,
+    ) -> String {
         match error {
             UsageRequestError::Status(status, body) => {
                 let truncated: String = body.chars().take(512).collect();
@@ -355,69 +385,6 @@ impl OpenAICodexProvider {
         )
         .await
         .map_err(|error| Self::usage_request_error_to_string(error, context.source))
-    }
-
-    pub async fn fetch_usage_with_refresh(
-        &mut self,
-        http_client: &reqwest::Client,
-        config_dir: &std::path::Path,
-    ) -> Result<OpenAICodexUsage, String> {
-        if !self.oauth_tokens.has_refresh_token() {
-            return self.fetch_usage(http_client).await;
-        }
-
-        let mut refresh_attempted = false;
-        let context = match self.resolve_wham_context() {
-            Ok(context) => context,
-            Err(_) if self.oauth_tokens.has_refresh_token() => {
-                refresh_attempted = true;
-                let access_token = self
-                    .force_refresh_after_auth_rejection(http_client, config_dir)
-                    .await?
-                    .ok_or_else(|| {
-                        "OpenAI Codex usage access token is expired and refresh returned no access token. Log in again in OpenAI Codex provider settings.".to_string()
-                    })?;
-                WhamContext {
-                    access_token,
-                    chatgpt_account_id: self.oauth_tokens.chatgpt_account_id.clone(),
-                    source: AuthSource::InAppOAuth,
-                }
-            }
-            Err(error) => return Err(error),
-        };
-
-        match self
-            .fetch_usage_once(
-                http_client,
-                &context.access_token,
-                &context.chatgpt_account_id,
-            )
-            .await
-        {
-            Ok(usage) => Ok(usage),
-            Err(UsageRequestError::Status(status, _body))
-                if Self::should_force_refresh_for_status(
-                    status,
-                    &self.oauth_tokens.refresh_token,
-                    refresh_attempted,
-                ) =>
-            {
-                let access_token = self
-                    .force_refresh_after_auth_rejection(http_client, config_dir)
-                    .await?
-                    .ok_or_else(|| {
-                        "OpenAI Codex usage API rejected the access token and refresh returned no access token. Log in again in OpenAI Codex provider settings.".to_string()
-                    })?;
-                self.fetch_usage_once(
-                    http_client,
-                    &access_token,
-                    &self.oauth_tokens.chatgpt_account_id,
-                )
-                .await
-                .map_err(|error| Self::usage_request_error_to_string(error, AuthSource::InAppOAuth))
-            }
-            Err(error) => Err(Self::usage_request_error_to_string(error, context.source)),
-        }
     }
 
     fn parse_usage_payload(root: &Value) -> OpenAICodexUsage {
@@ -581,12 +548,16 @@ impl OpenAICodexProvider {
                 return "OK (Codex CLI Platform API key)".to_string();
             }
             Ok(cli_tokens) if !cli_tokens.access_token.is_empty() && !cli_tokens.is_expired() => {
-                return "Connected (Codex CLI ChatGPT backend)".to_string();
+                return "Connected (Codex CLI ChatGPT backend; refresh managed by Codex CLI)"
+                    .to_string();
             }
             Ok(cli_tokens) if !cli_tokens.access_token.is_empty() => {
                 return "Codex CLI OAuth token expired. Run `codex login` again.".to_string();
             }
-            Err(error) if crate::providers::openai_codex_oauth::codex_cli_credentials_exist() => {
+            Err(error)
+                if error.contains("CODEX_HOME")
+                    || crate::providers::openai_codex_oauth::codex_cli_credentials_exist() =>
+            {
                 return format!("Codex CLI credentials are not usable: {}", error);
             }
             _ => {}
@@ -743,15 +714,12 @@ impl OpenAICodexProvider {
             }
             let enabled = enabled_set.contains(id);
             let pricing = self.custom_model_pricing(id);
-            let mut available = if let Some(caps) =
-                crate::caps::model_caps::resolve_model_caps(model_caps, &format!("openai/{id}"))
-            {
-                AvailableModel::from_caps(id, &caps.caps, enabled, pricing)
-            } else if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, id) {
-                AvailableModel::from_caps(id, &caps.caps, enabled, pricing)
-            } else {
-                self.unknown_live_codex_model(id.to_string(), enabled, pricing, model)
-            };
+            let mut available =
+                if let Some(caps) = resolve_openai_codex_catalog_caps(model_caps, id) {
+                    AvailableModel::from_caps(id, caps, enabled, pricing)
+                } else {
+                    self.unknown_live_codex_model(id.to_string(), enabled, pricing, model)
+                };
             available.display_name =
                 Self::live_model_display_name(model).or(available.display_name);
             models_map.insert(id.to_string(), available);
@@ -783,15 +751,10 @@ impl OpenAICodexProvider {
         model_caps: &HashMap<String, ModelCapabilities>,
         enabled_set: &HashSet<&str>,
     ) -> HashMap<String, AvailableModel> {
-        let has_openai_qualified_caps = model_caps.keys().any(|key| key.starts_with("openai/"));
         let mut models_map: HashMap<String, AvailableModel> = HashMap::new();
         for (capability_key, caps) in model_caps {
-            let model_id = if let Some(model_id) = capability_key.strip_prefix("openai/") {
-                model_id
-            } else if has_openai_qualified_caps || capability_key.contains('/') {
+            let Some(model_id) = openai_codex_catalog_model_id(capability_key) else {
                 continue;
-            } else {
-                capability_key.as_str()
             };
             if !is_codex_model(model_id) {
                 continue;
@@ -827,16 +790,12 @@ impl OpenAICodexProvider {
             let enabled = enabled_set.contains(slug);
             let pricing = self.custom_model_pricing(slug);
             let display_name = Self::live_model_display_name(model);
-            let mut available = if let Some(caps) =
-                crate::caps::model_caps::resolve_model_caps(model_caps, &format!("openai/{slug}"))
-            {
-                AvailableModel::from_caps(slug, &caps.caps, enabled, pricing)
-            } else if let Some(caps) = crate::caps::model_caps::resolve_model_caps(model_caps, slug)
-            {
-                AvailableModel::from_caps(slug, &caps.caps, enabled, pricing)
-            } else {
-                self.unknown_live_codex_model(slug.to_string(), enabled, pricing, model)
-            };
+            let mut available =
+                if let Some(caps) = resolve_openai_codex_catalog_caps(model_caps, slug) {
+                    AvailableModel::from_caps(slug, caps, enabled, pricing)
+                } else {
+                    self.unknown_live_codex_model(slug.to_string(), enabled, pricing, model)
+                };
             available.display_name = display_name.or(available.display_name);
             models_map.insert(slug.to_string(), available);
         }
@@ -1458,7 +1417,8 @@ mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
 
     use serde_json::json;
 
@@ -1514,11 +1474,21 @@ mod tests {
     fn caps_map() -> HashMap<String, ModelCapabilities> {
         HashMap::from([
             ("openai/gpt-5.6-codex".to_string(), codex_caps(256_000)),
+            (
+                "openai-codex/gpt-5.8-codex".to_string(),
+                codex_caps(192_000),
+            ),
+            (
+                "openai_codex/gpt-5.9-codex".to_string(),
+                codex_caps(224_000),
+            ),
             ("openai/gpt-4o".to_string(), codex_caps(128_000)),
             (
                 "github-copilot/gpt-5.7-codex".to_string(),
                 codex_caps(128_000),
             ),
+            ("openrouter/gpt-5.10-codex".to_string(), codex_caps(64_000)),
+            ("gpt-5.11-codex".to_string(), codex_caps(32_000)),
         ])
     }
 
@@ -1532,6 +1502,12 @@ mod tests {
         fn new(path: &Path) -> Self {
             let old = std::env::var_os("CODEX_HOME");
             std::env::set_var("CODEX_HOME", path);
+            Self { old }
+        }
+
+        fn new_value(value: &str) -> Self {
+            let old = std::env::var_os("CODEX_HOME");
+            std::env::set_var("CODEX_HOME", value);
             Self { old }
         }
     }
@@ -1641,7 +1617,7 @@ mod tests {
             );
             assert_eq!(
                 p.diagnose_auth_status(),
-                "Connected (Codex CLI ChatGPT backend)"
+                "Connected (Codex CLI ChatGPT backend; refresh managed by Codex CLI)"
             );
         });
     }
@@ -1672,6 +1648,30 @@ mod tests {
         let err = read_codex_cli_credentials().unwrap_err();
 
         assert!(err.contains(&nonexistent.join("auth.json").display().to_string()));
+    }
+
+    #[test]
+    fn codex_home_empty_override_is_invalid() {
+        let _lock = CODEX_HOME_LOCK.lock().unwrap();
+        let _guard = CodexHomeGuard::new_value("");
+
+        let err = read_codex_cli_credentials().unwrap_err();
+        let p = OpenAICodexProvider::default();
+
+        assert!(err.contains("CODEX_HOME"));
+        assert!(!err.contains("auth.json"));
+        assert!(p.diagnose_auth_status().contains("CODEX_HOME"));
+    }
+
+    #[test]
+    fn codex_home_whitespace_override_is_invalid() {
+        let _lock = CODEX_HOME_LOCK.lock().unwrap();
+        let _guard = CodexHomeGuard::new_value(" \t\n ");
+
+        let err = read_codex_cli_credentials().unwrap_err();
+
+        assert!(err.contains("CODEX_HOME"));
+        assert!(!err.contains("auth.json"));
     }
 
     #[test]
@@ -1709,11 +1709,28 @@ mod tests {
         let models = p.fetch_models_from_catalog(&caps_map());
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
 
-        assert_eq!(ids, vec!["gpt-5.6-codex"]);
+        assert_eq!(ids, vec!["gpt-5.6-codex", "gpt-5.8-codex", "gpt-5.9-codex"]);
         assert!(!ids.contains(&"gpt-5.3-codex"));
         assert!(!ids.contains(&"gpt-4o"));
         assert!(!ids.contains(&"gpt-5.7-codex"));
-        assert_eq!(models[0].n_ctx, 256_000);
+        assert!(!ids.contains(&"gpt-5.10-codex"));
+        assert!(!ids.contains(&"gpt-5.11-codex"));
+        assert_eq!(
+            models
+                .iter()
+                .find(|m| m.id == "gpt-5.6-codex")
+                .unwrap()
+                .n_ctx,
+            256_000
+        );
+        assert_eq!(
+            models
+                .iter()
+                .find(|m| m.id == "gpt-5.8-codex")
+                .unwrap()
+                .n_ctx,
+            192_000
+        );
     }
 
     #[test]
@@ -1818,6 +1835,44 @@ mod tests {
             .is_none());
     }
 
+    #[tokio::test]
+    async fn openai_codex_refresh_guard_serializes_concurrent_usage_refresh_and_stale_skip() {
+        let state = Arc::new(tokio::sync::Mutex::new(OpenAICodexProvider {
+            oauth_tokens: OAuthTokens {
+                access_token: "stale-access".to_string(),
+                refresh_token: "refresh".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        let refresh_count = Arc::new(AtomicUsize::new(0));
+
+        let attempt = |state: Arc<tokio::sync::Mutex<OpenAICodexProvider>>,
+                       refresh_count: Arc<AtomicUsize>| async move {
+            let _guard = OpenAICodexProvider::lock_refresh_guard().await.unwrap();
+            let mut provider = state.lock().await;
+            if provider
+                .access_token_changed_since_rejection("stale-access")
+                .is_some()
+            {
+                return "skip";
+            }
+            refresh_count.fetch_add(1, AtomicOrdering::SeqCst);
+            provider.oauth_tokens.access_token = "fresh-access".to_string();
+            "refresh"
+        };
+
+        let (first, second) = tokio::join!(
+            attempt(state.clone(), refresh_count.clone()),
+            attempt(state.clone(), refresh_count.clone())
+        );
+        let mut outcomes = vec![first, second];
+        outcomes.sort();
+
+        assert_eq!(refresh_count.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(outcomes, vec!["refresh", "skip"]);
+    }
+
     #[test]
     fn openai_codex_auth_state_update_preserves_model_settings() {
         let mut current = OpenAICodexProvider {
@@ -1889,6 +1944,27 @@ mod tests {
 
         assert!(err.contains("Refact does not refresh Codex CLI-managed tokens"));
         assert!(err.contains("codex login"));
+    }
+
+    #[test]
+    fn cli_oauth_runtime_auth_rejection_is_actionable() {
+        with_codex_home(|codex_home| {
+            write_codex_auth(
+                codex_home,
+                json!({
+                    "tokens": {
+                        "access_token": "cli-access",
+                        "refresh_token": "cli-refresh"
+                    }
+                }),
+            );
+
+            let message =
+                OpenAICodexProvider::codex_cli_unmanaged_refresh_message("cli-access").unwrap();
+
+            assert!(message.contains("Refact does not refresh Codex CLI-managed tokens"));
+            assert!(message.contains("codex login"));
+        });
     }
 
     #[test]
