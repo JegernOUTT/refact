@@ -25,7 +25,10 @@ impl Tool for ToolBuddyCreateIssue {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Create a GitHub issue for a confirmed product bug in smallcloudai/refact. This helper checks GitHub MCP first, then existing integration/CLI fallback, and only files when confidence is high.".to_string(),
+            description: "Create an issue for a confirmed product bug in the detected repository. \
+                This helper checks GitHub MCP first, then existing integration/CLI fallback, \
+                and only files when confidence is high."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -136,7 +139,23 @@ impl Tool for ToolBuddyCreateIssue {
 
         let has_mcp = crate::buddy::issues::has_github_mcp(gcx.clone()).await;
         let result = if has_mcp {
-            crate::buddy::issues::create_issue_via_mcp(gcx.clone(), title, body, labels).await
+            let context = crate::buddy::issues::resolve_issue_context(
+                gcx.clone(),
+                diagnostic_index,
+                diagnostic_id,
+                collected_at,
+                error,
+            )
+            .await?;
+            crate::buddy::issues::create_issue_via_mcp(
+                gcx.clone(),
+                &context,
+                title,
+                body,
+                labels,
+                false,
+            )
+            .await
         } else {
             crate::buddy::issues::create_issue_via_native(
                 gcx.clone(),

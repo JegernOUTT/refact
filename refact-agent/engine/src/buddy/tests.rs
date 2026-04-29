@@ -6,9 +6,10 @@ use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
 use super::actor::BuddyService;
 use super::diagnostics::{classify_error, DiagnosticContext, DiagnosticSeverity};
 use super::issues::{
-    check_issue_gate, check_manual_issue_gate, detect_repo_from_git, issue_title_and_body,
-    mcp_issue_args, parse_remote_url, record_issue_success, redact_diagnostic_text, sanitize_body,
-    sanitize_title, validate_issue_binary, IssueGate, IssueProvider, RepoHost,
+    check_issue_gate, check_manual_issue_gate, detect_repo_from_git, issue_dedupe_text,
+    issue_title_and_body, mcp_issue_args, parse_remote_url, prepare_issue_content,
+    record_issue_success, redact_diagnostic_text, sanitize_body, sanitize_title,
+    validate_issue_binary, IssueGate, IssueProvider, RepoHost,
 };
 use super::scheduler::BuddyJobContext;
 use super::settings::{AutonomyLevel, BuddySettings, HumorLevel, MAX_PALETTE_INDEX};
@@ -600,6 +601,114 @@ fn mcp_issue_creation_no_hardcoded_repo_in_args() {
 }
 
 #[test]
+fn mcp_issue_prepare_refuses_duplicate_before_tool_call() {
+    let ctx = make_issue_ctx("same issue error");
+    let recent = vec![(issue_dedupe_text(&ctx), chrono::Utc::now())];
+    let err = prepare_issue_content(
+        &ctx,
+        Some("Title"),
+        Some("Body"),
+        true,
+        true,
+        false,
+        None,
+        &recent,
+    )
+    .unwrap_err();
+    assert!(err.contains("Duplicate issue suppressed"));
+}
+
+#[test]
+fn mcp_issue_prepare_respects_rate_limit_when_not_manual() {
+    let ctx = make_issue_ctx("rate limited issue error");
+    let err = prepare_issue_content(
+        &ctx,
+        Some("Title"),
+        Some("Body"),
+        true,
+        true,
+        false,
+        Some(std::time::Instant::now()),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.contains("rate limit active"));
+
+    let prepared = prepare_issue_content(
+        &ctx,
+        Some("Title"),
+        Some("Body"),
+        true,
+        false,
+        true,
+        Some(std::time::Instant::now()),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(prepared.dedupe_text, issue_dedupe_text(&ctx));
+}
+
+#[test]
+fn mcp_issue_prepare_sanitizes_args_title_body() {
+    let ctx = make_issue_ctx("panic with token=CTXSECRET");
+    let raw_title = format!("Crash token=TITLESECRET\n{}", "x".repeat(200));
+    let raw_body = format!(
+        "Body Bearer BODYSECRET api_key=BODYAPI with ```\n{}",
+        "y".repeat(5000)
+    );
+    let prepared = prepare_issue_content(
+        &ctx,
+        Some(&raw_title),
+        Some(&raw_body),
+        true,
+        true,
+        false,
+        None,
+        &[],
+    )
+    .unwrap();
+    let args = mcp_issue_args(
+        "detected",
+        "project",
+        &prepared.title,
+        &prepared.body,
+        vec!["bug".to_string()],
+    );
+    assert_eq!(args["owner"], "detected");
+    assert_eq!(args["repo"], "project");
+    assert!(!prepared.title.contains('\n'));
+    assert!(!prepared.title.contains('\r'));
+    assert!(prepared.title.chars().count() <= 120);
+    assert!(prepared.body.chars().count() <= 4000);
+    assert!(!prepared.body.contains("```"));
+    let serialized = serde_json::to_string(&args).unwrap();
+    for raw in ["TITLESECRET", "BODYSECRET", "BODYAPI", "CTXSECRET"] {
+        assert!(!serialized.contains(raw), "raw secret leaked: {}", raw);
+    }
+    assert!(!serialized.contains("smallcloudai/refact"));
+}
+
+#[test]
+fn mcp_and_native_prepare_share_dedupe_text() {
+    let ctx = make_issue_ctx("shared dedupe token=SECRETDEDUP");
+    let native = prepare_issue_content(&ctx, None, None, true, true, false, None, &[]).unwrap();
+    let mcp = prepare_issue_content(
+        &ctx,
+        Some("Title"),
+        Some("Body"),
+        true,
+        true,
+        false,
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(native.dedupe_text, mcp.dedupe_text);
+    assert_eq!(mcp.dedupe_text, issue_dedupe_text(&ctx));
+    assert!(!mcp.dedupe_text.contains("SECRETDEDUP"));
+}
+
+#[test]
 fn validate_issue_binary_rejects_absolute_path() {
     assert!(validate_issue_binary("/tmp/gh").is_err());
     assert!(validate_issue_binary("C:\\tmp\\gh").is_err());
@@ -658,6 +767,14 @@ async fn issue_success_side_effects_are_centralized() {
         .recent_issue_errors
         .iter()
         .any(|(message, _)| message == "mcp issue title"));
+    for dedupe in ["native error", "mcp issue title"] {
+        let recorded = svc
+            .recent_issue_errors
+            .iter()
+            .filter(|(message, _)| message.as_str() == dedupe)
+            .count();
+        assert_eq!(recorded, 1, "{dedupe} must be recorded exactly once");
+    }
     let issue_activities = svc
         .state
         .recent_activities

@@ -280,19 +280,23 @@ async fn detect_provider(
     })
 }
 
-pub async fn has_github_mcp(gcx: Arc<ARwLock<GlobalContext>>) -> bool {
+async fn github_mcp_issue_tool(gcx: Arc<ARwLock<GlobalContext>>) -> Option<String> {
     let groups = crate::tools::tools_list::get_integration_tools(gcx).await;
-    groups.into_iter().any(|group| {
-        group.tools.into_iter().any(|tool| {
-            let desc = tool.tool_description();
-            let name = desc.name;
-            let cfg = desc.source.config_path;
-            (name.contains("github") || cfg.contains("github"))
-                && (name.ends_with("_create_issue")
-                    || name.ends_with("_get_file_contents")
-                    || name.ends_with("_search_code"))
-        })
+    groups.into_iter().flat_map(|group| group.tools).find_map(|tool| {
+        let desc = tool.tool_description();
+        let name = desc.name;
+        let cfg = desc.source.config_path;
+        let is_github = name.contains("github") || cfg.contains("github");
+        if is_github && name.ends_with("_create_issue") {
+            Some(name)
+        } else {
+            None
+        }
     })
+}
+
+pub async fn has_github_mcp(gcx: Arc<ARwLock<GlobalContext>>) -> bool {
+    github_mcp_issue_tool(gcx).await.is_some()
 }
 
 pub async fn investigation_logs(
@@ -402,9 +406,11 @@ pub(crate) fn mcp_issue_args(
 
 pub async fn create_issue_via_mcp(
     gcx: Arc<ARwLock<GlobalContext>>,
+    context: &DiagnosticContext,
     title: &str,
     body: &str,
     labels: Vec<String>,
+    manual: bool,
 ) -> Result<BuddyIssueCreateResult, String> {
     let project_root = crate::files_correction::get_project_dirs(gcx.clone())
         .await
@@ -417,6 +423,21 @@ pub async fn create_issue_via_mcp(
     if !matches!(&repo.host, RepoHost::GitHub) {
         return Err("GitHub MCP issue creation requires a GitHub origin remote".to_string());
     }
+
+    let mcp_tool = github_mcp_issue_tool(gcx.clone())
+        .await
+        .ok_or_else(|| "GitHub MCP issue tool not available".to_string())?;
+    let (auto_enabled, last_issue_at, recent_errors) = issue_control_snapshot(gcx.clone()).await?;
+    let prepared = prepare_issue_content(
+        context,
+        Some(title),
+        Some(body),
+        true,
+        auto_enabled,
+        manual,
+        last_issue_at,
+        &recent_errors,
+    )?;
 
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new(
@@ -434,29 +455,10 @@ pub async fn create_issue_via_mcp(
     ));
     let mut tool = crate::tools::tool_mcp_call::ToolMcpCall {};
     let mut args = HashMap::new();
-    let mcp_tool = {
-        let groups = crate::tools::tools_list::get_integration_tools(gcx.clone()).await;
-        groups
-            .into_iter()
-            .flat_map(|group| group.tools)
-            .find_map(|tool| {
-                let desc = tool.tool_description();
-                let name = desc.name;
-                let cfg = desc.source.config_path;
-                if (name.contains("github") || cfg.contains("github"))
-                    && name.ends_with("_create_issue")
-                {
-                    Some(name)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| "GitHub MCP issue tool not available".to_string())?
-    };
     args.insert("tool_name".to_string(), serde_json::json!(mcp_tool));
     args.insert(
         "args".to_string(),
-        mcp_issue_args(&repo.owner, &repo.repo, title, body, labels),
+        mcp_issue_args(&repo.owner, &repo.repo, &prepared.title, &prepared.body, labels),
     );
     let (_, out) = tool
         .tool_execute(ccx, &"buddy_mcp_issue".to_string(), &args)
@@ -469,7 +471,7 @@ pub async fn create_issue_via_mcp(
         timestamp: chrono::Utc::now().to_rfc3339(),
         activity_type: "issue_created".to_string(),
     };
-    record_issue_success(gcx, title.to_string(), activity).await;
+    record_issue_success(gcx, prepared.dedupe_text, activity).await;
 
     Ok(BuddyIssueCreateResult {
         url: text,
@@ -478,14 +480,17 @@ pub async fn create_issue_via_mcp(
     })
 }
 
-pub async fn create_issue_via_native(
+pub async fn resolve_issue_context(
     gcx: Arc<ARwLock<GlobalContext>>,
     diagnostic_index: Option<usize>,
     diagnostic_id: Option<String>,
     collected_at: Option<String>,
     error: Option<String>,
-) -> Result<BuddyIssueCreateResult, String> {
-    let pre_diag = if diagnostic_index.is_none() {
+) -> Result<DiagnosticContext, String> {
+    let pre_diag = if diagnostic_index.is_none()
+        && diagnostic_id.is_none()
+        && collected_at.is_none()
+    {
         match error.as_ref() {
             Some(err) => {
                 Some(crate::buddy::diagnostics::collect_diagnostics(gcx.clone(), err).await)
@@ -496,28 +501,56 @@ pub async fn create_issue_via_native(
         None
     };
 
-    let ctx = crate::buddy::actor::resolve_diagnostic(
-        gcx.clone(),
+    crate::buddy::actor::resolve_diagnostic(
+        gcx,
         diagnostic_index,
         diagnostic_id.as_deref(),
         collected_at.as_deref(),
         pre_diag,
     )
+    .await
+}
+
+async fn issue_control_snapshot(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> Result<
+    (
+        bool,
+        Option<std::time::Instant>,
+        Vec<(String, chrono::DateTime<chrono::Utc>)>,
+    ),
+    String,
+> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let svc = lock
+        .as_ref()
+        .ok_or_else(|| "buddy service not initialized".to_string())?;
+
+    Ok((
+        svc.settings.auto_issue_creation,
+        svc.last_issue_at,
+        svc.recent_issue_errors.clone(),
+    ))
+}
+
+pub async fn create_issue_via_native(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    diagnostic_index: Option<usize>,
+    diagnostic_id: Option<String>,
+    collected_at: Option<String>,
+    error: Option<String>,
+) -> Result<BuddyIssueCreateResult, String> {
+    let ctx = resolve_issue_context(
+        gcx.clone(),
+        diagnostic_index,
+        diagnostic_id,
+        collected_at,
+        error,
+    )
     .await?;
 
-    let (auto_enabled, last_issue_at, recent_errors) = {
-        let buddy_arc = gcx.read().await.buddy.clone();
-        let lock = buddy_arc.lock().await;
-        let svc = lock
-            .as_ref()
-            .ok_or_else(|| "buddy service not initialized".to_string())?;
-
-        (
-            svc.settings.auto_issue_creation,
-            svc.last_issue_at,
-            svc.recent_issue_errors.clone(),
-        )
-    };
+    let (auto_enabled, last_issue_at, recent_errors) = issue_control_snapshot(gcx.clone()).await?;
 
     let (url, _activity) = create_issue(
         gcx.clone(),
@@ -607,6 +640,94 @@ pub(crate) fn issue_title_and_body(ctx: &DiagnosticContext) -> (String, String) 
     (title, body)
 }
 
+fn redact_issue_text(text: &str) -> String {
+    let mut result = redact_sensitive(text);
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            result = result.replace(&home, "~");
+        }
+    }
+    result
+}
+
+fn sanitize_issue_title(raw: &str) -> String {
+    sanitize_title(&redact_issue_text(raw))
+}
+
+fn sanitize_issue_body(raw: &str) -> String {
+    sanitize_body(&redact_issue_text(raw))
+}
+
+pub(crate) fn issue_dedupe_text(context: &DiagnosticContext) -> String {
+    redact_diagnostic_text(&context.error_message)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedIssue {
+    pub title: String,
+    pub body: String,
+    pub dedupe_text: String,
+}
+
+pub(crate) fn prepare_issue_content(
+    context: &DiagnosticContext,
+    raw_title: Option<&str>,
+    raw_body: Option<&str>,
+    integration_configured: bool,
+    auto_creation_enabled: bool,
+    manual: bool,
+    last_issue_at: Option<std::time::Instant>,
+    recent_errors: &[(String, chrono::DateTime<chrono::Utc>)],
+) -> Result<PreparedIssue, String> {
+    let gate = IssueGate {
+        has_diagnostics: !context.error_message.is_empty()
+            && (context.source_file.is_some() || context.tool_name.is_some()),
+        has_repro_context: context.source_file.is_some() || context.tool_name.is_some(),
+        integration_configured,
+        auto_creation_enabled,
+        within_rate_limit: last_issue_at
+            .map(|t| t.elapsed().as_secs() >= RATE_LIMIT_SECS)
+            .unwrap_or(true),
+    };
+
+    let passed = if manual {
+        check_manual_issue_gate(&gate)
+    } else {
+        check_issue_gate(&gate)
+    };
+
+    if !passed {
+        return Err(gate_error(&gate, manual));
+    }
+
+    let dedupe_text = issue_dedupe_text(context);
+    let now = chrono::Utc::now();
+    for (msg, ts) in recent_errors {
+        let age = now.signed_duration_since(*ts).num_seconds();
+        if age < DEDUP_SECS && (msg == &dedupe_text || msg == &context.error_message) {
+            return Err("Duplicate issue suppressed (same error within 24h)".to_string());
+        }
+    }
+
+    let (title, body) = match (raw_title, raw_body) {
+        (Some(title), Some(body)) => (sanitize_issue_title(title), sanitize_issue_body(body)),
+        _ => issue_title_and_body(context),
+    };
+
+    if title.trim().is_empty() {
+        return Err("issue title empty after sanitization".to_string());
+    }
+    if body.trim().is_empty() {
+        return Err("issue body empty after sanitization".to_string());
+    }
+
+    Ok(PreparedIssue {
+        title,
+        body,
+        dedupe_text,
+    })
+}
+
 pub(crate) async fn record_issue_success(
     gcx: Arc<ARwLock<GlobalContext>>,
     dedupe_text: String,
@@ -639,38 +760,27 @@ pub async fn create_issue(
         .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
     let provider = detect_provider(gcx.clone(), &repo).await?;
 
-    let gate = IssueGate {
-        has_diagnostics: !context.error_message.is_empty()
-            && (context.source_file.is_some() || context.tool_name.is_some()),
-        has_repro_context: context.source_file.is_some() || context.tool_name.is_some(),
-        integration_configured: provider.is_some(),
+    let prepared = prepare_issue_content(
+        context,
+        None,
+        None,
+        provider.is_some(),
         auto_creation_enabled,
-        within_rate_limit: last_issue_at
-            .map(|t| t.elapsed().as_secs() >= RATE_LIMIT_SECS)
-            .unwrap_or(true),
-    };
+        manual,
+        last_issue_at,
+        recent_errors,
+    )?;
+    let provider = provider
+        .ok_or_else(|| "gate blocked: no issue tracker integration configured".to_string())?;
 
-    let passed = if manual {
-        check_manual_issue_gate(&gate)
-    } else {
-        check_issue_gate(&gate)
-    };
-
-    if !passed {
-        return Err(gate_error(&gate, manual));
-    }
-
-    let now = chrono::Utc::now();
-    for (msg, ts) in recent_errors {
-        let age = now.signed_duration_since(*ts).num_seconds();
-        if age < DEDUP_SECS && msg == &context.error_message {
-            return Err("Duplicate issue suppressed (same error within 24h)".to_string());
-        }
-    }
-
-    let (title, body) = issue_title_and_body(context);
-
-    let url = run_issue_create(provider.unwrap(), &repo, &project_root, &title, &body).await?;
+    let url = run_issue_create(
+        provider,
+        &repo,
+        &project_root,
+        &prepared.title,
+        &prepared.body,
+    )
+    .await?;
 
     info!("buddy: created issue {}", url);
 
@@ -681,7 +791,7 @@ pub async fn create_issue(
         timestamp: chrono::Utc::now().to_rfc3339(),
         activity_type: "issue_created".to_string(),
     };
-    record_issue_success(gcx, context.error_message.clone(), activity.clone()).await;
+    record_issue_success(gcx, prepared.dedupe_text, activity.clone()).await;
     Ok((url, activity))
 }
 
