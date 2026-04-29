@@ -6,11 +6,12 @@ use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
+use crate::buddy::drafts::{draft_kind_str, DraftTarget, DraftValidationError};
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::opportunities::is_terminal_status;
 use crate::buddy::types::{
@@ -18,10 +19,12 @@ use crate::buddy::types::{
     MarketKind, OpportunityStatus, PulseScope,
 };
 use crate::custom_error::ScratchError;
+use crate::ext::config_dirs::get_ext_dirs;
 use crate::ext::extensions_marketplace::{
     install_marketplace_item, list_marketplace_items, InstallMarketplaceItemRequest,
     MarketplaceKind,
 };
+use crate::ext::slash_commands::parse_frontmatter_and_body;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 
@@ -40,6 +43,53 @@ pub(crate) struct ActionOutcome {
     pub result: serde_json::Value,
     pub status: OpportunityStatus,
     pub handled: bool,
+}
+
+fn draft_validation_error(err: DraftValidationError) -> ScratchError {
+    match err {
+        DraftValidationError::NotFound => {
+            ScratchError::new(StatusCode::NOT_FOUND, "draft_not_found".to_string())
+        }
+        DraftValidationError::KindMismatch { expected, actual } => ScratchError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "draft_kind_mismatch: expected {}, got {}",
+                draft_kind_str(&expected),
+                draft_kind_str(&actual)
+            ),
+        ),
+        DraftValidationError::TargetMismatch { expected, actual } => ScratchError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "draft_target_mismatch: expected {}, got {}",
+                expected, actual
+            ),
+        ),
+        DraftValidationError::Parse(err) => ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("draft_parse_failed: {}", err),
+        ),
+    }
+}
+
+async fn validate_existing_draft(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    draft_id: &str,
+    expected_kind: DraftKind,
+    target: DraftTarget<'_>,
+) -> Result<(), ScratchError> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let svc = lock.as_ref().ok_or_else(|| {
+        ScratchError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "buddy not initialized".into(),
+        )
+    })?;
+    svc.draft_store
+        .get_validated(draft_id, expected_kind, target)
+        .map(|_| ())
+        .map_err(draft_validation_error)
 }
 
 pub async fn handle_v1_buddy_opportunities_list(
@@ -212,27 +262,38 @@ pub(crate) async fn dispatch_action(
         | BuddyAction::DraftCommand { draft_id, label }
         | BuddyAction::DraftDelegate { draft_id, label }
         | BuddyAction::DraftMode { draft_id, label } => {
-            let (kind, final_id) = if draft_id.is_empty() {
-                let (dk, title, content) = match action {
-                    BuddyAction::DraftSkill { .. } => (DraftKind::Skill, label.as_str(), "name: my-skill\ndescription: Describe when to use this skill\ncontext: Add context here"),
-                    BuddyAction::DraftCommand { .. } => (DraftKind::Command, label.as_str(), "name: my-command\ndescription: Describe this command"),
-                    BuddyAction::DraftDelegate { .. } => (DraftKind::Delegate, label.as_str(), "name: my-delegate\ndescription: Describe this delegate"),
-                    _ => (DraftKind::Mode, label.as_str(), "title: My Mode\nprompt: Describe this mode"),
-                };
-                let draft =
-                    synthesize_draft(gcx.clone(), dk, title.to_string(), content.to_string())
-                        .await?;
-                let id = draft.id.clone();
-                (dk, id)
-            } else {
-                let dk = match action {
-                    BuddyAction::DraftSkill { .. } => DraftKind::Skill,
-                    BuddyAction::DraftCommand { .. } => DraftKind::Command,
-                    BuddyAction::DraftDelegate { .. } => DraftKind::Delegate,
-                    _ => DraftKind::Mode,
-                };
-                (dk, draft_id.clone())
+            let dk = match action {
+                BuddyAction::DraftSkill { .. } => DraftKind::Skill,
+                BuddyAction::DraftCommand { .. } => DraftKind::Command,
+                BuddyAction::DraftDelegate { .. } => DraftKind::Delegate,
+                _ => DraftKind::Mode,
             };
+            let final_id = if draft_id.is_empty() {
+                let content = match action {
+                    BuddyAction::DraftSkill { .. } => format!(
+                        "---\nname: {}\ndescription: Describe when to use this skill\n---\nAdd context here\n",
+                        label
+                    ),
+                    BuddyAction::DraftCommand { .. } => {
+                        "---\ndescription: Describe this command\n---\nAdd command instructions here\n"
+                            .to_string()
+                    }
+                    BuddyAction::DraftDelegate { .. } => format!(
+                        "schema_version: 1\nid: {}\ntitle: {}\nsubchat:\n  context_mode: bare\n",
+                        label, label
+                    ),
+                    _ => format!(
+                        "schema_version: 1\nid: {}\ntitle: {}\nprompt: Describe this mode\n",
+                        label, label
+                    ),
+                };
+                let draft = synthesize_draft(gcx.clone(), dk, label.to_string(), content).await?;
+                draft.id.clone()
+            } else {
+                validate_existing_draft(gcx.clone(), draft_id, dk, DraftTarget::Any).await?;
+                draft_id.clone()
+            };
+            let kind = dk;
             Ok(ActionOutcome {
                 result: serde_json::json!({
                     "kind": "draft",
@@ -306,19 +367,17 @@ pub(crate) async fn dispatch_action(
             patch,
         } => {
             let draft_kind = customization_kind_to_draft_kind(*customization_kind);
-            let existing_yaml = read_existing_customization(&gcx, *customization_kind, id)
+            let existing = read_existing_customization(&gcx, *customization_kind, id)
                 .await
                 .unwrap_or_else(|| default_customization_template(*customization_kind, id));
-            let merged = merge_yaml_with_json_patch(&existing_yaml, patch)
+            let draft_content = merge_customization_content(*customization_kind, &existing, patch)
                 .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-            let merged_yaml = serde_yaml::to_string(&merged)
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let url_kind = customization_url_kind(*customization_kind);
+            let title_kind = customization_url_kind(*customization_kind);
             let draft = synthesize_draft(
                 gcx.clone(),
                 draft_kind,
-                format!("{} {}", url_kind, id),
-                merged_yaml,
+                format!("{} {}", title_kind, id),
+                draft_content,
             )
             .await?;
             Ok(ActionOutcome {
@@ -401,9 +460,46 @@ fn customization_url_kind(kind: CustomizationKind) -> &'static str {
         CustomizationKind::Mode => "modes",
         CustomizationKind::Skill => "skills",
         CustomizationKind::Command => "commands",
-        CustomizationKind::Delegate => "delegates",
+        CustomizationKind::Delegate => "subagents",
         CustomizationKind::Hook => "hooks",
     }
+}
+
+async fn read_effective_ext_file<F>(
+    gcx: &Arc<ARwLock<GlobalContext>>,
+    relative_path: F,
+) -> Option<String>
+where
+    F: Fn(&StdPath) -> PathBuf,
+{
+    let ext_dirs = get_ext_dirs(gcx.clone()).await;
+    let mut found = None;
+    for dir in ext_dirs.all_dirs_in_order() {
+        if let Ok(content) = tokio::fs::read_to_string(relative_path(dir)).await {
+            found = Some(content);
+        }
+    }
+    found
+}
+
+async fn read_effective_config_file(
+    gcx: &Arc<ARwLock<GlobalContext>>,
+    dir_name: &str,
+    file_name: &str,
+) -> Option<String> {
+    let config_dir = gcx.read().await.config_dir.clone();
+    let mut found = tokio::fs::read_to_string(config_dir.join(dir_name).join(file_name))
+        .await
+        .ok();
+    for project_root in get_project_dirs(gcx.clone()).await {
+        if let Ok(content) =
+            tokio::fs::read_to_string(project_root.join(".refact").join(dir_name).join(file_name))
+                .await
+        {
+            found = Some(content);
+        }
+    }
+    found
 }
 
 async fn read_existing_customization(
@@ -411,51 +507,99 @@ async fn read_existing_customization(
     kind: CustomizationKind,
     id: &str,
 ) -> Option<String> {
-    let url_kind = customization_url_kind(kind);
-    let config_dir = gcx.read().await.config_dir.clone();
-    let mut candidates = vec![config_dir.join(url_kind).join(format!("{}.yaml", id))];
-    for project_root in get_project_dirs(gcx.clone()).await {
-        candidates.push(
-            project_root
-                .join(".refact")
-                .join(url_kind)
-                .join(format!("{}.yaml", id)),
-        );
-    }
-    for path in candidates {
-        if let Ok(content) = tokio::fs::read_to_string(path).await {
-            return Some(content);
+    match kind {
+        CustomizationKind::Skill => {
+            read_effective_ext_file(gcx, |dir| dir.join("skills").join(id).join("SKILL.md")).await
         }
+        CustomizationKind::Command => {
+            read_effective_ext_file(gcx, |dir| dir.join("commands").join(format!("{}.md", id)))
+                .await
+        }
+        CustomizationKind::Delegate => {
+            read_effective_config_file(gcx, "subagents", &format!("{}.yaml", id)).await
+        }
+        CustomizationKind::Mode => {
+            read_effective_config_file(gcx, "modes", &format!("{}.yaml", id)).await
+        }
+        CustomizationKind::Hook => read_effective_config_file(gcx, "", "hooks.yaml").await,
     }
-    None
 }
 
 fn default_customization_template(kind: CustomizationKind, id: &str) -> String {
     match kind {
         CustomizationKind::Mode => format!(
-            "id: {}\nschema_version: 1\ntitle: {}\nprompt: Describe this mode\n",
+            "schema_version: 1\nid: {}\ntitle: {}\nprompt: Describe this mode\n",
             id, id
         ),
         CustomizationKind::Skill => format!(
-            "name: {}\ndescription: Describe when to use this skill\ncontext: Add context here\n",
+            "---\nname: {}\ndescription: Describe when to use this skill\n---\nAdd context here\n",
             id
         ),
         CustomizationKind::Command => {
-            format!("description: Describe this command\ncommand: {}\n", id)
+            "---\ndescription: Describe this command\n---\nAdd command instructions here\n"
+                .to_string()
         }
         CustomizationKind::Delegate => format!(
-            "id: {}\nschema_version: 1\ntitle: {}\nprompt: Describe this delegate\n",
+            "schema_version: 1\nid: {}\ntitle: {}\nsubchat:\n  context_mode: bare\n",
             id, id
         ),
         CustomizationKind::Hook => "hooks: {}\n".to_string(),
     }
 }
 
+fn patch_is_empty(patch: &Value) -> bool {
+    patch.is_null() || patch == &serde_json::json!({})
+}
+
+fn merge_customization_content(
+    kind: CustomizationKind,
+    existing: &str,
+    patch: &Value,
+) -> Result<String, String> {
+    if patch_is_empty(patch) {
+        return Ok(existing.to_string());
+    }
+    match kind {
+        CustomizationKind::Skill | CustomizationKind::Command => {
+            merge_markdown_with_json_patch(existing, patch)
+        }
+        _ => merge_yaml_with_json_patch(existing, patch)
+            .and_then(|merged| serde_yaml::to_string(&merged).map_err(|e| e.to_string())),
+    }
+}
+
+fn merge_markdown_with_json_patch(existing: &str, patch: &Value) -> Result<String, String> {
+    let Some(patch_obj) = patch.as_object() else {
+        return Err("patch must be an object".to_string());
+    };
+    let (frontmatter, existing_body) = parse_frontmatter_and_body(existing);
+    let mut base = serde_json::to_value(frontmatter).map_err(|e| e.to_string())?;
+    if !base.is_object() {
+        base = serde_json::json!({});
+    }
+    let mut body = existing_body;
+    let base_obj = base
+        .as_object_mut()
+        .ok_or_else(|| "base frontmatter must be an object".to_string())?;
+    for (key, value) in patch_obj {
+        if key == "body" {
+            if let Some(s) = value.as_str() {
+                body = s.to_string();
+            }
+            continue;
+        }
+        if value.is_null() {
+            base_obj.remove(key);
+        } else {
+            base_obj.insert(key.clone(), value.clone());
+        }
+    }
+    let frontmatter_yaml = serde_yaml::to_string(&base).map_err(|e| e.to_string())?;
+    Ok(format!("---\n{}---\n{}", frontmatter_yaml, body))
+}
+
 fn merge_yaml_with_json_patch(existing: &str, patch: &Value) -> Result<Value, String> {
     let mut base: Value = serde_yaml::from_str(existing).map_err(|e| e.to_string())?;
-    if patch.is_null() || patch == &serde_json::json!({}) {
-        return Ok(base);
-    }
     let Some(patch_obj) = patch.as_object() else {
         return Err("patch must be an object".to_string());
     };

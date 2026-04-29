@@ -3950,6 +3950,376 @@ fn ext_skill_save_consumes_draft() {
     );
 }
 
+async fn make_gcx_with_buddy() -> Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>> {
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let buddy_arc = gcx.read().await.buddy.clone();
+    *buddy_arc.lock().await = Some(make_service());
+    gcx
+}
+
+async fn draft_by_id(
+    gcx: &Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    id: &str,
+) -> super::types::BuddyDraft {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    lock.as_ref()
+        .and_then(|svc| svc.draft_store.get(id).cloned())
+        .expect("draft must exist")
+}
+
+async fn draft_exists(
+    gcx: &Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    id: &str,
+) -> bool {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    lock.as_ref()
+        .and_then(|svc| svc.draft_store.get(id))
+        .is_some()
+}
+
+async fn add_draft_to_gcx(
+    gcx: &Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    kind: DraftKind,
+    title: &str,
+    content: &str,
+) -> String {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    let svc = lock.as_mut().expect("buddy service must exist");
+    svc.draft_store
+        .create(kind, title.to_string(), content.to_string(), String::new())
+        .id
+}
+
+#[tokio::test]
+async fn draft_customization_change_reads_real_editor_storage() {
+    let gcx = make_gcx_with_buddy().await;
+    let config_dir = gcx.read().await.config_dir.clone();
+    tokio::fs::create_dir_all(config_dir.join("skills/real_skill"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(config_dir.join("commands"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(config_dir.join("subagents"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(config_dir.join("modes"))
+        .await
+        .unwrap();
+    let skill_raw = "---\nname: real_skill\ndescription: Real skill\n---\nKeep exact skill body\n";
+    let command_raw = "---\ndescription: Real command\n---\nKeep exact command body\n";
+    let delegate_raw = "schema_version: 1\nid: real_delegate\ntitle: Real Delegate\nsubchat:\n  context_mode: bare\n";
+    let mode_raw = "schema_version: 1\nid: real_mode\ntitle: Real Mode\nprompt: Keep mode prompt\n";
+    let hooks_raw = "hooks:\n  SessionStart:\n    - hooks:\n        - type: command\n          command: echo start\n";
+    tokio::fs::write(config_dir.join("skills/real_skill/SKILL.md"), skill_raw)
+        .await
+        .unwrap();
+    tokio::fs::write(config_dir.join("commands/real_command.md"), command_raw)
+        .await
+        .unwrap();
+    tokio::fs::write(
+        config_dir.join("subagents/real_delegate.yaml"),
+        delegate_raw,
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(config_dir.join("modes/real_mode.yaml"), mode_raw)
+        .await
+        .unwrap();
+    tokio::fs::write(config_dir.join("hooks.yaml"), hooks_raw)
+        .await
+        .unwrap();
+
+    let cases = vec![
+        (
+            CustomizationKind::Skill,
+            "real_skill",
+            DraftKind::Skill,
+            skill_raw,
+        ),
+        (
+            CustomizationKind::Command,
+            "real_command",
+            DraftKind::Command,
+            command_raw,
+        ),
+        (
+            CustomizationKind::Delegate,
+            "real_delegate",
+            DraftKind::Delegate,
+            delegate_raw,
+        ),
+        (
+            CustomizationKind::Mode,
+            "real_mode",
+            DraftKind::Mode,
+            mode_raw,
+        ),
+        (CustomizationKind::Hook, "hooks", DraftKind::Hook, hooks_raw),
+    ];
+
+    for (customization_kind, id, draft_kind, expected) in cases {
+        let outcome = crate::http::routers::v1::buddy_opportunities::dispatch_action(
+            gcx.clone(),
+            "opp-real-storage",
+            &BuddyAction::DraftCustomizationChange {
+                customization_kind,
+                id: id.to_string(),
+                patch: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("draft action must succeed");
+        let draft_id = outcome.result["draft_id"].as_str().unwrap();
+        let draft = draft_by_id(&gcx, draft_id).await;
+        assert_eq!(draft.kind, draft_kind);
+        assert_eq!(draft.yaml_or_json, expected);
+    }
+}
+
+#[tokio::test]
+async fn ext_skill_save_with_command_draft_fails_and_keeps_draft() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use hyper::StatusCode;
+
+    let gcx = make_gcx_with_buddy().await;
+    let draft_id = add_draft_to_gcx(
+        &gcx,
+        DraftKind::Command,
+        "Command Draft",
+        "---\ndescription: Command\n---\nBody",
+    )
+    .await;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "raw_content": "---\nname: target_skill\ndescription: Target\n---\nBody",
+        "draft_id": draft_id.clone(),
+        "scope": "global"
+    }))
+    .unwrap();
+    let response = crate::http::routers::v1::ext_management::handle_v1_ext_skill_put(
+        Extension(gcx.clone()),
+        Path("target_skill".to_string()),
+        hyper::body::Bytes::from(body),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(draft_exists(&gcx, &draft_id).await);
+}
+
+#[tokio::test]
+async fn ext_skill_save_with_mismatched_draft_target_keeps_draft() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use hyper::StatusCode;
+
+    let gcx = make_gcx_with_buddy().await;
+    let draft_id = add_draft_to_gcx(
+        &gcx,
+        DraftKind::Skill,
+        "Other Skill",
+        "---\nname: other_skill\ndescription: Other\n---\nBody",
+    )
+    .await;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "raw_content": "---\nname: target_skill\ndescription: Target\n---\nBody",
+
+        "draft_id": draft_id.clone(),
+        "scope": "global"
+    }))
+    .unwrap();
+    let response = crate::http::routers::v1::ext_management::handle_v1_ext_skill_put(
+        Extension(gcx.clone()),
+        Path("target_skill".to_string()),
+        hyper::body::Bytes::from(body),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(draft_exists(&gcx, &draft_id).await);
+}
+
+#[tokio::test]
+async fn raw_skill_save_rejects_mismatched_frontmatter_name() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use hyper::StatusCode;
+
+    let gcx = make_gcx_with_buddy().await;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "raw_content": "---\nname: wrong_skill\ndescription: Wrong\n---\nBody",
+        "scope": "global"
+    }))
+    .unwrap();
+    let response = crate::http::routers::v1::ext_management::handle_v1_ext_skill_put(
+        Extension(gcx),
+        Path("target_skill".to_string()),
+        hyper::body::Bytes::from(body),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn registry_validation_error_does_not_consume_draft() {
+    use axum::Extension;
+    use hyper::{Body, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let gcx = make_gcx_with_buddy().await;
+    let config_dir = gcx.read().await.config_dir.clone();
+    tokio::fs::create_dir_all(config_dir.join("modes"))
+        .await
+        .unwrap();
+    tokio::fs::write(config_dir.join("modes/broken.yaml"), "schema_version: [")
+        .await
+        .unwrap();
+    let draft_id = add_draft_to_gcx(
+        &gcx,
+        DraftKind::Mode,
+        "Mode Draft",
+        "schema_version: 1\nid: valid_mode\ntitle: Valid\nprompt: ok\n",
+    )
+    .await;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "config": {
+            "schema_version": 1,
+            "id": "valid_mode",
+            "title": "Valid",
+            "prompt": "ok"
+        },
+        "scope": "global",
+        "draft_id": draft_id.clone()
+    }))
+    .unwrap();
+    let app = crate::http::routers::v1::make_v1_router().layer(Extension(gcx.clone()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/customization/modes/valid_mode")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["ok"], false);
+    assert!(draft_exists(&gcx, &draft_id).await);
+}
+
+#[tokio::test]
+async fn customization_delegates_route_writes_subagent_storage_and_consumes() {
+    use axum::Extension;
+    use hyper::{Body, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let gcx = make_gcx_with_buddy().await;
+    let config_dir = gcx.read().await.config_dir.clone();
+    let draft_id = add_draft_to_gcx(
+        &gcx,
+        DraftKind::Delegate,
+        "Delegate Draft",
+        "schema_version: 1\nid: helper_delegate\ntitle: Helper\nsubchat:\n  context_mode: bare\n",
+    )
+    .await;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "config": {
+            "schema_version": 1,
+            "id": "helper_delegate",
+            "title": "Helper",
+            "subchat": { "context_mode": "bare" }
+        },
+        "scope": "global",
+        "draft_id": draft_id.clone()
+    }))
+    .unwrap();
+    let app = crate::http::routers::v1::make_v1_router().layer(Extension(gcx.clone()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/customization/delegates/helper_delegate")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        tokio::fs::metadata(config_dir.join("subagents/helper_delegate.yaml"))
+            .await
+            .is_ok()
+    );
+    assert!(!draft_exists(&gcx, &draft_id).await);
+}
+
+#[tokio::test]
+async fn concurrent_ext_atomic_writes_use_unique_temp_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands").join("same.md");
+    let first = crate::http::routers::v1::ext_management::write_file_atomic(&path, "first");
+    let second = crate::http::routers::v1::ext_management::write_file_atomic(&path, "second");
+    let (a, b) = tokio::join!(first, second);
+    assert!(a.is_ok());
+    assert!(b.is_ok());
+    let final_content = tokio::fs::read_to_string(&path).await.unwrap();
+    assert!(final_content == "first" || final_content == "second");
+    let mut entries = tokio::fs::read_dir(path.parent().unwrap()).await.unwrap();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        assert!(!name.ends_with(".tmp"));
+    }
+}
+
+#[tokio::test]
+async fn customization_save_leaves_no_atomic_temp_file() {
+    use axum::Extension;
+    use hyper::{Body, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let gcx = make_gcx_with_buddy().await;
+    let config_dir = gcx.read().await.config_dir.clone();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "config": {
+            "schema_version": 1,
+            "id": "atomic_mode",
+            "title": "Atomic",
+            "prompt": "ok"
+        },
+        "scope": "global"
+    }))
+    .unwrap();
+    let app = crate::http::routers::v1::make_v1_router().layer(Extension(gcx));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/customization/modes/atomic_mode")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let modes_dir = config_dir.join("modes");
+    let mut entries = tokio::fs::read_dir(&modes_dir).await.unwrap();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        assert!(!name.ends_with(".tmp"));
+    }
+}
+
 // =============================================================================
 // T-19: Privacy hardening + Opportunity lifecycle correctness
 // =============================================================================

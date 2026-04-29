@@ -3,6 +3,7 @@ use axum::Extension;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -18,6 +19,7 @@ use crate::yaml_configs::customization_types::*;
 use crate::yaml_configs::project_configs_bootstrap::{
     global_configs_try_create_all, project_configs_ensure_dirs,
 };
+use crate::buddy::drafts::{draft_kind_str, DraftTarget, DraftValidationError};
 use crate::buddy::types::DraftKind;
 
 fn json_error(status: StatusCode, msg: &str) -> Result<Response<Body>, ScratchError> {
@@ -48,6 +50,87 @@ fn json_response<T: Serialize>(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+fn draft_error_response(err: DraftValidationError) -> Result<Response<Body>, ScratchError> {
+    match err {
+        DraftValidationError::NotFound => json_error(StatusCode::NOT_FOUND, "draft_not_found"),
+        DraftValidationError::KindMismatch { expected, actual } => json_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "draft_kind_mismatch: expected {}, got {}",
+                draft_kind_str(&expected),
+                draft_kind_str(&actual)
+            ),
+        ),
+        DraftValidationError::TargetMismatch { expected, actual } => json_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "draft_target_mismatch: expected {}, got {}",
+                expected, actual
+            ),
+        ),
+        DraftValidationError::Parse(err) => json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("draft_parse_failed: {}", err),
+        ),
+    }
+}
+
+async fn validate_draft_for_target(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    draft_id: &str,
+    expected_kind: DraftKind,
+    target_id: &str,
+) -> std::result::Result<(), DraftValidationError> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let Some(svc) = lock.as_ref() else {
+        return Err(DraftValidationError::NotFound);
+    };
+    svc.draft_store
+        .get_validated(draft_id, expected_kind, DraftTarget::Id(target_id))
+        .map(|_| ())
+}
+
+async fn consume_draft_for_target(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    draft_id: &str,
+    expected_kind: DraftKind,
+    target_id: &str,
+) -> std::result::Result<ConsumedDraft, DraftValidationError> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    let Some(svc) = lock.as_mut() else {
+        return Err(DraftValidationError::NotFound);
+    };
+    svc.consume_validated_draft(draft_id, expected_kind, DraftTarget::Id(target_id))
+        .map(|d| ConsumedDraft { draft_id: d.id })
+}
+
+async fn write_file_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    tokio::fs::create_dir_all(parent).await?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config");
+    let tmp_path: PathBuf = parent.join(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()));
+    let write_result = async {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .await?;
+        file.write_all(content.as_bytes()).await?;
+        file.flush().await?;
+        tokio::fs::rename(&tmp_path, path).await
+    }
+    .await;
+    if write_result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+    }
+    write_result
+}
+
 async fn invalidate_registry_cache(gcx: Arc<ARwLock<GlobalContext>>, scope: ConfigScope) {
     match scope {
         ConfigScope::Global => {
@@ -59,25 +142,19 @@ async fn invalidate_registry_cache(gcx: Arc<ARwLock<GlobalContext>>, scope: Conf
     }
 }
 
-fn customization_kind_to_draft_kind(kind: &str) -> Option<DraftKind> {
-    match kind {
-        "modes" => Some(DraftKind::Mode),
-        "subagents" | "delegates" => Some(DraftKind::Delegate),
-        "hooks" => Some(DraftKind::Hook),
-        _ => None,
+fn normalize_kind(kind: &str) -> &str {
+    if kind == "delegates" {
+        "subagents"
+    } else {
+        kind
     }
 }
 
-fn draft_kind_str(kind: &DraftKind) -> &'static str {
-    match kind {
-        DraftKind::Skill => "skill",
-        DraftKind::Command => "command",
-        DraftKind::Delegate => "delegate",
-        DraftKind::Mode => "mode",
-        DraftKind::AgentsMd => "agents_md",
-        DraftKind::DefaultsModel => "defaults_model",
-        DraftKind::Hook => "hook",
-        DraftKind::PulseReport => "pulse_report",
+fn customization_kind_to_draft_kind(kind: &str) -> Option<DraftKind> {
+    match normalize_kind(kind) {
+        "modes" => Some(DraftKind::Mode),
+        "subagents" => Some(DraftKind::Delegate),
+        _ => None,
     }
 }
 
@@ -285,30 +362,37 @@ pub async fn handle_v1_customization_get(
     if let Err(e) = validate_id(&id) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
+    let storage_kind = normalize_kind(&kind).to_string();
 
     if let Some(ref draft_id) = query.draft_id {
-        let expected_kind = customization_kind_to_draft_kind(&kind);
+        let Some(expected_kind) = customization_kind_to_draft_kind(&kind) else {
+            return json_error(StatusCode::BAD_REQUEST, "drafts_not_supported_for_kind");
+        };
         let draft_data = {
             let buddy_arc = gcx.read().await.buddy.clone();
             let lock = buddy_arc.lock().await;
-            lock.as_ref().and_then(|svc| {
-                let draft = svc.draft_store.get(draft_id)?;
-                if expected_kind.as_ref() != Some(&draft.kind) {
-                    return None;
-                }
-                Some((
-                    draft.id.clone(),
-                    draft.kind.clone(),
-                    draft.title.clone(),
-                    draft.explanation.clone(),
-                    draft.expires_at,
-                    draft.yaml_or_json.clone(),
-                ))
-            })
+            match lock.as_ref() {
+                Some(svc) => match svc.draft_store.get_validated(
+                    draft_id,
+                    expected_kind,
+                    DraftTarget::Id(&id),
+                ) {
+                    Ok(draft) => Ok((
+                        draft.id.clone(),
+                        draft.kind,
+                        draft.title.clone(),
+                        draft.explanation.clone(),
+                        draft.expires_at,
+                        draft.yaml_or_json.clone(),
+                    )),
+                    Err(err) => Err(err),
+                },
+                None => Err(DraftValidationError::NotFound),
+            }
         };
         return match draft_data {
-            None => json_error(StatusCode::NOT_FOUND, "draft_not_found_or_kind_mismatch"),
-            Some((did, dkind, title, explanation, expires_at, yaml_or_json)) => {
+            Err(err) => draft_error_response(err),
+            Ok((did, dkind, title, explanation, expires_at, yaml_or_json)) => {
                 let data: serde_json::Value = match serde_yaml::from_str(&yaml_or_json) {
                     Ok(v) => v,
                     Err(e) => {
@@ -340,10 +424,12 @@ pub async fn handle_v1_customization_get(
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
-    let global_path = config_dir.join(&kind).join(format!("{}.yaml", id));
-    let local_path = project_root
-        .as_ref()
-        .map(|p| p.join(".refact").join(&kind).join(format!("{}.yaml", id)));
+    let global_path = config_dir.join(&storage_kind).join(format!("{}.yaml", id));
+    let local_path = project_root.as_ref().map(|p| {
+        p.join(".refact")
+            .join(&storage_kind)
+            .join(format!("{}.yaml", id))
+    });
 
     let (file_path, scope) = match query.scope.as_deref() {
         Some("global") => (global_path, ConfigScope::Global),
@@ -418,6 +504,7 @@ pub async fn handle_v1_customization_save(
     if let Err(e) = validate_id(&id) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
+    let storage_kind = normalize_kind(&kind).to_string();
 
     let config_dir = gcx.read().await.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
@@ -428,14 +515,25 @@ pub async fn handle_v1_customization_save(
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
-    if let Err(e) = validate_config(&kind, &request.config, &id) {
+    if let Err(e) = validate_config(&storage_kind, &request.config, &id) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
+    if let Some(ref draft_id) = request.draft_id {
+        let Some(expected_kind) = customization_kind_to_draft_kind(&kind) else {
+            return json_error(StatusCode::BAD_REQUEST, "drafts_not_supported_for_kind");
+        };
+        if let Err(err) = validate_draft_for_target(gcx.clone(), draft_id, expected_kind, &id).await
+        {
+            return draft_error_response(err);
+        }
+    }
 
-    let global_path = config_dir.join(&kind).join(format!("{}.yaml", id));
-    let local_path = project_root
-        .as_ref()
-        .map(|p| p.join(".refact").join(&kind).join(format!("{}.yaml", id)));
+    let global_path = config_dir.join(&storage_kind).join(format!("{}.yaml", id));
+    let local_path = project_root.as_ref().map(|p| {
+        p.join(".refact")
+            .join(&storage_kind)
+            .join(format!("{}.yaml", id))
+    });
 
     let (file_path, scope) = match request.scope.as_deref() {
         Some("global") => (global_path, ConfigScope::Global),
@@ -471,25 +569,34 @@ pub async fn handle_v1_customization_save(
         }
     };
 
-    if let Err(e) = tokio::fs::write(&file_path, &yaml_str).await {
+    if let Err(e) = write_file_atomic(&file_path, &yaml_str).await {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("write error: {}", e),
         );
     }
 
-    let consumed_draft = if let Some(ref draft_id) = request.draft_id {
-        let buddy_arc = gcx.read().await.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
-        lock.as_mut()
-            .and_then(|svc| svc.consume_draft(draft_id))
-            .map(|d| ConsumedDraft { draft_id: d.id })
+    invalidate_registry_cache(gcx.clone(), scope).await;
+    let registry = load_merged_registry(&config_dir, project_root.as_deref()).await;
+
+    let consumed_draft = if registry.errors.is_empty() {
+        if let Some(ref draft_id) = request.draft_id {
+            let expected_kind = customization_kind_to_draft_kind(&kind).ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    "drafts_not_supported_for_kind".to_string(),
+                )
+            })?;
+            match consume_draft_for_target(gcx.clone(), draft_id, expected_kind, &id).await {
+                Ok(consumed) => Some(consumed),
+                Err(err) => return draft_error_response(err),
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
-
-    invalidate_registry_cache(gcx.clone(), scope).await;
-    let registry = load_merged_registry(&config_dir, project_root.as_deref()).await;
 
     let response = SaveConfigResponse {
         ok: registry.errors.is_empty(),
@@ -538,6 +645,7 @@ pub async fn handle_v1_customization_create(
     if let Err(e) = validate_id(&request.id) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
+    let storage_kind = normalize_kind(&kind).to_string();
 
     let config_dir = gcx.read().await.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
@@ -545,13 +653,15 @@ pub async fn handle_v1_customization_create(
 
     let (file_path, scope) = match request.scope.as_deref() {
         Some("global") => (
-            config_dir.join(&kind).join(format!("{}.yaml", request.id)),
+            config_dir
+                .join(&storage_kind)
+                .join(format!("{}.yaml", request.id)),
             ConfigScope::Global,
         ),
         Some("local") => match &project_root {
             Some(p) => (
                 p.join(".refact")
-                    .join(&kind)
+                    .join(&storage_kind)
                     .join(format!("{}.yaml", request.id)),
                 ConfigScope::Local,
             ),
@@ -560,18 +670,20 @@ pub async fn handle_v1_customization_create(
         _ => match &project_root {
             Some(p) => (
                 p.join(".refact")
-                    .join(&kind)
+                    .join(&storage_kind)
                     .join(format!("{}.yaml", request.id)),
                 ConfigScope::Local,
             ),
             None => (
-                config_dir.join(&kind).join(format!("{}.yaml", request.id)),
+                config_dir
+                    .join(&storage_kind)
+                    .join(format!("{}.yaml", request.id)),
                 ConfigScope::Global,
             ),
         },
     };
 
-    if let Err(e) = validate_config(&kind, &request.config, &request.id) {
+    if let Err(e) = validate_config(&storage_kind, &request.config, &request.id) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
 
@@ -664,17 +776,20 @@ pub async fn handle_v1_customization_delete(
     }
 
     let config_dir = gcx.read().await.config_dir.clone();
+    let storage_kind = normalize_kind(&kind).to_string();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
     let (file_path, scope) = match query.scope.as_deref() {
         Some("global") => (
-            config_dir.join(&kind).join(format!("{}.yaml", id)),
+            config_dir.join(&storage_kind).join(format!("{}.yaml", id)),
             ConfigScope::Global,
         ),
         Some("local") => match &project_root {
             Some(p) => (
-                p.join(".refact").join(&kind).join(format!("{}.yaml", id)),
+                p.join(".refact")
+                    .join(&storage_kind)
+                    .join(format!("{}.yaml", id)),
                 ConfigScope::Local,
             ),
             None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
@@ -723,9 +838,8 @@ pub async fn handle_v1_customization_delete(
 
 fn validate_kind(kind: &str) -> std::result::Result<&str, String> {
     match kind {
-        "modes" | "subagents" | "delegates" | "hooks" | "toolbox_commands" | "code_lens" => {
-            Ok(kind)
-        }
+        "modes" | "subagents" | "delegates" | "toolbox_commands" | "code_lens" => Ok(kind),
+        "hooks" => Err("hooks are managed by ext hooks routes".to_string()),
         _ => Err(format!("invalid kind: {}", kind)),
     }
 }
@@ -755,6 +869,7 @@ fn validate_config(
     config: &serde_json::Value,
     expected_id: &str,
 ) -> std::result::Result<(), String> {
+    let kind = normalize_kind(kind);
     let config_id = config.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if config_id != expected_id {
         return Err(format!(

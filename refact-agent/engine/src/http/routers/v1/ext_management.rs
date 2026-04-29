@@ -5,6 +5,7 @@ use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock as ARwLock;
 
 use crate::custom_error::ScratchError;
@@ -15,20 +16,8 @@ use crate::ext::slash_commands::{load_slash_commands, parse_frontmatter_and_body
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::http::routers::v1::at_commands::invalidate_slash_cache;
+use crate::buddy::drafts::{draft_kind_str, DraftTarget, DraftValidationError};
 use crate::buddy::types::DraftKind;
-
-fn draft_kind_str(kind: &DraftKind) -> &'static str {
-    match kind {
-        DraftKind::Skill => "skill",
-        DraftKind::Command => "command",
-        DraftKind::Delegate => "delegate",
-        DraftKind::Mode => "mode",
-        DraftKind::AgentsMd => "agents_md",
-        DraftKind::DefaultsModel => "defaults_model",
-        DraftKind::Hook => "hook",
-        DraftKind::PulseReport => "pulse_report",
-    }
-}
 
 #[derive(serde::Serialize)]
 struct DraftMetadata {
@@ -75,6 +64,62 @@ fn json_response<T: Serialize>(
         .header("Content-Type", "application/json")
         .body(Body::from(body_str))
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn draft_error_response(err: DraftValidationError) -> Result<Response<Body>, ScratchError> {
+    match err {
+        DraftValidationError::NotFound => json_error(StatusCode::NOT_FOUND, "draft_not_found"),
+        DraftValidationError::KindMismatch { expected, actual } => json_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "draft_kind_mismatch: expected {}, got {}",
+                draft_kind_str(&expected),
+                draft_kind_str(&actual)
+            ),
+        ),
+        DraftValidationError::TargetMismatch { expected, actual } => json_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "draft_target_mismatch: expected {}, got {}",
+                expected, actual
+            ),
+        ),
+        DraftValidationError::Parse(err) => json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("draft_parse_failed: {}", err),
+        ),
+    }
+}
+
+async fn validate_draft_for_target(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    draft_id: &str,
+    expected_kind: DraftKind,
+    target: DraftTarget<'_>,
+) -> std::result::Result<(), DraftValidationError> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let Some(svc) = lock.as_ref() else {
+        return Err(DraftValidationError::NotFound);
+    };
+    svc.draft_store
+        .get_validated(draft_id, expected_kind, target)
+        .map(|_| ())
+}
+
+async fn consume_draft_for_target(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    draft_id: &str,
+    expected_kind: DraftKind,
+    target: DraftTarget<'_>,
+) -> std::result::Result<ConsumedDraft, DraftValidationError> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    let Some(svc) = lock.as_mut() else {
+        return Err(DraftValidationError::NotFound);
+    };
+    svc.consume_validated_draft(draft_id, expected_kind, target)
+        .map(|d| ConsumedDraft { draft_id: d.id })
 }
 
 fn source_str(source: &CommandSource) -> String {
@@ -171,10 +216,29 @@ fn validate_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-async fn write_file_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    let tmp_path = path.with_extension("tmp");
-    tokio::fs::write(&tmp_path, content).await?;
-    tokio::fs::rename(&tmp_path, path).await
+pub(crate) async fn write_file_atomic(
+    path: &std::path::Path,
+    content: &str,
+) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    tokio::fs::create_dir_all(parent).await?;
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("ext");
+    let tmp_path = parent.join(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()));
+    let write_result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .await?;
+        file.write_all(content.as_bytes()).await?;
+        file.flush().await?;
+        tokio::fs::rename(&tmp_path, path).await
+    }
+    .await;
+    if write_result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+    }
+    write_result
 }
 
 async fn resolve_scope_dir(
@@ -492,6 +556,26 @@ fn serialize_md_content(fm: &serde_yaml::Value, body: &str) -> std::result::Resu
     Ok(format!("---\n{}---\n{}", fm_str, body))
 }
 
+fn validate_raw_skill_name(name: &str, raw: &str) -> std::result::Result<(), String> {
+    let (frontmatter, _) = parse_frontmatter_and_body(raw);
+    let Some(raw_name) = frontmatter.get("name").and_then(|v| v.as_str()) else {
+        return Err("raw skill content must include frontmatter name".to_string());
+    };
+    if raw_name != name {
+        return Err(format!(
+            "raw skill content name '{}' does not match route '{}'",
+            raw_name, name
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_hooks(raw: &str) -> std::result::Result<(), String> {
+    serde_yaml::from_str::<serde_yaml::Value>(raw)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Serialize)]
 pub struct RegistrySkillEntry {
     pub name: String,
@@ -646,24 +730,28 @@ pub async fn handle_v1_ext_skill_get(
         let draft_data = {
             let buddy_arc = gcx.read().await.buddy.clone();
             let lock = buddy_arc.lock().await;
-            lock.as_ref().and_then(|svc| {
-                let draft = svc.draft_store.get(draft_id)?;
-                if draft.kind != DraftKind::Skill {
-                    return None;
-                }
-                Some((
-                    draft.id.clone(),
-                    draft.kind.clone(),
-                    draft.title.clone(),
-                    draft.explanation.clone(),
-                    draft.expires_at,
-                    draft.yaml_or_json.clone(),
-                ))
-            })
+            match lock.as_ref() {
+                Some(svc) => match svc.draft_store.get_validated(
+                    draft_id,
+                    DraftKind::Skill,
+                    DraftTarget::Id(&name),
+                ) {
+                    Ok(draft) => Ok((
+                        draft.id.clone(),
+                        draft.kind,
+                        draft.title.clone(),
+                        draft.explanation.clone(),
+                        draft.expires_at,
+                        draft.yaml_or_json.clone(),
+                    )),
+                    Err(err) => Err(err),
+                },
+                None => Err(DraftValidationError::NotFound),
+            }
         };
         return match draft_data {
-            None => json_error(StatusCode::NOT_FOUND, "draft_not_found_or_kind_mismatch"),
-            Some((did, dkind, title, explanation, expires_at, yaml_or_json)) => {
+            Err(err) => draft_error_response(err),
+            Ok((did, dkind, title, explanation, expires_at, yaml_or_json)) => {
                 let data: serde_json::Value = match serde_yaml::from_str(&yaml_or_json) {
                     Ok(v) => v,
                     Err(e) => {
@@ -783,9 +871,22 @@ pub async fn handle_v1_ext_skill_put(
     let skill_dir = base_dir.join("skills").join(&name);
     let file_path = skill_dir.join("SKILL.md");
 
+    if let Some(ref draft_id) = req.draft_id {
+        if let Err(err) = validate_draft_for_target(
+            gcx.clone(),
+            draft_id,
+            DraftKind::Skill,
+            DraftTarget::Id(&name),
+        )
+        .await
+        {
+            return draft_error_response(err);
+        }
+    }
+
     if let Some(raw) = &req.raw_content {
-        if let Some(parent) = file_path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
+        if let Err(e) = validate_raw_skill_name(&name, raw) {
+            return json_error(StatusCode::BAD_REQUEST, &e);
         }
         if let Err(e) = write_file_atomic(&file_path, raw).await {
             return json_error(
@@ -848,12 +949,22 @@ pub async fn handle_v1_ext_skill_put(
     }
 
     invalidate_slash_cache().await;
+    let ext_dirs = make_scope_ext_dirs(base_dir.clone(), &scope_name);
+    if load_skill_full(&ext_dirs, &name).await.is_none() {
+        return json_error(StatusCode::UNPROCESSABLE_ENTITY, "skill_validation_failed");
+    }
     let consumed = if let Some(ref draft_id) = req.draft_id {
-        let buddy_arc = gcx.read().await.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
-        lock.as_mut()
-            .and_then(|svc| svc.consume_draft(draft_id))
-            .map(|d| ConsumedDraft { draft_id: d.id })
+        match consume_draft_for_target(
+            gcx.clone(),
+            draft_id,
+            DraftKind::Skill,
+            DraftTarget::Id(&name),
+        )
+        .await
+        {
+            Ok(consumed) => Some(consumed),
+            Err(err) => return draft_error_response(err),
+        }
     } else {
         None
     };
@@ -1139,6 +1250,19 @@ pub async fn handle_v1_ext_command_put(
 
     let file_path = base_dir.join("commands").join(format!("{}.md", name));
 
+    if let Some(ref draft_id) = req.draft_id {
+        if let Err(err) = validate_draft_for_target(
+            gcx.clone(),
+            draft_id,
+            DraftKind::Command,
+            DraftTarget::Id(&name),
+        )
+        .await
+        {
+            return draft_error_response(err);
+        }
+    }
+
     if let Some(raw) = &req.raw_content {
         if let Some(parent) = file_path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
@@ -1185,12 +1309,26 @@ pub async fn handle_v1_ext_command_put(
     }
 
     invalidate_slash_cache().await;
+    let ext_dirs = make_scope_ext_dirs(base_dir.clone(), &scope_name);
+    let commands = load_slash_commands(&ext_dirs).await;
+    if !commands.iter().any(|cmd| cmd.name == name) {
+        return json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "command_validation_failed",
+        );
+    }
     let consumed = if let Some(ref draft_id) = req.draft_id {
-        let buddy_arc = gcx.read().await.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
-        lock.as_mut()
-            .and_then(|svc| svc.consume_draft(draft_id))
-            .map(|d| ConsumedDraft { draft_id: d.id })
+        match consume_draft_for_target(
+            gcx.clone(),
+            draft_id,
+            DraftKind::Command,
+            DraftTarget::Id(&name),
+        )
+        .await
+        {
+            Ok(consumed) => Some(consumed),
+            Err(err) => return draft_error_response(err),
+        }
     } else {
         None
     };
@@ -1424,7 +1562,19 @@ pub async fn handle_v1_ext_hooks_put(
 
     let file_path = base_dir.join("hooks.yaml");
 
+    if let Some(ref draft_id) = req.draft_id {
+        if let Err(err) =
+            validate_draft_for_target(gcx.clone(), draft_id, DraftKind::Hook, DraftTarget::Any)
+                .await
+        {
+            return draft_error_response(err);
+        }
+    }
+
     let content = if let Some(raw) = &req.raw_content {
+        if let Err(e) = validate_raw_hooks(raw) {
+            return json_error(StatusCode::UNPROCESSABLE_ENTITY, &e);
+        }
         raw.clone()
     } else if let Some(hooks) = &req.hooks {
         for h in hooks {
@@ -1454,11 +1604,12 @@ pub async fn handle_v1_ext_hooks_put(
     }
 
     let consumed = if let Some(ref draft_id) = req.draft_id {
-        let buddy_arc = gcx.read().await.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
-        lock.as_mut()
-            .and_then(|svc| svc.consume_draft(draft_id))
-            .map(|d| ConsumedDraft { draft_id: d.id })
+        match consume_draft_for_target(gcx.clone(), draft_id, DraftKind::Hook, DraftTarget::Any)
+            .await
+        {
+            Ok(consumed) => Some(consumed),
+            Err(err) => return draft_error_response(err),
+        }
     } else {
         None
     };

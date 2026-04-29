@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::global_context::GlobalContext;
-use super::drafts::DraftStore;
+use super::drafts::{DraftStore, DraftTarget, DraftValidationError};
 use super::events::BuddyEvent;
 use super::facts::FactStore;
 use super::humor::{HumorPlan, HumorService};
@@ -366,6 +366,16 @@ impl BuddyService {
             draft_id: id.to_string(),
         });
         Some(draft)
+    }
+
+    pub fn consume_validated_draft(
+        &mut self,
+        id: &str,
+        expected_kind: super::types::DraftKind,
+        target: DraftTarget<'_>,
+    ) -> Result<BuddyDraft, DraftValidationError> {
+        self.draft_store.get_validated(id, expected_kind, target)?;
+        self.consume_draft(id).ok_or(DraftValidationError::NotFound)
     }
 
     #[cfg(test)]
