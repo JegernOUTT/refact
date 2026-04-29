@@ -1,3 +1,4 @@
+pub mod competitor_import;
 pub mod config_dirs;
 pub mod extensions_marketplace;
 pub mod hooks;
