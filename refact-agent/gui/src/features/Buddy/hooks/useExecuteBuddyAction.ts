@@ -58,8 +58,6 @@ export function useExecuteBuddyAction() {
         case "marketplace_install":
           dispatch(push({ name: "marketplace hub" }));
           break;
-        case "unimplemented":
-          break;
       }
     },
     [dispatch, acceptOpportunity, dismissOpportunity],

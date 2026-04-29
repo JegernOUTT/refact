@@ -183,9 +183,12 @@ fn build_git_pulse(project_root: &std::path::Path) -> GitPulse {
 fn compute_diff_lines_4h(repo: &git2::Repository) -> Option<u32> {
     let cutoff = (Utc::now() - chrono::Duration::hours(4)).timestamp();
     let mut revwalk = repo.revwalk().ok()?;
+    revwalk
+        .set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)
+        .ok()?;
     revwalk.push_head().ok()?;
     let mut lines = 0u32;
-    for oid_result in revwalk {
+    for oid_result in revwalk.take(crate::buddy::observers::git_pressure::MAX_DIFF_COMMITS) {
         let oid = oid_result.ok()?;
         let commit = repo.find_commit(oid).ok()?;
         if commit.time().seconds() < cutoff {

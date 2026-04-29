@@ -575,7 +575,6 @@ export type BuddyFactKind =
   | "broken_model_reference"
   | "mcp_auth_expired"
   | "integration_failing"
-  | "integration_smartlink_match"
   | "diagnostic_cluster"
   | "frontend_error_burst"
   | "git_diff_widening"
@@ -615,8 +614,7 @@ export type OpportunityStatus =
 export type DefaultsKind =
   | "chat_model"
   | "chat_buddy_model"
-  | "chat_thinking_model"
-  | "embedding_model";
+  | "chat_thinking_model";
 
 export type CustomizationKind =
   | "mode"
@@ -734,8 +732,7 @@ export type BuddyActionResult =
       item_id: string;
       success?: boolean;
       error?: string | null;
-    }
-  | { kind: "unimplemented"; action: string };
+    };
 
 export interface BuddyOpportunityAcceptResponse {
   snapshot: BuddySnapshot;

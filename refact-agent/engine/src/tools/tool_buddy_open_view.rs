@@ -79,9 +79,10 @@ impl Tool for ToolBuddyOpenView {
         let gcx = ccx.lock().await.global_context.clone();
         let buddy_arc = gcx.read().await.buddy.clone();
         let lock = buddy_arc.lock().await;
-        if let Some(svc) = lock.as_ref() {
-            svc.send_navigation(page);
-        }
+        let svc = lock
+            .as_ref()
+            .ok_or_else(|| "buddy service not initialized".to_string())?;
+        svc.send_navigation(page);
 
         Ok((
             false,

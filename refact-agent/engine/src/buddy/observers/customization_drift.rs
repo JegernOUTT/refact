@@ -9,6 +9,13 @@ use crate::buddy::types::{BuddyFact, BuddyFactKind};
 use crate::global_context::GlobalContext;
 
 pub struct CustomizationDriftObserver;
+pub(crate) const MAX_MODE_OVERLAP_CANDIDATES: usize = 100;
+const MAX_MODE_PROMPT_CHARS: usize = 4000;
+
+fn cap_prompt(text: &str) -> String {
+    text.chars().take(MAX_MODE_PROMPT_CHARS).collect()
+}
+
 
 fn tokenize_for_tf(text: &str) -> HashMap<String, u32> {
     let mut counts = HashMap::new();
@@ -85,11 +92,13 @@ async fn detect_mode_overlap(
         Some(r) => r.modes,
         None => return,
     };
-    let candidates: Vec<(String, String)> = modes
+    let mut candidates: Vec<(String, String)> = modes
         .iter()
         .filter(|(_, m)| m.prompt.len() > 50)
-        .map(|(id, m)| (id.clone(), m.prompt.clone()))
+        .map(|(id, m)| (id.clone(), cap_prompt(&m.prompt)))
         .collect();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.truncate(MAX_MODE_OVERLAP_CANDIDATES);
 
     let n = candidates.len();
     for i in 0..n {

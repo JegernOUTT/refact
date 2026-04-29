@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -10,6 +11,8 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 const MAX_LINES: usize = 500;
 const DEFAULT_LINES: usize = 50;
+const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
+
 
 static REDACT_PATTERNS: &[&str] = &[
     r"sk-[a-zA-Z0-9]{20,}",
@@ -157,11 +160,49 @@ impl Tool for ToolBuddyGetLogs {
     }
 }
 
+fn is_log_candidate(path: &std::path::Path) -> bool {
+    let extension_is_log = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("log"))
+        .unwrap_or(false);
+    let filename_mentions_refact = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase().contains("refact"))
+        .unwrap_or(false);
+    extension_is_log || filename_mentions_refact
+}
+
+async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
+    let mut file = tokio::fs::File::open(log_path)
+        .await
+        .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e))?;
+    let len = file
+        .metadata()
+        .await
+        .map_err(|e| format!("failed to stat log file {:?}: {}", log_path, e))?
+        .len();
+    let start = len.saturating_sub(MAX_LOG_TAIL_BYTES);
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|e| format!("failed to seek log file {:?}: {}", log_path, e))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e))?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if start > 0 {
+        if let Some(pos) = text.find('\n') {
+            text = text[pos + 1..].to_string();
+        }
+    }
+    Ok(text)
+}
+
 async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
     if log_path.is_file() {
-        return tokio::fs::read_to_string(log_path)
-            .await
-            .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e));
+        return read_bounded_log_tail(log_path).await;
     }
 
     if log_path.is_dir() {
@@ -172,10 +213,11 @@ async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> 
         let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = vec![];
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("log")
-                || path.to_string_lossy().contains("refact")
-            {
-                if let Ok(meta) = tokio::fs::metadata(&path).await {
+            if !is_log_candidate(&path) {
+                continue;
+            }
+            if let Ok(meta) = tokio::fs::metadata(&path).await {
+                if meta.is_file() {
                     if let Ok(modified) = meta.modified() {
                         files.push((path, modified));
                     }
@@ -183,12 +225,10 @@ async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> 
             }
         }
 
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         if let Some((newest, _)) = files.first() {
-            return tokio::fs::read_to_string(newest)
-                .await
-                .map_err(|e| format!("failed to read log file {:?}: {}", newest, e));
+            return read_bounded_log_tail(newest).await;
         }
     }
 

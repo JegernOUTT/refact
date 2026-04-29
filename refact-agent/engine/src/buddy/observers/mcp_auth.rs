@@ -17,7 +17,6 @@ pub struct McpSessionSnapshot {
     pub auth_status: MCPAuthStatus,
     pub failed_calls: u64,
     pub expires_at_ms: Option<i64>,
-    pub smartlink_id: Option<String>,
 }
 
 pub fn detect_mcp_auth_facts(snaps: &[McpSessionSnapshot], now: DateTime<Utc>) -> Vec<BuddyFact> {
@@ -65,22 +64,6 @@ pub fn detect_mcp_auth_facts(snaps: &[McpSessionSnapshot], now: DateTime<Utc>) -
                 seen_at: now,
                 confidence: 0.85,
             });
-        }
-        if let Some(smartlink_id) = &snap.smartlink_id {
-            let troubled = token_expiring || needs_auth || snap.failed_calls >= FAILURE_THRESHOLD;
-            if troubled {
-                facts.push(BuddyFact {
-                    kind: BuddyFactKind::IntegrationSmartlinkMatch,
-                    key: format!("integration:smartlink:{}", snap.id),
-                    source: "mcp_auth",
-                    payload: serde_json::json!({
-                        "mcp_id": snap.id,
-                        "smartlink_id": smartlink_id,
-                    }),
-                    seen_at: now,
-                    confidence: 0.7,
-                });
-            }
         }
     }
     facts
@@ -139,7 +122,6 @@ impl BuddyObserver for McpAuthObserver {
                 auth_status,
                 failed_calls,
                 expires_at_ms,
-                smartlink_id: None,
             });
         }
         detect_mcp_auth_facts(&snaps, now)

@@ -28,6 +28,17 @@ fn extract_tool_text(out: Vec<ContextEnum>, fallback: &str) -> String {
 
 const RATE_LIMIT_SECS: u64 = 3600;
 const DEDUP_SECS: i64 = 86400;
+const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+fn trusted_issue_binary(binary: &str) -> PathBuf {
+    for dir in TRUSTED_COMMAND_PATH.split(':') {
+        let path = Path::new(dir).join(binary);
+        if path.is_file() {
+            return path;
+        }
+    }
+    PathBuf::from(binary)
+}
 
 #[derive(Debug)]
 pub struct IssueGate {
@@ -70,10 +81,27 @@ fn gate_error(gate: &IssueGate, manual: bool) -> String {
     "gate blocked: unknown condition".to_string()
 }
 
-#[derive(Debug, Clone)]
-enum IssueProvider {
+#[derive(Clone)]
+pub(crate) enum IssueProvider {
     GitHub { binary: String, token: String },
     GitLab { binary: String, token: String },
+}
+
+impl std::fmt::Debug for IssueProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssueProvider::GitHub { binary, .. } => f
+                .debug_struct("GitHub")
+                .field("binary", binary)
+                .field("token", &"[REDACTED]")
+                .finish(),
+            IssueProvider::GitLab { binary, .. } => f
+                .debug_struct("GitLab")
+                .field("binary", binary)
+                .field("token", &"[REDACTED]")
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,13 +215,9 @@ fn parse_remote_path(host: &str, path: &str) -> Option<RepoInfo> {
     if parts.len() < 2 {
         return None;
     }
-    let owner = parts[parts.len() - 2].to_string();
     let mut repo = parts[parts.len() - 1].to_string();
     if repo.ends_with(".git") {
         repo.truncate(repo.len() - 4);
-    }
-    if owner.is_empty() || repo.is_empty() {
-        return None;
     }
     let host = host.to_ascii_lowercase();
     let host = match host.as_str() {
@@ -201,15 +225,25 @@ fn parse_remote_path(host: &str, path: &str) -> Option<RepoInfo> {
         "gitlab.com" => RepoHost::GitLab,
         _ => RepoHost::GitLabSelfHosted(host),
     };
+    let owner = match &host {
+        RepoHost::GitHub => parts[parts.len() - 2].to_string(),
+        RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => parts[..parts.len() - 1].join("/"),
+    };
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
     Some(RepoInfo { owner, repo, host })
 }
 
-pub(crate) fn detect_repo_from_git(project_root: &Path) -> Option<RepoInfo> {
-    let output = std::process::Command::new("git")
+pub(crate) async fn detect_repo_from_git(project_root: &Path) -> Option<RepoInfo> {
+    let output = Command::new("git")
         .arg("-C")
         .arg(project_root)
         .args(["remote", "get-url", "origin"])
+        .env("PATH", TRUSTED_COMMAND_PATH)
+        .stdin(std::process::Stdio::null())
         .output()
+        .await
         .ok()?;
     if !output.status.success() {
         return None;
@@ -378,6 +412,7 @@ pub async fn create_issue_via_mcp(
         .next()
         .ok_or_else(|| "no project root".to_string())?;
     let repo = detect_repo_from_git(&project_root)
+        .await
         .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
     if !matches!(&repo.host, RepoHost::GitHub) {
         return Err("GitHub MCP issue creation requires a GitHub origin remote".to_string());
@@ -427,6 +462,14 @@ pub async fn create_issue_via_mcp(
         .tool_execute(ccx, &"buddy_mcp_issue".to_string(), &args)
         .await?;
     let text = extract_tool_text(out, "");
+    let activity = BuddyActivity {
+        icon: "🐛".to_string(),
+        title: "Issue created".to_string(),
+        description: format!("Auto-created issue: {}", text),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        activity_type: "issue_created".to_string(),
+    };
+    record_issue_success(gcx, title.to_string(), activity).await;
 
     Ok(BuddyIssueCreateResult {
         url: text,
@@ -491,6 +534,7 @@ pub async fn create_issue_via_native(
         .next()
         .ok_or_else(|| "no project root".to_string())?;
     let repo = detect_repo_from_git(&project_root)
+        .await
         .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
 
     Ok(BuddyIssueCreateResult {
@@ -563,6 +607,19 @@ pub(crate) fn issue_title_and_body(ctx: &DiagnosticContext) -> (String, String) 
     (title, body)
 }
 
+pub(crate) async fn record_issue_success(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    dedupe_text: String,
+    activity: BuddyActivity,
+) {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    if let Some(svc) = lock.as_mut() {
+        svc.record_issue_created(dedupe_text);
+        svc.add_activity(activity);
+    }
+}
+
 pub async fn create_issue(
     gcx: Arc<ARwLock<GlobalContext>>,
     context: &DiagnosticContext,
@@ -578,6 +635,7 @@ pub async fn create_issue(
         .ok_or_else(|| "no project root".to_string())?;
 
     let repo = detect_repo_from_git(&project_root)
+        .await
         .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
     let provider = detect_provider(gcx.clone(), &repo).await?;
 
@@ -623,6 +681,7 @@ pub async fn create_issue(
         timestamp: chrono::Utc::now().to_rfc3339(),
         activity_type: "issue_created".to_string(),
     };
+    record_issue_success(gcx, context.error_message.clone(), activity.clone()).await;
     Ok((url, activity))
 }
 
@@ -636,11 +695,12 @@ async fn run_issue_create(
     let repo_name = repo.full_name();
     match provider {
         IssueProvider::GitHub { binary, token } => {
-            let out = Command::new(&binary)
+            let out = Command::new(trusted_issue_binary(&binary))
                 .args([
                     "issue", "create", "-R", &repo_name, "--title", title, "--body", body,
                 ])
                 .current_dir(project_root)
+                .env("PATH", TRUSTED_COMMAND_PATH)
                 .env("GH_TOKEN", &token)
                 .env("GITHUB_TOKEN", &token)
                 .stdin(std::process::Stdio::null())
@@ -654,7 +714,7 @@ async fn run_issue_create(
             }
         }
         IssueProvider::GitLab { binary, token } => {
-            let out = Command::new(&binary)
+            let out = Command::new(trusted_issue_binary(&binary))
                 .args([
                     "issue",
                     "create",
@@ -666,6 +726,7 @@ async fn run_issue_create(
                     body,
                 ])
                 .current_dir(project_root)
+                .env("PATH", TRUSTED_COMMAND_PATH)
                 .env("GITLAB_TOKEN", &token)
                 .stdin(std::process::Stdio::null())
                 .output()

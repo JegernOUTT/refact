@@ -9,6 +9,9 @@ use crate::global_context::GlobalContext;
 
 pub struct GitPressureObserver;
 
+pub(crate) const MAX_UNCOMMITTED_STATUS_SCAN: usize = 2000;
+pub(crate) const MAX_DIFF_COMMITS: usize = 200;
+
 fn path_hash(p: &std::path::Path) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -26,10 +29,15 @@ pub fn count_uncommitted(project_root: &std::path::Path) -> Option<usize> {
         .include_ignored(false)
         .show(StatusShow::IndexAndWorkdir);
     let statuses = repo.statuses(Some(&mut opts)).ok()?;
-    Some(statuses.iter().filter(|s| !s.status().is_empty()).count())
+    let count = statuses
+        .iter()
+        .filter(|s| !s.status().is_empty())
+        .take(MAX_UNCOMMITTED_STATUS_SCAN)
+        .count();
+    Some(count)
 }
 
-fn git_diff_widening(
+pub(crate) fn git_diff_widening(
     project_root: &std::path::Path,
     now: DateTime<Utc>,
 ) -> Option<(u32, Vec<String>)> {
@@ -38,24 +46,38 @@ fn git_diff_widening(
     let cutoff_ts = (now - chrono::Duration::hours(4)).timestamp();
 
     let mut walker = repo.revwalk().ok()?;
+    walker
+        .set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)
+        .ok()?;
     walker.push(head.id()).ok()?;
 
-    let mut base_commit = None;
-    for oid in walker.by_ref() {
+    let mut oldest_in_window = None;
+    let mut first_before_cutoff = None;
+    for oid in walker.take(MAX_DIFF_COMMITS) {
         let oid = oid.ok()?;
         let commit = repo.find_commit(oid).ok()?;
-        if commit.time().seconds() < cutoff_ts {
+        if commit.time().seconds() >= cutoff_ts {
+            oldest_in_window = Some(oid);
+        } else {
+            first_before_cutoff = Some(oid);
             break;
         }
-        base_commit = Some(commit);
     }
 
-    let base = base_commit?;
+    let oldest_oid = oldest_in_window?;
     let head_tree = head.tree().ok()?;
-    let base_tree = base.tree().ok()?;
+    let base_tree = if let Some(oid) = first_before_cutoff {
+        repo.find_commit(oid).ok()?.tree().ok()
+    } else {
+        repo.find_commit(oldest_oid)
+            .ok()?
+            .parent(0)
+            .ok()
+            .and_then(|parent| parent.tree().ok())
+    };
 
     let diff = repo
-        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
+        .diff_tree_to_tree(base_tree.as_ref(), Some(&head_tree), None)
         .ok()?;
     let stats = diff.stats().ok()?;
     let lines = (stats.insertions() + stats.deletions()) as u32;
@@ -79,8 +101,9 @@ fn git_diff_widening(
     );
 
     if lines > 500 && dirs.len() >= 3 {
-        let mut top: Vec<String> = dirs.into_iter().take(5).collect();
+        let mut top: Vec<String> = dirs.into_iter().collect();
         top.sort();
+        top.truncate(5);
         Some((lines, top))
     } else {
         None

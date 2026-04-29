@@ -7,8 +7,8 @@ use super::actor::BuddyService;
 use super::diagnostics::{classify_error, DiagnosticContext, DiagnosticSeverity};
 use super::issues::{
     check_issue_gate, check_manual_issue_gate, detect_repo_from_git, issue_title_and_body,
-    mcp_issue_args, parse_remote_url, redact_diagnostic_text, sanitize_body, sanitize_title,
-    validate_issue_binary, IssueGate, RepoHost,
+    mcp_issue_args, parse_remote_url, record_issue_success, redact_diagnostic_text, sanitize_body,
+    sanitize_title, validate_issue_binary, IssueGate, IssueProvider, RepoHost,
 };
 use super::scheduler::BuddyJobContext;
 use super::settings::{AutonomyLevel, BuddySettings, HumorLevel, MAX_PALETTE_INDEX};
@@ -16,7 +16,8 @@ use super::state::{
     apply_care_action, apply_pet_tick, default_buddy_state, grant_xp, reroll_personality,
 };
 use super::types::{
-    BuddyAction, BuddyCareAction, BuddyFact, BuddyFactKind, BuddyJobState, BuddyOnboarding,
+    BuddyAction, BuddyActivity, BuddyCareAction, BuddyFact, BuddyFactKind, BuddyJobState,
+    BuddyOnboarding,
     BuddyOpportunity, BuddyOpportunityKind, BuddyOpportunityLinks, BuddyPage, BuddyPriority,
     BuddyPulse, BuddySuggestion, BuddyState, CustomizationKind, DefaultsKind, DraftKind,
     InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
@@ -548,6 +549,12 @@ fn parse_remote_url_handles_ssh_https_dot_git_combinations() {
             "repo",
             RepoHost::GitLabSelfHosted("gitlab.acme.com".to_string()),
         ),
+        (
+            "https://gitlab.example.com/org/platform/team/repo.git",
+            "org/platform/team",
+            "repo",
+            RepoHost::GitLabSelfHosted("gitlab.example.com".to_string()),
+        ),
     ];
     for (url, owner, repo, host) in fixtures {
         let parsed = parse_remote_url(url).expect("remote URL must parse");
@@ -563,23 +570,25 @@ fn parse_remote_url_returns_none_for_invalid() {
     assert!(parse_remote_url("https://github.com/only-owner").is_none());
 }
 
-#[test]
-fn mcp_issue_creation_uses_detected_repo() {
+#[tokio::test]
+async fn mcp_issue_creation_uses_detected_repo() {
     let dir = tempfile::tempdir().unwrap();
     let repo = git2::Repository::init(dir.path()).unwrap();
     repo.remote("origin", "git@github.com:detected/project.git")
         .unwrap();
-    let detected = detect_repo_from_git(dir.path()).expect("repo must be detected");
+    let detected = detect_repo_from_git(dir.path())
+        .await
+        .expect("repo must be detected");
     let args = mcp_issue_args(&detected.owner, &detected.repo, "title", "body", vec![]);
     assert_eq!(args["owner"], "detected");
     assert_eq!(args["repo"], "project");
 }
 
-#[test]
-fn mcp_issue_creation_no_remote_returns_error() {
+#[tokio::test]
+async fn mcp_issue_creation_no_remote_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     git2::Repository::init(dir.path()).unwrap();
-    assert!(detect_repo_from_git(dir.path()).is_none());
+    assert!(detect_repo_from_git(dir.path()).await.is_none());
 }
 
 #[test]
@@ -607,6 +616,56 @@ fn validate_issue_binary_rejects_unknown_command() {
 fn validate_issue_binary_accepts_gh_and_glab() {
     assert_eq!(validate_issue_binary("gh").unwrap(), "gh");
     assert_eq!(validate_issue_binary("glab").unwrap(), "glab");
+}
+
+#[test]
+fn issue_provider_debug_redacts_tokens() {
+    let provider = IssueProvider::GitHub {
+        binary: "gh".to_string(),
+        token: "ghp_AbCdEfGhIj1234567890".to_string(),
+    };
+    let rendered = format!("{:?}", provider);
+    assert!(!rendered.contains("ghp_AbCdEfGhIj1234567890"));
+    assert!(rendered.contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn issue_success_side_effects_are_centralized() {
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    *gcx.read().await.buddy.lock().await = Some(make_service());
+    for dedupe in ["native error", "mcp issue title"] {
+        record_issue_success(
+            gcx.clone(),
+            dedupe.to_string(),
+            BuddyActivity {
+                icon: "🐛".to_string(),
+                title: "Issue created".to_string(),
+                description: format!("created {dedupe}"),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                activity_type: "issue_created".to_string(),
+            },
+        )
+        .await;
+    }
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let svc = lock.as_ref().unwrap();
+    assert!(svc.last_issue_at.is_some());
+    assert!(svc
+        .recent_issue_errors
+        .iter()
+        .any(|(message, _)| message == "native error"));
+    assert!(svc
+        .recent_issue_errors
+        .iter()
+        .any(|(message, _)| message == "mcp issue title"));
+    let issue_activities = svc
+        .state
+        .recent_activities
+        .iter()
+        .filter(|activity| activity.activity_type == "issue_created")
+        .count();
+    assert_eq!(issue_activities, 2);
 }
 
 #[test]
@@ -691,6 +750,42 @@ fn test_same_day_log_filter_accepts_same_day_time() {
         "235959.999 ERROR old failure",
         "2026-04-27T10:16:00Z",
     ));
+}
+
+#[tokio::test]
+async fn investigation_log_tail_reads_bounded_and_redacts() {
+    use crate::http::routers::v1::buddy_opportunities::read_recent_log_lines;
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("refact.log");
+    let mut content = String::from("old secret token=old-secret\n");
+    content.push_str(&"x".repeat(300 * 1024));
+    content.push_str("\nrecent token=recent-secret\nlast line\n");
+    tokio::fs::write(&log_path, content).await.unwrap();
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    gcx.write().await.cmdline.logs_to_file = log_path.to_string_lossy().into_owned();
+    let tail = read_recent_log_lines(&gcx, 5).await.unwrap();
+    assert!(!tail.contains("old secret"));
+    assert!(!tail.contains("recent-secret"));
+    assert!(tail.contains("token=[REDACTED]"));
+    assert!(tail.contains("last line"));
+}
+
+#[tokio::test]
+async fn log_fallback_filters_by_filename_not_full_path() {
+    use crate::http::routers::v1::buddy_opportunities::{is_log_candidate, read_log_content};
+    let dir = tempfile::tempdir().unwrap();
+    let refact_dir = dir.path().join("path-with-refact-name");
+    tokio::fs::create_dir_all(&refact_dir).await.unwrap();
+    let unrelated = refact_dir.join("unrelated.txt");
+    let real_log = refact_dir.join("engine.log");
+    tokio::fs::write(&unrelated, "bad").await.unwrap();
+    tokio::fs::write(&real_log, "good").await.unwrap();
+
+    assert!(!is_log_candidate(&unrelated));
+    assert!(is_log_candidate(&real_log));
+    let content = read_log_content(&refact_dir.join("refact.log")).await.unwrap();
+    assert_eq!(content, "good");
 }
 
 #[test]
@@ -2205,10 +2300,6 @@ fn schema_contract_buddy_fact_kind_variants() {
         ),
         (BuddyFactKind::McpAuthExpired, "mcp_auth_expired"),
         (BuddyFactKind::IntegrationFailing, "integration_failing"),
-        (
-            BuddyFactKind::IntegrationSmartlinkMatch,
-            "integration_smartlink_match",
-        ),
         (BuddyFactKind::DiagnosticCluster, "diagnostic_cluster"),
         (BuddyFactKind::FrontendErrorBurst, "frontend_error_burst"),
         (BuddyFactKind::GitDiffWidening, "git_diff_widening"),
@@ -2278,7 +2369,6 @@ fn schema_contract_defaults_kind_variants() {
         (DefaultsKind::ChatModel, "chat_model"),
         (DefaultsKind::ChatBuddyModel, "chat_buddy_model"),
         (DefaultsKind::ChatThinkingModel, "chat_thinking_model"),
-        (DefaultsKind::EmbeddingModel, "embedding_model"),
     ];
     for (value, expected) in cases {
         assert_eq!(serialized_string(&value), expected);
@@ -2954,6 +3044,41 @@ fn trajectory_clutter_threshold() {
     );
 }
 
+#[tokio::test]
+async fn trajectory_scan_caps_file_reads() {
+    use super::observers::trajectory_clutter::{
+        scan_trajectories_dir, MAX_TRAJECTORY_SCAN_FILES,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..(MAX_TRAJECTORY_SCAN_FILES + 20) {
+        tokio::fs::write(
+            dir.path().join(format!("trajectory_{i:03}.json")),
+            r#"{"title":"","created_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .await
+        .unwrap();
+    }
+    let (total, untitled, _) = scan_trajectories_dir(dir.path()).await;
+    assert_eq!(total, (MAX_TRAJECTORY_SCAN_FILES + 20) as u32);
+    assert!(untitled <= MAX_TRAJECTORY_SCAN_FILES as u32);
+}
+
+#[test]
+fn observer_scan_budget_constants_are_bounded() {
+    assert!(
+        super::observers::task_health::MAX_TASK_CLUSTER_ENTRIES <= 200,
+        "task cluster duplicate scan must stay capped"
+    );
+    assert!(
+        super::observers::customization_drift::MAX_MODE_OVERLAP_CANDIDATES <= 100,
+        "mode overlap scan must stay capped"
+    );
+    assert!(
+        super::observers::git_pressure::MAX_DIFF_COMMITS <= 200,
+        "git revwalk scan must stay capped"
+    );
+}
+
 #[test]
 fn git_pressure_uncommitted() {
     use super::observers::git_pressure::{count_uncommitted, detect_git_pressure_facts};
@@ -3032,6 +3157,47 @@ fn git_pressure_discover_works_from_subdir() {
 }
 
 #[test]
+fn git_diff_widening_counts_single_large_recent_commit_deterministically() {
+    use super::observers::git_pressure::git_diff_widening;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    let sig = git2::Signature::now("test", "test@test.com").unwrap();
+    let initial = {
+        let mut index = repo.index().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap()
+    };
+    for dir_name in ["a", "b", "c"] {
+        std::fs::create_dir_all(dir.path().join(dir_name)).unwrap();
+        let lines = (0..220)
+            .map(|i| format!("line {dir_name} {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join(dir_name).join("file.txt"), lines).unwrap();
+    }
+    {
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(initial).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "large", &tree, &[&parent])
+            .unwrap();
+    }
+    drop(repo);
+
+    let first = git_diff_widening(dir.path(), chrono::Utc::now()).unwrap();
+    let second = git_diff_widening(dir.path(), chrono::Utc::now()).unwrap();
+    assert!(first.0 > 500);
+    assert_eq!(first, second);
+    assert_eq!(first.1, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+}
+
+#[test]
 fn diagnostic_cluster_threshold() {
     use super::observers::diagnostic_cluster::detect_diagnostic_cluster_facts;
     let now = chrono::Utc::now();
@@ -3101,7 +3267,7 @@ fn provider_health_default_missing() {
         chat_light_model: String::new(),
         chat_buddy_model: String::new(),
     };
-    let facts = detect_provider_health_facts(&defaults, &["openai/gpt-4o".to_string()], now);
+    let facts = detect_provider_health_facts(&defaults, &["openai/gpt-4o".to_string()], &[], now);
     assert!(
         facts
             .iter()
@@ -3122,7 +3288,7 @@ fn provider_health_broken_ref() {
         chat_light_model: String::new(),
         chat_buddy_model: String::new(),
     };
-    let facts = detect_provider_health_facts(&defaults, &[], now);
+    let facts = detect_provider_health_facts(&defaults, &[], &[], now);
     assert!(
         facts
             .iter()
@@ -3143,13 +3309,13 @@ fn provider_health_no_emit_when_ok() {
         chat_light_model: "openai/gpt-4o-mini".to_string(),
         chat_buddy_model: "openai/gpt-4o-mini".to_string(),
     };
-    let available = vec![
+    let chat_models = vec![
         "openai/gpt-4o".to_string(),
         "openai/o1".to_string(),
         "openai/gpt-4o-mini".to_string(),
-        "starcoder".to_string(),
     ];
-    let facts = detect_provider_health_facts(&defaults, &available, now);
+    let completion_models = vec!["starcoder".to_string()];
+    let facts = detect_provider_health_facts(&defaults, &chat_models, &completion_models, now);
     let interesting: Vec<_> = facts
         .iter()
         .filter(|f| {
@@ -3166,6 +3332,53 @@ fn provider_health_no_emit_when_ok() {
 }
 
 #[test]
+fn provider_health_completion_default_uses_completion_namespace() {
+    use super::observers::provider_health::detect_provider_health_facts;
+    use crate::caps::DefaultModels;
+    let now = chrono::Utc::now();
+    let defaults = DefaultModels {
+        completion_default_model: "shared/model".to_string(),
+        chat_default_model: "openai/gpt-4o".to_string(),
+        chat_thinking_model: "openai/o1".to_string(),
+        chat_light_model: "openai/gpt-4o-mini".to_string(),
+        chat_buddy_model: "openai/gpt-4o-mini".to_string(),
+    };
+    let chat_models = vec![
+        "shared/model".to_string(),
+        "openai/gpt-4o".to_string(),
+        "openai/o1".to_string(),
+        "openai/gpt-4o-mini".to_string(),
+    ];
+    let facts = detect_provider_health_facts(&defaults, &chat_models, &[], now);
+    assert!(facts.iter().any(|f| {
+        f.kind == BuddyFactKind::BrokenModelReference
+            && f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model")
+            && f.payload.get("model_id").and_then(|v| v.as_str()) == Some("shared/model")
+    }));
+}
+
+#[test]
+fn provider_health_chat_default_uses_chat_namespace() {
+    use super::observers::provider_health::detect_provider_health_facts;
+    use crate::caps::DefaultModels;
+    let now = chrono::Utc::now();
+    let defaults = DefaultModels {
+        completion_default_model: "starcoder".to_string(),
+        chat_default_model: "shared/model".to_string(),
+        chat_thinking_model: String::new(),
+        chat_light_model: String::new(),
+        chat_buddy_model: String::new(),
+    };
+    let completion_models = vec!["starcoder".to_string(), "shared/model".to_string()];
+    let facts = detect_provider_health_facts(&defaults, &[], &completion_models, now);
+    assert!(facts.iter().any(|f| {
+        f.kind == BuddyFactKind::BrokenModelReference
+            && f.payload.get("field").and_then(|v| v.as_str()) == Some("chat_model")
+            && f.payload.get("model_id").and_then(|v| v.as_str()) == Some("shared/model")
+    }));
+}
+
+#[test]
 fn mcp_auth_expiring_within_24h() {
     use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
     use crate::integrations::mcp::session_mcp::MCPAuthStatus;
@@ -3176,7 +3389,6 @@ fn mcp_auth_expiring_within_24h() {
         auth_status: MCPAuthStatus::Authenticated,
         failed_calls: 0,
         expires_at_ms: Some(expires_12h),
-        smartlink_id: None,
     }];
     let facts = detect_mcp_auth_facts(&snaps, now);
     assert!(
@@ -3197,7 +3409,6 @@ fn mcp_auth_failure_count() {
         auth_status: MCPAuthStatus::NotApplicable,
         failed_calls: 3,
         expires_at_ms: None,
-        smartlink_id: None,
     }];
     let facts = detect_mcp_auth_facts(&snaps, now);
     assert!(
@@ -3208,25 +3419,36 @@ fn mcp_auth_failure_count() {
     );
 }
 
-#[test]
-fn mcp_smartlink_match() {
-    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
-    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
-    let now = chrono::Utc::now();
-    let snaps = vec![McpSessionSnapshot {
-        id: "github-mcp".to_string(),
-        auth_status: MCPAuthStatus::NotApplicable,
-        failed_calls: 3,
-        expires_at_ms: None,
-        smartlink_id: Some("https://github.com/github/mcp".to_string()),
-    }];
-    let facts = detect_mcp_auth_facts(&snaps, now);
-    assert!(
-        facts
-            .iter()
-            .any(|f| f.kind == BuddyFactKind::IntegrationSmartlinkMatch),
-        "must emit IntegrationSmartlinkMatch when failing integration has a smartlink"
-    );
+#[tokio::test]
+async fn buddy_open_view_errors_without_service() {
+    use crate::at_commands::at_commands::AtCommandsContext;
+    use crate::tools::tool_buddy_open_view::ToolBuddyOpenView;
+    use crate::tools::tools_description::Tool;
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let ccx = Arc::new(tokio::sync::Mutex::new(
+        AtCommandsContext::new(
+            gcx,
+            4000,
+            20,
+            false,
+            vec![],
+            String::new(),
+            None,
+            String::new(),
+            None,
+        )
+        .await,
+    ));
+    let mut tool = ToolBuddyOpenView {
+        config_path: String::new(),
+    };
+    let mut args = std::collections::HashMap::new();
+    args.insert("page".to_string(), serde_json::json!({ "type": "buddy" }));
+    let err = tool
+        .tool_execute(ccx, &"tool-call".to_string(), &args)
+        .await
+        .unwrap_err();
+    assert!(err.contains("buddy service not initialized"));
 }
 
 fn chat_msg(role: &str, content: &str) -> crate::call_validation::ChatMessage {
@@ -4469,7 +4691,7 @@ fn provider_health_payload_keys_match_detector() {
         chat_buddy_model: String::new(),
     };
     let available = vec!["openai/gpt-4o".to_string()];
-    let facts = detect_provider_health_facts(&defaults, &available, now);
+    let facts = detect_provider_health_facts(&defaults, &available, &available, now);
     assert!(facts
         .iter()
         .any(|f| f.kind == BuddyFactKind::DefaultModelMissing));
@@ -4485,7 +4707,7 @@ fn provider_health_payload_keys_match_detector() {
         chat_buddy_model: String::new(),
     };
     let available2 = vec![];
-    let facts2 = detect_provider_health_facts(&defaults2, &available2, now);
+    let facts2 = detect_provider_health_facts(&defaults2, &available2, &available2, now);
     for f in facts2 {
         store.ingest(f);
     }
@@ -4540,14 +4762,12 @@ fn mcp_auth_payload_keys_match_detector() {
             auth_status: MCPAuthStatus::Authenticated,
             failed_calls: 0,
             expires_at_ms: Some(expires_12h),
-            smartlink_id: None,
         },
         McpSessionSnapshot {
             id: "linear-mcp".to_string(),
             auth_status: MCPAuthStatus::NotApplicable,
             failed_calls: 5,
             expires_at_ms: None,
-            smartlink_id: None,
         },
     ];
     let facts = detect_mcp_auth_facts(&snaps, now);
@@ -5041,7 +5261,6 @@ async fn accept_dismiss_action_via_accept_route_is_single_resolution() {
         .await
         .unwrap();
 
-    assert!(outcome.handled, "Dismiss must be handled");
     assert_eq!(
         outcome.status,
         OpportunityStatus::Dismissed,
@@ -5074,7 +5293,7 @@ async fn accept_dismiss_action_via_accept_route_is_single_resolution() {
 }
 
 #[tokio::test]
-async fn draft_customization_change_is_handled() {
+async fn draft_customization_change_dispatches() {
     use crate::http::routers::v1::buddy_opportunities::dispatch_action;
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -5093,7 +5312,6 @@ async fn draft_customization_change_is_handled() {
     .await
     .unwrap();
 
-    assert!(outcome.handled, "DraftCustomizationChange must be handled");
     assert_eq!(outcome.status, OpportunityStatus::Accepted);
     assert_eq!(
         outcome.result.get("draft_kind").and_then(|v| v.as_str()),
@@ -5165,7 +5383,6 @@ async fn accept_route_response_shape_for_defaults_draft() {
         .await
         .unwrap();
 
-    assert!(outcome.handled, "DraftDefaultsChange must be handled");
     assert_eq!(outcome.status, OpportunityStatus::Accepted);
 
     let result = &outcome.result;
@@ -6467,13 +6684,13 @@ fn provider_health_checks_chat_light_and_completion_models() {
         chat_light_model: String::new(),
         chat_buddy_model: "openai/gpt-4o-mini".to_string(),
     };
-    let available = vec![
+    let chat_models = vec![
         "openai/gpt-4o".to_string(),
         "openai/o1".to_string(),
         "openai/gpt-4o-mini".to_string(),
     ];
 
-    let facts = detect_provider_health_facts(&defaults, &available, now);
+    let facts = detect_provider_health_facts(&defaults, &chat_models, &[], now);
     assert!(facts.iter().any(|f| {
         f.kind == BuddyFactKind::DefaultModelMissing
             && f.payload.get("field").and_then(|v| v.as_str()) == Some("chat_light_model")
@@ -6499,9 +6716,10 @@ fn broken_ref_per_field_distinct_opportunities() {
         chat_light_model: "openai/gpt-4o-mini".to_string(),
         chat_buddy_model: "openai/gpt-4o-mini".to_string(),
     };
-    let available = vec!["openai/gpt-4o-mini".to_string(), "starcoder".to_string()];
+    let chat_models = vec!["openai/gpt-4o-mini".to_string()];
+    let completion_models = vec!["starcoder".to_string()];
     let mut store = FactStore::new();
-    for fact in detect_provider_health_facts(&defaults, &available, now) {
+    for fact in detect_provider_health_facts(&defaults, &chat_models, &completion_models, now) {
         store.ingest(fact);
     }
 
@@ -6536,9 +6754,10 @@ fn multiple_missing_defaults_surface_separately() {
         chat_light_model: "openai/gpt-4o-mini".to_string(),
         chat_buddy_model: "openai/gpt-4o-mini".to_string(),
     };
-    let available = vec!["openai/gpt-4o-mini".to_string(), "starcoder".to_string()];
+    let chat_models = vec!["openai/gpt-4o-mini".to_string()];
+    let completion_models = vec!["starcoder".to_string()];
     let mut store = FactStore::new();
-    for fact in detect_provider_health_facts(&defaults, &available, now) {
+    for fact in detect_provider_health_facts(&defaults, &chat_models, &completion_models, now) {
         store.ingest(fact);
     }
 

@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
@@ -42,7 +43,6 @@ pub struct AcceptRequest {
 pub(crate) struct ActionOutcome {
     pub result: serde_json::Value,
     pub status: OpportunityStatus,
-    pub handled: bool,
 }
 
 fn draft_validation_error(err: DraftValidationError) -> ScratchError {
@@ -176,20 +176,6 @@ pub async fn handle_v1_buddy_opportunity_accept(
         }
     };
 
-    if !outcome.handled {
-        clear_accept_claim(gcx.clone(), &id).await;
-        let action_kind = outcome
-            .result
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        return Err(ScratchError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            format!("action_not_implemented: {}", action_kind),
-        ));
-    }
-
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
@@ -231,9 +217,13 @@ pub(crate) async fn dispatch_action(
         BuddyAction::OpenPage { page, .. } => {
             let buddy_arc = gcx.read().await.buddy.clone();
             let lock = buddy_arc.lock().await;
-            if let Some(svc) = lock.as_ref() {
-                svc.send_navigation(page.clone());
-            }
+            let svc = lock.as_ref().ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "buddy not initialized".to_string(),
+                )
+            })?;
+            svc.send_navigation(page.clone());
             let nav_page = serde_json::to_value(page)
                 .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(ActionOutcome {
@@ -242,7 +232,6 @@ pub(crate) async fn dispatch_action(
                     "navigate_to": nav_page
                 }),
                 status: OpportunityStatus::Accepted,
-                handled: true,
             })
         }
         BuddyAction::LaunchInvestigationChat { preload } => {
@@ -255,7 +244,6 @@ pub(crate) async fn dispatch_action(
                     "chat_id": chat_id
                 }),
                 status: OpportunityStatus::Accepted,
-                handled: true,
             })
         }
         BuddyAction::DraftSkill { draft_id, label }
@@ -302,7 +290,6 @@ pub(crate) async fn dispatch_action(
                     "label": label
                 }),
                 status: OpportunityStatus::Accepted,
-                handled: true,
             })
         }
         BuddyAction::DraftAgentsMdPatch { diff } => {
@@ -325,7 +312,6 @@ pub(crate) async fn dispatch_action(
                     "draft_id": draft.id
                 }),
                 status: OpportunityStatus::Accepted,
-                handled: true,
             })
         }
         BuddyAction::DraftDefaultsChange {
@@ -358,7 +344,6 @@ pub(crate) async fn dispatch_action(
                     "draft_id": draft.id
                 }),
                 status: OpportunityStatus::Accepted,
-                handled: true,
             })
         }
         BuddyAction::DraftCustomizationChange {
@@ -388,7 +373,6 @@ pub(crate) async fn dispatch_action(
                     "label": format!("Edit {}", id)
                 }),
                 status: OpportunityStatus::Accepted,
-                handled: true,
             })
         }
         BuddyAction::CreatePulseReport { scope } => {
@@ -414,7 +398,6 @@ pub(crate) async fn dispatch_action(
                     "draft_id": draft.id
                 }),
                 status: OpportunityStatus::Accepted,
-                handled: true,
             })
         }
         BuddyAction::OfferMarketplaceInstall {
@@ -434,13 +417,11 @@ pub(crate) async fn dispatch_action(
                     "error": error
                 }),
                 status: OpportunityStatus::Accepted,
-                handled: true,
             })
         }
         BuddyAction::Dismiss => Ok(ActionOutcome {
             result: serde_json::json!({ "kind": "dismiss" }),
             status: OpportunityStatus::Dismissed,
-            handled: true,
         }),
     }
 }
@@ -856,11 +837,51 @@ pub(crate) async fn read_recent_log_lines(
     Ok(tail.join("\n"))
 }
 
-async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
+const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+pub(crate) fn is_log_candidate(path: &std::path::Path) -> bool {
+    let extension_is_log = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("log"))
+        .unwrap_or(false);
+    let filename_mentions_refact = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase().contains("refact"))
+        .unwrap_or(false);
+    extension_is_log || filename_mentions_refact
+}
+
+async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
+    let mut file = tokio::fs::File::open(log_path)
+        .await
+        .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e))?;
+    let len = file
+        .metadata()
+        .await
+        .map_err(|e| format!("failed to stat log file {:?}: {}", log_path, e))?
+        .len();
+    let start = len.saturating_sub(MAX_LOG_TAIL_BYTES);
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|e| format!("failed to seek log file {:?}: {}", log_path, e))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e))?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if start > 0 {
+        if let Some(pos) = text.find('\n') {
+            text = text[pos + 1..].to_string();
+        }
+    }
+    Ok(text)
+}
+
+pub(crate) async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
     if log_path.is_file() {
-        return tokio::fs::read_to_string(log_path)
-            .await
-            .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e));
+        return read_bounded_log_tail(log_path).await;
     }
     let log_dir = log_path.parent().unwrap_or(log_path);
     let mut entries = tokio::fs::read_dir(log_dir)
@@ -869,23 +890,22 @@ async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> 
     let mut files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("log")
-            || path.to_string_lossy().contains("refact")
-        {
-            if let Ok(meta) = tokio::fs::metadata(&path).await {
+        if !is_log_candidate(&path) {
+            continue;
+        }
+        if let Ok(meta) = tokio::fs::metadata(&path).await {
+            if meta.is_file() {
                 if let Ok(modified) = meta.modified() {
                     files.push((path, modified));
                 }
             }
         }
     }
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let Some((newest, _)) = files.first() else {
         return Ok(String::new());
     };
-    tokio::fs::read_to_string(newest)
-        .await
-        .map_err(|e| format!("failed to read log file {:?}: {}", newest, e))
+    read_bounded_log_tail(newest).await
 }
 
 pub(crate) fn cap_text_to_chars(s: &str, max: usize) -> String {

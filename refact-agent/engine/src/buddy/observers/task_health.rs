@@ -10,6 +10,8 @@ use crate::global_context::GlobalContext;
 use crate::tasks::types::{TaskBoard, TaskMeta, TaskStatus};
 
 pub struct TaskHealthObserver;
+pub(crate) const MAX_TASK_CLUSTER_ENTRIES: usize = 200;
+
 
 pub struct TaskHealthEntry {
     pub meta: TaskMeta,
@@ -94,6 +96,7 @@ pub fn detect_task_health_facts(entries: &[TaskHealthEntry], now: DateTime<Utc>)
     let active: Vec<&TaskHealthEntry> = entries
         .iter()
         .filter(|e| !matches!(e.meta.status, TaskStatus::Completed | TaskStatus::Abandoned))
+        .take(MAX_TASK_CLUSTER_ENTRIES)
         .collect();
 
     let mut emitted: HashSet<String> = HashSet::new();

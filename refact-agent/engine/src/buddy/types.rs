@@ -399,7 +399,6 @@ pub enum BuddyFactKind {
     BrokenModelReference,
     McpAuthExpired,
     IntegrationFailing,
-    IntegrationSmartlinkMatch,
     DiagnosticCluster,
     FrontendErrorBurst,
     GitDiffWidening,
@@ -538,7 +537,6 @@ pub enum DefaultsKind {
     ChatModel,
     ChatBuddyModel,
     ChatThinkingModel,
-    EmbeddingModel,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

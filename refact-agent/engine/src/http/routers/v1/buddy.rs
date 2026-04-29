@@ -688,16 +688,7 @@ pub async fn handle_v1_buddy_issues_create(
     .await
     .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
-    let (url, activity) = result;
-
-    {
-        let buddy_arc = gcx.read().await.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
-        if let Some(svc) = lock.as_mut() {
-            svc.record_issue_created(ctx.error_message.clone());
-            svc.add_activity(activity);
-        }
-    }
+    let (url, _activity) = result;
 
     Ok(axum::Json(serde_json::json!({"url": url})))
 }
