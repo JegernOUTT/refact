@@ -28,6 +28,8 @@ function assertBuddyPage(page: BuddyPage): string {
       return page.type;
     case "task_workspace":
       return page.task_id;
+    case "setup_mode":
+      return page.mode;
     default: {
       const _never: never = page;
       return _never;
@@ -83,13 +85,18 @@ describe("Buddy schema contract", () => {
       { type: "tasks_list" },
       { type: "task_workspace", task_id: "task-1" },
       { type: "knowledge_graph" },
+      { type: "setup_mode", mode: "setup_mcp" },
     ];
 
     for (const page of pages) {
       const parsed = roundTrip(page) as BuddyPage;
-      expect(assertBuddyPage(parsed)).toBe(
-        page.type === "task_workspace" ? page.task_id : page.type,
-      );
+      const expected =
+        page.type === "task_workspace"
+          ? page.task_id
+          : page.type === "setup_mode"
+            ? page.mode
+            : page.type;
+      expect(assertBuddyPage(parsed)).toBe(expected);
     }
   });
 

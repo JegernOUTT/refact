@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  executeBuddyAction,
   executeBuddyNavigation,
   routeDraftByKind,
 } from "../features/Buddy/executeBuddyAction";
@@ -53,6 +54,7 @@ import type {
   BuddySpeechItem,
   BuddyRuntimeEvent,
   BuddyOpportunity,
+  BuddyControl,
   BuddyDraft,
   BuddyPulse,
   BuddyAction,
@@ -77,6 +79,27 @@ import { BuddyErrorBoundary } from "../features/Buddy/BuddyErrorBoundary";
 import { getOpportunityDismissAction } from "../features/Buddy/buddyOpportunityActions";
 
 const reducer = buddySlice.reducer;
+
+type CapturedThunk = (
+  dispatch: (action: unknown) => unknown,
+  getState: () => unknown,
+  extra: unknown,
+) => unknown;
+
+function makeThunkDispatch() {
+  const innerDispatch = vi.fn();
+  const dispatch = vi.fn((action: unknown) => {
+    if (typeof action === "function") {
+      return (action as CapturedThunk)(
+        innerDispatch,
+        () => ({ config: { lspPort: 0, apiKey: null } }),
+        undefined,
+      );
+    }
+    return innerDispatch(action);
+  });
+  return { dispatch, innerDispatch };
+}
 
 beforeEach(() => {
   resetBuddyFrontendErrorReportCache();
@@ -1822,14 +1845,19 @@ describe("buddy opportunities, pulse, and drafts", () => {
       { type: "buddy" },
       { type: "task_workspace", task_id: "task-123" },
       { type: "knowledge_graph" },
+      { type: "setup_mode", mode: "setup_mcp" },
     ];
     const types = pages.map((p) => p.type);
     expect(types).toContain("buddy");
     expect(types).toContain("task_workspace");
     expect(types).toContain("knowledge_graph");
+    expect(types).toContain("setup_mode");
     for (const page of pages) {
       if (page.type === "task_workspace") {
         expect(page.task_id).toBe("task-123");
+      }
+      if (page.type === "setup_mode") {
+        expect(page.mode).toBe("setup_mcp");
       }
     }
   });
@@ -1875,6 +1903,89 @@ describe("executeBuddyNavigation dispatches for each BuddyPage variant", () => {
       name: "task workspace",
       taskId: "task-abc",
     });
+  });
+
+  test("dispatches setup_mode through openChatInModeAndStart", () => {
+    const { dispatch, innerDispatch } = makeThunkDispatch();
+    executeBuddyNavigation(
+      { type: "setup_mode", mode: "setup_mcp" },
+      dispatch as never,
+    );
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(innerDispatch.mock.calls.map((call) => call[0])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "chatThread/createWithId",
+          payload: expect.objectContaining({ mode: "setup_mcp" }),
+        }),
+      ]),
+    );
+  });
+
+  test("ignores invalid setup_mode navigation", () => {
+    const dispatch = vi.fn();
+    executeBuddyNavigation(
+      { type: "setup_mode", mode: "unknown_setup" },
+      dispatch as never,
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("executeBuddyAction setup controls", () => {
+  test("legacy setup controls dispatch their setup modes", async () => {
+    const cases: [string, string][] = [
+      ["open_setup_mcp", "setup_mcp"],
+      ["open_setup_skills", "setup_skills"],
+      ["open_setup_commands", "setup_commands"],
+      ["open_setup_agents_md", "setup_agents_md"],
+      ["open_setup_subagents", "setup_subagents"],
+    ];
+
+    for (const [action, expectedMode] of cases) {
+      const { dispatch, innerDispatch } = makeThunkDispatch();
+      const control: BuddyControl = {
+        id: action,
+        label: action,
+        action,
+        style: "secondary",
+      };
+      await executeBuddyAction(control, dispatch as never);
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(innerDispatch.mock.calls.map((call) => call[0])).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "chatThread/createWithId",
+            payload: expect.objectContaining({ mode: expectedMode }),
+          }),
+        ]),
+      );
+      expect(innerDispatch.mock.calls.map((call) => call[0])).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: clearActiveSpeech.type }),
+        ]),
+      );
+    }
+  });
+
+  test("open_setup_mode falls back to generic setup for invalid action_param", async () => {
+    const { dispatch, innerDispatch } = makeThunkDispatch();
+    const control: BuddyControl = {
+      id: "bad-setup",
+      label: "Setup",
+      action: "open_setup_mode",
+      action_param: "unknown_setup",
+      style: "secondary",
+    };
+    await executeBuddyAction(control, dispatch as never);
+    expect(innerDispatch.mock.calls.map((call) => call[0])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "chatThread/createWithId",
+          payload: expect.objectContaining({ mode: "setup" }),
+        }),
+      ]),
+    );
   });
 });
 

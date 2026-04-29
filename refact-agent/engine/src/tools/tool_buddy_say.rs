@@ -10,6 +10,31 @@ use crate::buddy::types::{BuddyControl, BuddySpeechItem};
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
+const ADVERTISED_CONTROL_ACTIONS: &[&str] = &[
+    "open_setup",
+    "open_setup_mode",
+    "open_stats",
+    "open_buddy",
+    "dismiss",
+];
+
+const LEGACY_SETUP_CONTROL_ACTIONS: &[(&str, &str)] = &[
+    ("open_setup_mcp", "setup_mcp"),
+    ("open_setup_skills", "setup_skills"),
+    ("open_setup_commands", "setup_commands"),
+    ("open_setup_agents_md", "setup_agents_md"),
+    ("open_setup_subagents", "setup_subagents"),
+];
+
+const VALID_SETUP_MODES: &[&str] = &[
+    "setup",
+    "setup_mcp",
+    "setup_skills",
+    "setup_commands",
+    "setup_agents_md",
+    "setup_subagents",
+];
+
 pub struct ToolBuddySay {
     pub config_path: String,
 }
@@ -119,9 +144,10 @@ impl Tool for ToolBuddySay {
         let gcx = ccx.lock().await.global_context.clone();
         let buddy_arc = gcx.read().await.buddy.clone();
         let mut lock = buddy_arc.lock().await;
-        if let Some(svc) = lock.as_mut() {
-            svc.update_speech(speech);
-        }
+        let svc = lock
+            .as_mut()
+            .ok_or_else(|| "buddy service not initialized".to_string())?;
+        svc.update_speech(speech);
 
         Ok((
             false,
@@ -176,12 +202,12 @@ impl Tool for ToolBuddyRenderControls {
                                 },
                                 "action": {
                                     "type": "string",
-                                    "description": "Action: open_chat, open_setup, open_setup_mcp, open_setup_skills, open_stats, open_buddy, dismiss, run_command.",
-                                    "enum": ["open_chat", "open_setup", "open_setup_mcp", "open_setup_skills", "open_stats", "open_buddy", "dismiss", "run_command"]
+                                    "description": "Action: open_setup, open_setup_mode, open_stats, open_buddy, dismiss.",
+                                    "enum": ADVERTISED_CONTROL_ACTIONS
                                 },
                                 "action_param": {
                                     "type": "string",
-                                    "description": "Parameter for the action (e.g., chat_id, command name)."
+                                    "description": "Required setup mode when action=open_setup_mode."
                                 },
                                 "style": {
                                     "type": "string",
@@ -230,22 +256,27 @@ impl Tool for ToolBuddyRenderControls {
             return Err("controls array cannot be empty".to_string());
         }
 
-        let valid_actions = [
-            "open_chat",
-            "open_setup",
-            "open_setup_mcp",
-            "open_setup_skills",
-            "open_stats",
-            "open_buddy",
-            "dismiss",
-            "run_command",
-        ];
         for c in &controls {
-            if !valid_actions.contains(&c.action.as_str()) {
+            let is_advertised = ADVERTISED_CONTROL_ACTIONS.contains(&c.action.as_str());
+            let is_legacy_setup = LEGACY_SETUP_CONTROL_ACTIONS
+                .iter()
+                .any(|(action, _)| *action == c.action.as_str());
+            if !is_advertised && !is_legacy_setup {
                 return Err(format!(
                     "invalid action '{}' for control '{}'",
                     c.action, c.id
                 ));
+            }
+            if c.action == "open_setup_mode" {
+                let mode = c.action_param.as_deref().ok_or_else(|| {
+                    format!("action_param is required for control '{}'", c.id)
+                })?;
+                if !VALID_SETUP_MODES.contains(&mode) {
+                    return Err(format!(
+                        "invalid setup mode '{}' for control '{}'",
+                        mode, c.id
+                    ));
+                }
             }
         }
 
@@ -275,9 +306,10 @@ impl Tool for ToolBuddyRenderControls {
         let gcx = ccx.lock().await.global_context.clone();
         let buddy_arc = gcx.read().await.buddy.clone();
         let mut lock = buddy_arc.lock().await;
-        if let Some(svc) = lock.as_mut() {
-            svc.update_speech(speech);
-        }
+        let svc = lock
+            .as_mut()
+            .ok_or_else(|| "buddy service not initialized".to_string())?;
+        svc.update_speech(speech);
 
         Ok((
             false,

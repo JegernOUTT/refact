@@ -590,6 +590,7 @@ pub enum BuddyPage {
     TasksList,
     TaskWorkspace { task_id: String },
     KnowledgeGraph,
+    SetupMode { mode: String },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -29,6 +29,27 @@ const CONFIG_STATE = {
   },
 };
 
+type CapturedThunk = (
+  dispatch: (action: unknown) => unknown,
+  getState: () => unknown,
+  extra: unknown,
+) => unknown;
+
+function makeThunkDispatch() {
+  const innerDispatch = vi.fn();
+  const dispatch = vi.fn((action: unknown) => {
+    if (typeof action === "function") {
+      return (action as CapturedThunk)(
+        innerDispatch,
+        () => ({ config: { lspPort: 0, apiKey: null } }),
+        undefined,
+      );
+    }
+    return innerDispatch(action);
+  });
+  return { dispatch, innerDispatch };
+}
+
 function makeOpportunity(
   overrides?: Partial<BuddyOpportunity>,
 ): BuddyOpportunity {
@@ -200,7 +221,7 @@ describe("buddy UI polish", () => {
     expect(unread.map((o) => o.id)).toEqual(["o-new", "o-shown"]);
   });
 
-  it("shared_navigation_helper_routes_all_pages", () => {
+  it("shared_navigation_helper_routes_pages", () => {
     const cases: [BuddyPage, string][] = [
       [{ type: "buddy" }, "buddy"],
       [{ type: "stats" }, "stats dashboard"],
@@ -225,6 +246,22 @@ describe("buddy UI polish", () => {
       const action = dispatch.mock.calls[0][0] as ReturnType<typeof push>;
       expect(action.payload).toMatchObject({ name: expectedName });
     }
+  });
+
+  it("shared_navigation_helper_routes_setup_mode", () => {
+    const { dispatch, innerDispatch } = makeThunkDispatch();
+    navigateFromBuddyPage(
+      { type: "setup_mode", mode: "setup_mcp" },
+      dispatch as never,
+    );
+    expect(innerDispatch.mock.calls.map((call) => call[0])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "chatThread/createWithId",
+          payload: expect.objectContaining({ mode: "setup_mcp" }),
+        }),
+      ]),
+    );
   });
 
   it("BuddyHome_container_renders_split_subcomponents", async () => {

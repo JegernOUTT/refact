@@ -10,6 +10,16 @@ import type { BuddyControl, BuddyPage, DraftKind } from "./types";
 import type { DiagnosticContext } from "./types";
 import { buddyApi } from "../../services/refact/buddy";
 
+const LEGACY_SETUP_ACTION_TO_MODE = {
+  open_setup_mcp: "setup_mcp",
+  open_setup_skills: "setup_skills",
+  open_setup_commands: "setup_commands",
+  open_setup_agents_md: "setup_agents_md",
+  open_setup_subagents: "setup_subagents",
+} as const;
+
+type LegacySetupAction = keyof typeof LEGACY_SETUP_ACTION_TO_MODE;
+
 /**
  * Central executor for all Buddy control actions.
  *
@@ -45,6 +55,17 @@ export async function executeBuddyAction(
     case "open_setup_mode": {
       const param = ctrl.action_param ?? "";
       const mode = isValidSetupMode(param) ? param : "setup";
+      void dispatch(openChatInModeAndStart({ mode }));
+      dispatch(clearActiveSpeech());
+      break;
+    }
+
+    case "open_setup_mcp":
+    case "open_setup_skills":
+    case "open_setup_commands":
+    case "open_setup_agents_md":
+    case "open_setup_subagents": {
+      const mode = LEGACY_SETUP_ACTION_TO_MODE[ctrl.action as LegacySetupAction];
       void dispatch(openChatInModeAndStart({ mode }));
       dispatch(clearActiveSpeech());
       break;
@@ -234,6 +255,12 @@ export function executeBuddyNavigation(
 
     case "knowledge_graph":
       dispatch(push({ name: "knowledge graph" }));
+      break;
+
+    case "setup_mode":
+      if (isValidSetupMode(page.mode)) {
+        void dispatch(openChatInModeAndStart({ mode: page.mode }));
+      }
       break;
 
     default: {

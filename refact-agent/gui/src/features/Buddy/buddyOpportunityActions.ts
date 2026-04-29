@@ -172,5 +172,7 @@ function humanizePage(page: BuddyPage): string {
       return "Task Workspace";
     case "knowledge_graph":
       return "Knowledge Graph";
+    case "setup_mode":
+      return "Setup";
   }
 }

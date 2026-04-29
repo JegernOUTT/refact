@@ -23,9 +23,9 @@ use super::types::{
     DraftKind, InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
 };
 
-fn make_service() -> BuddyService {
-    let (tx, _rx) = broadcast::channel(16);
-    BuddyService::new(
+fn make_service_with_events() -> (BuddyService, broadcast::Receiver<super::events::BuddyEvent>) {
+    let (tx, rx) = broadcast::channel(16);
+    let svc = BuddyService::new(
         std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
         default_buddy_state(),
         BuddySettings::default(),
@@ -33,7 +33,12 @@ fn make_service() -> BuddyService {
         super::runtime_queue::RuntimeQueue::new(),
         tx,
         None,
-    )
+    );
+    (svc, rx)
+}
+
+fn make_service() -> BuddyService {
+    make_service_with_events().0
 }
 
 fn make_suggestion(id: &str, stype: &str, created_at: &str) -> BuddySuggestion {
@@ -952,19 +957,25 @@ fn test_buddy_say_creates_speech() {
 
 #[test]
 fn test_buddy_controls_schema() {
-    let valid_actions = [
-        "open_chat",
-        "open_setup",
-        "open_setup_mcp",
-        "open_setup_skills",
-        "open_stats",
-        "open_buddy",
-        "dismiss",
-        "run_command",
-    ];
-    assert!(valid_actions.contains(&"open_setup"));
-    assert!(valid_actions.contains(&"dismiss"));
-    assert!(!valid_actions.contains(&"invalid_action"));
+    use crate::tools::tool_buddy_say::ToolBuddyRenderControls;
+    use crate::tools::tools_description::Tool;
+    let tool = ToolBuddyRenderControls {
+        config_path: String::new(),
+    };
+    let desc = tool.tool_description();
+    let actions: Vec<&str> = desc.input_schema["properties"]["controls"]["items"]["properties"]
+        ["action"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(actions.contains(&"open_setup"));
+    assert!(actions.contains(&"open_setup_mode"));
+    assert!(actions.contains(&"dismiss"));
+    assert!(!actions.contains(&"open_setup_mcp"));
+    assert!(!actions.contains(&"run_command"));
+    assert!(!actions.contains(&"invalid_action"));
 }
 
 #[test]
@@ -2264,6 +2275,9 @@ fn buddy_page_round_trip() {
             task_id: "task-abc".to_string(),
         },
         BuddyPage::KnowledgeGraph,
+        BuddyPage::SetupMode {
+            mode: "setup_mcp".to_string(),
+        },
     ];
     for page in &pages {
         let json = serde_json::to_string(page).expect("serialize");
@@ -2275,6 +2289,11 @@ fn buddy_page_round_trip() {
     })
     .unwrap();
     assert!(task_json.contains("task-abc"), "task_id must be serialized");
+    let setup_json = serde_json::to_string(&BuddyPage::SetupMode {
+        mode: "setup_mcp".to_string(),
+    })
+    .unwrap();
+    assert!(setup_json.contains("setup_mcp"), "mode must be serialized");
 }
 
 fn serialized_string<T: serde::Serialize>(value: &T) -> String {
@@ -2317,12 +2336,21 @@ fn schema_contract_buddy_page_variants() {
             "task_workspace",
         ),
         (BuddyPage::KnowledgeGraph, "knowledge_graph"),
+        (
+            BuddyPage::SetupMode {
+                mode: "setup_mcp".to_string(),
+            },
+            "setup_mode",
+        ),
     ];
     for (page, expected) in cases {
         let json = serde_json::to_value(&page).expect("serialize");
         assert_eq!(json.get("type").and_then(|v| v.as_str()), Some(expected));
         if expected == "task_workspace" {
             assert_eq!(json.get("task_id").and_then(|v| v.as_str()), Some("task-1"));
+        }
+        if expected == "setup_mode" {
+            assert_eq!(json.get("mode").and_then(|v| v.as_str()), Some("setup_mcp"));
         }
     }
 }
@@ -3595,14 +3623,11 @@ fn mcp_auth_failure_count() {
     );
 }
 
-#[tokio::test]
-async fn buddy_open_view_errors_without_service() {
-    use crate::at_commands::at_commands::AtCommandsContext;
-    use crate::tools::tool_buddy_open_view::ToolBuddyOpenView;
-    use crate::tools::tools_description::Tool;
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    let ccx = Arc::new(tokio::sync::Mutex::new(
-        AtCommandsContext::new(
+async fn make_tool_ccx(
+    gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+) -> Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>> {
+    Arc::new(tokio::sync::Mutex::new(
+        crate::at_commands::at_commands::AtCommandsContext::new(
             gcx,
             4000,
             20,
@@ -3614,7 +3639,15 @@ async fn buddy_open_view_errors_without_service() {
             None,
         )
         .await,
-    ));
+    ))
+}
+
+#[tokio::test]
+async fn buddy_open_view_errors_without_service() {
+    use crate::tools::tool_buddy_open_view::ToolBuddyOpenView;
+    use crate::tools::tools_description::Tool;
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let ccx = make_tool_ccx(gcx).await;
     let mut tool = ToolBuddyOpenView {
         config_path: String::new(),
     };
@@ -3625,6 +3658,97 @@ async fn buddy_open_view_errors_without_service() {
         .await
         .unwrap_err();
     assert!(err.contains("buddy service not initialized"));
+}
+
+#[tokio::test]
+async fn buddy_open_setup_flow_emits_setup_mode() {
+    use crate::tools::tool_buddy_open_setup_flow::ToolBuddyOpenSetupFlow;
+    use crate::tools::tools_description::Tool;
+    let (svc, mut rx) = make_service_with_events();
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    *gcx.read().await.buddy.lock().await = Some(svc);
+    let ccx = make_tool_ccx(gcx).await;
+    let mut tool = ToolBuddyOpenSetupFlow {
+        config_path: String::new(),
+    };
+    let mut args = std::collections::HashMap::new();
+    args.insert("flow".to_string(), serde_json::json!("setup_mcp"));
+    tool.tool_execute(ccx, &"tool-call".to_string(), &args)
+        .await
+        .unwrap();
+    match rx.try_recv().unwrap() {
+        super::events::BuddyEvent::NavigationRequest {
+            page: BuddyPage::SetupMode { mode },
+        } => assert_eq!(mode, "setup_mcp"),
+        event => panic!("unexpected event: {:?}", event),
+    }
+}
+
+#[tokio::test]
+async fn buddy_setup_speech_tools_error_without_service() {
+    use crate::tools::tool_buddy_open_setup_flow::ToolBuddyOpenSetupFlow;
+    use crate::tools::tool_buddy_say::{ToolBuddyRenderControls, ToolBuddySay};
+    use crate::tools::tools_description::Tool;
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let ccx = make_tool_ccx(gcx).await;
+
+    let mut setup = ToolBuddyOpenSetupFlow {
+        config_path: String::new(),
+    };
+    let mut setup_args = std::collections::HashMap::new();
+    setup_args.insert("flow".to_string(), serde_json::json!("setup_mcp"));
+    let setup_err = setup
+        .tool_execute(ccx.clone(), &"setup-call".to_string(), &setup_args)
+        .await
+        .unwrap_err();
+    assert!(setup_err.contains("buddy service not initialized"));
+
+    let mut say = ToolBuddySay {
+        config_path: String::new(),
+    };
+    let mut say_args = std::collections::HashMap::new();
+    say_args.insert("text".to_string(), serde_json::json!("hello"));
+    let say_err = say
+        .tool_execute(ccx.clone(), &"say-call".to_string(), &say_args)
+        .await
+        .unwrap_err();
+    assert!(say_err.contains("buddy service not initialized"));
+
+    let mut controls = ToolBuddyRenderControls {
+        config_path: String::new(),
+    };
+    let mut control_args = std::collections::HashMap::new();
+    control_args.insert(
+        "controls".to_string(),
+        serde_json::json!([
+            {"id": "setup", "label": "Setup", "action": "open_setup"}
+        ]),
+    );
+    let controls_err = controls
+        .tool_execute(ccx, &"controls-call".to_string(), &control_args)
+        .await
+        .unwrap_err();
+    assert!(controls_err.contains("buddy service not initialized"));
+}
+
+#[test]
+fn buddy_open_setup_flow_schema_excludes_configurator() {
+    use crate::tools::tool_buddy_open_setup_flow::ToolBuddyOpenSetupFlow;
+    use crate::tools::tools_description::Tool;
+    let tool = ToolBuddyOpenSetupFlow {
+        config_path: String::new(),
+    };
+    let desc = tool.tool_description();
+    let flows: Vec<&str> = desc.input_schema["properties"]["flow"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(flows.contains(&"setup"));
+    assert!(flows.contains(&"setup_mcp"));
+    assert!(flows.contains(&"setup_subagents"));
+    assert!(!flows.contains(&"configurator"));
 }
 
 fn chat_msg(role: &str, content: &str) -> crate::call_validation::ChatMessage {
@@ -4060,6 +4184,9 @@ fn tool_buddy_open_view_each_page() {
             task_id: "task-xyz".to_string(),
         },
         BuddyPage::KnowledgeGraph,
+        BuddyPage::SetupMode {
+            mode: "setup_mcp".to_string(),
+        },
     ];
 
     let mut svc = make_service();

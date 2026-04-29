@@ -5,6 +5,7 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::buddy::types::BuddyPage;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -15,7 +16,6 @@ const VALID_FLOWS: &[&str] = &[
     "setup_commands",
     "setup_agents_md",
     "setup_subagents",
-    "configurator",
 ];
 
 pub struct ToolBuddyOpenSetupFlow {
@@ -41,7 +41,7 @@ impl Tool for ToolBuddyOpenSetupFlow {
                     "flow": {
                         "type": "string",
                         "description": "Which setup flow to launch.",
-                        "enum": ["setup", "setup_mcp", "setup_skills", "setup_commands", "setup_agents_md", "setup_subagents", "configurator"]
+                        "enum": VALID_FLOWS
                     }
                 },
                 "required": ["flow"]
@@ -75,9 +75,10 @@ impl Tool for ToolBuddyOpenSetupFlow {
 
         let buddy_arc = gcx.read().await.buddy.clone();
         let lock = buddy_arc.lock().await;
-        if let Some(svc) = lock.as_ref() {
-            svc.send_navigation(crate::buddy::types::BuddyPage::Customization);
-        }
+        let svc = lock
+            .as_ref()
+            .ok_or_else(|| "buddy service not initialized".to_string())?;
+        svc.send_navigation(BuddyPage::SetupMode { mode: flow.clone() });
 
         Ok((
             false,

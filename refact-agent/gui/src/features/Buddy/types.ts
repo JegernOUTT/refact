@@ -652,7 +652,8 @@ export type BuddyPage =
   | { type: "delegates_marketplace" }
   | { type: "tasks_list" }
   | { type: "task_workspace"; task_id: string }
-  | { type: "knowledge_graph" };
+  | { type: "knowledge_graph" }
+  | { type: "setup_mode"; mode: string };
 
 export interface InvestigationContext {
   fact_keys: string[];

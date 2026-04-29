@@ -49,6 +49,7 @@ describe("isValidSetupMode", () => {
     expect(isValidSetupMode("agent")).toBe(false);
     expect(isValidSetupMode("task_planner")).toBe(false);
     expect(isValidSetupMode("unknown_mode")).toBe(false);
+    expect(isValidSetupMode("configurator")).toBe(false);
   });
 
   test("returns false for a partial prefix match", () => {
