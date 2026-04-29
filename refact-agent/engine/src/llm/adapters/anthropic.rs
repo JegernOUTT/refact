@@ -200,6 +200,8 @@ impl LlmWireAdapter for AnthropicAdapter {
             }
         }
 
+        crate::llm::provider_quirks::remove_anthropic_unsupported_fields(&mut body, settings);
+
         {
             let mut betas: Vec<&str> = Vec::new();
             let thinking_type = body
@@ -971,6 +973,57 @@ mod tests {
 
         let http = adapter.build_http(&req, &settings).unwrap();
         assert!(http.body.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn test_minimax_unsupported_cache_control_beta_and_tools_remain_absent() {
+        use crate::llm::params::ReasoningIntent;
+        use std::collections::HashMap;
+
+        let adapter = AnthropicAdapter;
+        let mut extra = HashMap::new();
+        extra.insert(
+            "cache_control".to_string(),
+            json!({"type": "ephemeral", "ttl": "1h"}),
+        );
+        extra.insert(
+            "thinking".to_string(),
+            json!({"type": "enabled", "budget_tokens": 4096}),
+        );
+        extra.insert("output_config".to_string(), json!({"effort": "high"}));
+        extra.insert("tools".to_string(), json!([{"name": "blocked"}]));
+        extra.insert("tool_choice".to_string(), json!({"type": "any"}));
+
+        let req = LlmRequest::new(
+            "minimax/MiniMax-M2".to_string(),
+            vec![ChatMessage::new("user".to_string(), "test".to_string())],
+        )
+        .with_cache_control(CacheControl::Ephemeral)
+        .with_reasoning(ReasoningIntent::High)
+        .with_tools(
+            vec![json!({
+                "type": "function",
+                "function": {"name": "tool", "parameters": {}}
+            })],
+            Some(CanonicalToolChoice::Required),
+        )
+        .with_extra_body(extra);
+
+        let mut settings = settings();
+        settings.model_name = "MiniMax-M2".to_string();
+        settings.endpoint = "https://api.minimax.io/anthropic/v1/messages".to_string();
+        settings.supports_cache_control = false;
+        settings.supports_reasoning = false;
+        settings.supports_tools = false;
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert!(http.body.get("cache_control").is_none());
+        assert!(http.body.get("thinking").is_none());
+        assert!(http.body.get("output_config").is_none());
+        assert!(http.body.get("tools").is_none());
+        assert!(http.body.get("tool_choice").is_none());
+        assert!(http.headers.get("anthropic-beta").is_none());
     }
 
     #[test]

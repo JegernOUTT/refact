@@ -4,6 +4,7 @@ pub mod canonical;
 pub mod embeddings;
 pub mod logging;
 pub mod params;
+pub mod provider_quirks;
 
 pub use adapter::{get_adapter, WireFormat};
 pub use canonical::{LlmRequest, LlmStreamDelta, CanonicalToolChoice};

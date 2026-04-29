@@ -200,8 +200,10 @@ impl LlmWireAdapter for OpenAiChatAdapter {
         }
 
         if settings.supports_reasoning {
-            if let Some(effort) = req.reasoning.to_openai_effort() {
-                body["reasoning_effort"] = json!(effort);
+            if !crate::llm::provider_quirks::uses_openai_provider_reasoning_controls(req) {
+                if let Some(effort) = req.reasoning.to_openai_effort() {
+                    body["reasoning_effort"] = json!(effort);
+                }
             }
             body.as_object_mut().map(|obj| obj.remove("temperature"));
             body.as_object_mut().map(|obj| obj.remove("top_p"));
@@ -225,6 +227,8 @@ impl LlmWireAdapter for OpenAiChatAdapter {
                 }
             }
         }
+
+        crate::llm::provider_quirks::apply_openai_chat_body_quirks(&mut body, req, settings);
 
         tracing::info!(
             model = %settings.model_name,
@@ -693,9 +697,15 @@ fn parse_openai_usage(usage: &Value) -> Option<ChatUsage> {
         .filter(|&v| v > 0)
         .map(|v| v as usize);
 
+    let moonshot_cached = usage
+        .get("cached_tokens")
+        .and_then(|t| t.as_u64())
+        .filter(|&v| v > 0)
+        .map(|v| v as usize);
+
     // Merge: prefer Anthropic fields (when routing via OpenRouter), fall back to OpenAI fields
     let cache_creation = anthropic_cache_creation;
-    let cache_read = anthropic_cache_read.or(openai_cached);
+    let cache_read = anthropic_cache_read.or(openai_cached).or(moonshot_cached);
 
     let raw_prompt = usage
         .get("prompt_tokens")
@@ -786,6 +796,110 @@ mod tests {
 
         assert!(http.body.get("temperature").is_none());
         assert!(http.body.get("top_p").is_none());
+    }
+
+    #[test]
+    fn test_qwen_reasoning_enabled_body_contains_thinking_budget() {
+        use crate::llm::params::ReasoningIntent;
+
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new(
+            "qwen/qwen3-max".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        )
+        .with_reasoning(ReasoningIntent::BudgetTokens(2048));
+
+        let mut settings = default_settings();
+        settings.model_name = "qwen3-max".to_string();
+        settings.endpoint =
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions".to_string();
+        settings.supports_reasoning = true;
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(http.body["enable_thinking"], true);
+        assert_eq!(http.body["thinking_budget"], 2048);
+        assert!(http.body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_qwen_reasoning_off_body_contains_enable_thinking_false() {
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new(
+            "qwen/qwen3-max".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+
+        let mut settings = default_settings();
+        settings.model_name = "qwen3-max".to_string();
+        settings.supports_reasoning = true;
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(http.body["enable_thinking"], false);
+        assert!(http.body.get("thinking_budget").is_none());
+        assert!(http.body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_non_qwen_openai_model_never_gets_qwen_fields() {
+        use crate::llm::params::ReasoningIntent;
+
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new(
+            "custom/qwen3-max".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        )
+        .with_reasoning(ReasoningIntent::BudgetTokens(2048));
+
+        let mut settings = default_settings();
+        settings.model_name = "qwen3-max".to_string();
+        settings.supports_reasoning = true;
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert!(http.body.get("enable_thinking").is_none());
+        assert!(http.body.get("thinking_budget").is_none());
+        assert_eq!(http.body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn test_zhipu_reasoning_enabled_uses_glm_thinking_body() {
+        use crate::llm::params::ReasoningIntent;
+
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new(
+            "zhipu/glm-4.7".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        )
+        .with_reasoning(ReasoningIntent::Medium);
+
+        let mut settings = default_settings();
+        settings.model_name = "glm-4.7".to_string();
+        settings.supports_reasoning = true;
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(http.body["thinking"], json!({"type": "enabled"}));
+        assert!(http.body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_zhipu_reasoning_off_uses_glm_thinking_disabled() {
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new(
+            "zhipu/glm-4.7".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+
+        let mut settings = default_settings();
+        settings.model_name = "glm-4.7".to_string();
+        settings.supports_reasoning = true;
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(http.body["thinking"], json!({"type": "disabled"}));
+        assert!(http.body.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -1322,6 +1436,24 @@ mod tests {
         assert_eq!(result.completion_tokens, 100);
         assert_eq!(result.cache_creation_tokens, None);
         assert_eq!(result.cache_read_tokens, Some(800));
+    }
+
+    #[test]
+    fn test_parse_openai_usage_with_moonshot_top_level_cached_tokens() {
+        let usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "cached_tokens": 300
+        });
+
+        let result = parse_openai_usage(&usage).unwrap();
+
+        assert_eq!(result.prompt_tokens, 700);
+        assert_eq!(result.completion_tokens, 100);
+        assert_eq!(result.cache_creation_tokens, None);
+        assert_eq!(result.cache_read_tokens, Some(300));
+        assert_eq!(result.total_tokens, 1100);
     }
 
     #[test]
