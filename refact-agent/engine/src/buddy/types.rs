@@ -510,7 +510,7 @@ pub enum BuddyAction {
         label: String,
     },
     DraftAgentsMdPatch {
-        diff: String,
+        content: String,
     },
     DraftDefaultsChange {
         defaults_kind: DefaultsKind,

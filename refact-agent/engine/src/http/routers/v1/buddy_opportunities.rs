@@ -12,8 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
-use crate::buddy::drafts::{draft_kind_str, DraftTarget, DraftValidationError};
-use crate::buddy::events::BuddyEvent;
+use crate::buddy::drafts::{draft_kind_str, DraftCreateError, DraftTarget, DraftValidationError};
 use crate::buddy::opportunities::is_terminal_status;
 use crate::buddy::types::{
     BuddyAction, BuddyDraft, BuddyPulse, CustomizationKind, DraftKind, InvestigationContext,
@@ -43,6 +42,10 @@ pub struct AcceptRequest {
 pub(crate) struct ActionOutcome {
     pub result: serde_json::Value,
     pub status: OpportunityStatus,
+}
+
+fn draft_create_error(err: DraftCreateError) -> ScratchError {
+    ScratchError::new(StatusCode::PAYLOAD_TOO_LARGE, err.to_string())
 }
 
 fn draft_validation_error(err: DraftValidationError) -> ScratchError {
@@ -292,17 +295,17 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
-        BuddyAction::DraftAgentsMdPatch { diff } => {
-            let content = if diff.is_empty() {
+        BuddyAction::DraftAgentsMdPatch { content } => {
+            let draft_content = if content.is_empty() {
                 "# AGENTS.md\n\nThis file provides guidance to AI agents when working with this repository.\n\n## Development Commands\n\n- **Build**: `make build`\n- **Test**: `make test`\n\n## Architecture\n\nDescribe the project architecture here.\n"
             } else {
-                diff.as_str()
+                content.as_str()
             };
             let draft = synthesize_draft(
                 gcx.clone(),
                 DraftKind::AgentsMd,
                 "AGENTS.md".to_string(),
-                content.to_string(),
+                draft_content.to_string(),
             )
             .await?;
             Ok(ActionOutcome {
@@ -734,11 +737,8 @@ async fn synthesize_draft(
             "buddy not initialized".into(),
         )
     })?;
-    let draft = svc.draft_store.create(kind, title, content, String::new());
-    let _ = svc.events_tx.send(BuddyEvent::DraftCreated {
-        draft: draft.clone(),
-    });
-    Ok(draft)
+    svc.create_draft(kind, title, content, String::new())
+        .map_err(draft_create_error)
 }
 
 fn diagnostic_severity_label(

@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 
+use crate::buddy::drafts::DraftCreateError;
 use crate::buddy::types::{BuddyDraft, DraftKind};
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
@@ -15,6 +16,10 @@ pub struct DraftCreateRequest {
     pub title: String,
     pub yaml_or_json: String,
     pub explanation: String,
+}
+
+fn draft_create_error(err: DraftCreateError) -> ScratchError {
+    ScratchError::new(StatusCode::PAYLOAD_TOO_LARGE, err.to_string())
 }
 
 pub async fn handle_v1_buddy_draft_create_skill(
@@ -87,9 +92,8 @@ async fn create_draft(
         )
     })?;
     let draft = svc
-        .draft_store
-        .create(kind, req.title, req.yaml_or_json, req.explanation);
-    svc.add_draft(draft.clone());
+        .create_draft(kind, req.title, req.yaml_or_json, req.explanation)
+        .map_err(draft_create_error)?;
     Ok(axum::Json(draft))
 }
 
@@ -123,6 +127,6 @@ pub async fn handle_v1_buddy_draft_delete(
             "buddy not initialized".into(),
         )
     })?;
-    svc.draft_store.delete(&id);
-    Ok(axum::Json(serde_json::json!({ "ok": true })))
+    let deleted = svc.delete_draft(&id).is_some();
+    Ok(axum::Json(serde_json::json!({ "ok": true, "deleted": deleted })))
 }

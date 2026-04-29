@@ -5,7 +5,6 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::buddy::events::BuddyEvent;
 use crate::buddy::types::DraftKind;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -26,14 +25,14 @@ impl Tool for ToolBuddyCreateDraft {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Create a Buddy draft (skill, command, delegate, mode, agents_md, defaults_model, hook). Returns a draft_id the user can navigate to in the corresponding editor for review/save.".to_string(),
+            description: "Create a Buddy draft (skill, command, delegate, mode, agents_md, defaults_model, hook, pulse_report). Returns a draft_id the user can navigate to in the corresponding editor for review/save.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "kind": {
                         "type": "string",
                         "description": "Draft type.",
-                        "enum": ["skill", "command", "delegate", "mode", "agents_md", "defaults_model", "hook"]
+                        "enum": ["skill", "command", "delegate", "mode", "agents_md", "defaults_model", "hook", "pulse_report"]
                     },
                     "title": {
                         "type": "string",
@@ -90,11 +89,8 @@ impl Tool for ToolBuddyCreateDraft {
         let svc = lock.as_mut().ok_or("buddy service not initialized")?;
 
         let draft = svc
-            .draft_store
-            .create(kind, title.clone(), yaml_or_json, explanation);
-        let _ = svc.events_tx.send(BuddyEvent::DraftCreated {
-            draft: draft.clone(),
-        });
+            .create_draft(kind, title.clone(), yaml_or_json, explanation)
+            .map_err(|e| e.to_string())?;
 
         let draft_id = draft.id.clone();
         let expires_at = draft.expires_at.to_rfc3339();

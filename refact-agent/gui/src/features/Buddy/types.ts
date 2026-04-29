@@ -668,7 +668,7 @@ export type BuddyAction =
   | { kind: "draft_command"; draft_id: string; label: string }
   | { kind: "draft_delegate"; draft_id: string; label: string }
   | { kind: "draft_mode"; draft_id: string; label: string }
-  | { kind: "draft_agents_md_patch"; diff: string }
+  | { kind: "draft_agents_md_patch"; content: string }
   | {
       kind: "draft_defaults_change";
       defaults_kind: DefaultsKind;
@@ -953,4 +953,5 @@ export type BuddySSEEvent =
     }
   | { event_type: "PulseUpdated"; pulse: BuddyPulse }
   | { event_type: "DraftCreated"; draft: BuddyDraft }
-  | { event_type: "DraftConsumed"; draft_id: string };
+  | { event_type: "DraftConsumed"; draft_id: string }
+  | { event_type: "DraftRemoved"; draft_id: string };

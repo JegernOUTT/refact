@@ -149,7 +149,7 @@ export function routeDraftByKind(
       );
       break;
     case "agents_md":
-      dispatch(push({ name: "customization" }));
+      dispatch(push({ name: "buddy", draftId: result.draft_id }));
       break;
     case "defaults_model":
       dispatch(push({ name: "default models", draftId: result.draft_id }));
@@ -160,7 +160,7 @@ export function routeDraftByKind(
       );
       break;
     case "pulse_report":
-      dispatch(push({ name: "buddy" }));
+      dispatch(push({ name: "buddy", draftId: result.draft_id }));
       break;
   }
 }

@@ -47,4 +47,7 @@ pub enum BuddyEvent {
     DraftConsumed {
         draft_id: String,
     },
+    DraftRemoved {
+        draft_id: String,
+    },
 }

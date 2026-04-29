@@ -2071,7 +2071,7 @@ fn buddy_action_round_trip() {
             label: "My Mode".to_string(),
         },
         BuddyAction::DraftAgentsMdPatch {
-            diff: "--- a\n+++ b".to_string(),
+            content: "--- a\n+++ b".to_string(),
         },
         BuddyAction::DraftDefaultsChange {
             defaults_kind: DefaultsKind::ChatModel,
@@ -2234,7 +2234,7 @@ fn schema_contract_buddy_action_variants() {
         ),
         (
             BuddyAction::DraftAgentsMdPatch {
-                diff: String::new(),
+                content: String::new(),
             },
             "draft_agents_md_patch",
         ),
@@ -3905,15 +3905,14 @@ fn tool_buddy_create_draft_persists() {
     let mut svc = make_service();
     let mut rx = svc.events_tx.subscribe();
 
-    let draft = svc.draft_store.create(
-        DraftKind::Skill,
-        "My Skill".to_string(),
-        "yaml: {}".to_string(),
-        "A test skill draft".to_string(),
-    );
-    let _ = svc.events_tx.send(super::events::BuddyEvent::DraftCreated {
-        draft: draft.clone(),
-    });
+    let draft = svc
+        .create_draft(
+            DraftKind::Skill,
+            "My Skill".to_string(),
+            "yaml: {}".to_string(),
+            "A test skill draft".to_string(),
+        )
+        .expect("draft must be created");
 
     let draft_id = draft.id.clone();
     assert!(
@@ -3930,12 +3929,210 @@ fn tool_buddy_create_draft_persists() {
         matches!(event, super::events::BuddyEvent::DraftCreated { .. }),
         "event must be DraftCreated"
     );
+    assert!(rx.try_recv().is_err(), "draft create must emit exactly once");
 
-    let _ = svc.draft_store.consume(&draft_id);
+    let _ = svc.consume_draft(&draft_id);
     assert!(
         svc.draft_store.get(&draft_id).is_none(),
         "consumed draft must be removed"
     );
+}
+
+#[test]
+fn tool_buddy_create_draft_schema_accepts_pulse_report() {
+    use crate::tools::tool_buddy_create_draft::ToolBuddyCreateDraft;
+    use crate::tools::tools_description::Tool;
+    let tool = ToolBuddyCreateDraft {
+        config_path: String::new(),
+    };
+    let desc = tool.tool_description();
+    let kinds = desc.input_schema["properties"]["kind"]["enum"]
+        .as_array()
+        .expect("kind enum must be an array");
+    assert!(
+        kinds.iter().any(|v| v.as_str() == Some("pulse_report")),
+        "buddy_create_draft must accept pulse_report"
+    );
+}
+
+#[tokio::test]
+async fn tool_buddy_create_draft_rejects_oversized_content() {
+    use crate::at_commands::at_commands::AtCommandsContext;
+    use crate::tools::tool_buddy_create_draft::ToolBuddyCreateDraft;
+    use crate::tools::tools_description::Tool;
+    let gcx = make_gcx_with_buddy().await;
+    let ccx = Arc::new(tokio::sync::Mutex::new(
+        AtCommandsContext::new(
+            gcx,
+            4000,
+            20,
+            false,
+            vec![],
+            String::new(),
+            None,
+            String::new(),
+            None,
+        )
+        .await,
+    ));
+    let mut tool = ToolBuddyCreateDraft {
+        config_path: String::new(),
+    };
+    let mut args = std::collections::HashMap::new();
+    args.insert("kind".to_string(), serde_json::json!("skill"));
+    args.insert("title".to_string(), serde_json::json!("Skill"));
+    let oversized_content = "x".repeat(super::drafts::DRAFT_CONTENT_MAX_BYTES + 1);
+    args.insert(
+        "yaml_or_json".to_string(),
+        serde_json::json!(oversized_content),
+    );
+    args.insert("explanation".to_string(), serde_json::json!(""));
+    let err = tool
+        .tool_execute(ccx, &"tool-call".to_string(), &args)
+        .await
+        .unwrap_err();
+    assert!(err.contains("draft content too large"));
+}
+
+#[tokio::test]
+async fn draft_create_endpoint_emits_exactly_one_created() {
+    use axum::Extension;
+    let gcx = make_gcx_with_buddy().await;
+    let mut rx = {
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        lock.as_ref().unwrap().events_tx.subscribe()
+    };
+    let response = crate::http::routers::v1::buddy_drafts::handle_v1_buddy_draft_create_skill(
+        Extension(gcx.clone()),
+        axum::Json(crate::http::routers::v1::buddy_drafts::DraftCreateRequest {
+            title: "Skill".to_string(),
+            yaml_or_json: "---\nname: skill\n---\nBody".to_string(),
+            explanation: "explain".to_string(),
+        }),
+    )
+    .await
+    .expect("draft create endpoint must succeed");
+    let draft_id = response.0.id;
+    let event = rx.try_recv().expect("must receive DraftCreated event");
+    match event {
+        super::events::BuddyEvent::DraftCreated { draft } => assert_eq!(draft.id, draft_id),
+        other => panic!("expected DraftCreated, got {:?}", other),
+    }
+    assert!(rx.try_recv().is_err(), "endpoint must emit exactly once");
+    assert!(draft_exists(&gcx, &draft_id).await);
+}
+
+#[tokio::test]
+async fn draft_create_endpoint_rejects_oversized_title() {
+    use axum::Extension;
+    use hyper::StatusCode;
+    let gcx = make_gcx_with_buddy().await;
+    let err = crate::http::routers::v1::buddy_drafts::handle_v1_buddy_draft_create_skill(
+        Extension(gcx),
+        axum::Json(crate::http::routers::v1::buddy_drafts::DraftCreateRequest {
+            title: "x".repeat(super::drafts::DRAFT_TITLE_MAX_CHARS + 1),
+            yaml_or_json: "{}".to_string(),
+            explanation: String::new(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(err.message.contains("draft title too large"));
+}
+
+#[tokio::test]
+async fn draft_delete_emits_removed_event() {
+    use axum::Extension;
+    use axum::extract::Path;
+    let gcx = make_gcx_with_buddy().await;
+    let draft_id = add_draft_to_gcx(&gcx, DraftKind::Skill, "Skill", "---\nname: skill\n---\nBody").await;
+    let mut rx = {
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        lock.as_ref().unwrap().events_tx.subscribe()
+    };
+    let _ = crate::http::routers::v1::buddy_drafts::handle_v1_buddy_draft_delete(
+        Extension(gcx.clone()),
+        Path(draft_id.clone()),
+    )
+    .await
+    .expect("draft delete must succeed");
+    let event = rx.try_recv().expect("must receive DraftRemoved event");
+    match event {
+        super::events::BuddyEvent::DraftRemoved { draft_id: removed } => {
+            assert_eq!(removed, draft_id)
+        }
+        other => panic!("expected DraftRemoved, got {:?}", other),
+    }
+    assert!(!draft_exists(&gcx, &draft_id).await);
+}
+
+#[test]
+fn draft_expiry_emits_removed_event() {
+    let mut svc = make_service();
+    let mut rx = svc.events_tx.subscribe();
+    let mut draft = svc
+        .create_draft(
+            DraftKind::PulseReport,
+            "Report".to_string(),
+            "# Report".to_string(),
+            String::new(),
+        )
+        .expect("draft must be created");
+    let _ = rx.try_recv();
+    let draft_id = draft.id.clone();
+    draft.expires_at = chrono::Utc::now() - Duration::seconds(1);
+    svc.draft_store.insert(draft);
+    let expired = svc.expire_drafts(chrono::Utc::now());
+    assert_eq!(expired, vec![draft_id.clone()]);
+    let event = rx.try_recv().expect("must receive DraftRemoved event");
+    match event {
+        super::events::BuddyEvent::DraftRemoved { draft_id: removed } => {
+            assert_eq!(removed, draft_id)
+        }
+        other => panic!("expected DraftRemoved, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn accept_agents_md_action_returns_content_draft_id() {
+    let gcx = make_gcx_with_buddy().await;
+    let content = "# AGENTS.md\n\nUse cargo test.";
+    let outcome = crate::http::routers::v1::buddy_opportunities::dispatch_action(
+        gcx.clone(),
+        "opp-agents-md",
+        &BuddyAction::DraftAgentsMdPatch {
+            content: content.to_string(),
+        },
+    )
+    .await
+    .expect("agents md draft action must succeed");
+    assert_eq!(outcome.result["draft_kind"], "agents_md");
+    let draft_id = outcome.result["draft_id"].as_str().unwrap();
+    let draft = draft_by_id(&gcx, draft_id).await;
+    assert_eq!(draft.kind, DraftKind::AgentsMd);
+    assert_eq!(draft.yaml_or_json, content);
+}
+
+#[tokio::test]
+async fn accept_pulse_report_action_returns_report_draft_id() {
+    let gcx = make_gcx_with_buddy().await;
+    let outcome = crate::http::routers::v1::buddy_opportunities::dispatch_action(
+        gcx.clone(),
+        "opp-pulse-report",
+        &BuddyAction::CreatePulseReport {
+            scope: PulseScope::All,
+        },
+    )
+    .await
+    .expect("pulse report draft action must succeed");
+    assert_eq!(outcome.result["draft_kind"], "pulse_report");
+    let draft_id = outcome.result["draft_id"].as_str().unwrap();
+    let draft = draft_by_id(&gcx, draft_id).await;
+    assert_eq!(draft.kind, DraftKind::PulseReport);
+    assert!(draft.yaml_or_json.contains("# Buddy Pulse Report"));
 }
 
 #[tokio::test]
@@ -4877,13 +5074,13 @@ async fn accept_synthesizes_real_draft() {
     );
     let mut opp = make_opportunity("opp-synth", "ck-synth");
     opp.proposed_actions = vec![BuddyAction::DraftAgentsMdPatch {
-        diff: String::new(),
+        content: String::new(),
     }];
     svc.add_opportunity(opp);
     let synth_opp = svc.opportunity_queue.get("opp-synth").cloned().unwrap();
     let action = &synth_opp.proposed_actions[0];
-    if let BuddyAction::DraftAgentsMdPatch { diff } = action {
-        assert!(diff.is_empty(), "action has empty diff placeholder");
+    if let BuddyAction::DraftAgentsMdPatch { content } = action {
+        assert!(content.is_empty(), "action has empty content placeholder");
     }
     let draft = svc.draft_store.create(
         DraftKind::AgentsMd,

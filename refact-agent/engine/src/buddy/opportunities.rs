@@ -944,7 +944,7 @@ mod rules {
                     "agents_md:gap:global",
                     vec![
                         BuddyAction::DraftAgentsMdPatch {
-                            diff: String::new(),
+                            content: String::new(),
                         },
                         BuddyAction::Dismiss,
                     ],

@@ -16,7 +16,11 @@ import type {
   BuddyOpportunityAcceptResponse,
   InvestigationContext,
 } from "../../features/Buddy/types";
-import { replaceOpportunities } from "../../features/Buddy/buddySlice";
+import {
+  addDraft,
+  removeDraft,
+  replaceOpportunities,
+} from "../../features/Buddy/buddySlice";
 
 type BuddyApiState = {
   config: {
@@ -520,6 +524,50 @@ export const buddyApi = createApi({
       },
       invalidatesTags: ["BuddyDrafts", "BuddySnapshot"],
     }),
+    createHookDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: `http://127.0.0.1:${port}/v1/buddy/drafts/hook`,
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as BuddyDraft };
+      },
+      invalidatesTags: ["BuddyDrafts", "BuddySnapshot"],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(addDraft(data));
+        } catch {
+          return;
+        }
+      },
+    }),
+    createPulseReportDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: `http://127.0.0.1:${port}/v1/buddy/drafts/pulse_report`,
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as BuddyDraft };
+      },
+      invalidatesTags: ["BuddyDrafts", "BuddySnapshot"],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(addDraft(data));
+        } catch {
+          return;
+        }
+      },
+    }),
     getDraft: builder.query<BuddyDraft, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
@@ -546,6 +594,14 @@ export const buddyApi = createApi({
         return { data: undefined };
       },
       invalidatesTags: ["BuddyDrafts", "BuddySnapshot"],
+      async onQueryStarted(id, { dispatch, queryFulfilled }) {
+        try {
+          await queryFulfilled;
+          dispatch(removeDraft(id));
+        } catch {
+          return;
+        }
+      },
     }),
     launchInvestigation: builder.mutation<
       LaunchInvestigationResponse,
@@ -615,6 +671,8 @@ export const {
   useCreateModeDraftMutation,
   useCreateAgentsMdDraftMutation,
   useCreateDefaultsDraftMutation,
+  useCreateHookDraftMutation,
+  useCreatePulseReportDraftMutation,
   useGetDraftQuery,
   useDeleteDraftMutation,
   useLaunchInvestigationMutation,

@@ -43,7 +43,7 @@ function assertBuddyAction(action: BuddyAction): string {
     case "draft_mode":
       return action.draft_id + action.label;
     case "draft_agents_md_patch":
-      return action.diff;
+      return action.content;
     case "draft_defaults_change":
       return action.defaults_kind;
     case "draft_customization_change":
@@ -106,7 +106,7 @@ describe("Buddy schema contract", () => {
       { kind: "draft_command", draft_id: "d2", label: "Command" },
       { kind: "draft_delegate", draft_id: "d3", label: "Delegate" },
       { kind: "draft_mode", draft_id: "d4", label: "Mode" },
-      { kind: "draft_agents_md_patch", diff: "diff" },
+      { kind: "draft_agents_md_patch", content: "# AGENTS.md" },
       {
         kind: "draft_defaults_change",
         defaults_kind: "chat_model",

@@ -39,6 +39,7 @@ import {
   setPulse,
   addDraft,
   consumeDraft,
+  removeDraft,
 } from "../features/Buddy/buddySlice";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 
@@ -450,6 +451,9 @@ export function useSidebarSubscription() {
           break;
         case "DraftConsumed":
           dispatch(consumeDraft(buddy_event.draft_id));
+          break;
+        case "DraftRemoved":
+          dispatch(removeDraft(buddy_event.draft_id));
           break;
       }
     },

@@ -95,6 +95,7 @@ export interface MarketplaceHubPage {
 
 export interface BuddyPage {
   name: "buddy";
+  draftId?: string;
 }
 
 export interface IntegrationsSetupPage {

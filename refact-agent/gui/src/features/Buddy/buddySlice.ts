@@ -427,6 +427,11 @@ export const buddySlice = createSlice({
         (d) => d.id !== action.payload,
       );
     },
+    removeDraft: (state, action: PayloadAction<string>) => {
+      state.activeDrafts = state.activeDrafts.filter(
+        (d) => d.id !== action.payload,
+      );
+    },
     replaceOpportunities: (
       state,
       action: PayloadAction<BuddyOpportunity[]>,
@@ -480,6 +485,7 @@ export const {
   setPulse,
   addDraft,
   consumeDraft,
+  removeDraft,
   replaceOpportunities,
 } = buddySlice.actions;
 

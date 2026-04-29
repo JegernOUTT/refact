@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
+import {
+  executeBuddyNavigation,
+  routeDraftByKind,
+} from "../features/Buddy/executeBuddyAction";
 import { pagesSlice, push } from "../features/Pages/pagesSlice";
 import * as fs from "fs";
 import * as path from "path";
@@ -23,6 +26,7 @@ import {
   setPulse,
   addDraft,
   consumeDraft,
+  removeDraft,
   selectUnreadOpportunities,
   defaultBuddyPulse,
 } from "../features/Buddy/buddySlice";
@@ -31,7 +35,7 @@ import { PALETTES, SIGNALS, STAGES } from "../features/Buddy/constants";
 import { buildColorMap } from "../features/Buddy/canvas/colorMap";
 import { updateSceneAnimation } from "../features/Buddy/canvas/animLoop";
 import { createInitialAnimState } from "../features/Buddy/state";
-import type { BuddyErrorReport } from "../services/refact/buddy";
+import { buddyApi, type BuddyErrorReport } from "../services/refact/buddy";
 import type {
   BuddySnapshot,
   BuddyState,
@@ -46,6 +50,7 @@ import type {
   BuddyPulse,
   BuddyAction,
   BuddyPage,
+  DraftKind,
 } from "../features/Buddy/types";
 import { buildBuddyInvestigationPrompt } from "../features/Buddy/investigation";
 import { withBuddyErrorReport } from "../features/Buddy/BuddyErrorBoundary";
@@ -1407,6 +1412,16 @@ describe("buddy opportunities, pulse, and drafts", () => {
     expect(s3.activeDrafts[0].id).toBe("d2");
   });
 
+  test("removeDraft removes by id", () => {
+    const d1 = makeDraft({ id: "d1" });
+    const d2 = makeDraft({ id: "d2" });
+    const s1 = reducer(undefined, addDraft(d1));
+    const s2 = reducer(s1, addDraft(d2));
+    const s3 = reducer(s2, removeDraft("d2"));
+    expect(s3.activeDrafts).toHaveLength(1);
+    expect(s3.activeDrafts[0].id).toBe("d1");
+  });
+
   test("setBuddySnapshot without pulse defaults defensively", () => {
     const snap = makeSnapshot();
     const state = reducer(undefined, setBuddySnapshot(snap));
@@ -1550,6 +1565,52 @@ describe("executeBuddyNavigation dispatches for each BuddyPage variant", () => {
   });
 });
 
+describe("routeDraftByKind preserves draft IDs", () => {
+  test("dispatches a draft-aware consumer for every DraftKind", () => {
+    const cases: [DraftKind, string, Record<string, unknown>][] = [
+      ["skill", "extensions", { tab: "skills", draftId: "draft-x" }],
+      ["command", "extensions", { tab: "commands", draftId: "draft-x" }],
+      ["delegate", "customization", { kind: "subagents", draftId: "draft-x" }],
+      ["mode", "customization", { kind: "modes", draftId: "draft-x" }],
+      ["agents_md", "buddy", { draftId: "draft-x" }],
+      ["defaults_model", "default models", { draftId: "draft-x" }],
+      ["hook", "extensions", { tab: "hooks", draftId: "draft-x" }],
+      ["pulse_report", "buddy", { draftId: "draft-x" }],
+    ];
+
+    for (const [draftKind, expectedName, expectedPayload] of cases) {
+      const dispatch = vi.fn();
+      routeDraftByKind(
+        { draft_kind: draftKind, draft_id: "draft-x" },
+        dispatch as never,
+      );
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const action = dispatch.mock.calls[0][0] as ReturnType<typeof push>;
+      expect(action.payload).toMatchObject({
+        name: expectedName,
+        ...expectedPayload,
+      });
+    }
+  });
+
+  test("RTK service exposes hook and pulse report draft endpoints", () => {
+    expect(buddyApi.endpoints.createHookDraft).toBeDefined();
+    expect(buddyApi.endpoints.createPulseReportDraft).toBeDefined();
+    const source = fs.readFileSync(
+      path.join(
+        __dirname,
+        "..",
+        "services",
+        "refact",
+        "buddy.ts",
+      ),
+      "utf8",
+    );
+    expect(source).toContain("/v1/buddy/drafts/hook");
+    expect(source).toContain("/v1/buddy/drafts/pulse_report");
+  });
+});
+
 describe("pagesSlice handles new page entries", () => {
   const reducer = pagesSlice.reducer;
 
@@ -1578,6 +1639,15 @@ describe("pagesSlice handles new page entries", () => {
   test("push subagents marketplace stores page name", () => {
     const state = reducer(undefined, push({ name: "subagents marketplace" }));
     expect(state[state.length - 1].name).toBe("subagents marketplace");
+  });
+
+  test("push buddy draft stores draftId", () => {
+    const state = reducer(undefined, push({ name: "buddy", draftId: "draft-x" }));
+    const last = state[state.length - 1];
+    expect(last.name).toBe("buddy");
+    if (last.name === "buddy") {
+      expect(last.draftId).toBe("draft-x");
+    }
   });
 });
 

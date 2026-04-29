@@ -784,5 +784,39 @@
   align-items: center;
 }
 
+.draftPanel {
+  gap: var(--space-3);
+}
+
+.draftMeta {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draftContent {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  background: var(--gray-a3);
+  color: var(--gray-12);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.draftActions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
 /* Recent chats panel uses the shared .panel; its internals already render
    their own header/filters/rows from BuddyRecentChats. */

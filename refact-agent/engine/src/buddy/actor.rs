@@ -9,7 +9,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::global_context::GlobalContext;
-use super::drafts::{DraftStore, DraftTarget, DraftValidationError};
+use super::drafts::{
+    validate_draft_payload, DraftCreateError, DraftStore, DraftTarget, DraftValidationError,
+};
 use super::events::BuddyEvent;
 use super::facts::FactStore;
 use super::humor::{HumorPlan, HumorService};
@@ -355,9 +357,32 @@ impl BuddyService {
         let _ = self.events_tx.send(BuddyEvent::PulseUpdated { pulse });
     }
 
+    pub fn create_draft(
+        &mut self,
+        kind: super::types::DraftKind,
+        title: String,
+        yaml_or_json: String,
+        explanation: String,
+    ) -> Result<BuddyDraft, DraftCreateError> {
+        validate_draft_payload(&title, &yaml_or_json, &explanation)?;
+        let draft = self.draft_store.create(kind, title, yaml_or_json, explanation);
+        let _ = self.events_tx.send(BuddyEvent::DraftCreated {
+            draft: draft.clone(),
+        });
+        Ok(draft)
+    }
+
     pub fn add_draft(&mut self, draft: BuddyDraft) {
         self.draft_store.insert(draft.clone());
         let _ = self.events_tx.send(BuddyEvent::DraftCreated { draft });
+    }
+
+    pub fn delete_draft(&mut self, id: &str) -> Option<BuddyDraft> {
+        let draft = self.draft_store.delete(id)?;
+        let _ = self.events_tx.send(BuddyEvent::DraftRemoved {
+            draft_id: id.to_string(),
+        });
+        Some(draft)
     }
 
     pub fn consume_draft(&mut self, id: &str) -> Option<BuddyDraft> {
@@ -366,6 +391,16 @@ impl BuddyService {
             draft_id: id.to_string(),
         });
         Some(draft)
+    }
+
+    pub fn expire_drafts(&mut self, now: DateTime<Utc>) -> Vec<String> {
+        let expired = self.draft_store.expire_old(now);
+        for id in &expired {
+            let _ = self.events_tx.send(BuddyEvent::DraftRemoved {
+                draft_id: id.clone(),
+            });
+        }
+        expired
     }
 
     pub fn consume_validated_draft(
@@ -1292,7 +1327,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                     svc.set_pulse(new_pulse);
                     svc.expire_opportunities();
                     svc.opportunity_queue.refresh_cooldowns(now);
-                    svc.draft_store.expire_old(now);
+                    svc.expire_drafts(now);
                 }
             }
         }

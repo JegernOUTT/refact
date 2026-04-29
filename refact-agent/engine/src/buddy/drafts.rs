@@ -1,9 +1,67 @@
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::buddy::types::{BuddyDraft, DraftKind};
 
 pub const DRAFT_TTL: Duration = Duration::hours(2);
+pub const DRAFT_TITLE_MAX_CHARS: usize = 256;
+pub const DRAFT_EXPLANATION_MAX_CHARS: usize = 8192;
+pub const DRAFT_CONTENT_MAX_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftCreateError {
+    TitleTooLong { max: usize, actual: usize },
+    ExplanationTooLong { max: usize, actual: usize },
+    ContentTooLarge { max: usize, actual: usize },
+}
+
+impl fmt::Display for DraftCreateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DraftCreateError::TitleTooLong { max, actual } => {
+                write!(f, "draft title too large: {} chars > {}", actual, max)
+            }
+            DraftCreateError::ExplanationTooLong { max, actual } => write!(
+                f,
+                "draft explanation too large: {} chars > {}",
+                actual, max
+            ),
+            DraftCreateError::ContentTooLarge { max, actual } => {
+                write!(f, "draft content too large: {} bytes > {}", actual, max)
+            }
+        }
+    }
+}
+
+pub fn validate_draft_payload(
+    title: &str,
+    yaml_or_json: &str,
+    explanation: &str,
+) -> Result<(), DraftCreateError> {
+    let title_chars = title.chars().count();
+    if title_chars > DRAFT_TITLE_MAX_CHARS {
+        return Err(DraftCreateError::TitleTooLong {
+            max: DRAFT_TITLE_MAX_CHARS,
+            actual: title_chars,
+        });
+    }
+    let explanation_chars = explanation.chars().count();
+    if explanation_chars > DRAFT_EXPLANATION_MAX_CHARS {
+        return Err(DraftCreateError::ExplanationTooLong {
+            max: DRAFT_EXPLANATION_MAX_CHARS,
+            actual: explanation_chars,
+        });
+    }
+    let content_bytes = yaml_or_json.len();
+    if content_bytes > DRAFT_CONTENT_MAX_BYTES {
+        return Err(DraftCreateError::ContentTooLarge {
+            max: DRAFT_CONTENT_MAX_BYTES,
+            actual: content_bytes,
+        });
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum DraftTarget<'a> {
@@ -172,8 +230,17 @@ impl DraftStore {
         self.consume(id).ok_or(DraftValidationError::NotFound)
     }
 
-    pub fn expire_old(&mut self, now: DateTime<Utc>) {
-        self.drafts.retain(|_, d| d.expires_at > now);
+    pub fn expire_old(&mut self, now: DateTime<Utc>) -> Vec<String> {
+        let expired: Vec<String> = self
+            .drafts
+            .iter()
+            .filter(|(_, draft)| draft.expires_at <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            self.drafts.remove(id);
+        }
+        expired
     }
 
     pub fn snapshot(&self) -> Vec<BuddyDraft> {

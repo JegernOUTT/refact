@@ -3,7 +3,7 @@ import { Button, Flex, Spinner, Text } from "@radix-ui/themes";
 import { ArrowLeftIcon, GearIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { pop, push } from "../Pages/pagesSlice";
+import { pop, push, selectCurrentPage } from "../Pages/pagesSlice";
 import { BuddyRecentChats } from "./BuddyRecentChats";
 import { BuddyPulseCard } from "./BuddyPulseCard";
 import { BuddyOpportunitiesFeed } from "./BuddyOpportunitiesFeed";
@@ -35,14 +35,18 @@ import {
 } from "../Chat/Thread";
 import { executeBuddyAction } from "./executeBuddyAction";
 import {
+  useDeleteDraftMutation,
   useDismissBuddyRuntimeEventMutation,
+  useGetDraftQuery,
   useUpdateBuddySettingsMutation,
 } from "../../services/refact/buddy";
 import type {
   BuddyCareAction,
   BuddyControl,
+  BuddyDraft,
   BuddyNeeds,
   BuddyRuntimeEvent,
+  DraftKind,
 } from "./types";
 import { PALETTES, STAGES } from "./constants";
 import { computeXpFill } from "./buddyUtils";
@@ -62,9 +66,112 @@ const NEED_ROWS: {
   { key: "boredom", label: "Boredom", invert: true },
   { key: "affection", label: "Affection" },
 ];
+const DRAFT_KIND_LABELS: Record<DraftKind, string> = {
+  skill: "Skill",
+  command: "Command",
+  delegate: "Delegate",
+  mode: "Mode",
+  agents_md: "AGENTS.md",
+  defaults_model: "Default Models",
+  hook: "Hooks",
+  pulse_report: "Pulse Report",
+};
+
+const REVIEWABLE_DRAFT_KINDS: DraftKind[] = ["agents_md", "pulse_report"];
+
+function draftKindLabel(draft: BuddyDraft): string {
+  return DRAFT_KIND_LABELS[draft.kind];
+}
+
+const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
+  const { data: draft, isLoading, isError } = useGetDraftQuery(draftId);
+  const [deleteDraft, { isLoading: isDeleting }] = useDeleteDraftMutation();
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    if (!draft) return;
+    await navigator.clipboard.writeText(draft.yaml_or_json);
+    setCopied(true);
+  }, [draft]);
+
+  const handleDismiss = useCallback(async () => {
+    await deleteDraft(draftId).unwrap();
+  }, [deleteDraft, draftId]);
+
+  if (isLoading) {
+    return (
+      <div className={classNames(styles.panel, styles.draftPanel)}>
+        <Flex align="center" gap="2">
+          <Spinner size="1" />
+          <Text size="2">Loading Buddy draft…</Text>
+        </Flex>
+      </div>
+    );
+  }
+
+  if (isError || !draft) {
+    return (
+      <div className={classNames(styles.panel, styles.draftPanel)}>
+        <Text size="2" color="red">
+          Draft unavailable or expired.
+        </Text>
+      </div>
+    );
+  }
+
+  const reviewable = REVIEWABLE_DRAFT_KINDS.includes(draft.kind);
+
+  return (
+    <div className={classNames(styles.panel, styles.draftPanel)}>
+      <div className={styles.panelHeader}>
+        <div className={styles.panelTitleGroup}>
+          <Text size="1" color="gray" className={styles.sectionLabel}>
+            Buddy draft review
+          </Text>
+          <Text size="3" weight="bold">
+            {draft.title}
+          </Text>
+        </div>
+        <Text size="1" color="gray" className={styles.draftMeta}>
+          {draftKindLabel(draft)} · {draft.id}
+        </Text>
+      </div>
+      {draft.explanation && (
+        <Text size="2" color="gray">
+          {draft.explanation}
+        </Text>
+      )}
+      {!reviewable && (
+        <Text size="2" color="orange">
+          This draft opens in its dedicated editor from the opportunity action.
+        </Text>
+      )}
+      <pre className={styles.draftContent}>{draft.yaml_or_json}</pre>
+      <div className={styles.draftActions}>
+        <button
+          type="button"
+          className={classNames(styles.chip, styles.chipPrimary)}
+          onClick={() => void handleCopy()}
+        >
+          {copied ? "Copied" : "Copy content"}
+        </button>
+        <button
+          type="button"
+          className={styles.chip}
+          disabled={isDeleting}
+          onClick={() => void handleDismiss()}
+        >
+          Dismiss draft
+        </button>
+      </div>
+    </div>
+  );
+};
 
 export const BuddyHome: React.FC = () => {
   const dispatch = useAppDispatch();
+  const currentPage = useAppSelector(selectCurrentPage);
+  const draftId = currentPage?.name === "buddy" ? currentPage.draftId : undefined;
   const snapshot = useAppSelector(selectBuddySnapshot);
   const loaded = useAppSelector(selectBuddyLoaded);
   const enabled = useAppSelector(selectIsBuddyEnabled);
@@ -403,6 +510,12 @@ export const BuddyHome: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {draftId && (
+        <div className={classNames(styles.row, styles.rowSingle)}>
+          <BuddyHomeDraftReview draftId={draftId} />
+        </div>
+      )}
 
       <div className={styles.row} data-testid="buddy-home-new-sections">
         <BuddyPulseCard />
