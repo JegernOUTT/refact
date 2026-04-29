@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use super::types::{Competitor, ImportScope, ImportSourceRoot};
 
+pub mod claude;
+
 pub fn config_root_from_refact_config_dir(refact_config_dir: &Path) -> PathBuf {
     refact_config_dir
         .parent()
@@ -66,7 +68,10 @@ mod tests {
         let config = tempfile::tempdir().unwrap();
 
         let sources = discover_global_sources(home.path(), config.path());
-        let paths = sources.iter().map(|source| source.path.clone()).collect::<Vec<_>>();
+        let paths = sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<Vec<_>>();
 
         assert_eq!(sources.len(), 6);
         assert!(paths.contains(&home.path().join(".claude")));
@@ -75,7 +80,9 @@ mod tests {
         assert!(paths.contains(&home.path().join(".kilo")));
         assert!(paths.contains(&home.path().join(".kilocode")));
         assert!(paths.contains(&home.path().join(".continue")));
-        assert!(sources.iter().all(|source| source.scope == ImportScope::Global));
+        assert!(sources
+            .iter()
+            .all(|source| source.scope == ImportScope::Global));
     }
 
     #[test]
