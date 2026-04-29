@@ -106,6 +106,9 @@ const PROTECTED_HEADERS: &[&str] = &[
 pub fn insert_extra_headers(headers: &mut HeaderMap, extra_headers: &HashMap<String, String>) {
     for (key, value) in extra_headers {
         let key_lower = key.to_lowercase();
+        if key_lower.starts_with("x-refact-internal-") {
+            continue;
+        }
         if PROTECTED_HEADERS.contains(&key_lower.as_str()) {
             tracing::warn!(
                 "extra_headers attempted to override protected header '{}', ignoring",
@@ -251,6 +254,10 @@ mod tests {
         extra.insert("x-api-key".to_string(), "HACKED-KEY".to_string());
         extra.insert("content-type".to_string(), "text/plain".to_string());
         extra.insert("X-Custom-Header".to_string(), "allowed-value".to_string());
+        extra.insert(
+            "x-refact-internal-test".to_string(),
+            "internal-value".to_string(),
+        );
 
         insert_extra_headers(&mut headers, &extra);
 
@@ -261,5 +268,6 @@ mod tests {
 
         // Non-protected headers should be added
         assert_eq!(headers.get("X-Custom-Header").unwrap(), "allowed-value");
+        assert!(headers.get("x-refact-internal-test").is_none());
     }
 }

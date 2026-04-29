@@ -1233,6 +1233,33 @@ mod tests {
     }
 
     #[test]
+    fn test_chatgpt_backend_http_request_omits_internal_websocket_header() {
+        let adapter = OpenAiResponsesAdapter;
+        let req = LlmRequest::new(
+            "gpt-5.3-codex".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        let mut settings = chatgpt_backend_settings();
+        settings.extra_headers.insert(
+            crate::providers::openai_codex::CODEX_WEBSOCKET_ENDPOINT_HEADER.to_string(),
+            "wss://chatgpt.com/backend-api/codex/responses".to_string(),
+        );
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert!(http
+            .headers
+            .get(crate::providers::openai_codex::CODEX_WEBSOCKET_ENDPOINT_HEADER)
+            .is_none());
+        assert_eq!(
+            http.headers
+                .get(reqwest::header::ACCEPT)
+                .map(|v| v.to_str().unwrap()),
+            None
+        );
+    }
+
+    #[test]
     fn test_previous_response_id_forwarded() {
         let adapter = OpenAiResponsesAdapter;
         let mut req = LlmRequest::new(

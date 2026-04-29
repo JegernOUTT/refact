@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use eventsource_stream::Eventsource;
 use serde_json::{json, Value};
 use tokio::sync::RwLock as ARwLock;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
@@ -204,6 +205,51 @@ pub trait StreamCollector: Send {
     fn on_finish(&mut self, choice_idx: usize, finish_reason: Option<String>);
 }
 
+enum CollectorReplayEvent {
+    DeltaOps(usize, Vec<DeltaOp>),
+    Usage(ChatUsage),
+    Finish(usize, Option<String>),
+}
+
+#[derive(Default)]
+struct ReplayCollector {
+    events: Vec<CollectorReplayEvent>,
+}
+
+impl ReplayCollector {
+    fn replay<C: StreamCollector>(self, collector: &mut C) {
+        for event in self.events {
+            match event {
+                CollectorReplayEvent::DeltaOps(choice_idx, ops) => {
+                    collector.on_delta_ops(choice_idx, ops);
+                }
+                CollectorReplayEvent::Usage(usage) => {
+                    collector.on_usage(&usage);
+                }
+                CollectorReplayEvent::Finish(choice_idx, finish_reason) => {
+                    collector.on_finish(choice_idx, finish_reason);
+                }
+            }
+        }
+    }
+}
+
+impl StreamCollector for ReplayCollector {
+    fn on_delta_ops(&mut self, choice_idx: usize, ops: Vec<DeltaOp>) {
+        self.events
+            .push(CollectorReplayEvent::DeltaOps(choice_idx, ops));
+    }
+
+    fn on_usage(&mut self, usage: &ChatUsage) {
+        self.events.push(CollectorReplayEvent::Usage(usage.clone()));
+    }
+
+    fn on_finish(&mut self, choice_idx: usize, finish_reason: Option<String>) {
+        self.events
+            .push(CollectorReplayEvent::Finish(choice_idx, finish_reason));
+    }
+}
+
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 
@@ -358,6 +404,403 @@ fn handle_append_content_delta(
     }
 }
 
+fn process_stream_event_data<C: StreamCollector>(
+    adapter: &dyn crate::llm::adapter::LlmWireAdapter,
+    auth_token: &str,
+    data: &str,
+    accumulators: &mut [ChoiceAccumulator],
+    collector: &mut C,
+    malformed_is_fatal: bool,
+) -> Result<bool, String> {
+    let deltas = match adapter.parse_stream_chunk(data) {
+        Ok(d) => d,
+        Err(StreamParseError::Skip) => return Ok(false),
+        Err(StreamParseError::MalformedChunk(e)) if malformed_is_fatal => {
+            return Err(format!("Malformed stream chunk: {}", e));
+        }
+        Err(StreamParseError::MalformedChunk(e)) => {
+            tracing::warn!("Malformed stream chunk: {}", e);
+            return Ok(false);
+        }
+        Err(StreamParseError::FatalError(e)) => {
+            return Err(format!("LLM error: {}", e));
+        }
+    };
+
+    let acc = &mut accumulators[0];
+    let mut ops = Vec::new();
+    let mut stream_done = false;
+
+    for delta in deltas {
+        match delta {
+            LlmStreamDelta::AppendContent { text, block_index } => {
+                handle_append_content_delta(acc, &mut ops, text, block_index);
+            }
+            LlmStreamDelta::AppendReasoning { text, block_index } => {
+                flush_pending_think_parse(acc, &mut ops);
+                push_reasoning_delta(acc, &mut ops, text, block_index);
+            }
+            LlmStreamDelta::SetToolCalls { tool_calls } => {
+                let tool_calls = if !auth_token.is_empty() {
+                    tool_calls
+                        .into_iter()
+                        .map(|mut tc| {
+                            strip_mcp_prefix_from_tool_call(&mut tc);
+                            tc
+                        })
+                        .collect()
+                } else {
+                    tool_calls
+                };
+                for tc in &tool_calls {
+                    acc.tool_calls.merge(tc);
+                }
+                ops.push(DeltaOp::SetToolCalls {
+                    tool_calls: acc.tool_calls.finalize(),
+                });
+            }
+            LlmStreamDelta::FinalizeToolCalls { tool_calls } => {
+                let tool_calls = if !auth_token.is_empty() {
+                    tool_calls
+                        .into_iter()
+                        .map(|mut tc| {
+                            strip_mcp_prefix_from_tool_call(&mut tc);
+                            tc
+                        })
+                        .collect()
+                } else {
+                    tool_calls
+                };
+                for tc in &tool_calls {
+                    acc.tool_calls.set_final(tc);
+                }
+                ops.push(DeltaOp::SetToolCalls {
+                    tool_calls: acc.tool_calls.finalize(),
+                });
+            }
+            LlmStreamDelta::SetThinkingBlocks { blocks } => {
+                merge_thinking_blocks(&mut acc.thinking_blocks, blocks);
+                ops.push(DeltaOp::SetThinkingBlocks {
+                    blocks: acc.thinking_blocks.clone(),
+                });
+            }
+            LlmStreamDelta::AddCitation { citation } => {
+                acc.citations.push(citation.clone());
+                ops.push(DeltaOp::AddCitation { citation });
+            }
+            LlmStreamDelta::AddServerContentBlock { block } => {
+                acc.server_content_blocks.push(block.clone());
+                ops.push(DeltaOp::AddServerContentBlock { block });
+            }
+            LlmStreamDelta::SetUsage { usage } => {
+                acc.usage = Some(merge_usage(acc.usage.take(), usage.clone()));
+                if let Some(ref merged) = acc.usage {
+                    collector.on_usage(merged);
+                    ops.push(DeltaOp::SetUsage {
+                        usage: json!(merged),
+                    });
+                }
+            }
+            LlmStreamDelta::SetFinishReason { reason } => {
+                acc.finish_reason = Some(reason);
+            }
+            LlmStreamDelta::MergeExtra { extra } => {
+                for (k, v) in &extra {
+                    match (acc.extra.get_mut(k), v) {
+                        (Some(Value::Array(existing)), Value::Array(incoming)) => {
+                            existing.extend(incoming.clone());
+                        }
+                        (Some(Value::Object(existing)), Value::Object(incoming)) => {
+                            for (ik, iv) in incoming {
+                                existing.insert(ik.clone(), iv.clone());
+                            }
+                        }
+                        _ => {
+                            acc.extra.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                ops.push(DeltaOp::MergeExtra { extra });
+            }
+            LlmStreamDelta::Done => {
+                stream_done = true;
+                break;
+            }
+        }
+    }
+
+    if !ops.is_empty() {
+        collector.on_delta_ops(0, ops);
+    }
+
+    Ok(stream_done)
+}
+
+fn finalize_accumulators<C: StreamCollector>(
+    mut accumulators: Vec<ChoiceAccumulator>,
+    collector: &mut C,
+) -> Vec<ChoiceFinal> {
+    for (idx, acc) in accumulators.iter_mut().enumerate() {
+        let mut tail_ops = Vec::new();
+        flush_pending_think_parse(acc, &mut tail_ops);
+        if !tail_ops.is_empty() {
+            collector.on_delta_ops(idx, tail_ops);
+        }
+    }
+
+    accumulators
+        .into_iter()
+        .enumerate()
+        .map(|(idx, acc)| {
+            collector.on_finish(idx, acc.finish_reason.clone());
+            let thinking_blocks = if !acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
+                acc.thinking_blocks
+                    .into_iter()
+                    .map(|mut block| {
+                        if let Some(obj) = block.as_object_mut() {
+                            let is_anthropic_thinking =
+                                obj.get("type").and_then(|t| t.as_str()) == Some("thinking");
+                            let thinking_is_empty = obj
+                                .get("thinking")
+                                .and_then(|v| v.as_str())
+                                .map_or(true, |s| s.trim().is_empty());
+                            if is_anthropic_thinking && thinking_is_empty {
+                                let block_idx = obj.get("index").and_then(|v| v.as_u64());
+                                let reasoning_text = block_idx
+                                    .and_then(|idx| acc.reasoning_per_block.get(&idx))
+                                    .unwrap_or(&acc.reasoning);
+                                if !reasoning_text.is_empty() {
+                                    obj.insert(
+                                        "thinking".to_string(),
+                                        json!(reasoning_text.clone()),
+                                    );
+                                }
+                            }
+                        }
+                        block
+                    })
+                    .collect()
+            } else if acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
+                vec![json!({
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": acc.reasoning.clone()}]
+                })]
+            } else {
+                acc.thinking_blocks
+            };
+
+            ChoiceFinal {
+                content: acc.content,
+                reasoning: acc.reasoning,
+                thinking_blocks,
+                tool_calls_raw: acc.tool_calls.finalize(),
+                citations: acc.citations,
+                server_content_blocks: acc.server_content_blocks,
+                extra: {
+                    let mut extra = acc.extra;
+                    if !acc.content_per_block.is_empty() {
+                        let mut text_blocks: Vec<_> = acc.content_per_block.into_iter().collect();
+                        text_blocks.sort_by_key(|(idx, _)| *idx);
+                        extra.insert(
+                            "_anthropic_text_blocks".to_string(),
+                            json!(text_blocks
+                                .into_iter()
+                                .map(|(idx, text)| { json!({"index": idx, "text": text}) })
+                                .collect::<Vec<_>>()),
+                        );
+                    }
+                    extra
+                },
+                finish_reason: acc.finish_reason,
+                usage: acc.usage,
+            }
+        })
+        .collect()
+}
+
+fn openai_codex_websocket_endpoint(model_rec: &BaseModelRecord) -> Option<&str> {
+    if !is_openai_codex_chatgpt_backend(model_rec) {
+        return None;
+    }
+    model_rec
+        .extra_headers
+        .get(crate::providers::openai_codex::CODEX_WEBSOCKET_ENDPOINT_HEADER)
+        .map(String::as_str)
+        .filter(|endpoint| !endpoint.trim().is_empty())
+}
+
+fn build_openai_codex_websocket_message(body: &Value) -> Value {
+    let mut message = body.clone();
+    if let Some(obj) = message.as_object_mut() {
+        obj.insert("type".to_string(), json!("response.create"));
+        message
+    } else {
+        json!({"type": "response.create", "request": body})
+    }
+}
+
+fn websocket_header_entries(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Vec<(String, String)>, String> {
+    let mut entries = Vec::new();
+    for (key, value) in headers {
+        let key = key.as_str().to_ascii_lowercase();
+        if key == "accept"
+            || key == "content-type"
+            || key == "content-length"
+            || key == "connection"
+            || key == "host"
+            || key.starts_with("sec-websocket-")
+            || key.starts_with("x-refact-internal-")
+        {
+            continue;
+        }
+        let value = value
+            .to_str()
+            .map_err(|e| format!("WebSocket header '{}' is not valid UTF-8: {}", key, e))?;
+        entries.push((key, value.to_string()));
+    }
+    entries.push((
+        "openai-beta".to_string(),
+        "responses_websockets=2026-02-06".to_string(),
+    ));
+    Ok(entries)
+}
+
+async fn commit_cache_guard_snapshot_if_needed(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    chat_id: Option<&String>,
+    sanitized_for_commit: Option<serde_json::Value>,
+) {
+    let (Some(chat_id), Some(sanitized)) = (chat_id, sanitized_for_commit) else {
+        return;
+    };
+    let session_arc_opt = {
+        let gcx_locked = gcx.read().await;
+        let sessions = gcx_locked.chat_sessions.read().await;
+        sessions.get(chat_id).cloned()
+    };
+    if let Some(session_arc) = session_arc_opt {
+        crate::chat::cache_guard::commit_cache_guard_snapshot(session_arc, sanitized).await;
+    }
+}
+
+async fn run_llm_websocket_request<C: StreamCollector>(
+    websocket_endpoint: &str,
+    http_parts: &HttpParts,
+    adapter: &dyn crate::llm::adapter::LlmWireAdapter,
+    auth_token: &str,
+    abort_flag: Option<Arc<AtomicBool>>,
+    collector: &mut C,
+) -> Result<Vec<ChoiceFinal>, String> {
+    let mut request = websocket_endpoint
+        .into_client_request()
+        .map_err(|e| format!("OpenAI Codex WebSocket request build failed: {}", e))?;
+    {
+        let headers = request.headers_mut();
+        for (key, value) in websocket_header_entries(&http_parts.headers)? {
+            let name = tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(key.as_bytes())
+                .map_err(|e| {
+                    format!("OpenAI Codex WebSocket header '{}' is invalid: {}", key, e)
+                })?;
+            let value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value)
+                .map_err(|e| {
+                    format!(
+                        "OpenAI Codex WebSocket header '{}' value is invalid: {}",
+                        key, e
+                    )
+                })?;
+            headers.insert(name, value);
+        }
+    }
+
+    let (mut websocket, _) = tokio::time::timeout(
+        stream_idle_timeout(),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| "OpenAI Codex WebSocket connect timed out".to_string())?
+    .map_err(|e| format!("OpenAI Codex WebSocket connect failed: {}", e))?;
+    websocket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            build_openai_codex_websocket_message(&http_parts.body).to_string(),
+        ))
+        .await
+        .map_err(|e| format!("OpenAI Codex WebSocket send failed: {}", e))?;
+
+    let mut accumulators: Vec<ChoiceAccumulator> = vec![ChoiceAccumulator::default()];
+    let mut stream_done = false;
+    let stream_started_at = Instant::now();
+    let mut last_event_at = Instant::now();
+    let mut heartbeat = tokio::time::interval(stream_heartbeat());
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        if stream_done {
+            break;
+        }
+        let message = tokio::select! {
+            _ = heartbeat.tick() => {
+                if let Some(ref flag) = abort_flag {
+                    if flag.load(Ordering::SeqCst) {
+                        return Err("Aborted".to_string());
+                    }
+                }
+                if stream_started_at.elapsed() > stream_total_timeout() {
+                    return Err("OpenAI Codex WebSocket stream timeout".to_string());
+                }
+                if last_event_at.elapsed() > stream_idle_timeout() {
+                    return Err("OpenAI Codex WebSocket stream stalled".to_string());
+                }
+                continue;
+            }
+            maybe_message = websocket.next() => {
+                match maybe_message {
+                    Some(Ok(message)) => message,
+                    Some(Err(e)) => {
+                        return Err(format!("OpenAI Codex WebSocket stream error: {}", e));
+                    }
+                    None => {
+                        if !stream_done {
+                            return Err("OpenAI Codex WebSocket ended before completion".to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        };
+        last_event_at = Instant::now();
+
+        let data = match message {
+            tokio_tungstenite::tungstenite::Message::Text(text) => text,
+            tokio_tungstenite::tungstenite::Message::Binary(bytes) => String::from_utf8(bytes)
+                .map_err(|e| {
+                    format!("OpenAI Codex WebSocket binary message was not UTF-8: {}", e)
+                })?,
+            tokio_tungstenite::tungstenite::Message::Ping(_)
+            | tokio_tungstenite::tungstenite::Message::Pong(_) => continue,
+            tokio_tungstenite::tungstenite::Message::Close(_) => {
+                if stream_done {
+                    break;
+                }
+                return Err("OpenAI Codex WebSocket closed before completion".to_string());
+            }
+            tokio_tungstenite::tungstenite::Message::Frame(_) => continue,
+        };
+
+        stream_done = process_stream_event_data(
+            adapter,
+            auth_token,
+            &data,
+            &mut accumulators,
+            collector,
+            true,
+        )?;
+    }
+
+    Ok(finalize_accumulators(accumulators, collector))
+}
+
 pub async fn run_llm_stream<C: StreamCollector>(
     gcx: Arc<ARwLock<GlobalContext>>,
     params: StreamRunParams,
@@ -429,6 +872,37 @@ pub async fn run_llm_stream<C: StreamCollector>(
         "LLM streaming request"
     );
 
+    if let Some(websocket_endpoint) = openai_codex_websocket_endpoint(&params.model_rec) {
+        let mut replay_collector = ReplayCollector::default();
+        match run_llm_websocket_request(
+            websocket_endpoint,
+            &http_parts,
+            adapter,
+            &params.model_rec.auth_token,
+            params.abort_flag.clone(),
+            &mut replay_collector,
+        )
+        .await
+        {
+            Ok(results) => {
+                commit_cache_guard_snapshot_if_needed(
+                    gcx.clone(),
+                    params.chat_id.as_ref(),
+                    sanitized_for_commit.clone(),
+                )
+                .await;
+                replay_collector.replay(collector);
+                return Ok(results);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "OpenAI Codex WebSocket streaming failed, falling back to HTTP SSE: {}",
+                    error
+                );
+            }
+        }
+    }
+
     let mut response = send_llm_http_request(&client, &http_parts).await?;
     let mut status = response.status();
     if !status.is_success()
@@ -472,16 +946,12 @@ pub async fn run_llm_stream<C: StreamCollector>(
         return Err(format_llm_error_body(&format!("{}", status), &text));
     }
 
-    if let (Some(chat_id), Some(sanitized)) = (&params.chat_id, sanitized_for_commit) {
-        let session_arc_opt = {
-            let gcx_locked = gcx.read().await;
-            let sessions = gcx_locked.chat_sessions.read().await;
-            sessions.get(chat_id).cloned()
-        };
-        if let Some(session_arc) = session_arc_opt {
-            crate::chat::cache_guard::commit_cache_guard_snapshot(session_arc, sanitized).await;
-        }
-    }
+    commit_cache_guard_snapshot_if_needed(
+        gcx.clone(),
+        params.chat_id.as_ref(),
+        sanitized_for_commit,
+    )
+    .await;
 
     let mut stream = response.bytes_stream().eventsource();
 
@@ -529,212 +999,17 @@ pub async fn run_llm_stream<C: StreamCollector>(
         };
         last_event_at = Instant::now();
 
-        let deltas = match adapter.parse_stream_chunk(&event.data) {
-            Ok(d) => d,
-            Err(StreamParseError::Skip) => continue,
-            Err(StreamParseError::MalformedChunk(e)) => {
-                tracing::warn!("Malformed stream chunk: {}", e);
-                continue;
-            }
-            Err(StreamParseError::FatalError(e)) => {
-                return Err(format!("LLM error: {}", e));
-            }
-        };
-
-        let acc = &mut accumulators[0];
-        let mut ops = Vec::new();
-
-        for delta in deltas {
-            match delta {
-                LlmStreamDelta::AppendContent { text, block_index } => {
-                    handle_append_content_delta(acc, &mut ops, text, block_index);
-                }
-                LlmStreamDelta::AppendReasoning { text, block_index } => {
-                    flush_pending_think_parse(acc, &mut ops);
-                    push_reasoning_delta(acc, &mut ops, text, block_index);
-                }
-                LlmStreamDelta::SetToolCalls { tool_calls } => {
-                    let tool_calls = if !params.model_rec.auth_token.is_empty() {
-                        tool_calls
-                            .into_iter()
-                            .map(|mut tc| {
-                                strip_mcp_prefix_from_tool_call(&mut tc);
-                                tc
-                            })
-                            .collect()
-                    } else {
-                        tool_calls
-                    };
-                    for tc in &tool_calls {
-                        acc.tool_calls.merge(tc);
-                    }
-                    ops.push(DeltaOp::SetToolCalls {
-                        tool_calls: acc.tool_calls.finalize(),
-                    });
-                }
-                LlmStreamDelta::FinalizeToolCalls { tool_calls } => {
-                    let tool_calls = if !params.model_rec.auth_token.is_empty() {
-                        tool_calls
-                            .into_iter()
-                            .map(|mut tc| {
-                                strip_mcp_prefix_from_tool_call(&mut tc);
-                                tc
-                            })
-                            .collect()
-                    } else {
-                        tool_calls
-                    };
-                    for tc in &tool_calls {
-                        acc.tool_calls.set_final(tc);
-                    }
-                    ops.push(DeltaOp::SetToolCalls {
-                        tool_calls: acc.tool_calls.finalize(),
-                    });
-                }
-                LlmStreamDelta::SetThinkingBlocks { blocks } => {
-                    merge_thinking_blocks(&mut acc.thinking_blocks, blocks);
-                    ops.push(DeltaOp::SetThinkingBlocks {
-                        blocks: acc.thinking_blocks.clone(),
-                    });
-                }
-                LlmStreamDelta::AddCitation { citation } => {
-                    acc.citations.push(citation.clone());
-                    ops.push(DeltaOp::AddCitation { citation });
-                }
-                LlmStreamDelta::AddServerContentBlock { block } => {
-                    acc.server_content_blocks.push(block.clone());
-                    ops.push(DeltaOp::AddServerContentBlock { block });
-                }
-                LlmStreamDelta::SetUsage { usage } => {
-                    acc.usage = Some(merge_usage(acc.usage.take(), usage.clone()));
-                    if let Some(ref merged) = acc.usage {
-                        collector.on_usage(merged);
-                        ops.push(DeltaOp::SetUsage {
-                            usage: json!(merged),
-                        });
-                    }
-                }
-                LlmStreamDelta::SetFinishReason { reason } => {
-                    acc.finish_reason = Some(reason);
-                }
-                LlmStreamDelta::MergeExtra { extra } => {
-                    for (k, v) in &extra {
-                        match (acc.extra.get_mut(k), v) {
-                            (Some(Value::Array(existing)), Value::Array(incoming)) => {
-                                existing.extend(incoming.clone());
-                            }
-                            (Some(Value::Object(existing)), Value::Object(incoming)) => {
-                                // Shallow-merge objects.
-                                for (ik, iv) in incoming {
-                                    existing.insert(ik.clone(), iv.clone());
-                                }
-                            }
-                            _ => {
-                                acc.extra.insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
-                    ops.push(DeltaOp::MergeExtra { extra });
-                }
-                LlmStreamDelta::Done => {
-                    stream_done = true;
-                    break;
-                }
-            }
-        }
-
-        if !ops.is_empty() {
-            collector.on_delta_ops(0, ops);
-        }
+        stream_done = process_stream_event_data(
+            adapter,
+            &params.model_rec.auth_token,
+            &event.data,
+            &mut accumulators,
+            collector,
+            false,
+        )?;
     }
 
-    for (idx, acc) in accumulators.iter_mut().enumerate() {
-        let mut tail_ops = Vec::new();
-        flush_pending_think_parse(acc, &mut tail_ops);
-        if !tail_ops.is_empty() {
-            collector.on_delta_ops(idx, tail_ops);
-        }
-    }
-
-    let results: Vec<ChoiceFinal> = accumulators
-        .into_iter()
-        .enumerate()
-        .map(|(idx, acc)| {
-            collector.on_finish(idx, acc.finish_reason.clone());
-            // Merge accumulated reasoning text into thinking_blocks.
-            // Three cases:
-            // 1) Anthropic: thinking_blocks exist with type="thinking" — merge per-block reasoning
-            //    (for interleaved thinking, each block gets its own text via block_index)
-            // 2) OpenAI: thinking_blocks exist with type="reasoning" — leave opaque, don't modify
-            // 3) No blocks but reasoning text exists — create a synthetic reasoning block
-            let thinking_blocks = if !acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
-                acc.thinking_blocks
-                    .into_iter()
-                    .map(|mut block| {
-                        if let Some(obj) = block.as_object_mut() {
-                            let is_anthropic_thinking =
-                                obj.get("type").and_then(|t| t.as_str()) == Some("thinking");
-                            // Check if thinking text is missing or empty/whitespace.
-                            // LiteLLM sends final signed blocks with empty "thinking": ""
-                            // since the text was already streamed via reasoning_content.
-                            let thinking_is_empty = obj
-                                .get("thinking")
-                                .and_then(|v| v.as_str())
-                                .map_or(true, |s| s.trim().is_empty());
-                            if is_anthropic_thinking && thinking_is_empty {
-                                // Use per-block reasoning when available (interleaved thinking),
-                                // fall back to global reasoning for single-block case.
-                                let block_idx = obj.get("index").and_then(|v| v.as_u64());
-                                let reasoning_text = block_idx
-                                    .and_then(|idx| acc.reasoning_per_block.get(&idx))
-                                    .unwrap_or(&acc.reasoning);
-                                if !reasoning_text.is_empty() {
-                                    obj.insert(
-                                        "thinking".to_string(),
-                                        json!(reasoning_text.clone()),
-                                    );
-                                }
-                            }
-                        }
-                        block
-                    })
-                    .collect()
-            } else if acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
-                vec![json!({
-                    "type": "reasoning",
-                    "summary": [{"type": "summary_text", "text": acc.reasoning.clone()}]
-                })]
-            } else {
-                acc.thinking_blocks
-            };
-
-            ChoiceFinal {
-                content: acc.content,
-                reasoning: acc.reasoning,
-                thinking_blocks,
-                tool_calls_raw: acc.tool_calls.finalize(),
-                citations: acc.citations,
-                server_content_blocks: acc.server_content_blocks,
-                extra: {
-                    let mut extra = acc.extra;
-                    if !acc.content_per_block.is_empty() {
-                        let mut text_blocks: Vec<_> = acc.content_per_block.into_iter().collect();
-                        text_blocks.sort_by_key(|(idx, _)| *idx);
-                        extra.insert(
-                            "_anthropic_text_blocks".to_string(),
-                            json!(text_blocks
-                                .into_iter()
-                                .map(|(idx, text)| { json!({"index": idx, "text": text}) })
-                                .collect::<Vec<_>>()),
-                        );
-                    }
-                    extra
-                },
-                finish_reason: acc.finish_reason,
-                usage: acc.usage,
-            }
-        })
-        .collect();
+    let results = finalize_accumulators(accumulators, collector);
 
     Ok(results)
 }
@@ -887,6 +1162,110 @@ fn format_llm_error_body(status_label: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_endpoint_requires_codex_backend_and_internal_marker() {
+        let mut model = BaseModelRecord {
+            id: "openai_codex/gpt-5.6-codex".to_string(),
+            endpoint: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+            ..Default::default()
+        };
+
+        assert!(openai_codex_websocket_endpoint(&model).is_none());
+
+        model.extra_headers.insert(
+            crate::providers::openai_codex::CODEX_WEBSOCKET_ENDPOINT_HEADER.to_string(),
+            "wss://chatgpt.com/backend-api/codex/responses".to_string(),
+        );
+        assert_eq!(
+            openai_codex_websocket_endpoint(&model),
+            Some("wss://chatgpt.com/backend-api/codex/responses")
+        );
+
+        model.endpoint = "https://api.openai.com/v1/responses".to_string();
+        assert!(openai_codex_websocket_endpoint(&model).is_none());
+
+        model.endpoint = "https://chatgpt.com/backend-api/codex/responses".to_string();
+        model.id = "openai/gpt-5.6-codex".to_string();
+        assert!(openai_codex_websocket_endpoint(&model).is_none());
+    }
+
+    #[test]
+    fn websocket_create_message_wraps_responses_body() {
+        let body = json!({
+            "model": "gpt-5.6-codex",
+            "stream": true,
+            "input": []
+        });
+
+        let message = build_openai_codex_websocket_message(&body);
+
+        assert_eq!(message["type"], json!("response.create"));
+        assert_eq!(message["model"], json!("gpt-5.6-codex"));
+        assert_eq!(message["stream"], json!(true));
+    }
+
+    #[test]
+    fn websocket_headers_override_beta_and_omit_http_only_metadata() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer tok"),
+        );
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static("text/event-stream"),
+        );
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            "OpenAI-Beta",
+            reqwest::header::HeaderValue::from_static("responses=experimental"),
+        );
+        headers.insert(
+            crate::providers::openai_codex::CODEX_WEBSOCKET_ENDPOINT_HEADER,
+            reqwest::header::HeaderValue::from_static(
+                "wss://chatgpt.com/backend-api/codex/responses",
+            ),
+        );
+
+        let entries = websocket_header_entries(&headers).unwrap();
+        let map: HashMap<_, _> = entries.into_iter().collect();
+
+        assert_eq!(
+            map.get("authorization").map(String::as_str),
+            Some("Bearer tok")
+        );
+        assert_eq!(
+            map.get("openai-beta").map(String::as_str),
+            Some("responses_websockets=2026-02-06")
+        );
+        assert!(!map.contains_key("accept"));
+        assert!(!map.contains_key("content-type"));
+        assert!(!map.contains_key(crate::providers::openai_codex::CODEX_WEBSOCKET_ENDPOINT_HEADER));
+    }
+
+    #[test]
+    fn websocket_parse_errors_are_fatal_before_replay() {
+        let adapter = get_adapter(crate::llm::WireFormat::OpenaiResponses);
+        let mut accumulators = vec![ChoiceAccumulator::default()];
+        let mut collector = ReplayCollector::default();
+
+        let err = process_stream_event_data(
+            adapter,
+            "",
+            "not json",
+            &mut accumulators,
+            &mut collector,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Malformed stream chunk"));
+        assert!(collector.events.is_empty());
+    }
 
     #[test]
     fn test_merge_usage_cache_read_appears_later() {

@@ -19,6 +19,9 @@ use crate::providers::traits::{
 const CODEX_ORIGINATOR: &str = "refact-lsp";
 const CHATGPT_CODEX_MODELS_URL: &str =
     "https://chatgpt.com/backend-api/codex/models?client_version=999.999.999";
+const CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
+pub(crate) const CODEX_WEBSOCKET_ENDPOINT_HEADER: &str =
+    "x-refact-internal-openai-codex-websocket-endpoint";
 const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 
 lazy_static::lazy_static! {
@@ -77,6 +80,8 @@ pub struct OpenAICodexProvider {
     pub oauth_tokens: OAuthTokens,
     #[serde(default = "new_codex_session_id")]
     pub session_id: String,
+    #[serde(default)]
+    pub use_websocket: bool,
 }
 
 impl Default for OpenAICodexProvider {
@@ -86,6 +91,7 @@ impl Default for OpenAICodexProvider {
             custom_models: HashMap::new(),
             oauth_tokens: OAuthTokens::default(),
             session_id: new_codex_session_id(),
+            use_websocket: false,
         }
     }
 }
@@ -1180,7 +1186,12 @@ impl ProviderTrait for OpenAICodexProvider {
 
     fn provider_schema(&self) -> &'static str {
         r#"
-fields: {}
+fields:
+  use_websocket:
+    f_type: boolean
+    f_desc: "Use experimental WebSocket streaming for ChatGPT backend OAuth requests. HTTP SSE remains the fallback."
+    f_label: "Use WebSocket streaming"
+    f_default: false
 oauth:
   supported: true
   methods:
@@ -1208,6 +1219,9 @@ available:
         {
             self.session_id = session_id.to_string();
         }
+        if let Some(use_websocket) = yaml.get("use_websocket").and_then(|v| v.as_bool()) {
+            self.use_websocket = use_websocket;
+        }
         parse_enabled_models(&yaml, &mut self.enabled_models);
         parse_custom_models(&yaml, &mut self.custom_models);
         Ok(())
@@ -1224,6 +1238,7 @@ available:
             "oauth_connected": oauth_connected,
             "api_key_ready": api_key_ready,
             "api_key_exchange_error": self.oauth_tokens.api_key_exchange_error,
+            "use_websocket": self.use_websocket,
             "enabled_models": self.enabled_models,
             "custom_models": self.custom_models
         })
@@ -1243,6 +1258,12 @@ available:
                 ..
             } => {
                 extra_headers = self.chatgpt_backend_streaming_headers(&chatgpt_account_id);
+                if self.use_websocket {
+                    extra_headers.insert(
+                        CODEX_WEBSOCKET_ENDPOINT_HEADER.to_string(),
+                        CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL.to_string(),
+                    );
+                }
                 (
                     "https://chatgpt.com/backend-api/codex/responses".to_string(),
                     access_token,
@@ -1889,6 +1910,7 @@ mod tests {
                 ..Default::default()
             },
             session_id: "old-session".to_string(),
+            use_websocket: false,
         };
         let source = OpenAICodexProvider {
             enabled_models: vec!["clobber-enabled".to_string()],
@@ -1900,6 +1922,7 @@ mod tests {
                 ..Default::default()
             },
             session_id: "new-session".to_string(),
+            use_websocket: true,
         };
 
         current.update_auth_state_from(&source);
@@ -1907,6 +1930,7 @@ mod tests {
         assert_eq!(current.oauth_tokens.access_token, "new-access");
         assert_eq!(current.oauth_tokens.refresh_token, "new-refresh");
         assert_eq!(current.session_id, "new-session");
+        assert!(!current.use_websocket);
         assert_eq!(current.enabled_models, vec!["keep-enabled".to_string()]);
         assert!(current.custom_models.contains_key("keep-custom"));
         assert!(!current.custom_models.contains_key("clobber-custom"));
@@ -1991,6 +2015,60 @@ mod tests {
             Some("responses=experimental")
         );
         assert!(headers.get("accept").is_none());
+    }
+
+    #[test]
+    fn websocket_setting_defaults_to_disabled() {
+        let p = OpenAICodexProvider::default();
+        let settings = p.provider_settings_as_json();
+
+        assert!(!p.use_websocket);
+        assert_eq!(settings["use_websocket"], json!(false));
+    }
+
+    #[test]
+    fn websocket_setting_parses_from_provider_yaml() {
+        let mut p = OpenAICodexProvider::default();
+        p.provider_settings_apply(serde_yaml::from_str("use_websocket: true").unwrap())
+            .unwrap();
+
+        assert!(p.use_websocket);
+        assert_eq!(p.provider_settings_as_json()["use_websocket"], json!(true));
+    }
+
+    #[test]
+    fn websocket_setting_adds_chatgpt_backend_runtime_marker_only_when_enabled() {
+        let mut p = provider_with_oauth("tok", "acct-123");
+        p.enabled_models = vec!["gpt-5.6-codex".to_string()];
+
+        let runtime = p.build_runtime().unwrap();
+        assert!(!runtime
+            .extra_headers
+            .contains_key(super::CODEX_WEBSOCKET_ENDPOINT_HEADER));
+
+        p.use_websocket = true;
+        let runtime = p.build_runtime().unwrap();
+        assert_eq!(
+            runtime
+                .extra_headers
+                .get(super::CODEX_WEBSOCKET_ENDPOINT_HEADER)
+                .map(String::as_str),
+            Some(super::CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL)
+        );
+    }
+
+    #[test]
+    fn websocket_setting_does_not_affect_platform_api_runtime() {
+        let mut p = provider_with_api_key("sk-test");
+        p.enabled_models = vec!["gpt-5.6-codex".to_string()];
+        p.use_websocket = true;
+
+        let runtime = p.build_runtime().unwrap();
+
+        assert_eq!(runtime.chat_endpoint, "https://api.openai.com/v1/responses");
+        assert!(!runtime
+            .extra_headers
+            .contains_key(super::CODEX_WEBSOCKET_ENDPOINT_HEADER));
     }
 
     #[test]
