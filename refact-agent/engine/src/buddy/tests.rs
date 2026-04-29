@@ -1241,6 +1241,21 @@ async fn test_greeting_triggers_on_first_launch() {
     assert!(job.should_run(gcx, &ctx).await);
 }
 
+#[tokio::test]
+async fn test_first_launch_greeting_has_short_ttl() {
+    use super::jobs::greeting::GreetingJob;
+    use super::scheduler::BuddyJob;
+    let job = GreetingJob;
+    let ctx = make_job_context(BuddyOnboarding::default(), 0, BuddyJobState::default());
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+
+    let result = job.execute(gcx, ctx).await;
+    let speech = result.speech.expect("greeting should produce speech");
+
+    assert!(!speech.persistent);
+    assert!(speech.ttl_seconds > 0 && speech.ttl_seconds <= 15);
+}
+
 #[test]
 fn test_greeting_blocked_within_cooldown() {
     use super::jobs::greeting::GreetingJob;
@@ -1393,6 +1408,29 @@ async fn test_tour_job_runs_only_once() {
         !job.should_run(gcx, &ran_ctx).await,
         "tour must not run after first run"
     );
+}
+
+#[tokio::test]
+async fn test_tour_speech_has_short_ttl() {
+    use super::jobs::tour::TourJob;
+    use super::scheduler::BuddyJob;
+    let job = TourJob;
+    let ctx = make_job_context(
+        BuddyOnboarding {
+            greeted: true,
+            tour_completed: false,
+            ..Default::default()
+        },
+        0,
+        BuddyJobState::default(),
+    );
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+
+    let result = job.execute(gcx, ctx).await;
+    let speech = result.speech.expect("tour should produce speech");
+
+    assert!(!speech.persistent);
+    assert!(speech.ttl_seconds > 0 && speech.ttl_seconds <= 15);
 }
 
 #[test]
