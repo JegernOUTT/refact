@@ -1,0 +1,8 @@
+wire_format: openai_chat_completions
+chat_endpoint: https://ark.cn-beijing.volces.com/api/v3/chat/completions
+supports_completion: false
+
+api_key: "$DOUBAO_API_KEY"
+base_url: https://ark.cn-beijing.volces.com/api/v3
+models_dev_provider_id: volcengine-cn
+custom_models: {}

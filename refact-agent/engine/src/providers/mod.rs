@@ -10,6 +10,7 @@ pub mod claude_code;
 pub mod claude_code_oauth;
 mod custom;
 mod deepseek;
+mod doubao;
 mod google_gemini;
 mod groq;
 mod kimi;

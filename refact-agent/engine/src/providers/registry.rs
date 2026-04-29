@@ -5,10 +5,10 @@ use crate::providers::{
     anthropic::AnthropicProvider, openai::OpenAIProvider,
     openai_responses::OpenAIResponsesProvider, openai_codex::OpenAICodexProvider,
     openrouter::OpenRouterProvider, ollama::OllamaProvider, lmstudio::LMStudioProvider,
-    vllm::VLLMProvider, groq::GroqProvider, deepseek::DeepseekProvider, xai::XAIProvider,
-    xai_responses::XAIResponsesProvider, google_gemini::GoogleGeminiProvider, qwen::QwenProvider,
-    kimi::KimiProvider, zhipu::ZhipuProvider, minimax::MiniMaxProvider, custom::CustomProvider,
-    claude_code::ClaudeCodeProvider,
+    vllm::VLLMProvider, groq::GroqProvider, deepseek::DeepseekProvider, doubao::DoubaoProvider,
+    xai::XAIProvider, xai_responses::XAIResponsesProvider, google_gemini::GoogleGeminiProvider,
+    qwen::QwenProvider, kimi::KimiProvider, zhipu::ZhipuProvider, minimax::MiniMaxProvider,
+    custom::CustomProvider, claude_code::ClaudeCodeProvider,
 };
 
 pub const PROVIDER_NAMES: &[&str] = &[
@@ -22,6 +22,7 @@ pub const PROVIDER_NAMES: &[&str] = &[
     "vllm",
     "groq",
     "deepseek",
+    "doubao",
     "xai",
     "xai_responses",
     "google_gemini",
@@ -45,6 +46,7 @@ pub fn create_provider(name: &str) -> Option<Box<dyn ProviderTrait>> {
         "vllm" => Some(Box::new(VLLMProvider::default())),
         "groq" => Some(Box::new(GroqProvider::default())),
         "deepseek" => Some(Box::new(DeepseekProvider::default())),
+        "doubao" => Some(Box::new(DoubaoProvider::default())),
         "xai" => Some(Box::new(XAIProvider::default())),
         "xai_responses" => Some(Box::new(XAIResponsesProvider::default())),
         "google_gemini" => Some(Box::new(GoogleGeminiProvider::default())),

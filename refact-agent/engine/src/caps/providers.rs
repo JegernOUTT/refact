@@ -279,6 +279,10 @@ const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
         include_str!("../yaml_configs/default_providers/deepseek.yaml"),
     ),
     (
+        "doubao",
+        include_str!("../yaml_configs/default_providers/doubao.yaml"),
+    ),
+    (
         "google_gemini",
         include_str!("../yaml_configs/default_providers/google_gemini.yaml"),
     ),
