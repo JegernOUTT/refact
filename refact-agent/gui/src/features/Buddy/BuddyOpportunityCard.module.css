@@ -71,6 +71,10 @@
   gap: var(--space-1);
 }
 
+.actionError {
+  color: var(--red-11);
+}
+
 /* Action buttons reuse the page-wide chip pill so every clickable
  * control on the Buddy home — care, project setup, persona footer,
  * recent errors, opportunity cards — shares one visual language. */

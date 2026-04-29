@@ -172,6 +172,10 @@ function lastPage(store: AppStore) {
   return pages[pages.length - 1];
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 describe("buddy action execution contract", () => {
   it("click_second_action_sends_action_index_1", async () => {
     let requestBody: unknown = null;
@@ -320,6 +324,124 @@ describe("buddy action execution contract", () => {
 
     expect(dismissCalled).toBe(true);
     expect(acceptCalled).toBe(false);
+  });
+
+  it("double_click_sends_one_opportunity_request", async () => {
+    let acceptCalls = 0;
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept",
+        async () => {
+          acceptCalls += 1;
+          await delay(25);
+          return acceptResponse({
+            kind: "open_page",
+            navigate_to: { type: "buddy" },
+          });
+        },
+      ),
+    );
+
+    const action: BuddyAction = { kind: "open_page", page: { type: "buddy" } };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const button = screen.getByRole("button", { name: "Open Buddy" });
+    await user.dblClick(button);
+
+    await waitFor(() => {
+      expect(acceptCalls).toBe(1);
+    });
+  });
+
+  it("failed_marketplace_install_shows_error_and_stays_retryable", async () => {
+    let acceptCalls = 0;
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept",
+        () => {
+          acceptCalls += 1;
+          return HttpResponse.json(
+            { detail: "marketplace_install_failed: denied" },
+            { status: 502 },
+          );
+        },
+      ),
+    );
+
+    const action: BuddyAction = {
+      kind: "offer_marketplace_install",
+      market_kind: "mcp",
+      item_id: "github",
+    };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const button = screen.getByRole("button", { name: "Install MCP" });
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "marketplace_install_failed",
+      );
+    });
+    expect(button).toBeEnabled();
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(acceptCalls).toBe(2);
+    });
+  });
+
+  it("dismiss_failure_shows_error_and_keeps_button_visible", async () => {
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/dismiss",
+        () => HttpResponse.json({ detail: "dismiss failed" }, { status: 409 }),
+      ),
+    );
+
+    const action: BuddyAction = { kind: "dismiss" };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const button = screen.getByRole("button", { name: "Dismiss" });
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("dismiss failed");
+    });
+    expect(button).toBeEnabled();
+  });
+
+  it("successful_marketplace_install_navigates_to_marketplace_hub", async () => {
+    server.use(
+      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+        acceptResponse({
+          kind: "marketplace_install",
+          market_kind: "mcp",
+          item_id: "github",
+          success: true,
+          error: null,
+        }),
+      ),
+    );
+
+    const { store, execute } = renderExecutor();
+    const action: BuddyAction = {
+      kind: "offer_marketplace_install",
+      market_kind: "mcp",
+      item_id: "github",
+    };
+    await execute(action, makeOpportunity({ proposed_actions: [action] }), 0);
+
+    expect(lastPage(store)).toMatchObject({ name: "marketplace hub" });
   });
 
   it("accept_failure_surfaces_error_does_not_navigate", async () => {

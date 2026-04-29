@@ -2,7 +2,7 @@ import React from "react";
 import classNames from "classnames";
 import { BuddyCanvas } from "./BuddyCanvas";
 import { SETUP_MODES } from "../Setup/setupModes";
-import { SIGNALS } from "./constants";
+import { getSignalDef } from "./constants";
 import type {
   BuddyCareAction,
   BuddyControl,
@@ -94,7 +94,7 @@ export const BuddyHero: React.FC<BuddyHeroProps> = ({
     {nowPlaying?.progress != null && (
       <div className={styles.statusBubble}>
         <span className={styles.statusIcon}>
-          {SIGNALS[nowPlaying.signal_type].icon}
+          {getSignalDef(nowPlaying.signal_type).icon}
         </span>
         <div className={styles.statusContent}>
           <div className={styles.progressBar}>

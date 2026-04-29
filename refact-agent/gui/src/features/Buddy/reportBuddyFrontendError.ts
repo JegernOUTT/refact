@@ -127,6 +127,52 @@ function storage(): Storage | null {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function parseCrashBreadcrumb(value: unknown): BuddyCrashBreadcrumb | null {
+  if (!isRecord(value)) return null;
+  const ts = finiteNumber(value.ts);
+  const label = optionalString(value.label);
+  const detail = optionalString(value.detail);
+  if (ts === undefined || label === undefined || detail === undefined) {
+    return null;
+  }
+  return { ts, label, detail };
+}
+
+function parseCrashHotSlots(
+  value: unknown,
+): Partial<Record<BuddyCrashHotSlot, string>> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [BuddyCrashHotSlot, string] => {
+        const [key, slotValue] = entry;
+        return (
+          ["tool", "report", "reasoning", "tasks"].includes(key) &&
+          typeof slotValue === "string"
+        );
+      },
+    ),
+  );
+}
+
 function readCrashSession(): BuddyCrashSession | null {
   if (crashSessionCache) return crashSessionCache;
   const handle = storage();
@@ -135,34 +181,47 @@ function readCrashSession(): BuddyCrashSession | null {
   try {
     const raw = handle.getItem(CRASH_STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<BuddyCrashSession>;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    const startedAt = finiteNumber(parsed.startedAt);
+    const updatedAt = finiteNumber(parsed.updatedAt);
+    const sessionId = optionalString(parsed.sessionId);
+    const status =
+      parsed.status === "running" || parsed.status === "closed"
+        ? parsed.status
+        : undefined;
     if (
       parsed.version !== CRASH_SESSION_VERSION ||
-      typeof parsed.sessionId !== "string" ||
-      typeof parsed.startedAt !== "number" ||
-      typeof parsed.updatedAt !== "number" ||
-      (parsed.status !== "running" && parsed.status !== "closed")
+      sessionId === undefined ||
+      startedAt === undefined ||
+      updatedAt === undefined ||
+      status === undefined
     ) {
       return null;
     }
 
     const session: BuddyCrashSession = {
       version: CRASH_SESSION_VERSION,
-      sessionId: parsed.sessionId,
-      status: parsed.status,
-      startedAt: parsed.startedAt,
-      updatedAt: parsed.updatedAt,
-      closedAt: parsed.closedAt,
-      host: parsed.host,
-      page: parsed.page,
-      chatId: parsed.chatId,
-      isStreaming: parsed.isStreaming,
-      visibility: parsed.visibility,
-      userAgent: parsed.userAgent,
-      heapUsed: parsed.heapUsed,
-      heapLimit: parsed.heapLimit,
-      hot: parsed.hot ?? {},
-      breadcrumbs: Array.isArray(parsed.breadcrumbs) ? parsed.breadcrumbs : [],
+      sessionId,
+      status,
+      startedAt,
+      updatedAt,
+      closedAt: finiteNumber(parsed.closedAt),
+      host: optionalString(parsed.host),
+      page: optionalString(parsed.page),
+      chatId: optionalString(parsed.chatId),
+      isStreaming: optionalBoolean(parsed.isStreaming),
+      visibility: optionalString(parsed.visibility),
+      userAgent: optionalString(parsed.userAgent),
+      heapUsed: finiteNumber(parsed.heapUsed),
+      heapLimit: finiteNumber(parsed.heapLimit),
+      hot: parseCrashHotSlots(parsed.hot),
+      breadcrumbs: Array.isArray(parsed.breadcrumbs)
+        ? parsed.breadcrumbs
+            .map(parseCrashBreadcrumb)
+            .filter((entry): entry is BuddyCrashBreadcrumb => entry !== null)
+            .slice(-CRASH_MAX_BREADCRUMBS)
+        : [],
     };
     crashSessionCache = session;
     return session;

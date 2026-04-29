@@ -407,17 +407,21 @@ pub(crate) async fn dispatch_action(
             market_kind,
             item_id,
         } => {
-            let install_result =
-                install_marketplace_action(gcx.clone(), *market_kind, item_id).await;
-            let success = install_result.is_ok();
-            let error = install_result.as_ref().err().cloned();
+            install_marketplace_action(gcx.clone(), *market_kind, item_id)
+                .await
+                .map_err(|e| {
+                    ScratchError::new(
+                        StatusCode::BAD_GATEWAY,
+                        format!("marketplace_install_failed: {}", e),
+                    )
+                })?;
             Ok(ActionOutcome {
                 result: serde_json::json!({
                     "kind": "marketplace_install",
                     "market_kind": serde_json::to_value(market_kind).unwrap_or_default(),
                     "item_id": item_id,
-                    "success": success,
-                    "error": error
+                    "success": true,
+                    "error": null
                 }),
                 status: OpportunityStatus::Accepted,
             })

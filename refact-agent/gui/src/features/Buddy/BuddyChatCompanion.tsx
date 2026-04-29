@@ -25,7 +25,10 @@ import {
 import { useBuddyState } from "./hooks/useBuddyState";
 import { BuddyCanvas } from "./BuddyCanvas";
 import { useBuddyOpportunities } from "./hooks/useBuddyOpportunities";
-import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
+import {
+  formatOpportunityActionError,
+  useExecuteBuddyAction,
+} from "./hooks/useExecuteBuddyAction";
 import type {
   BuddyControl,
   BuddyOpportunity,
@@ -79,12 +82,15 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const pendingRef = useRef(false);
   const prevChatIdRef = useRef(chatId);
 
   useEffect(() => {
     if (prevChatIdRef.current !== chatId) {
       prevChatIdRef.current = chatId;
       setDismissedIds(new Set());
+      setActionError(null);
       setOpportunityIndex(0);
     }
   }, [chatId]);
@@ -265,6 +271,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const isDismissed = notification ? dismissedIds.has(notification.id) : false;
 
   useEffect(() => {
+    setActionError(null);
+  }, [notification?.id]);
+
+  useEffect(() => {
     if (chatCooldownActive || !notification || isDismissed) return;
     const t = setTimeout(() => {
       setDismissedIds((prev) => new Set(prev).add(notification.id));
@@ -277,7 +287,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       if (!notification) return;
 
       if (notification.source === "opportunity") {
-        if (!notification.opportunity) return;
+        if (pendingRef.current || !notification.opportunity) return;
         const actionIndex = getOpportunityActionIndexFromControl(ctrl);
         if (actionIndex == null) return;
         const action = getOpportunityActionFromControl(
@@ -286,35 +296,57 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         );
         if (!action) return;
 
-        if (action.kind === "dismiss") {
-          setDismissedIds((prev) => {
-            const next = new Set(prev);
-            for (const opp of activeOpportunities) {
-              next.add(`opportunity-${opp.id}`);
+        pendingRef.current = true;
+        setPending(true);
+        setActionError(null);
+        try {
+          if (action.kind === "dismiss") {
+            const results = await Promise.allSettled(
+              activeOpportunities.map(async (opp) => {
+                const dismissAction = getOpportunityDismissAction(opp);
+                await executeOpportunityAction(
+                  dismissAction.action,
+                  opp,
+                  dismissAction.actionIndex,
+                );
+                return opp.id;
+              }),
+            );
+            const dismissedOpportunityIds = results.flatMap((result) =>
+              result.status === "fulfilled" ? [result.value] : [],
+            );
+            if (dismissedOpportunityIds.length > 0) {
+              setDismissedIds((prev) => {
+                const next = new Set(prev);
+                for (const oppId of dismissedOpportunityIds) {
+                  next.add(`opportunity-${oppId}`);
+                }
+                return next;
+              });
             }
-            return next;
-          });
-          await Promise.allSettled(
-            activeOpportunities.map((opp) => {
-              const dismissAction = getOpportunityDismissAction(opp);
-              return executeOpportunityAction(
-                dismissAction.action,
-                opp,
-                dismissAction.actionIndex,
-              );
-            }),
-          );
-          setOpportunityIndex(0);
-          return;
-        }
+            const failed = results.find(
+              (result) => result.status === "rejected",
+            );
+            if (failed) {
+              setActionError(formatOpportunityActionError(failed.reason));
+            }
+            setOpportunityIndex(0);
+            return;
+          }
 
-        await executeOpportunityAction(
-          action,
-          notification.opportunity,
-          actionIndex,
-        );
-        setDismissedIds((prev) => new Set(prev).add(notification.id));
-        setOpportunityIndex((index) => index + 1);
+          await executeOpportunityAction(
+            action,
+            notification.opportunity,
+            actionIndex,
+          );
+          setDismissedIds((prev) => new Set(prev).add(notification.id));
+          setOpportunityIndex((index) => index + 1);
+        } catch (error) {
+          setActionError(formatOpportunityActionError(error));
+        } finally {
+          pendingRef.current = false;
+          setPending(false);
+        }
         return;
       }
 
@@ -364,8 +396,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       }
 
       if (ctrl.action === "investigate_error") {
-        if (pending) return;
+        if (pendingRef.current || pending) return;
+        pendingRef.current = true;
         setPending(true);
+        setActionError(null);
         try {
           if (notification.source === "suggestion") {
             await dismissMutation(notification.id);
@@ -390,7 +424,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             }),
           );
           setDismissedIds((prev) => new Set(prev).add(notification.id));
+        } catch (error) {
+          setActionError(formatOpportunityActionError(error));
         } finally {
+          pendingRef.current = false;
           setPending(false);
         }
       }
@@ -416,7 +453,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         state={buddy.state}
         onEvent={buddy.handleCanvasEvent}
         displaySize={160}
-        speechOverride={notification.text}
+        speechOverride={actionError ?? notification.text}
         speechControls={notification.controls}
         onSpeechControlClick={(ctrl) => void handleControl(ctrl)}
         bubblePosition="left"

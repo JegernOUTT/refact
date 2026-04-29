@@ -1,8 +1,11 @@
-import React from "react";
+import React, { useRef, useState } from "react";
 import { Text } from "@radix-ui/themes";
 import classNames from "classnames";
 import type { BuddyOpportunity } from "./types";
-import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
+import {
+  formatOpportunityActionError,
+  useExecuteBuddyAction,
+} from "./hooks/useExecuteBuddyAction";
 import { actionLabel } from "./buddyOpportunityActions";
 import styles from "./BuddyOpportunityCard.module.css";
 
@@ -12,6 +15,11 @@ interface Props {
 
 export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
   const executeAction = useExecuteBuddyAction();
+  const [pendingActionIndex, setPendingActionIndex] = useState<number | null>(
+    null,
+  );
+  const [actionError, setActionError] = useState<string | null>(null);
+  const pendingRef = useRef(false);
   const isActive =
     opportunity.status === "new" || opportunity.status === "shown";
 
@@ -21,6 +29,23 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
     normal: styles.priorityNormal,
     low: styles.priorityLow,
   }[opportunity.priority];
+
+  const handleActionClick = async (idx: number) => {
+    if (pendingRef.current || !isActive) return;
+    pendingRef.current = true;
+    setPendingActionIndex(idx);
+    setActionError(null);
+    try {
+      if (idx < 0 || idx >= opportunity.proposed_actions.length) return;
+      const action = opportunity.proposed_actions[idx];
+      await executeAction(action, opportunity, idx);
+    } catch (error) {
+      setActionError(formatOpportunityActionError(error));
+    } finally {
+      pendingRef.current = false;
+      setPendingActionIndex(null);
+    }
+  };
 
   return (
     <div className={styles.card}>
@@ -52,14 +77,20 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
                   ? styles.actionButtonGhost
                   : styles.actionButtonPrimary,
               )}
-              disabled={!isActive}
+              disabled={!isActive || pendingActionIndex !== null}
               aria-label={actionLabel(action)}
-              onClick={() => void executeAction(action, opportunity, idx)}
+              aria-busy={pendingActionIndex === idx}
+              onClick={() => void handleActionClick(idx)}
             >
-              {actionLabel(action)}
+              {pendingActionIndex === idx ? "Working…" : actionLabel(action)}
             </button>
           ))}
         </div>
+      )}
+      {actionError && (
+        <Text size="1" color="red" className={styles.actionError} role="alert">
+          {actionError}
+        </Text>
       )}
     </div>
   );

@@ -31,7 +31,12 @@ import {
   defaultBuddyPulse,
 } from "../features/Buddy/buddySlice";
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
-import { PALETTES, SIGNALS, STAGES } from "../features/Buddy/constants";
+import {
+  getSignalDef,
+  PALETTES,
+  SIGNALS,
+  STAGES,
+} from "../features/Buddy/constants";
 import { buildColorMap } from "../features/Buddy/canvas/colorMap";
 import { updateSceneAnimation } from "../features/Buddy/canvas/animLoop";
 import { createInitialAnimState } from "../features/Buddy/state";
@@ -497,6 +502,12 @@ describe("BuddyChatCompanion triggers", () => {
 
   test("chat_completed signal is not an error", () => {
     expect(SIGNALS.chat_completed.isError).toBe(false);
+  });
+
+  test("unknown signal type uses fallback definition", () => {
+    const fallback = getSignalDef("future_backend_signal");
+    expect(fallback.icon).toBe("✨");
+    expect(fallback.isError).toBe(false);
   });
 
   test("diagnostic stored in recentDiagnostics on addBuddyDiagnostic", () => {
@@ -975,6 +986,15 @@ describe("BuddyPanel hero layout", () => {
     expect(panel).toContain("Promise.allSettled");
     expect(companion).toContain("Promise.allSettled");
   });
+
+  test("runtime signal chrome uses fallback lookup", () => {
+    const panel = fs.readFileSync(path.join(buddyDir, "BuddyPanel.tsx"), "utf8");
+    const hero = fs.readFileSync(path.join(buddyDir, "BuddyHero.tsx"), "utf8");
+    expect(panel).toContain("getSignalDef(activeRuntime.signal_type)");
+    expect(hero).toContain("getSignalDef(nowPlaying.signal_type)");
+    expect(panel).not.toContain("SIGNALS[activeRuntime.signal_type]");
+    expect(hero).not.toContain("SIGNALS[nowPlaying.signal_type]");
+  });
 });
 
 describe("Buddy investigation prompt hardening", () => {
@@ -1228,6 +1248,41 @@ describe("Buddy frontend error reporting helpers", () => {
     expect(report).toContain("reasoning");
     expect(report).toContain("Recent breadcrumbs:");
     expect(report).toContain("task_done");
+  });
+
+  test("corrupt crash breadcrumbs are ignored during recovery", () => {
+    const now = Date.now();
+    localStorage.setItem(
+      "refact:buddy:frontend-crash:v1",
+      JSON.stringify({
+        version: 1,
+        sessionId: "bad-breadcrumbs",
+        status: "running",
+        startedAt: now - 1000,
+        updatedAt: now,
+        breadcrumbs: [
+          { ts: "bad", label: "bad_ts", detail: "hidden" },
+          { ts: now, label: 42, detail: "hidden" },
+          { ts: now, label: "good", detail: "visible" },
+        ],
+      }),
+    );
+
+    const recovered = beginBuddyCrashSession({
+      host: "web",
+      page: "chat",
+      chatId: "chat-b",
+      isStreaming: false,
+    });
+
+    expect(recovered).not.toBeNull();
+    if (!recovered) {
+      throw new Error("expected recovered crash session");
+    }
+    expect(() => buildBuddyCrashRecoveryError(recovered)).not.toThrow();
+    const report = buildBuddyCrashRecoveryError(recovered);
+    expect(report).toContain("good: visible");
+    expect(report).not.toContain("hidden");
   });
 
   test("reportBuddyFrontendError supports ui error state source", async () => {

@@ -5954,6 +5954,89 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
 }
 
 #[tokio::test]
+async fn failed_marketplace_install_leaves_opportunity_retryable() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, AcceptRequest,
+    };
+    use hyper::StatusCode;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-marketplace-fails", "ck-marketplace-fails");
+    opp.proposed_actions = vec![BuddyAction::OfferMarketplaceInstall {
+        market_kind: MarketKind::Mcp,
+        item_id: "../evil".to_string(),
+    }];
+    svc.add_opportunity(opp);
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    let err = handle_v1_buddy_opportunity_accept(
+        Extension(gcx.clone()),
+        Path("opp-marketplace-fails".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code, StatusCode::BAD_GATEWAY);
+    assert!(err.message.contains("marketplace_install_failed"));
+
+    {
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        let svc = lock.as_ref().unwrap();
+        let opp = svc.opportunity_queue.get("opp-marketplace-fails").unwrap();
+        assert_eq!(opp.status, OpportunityStatus::New);
+        assert!(!svc.is_opportunity_accept_claimed("opp-marketplace-fails"));
+    }
+
+    let err = handle_v1_buddy_opportunity_accept(
+        Extension(gcx.clone()),
+        Path("opp-marketplace-fails".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn successful_marketplace_install_accepts_opportunity() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, AcceptRequest,
+    };
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-marketplace-ok", "ck-marketplace-ok");
+    opp.proposed_actions = vec![BuddyAction::OfferMarketplaceInstall {
+        market_kind: MarketKind::Mcp,
+        item_id: "github".to_string(),
+    }];
+    svc.add_opportunity(opp);
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    let response = handle_v1_buddy_opportunity_accept(
+        Extension(gcx.clone()),
+        Path("opp-marketplace-ok".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.0["action_result"]["kind"], "marketplace_install");
+    assert_eq!(response.0["action_result"]["success"], true);
+
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let svc = lock.as_ref().unwrap();
+    let opp = svc.opportunity_queue.get("opp-marketplace-ok").unwrap();
+    assert_eq!(opp.status, OpportunityStatus::Accepted);
+}
+
+#[tokio::test]
 async fn opportunity_expiry_persists_and_noops_when_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

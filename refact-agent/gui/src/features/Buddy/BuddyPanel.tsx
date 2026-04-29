@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
 import { BuddyCanvas } from "./BuddyCanvas";
@@ -14,8 +20,11 @@ import {
 } from "./buddySlice";
 import { executeBuddyAction } from "./executeBuddyAction";
 import type { BuddyControl } from "./types";
-import { PALETTES, SIGNALS } from "./constants";
-import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
+import { getSignalDef, PALETTES } from "./constants";
+import {
+  formatOpportunityActionError,
+  useExecuteBuddyAction,
+} from "./hooks/useExecuteBuddyAction";
 import {
   getOpportunityActionFromControl,
   getOpportunityActionIndexFromControl,
@@ -38,6 +47,8 @@ export const BuddyPanel: React.FC = () => {
   const [dismissedOpportunityIds, setDismissedOpportunityIds] = useState<
     Set<string>
   >(new Set());
+  const [opportunityError, setOpportunityError] = useState<string | null>(null);
+  const pendingOpportunityRef = useRef(false);
   const executeOpportunityAction = useExecuteBuddyAction();
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
 
@@ -48,6 +59,9 @@ export const BuddyPanel: React.FC = () => {
     ? diagnostics.find((diag) => diag.chat_id === activeSpeech.chat_id)
     : undefined;
   const activeRuntime = nowPlaying?.dismissed ? null : nowPlaying;
+  const activeRuntimeSignal = activeRuntime
+    ? getSignalDef(activeRuntime.signal_type)
+    : null;
   const runtimeDiagnostic = activeRuntime?.chat_id
     ? diagnostics.find((diag) => diag.chat_id === activeRuntime.chat_id)
     : undefined;
@@ -81,11 +95,16 @@ export const BuddyPanel: React.FC = () => {
     activeOpportunities.length > 0
       ? activeOpportunities[opportunityIndex % activeOpportunities.length]
       : null;
-  const speechText = activeSpeech
-    ? activeSpeech.text
-    : topOpportunity
-      ? opportunitySpeechText(topOpportunity)
-      : activeRuntime?.speech_text ?? activeRuntime?.title ?? null;
+  useEffect(() => {
+    setOpportunityError(null);
+  }, [topOpportunity?.id]);
+  const speechText = opportunityError
+    ? opportunityError
+    : activeSpeech
+      ? activeSpeech.text
+      : topOpportunity
+        ? opportunitySpeechText(topOpportunity)
+        : activeRuntime?.speech_text ?? activeRuntime?.title ?? null;
   const speechControls = activeSpeech
     ? activeSpeech.controls
     : topOpportunity
@@ -104,38 +123,61 @@ export const BuddyPanel: React.FC = () => {
       }
     : topOpportunity
       ? async (ctrl: BuddyControl) => {
+          if (pendingOpportunityRef.current) return;
           const actionIndex = getOpportunityActionIndexFromControl(ctrl);
           if (actionIndex == null) return;
           const action = getOpportunityActionFromControl(ctrl, topOpportunity);
           if (!action) return;
 
-          if (action.kind === "dismiss") {
-            setDismissedOpportunityIds((prev) => {
-              const next = new Set(prev);
-              for (const opp of activeOpportunities) {
-                next.add(`opportunity-${opp.id}`);
+          pendingOpportunityRef.current = true;
+          setOpportunityError(null);
+          try {
+            if (action.kind === "dismiss") {
+              const results = await Promise.allSettled(
+                activeOpportunities.map(async (opp) => {
+                  const dismissAction = getOpportunityDismissAction(opp);
+                  await executeOpportunityAction(
+                    dismissAction.action,
+                    opp,
+                    dismissAction.actionIndex,
+                  );
+                  return opp.id;
+                }),
+              );
+              const dismissedIds = results.flatMap((result) =>
+                result.status === "fulfilled" ? [result.value] : [],
+              );
+              if (dismissedIds.length > 0) {
+                setDismissedOpportunityIds((prev) => {
+                  const next = new Set(prev);
+                  for (const oppId of dismissedIds) {
+                    next.add(`opportunity-${oppId}`);
+                  }
+                  return next;
+                });
               }
-              return next;
-            });
-            await Promise.allSettled(
-              activeOpportunities.map((opp) => {
-                const dismissAction = getOpportunityDismissAction(opp);
-                return executeOpportunityAction(
-                  dismissAction.action,
-                  opp,
-                  dismissAction.actionIndex,
+              const failed = results.find(
+                (result) => result.status === "rejected",
+              );
+              if (failed) {
+                setOpportunityError(
+                  formatOpportunityActionError(failed.reason),
                 );
-              }),
-            );
-            setOpportunityIndex(0);
-            return;
-          }
+              }
+              setOpportunityIndex(0);
+              return;
+            }
 
-          await executeOpportunityAction(action, topOpportunity, actionIndex);
-          setDismissedOpportunityIds((prev) =>
-            new Set(prev).add(`opportunity-${topOpportunity.id}`),
-          );
-          setOpportunityIndex((index) => index + 1);
+            await executeOpportunityAction(action, topOpportunity, actionIndex);
+            setDismissedOpportunityIds((prev) =>
+              new Set(prev).add(`opportunity-${topOpportunity.id}`),
+            );
+            setOpportunityIndex((index) => index + 1);
+          } catch (error) {
+            setOpportunityError(formatOpportunityActionError(error));
+          } finally {
+            pendingOpportunityRef.current = false;
+          }
         }
       : activeRuntime?.controls?.length
         ? async (ctrl: BuddyControl) => {
@@ -193,7 +235,7 @@ export const BuddyPanel: React.FC = () => {
           {activeRuntime?.progress != null && (
             <div className={styles.statusBubble}>
               <span className={styles.statusIcon}>
-                {SIGNALS[activeRuntime.signal_type].icon}
+                {activeRuntimeSignal?.icon}
               </span>
               <div className={styles.progressBar}>
                 <div style={{ width: `${activeRuntime.progress}%` }} />
