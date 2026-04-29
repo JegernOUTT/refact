@@ -20,6 +20,7 @@ const PROTECTED_FIELDS: &[&str] = &[
     "store",
     "previous_response_id",
     "conversation",
+    "top_p",
 ];
 
 pub struct OpenAiResponsesAdapter;
@@ -83,6 +84,10 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             if settings.supports_temperature {
                 if let Some(temp) = req.params.temperature {
                     body["temperature"] = json!(temp);
+                }
+
+                if let Some(top_p) = req.params.top_p {
+                    body["top_p"] = json!(top_p);
                 }
             }
 
@@ -153,6 +158,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 body["reasoning"] = json!({"effort": effort, "summary": "auto"});
             }
             body.as_object_mut().map(|obj| obj.remove("temperature"));
+            body.as_object_mut().map(|obj| obj.remove("top_p"));
         }
 
         // Ask server to include extra fields we rely on for rich tool cards.
@@ -180,6 +186,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 "max_tokens",
                 "max_completion_tokens",
                 "temperature",
+                "top_p",
                 "frequency_penalty",
                 "stop",
             ];
@@ -706,11 +713,11 @@ fn convert_to_responses_format(
 
     for msg in messages {
         match msg.role.as_str() {
-            "system" => {
+            "system" | "developer" => {
                 system_count += 1;
                 if system_count > 1 {
                     tracing::warn!(
-                        "Multiple system messages detected ({}), only the last one will be used",
+                        "Multiple instruction messages detected ({}), only the last one will be used",
                         system_count
                     );
                 }
@@ -1123,6 +1130,7 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
         );
         req.params.temperature = Some(0.5);
+        req.params.top_p = Some(0.9);
         req.params.frequency_penalty = Some(0.3);
         req.params.stop = vec!["STOP".to_string()];
 
@@ -1137,6 +1145,10 @@ mod tests {
         assert!(
             http.body.get("temperature").is_none(),
             "ChatGPT backend must not have temperature"
+        );
+        assert!(
+            http.body.get("top_p").is_none(),
+            "ChatGPT backend must not have top_p"
         );
         assert!(
             http.body.get("frequency_penalty").is_none(),
@@ -1261,6 +1273,7 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
         );
         req.params.temperature = Some(0.5);
+        req.params.top_p = Some(0.9);
 
         let http = adapter.build_http(&req, &default_settings()).unwrap();
 
@@ -1272,6 +1285,27 @@ mod tests {
             http.body.get("temperature").is_none(),
             "Responses requests for reasoning-capable models must omit temperature"
         );
+        assert!(
+            http.body.get("top_p").is_none(),
+            "Responses requests for reasoning-capable models must omit top_p"
+        );
+    }
+
+    #[test]
+    fn test_standard_api_includes_top_p_for_non_reasoning_model() {
+        let adapter = OpenAiResponsesAdapter;
+        let mut req = LlmRequest::new(
+            "gpt-4.1".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        req.params.top_p = Some(0.9);
+
+        let mut settings = default_settings();
+        settings.supports_reasoning = false;
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert!((http.body["top_p"].as_f64().unwrap() - 0.9).abs() < 0.000_001);
     }
 
     #[test]
@@ -1371,6 +1405,19 @@ mod tests {
         let (input, instructions) = convert_to_responses_format(&messages);
 
         assert_eq!(instructions, Some("Be helpful".to_string()));
+        assert_eq!(input.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_convert_developer_to_instructions() {
+        let messages = vec![
+            ChatMessage::new("developer".to_string(), "Be concise".to_string()),
+            ChatMessage::new("user".to_string(), "Hi".to_string()),
+        ];
+
+        let (input, instructions) = convert_to_responses_format(&messages);
+
+        assert_eq!(instructions, Some("Be concise".to_string()));
         assert_eq!(input.as_array().unwrap().len(), 1);
     }
 

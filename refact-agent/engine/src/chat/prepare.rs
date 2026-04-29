@@ -334,6 +334,7 @@ pub async fn prepare_chat_passthrough(
         n_ctx: Some(effective_n_ctx),
         max_tokens: sampling_parameters.max_new_tokens,
         temperature: sampling_parameters.temperature,
+        top_p: sampling_parameters.top_p,
         frequency_penalty: sampling_parameters.frequency_penalty,
         stop: sampling_parameters.stop.clone(),
         n: Some(1),

@@ -18,6 +18,7 @@ const PROTECTED_FIELDS: &[&str] = &[
     "parallel_tool_calls",
     "stream_options",
     "cache_control",
+    "top_p",
 ];
 
 pub struct OpenAiChatAdapter;
@@ -161,6 +162,10 @@ impl LlmWireAdapter for OpenAiChatAdapter {
             if let Some(temp) = req.params.temperature {
                 body["temperature"] = json!(temp);
             }
+
+            if let Some(top_p) = req.params.top_p {
+                body["top_p"] = json!(top_p);
+            }
         }
 
         if let Some(freq_penalty) = req.params.frequency_penalty {
@@ -199,6 +204,7 @@ impl LlmWireAdapter for OpenAiChatAdapter {
                 body["reasoning_effort"] = json!(effort);
             }
             body.as_object_mut().map(|obj| obj.remove("temperature"));
+            body.as_object_mut().map(|obj| obj.remove("top_p"));
         }
 
         if let Some(ref format) = req.response_format {
@@ -278,6 +284,15 @@ impl LlmWireAdapter for OpenAiChatAdapter {
                         if !content.is_empty() {
                             deltas.push(LlmStreamDelta::AppendContent {
                                 text: content.to_string(),
+                                block_index: None,
+                            });
+                        }
+                    }
+
+                    if let Some(refusal) = delta.get("refusal").and_then(|r| r.as_str()) {
+                        if !refusal.is_empty() {
+                            deltas.push(LlmStreamDelta::AppendContent {
+                                text: refusal.to_string(),
                                 block_index: None,
                             });
                         }
@@ -403,7 +418,7 @@ fn convert_messages_to_openai(messages: &[crate::call_validation::ChatMessage]) 
         }
 
         let role = match msg.role.as_str() {
-            "user" | "assistant" | "system" | "tool" => msg.role.clone(),
+            "developer" | "user" | "assistant" | "system" | "tool" => msg.role.clone(),
             "diff" => "tool".to_string(),
             _ => continue,
         };
@@ -735,10 +750,11 @@ mod tests {
     #[test]
     fn test_build_http_basic() {
         let adapter = OpenAiChatAdapter;
-        let req = LlmRequest::new(
+        let mut req = LlmRequest::new(
             "gpt-4".to_string(),
             vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
         );
+        req.params.top_p = Some(0.9);
         let settings = default_settings();
 
         let http = adapter.build_http(&req, &settings).unwrap();
@@ -748,6 +764,28 @@ mod tests {
         assert_eq!(http.body["model"], "gpt-4");
         assert_eq!(http.body["messages"][0]["role"], "user");
         assert_eq!(http.body["messages"][0]["content"], "Hello");
+        assert!((http.body["top_p"].as_f64().unwrap() - 0.9).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn test_build_http_omits_top_p_for_reasoning_models() {
+        let adapter = OpenAiChatAdapter;
+        let mut req = LlmRequest::new(
+            "o3".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        req.params.temperature = Some(0.5);
+        req.params.top_p = Some(0.9);
+
+        let mut settings = default_settings();
+        settings.model_name = "o3".to_string();
+        settings.supports_reasoning = true;
+        settings.supports_temperature = true;
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert!(http.body.get("temperature").is_none());
+        assert!(http.body.get("top_p").is_none());
     }
 
     #[test]
@@ -793,6 +831,22 @@ mod tests {
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
             LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
+            _ => panic!("expected AppendContent"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_chunk_refusal() {
+        let adapter = OpenAiChatAdapter;
+        let chunk = r#"{"choices":[{"delta":{"refusal":"I can’t help with that."}}]}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        match &deltas[0] {
+            LlmStreamDelta::AppendContent { text, .. } => {
+                assert_eq!(text, "I can’t help with that.")
+            }
             _ => panic!("expected AppendContent"),
         }
     }
@@ -892,6 +946,23 @@ mod tests {
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0]["role"], "user");
         assert_eq!(converted[1]["role"], "assistant");
+    }
+
+    #[test]
+    fn test_convert_messages_preserves_developer_role() {
+        let messages = vec![
+            ChatMessage::new(
+                "developer".to_string(),
+                "Prefer concise answers".to_string(),
+            ),
+            ChatMessage::new("user".to_string(), "hi".to_string()),
+        ];
+
+        let converted = convert_messages_to_openai(&messages);
+
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0]["role"], "developer");
+        assert_eq!(converted[0]["content"], "Prefer concise answers");
     }
 
     #[test]

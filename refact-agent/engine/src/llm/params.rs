@@ -19,6 +19,8 @@ pub struct CommonParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub stop: Vec<String>,
@@ -36,6 +38,7 @@ impl Default for CommonParams {
             n_ctx: None,
             max_tokens: DEFAULT_MAX_TOKENS,
             temperature: None,
+            top_p: None,
             frequency_penalty: None,
             stop: Vec::new(),
             n: None,
