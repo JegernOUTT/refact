@@ -443,6 +443,7 @@ fn is_special_purpose_model(model: &ModelsDevModel) -> bool {
         "moderation",
         "classifier",
         "classify",
+        "router",
         "guard",
         "safety",
         "gpt-image",

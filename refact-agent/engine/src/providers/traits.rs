@@ -677,3 +677,47 @@ pub fn set_model_enabled_impl(enabled_models: &mut Vec<String>, model_id: &str, 
         enabled_models.retain(|m| m != model_id);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn models_dev_available_model_omits_empty_override_fields_when_serialized() {
+        let model = AvailableModel::from_caps(
+            "test-model",
+            &ModelCapabilities {
+                n_ctx: 4096,
+                supports_tools: true,
+                ..Default::default()
+            },
+            true,
+            None,
+        );
+
+        let value = serde_json::to_value(model).unwrap();
+
+        assert!(value.get("wire_format_override").is_none());
+        assert!(value.get("endpoint_override").is_none());
+    }
+
+    #[test]
+    fn models_dev_available_model_deserializes_without_override_fields() {
+        let model: AvailableModel = serde_json::from_value(json!({
+            "id": "old-model",
+            "display_name": null,
+            "n_ctx": 8192,
+            "supports_tools": true,
+            "supports_multimodality": false,
+            "tokenizer": null,
+            "enabled": true,
+            "is_custom": false
+        }))
+        .unwrap();
+
+        assert_eq!(model.id, "old-model");
+        assert!(model.wire_format_override.is_none());
+        assert!(model.endpoint_override.is_none());
+    }
+}

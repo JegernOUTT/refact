@@ -429,8 +429,8 @@ pub fn resolve_model_caps(
 mod tests {
     use super::*;
     use crate::caps::models_dev::{
-        load_models_dev_snapshot_catalog, write_models_dev_cache, ModelsDevCost, ModelsDevCostTier,
-        ModelsDevLimit, ModelsDevModalities, ModelsDevModel, ModelsDevProvider,
+        get_model, load_models_dev_snapshot_catalog, write_models_dev_cache, ModelsDevCost,
+        ModelsDevCostTier, ModelsDevLimit, ModelsDevModalities, ModelsDevModel, ModelsDevProvider,
     };
 
     fn catalog_with_providers(
@@ -855,6 +855,54 @@ mod tests {
             assert!(
                 resolve_model_caps(&caps, model).is_some(),
                 "models.dev snapshot should resolve {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_models_dev_snapshot_filters_representative_real_catalog_entries() {
+        let catalog = load_models_dev_snapshot_catalog().unwrap();
+        let caps = model_caps_from_models_dev_catalog(&catalog).unwrap();
+
+        for (provider, model) in [
+            ("openai", "gpt-4o"),
+            ("openai", "gpt-5.1"),
+            ("anthropic", "claude-3-5-sonnet-20241022"),
+            ("deepseek", "deepseek-chat"),
+            ("alibaba", "qwen-plus"),
+            ("moonshotai", "kimi-k2-thinking"),
+            ("zai", "glm-4.6"),
+            ("zhipuai", "glm-4.6"),
+            ("minimax", "MiniMax-M2.1"),
+        ] {
+            assert!(
+                get_model(&catalog, provider, model).is_some(),
+                "snapshot fixture should contain {provider}/{model}"
+            );
+            assert!(
+                resolve_model_caps(&caps, &format!("{provider}/{model}")).is_some(),
+                "models.dev caps should include {provider}/{model}"
+            );
+        }
+
+        for (provider, model) in [
+            ("openai", "gpt-image-1"),
+            ("alibaba", "qwen-omni-turbo"),
+            ("alibaba", "qwen3-asr-flash"),
+            ("alibaba", "qwen-vl-ocr"),
+            ("openai", "text-embedding-3-large"),
+            ("azure", "cohere-embed-v-4-0"),
+            ("regolo-ai", "qwen3-reranker-4b"),
+            ("groq", "meta-llama/llama-prompt-guard-2-22m"),
+            ("azure", "model-router"),
+        ] {
+            assert!(
+                get_model(&catalog, provider, model).is_some(),
+                "snapshot fixture should contain {provider}/{model}"
+            );
+            assert!(
+                resolve_model_caps(&caps, &format!("{provider}/{model}")).is_none(),
+                "models.dev caps should exclude {provider}/{model}"
             );
         }
     }

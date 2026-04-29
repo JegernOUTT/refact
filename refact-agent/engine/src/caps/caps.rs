@@ -1382,4 +1382,43 @@ mod tests {
         assert_eq!(record.base.n_ctx, 131_072);
         assert!(record.supports_tools);
     }
+
+    #[test]
+    fn test_build_chat_model_record_uses_models_dev_available_model_runtime_overrides() {
+        let mut model = AvailableModel::from_caps(
+            "qwen-override",
+            &ModelCapabilities {
+                n_ctx: 128_000,
+                supports_tools: true,
+                tokenizer: "fake".to_string(),
+                ..Default::default()
+            },
+            true,
+            None,
+        );
+        model.wire_format_override = Some(WireFormat::OpenaiResponses);
+        model.endpoint_override =
+            Some("https://dashscope.aliyuncs.com/model-specific/v1/responses".to_string());
+
+        let record = build_chat_model_record(
+            "qwen",
+            &model,
+            &HashMap::new(),
+            WireFormat::OpenaiChatCompletions,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "test-key",
+            "",
+            "",
+            &HashMap::new(),
+            true,
+        );
+
+        assert_eq!(record.base.id, "qwen/qwen-override");
+        assert_eq!(record.base.wire_format, WireFormat::OpenaiResponses);
+        assert_eq!(
+            record.base.endpoint,
+            "https://dashscope.aliyuncs.com/model-specific/v1/responses"
+        );
+        assert_eq!(record.base.api_key, "test-key");
+    }
 }

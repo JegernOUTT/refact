@@ -219,6 +219,26 @@ pub fn validate_models_dev_endpoint(
             "models.dev endpoint '{endpoint}' must use https before credentials are sent"
         ));
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!(
+            "models.dev endpoint '{endpoint}' must not include userinfo before credentials are sent"
+        ));
+    }
+    if url.query().is_some() {
+        return Err(format!(
+            "models.dev endpoint '{endpoint}' must not include a query string before credentials are sent"
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(format!(
+            "models.dev endpoint '{endpoint}' must not include a fragment before credentials are sent"
+        ));
+    }
+    if url.port().is_some_and(|port| port != 443) {
+        return Err(format!(
+            "models.dev endpoint '{endpoint}' must not use a non-default port before credentials are sent"
+        ));
+    }
     let host = normalized_host(&url).ok_or_else(|| {
         format!("models.dev endpoint '{endpoint}' has no hostname and cannot be trusted")
     })?;
@@ -288,17 +308,18 @@ fn model_endpoint_override(
     }
     let wire_format = model_wire_format_from_profile(provider, model_provider, config);
     let endpoint = api.trim().trim_end_matches('/').to_string();
+    let endpoint = if is_complete_endpoint(&endpoint) {
+        endpoint
+    } else {
+        derive_models_dev_endpoint(&endpoint, wire_format)
+    };
     validate_models_dev_endpoint(
         &endpoint,
         config.family,
         ModelsDevEndpointSource::Catalog,
         &config.user_allowed_hosts,
     )?;
-    if is_complete_endpoint(&endpoint) {
-        Ok(Some(endpoint))
-    } else {
-        Ok(Some(derive_models_dev_endpoint(&endpoint, wire_format)))
-    }
+    Ok(Some(endpoint))
 }
 
 fn model_wire_format_from_profile(
@@ -415,12 +436,21 @@ fn normalized_host(url: &Url) -> Option<String> {
 }
 
 fn normalize_host_for_compare(host: &str) -> String {
-    host.trim().trim_end_matches('.').to_ascii_lowercase()
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(&host)
+        .to_string()
 }
 
 fn allowed_hosts(family: ModelsDevProviderFamily) -> &'static [&'static str] {
     match family {
-        ModelsDevProviderFamily::Qwen => &["dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"],
+        ModelsDevProviderFamily::Qwen => &[
+            "dashscope.aliyuncs.com",
+            "dashscope-intl.aliyuncs.com",
+            "coding-intl.dashscope.aliyuncs.com",
+            "coding.dashscope.aliyuncs.com",
+        ],
         ModelsDevProviderFamily::Kimi => &["api.moonshot.ai", "api.moonshot.cn"],
         ModelsDevProviderFamily::Zai => &["api.z.ai", "open.bigmodel.cn"],
         ModelsDevProviderFamily::MiniMax => &["api.minimax.io", "api.minimaxi.com"],
@@ -453,7 +483,11 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_private_ipv6(ip: Ipv6Addr) -> bool {
-    ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_unspecified()
+    ip.to_ipv4_mapped().map_or(false, is_private_ipv4)
+        || ip.is_loopback()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || ip.is_unspecified()
 }
 
 #[cfg(test)]
@@ -510,31 +544,52 @@ mod tests {
 
     #[test]
     fn models_dev_provider_endpoint_derivation_for_supported_wire_formats() {
-        assert_eq!(
-            derive_models_dev_endpoint(
-                "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                WireFormat::OpenaiChatCompletions
+        let cases = [
+            (
+                "https://dashscope.aliyuncs.com/v1",
+                WireFormat::OpenaiChatCompletions,
+                "https://dashscope.aliyuncs.com/v1/chat/completions",
             ),
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-        );
-        assert_eq!(
-            derive_models_dev_endpoint("https://api.openai.com/v1", WireFormat::OpenaiResponses),
-            "https://api.openai.com/v1/responses"
-        );
-        assert_eq!(
-            derive_models_dev_endpoint(
+            (
+                "https://dashscope.aliyuncs.com/v1/",
+                WireFormat::OpenaiChatCompletions,
+                "https://dashscope.aliyuncs.com/v1/chat/completions",
+            ),
+            (
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+                WireFormat::OpenaiChatCompletions,
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            ),
+            (
+                "https://api.openai.com/v1",
+                WireFormat::OpenaiResponses,
+                "https://api.openai.com/v1/responses",
+            ),
+            (
+                "https://api.openai.com/v1/responses",
+                WireFormat::OpenaiResponses,
+                "https://api.openai.com/v1/responses",
+            ),
+            (
+                "https://api.openai.com/v1/chat/completions",
+                WireFormat::OpenaiChatCompletions,
+                "https://api.openai.com/v1/chat/completions",
+            ),
+            (
+                "https://api.minimax.io/v1",
+                WireFormat::AnthropicMessages,
+                "https://api.minimax.io/v1/messages",
+            ),
+            (
                 "https://api.minimax.io/anthropic/v1",
-                WireFormat::AnthropicMessages
+                WireFormat::AnthropicMessages,
+                "https://api.minimax.io/anthropic/v1/messages",
             ),
-            "https://api.minimax.io/anthropic/v1/messages"
-        );
-        assert_eq!(
-            derive_models_dev_endpoint(
-                "https://api.example.com/v1/chat/completions",
-                WireFormat::OpenaiChatCompletions
-            ),
-            "https://api.example.com/v1/chat/completions"
-        );
+        ];
+
+        for (api, wire_format, expected) in cases {
+            assert_eq!(derive_models_dev_endpoint(api, wire_format), expected);
+        }
     }
 
     #[test]
@@ -687,6 +742,37 @@ mod tests {
     }
 
     #[test]
+    fn models_dev_provider_model_level_full_responses_endpoint_remains_final() {
+        let mut model = text_chat_model("qwen-max");
+        model.provider = Some(ModelsDevModelProvider {
+            api: Some("https://dashscope.aliyuncs.com/model-specific/v1/responses".to_string()),
+            npm: Some("@ai-sdk/openai-responses".to_string()),
+        });
+        let provider = ModelsDevProvider {
+            id: "alibaba".to_string(),
+            name: "Alibaba".to_string(),
+            api: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
+            npm: Some("@ai-sdk/openai-compatible".to_string()),
+            models: HashMap::from([("qwen-max".to_string(), model)]),
+            ..Default::default()
+        };
+        let catalog = catalog_with_provider("alibaba", provider);
+        let config = ModelsDevProviderConfig::new("alibaba", ModelsDevProviderFamily::Qwen);
+
+        let models =
+            build_models_dev_available_models(&catalog, &config, &[], &HashMap::new()).unwrap();
+
+        assert_eq!(
+            models[0].endpoint_override.as_deref(),
+            Some("https://dashscope.aliyuncs.com/model-specific/v1/responses")
+        );
+        assert_eq!(
+            models[0].wire_format_override,
+            Some(WireFormat::OpenaiResponses)
+        );
+    }
+
+    #[test]
     fn models_dev_provider_wire_format_inference_is_deterministic() {
         assert_eq!(
             infer_models_dev_wire_format(Some("@ai-sdk/openai-compatible"), None),
@@ -740,6 +826,86 @@ mod tests {
     }
 
     #[test]
+    fn models_dev_provider_endpoint_validation_rejects_tricky_url_forms() {
+        let cases = [
+            (
+                ModelsDevProviderFamily::Kimi,
+                "https://api.moonshot.ai@evil.example/v1/chat/completions",
+                "userinfo",
+            ),
+            (
+                ModelsDevProviderFamily::Kimi,
+                "https://api.moonshot.ai.evil.example/v1/chat/completions",
+                "allowlisted",
+            ),
+            (
+                ModelsDevProviderFamily::Qwen,
+                "https://dashscope.aliyuncs.com.evil.example/v1/chat/completions",
+                "allowlisted",
+            ),
+            (
+                ModelsDevProviderFamily::Kimi,
+                "https://api.moonshot.ai:8443/v1/chat/completions",
+                "non-default port",
+            ),
+            (
+                ModelsDevProviderFamily::Kimi,
+                "https://api.moonshot.ai/v1/chat/completions?target=evil",
+                "query string",
+            ),
+            (
+                ModelsDevProviderFamily::Kimi,
+                "https://api.moonshot.ai/v1/chat/completions#fragment",
+                "fragment",
+            ),
+            (
+                ModelsDevProviderFamily::Qwen,
+                "https://10.0.0.1/v1/chat/completions",
+                "local or private",
+            ),
+            (
+                ModelsDevProviderFamily::Qwen,
+                "https://172.16.0.1/v1/chat/completions",
+                "local or private",
+            ),
+            (
+                ModelsDevProviderFamily::Qwen,
+                "https://169.254.1.1/v1/chat/completions",
+                "local or private",
+            ),
+            (
+                ModelsDevProviderFamily::Qwen,
+                "https://[::1]/v1/chat/completions",
+                "local or private",
+            ),
+            (
+                ModelsDevProviderFamily::Qwen,
+                "https://[fc00::1]/v1/chat/completions",
+                "local or private",
+            ),
+            (
+                ModelsDevProviderFamily::Qwen,
+                "https://[::ffff:127.0.0.1]/v1/chat/completions",
+                "local or private",
+            ),
+        ];
+
+        for (family, endpoint, expected) in cases {
+            let error = validate_models_dev_endpoint(
+                endpoint,
+                family,
+                ModelsDevEndpointSource::Catalog,
+                &[],
+            )
+            .unwrap_err();
+            assert!(
+                error.contains(expected),
+                "{endpoint} should fail with '{expected}', got '{error}'"
+            );
+        }
+    }
+
+    #[test]
     fn models_dev_provider_endpoint_validation_accepts_known_hosts() {
         let cases = [
             (
@@ -751,8 +917,20 @@ mod tests {
                 "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
             ),
             (
+                ModelsDevProviderFamily::Qwen,
+                "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+            ),
+            (
+                ModelsDevProviderFamily::Qwen,
+                "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+            ),
+            (
                 ModelsDevProviderFamily::Kimi,
                 "https://api.moonshot.ai/v1/chat/completions",
+            ),
+            (
+                ModelsDevProviderFamily::Kimi,
+                "https://api.moonshot.ai:443/v1/chat/completions",
             ),
             (
                 ModelsDevProviderFamily::Kimi,

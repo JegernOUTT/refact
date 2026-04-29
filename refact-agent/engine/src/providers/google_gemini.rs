@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::caps::model_caps::{resolve_model_caps, ModelCapabilities};
+use crate::caps::model_caps::{resolve_model_caps, ModelCapabilities, ResolvedCaps};
 use crate::llm::adapter::WireFormat;
 use crate::providers::config::resolve_env_var;
 use crate::providers::traits::{
@@ -58,6 +58,14 @@ impl GoogleGeminiProvider {
         let mut available = AvailableModel::from_caps(&id, caps, enabled, pricing);
         available.display_name = display_name;
         Some(available)
+    }
+
+    fn resolve_models_dev_caps(
+        model_caps: &HashMap<String, ModelCapabilities>,
+        id: &str,
+    ) -> Option<ResolvedCaps> {
+        resolve_model_caps(model_caps, &format!("google/{id}"))
+            .or_else(|| resolve_model_caps(model_caps, id))
     }
 
     fn models_url(
@@ -323,9 +331,7 @@ available:
 
                     if let Some(id) = model_id {
                         let enabled = enabled_set.contains(id);
-                        let Some(resolved_caps) =
-                            resolve_model_caps(model_caps, &format!("google/{id}"))
-                                .or_else(|| resolve_model_caps(model_caps, &id))
+                        let Some(resolved_caps) = Self::resolve_models_dev_caps(model_caps, id)
                         else {
                             continue;
                         };
@@ -429,6 +435,28 @@ mod tests {
         assert!(model.supports_tools);
         assert!(model.supports_parallel_tools);
         assert!(model.supports_multimodality);
+    }
+
+    #[test]
+    fn test_models_dev_gemini_unknown_live_models_are_hidden() {
+        let empty_caps = HashMap::new();
+        assert!(
+            GoogleGeminiProvider::resolve_models_dev_caps(&empty_caps, "gemini-uncataloged")
+                .is_none()
+        );
+
+        let mut model_caps = HashMap::new();
+        model_caps.insert(
+            "google/gemini-cataloged".to_string(),
+            ModelCapabilities {
+                n_ctx: 128_000,
+                ..Default::default()
+            },
+        );
+        assert!(
+            GoogleGeminiProvider::resolve_models_dev_caps(&model_caps, "gemini-cataloged")
+                .is_some()
+        );
     }
 
     #[test]
