@@ -42,9 +42,12 @@ impl OpportunityQueue {
     pub fn from_state(opps: Vec<BuddyOpportunity>, dismissed: Vec<DismissEntry>) -> Self {
         let mut q = Self::new();
         let now = Utc::now();
+        let dismissed_cutoff = now - DISMISS_MEMORY;
         for entry in dismissed {
-            q.dismissed_history
-                .insert(entry.cooldown_key, entry.dismissed_at);
+            if entry.dismissed_at >= dismissed_cutoff {
+                q.dismissed_history
+                    .insert(entry.cooldown_key, entry.dismissed_at);
+            }
         }
         for opp in opps {
             let expires = opp.created_at + Duration::seconds(opp.cooldown_secs as i64);
@@ -52,12 +55,13 @@ impl OpportunityQueue {
                 q.cooldowns.insert(opp.cooldown_key.clone(), expires);
             }
             q.items.push(opp);
+            q.cap_items();
         }
         q
     }
 
     fn cap_items(&mut self) {
-        if self.items.len() > MAX_OPPORTUNITIES {
+        while self.items.len() > MAX_OPPORTUNITIES {
             if let Some(pos) = self.items.iter().position(|o| is_terminal_status(o.status)) {
                 self.items.remove(pos);
             } else if let Some(pos) = self
@@ -68,6 +72,8 @@ impl OpportunityQueue {
                 .map(|(i, _)| i)
             {
                 self.items.remove(pos);
+            } else {
+                break;
             }
         }
     }
@@ -106,32 +112,59 @@ impl OpportunityQueue {
             .unwrap_or(false)
     }
 
-    pub fn mark_status(&mut self, id: &str, status: OpportunityStatus) {
-        if let Some(opp) = self.items.iter_mut().find(|o| o.id == id) {
+    pub fn mark_status(&mut self, id: &str, status: OpportunityStatus) -> bool {
+        let Some(opp) = self.items.iter_mut().find(|o| o.id == id) else {
+            return false;
+        };
+        let mut changed = false;
+        if opp.status != status {
             opp.status = status;
-            if is_terminal_status(status) {
-                opp.resolved_at.get_or_insert_with(Utc::now);
-            }
+            changed = true;
         }
+        if is_terminal_status(status) && opp.resolved_at.is_none() {
+            opp.resolved_at = Some(Utc::now());
+            changed = true;
+        }
+        changed
     }
 
-    pub fn dismiss(&mut self, id: &str) {
-        if let Some(opp) = self.items.iter_mut().find(|o| o.id == id) {
-            let now = Utc::now();
+    pub fn dismiss(&mut self, id: &str) -> bool {
+        let Some(opp) = self.items.iter_mut().find(|o| o.id == id) else {
+            return false;
+        };
+        if opp.status == OpportunityStatus::Dismissed
+            && opp.resolved_at.is_some()
+            && self.dismissed_history.contains_key(&opp.cooldown_key)
+        {
+            return false;
+        }
+        let now = Utc::now();
+        let mut changed = false;
+        if opp.status != OpportunityStatus::Dismissed {
             opp.status = OpportunityStatus::Dismissed;
-            opp.resolved_at.get_or_insert(now);
-            self.dismissed_history.insert(opp.cooldown_key.clone(), now);
+            changed = true;
         }
+        if opp.resolved_at.is_none() {
+            opp.resolved_at = Some(now);
+            changed = true;
+        }
+        if self.dismissed_history.insert(opp.cooldown_key.clone(), now) != Some(now) {
+            changed = true;
+        }
+        changed
     }
 
-    pub fn expire_old(&mut self, now: DateTime<Utc>) {
+    pub fn expire_old(&mut self, now: DateTime<Utc>) -> bool {
+        let mut changed = false;
         for opp in self.items.iter_mut() {
             if opp.expires_at <= now && !is_terminal_status(opp.status) {
                 opp.status = OpportunityStatus::Expired;
                 opp.resolved_at.get_or_insert(now);
+                changed = true;
             }
         }
-        let cutoff = now - Duration::hours(24);
+        let cutoff = now - DISMISS_MEMORY;
+        let before_items = self.items.len();
         self.items.retain(|o| {
             if !is_terminal_status(o.status) {
                 return true;
@@ -139,6 +172,12 @@ impl OpportunityQueue {
             let terminal_since = o.resolved_at.unwrap_or(o.created_at);
             terminal_since >= cutoff
         });
+        changed |= self.items.len() != before_items;
+        let before_history = self.dismissed_history.len();
+        self.dismissed_history
+            .retain(|_, dismissed_at| *dismissed_at >= cutoff);
+        changed |= self.dismissed_history.len() != before_history;
+        changed
     }
 
     pub fn refresh_cooldowns(&mut self, now: DateTime<Utc>) {

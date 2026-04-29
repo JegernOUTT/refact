@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::path::Path;
@@ -167,6 +167,7 @@ pub struct BuddyService {
     pub queue_writer: Option<mpsc::UnboundedSender<RuntimeQueueWriteOp>>,
     pub fact_store: FactStore,
     pub opportunity_queue: OpportunityQueue,
+    pub opportunity_accept_claims: HashSet<String>,
     pub humor_service: Arc<tokio::sync::Mutex<HumorService>>,
     pub pulse: BuddyPulse,
     pub draft_store: DraftStore,
@@ -177,7 +178,7 @@ pub struct BuddyService {
 impl BuddyService {
     pub fn new(
         project_root: std::path::PathBuf,
-        state: BuddyState,
+        mut state: BuddyState,
         settings: BuddySettings,
         recent_diagnostics: Vec<super::diagnostics::DiagnosticContext>,
         runtime_queue: RuntimeQueue,
@@ -188,6 +189,12 @@ impl BuddyService {
             state.opportunities.clone(),
             state.dismissed_history.clone(),
         );
+        let opportunity_snapshot = opportunity_queue.snapshot();
+        let dismissed_snapshot = opportunity_queue.dismissed_history_snapshot();
+        let state_changed = state.opportunities.len() != opportunity_snapshot.len()
+            || state.dismissed_history.len() != dismissed_snapshot.len();
+        state.opportunities = opportunity_snapshot;
+        state.dismissed_history = dismissed_snapshot;
         Self {
             project_root,
             state,
@@ -198,11 +205,12 @@ impl BuddyService {
             last_issue_at: None,
             recent_issue_errors: Vec::new(),
             runtime_queue,
-            dirty: false,
+            dirty: state_changed,
             active_speech: None,
             queue_writer,
             fact_store: FactStore::new(),
             opportunity_queue,
+            opportunity_accept_claims: HashSet::new(),
             humor_service: Arc::new(tokio::sync::Mutex::new(HumorService::new())),
             pulse: BuddyPulse::default(),
             draft_store: DraftStore::new(),
@@ -259,7 +267,10 @@ impl BuddyService {
             })
             .map(|o| o.id.clone())
             .collect();
-        self.opportunity_queue.expire_old(now);
+        let changed = self.opportunity_queue.expire_old(now);
+        if !changed {
+            return;
+        }
         for id in expiring {
             let _ = self.events_tx.send(BuddyEvent::OpportunityResolved {
                 opportunity_id: id,
@@ -268,6 +279,7 @@ impl BuddyService {
         }
         self.state.opportunities = self.opportunity_queue.snapshot();
         self.state.dismissed_history = self.opportunity_queue.dismissed_history_snapshot();
+        self.dirty = true;
     }
 
     #[cfg(test)]
@@ -289,14 +301,44 @@ impl BuddyService {
             .send(BuddyEvent::OpportunityProduced { opportunity: opp });
     }
 
-    pub fn resolve_opportunity(&mut self, id: &str, status: OpportunityStatus) -> bool {
-        if self.opportunity_queue.get(id).is_none() {
-            return false;
+    pub fn surface_opportunity_with_cooldown(
+        &mut self,
+        mut opp: BuddyOpportunity,
+        cooldown_secs: u64,
+    ) -> bool {
+        match evaluate(&opp, &self.settings, &self.opportunity_queue) {
+            PolicyDecision::Drop { reason } => {
+                tracing::debug!("buddy: opportunity dropped by policy: {}", reason);
+                false
+            }
+            PolicyDecision::Surface { humor_allowed } => {
+                opp.humor_allowed = humor_allowed;
+                self.add_opportunity_with_cooldown(opp, cooldown_secs);
+                true
+            }
         }
-        if matches!(status, OpportunityStatus::Dismissed) {
-            self.opportunity_queue.dismiss(id);
+    }
+
+    pub fn claim_opportunity_accept(&mut self, id: &str) -> bool {
+        self.opportunity_accept_claims.insert(id.to_string())
+    }
+
+    pub fn clear_opportunity_accept_claim(&mut self, id: &str) {
+        self.opportunity_accept_claims.remove(id);
+    }
+
+    pub fn is_opportunity_accept_claimed(&self, id: &str) -> bool {
+        self.opportunity_accept_claims.contains(id)
+    }
+
+    pub fn resolve_opportunity(&mut self, id: &str, status: OpportunityStatus) -> bool {
+        let changed = if matches!(status, OpportunityStatus::Dismissed) {
+            self.opportunity_queue.dismiss(id)
         } else {
-            self.opportunity_queue.mark_status(id, status);
+            self.opportunity_queue.mark_status(id, status)
+        };
+        if !changed {
+            return false;
         }
         self.state.opportunities = self.opportunity_queue.snapshot();
         self.state.dismissed_history = self.opportunity_queue.dismissed_history_snapshot();
@@ -334,16 +376,7 @@ impl BuddyService {
             &self.opportunity_queue,
         );
         for (opp, cooldown_secs) in candidates {
-            match evaluate(&opp, &self.settings, &self.opportunity_queue) {
-                PolicyDecision::Drop { reason } => {
-                    tracing::debug!("buddy: opportunity dropped by policy: {}", reason);
-                }
-                PolicyDecision::Surface { humor_allowed } => {
-                    let mut o = opp;
-                    o.humor_allowed = humor_allowed;
-                    self.add_opportunity_with_cooldown(o, cooldown_secs);
-                }
-            }
+            self.surface_opportunity_with_cooldown(opp, cooldown_secs);
         }
     }
 
@@ -1306,34 +1339,28 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                             &svc.pulse,
                             &svc.opportunity_queue,
                         );
-                        let mut to_add: Vec<(BuddyOpportunity, bool, u64)> = vec![];
+                        let mut humor_needed: Vec<(BuddyOpportunity, BuddyFactKind, u64)> = vec![];
                         for (opp, cooldown_secs) in candidates {
                             match evaluate(&opp, &svc.settings, &svc.opportunity_queue) {
                                 PolicyDecision::Drop { reason } => {
                                     tracing::debug!("buddy: opp dropped by policy: {}", reason);
                                 }
                                 PolicyDecision::Surface { humor_allowed } => {
-                                    let mut o = opp;
-                                    o.humor_allowed = humor_allowed;
-                                    to_add.push((o, humor_allowed, cooldown_secs));
+                                    if humor_allowed {
+                                        let kind = primary_fact_kind_for_opportunity(
+                                            &opp,
+                                            &svc.fact_store,
+                                        );
+                                        humor_needed.push((opp, kind, cooldown_secs));
+                                    } else {
+                                        svc.surface_opportunity_with_cooldown(opp, cooldown_secs);
+                                    }
                                 }
                             }
                         }
                         let pulse = svc.pulse.clone();
                         let humor_arc = svc.humor_service.clone();
-                        let (humor_needed, no_humor): (Vec<_>, Vec<_>) =
-                            to_add.into_iter().partition(|(_, ha, _)| *ha);
-                        for (opp, _, cooldown_secs) in no_humor {
-                            svc.add_opportunity_with_cooldown(opp, cooldown_secs);
-                        }
-                        let tasks: Vec<(BuddyOpportunity, BuddyFactKind, u64)> = humor_needed
-                            .into_iter()
-                            .map(|(opp, _, cs)| {
-                                let kind = primary_fact_kind_for_opportunity(&opp, &svc.fact_store);
-                                (opp, kind, cs)
-                            })
-                            .collect();
-                        (tasks, pulse, humor_arc)
+                        (humor_needed, pulse, humor_arc)
                     } else {
                         (
                             vec![],
@@ -1374,7 +1401,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                     let mut buddy = buddy_arc.lock().await;
                     if let Some(svc) = buddy.as_mut() {
                         for (opp, cooldown_secs) in ready {
-                            svc.add_opportunity_with_cooldown(opp, cooldown_secs);
+                            svc.surface_opportunity_with_cooldown(opp, cooldown_secs);
                         }
                     }
                 }

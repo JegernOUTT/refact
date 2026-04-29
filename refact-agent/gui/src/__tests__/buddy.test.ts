@@ -62,6 +62,7 @@ import {
   setBuddyCrashHotSlot,
 } from "../features/Buddy/reportBuddyFrontendError";
 import { BuddyErrorBoundary } from "../features/Buddy/BuddyErrorBoundary";
+import { getOpportunityDismissAction } from "../features/Buddy/buddyOpportunityActions";
 
 const reducer = buddySlice.reducer;
 
@@ -959,6 +960,16 @@ describe("BuddyPanel hero layout", () => {
     expect(src).toContain("speechControls");
     expect(src).toContain("onSpeechControlClick");
   });
+
+  test("bulk opportunity dismiss uses settled results", () => {
+    const panel = fs.readFileSync(path.join(buddyDir, "BuddyPanel.tsx"), "utf8");
+    const companion = fs.readFileSync(
+      path.join(buddyDir, "BuddyChatCompanion.tsx"),
+      "utf8",
+    );
+    expect(panel).toContain("Promise.allSettled");
+    expect(companion).toContain("Promise.allSettled");
+  });
 });
 
 describe("Buddy investigation prompt hardening", () => {
@@ -1435,6 +1446,29 @@ describe("buddy opportunities, pulse, and drafts", () => {
     expect(unread.map((o) => o.id)).toContain("o1");
     expect(unread.map((o) => o.id)).not.toContain("o2");
     expect(unread.map((o) => o.id)).not.toContain("o3");
+  });
+
+  test("getOpportunityDismissAction uses each opportunity dismiss index", () => {
+    const first = makeOpportunity({
+      proposed_actions: [
+        { kind: "open_page", page: { type: "buddy" } },
+        { kind: "dismiss" },
+      ],
+    });
+    const second = makeOpportunity({
+      proposed_actions: [
+        { kind: "dismiss" },
+        { kind: "open_page", page: { type: "stats" } },
+      ],
+    });
+    expect(getOpportunityDismissAction(first)).toEqual({
+      action: { kind: "dismiss" },
+      actionIndex: 1,
+    });
+    expect(getOpportunityDismissAction(second)).toEqual({
+      action: { kind: "dismiss" },
+      actionIndex: 0,
+    });
   });
 
   test("BuddyAction discriminated union type check", () => {

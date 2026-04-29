@@ -5121,6 +5121,157 @@ async fn accept_route_with_action_index_1_dispatches_second_action() {
     assert!(saw_stats_navigation);
 }
 
+#[tokio::test]
+async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
+    use axum::extract::Path;
+    use axum::Extension;
+    use crate::http::routers::v1::buddy_opportunities::{
+        handle_v1_buddy_opportunity_accept, AcceptRequest,
+    };
+    use hyper::StatusCode;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let mut svc = make_service();
+    let mut opp = make_opportunity("opp-dispatch-fails", "ck-dispatch-fails");
+    opp.proposed_actions = vec![BuddyAction::DraftCustomizationChange {
+        customization_kind: CustomizationKind::Mode,
+        id: "mode-dispatch-fails".to_string(),
+        patch: serde_json::json!("not-an-object"),
+    }];
+    svc.add_opportunity(opp);
+    *gcx.read().await.buddy.lock().await = Some(svc);
+
+    let err = handle_v1_buddy_opportunity_accept(
+        Extension(gcx.clone()),
+        Path("opp-dispatch-fails".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
+
+    {
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        let svc = lock.as_ref().unwrap();
+        let opp = svc.opportunity_queue.get("opp-dispatch-fails").unwrap();
+        assert_eq!(opp.status, OpportunityStatus::New);
+        assert!(!svc.is_opportunity_accept_claimed("opp-dispatch-fails"));
+    }
+
+    let err = handle_v1_buddy_opportunity_accept(
+        Extension(gcx.clone()),
+        Path("opp-dispatch-fails".to_string()),
+        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn opportunity_expiry_persists_and_noops_when_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+    let (tx, _rx) = broadcast::channel(16);
+    let mut svc = BuddyService::new(
+        root.to_path_buf(),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    );
+    let mut opp = make_opportunity("opp-expiry-persist", "ck-expiry-persist");
+    opp.expires_at = chrono::Utc::now() - Duration::seconds(1);
+    svc.add_opportunity(opp);
+    svc.dirty = false;
+
+    svc.expire_opportunities();
+    assert!(svc.dirty);
+    super::state::save_state(root, &svc.state).await.unwrap();
+    let loaded = super::state::load_state(root).await;
+    assert_eq!(
+        loaded
+            .opportunities
+            .iter()
+            .find(|o| o.id == "opp-expiry-persist")
+            .map(|o| o.status),
+        Some(OpportunityStatus::Expired)
+    );
+
+    svc.dirty = false;
+    svc.expire_opportunities();
+    assert!(!svc.dirty);
+}
+
+#[test]
+fn batch_surface_honors_max_unread() {
+    use super::opportunities::MAX_UNREAD;
+    let mut svc = make_service();
+    let now = chrono::Utc::now();
+    for i in 0..(MAX_UNREAD + 2) {
+        let mut fact = make_fact(&format!("task-stuck-{}", i), BuddyFactKind::TaskStuck, now);
+        fact.payload = serde_json::json!({ "task_id": format!("task-{}", i) });
+        svc.fact_store.ingest(fact);
+    }
+
+    svc.detect_and_surface();
+    assert_eq!(svc.opportunity_queue.unread_count(), MAX_UNREAD);
+}
+
+#[test]
+fn humor_delayed_opportunity_is_rechecked_before_add() {
+    use super::opportunities::MAX_UNREAD;
+    let mut svc = make_service();
+    for i in 0..MAX_UNREAD {
+        svc.add_opportunity(make_opportunity(
+            &format!("pre-humor-{}", i),
+            &format!("ck-pre-humor-{}", i),
+        ));
+    }
+    let mut opp = make_opportunity("opp-humor-delayed", "ck-humor-delayed");
+    opp.humor_allowed = true;
+    opp.humor = Some("joke".to_string());
+
+    assert!(!svc.surface_opportunity_with_cooldown(opp, 1800));
+    assert!(svc.opportunity_queue.get("opp-humor-delayed").is_none());
+    assert_eq!(svc.opportunity_queue.unread_count(), MAX_UNREAD);
+}
+
+#[test]
+fn dismissed_history_prunes_old_entries() {
+    use super::opportunities::{OpportunityQueue, DISMISS_MEMORY};
+    let now = chrono::Utc::now();
+    let mut q = OpportunityQueue::new();
+    q.dismissed_history.insert(
+        "old".to_string(),
+        now - DISMISS_MEMORY - Duration::seconds(1),
+    );
+    q.dismissed_history.insert("fresh".to_string(), now);
+
+    assert!(q.expire_old(now));
+    assert!(!q.dismissed_history.contains_key("old"));
+    assert!(q.dismissed_history.contains_key("fresh"));
+}
+
+#[test]
+fn from_state_caps_oversized_opportunities() {
+    use super::opportunities::{OpportunityQueue, MAX_OPPORTUNITIES};
+    let now = chrono::Utc::now();
+    let mut opps = vec![];
+    for i in 0..(MAX_OPPORTUNITIES + 25) {
+        let mut opp = make_opportunity(&format!("opp-cap-{}", i), &format!("ck-cap-{}", i));
+        opp.created_at = now - Duration::minutes(i as i64);
+        opps.push(opp);
+    }
+
+    let queue = OpportunityQueue::from_state(opps, vec![]);
+    assert_eq!(queue.snapshot().len(), MAX_OPPORTUNITIES);
+}
+
 // =============================================================================
 // G-B: Per-rule cooldown persistence + provider-tuning DefaultsKind correctness
 // =============================================================================

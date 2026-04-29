@@ -19,6 +19,7 @@ import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
 import {
   getOpportunityActionFromControl,
   getOpportunityActionIndexFromControl,
+  getOpportunityDismissAction,
   opportunityActionControls,
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
@@ -116,10 +117,15 @@ export const BuddyPanel: React.FC = () => {
               }
               return next;
             });
-            await Promise.all(
-              activeOpportunities.map((opp) =>
-                executeOpportunityAction(action, opp, actionIndex),
-              ),
+            await Promise.allSettled(
+              activeOpportunities.map((opp) => {
+                const dismissAction = getOpportunityDismissAction(opp);
+                return executeOpportunityAction(
+                  dismissAction.action,
+                  opp,
+                  dismissAction.actionIndex,
+                );
+              }),
             );
             setOpportunityIndex(0);
             return;

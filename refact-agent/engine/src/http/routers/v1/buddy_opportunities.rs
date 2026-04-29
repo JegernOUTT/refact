@@ -93,6 +93,12 @@ pub async fn handle_v1_buddy_opportunity_accept(
                 format!("opportunity already resolved: {:?}", opp.status),
             ));
         }
+        if svc.is_opportunity_accept_claimed(&id) {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                format!("opportunity already in progress: {}", id),
+            ));
+        }
         let action = opp
             .proposed_actions
             .get(req.action_index)
@@ -103,18 +109,25 @@ pub async fn handle_v1_buddy_opportunity_accept(
                 )
             })?
             .clone();
-        if !matches!(action, BuddyAction::Dismiss) {
-            svc.opportunity_queue
-                .mark_status(&id, OpportunityStatus::Accepted);
-            svc.state.opportunities = svc.opportunity_queue.snapshot();
-            svc.dirty = true;
+        if !svc.claim_opportunity_accept(&id) {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                format!("opportunity already in progress: {}", id),
+            ));
         }
         action
     };
 
-    let outcome = dispatch_action(gcx.clone(), &id, &action).await?;
+    let outcome = match dispatch_action(gcx.clone(), &id, &action).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            clear_accept_claim(gcx.clone(), &id).await;
+            return Err(err);
+        }
+    };
 
     if !outcome.handled {
+        clear_accept_claim(gcx.clone(), &id).await;
         let action_kind = outcome
             .result
             .get("action")
@@ -135,7 +148,13 @@ pub async fn handle_v1_buddy_opportunity_accept(
             "buddy not initialized".into(),
         )
     })?;
-    svc.resolve_opportunity(&id, outcome.status);
+    svc.clear_opportunity_accept_claim(&id);
+    if !svc.resolve_opportunity(&id, outcome.status) {
+        return Err(ScratchError::new(
+            StatusCode::NOT_FOUND,
+            format!("opportunity not found: {}", id),
+        ));
+    }
     let snap = serde_json::to_value(svc.snapshot())
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -143,6 +162,14 @@ pub async fn handle_v1_buddy_opportunity_accept(
         "snapshot": snap,
         "action_result": outcome.result
     })))
+}
+
+async fn clear_accept_claim(gcx: Arc<ARwLock<GlobalContext>>, id: &str) {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    if let Some(svc) = lock.as_mut() {
+        svc.clear_opportunity_accept_claim(id);
+    }
 }
 
 pub(crate) async fn dispatch_action(
@@ -861,6 +888,12 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
         return Err(ScratchError::new(
             StatusCode::CONFLICT,
             format!("opportunity already resolved: {:?}", opp.status),
+        ));
+    }
+    if svc.is_opportunity_accept_claimed(&id) {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            format!("opportunity already in progress: {}", id),
         ));
     }
     svc.resolve_opportunity(&id, OpportunityStatus::Dismissed);

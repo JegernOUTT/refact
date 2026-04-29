@@ -75,6 +75,20 @@ export function getOpportunityActionFromControl(
   return opportunity.proposed_actions[index] ?? null;
 }
 
+export function getOpportunityDismissAction(opportunity: BuddyOpportunity): {
+  action: BuddyAction;
+  actionIndex: number;
+} {
+  const actionIndex = opportunity.proposed_actions.findIndex(
+    (action) => action.kind === "dismiss",
+  );
+  if (actionIndex >= 0) {
+    const action = opportunity.proposed_actions[actionIndex];
+    return { action, actionIndex };
+  }
+  return { action: { kind: "dismiss" }, actionIndex: 0 };
+}
+
 export function humanizeCustomizationKind(kind: CustomizationKind): string {
   switch (kind) {
     case "mode":
