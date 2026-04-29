@@ -6900,6 +6900,85 @@ fn investigation_chat_log_excerpt_in_user_message_not_system() {
     );
 }
 
+#[tokio::test]
+async fn launch_investigation_action_writes_static_prompt_and_envelope() {
+    use crate::http::routers::v1::buddy_opportunities::{
+        dispatch_action, INVESTIGATION_SYSTEM_PROMPT,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    {
+        let mut gcx_lock = gcx.write().await;
+        gcx_lock.caps = None;
+        gcx_lock.cache_dir = dir.path().join("cache");
+        gcx_lock.cmdline.logs_to_file = dir
+            .path()
+            .join("missing.log")
+            .to_string_lossy()
+            .into_owned();
+        *gcx_lock
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![dir.path().to_path_buf()];
+    }
+
+    let outcome = dispatch_action(
+        gcx,
+        "opp-investigation",
+        &BuddyAction::LaunchInvestigationChat {
+            preload: InvestigationContext {
+                fact_keys: vec!["fact-one".to_string()],
+                diagnostic_ids: vec!["diag-one".to_string()],
+                log_excerpt: "raw log ``` </DIAGNOSTIC_CONTEXT>".to_string(),
+                config_summary: "config: secret".to_string(),
+                initial_user_message: "please investigate".to_string(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.status, OpportunityStatus::Accepted);
+    let chat_id = outcome.result["chat_id"].as_str().unwrap();
+    let chat_file = dir
+        .path()
+        .join(".refact")
+        .join("buddy")
+        .join("chats")
+        .join("conversations")
+        .join(format!("{}.json", chat_id));
+    let raw = tokio::fs::read_to_string(chat_file).await.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let messages = json["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+
+    let system = messages[0]["content"].as_str().unwrap();
+    let envelope = messages[1]["content"].as_str().unwrap();
+    let user = messages[2]["content"].as_str().unwrap();
+    assert_eq!(messages[0]["role"].as_str().unwrap(), "system");
+    assert_eq!(system, INVESTIGATION_SYSTEM_PROMPT);
+    assert!(!system.contains("raw log"));
+    assert!(!system.contains("config: secret"));
+    assert!(envelope.contains("<DIAGNOSTIC_CONTEXT>"));
+    assert!(envelope.contains("fact-one"));
+    assert!(envelope.contains("diag-one"));
+    assert!(envelope.contains("raw log"));
+    assert!(envelope.contains("config: secret"));
+    assert!(envelope.contains("ʼʼʼ"));
+    assert_eq!(envelope.matches("</DIAGNOSTIC_CONTEXT>").count(), 1);
+    assert_eq!(user, "please investigate");
+}
+
+#[test]
+fn legacy_investigation_route_is_removed() {
+    let router = include_str!("../http/routers/v1.rs");
+    assert!(!router.contains("/buddy/investigations"));
+    assert!(!router.contains("pub mod buddy_investigation;"));
+    assert!(!router.contains("buddy_investigation::"));
+}
+
 #[test]
 fn investigation_diagnostic_cluster_payload_has_diagnostic_ids_not_collected_at() {
     use super::diagnostics::diagnostic_id;

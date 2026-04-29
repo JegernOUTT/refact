@@ -14,7 +14,6 @@ import type {
   BuddyPulse,
   BuddyDraft,
   BuddyOpportunityAcceptResponse,
-  InvestigationContext,
 } from "../../features/Buddy/types";
 import {
   addDraft,
@@ -52,10 +51,6 @@ export interface CreateDraftRequest {
   title: string;
   yaml_or_json: string;
   explanation: string;
-}
-
-export interface LaunchInvestigationResponse {
-  chat_id: string;
 }
 
 export interface FrontendErrorReport {
@@ -631,23 +626,6 @@ export const buddyApi = createApi({
         }
       },
     }),
-    launchInvestigation: builder.mutation<
-      LaunchInvestigationResponse,
-      InvestigationContext
-    >({
-      queryFn: async (body, api, _opts, baseQuery) => {
-        const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
-        const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/investigations`,
-          method: "POST",
-          body,
-        });
-        if (result.error) return { error: result.error };
-        return { data: result.data as LaunchInvestigationResponse };
-      },
-      invalidatesTags: ["BuddySnapshot"],
-    }),
     reportFrontendError: builder.mutation<undefined, FrontendErrorReport>({
       queryFn: async (body, api) => {
         const state = api.getState() as BuddyApiState;
@@ -715,6 +693,5 @@ export const {
   useCreatePulseReportDraftMutation,
   useGetDraftQuery,
   useDeleteDraftMutation,
-  useLaunchInvestigationMutation,
   useReportFrontendErrorMutation,
 } = buddyApi;

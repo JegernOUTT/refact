@@ -95,7 +95,6 @@ pub mod at_tools;
 pub mod buddy;
 pub mod buddy_drafts;
 pub mod buddy_frontend_error;
-pub mod buddy_investigation;
 pub mod buddy_opportunities;
 pub mod buddy_pulse;
 pub mod caps;
@@ -812,10 +811,6 @@ pub fn make_v1_router() -> Router {
         .route(
             "/buddy/drafts/:id",
             delete(buddy_drafts::handle_v1_buddy_draft_delete),
-        )
-        .route(
-            "/buddy/investigations",
-            post(buddy_investigation::handle_v1_buddy_investigations),
         )
         .route(
             "/buddy/frontend-error",

@@ -1048,6 +1048,34 @@ describe("Buddy investigation prompt hardening", () => {
 
     expect(prompt).toContain("Structured assistant reply");
   });
+
+  test("uses conversation context instead of the legacy launch mutation", () => {
+    const buddyService = fs.readFileSync(
+      path.join(__dirname, "..", "services", "refact", "buddy.ts"),
+      "utf8",
+    );
+    const chatActions = fs.readFileSync(
+      path.join(
+        __dirname,
+        "..",
+        "features",
+        "Chat",
+        "Thread",
+        "actions.ts",
+      ),
+      "utf8",
+    );
+
+    expect("launchInvestigation" in buddyApi.endpoints).toBe(false);
+    expect(buddyService).not.toContain("/v1/buddy/investigations");
+    expect(buddyService).not.toContain("useLaunchInvestigationMutation");
+    expect(buddyService).not.toContain("launchInvestigation:");
+    expect(buddyService).toContain("/v1/buddy/conversations");
+    expect(buddyService).toContain("/v1/buddy/investigation-context");
+    expect(chatActions).toContain("startBuddyInvestigation");
+    expect(chatActions).toContain("createBuddyConversationRequest");
+    expect(chatActions).toContain("fetchBuddyInvestigationContextRequest");
+  });
 });
 
 describe("Buddy frontend error reporting helpers", () => {

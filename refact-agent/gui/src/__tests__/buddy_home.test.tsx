@@ -204,9 +204,6 @@ describe("BuddyOpportunityCard_renders_actions", () => {
         "http://127.0.0.1:8001/v1/buddy/opportunities/:id/dismiss",
         () => HttpResponse.json({ snapshot: makeSnapshot() }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/investigations", () =>
-        HttpResponse.json({ chat_id: "inv-1" }),
-      ),
     );
 
     const opp = makeOpportunity({
