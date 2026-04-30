@@ -118,7 +118,9 @@ impl LlmWireAdapter for OllamaAdapter {
                 let normalized: Vec<_> = tool_calls
                     .iter()
                     .enumerate()
-                    .filter_map(|(idx, tool_call)| normalize_ollama_tool_call(tool_call, idx))
+                    .filter_map(|(idx, tool_call)| {
+                        normalize_ollama_tool_call(tool_call, idx, &json)
+                    })
                     .collect();
                 if !normalized.is_empty() {
                     deltas.push(LlmStreamDelta::FinalizeToolCalls {
@@ -203,6 +205,9 @@ fn convert_messages_to_ollama(messages: &[ChatMessage]) -> Vec<Value> {
     let mut pending_user_text = Vec::new();
     let mut pending_user_images = Vec::new();
 
+    // Ollama native chat accepts tool results as role "tool" messages matched by tool_call_id.
+    // Tool-result images are deferred to the next user message because Ollama expects images
+    // on user messages.
     for msg in messages {
         if is_context_role(&msg.role) {
             let Some(text) = render_context_message(msg) else {
@@ -394,7 +399,74 @@ fn convert_tools_to_ollama(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn normalize_ollama_tool_call(tool_call: &Value, index: usize) -> Option<Value> {
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+fn stable_hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn stable_hash_str(hash: &mut u64, value: &str) {
+    stable_hash_bytes(hash, &(value.len() as u64).to_le_bytes());
+    stable_hash_bytes(hash, value.as_bytes());
+}
+
+fn stable_hash_value(hash: &mut u64, value: &Value) {
+    match value {
+        Value::Null => stable_hash_str(hash, "null"),
+        Value::Bool(value) => {
+            stable_hash_str(hash, "bool");
+            stable_hash_str(hash, if *value { "true" } else { "false" });
+        }
+        Value::Number(value) => {
+            stable_hash_str(hash, "number");
+            stable_hash_str(hash, &value.to_string());
+        }
+        Value::String(value) => {
+            stable_hash_str(hash, "string");
+            stable_hash_str(hash, value);
+        }
+        Value::Array(values) => {
+            stable_hash_str(hash, "array");
+            stable_hash_bytes(hash, &(values.len() as u64).to_le_bytes());
+            for value in values {
+                stable_hash_value(hash, value);
+            }
+        }
+        Value::Object(values) => {
+            stable_hash_str(hash, "object");
+            stable_hash_bytes(hash, &(values.len() as u64).to_le_bytes());
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, value) in entries {
+                stable_hash_str(hash, key);
+                stable_hash_value(hash, value);
+            }
+        }
+    }
+}
+
+fn ollama_tool_call_id(index: usize, name: &str, arguments: &Value, response: &Value) -> String {
+    let mut hash = FNV_OFFSET_BASIS;
+    stable_hash_str(&mut hash, "index");
+    stable_hash_str(&mut hash, &index.to_string());
+    stable_hash_str(&mut hash, "name");
+    stable_hash_str(&mut hash, name);
+    stable_hash_str(&mut hash, "arguments");
+    stable_hash_value(&mut hash, arguments);
+    for key in ["created_at", "model"] {
+        if let Some(value) = response.get(key) {
+            stable_hash_str(&mut hash, key);
+            stable_hash_value(&mut hash, value);
+        }
+    }
+    format!("ollama-tool-{index}-{:012x}", hash & 0x0000_ffff_ffff_ffff)
+}
+
+fn normalize_ollama_tool_call(tool_call: &Value, index: usize, response: &Value) -> Option<Value> {
     let function = tool_call.get("function")?;
     let name = function.get("name").and_then(|v| v.as_str())?.trim();
     if name.is_empty() {
@@ -404,10 +476,13 @@ fn normalize_ollama_tool_call(tool_call: &Value, index: usize) -> Option<Value> 
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    // If Ollama omits response-level seeds and repeats the same tool name/arguments at the
+    // same index across turns, perfect uniqueness is impossible.
+    let id = ollama_tool_call_id(index, name, &arguments, response);
 
     Some(json!({
         "index": index,
-        "id": format!("ollama-tool-{index}"),
+        "id": id,
         "type": "function",
         "function": {
             "name": name,
@@ -597,6 +672,71 @@ mod tests {
         assert_eq!(http.body["think"], true);
     }
 
+    fn tool_call_ids_from_chunk(chunk: &str) -> Vec<String> {
+        let adapter = OllamaAdapter;
+        adapter
+            .parse_stream_chunk(chunk)
+            .unwrap()
+            .into_iter()
+            .find_map(|delta| match delta {
+                LlmStreamDelta::FinalizeToolCalls { tool_calls } => Some(
+                    tool_calls
+                        .into_iter()
+                        .map(|tool_call| tool_call["id"].as_str().unwrap().to_string())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn ollama_tool_call_ids_are_stable_and_less_collision_prone() {
+        let chunk = r#"{
+            "model": "llama3.1:8b",
+            "created_at": "2026-04-30T00:00:00Z",
+            "message": {
+                "tool_calls": [
+                    {"function": {"name": "read_file", "arguments": {"path": "a.txt"}}},
+                    {"function": {"name": "read_file", "arguments": {"path": "a.txt"}}}
+                ]
+            }
+        }"#;
+
+        let ids = tool_call_ids_from_chunk(chunk);
+        let repeated = tool_call_ids_from_chunk(chunk);
+        let changed_args = tool_call_ids_from_chunk(
+            r#"{
+            "model": "llama3.1:8b",
+            "created_at": "2026-04-30T00:00:00Z",
+            "message": {
+                "tool_calls": [
+                    {"function": {"name": "read_file", "arguments": {"path": "b.txt"}}}
+                ]
+            }
+        }"#,
+        );
+        let changed_seed = tool_call_ids_from_chunk(
+            r#"{
+            "model": "llama3.2:8b",
+            "created_at": "2026-04-30T00:00:00Z",
+            "message": {
+                "tool_calls": [
+                    {"function": {"name": "read_file", "arguments": {"path": "a.txt"}}}
+                ]
+            }
+        }"#,
+        );
+
+        assert_eq!(ids, repeated);
+        assert_eq!(ids[0].len(), "ollama-tool-0-".len() + 12);
+        assert!(ids[0].starts_with("ollama-tool-0-"));
+        assert!(ids[1].starts_with("ollama-tool-1-"));
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[0], changed_args[0]);
+        assert_ne!(ids[0], changed_seed[0]);
+    }
+
     #[test]
     fn parse_stream_chunk_maps_native_events() {
         let adapter = OllamaAdapter;
@@ -622,7 +762,9 @@ mod tests {
         );
         match &deltas[2] {
             LlmStreamDelta::FinalizeToolCalls { tool_calls } => {
-                assert_eq!(tool_calls[0]["id"], "ollama-tool-0");
+                let id = tool_calls[0]["id"].as_str().unwrap();
+                assert!(id.starts_with("ollama-tool-0-"));
+                assert_ne!(id, "ollama-tool-0");
                 assert_eq!(tool_calls[0]["function"]["name"], "read_file");
                 assert_eq!(tool_calls[0]["function"]["arguments"]["path"], "a.txt");
             }

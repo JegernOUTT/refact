@@ -170,6 +170,9 @@ pub fn models_dev_provider_wire_format(
 pub fn infer_models_dev_wire_format(npm: Option<&str>, api: Option<&str>) -> Option<WireFormat> {
     if let Some(api) = api {
         let api_lower = api.to_ascii_lowercase();
+        if api_lower.ends_with("/api/chat") {
+            return Some(WireFormat::OllamaNative);
+        }
         if api_lower.ends_with("/messages") || api_lower.contains("/anthropic/") {
             return Some(WireFormat::AnthropicMessages);
         }
@@ -418,6 +421,7 @@ fn is_complete_endpoint(endpoint: &str) -> bool {
         "/chat/completions",
         "/responses",
         "/messages",
+        "/api/chat",
         "/v1/chat/completions",
         "/v1/responses",
         "/v1/messages",
@@ -585,6 +589,16 @@ mod tests {
                 "https://api.minimax.io/anthropic/v1",
                 WireFormat::AnthropicMessages,
                 "https://api.minimax.io/anthropic/v1/messages",
+            ),
+            (
+                "https://ollama.example.com",
+                WireFormat::OllamaNative,
+                "https://ollama.example.com/api/chat",
+            ),
+            (
+                "https://ollama.example.com/api/chat",
+                WireFormat::OllamaNative,
+                "https://ollama.example.com/api/chat",
             ),
         ];
 
@@ -786,6 +800,10 @@ mod tests {
         assert_eq!(
             infer_models_dev_wire_format(None, Some("https://api.example.com/v1/responses")),
             Some(WireFormat::OpenaiResponses)
+        );
+        assert_eq!(
+            infer_models_dev_wire_format(None, Some("https://ollama.example.com/api/chat")),
+            Some(WireFormat::OllamaNative)
         );
         let provider = anthropic_provider("https://api.minimax.io/anthropic/v1");
         let catalog = catalog_with_provider("minimax", provider);

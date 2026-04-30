@@ -549,6 +549,12 @@ fn process_stream_event_data<C: StreamCollector>(
     Ok(stream_done)
 }
 
+const MAX_NDJSON_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+fn ndjson_line_size_error(size: usize) -> String {
+    format!("Ollama NDJSON line exceeds {MAX_NDJSON_LINE_BYTES} bytes ({size} bytes)")
+}
+
 fn process_ndjson_bytes<C: StreamCollector>(
     adapter: &dyn crate::llm::adapter::LlmWireAdapter,
     auth_token: &str,
@@ -557,8 +563,25 @@ fn process_ndjson_bytes<C: StreamCollector>(
     accumulators: &mut [ChoiceAccumulator],
     collector: &mut C,
 ) -> Result<bool, String> {
-    pending.extend_from_slice(bytes);
-    process_complete_ndjson_lines(adapter, auth_token, pending, accumulators, collector)
+    for segment in bytes.split_inclusive(|b| *b == b'\n') {
+        let segment_line_len = segment
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap_or(segment.len());
+        let next_line_len = pending.len().saturating_add(segment_line_len);
+        if next_line_len > MAX_NDJSON_LINE_BYTES {
+            return Err(ndjson_line_size_error(next_line_len));
+        }
+
+        pending.extend_from_slice(segment);
+        if process_complete_ndjson_lines(adapter, auth_token, pending, accumulators, collector)? {
+            return Ok(true);
+        }
+        if pending.len() > MAX_NDJSON_LINE_BYTES {
+            return Err(ndjson_line_size_error(pending.len()));
+        }
+    }
+    Ok(false)
 }
 
 fn process_complete_ndjson_lines<C: StreamCollector>(
@@ -570,6 +593,9 @@ fn process_complete_ndjson_lines<C: StreamCollector>(
 ) -> Result<bool, String> {
     loop {
         let Some(pos) = pending.iter().position(|b| *b == b'\n') else {
+            if pending.len() > MAX_NDJSON_LINE_BYTES {
+                return Err(ndjson_line_size_error(pending.len()));
+            }
             return Ok(false);
         };
         let mut line: Vec<u8> = pending.drain(..=pos).collect();
@@ -578,6 +604,9 @@ fn process_complete_ndjson_lines<C: StreamCollector>(
         }
         if line.last() == Some(&b'\r') {
             line.pop();
+        }
+        if line.len() > MAX_NDJSON_LINE_BYTES {
+            return Err(ndjson_line_size_error(line.len()));
         }
         if line.iter().all(|b| b.is_ascii_whitespace()) {
             continue;
@@ -597,6 +626,9 @@ fn process_ndjson_eof<C: StreamCollector>(
     accumulators: &mut [ChoiceAccumulator],
     collector: &mut C,
 ) -> Result<bool, String> {
+    if pending.len() > MAX_NDJSON_LINE_BYTES {
+        return Err(ndjson_line_size_error(pending.len()));
+    }
     if pending.iter().all(|b| b.is_ascii_whitespace()) {
         pending.clear();
         return Ok(false);
@@ -604,6 +636,9 @@ fn process_ndjson_eof<C: StreamCollector>(
     let mut line = std::mem::take(pending);
     while line.last().is_some_and(|b| b.is_ascii_whitespace()) {
         line.pop();
+    }
+    if line.len() > MAX_NDJSON_LINE_BYTES {
+        return Err(ndjson_line_size_error(line.len()));
     }
     let data =
         std::str::from_utf8(&line).map_err(|e| format!("Malformed stream chunk: utf8: {}", e))?;
@@ -1480,6 +1515,51 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("Malformed stream chunk"));
+        assert!(collector.events.is_empty());
+    }
+
+    #[test]
+    fn ollama_ndjson_oversized_complete_line_is_fatal() {
+        let adapter = get_adapter(crate::llm::WireFormat::OllamaNative);
+        let mut accumulators = vec![ChoiceAccumulator::default()];
+        let mut collector = ReplayCollector::default();
+        let mut pending = Vec::new();
+        let mut line = vec![b' '; MAX_NDJSON_LINE_BYTES + 1];
+        line.push(b'\n');
+
+        let err = process_ndjson_bytes(
+            adapter,
+            "",
+            &mut pending,
+            &line,
+            &mut accumulators,
+            &mut collector,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("exceeds"));
+        assert!(collector.events.is_empty());
+    }
+
+    #[test]
+    fn ollama_ndjson_oversized_pending_buffer_is_fatal() {
+        let adapter = get_adapter(crate::llm::WireFormat::OllamaNative);
+        let mut accumulators = vec![ChoiceAccumulator::default()];
+        let mut collector = ReplayCollector::default();
+        let mut pending = Vec::new();
+        let bytes = vec![b'a'; MAX_NDJSON_LINE_BYTES + 1];
+
+        let err = process_ndjson_bytes(
+            adapter,
+            "",
+            &mut pending,
+            &bytes,
+            &mut accumulators,
+            &mut collector,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("exceeds"));
         assert!(collector.events.is_empty());
     }
 
