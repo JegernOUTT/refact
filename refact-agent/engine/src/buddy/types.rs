@@ -403,6 +403,7 @@ pub enum BuddyFactKind {
     FrontendErrorBurst,
     GitDiffWidening,
     UncommittedPressure,
+    WorktreeHygiene,
 }
 
 fn default_cooldown_secs() -> u64 {
@@ -447,6 +448,7 @@ pub enum BuddyOpportunityKind {
     IntegrationFix,
     DiagnosticInvestigation,
     GitHygiene,
+    WorktreeCleanup,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -570,6 +572,7 @@ pub enum PulseScope {
     Customization,
     Diagnostics,
     Git,
+    Worktrees,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -590,6 +593,7 @@ pub enum BuddyPage {
     TasksList,
     TaskWorkspace { task_id: String },
     KnowledgeGraph,
+    Worktrees,
     SetupMode { mode: String },
 }
 
@@ -604,6 +608,7 @@ pub struct BuddyPulse {
     pub customization: CustomizationPulse,
     pub diagnostics: DiagnosticPulse,
     pub git: GitPulse,
+    pub worktrees: WorktreePulse,
     pub humor: Option<String>,
 }
 
@@ -682,6 +687,29 @@ pub struct GitPulse {
     pub uncommitted_files: u32,
     pub diff_lines_4h: u32,
     pub branches: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorktreePulse {
+    pub total_registered: u32,
+    pub total_discovered: u32,
+    pub total: u32,
+    pub clean: u32,
+    pub dirty: u32,
+    pub stale: u32,
+    pub conflicted: u32,
+    pub shared: u32,
+    pub abandoned_clean: u32,
+    pub changed_files: u32,
+    pub additions: u32,
+    pub deletions: u32,
+    pub missing_registry_paths: u32,
+    pub unregistered_cache_dirs: u32,
+    pub merged_branches: u32,
+    pub newest_age_hours: Option<u64>,
+    pub oldest_age_hours: Option<u64>,
+    pub disk_usage_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

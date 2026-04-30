@@ -621,6 +621,7 @@ fn scope_label(scope: PulseScope) -> &'static str {
         PulseScope::Customization => "customization",
         PulseScope::Diagnostics => "diagnostics",
         PulseScope::Git => "git",
+        PulseScope::Worktrees => "worktrees",
     }
 }
 
@@ -682,6 +683,22 @@ fn render_pulse_to_markdown(pulse: &BuddyPulse, scope: PulseScope) -> String {
         out.push(format!(
             "## Git\n\n- Uncommitted files: {}\n- Diff lines 4h: {}\n- Branches: {}",
             pulse.git.uncommitted_files, pulse.git.diff_lines_4h, pulse.git.branches
+        ));
+    }
+    if include(PulseScope::Worktrees) {
+        out.push(format!(
+            "## Worktrees\n\n- Total: {}\n- Registered: {}\n- Discovered: {}\n- Clean abandoned: {}\n- Dirty: {}\n- Stale: {}\n- Conflicted: {}\n- Shared: {}\n- Changed files: {}\n- Lines: +{} -{}",
+            pulse.worktrees.total,
+            pulse.worktrees.total_registered,
+            pulse.worktrees.total_discovered,
+            pulse.worktrees.abandoned_clean,
+            pulse.worktrees.dirty,
+            pulse.worktrees.stale,
+            pulse.worktrees.conflicted,
+            pulse.worktrees.shared,
+            pulse.worktrees.changed_files,
+            pulse.worktrees.additions,
+            pulse.worktrees.deletions
         ));
     }
     out.join("\n\n")

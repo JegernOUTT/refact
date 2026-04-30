@@ -108,6 +108,8 @@ export type WorktreeDiffStats = {
   unstaged_files: number;
   untracked_files: number;
   files_changed: number;
+  additions?: number;
+  deletions?: number;
 };
 
 export type WorktreeDiffResponse = {
@@ -203,6 +205,124 @@ export type OpenWorktreeResponse = {
   can_open_folder: boolean;
 };
 
+export type WorktreeInventorySummary = {
+  total_registered: number;
+  total_discovered: number;
+  total: number;
+  clean: number;
+  dirty: number;
+  stale: number;
+  conflicted: number;
+  shared: number;
+  abandoned_clean: number;
+  changed_files: number;
+  additions: number;
+  deletions: number;
+  missing_registry_paths: number;
+  unregistered_cache_dirs: number;
+  merged_branches: number;
+  newest_age_hours?: number | null;
+  oldest_age_hours?: number | null;
+  disk_usage_bytes?: number | null;
+};
+
+export type WorktreeInspection = {
+  id: string;
+  source: string;
+  root: string;
+  branch?: string | null;
+  base_branch?: string | null;
+  base_commit?: string | null;
+  status: WorktreeStatus;
+  references: WorktreeReference[];
+  reference_count: number;
+  shared: boolean;
+  stale: boolean;
+  conflicted: boolean;
+  changed_files: number;
+  committed_files: number;
+  staged_files: number;
+  unstaged_files: number;
+  untracked_files: number;
+  additions: number;
+  deletions: number;
+  cleanup_candidate: boolean;
+  cleanup_blockers: string[];
+  disk_usage_bytes?: number | null;
+  age_hours?: number | null;
+  last_used_at?: string | null;
+  branch_merged?: boolean | null;
+  registry_missing: boolean;
+  cache_dir_missing_from_registry: boolean;
+  attached_chat_ids: string[];
+  attached_task_ids: string[];
+};
+
+export type WorktreeInventory = {
+  project_hash: string;
+  source_workspace_root: string;
+  generated_at: string;
+  summary: WorktreeInventorySummary;
+  worktrees: WorktreeInspection[];
+  cleanup_candidates: string[];
+};
+
+export type WorktreeCleanupRequest = {
+  ids: string[];
+  source_workspace_root?: string;
+  clean_only?: boolean;
+  delete_branches?: boolean;
+  allow_shared?: boolean;
+  min_age_hours?: number;
+};
+
+export type WorktreeCleanupTarget = {
+  id: string;
+  root: string;
+  branch?: string | null;
+  shared: boolean;
+  stale: boolean;
+  changed_files: number;
+  additions: number;
+  deletions: number;
+  delete_branch: boolean;
+  references: WorktreeReference[];
+  disk_usage_bytes?: number | null;
+};
+
+export type WorktreeCleanupSkipped = {
+  id: string;
+  root?: string | null;
+  reason: string;
+  details: string[];
+};
+
+export type WorktreeCleanupDeleted = {
+  id: string;
+  root: string;
+  branch?: string | null;
+  worktree_deleted: boolean;
+  branch_deleted: boolean;
+  registry_deleted: boolean;
+  stale_path: boolean;
+  warnings: string[];
+};
+
+export type WorktreeCleanupPlan = {
+  generated_at: string;
+  request: WorktreeCleanupRequest;
+  candidates: WorktreeCleanupTarget[];
+  skipped: WorktreeCleanupSkipped[];
+};
+
+export type WorktreeCleanupRunResult = {
+  generated_at: string;
+  request: WorktreeCleanupRequest;
+  deleted: WorktreeCleanupDeleted[];
+  skipped: WorktreeCleanupSkipped[];
+  warnings: string[];
+};
+
 type WorktreeQueryParams = Record<
   string,
   string | number | boolean | null | undefined
@@ -263,6 +383,60 @@ export const worktreesApi = createApi({
               })),
             ]
           : [{ type: "Worktrees", id: "LIST" }],
+    }),
+
+    getWorktreesSummary: builder.query<
+      WorktreeInventory,
+      { source_workspace_root?: string } | undefined
+    >({
+      queryFn: async (args, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: buildWorktreeUrl(port, "/worktrees/summary", {
+            source_workspace_root: args?.source_workspace_root,
+          }),
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as WorktreeInventory };
+      },
+      providesTags: [{ type: "Worktrees", id: "SUMMARY" }],
+    }),
+    cleanupWorktreesDryRun: builder.mutation<
+      WorktreeCleanupPlan,
+      WorktreeCleanupRequest
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: buildWorktreeUrl(port, "/worktrees/cleanup-dry-run"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as WorktreeCleanupPlan };
+      },
+    }),
+    cleanupWorktrees: builder.mutation<
+      WorktreeCleanupRunResult,
+      WorktreeCleanupRequest
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: buildWorktreeUrl(port, "/worktrees/cleanup"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as WorktreeCleanupRunResult };
+      },
+      invalidatesTags: [
+        { type: "Worktrees", id: "LIST" },
+        { type: "Worktrees", id: "SUMMARY" },
+      ],
     }),
     createWorktree: builder.mutation<
       CreateWorktreeResponse,
@@ -403,6 +577,9 @@ export const worktreesApi = createApi({
 
 export const {
   useListWorktreesQuery,
+  useGetWorktreesSummaryQuery,
+  useCleanupWorktreesDryRunMutation,
+  useCleanupWorktreesMutation,
   useCreateWorktreeMutation,
   useGetWorktreeQuery,
   useGetWorktreeDiffQuery,

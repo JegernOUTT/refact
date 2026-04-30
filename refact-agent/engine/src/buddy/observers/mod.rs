@@ -7,6 +7,7 @@ pub mod memory_garden;
 pub mod provider_health;
 pub mod task_health;
 pub mod trajectory_clutter;
+pub mod worktree_hygiene;
 
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
@@ -56,6 +57,7 @@ pub fn build_observer_registry() -> Vec<Arc<dyn BuddyObserver>> {
         Arc::new(task_health::TaskHealthObserver),
         Arc::new(trajectory_clutter::TrajectoryClutterObserver),
         Arc::new(git_pressure::GitPressureObserver),
+        Arc::new(worktree_hygiene::WorktreeHygieneObserver),
         Arc::new(diagnostic_cluster::DiagnosticClusterObserver),
         Arc::new(provider_health::ProviderHealthObserver),
         Arc::new(mcp_auth::McpAuthObserver),

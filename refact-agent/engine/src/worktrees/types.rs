@@ -20,6 +20,14 @@ fn default_registry_schema_version() -> u32 {
     1
 }
 
+fn default_cleanup_clean_only() -> bool {
+    true
+}
+
+fn default_cleanup_min_age_hours() -> u64 {
+    24
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeMeta {
     pub id: String,
@@ -82,6 +90,8 @@ pub struct WorktreeStatus {
     pub path_exists: bool,
     pub is_git_worktree: bool,
     pub dirty: bool,
+    #[serde(default)]
+    pub conflicted: bool,
     pub staged_count: usize,
     pub unstaged_count: usize,
     pub untracked_count: usize,
@@ -188,7 +198,7 @@ pub struct DeleteWorktreeResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorktreeCleanupResult {
+pub struct WorktreeRemovalResult {
     pub worktree_deleted: bool,
     pub branch_deleted: bool,
     pub registry_deleted: bool,
@@ -253,7 +263,7 @@ pub struct MergeWorktreeResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleanup: Option<WorktreeCleanupResult>,
+    pub cleanup: Option<WorktreeRemovalResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<WorktreeConflictState>,
     pub affected_references: Vec<WorktreeReference>,
@@ -292,6 +302,10 @@ pub struct WorktreeDiffStats {
     pub unstaged_files: usize,
     pub untracked_files: usize,
     pub files_changed: usize,
+    #[serde(default)]
+    pub additions: usize,
+    #[serde(default)]
+    pub deletions: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,6 +322,182 @@ pub struct WorktreeDiffResponse {
     pub stats: WorktreeDiffStats,
     pub patch: String,
     pub patch_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeInventory {
+    pub project_hash: String,
+    #[serde(
+        serialize_with = "serialize_path",
+        deserialize_with = "deserialize_path"
+    )]
+    pub source_workspace_root: PathBuf,
+    pub generated_at: String,
+    pub summary: WorktreeInventorySummary,
+    pub worktrees: Vec<WorktreeInspection>,
+    pub cleanup_candidates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorktreeInventorySummary {
+    pub total_registered: usize,
+    pub total_discovered: usize,
+    pub total: usize,
+    pub clean: usize,
+    pub dirty: usize,
+    pub stale: usize,
+    pub conflicted: usize,
+    pub shared: usize,
+    pub abandoned_clean: usize,
+    pub changed_files: usize,
+    pub additions: usize,
+    pub deletions: usize,
+    pub missing_registry_paths: usize,
+    pub unregistered_cache_dirs: usize,
+    pub merged_branches: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_age_hours: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_age_hours: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_usage_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeInspection {
+    pub id: String,
+    pub source: String,
+    #[serde(
+        serialize_with = "serialize_path",
+        deserialize_with = "deserialize_path"
+    )]
+    pub root: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    pub status: WorktreeStatus,
+    pub references: Vec<WorktreeReference>,
+    pub reference_count: usize,
+    pub shared: bool,
+    pub stale: bool,
+    pub conflicted: bool,
+    pub changed_files: usize,
+    pub committed_files: usize,
+    pub staged_files: usize,
+    pub unstaged_files: usize,
+    pub untracked_files: usize,
+    pub additions: usize,
+    pub deletions: usize,
+    pub cleanup_candidate: bool,
+    pub cleanup_blockers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_usage_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_hours: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_merged: Option<bool>,
+    #[serde(default)]
+    pub registry_missing: bool,
+    #[serde(default)]
+    pub cache_dir_missing_from_registry: bool,
+    #[serde(default)]
+    pub attached_chat_ids: Vec<String>,
+    #[serde(default)]
+    pub attached_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WorktreeCleanupRequest {
+    pub ids: Vec<String>,
+    pub clean_only: bool,
+    pub delete_branches: bool,
+    pub allow_shared: bool,
+    pub min_age_hours: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_workspace_root: Option<String>,
+}
+
+impl Default for WorktreeCleanupRequest {
+    fn default() -> Self {
+        Self {
+            ids: Vec::new(),
+            clean_only: default_cleanup_clean_only(),
+            delete_branches: false,
+            allow_shared: false,
+            min_age_hours: default_cleanup_min_age_hours(),
+            source_workspace_root: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupPlan {
+    pub generated_at: String,
+    pub request: WorktreeCleanupRequest,
+    pub candidates: Vec<WorktreeCleanupTarget>,
+    pub skipped: Vec<WorktreeCleanupSkipped>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupTarget {
+    pub id: String,
+    #[serde(
+        serialize_with = "serialize_path",
+        deserialize_with = "deserialize_path"
+    )]
+    pub root: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub shared: bool,
+    pub stale: bool,
+    pub changed_files: usize,
+    pub additions: usize,
+    pub deletions: usize,
+    pub delete_branch: bool,
+    pub references: Vec<WorktreeReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_usage_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupSkipped {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<PathBuf>,
+    pub reason: String,
+    pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupDeleted {
+    pub id: String,
+    #[serde(
+        serialize_with = "serialize_path",
+        deserialize_with = "deserialize_path"
+    )]
+    pub root: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub worktree_deleted: bool,
+    pub branch_deleted: bool,
+    pub registry_deleted: bool,
+    pub stale_path: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupResult {
+    pub generated_at: String,
+    pub request: WorktreeCleanupRequest,
+    pub deleted: Vec<WorktreeCleanupDeleted>,
+    pub skipped: Vec<WorktreeCleanupSkipped>,
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]

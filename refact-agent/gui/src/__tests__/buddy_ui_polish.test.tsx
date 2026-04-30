@@ -97,6 +97,23 @@ function makePulse(): BuddyPulse {
     customization: { modes: 3, skills: 2, commands: 1, subagents: 0, hooks: 0 },
     diagnostics: { last_hour: 7, top_error_types: ["model_not_found"] },
     git: { uncommitted_files: 5, diff_lines_4h: 120, branches: 3 },
+    worktrees: {
+      total_registered: 3,
+      total_discovered: 1,
+      total: 4,
+      clean: 2,
+      dirty: 1,
+      stale: 1,
+      conflicted: 0,
+      shared: 1,
+      abandoned_clean: 2,
+      changed_files: 3,
+      additions: 10,
+      deletions: 2,
+      missing_registry_paths: 1,
+      unregistered_cache_dirs: 1,
+      merged_branches: 2,
+    },
   };
 }
 

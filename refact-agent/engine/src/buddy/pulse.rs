@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use crate::buddy::facts::FactStore;
 use crate::buddy::types::{
     BuddyFactKind, BuddyPulse, CompetitorImportPulse, CustomizationPulse, DiagnosticPulse,
-    GitPulse, McpPulse, MemoryPulse, ProviderPulse, TaskPulse, TrajectoryPulse,
+    GitPulse, McpPulse, MemoryPulse, ProviderPulse, TaskPulse, TrajectoryPulse, WorktreePulse,
 };
 use crate::ext::competitor_import::manifest::{manifest_path_for_scope_root, ImportManifest};
 use crate::ext::competitor_import::types::{ImportReport, ImportReportCounts, ImportStatus};
@@ -29,6 +29,7 @@ pub async fn build_pulse(
     p.customization = build_customization_pulse(gcx.clone()).await;
     p.diagnostics = build_diagnostics_pulse(gcx.clone()).await;
     p.git = build_git_pulse(project_root);
+    p.worktrees = build_worktree_pulse(gcx.clone(), project_root).await;
 
     p
 }
@@ -270,6 +271,43 @@ async fn build_diagnostics_pulse(gcx: Arc<RwLock<GlobalContext>>) -> DiagnosticP
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
     pulse.top_error_types = sorted.into_iter().take(3).map(|(t, _)| t).collect();
     pulse
+}
+
+async fn build_worktree_pulse(
+    gcx: Arc<RwLock<GlobalContext>>,
+    project_root: &std::path::Path,
+) -> WorktreePulse {
+    let cache_dir = gcx.read().await.cache_dir.clone();
+    let Ok(service) = crate::worktrees::service::WorktreeService::new(
+        cache_dir,
+        project_root.to_path_buf(),
+    ) else {
+        return WorktreePulse::default();
+    };
+    let Ok(inventory) = service.inspect_worktrees().await else {
+        return WorktreePulse::default();
+    };
+    let summary = inventory.summary;
+    WorktreePulse {
+        total_registered: saturating_u32(summary.total_registered),
+        total_discovered: saturating_u32(summary.total_discovered),
+        total: saturating_u32(summary.total),
+        clean: saturating_u32(summary.clean),
+        dirty: saturating_u32(summary.dirty),
+        stale: saturating_u32(summary.stale),
+        conflicted: saturating_u32(summary.conflicted),
+        shared: saturating_u32(summary.shared),
+        abandoned_clean: saturating_u32(summary.abandoned_clean),
+        changed_files: saturating_u32(summary.changed_files),
+        additions: saturating_u32(summary.additions),
+        deletions: saturating_u32(summary.deletions),
+        missing_registry_paths: saturating_u32(summary.missing_registry_paths),
+        unregistered_cache_dirs: saturating_u32(summary.unregistered_cache_dirs),
+        merged_branches: saturating_u32(summary.merged_branches),
+        newest_age_hours: summary.newest_age_hours,
+        oldest_age_hours: summary.oldest_age_hours,
+        disk_usage_bytes: summary.disk_usage_bytes,
+    }
 }
 
 fn build_git_pulse(project_root: &std::path::Path) -> GitPulse {

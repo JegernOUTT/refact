@@ -21,6 +21,13 @@ pub struct WorktreeDiffParts {
     pub patch_truncated: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct GitWorktreeEntry {
+    pub root: PathBuf,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+}
+
 fn status_options(show: StatusShow) -> StatusOptions {
     let mut options = StatusOptions::new();
     options
@@ -218,6 +225,7 @@ pub fn status_for_path(path: &Path) -> WorktreeStatus {
             path_exists: false,
             is_git_worktree: false,
             dirty: false,
+            conflicted: false,
             staged_count: 0,
             unstaged_count: 0,
             untracked_count: 0,
@@ -233,6 +241,7 @@ pub fn status_for_path(path: &Path) -> WorktreeStatus {
                 path_exists: true,
                 is_git_worktree: true,
                 dirty: false,
+                conflicted: false,
                 staged_count: 0,
                 unstaged_count: 0,
                 untracked_count: 0,
@@ -246,6 +255,9 @@ pub fn status_for_path(path: &Path) -> WorktreeStatus {
                         let entry_status = entry.status();
                         if is_index_changed(entry_status) {
                             status.staged_count += 1;
+                        }
+                        if entry_status.is_conflicted() {
+                            status.conflicted = true;
                         }
                         if entry_status.is_wt_new() && !is_index_changed(entry_status) {
                             status.untracked_count += 1;
@@ -267,6 +279,7 @@ pub fn status_for_path(path: &Path) -> WorktreeStatus {
             path_exists: true,
             is_git_worktree: false,
             dirty: false,
+            conflicted: false,
             staged_count: 0,
             unstaged_count: 0,
             untracked_count: 0,
@@ -292,6 +305,62 @@ pub fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
 
 pub fn run_git_lossy(path: &Path, args: &[&str]) -> String {
     run_git(path, args).unwrap_or_default()
+}
+
+pub fn remove_worktree_path(source_root: &Path, worktree_path: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let path_arg = worktree_path.to_string_lossy().to_string();
+    if let Err(e) = run_git(source_root, &["worktree", "remove", "--force", &path_arg]) {
+        warnings.push(format!(
+            "Failed to remove worktree '{}': {}",
+            worktree_path.display(),
+            e
+        ));
+    }
+    if worktree_path.exists() {
+        if let Err(e) = std::fs::remove_dir_all(worktree_path) {
+            warnings.push(format!(
+                "Failed to remove worktree directory '{}': {}",
+                worktree_path.display(),
+                e
+            ));
+        }
+    }
+    warnings
+}
+
+pub fn branch_merged_into(root: &Path, branch: &str, base: &str) -> bool {
+    branch == base || run_git(root, &["merge-base", "--is-ancestor", branch, base]).is_ok()
+}
+
+pub fn list_git_worktrees(source_root: &Path) -> Vec<GitWorktreeEntry> {
+    let output = run_git_lossy(source_root, &["worktree", "list", "--porcelain"]);
+    let mut entries = Vec::new();
+    let mut root: Option<PathBuf> = None;
+    let mut branch: Option<String> = None;
+    let mut head: Option<String> = None;
+    for line in output.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if let Some(root) = root.take() {
+                entries.push(GitWorktreeEntry {
+                    root,
+                    branch: branch.take(),
+                    head: head.take(),
+                });
+            }
+            branch = None;
+            head = None;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("worktree ") {
+            root = Some(PathBuf::from(value));
+        } else if let Some(value) = line.strip_prefix("HEAD ") {
+            head = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("branch ") {
+            branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string());
+        }
+    }
+    entries
 }
 
 fn parse_numstat(output: &str) -> HashMap<String, (Option<usize>, Option<usize>)> {
@@ -490,6 +559,8 @@ pub fn diff_for_path(
     );
     files.extend(untracked);
     stats.files_changed = files.len();
+    stats.additions = files.iter().filter_map(|file| file.additions).sum();
+    stats.deletions = files.iter().filter_map(|file| file.deletions).sum();
 
     if patch_truncated {
         push_bounded(

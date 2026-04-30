@@ -91,6 +91,18 @@ export async function executeBuddyAction(
       dispatch(clearActiveSpeech());
       break;
 
+    case "open_worktrees":
+    case "review_worktree_cleanup":
+    case "open_worktree_cleanup":
+      navigateFromBuddyPage({ type: "worktrees" }, dispatch);
+      dispatch(clearActiveSpeech());
+      break;
+
+    case "create_worktrees_pulse":
+      navigateFromBuddyPage({ type: "buddy" }, dispatch);
+      dispatch(clearActiveSpeech());
+      break;
+
     case "open_buddy":
       navigateFromBuddyPage({ type: "buddy" }, dispatch);
       dispatch(clearActiveSpeech());
@@ -270,6 +282,10 @@ export function executeBuddyNavigation(
 
     case "knowledge_graph":
       dispatch(push({ name: "knowledge graph" }));
+      break;
+
+    case "worktrees":
+      dispatch(push({ name: "tasks list" }));
       break;
 
     case "setup_mode":

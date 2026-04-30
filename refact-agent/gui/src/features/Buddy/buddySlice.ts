@@ -123,6 +123,23 @@ export function defaultBuddyPulse(): BuddyPulse {
     customization: { modes: 0, skills: 0, commands: 0, subagents: 0, hooks: 0 },
     diagnostics: { last_hour: 0, top_error_types: [] },
     git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 0 },
+    worktrees: {
+      total_registered: 0,
+      total_discovered: 0,
+      total: 0,
+      clean: 0,
+      dirty: 0,
+      stale: 0,
+      conflicted: 0,
+      shared: 0,
+      abandoned_clean: 0,
+      changed_files: 0,
+      additions: 0,
+      deletions: 0,
+      missing_registry_paths: 0,
+      unregistered_cache_dirs: 0,
+      merged_branches: 0,
+    },
   };
 }
 

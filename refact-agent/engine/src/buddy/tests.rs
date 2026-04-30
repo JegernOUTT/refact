@@ -2331,6 +2331,7 @@ fn buddy_page_round_trip() {
             task_id: "task-abc".to_string(),
         },
         BuddyPage::KnowledgeGraph,
+        BuddyPage::Worktrees,
         BuddyPage::SetupMode {
             mode: "setup_mcp".to_string(),
         },
@@ -2392,6 +2393,7 @@ fn schema_contract_buddy_page_variants() {
             "task_workspace",
         ),
         (BuddyPage::KnowledgeGraph, "knowledge_graph"),
+        (BuddyPage::Worktrees, "worktrees"),
         (
             BuddyPage::SetupMode {
                 mode: "setup_mcp".to_string(),
@@ -2541,6 +2543,7 @@ fn schema_contract_buddy_fact_kind_variants() {
         (BuddyFactKind::FrontendErrorBurst, "frontend_error_burst"),
         (BuddyFactKind::GitDiffWidening, "git_diff_widening"),
         (BuddyFactKind::UncommittedPressure, "uncommitted_pressure"),
+        (BuddyFactKind::WorktreeHygiene, "worktree_hygiene"),
     ];
     for (value, expected) in cases {
         assert_eq!(serialized_string(&value), expected);
@@ -2566,6 +2569,7 @@ fn schema_contract_buddy_opportunity_kind_variants() {
             "diagnostic_investigation",
         ),
         (BuddyOpportunityKind::GitHygiene, "git_hygiene"),
+        (BuddyOpportunityKind::WorktreeCleanup, "worktree_cleanup"),
     ];
     for (value, expected) in cases {
         assert_eq!(serialized_string(&value), expected);
@@ -2669,6 +2673,7 @@ fn schema_contract_pulse_scope_variants() {
         (PulseScope::Customization, "customization"),
         (PulseScope::Diagnostics, "diagnostics"),
         (PulseScope::Git, "git"),
+        (PulseScope::Worktrees, "worktrees"),
     ];
     for (value, expected) in cases {
         assert_eq!(serialized_string(&value), expected);
@@ -3869,19 +3874,180 @@ fn observer_registry_has_9_entries() {
     let registry = build_observer_registry();
     assert_eq!(
         registry.len(),
-        9,
-        "build_observer_registry must return 9 observers"
+        10,
+        "build_observer_registry must return 10 observers"
     );
     let ids: Vec<&str> = registry.iter().map(|o| o.id()).collect();
     assert!(ids.contains(&"task_health"));
     assert!(ids.contains(&"trajectory_clutter"));
     assert!(ids.contains(&"git_pressure"));
+    assert!(ids.contains(&"worktree_hygiene"));
     assert!(ids.contains(&"diagnostic_cluster"));
     assert!(ids.contains(&"chat_pattern"));
     assert!(ids.contains(&"customization_drift"));
     assert!(ids.contains(&"memory_garden"));
     assert!(ids.contains(&"mcp_auth"));
     assert!(ids.contains(&"provider_health"));
+}
+
+fn buddy_worktree_inventory(
+    total: usize,
+    abandoned_clean: usize,
+    dirty: usize,
+    stale: usize,
+) -> crate::worktrees::types::WorktreeInventory {
+    use crate::worktrees::types::{WorktreeInventory, WorktreeInventorySummary};
+    WorktreeInventory {
+        project_hash: "project".to_string(),
+        source_workspace_root: std::path::PathBuf::from("/repo"),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        summary: WorktreeInventorySummary {
+            total,
+            total_registered: total,
+            abandoned_clean,
+            dirty,
+            stale,
+            clean: total.saturating_sub(dirty + stale),
+            ..WorktreeInventorySummary::default()
+        },
+        worktrees: Vec::new(),
+        cleanup_candidates: (0..abandoned_clean)
+            .map(|idx| format!("wt-{idx}"))
+            .collect(),
+    }
+}
+
+#[test]
+fn buddy_worktree_observer_emits_worktree_hygiene_fact() {
+    let facts = super::observers::worktree_hygiene::detect_worktree_hygiene_facts(
+        buddy_worktree_inventory(5, 2, 2, 1),
+        chrono::Utc::now(),
+    );
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].kind, BuddyFactKind::WorktreeHygiene);
+    assert_eq!(
+        facts[0].payload["summary"]["abandoned_clean"].as_u64(),
+        Some(2)
+    );
+}
+
+#[test]
+fn buddy_worktree_opportunity_generated_when_abandoned_clean_exists() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let mut store = FactStore::new();
+    let fact = super::observers::worktree_hygiene::detect_worktree_hygiene_facts(
+        buddy_worktree_inventory(5, 2, 2, 1),
+        chrono::Utc::now(),
+    )
+    .remove(0);
+    store.ingest(fact);
+    let opps = OpportunityDetector::new().detect(
+        &store,
+        &BuddyPulse::default(),
+        &OpportunityQueue::new(),
+    );
+    let opp = opps
+        .iter()
+        .find(|(opp, _)| opp.kind == BuddyOpportunityKind::WorktreeCleanup)
+        .expect("worktree cleanup opportunity");
+    assert!(opp.0.summary.contains("2 clean abandoned"));
+}
+
+#[test]
+fn buddy_worktree_no_opportunity_when_no_candidates() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let mut store = FactStore::new();
+    let fact = super::observers::worktree_hygiene::detect_worktree_hygiene_facts(
+        buddy_worktree_inventory(3, 0, 2, 1),
+        chrono::Utc::now(),
+    )
+    .remove(0);
+    store.ingest(fact);
+    let opps = OpportunityDetector::new().detect(
+        &store,
+        &BuddyPulse::default(),
+        &OpportunityQueue::new(),
+    );
+    assert!(!opps
+        .iter()
+        .any(|(opp, _)| opp.kind == BuddyOpportunityKind::WorktreeCleanup));
+}
+
+#[test]
+fn buddy_worktree_suggestion_text_includes_counts() {
+    let inventory = buddy_worktree_inventory(5, 2, 2, 1);
+    let suggestion = super::jobs::proactive_suggestions::worktree_hygiene_suggestion_from_inventory(
+        &inventory,
+    )
+    .expect("suggestion");
+    assert!(suggestion.description.contains("5 worktrees"));
+    assert!(suggestion.description.contains("2 clean abandoned"));
+    assert!(suggestion
+        .controls
+        .iter()
+        .any(|control| control.label == "Clean selected clean abandoned worktrees"));
+}
+
+#[tokio::test]
+async fn buddy_worktree_pulse_includes_worktree_stats() {
+    use crate::worktrees::types::CreateWorktreeRequest;
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("repo");
+    std::fs::create_dir_all(&source).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&source)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&source)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&source)
+        .output()
+        .unwrap();
+    std::fs::write(source.join("file.txt"), "hello\n").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&source)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(&source)
+        .output()
+        .unwrap();
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let cache_dir = gcx.read().await.cache_dir.clone();
+    let service = crate::worktrees::service::WorktreeService::new(cache_dir, source.clone())
+        .unwrap();
+    let created = service
+        .create_worktree(CreateWorktreeRequest {
+            branch: Some("refact/chat/buddy-worktree-pulse".to_string()),
+            kind: Some("chat".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut registry = service.load_registry().await.unwrap();
+    let record = registry
+        .records
+        .iter_mut()
+        .find(|record| record.meta.id == created.worktree.meta.id)
+        .unwrap();
+    let ts = (chrono::Utc::now() - Duration::hours(48)).to_rfc3339();
+    record.updated_at = ts.clone();
+    record.last_seen_at = Some(ts);
+    service.save_registry(&registry).await.unwrap();
+    let store = super::facts::FactStore::new();
+    let pulse = super::pulse::build_pulse(gcx, &source, &store).await;
+    assert_eq!(pulse.worktrees.total_registered, 1);
+    assert_eq!(pulse.worktrees.abandoned_clean, 1);
 }
 
 // =============================================================================
@@ -4241,6 +4407,7 @@ fn tool_buddy_open_view_each_page() {
             task_id: "task-xyz".to_string(),
         },
         BuddyPage::KnowledgeGraph,
+        BuddyPage::Worktrees,
         BuddyPage::SetupMode {
             mode: "setup_mcp".to_string(),
         },

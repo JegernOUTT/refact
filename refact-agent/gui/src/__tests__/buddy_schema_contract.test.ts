@@ -25,6 +25,7 @@ function assertBuddyPage(page: BuddyPage): string {
     case "delegates_marketplace":
     case "tasks_list":
     case "knowledge_graph":
+    case "worktrees":
       return page.type;
     case "task_workspace":
       return page.task_id;
@@ -85,6 +86,7 @@ describe("Buddy schema contract", () => {
       { type: "tasks_list" },
       { type: "task_workspace", task_id: "task-1" },
       { type: "knowledge_graph" },
+      { type: "worktrees" },
       { type: "setup_mode", mode: "setup_mcp" },
     ];
 

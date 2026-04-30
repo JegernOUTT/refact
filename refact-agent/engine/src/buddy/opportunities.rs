@@ -261,6 +261,10 @@ const RULES: &[Rule] = &[
         build: rules::git_hygiene,
     },
     Rule {
+        cooldown_secs: 14400,
+        build: rules::worktree_cleanup,
+    },
+    Rule {
         cooldown_secs: 7200,
         build: rules::git_hygiene_widening,
     },
@@ -809,6 +813,63 @@ mod rules {
             .collect()
     }
 
+    pub fn worktree_cleanup(
+        store: &crate::buddy::facts::FactStore,
+        _pulse: &BuddyPulse,
+        _queue: &OpportunityQueue,
+        now: DateTime<Utc>,
+    ) -> Vec<BuddyOpportunity> {
+        store
+            .recent_at(BuddyFactKind::WorktreeHygiene, Duration::hours(4), now)
+            .into_iter()
+            .filter_map(|fact| {
+                let summary = fact.payload.get("summary")?;
+                let total = summary.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                let abandoned = summary
+                    .get("abandoned_clean")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if abandoned == 0 {
+                    return None;
+                }
+                let dirty = summary.get("dirty").and_then(|v| v.as_u64()).unwrap_or(0);
+                let stale = summary.get("stale").and_then(|v| v.as_u64()).unwrap_or(0);
+                let summary_text = format!(
+                    "I found {} worktrees: {} clean abandoned, {} with changes, {} stale. Want to review cleanup candidates?",
+                    total, abandoned, dirty, stale
+                );
+                Some(opp(
+                    BuddyOpportunityKind::WorktreeCleanup,
+                    summary_text,
+                    BuddyPriority::Normal,
+                    fact.confidence,
+                    vec![fact.key.clone()],
+                    "worktrees:cleanup:global",
+                    vec![
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Worktrees,
+                        },
+                        BuddyAction::LaunchInvestigationChat {
+                            preload: InvestigationContext {
+                                fact_keys: vec![fact.key.clone()],
+                                diagnostic_ids: vec![],
+                                log_excerpt: String::new(),
+                                config_summary: String::new(),
+                                initial_user_message: "Review worktree cleanup candidates and help me choose safe IDs to clean".to_string(),
+                            },
+                        },
+                        BuddyAction::CreatePulseReport {
+                            scope: PulseScope::Worktrees,
+                        },
+                        BuddyAction::Dismiss,
+                    ],
+                    now,
+                ))
+            })
+            .take(1)
+            .collect()
+    }
+
     pub fn git_hygiene_widening(
         store: &crate::buddy::facts::FactStore,
         _pulse: &BuddyPulse,
@@ -1139,5 +1200,6 @@ pub fn primary_fact_kind_for_opportunity(
         BuddyOpportunityKind::IntegrationFix => BuddyFactKind::McpAuthExpired,
         BuddyOpportunityKind::DiagnosticInvestigation => BuddyFactKind::DiagnosticCluster,
         BuddyOpportunityKind::GitHygiene => BuddyFactKind::UncommittedPressure,
+        BuddyOpportunityKind::WorktreeCleanup => BuddyFactKind::WorktreeHygiene,
     }
 }

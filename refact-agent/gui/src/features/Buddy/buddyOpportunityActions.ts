@@ -124,6 +124,8 @@ export function humanizePulseScope(scope: PulseScope): string {
       return "diagnostic";
     case "git":
       return "git";
+    case "worktrees":
+      return "worktrees";
   }
 }
 
@@ -172,6 +174,8 @@ function humanizePage(page: BuddyPage): string {
       return "Task Workspace";
     case "knowledge_graph":
       return "Knowledge Graph";
+    case "worktrees":
+      return "Worktrees";
     case "setup_mode":
       return "Setup";
   }

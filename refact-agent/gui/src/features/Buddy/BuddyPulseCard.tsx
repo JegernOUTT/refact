@@ -106,6 +106,15 @@ export const BuddyPulseCard: React.FC = () => {
             lines / 4h
           </Text>
         </div>
+        <div className={styles.row} role="listitem">
+          <Text size="1" color="gray" className={styles.rowLabel}>
+            Worktrees
+          </Text>
+          <Text size="1" className={styles.rowValue}>
+            {pulse.worktrees.total} total · {pulse.worktrees.abandoned_clean}{" "}
+            clean abandoned · {pulse.worktrees.dirty} dirty
+          </Text>
+        </div>
       </div>
     </div>
   );

@@ -89,9 +89,10 @@ use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_bootstrap,
 };
 use crate::http::routers::v1::worktrees::{
+    handle_v1_worktrees_cleanup, handle_v1_worktrees_cleanup_dry_run,
     handle_v1_worktrees_create, handle_v1_worktrees_delete, handle_v1_worktrees_diff,
     handle_v1_worktrees_get, handle_v1_worktrees_list, handle_v1_worktrees_merge,
-    handle_v1_worktrees_open,
+    handle_v1_worktrees_open, handle_v1_worktrees_summary,
 };
 
 mod ast;
@@ -255,6 +256,12 @@ pub fn make_v1_router() -> Router {
         )
         .route("/worktrees", get(handle_v1_worktrees_list))
         .route("/worktrees", post(handle_v1_worktrees_create))
+        .route("/worktrees/summary", get(handle_v1_worktrees_summary))
+        .route(
+            "/worktrees/cleanup-dry-run",
+            post(handle_v1_worktrees_cleanup_dry_run),
+        )
+        .route("/worktrees/cleanup", post(handle_v1_worktrees_cleanup))
         .route("/worktrees/:id", get(handle_v1_worktrees_get))
         .route("/worktrees/:id", delete(handle_v1_worktrees_delete))
         .route("/worktrees/:id/diff", get(handle_v1_worktrees_diff))

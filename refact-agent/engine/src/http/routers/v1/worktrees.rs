@@ -14,7 +14,8 @@ use crate::global_context::GlobalContext;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{
     CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
-    MergeWorktreeResponse, OpenWorktreeResponse, WorktreeDiffResponse, WorktreeListResponse,
+    MergeWorktreeResponse, OpenWorktreeResponse, WorktreeCleanupPlan, WorktreeCleanupRequest,
+    WorktreeCleanupResult, WorktreeDiffResponse, WorktreeInventory, WorktreeListResponse,
     WorktreeRecordView,
 };
 
@@ -57,6 +58,7 @@ fn status_for_error(error: &str) -> StatusCode {
         || lower.contains("no project root")
         || lower.contains("outside registry")
         || lower.contains("cannot be empty")
+        || lower.contains("requires explicit")
     {
         StatusCode::BAD_REQUEST
     } else {
@@ -132,6 +134,52 @@ pub async fn handle_v1_worktrees_list(
     let service = service_for_request(gcx, query.source_workspace_root).await?;
     service
         .list_worktrees()
+        .await
+        .map(Json)
+        .map_err(map_service_error)
+}
+
+pub async fn handle_v1_worktrees_summary(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Query(query): Query<WorktreeQuery>,
+) -> ApiResult<WorktreeInventory> {
+    let service = service_for_request(gcx, query.source_workspace_root).await?;
+    service
+        .inspect_worktrees()
+        .await
+        .map(Json)
+        .map_err(map_service_error)
+}
+
+pub async fn handle_v1_worktrees_cleanup_dry_run(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Query(query): Query<WorktreeQuery>,
+    Json(request): Json<WorktreeCleanupRequest>,
+) -> ApiResult<WorktreeCleanupPlan> {
+    let requested_root = request
+        .source_workspace_root
+        .clone()
+        .or(query.source_workspace_root);
+    let service = service_for_request(gcx, requested_root).await?;
+    service
+        .cleanup_worktrees_dry_run(request)
+        .await
+        .map(Json)
+        .map_err(map_service_error)
+}
+
+pub async fn handle_v1_worktrees_cleanup(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Query(query): Query<WorktreeQuery>,
+    Json(request): Json<WorktreeCleanupRequest>,
+) -> ApiResult<WorktreeCleanupResult> {
+    let requested_root = request
+        .source_workspace_root
+        .clone()
+        .or(query.source_workspace_root);
+    let service = service_for_request(gcx, requested_root).await?;
+    service
+        .cleanup_worktrees(request)
         .await
         .map(Json)
         .map_err(map_service_error)

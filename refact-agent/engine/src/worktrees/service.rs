@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -10,9 +10,11 @@ use uuid::Uuid;
 use super::git;
 use super::types::{
     CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
-    MergeWorktreeResponse, OpenWorktreeResponse, WorktreeCleanupResult, WorktreeConflictState,
-    WorktreeDiffResponse, WorktreeListResponse, WorktreeMeta, WorktreeRecordView,
-    WorktreeReference, WorktreeRegistry, WorktreeRegistryRecord,
+    MergeWorktreeResponse, OpenWorktreeResponse, WorktreeCleanupDeleted, WorktreeCleanupPlan,
+    WorktreeCleanupRequest, WorktreeCleanupResult, WorktreeCleanupSkipped, WorktreeCleanupTarget,
+    WorktreeConflictState, WorktreeDiffResponse, WorktreeInspection, WorktreeInventory,
+    WorktreeInventorySummary, WorktreeListResponse, WorktreeMeta, WorktreeRecordView,
+    WorktreeReference, WorktreeRegistry, WorktreeRegistryRecord, WorktreeRemovalResult,
 };
 
 const DEFAULT_MAX_PATCH_BYTES: usize = 200_000;
@@ -527,13 +529,408 @@ impl WorktreeService {
         })
     }
 
+    pub async fn inspect_worktrees(&self) -> Result<WorktreeInventory, String> {
+        self.inspect_worktrees_with_min_age(24).await
+    }
+
+    pub async fn inspect_worktrees_with_min_age(
+        &self,
+        min_age_hours: u64,
+    ) -> Result<WorktreeInventory, String> {
+        let registry = self.load_registry_unlocked().await?;
+        self.inspect_worktrees_from_registry(&registry, min_age_hours)
+    }
+
+    pub async fn cleanup_worktrees_dry_run(
+        &self,
+        request: WorktreeCleanupRequest,
+    ) -> Result<WorktreeCleanupPlan, String> {
+        validate_cleanup_request(&request)?;
+        let registry = self.load_registry_unlocked().await?;
+        let inventory = self.inspect_worktrees_from_registry(&registry, request.min_age_hours)?;
+        Ok(self.cleanup_plan_from_inventory(&inventory, request))
+    }
+
+    pub async fn cleanup_worktrees(
+        &self,
+        request: WorktreeCleanupRequest,
+    ) -> Result<WorktreeCleanupResult, String> {
+        validate_cleanup_request(&request)?;
+        let _guard = registry_write_lock().lock().await;
+        let mut registry = self.load_registry_unlocked().await?;
+        let inventory = self.inspect_worktrees_from_registry(&registry, request.min_age_hours)?;
+        let plan = self.cleanup_plan_from_inventory(&inventory, request.clone());
+        let mut deleted = Vec::new();
+        let mut skipped = plan.skipped.clone();
+        let warnings = Vec::new();
+
+        for target in plan.candidates {
+            if let Some(index) = registry
+                .records
+                .iter()
+                .position(|record| record.meta.id == target.id)
+            {
+                let record = registry.records[index].clone();
+                let removal = self
+                    .cleanup_registered_worktree(&mut registry, index, &record, target.delete_branch)
+                    .await?;
+                deleted.push(WorktreeCleanupDeleted {
+                    id: target.id,
+                    root: target.root,
+                    branch: target.branch,
+                    worktree_deleted: removal.worktree_deleted,
+                    branch_deleted: removal.branch_deleted,
+                    registry_deleted: removal.registry_deleted,
+                    stale_path: removal.stale_path,
+                    warnings: removal.warnings,
+                });
+            } else {
+                let stale_path = !target.root.exists();
+                let mut item_warnings = git::remove_worktree_path(&self.source_workspace_root, &target.root);
+                let mut branch_deleted = false;
+                if target.delete_branch {
+                    if let Some(branch) = target.branch.as_deref() {
+                        match git::delete_branch(&self.source_workspace_root, branch) {
+                            Ok(deleted) => branch_deleted = deleted,
+                            Err(e) => item_warnings.push(e),
+                        }
+                    }
+                }
+                deleted.push(WorktreeCleanupDeleted {
+                    id: target.id,
+                    root: target.root.clone(),
+                    branch: target.branch.clone(),
+                    worktree_deleted: !target.root.exists(),
+                    branch_deleted,
+                    registry_deleted: false,
+                    stale_path,
+                    warnings: item_warnings,
+                });
+            }
+        }
+
+        skipped.sort_by(|a, b| a.id.cmp(&b.id));
+        deleted.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(WorktreeCleanupResult {
+            generated_at: Utc::now().to_rfc3339(),
+            request,
+            deleted,
+            skipped,
+            warnings,
+        })
+    }
+
+    fn inspect_worktrees_from_registry(
+        &self,
+        registry: &WorktreeRegistry,
+        min_age_hours: u64,
+    ) -> Result<WorktreeInventory, String> {
+        let mut worktrees = Vec::new();
+        let mut registered_roots = HashSet::new();
+        let registry_dir = self.registry_dir();
+
+        for record in &registry.records {
+            let root_key = normalize_lexical(&record.meta.root)?;
+            registered_roots.insert(root_key);
+            worktrees.push(self.inspect_registered_record(record, min_age_hours));
+        }
+
+        let mut discovered_roots = HashSet::new();
+        for entry in git::list_git_worktrees(&self.source_workspace_root) {
+            let root_key = normalize_lexical(&entry.root)?;
+            if root_key == self.source_workspace_root || registered_roots.contains(&root_key) {
+                continue;
+            }
+            if !root_key.starts_with(&registry_dir) || !discovered_roots.insert(root_key.clone()) {
+                continue;
+            }
+            worktrees.push(self.inspect_discovered_root(
+                worktree_id_from_path(&root_key),
+                root_key,
+                entry.branch,
+                entry.head,
+                true,
+                min_age_hours,
+            ));
+        }
+
+        if registry_dir.exists() {
+            if let Ok(read_dir) = std::fs::read_dir(&registry_dir) {
+                for entry in read_dir.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let root_key = normalize_lexical(&path)?;
+                    if registered_roots.contains(&root_key) || discovered_roots.contains(&root_key) {
+                        continue;
+                    }
+                    if !discovered_roots.insert(root_key.clone()) {
+                        continue;
+                    }
+                    worktrees.push(self.inspect_discovered_root(
+                        worktree_id_from_path(&root_key),
+                        root_key,
+                        None,
+                        None,
+                        true,
+                        min_age_hours,
+                    ));
+                }
+            }
+        }
+
+        worktrees.sort_by(|a, b| a.id.cmp(&b.id));
+        let summary = summarize_inventory(&worktrees);
+        let cleanup_candidates = worktrees
+            .iter()
+            .filter(|item| item.cleanup_candidate)
+            .map(|item| item.id.clone())
+            .collect();
+        Ok(WorktreeInventory {
+            project_hash: self.project_hash.clone(),
+            source_workspace_root: self.source_workspace_root.clone(),
+            generated_at: Utc::now().to_rfc3339(),
+            summary,
+            worktrees,
+            cleanup_candidates,
+        })
+    }
+
+    fn inspect_registered_record(
+        &self,
+        record: &WorktreeRegistryRecord,
+        min_age_hours: u64,
+    ) -> WorktreeInspection {
+        let age_hours = age_hours_since(
+            record
+                .last_seen_at
+                .as_deref()
+                .unwrap_or(record.updated_at.as_str()),
+        );
+        let last_used_at = record
+            .last_seen_at
+            .clone()
+            .or_else(|| Some(record.updated_at.clone()));
+        let mut item = self.inspect_root(
+            record.meta.id.clone(),
+            "registered".to_string(),
+            record.meta.root.clone(),
+            record.meta.branch.clone(),
+            record.meta.base_branch.clone(),
+            record.meta.base_commit.clone(),
+            record.references.clone(),
+            age_hours,
+            last_used_at,
+            false,
+            false,
+            min_age_hours,
+        );
+        item.attached_chat_ids = attached_chat_ids(&item.references);
+        item.attached_task_ids = attached_task_ids(&item.references);
+        item
+    }
+
+    fn inspect_discovered_root(
+        &self,
+        id: String,
+        root: PathBuf,
+        branch: Option<String>,
+        _head: Option<String>,
+        cache_dir_missing_from_registry: bool,
+        min_age_hours: u64,
+    ) -> WorktreeInspection {
+        let age_hours = filesystem_age_hours(&root);
+        let mut item = self.inspect_root(
+            id,
+            "discovered".to_string(),
+            root,
+            branch,
+            None,
+            None,
+            Vec::new(),
+            age_hours,
+            None,
+            true,
+            cache_dir_missing_from_registry,
+            min_age_hours,
+        );
+        item.attached_chat_ids = attached_chat_ids(&item.references);
+        item.attached_task_ids = attached_task_ids(&item.references);
+        item
+    }
+
+    fn inspect_root(
+        &self,
+        id: String,
+        source: String,
+        root: PathBuf,
+        branch: Option<String>,
+        base_branch: Option<String>,
+        base_commit: Option<String>,
+        references: Vec<WorktreeReference>,
+        age_hours: Option<u64>,
+        last_used_at: Option<String>,
+        registry_missing: bool,
+        cache_dir_missing_from_registry: bool,
+        min_age_hours: u64,
+    ) -> WorktreeInspection {
+        let mut status = git::status_for_path(&root);
+        if let Some(branch) = branch.as_deref() {
+            if status.branch.is_none() {
+                status.branch = Some(branch.to_string());
+            }
+        }
+        let mut diff_stats = None;
+        if status.path_exists && status.is_git_worktree {
+            if let Ok(diff) = git::diff_for_path(&root, base_commit.as_deref(), 1) {
+                diff_stats = Some(diff.stats);
+            }
+        }
+        let conflicted = status.conflicted
+            || (status.path_exists
+                && status.is_git_worktree
+                && !git::conflict_files_for_path(&root).is_empty());
+        status.conflicted = conflicted;
+        let shared = references.len() > 1;
+        let stale = !status.path_exists || !status.is_git_worktree;
+        let changed_files = diff_stats
+            .as_ref()
+            .map(|stats| stats.files_changed)
+            .unwrap_or_else(|| status.staged_count + status.unstaged_count + status.untracked_count);
+        let committed_files = diff_stats.as_ref().map(|stats| stats.committed_files).unwrap_or(0);
+        let staged_files = diff_stats
+            .as_ref()
+            .map(|stats| stats.staged_files)
+            .unwrap_or(status.staged_count);
+        let unstaged_files = diff_stats
+            .as_ref()
+            .map(|stats| stats.unstaged_files)
+            .unwrap_or(status.unstaged_count);
+        let untracked_files = diff_stats
+            .as_ref()
+            .map(|stats| stats.untracked_files)
+            .unwrap_or(status.untracked_count);
+        let additions = diff_stats.as_ref().map(|stats| stats.additions).unwrap_or(0);
+        let deletions = diff_stats.as_ref().map(|stats| stats.deletions).unwrap_or(0);
+        let branch_merged = branch.as_deref().and_then(|branch| {
+            base_branch.as_deref().map(|base| {
+                git::branch_merged_into(&self.source_workspace_root, branch, base)
+            })
+        });
+        let mut item = WorktreeInspection {
+            id,
+            source,
+            root: root.clone(),
+            branch,
+            base_branch,
+            base_commit,
+            status,
+            reference_count: references.len(),
+            references,
+            shared,
+            stale,
+            conflicted,
+            changed_files,
+            committed_files,
+            staged_files,
+            unstaged_files,
+            untracked_files,
+            additions,
+            deletions,
+            cleanup_candidate: false,
+            cleanup_blockers: Vec::new(),
+            disk_usage_bytes: cheap_disk_usage(&root),
+            age_hours,
+            last_used_at,
+            branch_merged,
+            registry_missing,
+            cache_dir_missing_from_registry,
+            attached_chat_ids: Vec::new(),
+            attached_task_ids: Vec::new(),
+        };
+        item.reference_count = item.references.len();
+        item.shared = item.reference_count > 1;
+        let request = WorktreeCleanupRequest {
+            ids: vec![item.id.clone()],
+            min_age_hours,
+            ..WorktreeCleanupRequest::default()
+        };
+        item.cleanup_blockers = cleanup_blockers_for_item(&item, &request);
+        item.cleanup_candidate = item.cleanup_blockers.is_empty();
+        item
+    }
+
+    fn cleanup_plan_from_inventory(
+        &self,
+        inventory: &WorktreeInventory,
+        request: WorktreeCleanupRequest,
+    ) -> WorktreeCleanupPlan {
+        let by_id: HashMap<&str, &WorktreeInspection> = inventory
+            .worktrees
+            .iter()
+            .map(|item| (item.id.as_str(), item))
+            .collect();
+        let mut candidates = Vec::new();
+        let mut skipped = Vec::new();
+        let mut seen = HashSet::new();
+        for id in &request.ids {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(item) = by_id.get(id.as_str()) else {
+                skipped.push(WorktreeCleanupSkipped {
+                    id: id.clone(),
+                    root: None,
+                    reason: "not_found".to_string(),
+                    details: vec!["worktree id was not found in registry or discovery".to_string()],
+                });
+                continue;
+            };
+            let blockers = cleanup_blockers_for_item(item, &request);
+            if blockers.is_empty() {
+                candidates.push(WorktreeCleanupTarget {
+                    id: item.id.clone(),
+                    root: item.root.clone(),
+                    branch: item.branch.clone(),
+                    shared: item.shared,
+                    stale: item.stale,
+                    changed_files: item.changed_files,
+                    additions: item.additions,
+                    deletions: item.deletions,
+                    delete_branch: request.delete_branches,
+                    references: item.references.clone(),
+                    disk_usage_bytes: item.disk_usage_bytes,
+                });
+            } else {
+                skipped.push(WorktreeCleanupSkipped {
+                    id: item.id.clone(),
+                    root: Some(item.root.clone()),
+                    reason: blockers
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "blocked".to_string()),
+                    details: blockers,
+                });
+            }
+        }
+        candidates.sort_by(|a, b| a.id.cmp(&b.id));
+        skipped.sort_by(|a, b| a.id.cmp(&b.id));
+        WorktreeCleanupPlan {
+            generated_at: Utc::now().to_rfc3339(),
+            request,
+            candidates,
+            skipped,
+        }
+    }
+
     async fn cleanup_registered_worktree(
         &self,
         registry: &mut WorktreeRegistry,
         index: usize,
         record: &WorktreeRegistryRecord,
         delete_branch: bool,
-    ) -> Result<WorktreeCleanupResult, String> {
+    ) -> Result<WorktreeRemovalResult, String> {
         let stale_path = !record.meta.root.exists();
         let mut warnings = git::remove_worktree(
             &record.meta.source_workspace_root,
@@ -558,7 +955,7 @@ impl WorktreeService {
             record.updated_at = Utc::now().to_rfc3339();
         }
         self.save_registry_unlocked(registry).await?;
-        Ok(WorktreeCleanupResult {
+        Ok(WorktreeRemovalResult {
             worktree_deleted,
             branch_deleted,
             registry_deleted,
@@ -867,6 +1264,187 @@ fn conflict_state(
             "Merge conflicts remain in the target workspace; resolve or abort the merge before retrying.".to_string()
         },
     }
+}
+
+fn validate_cleanup_request(request: &WorktreeCleanupRequest) -> Result<(), String> {
+    if request.ids.is_empty() {
+        return Err("Cleanup requires explicit worktree ids".to_string());
+    }
+    for id in &request.ids {
+        validate_worktree_id(id)?;
+    }
+    Ok(())
+}
+
+fn cleanup_blockers_for_item(
+    item: &WorktreeInspection,
+    request: &WorktreeCleanupRequest,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if !item.status.path_exists {
+        blockers.push("missing_path".to_string());
+    }
+    if !item.status.is_git_worktree {
+        blockers.push("not_git_worktree".to_string());
+    }
+    if item.conflicted {
+        blockers.push("conflicted".to_string());
+    }
+    if request.clean_only && item.changed_files > 0 {
+        blockers.push("dirty".to_string());
+    }
+    if !request.allow_shared && item.shared {
+        blockers.push("shared".to_string());
+    }
+    match item.age_hours {
+        Some(age) if age < request.min_age_hours => blockers.push("too_recent".to_string()),
+        None if request.min_age_hours > 0 => blockers.push("age_unknown".to_string()),
+        _ => {}
+    }
+    if request.delete_branches {
+        match (&item.branch, item.branch_merged) {
+            (Some(_), Some(true)) => {}
+            (Some(_), Some(false)) => blockers.push("branch_not_merged".to_string()),
+            (Some(_), None) => blockers.push("branch_safety_unknown".to_string()),
+            (None, _) => {}
+        }
+    }
+    blockers
+}
+
+fn summarize_inventory(worktrees: &[WorktreeInspection]) -> WorktreeInventorySummary {
+    let mut summary = WorktreeInventorySummary::default();
+    let mut disk_usage = 0u64;
+    let mut has_disk_usage = false;
+    for item in worktrees {
+        if item.source == "registered" {
+            summary.total_registered += 1;
+        } else {
+            summary.total_discovered += 1;
+        }
+        if item.stale {
+            summary.stale += 1;
+        }
+        if item.conflicted {
+            summary.conflicted += 1;
+        }
+        if item.shared {
+            summary.shared += 1;
+        }
+        if item.changed_files > 0 || item.status.dirty {
+            summary.dirty += 1;
+        } else if !item.stale && !item.conflicted {
+            summary.clean += 1;
+        }
+        if item.cleanup_candidate {
+            summary.abandoned_clean += 1;
+        }
+        if item.source == "registered" && !item.status.path_exists {
+            summary.missing_registry_paths += 1;
+        }
+        if item.cache_dir_missing_from_registry {
+            summary.unregistered_cache_dirs += 1;
+        }
+        if item.branch_merged == Some(true) {
+            summary.merged_branches += 1;
+        }
+        summary.changed_files += item.changed_files;
+        summary.additions += item.additions;
+        summary.deletions += item.deletions;
+        if let Some(bytes) = item.disk_usage_bytes {
+            has_disk_usage = true;
+            disk_usage = disk_usage.saturating_add(bytes);
+        }
+        if let Some(age) = item.age_hours {
+            summary.newest_age_hours = Some(
+                summary
+                    .newest_age_hours
+                    .map(|current| current.min(age))
+                    .unwrap_or(age),
+            );
+            summary.oldest_age_hours = Some(
+                summary
+                    .oldest_age_hours
+                    .map(|current| current.max(age))
+                    .unwrap_or(age),
+            );
+        }
+    }
+    summary.total = worktrees.len();
+    if has_disk_usage {
+        summary.disk_usage_bytes = Some(disk_usage);
+    }
+    summary
+}
+
+fn worktree_id_from_path(path: &Path) -> String {
+    if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+        if validate_worktree_id(name).is_ok() {
+            return name.to_string();
+        }
+    }
+    format!("discovered_{}", project_hash_for_path(path))
+}
+
+fn age_hours_since(timestamp: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|dt| Utc::now().signed_duration_since(dt.with_timezone(&Utc)))
+        .map(|duration| duration.num_hours().max(0) as u64)
+}
+
+fn filesystem_age_hours(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .ok()
+        .map(|duration| duration.as_secs() / 3600)
+}
+
+fn cheap_disk_usage(path: &Path) -> Option<u64> {
+    if !path.exists() {
+        return None;
+    }
+    let mut total = 0u64;
+    let mut seen = 0usize;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        seen += 1;
+        if seen > 5000 {
+            return None;
+        }
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        } else if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path).ok()? {
+                stack.push(entry.ok()?.path());
+            }
+        }
+    }
+    Some(total)
+}
+
+fn attached_chat_ids(references: &[WorktreeReference]) -> Vec<String> {
+    let mut ids = references
+        .iter()
+        .filter_map(|reference| reference.chat_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
+fn attached_task_ids(references: &[WorktreeReference]) -> Vec<String> {
+    let mut ids = references
+        .iter()
+        .filter_map(|reference| reference.task_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 #[cfg(test)]
@@ -1404,6 +1982,254 @@ mod worktree_registry_tests {
             .get_worktree(&created.worktree.meta.id)
             .await
             .is_ok());
+    }
+
+    async fn mark_worktree_old(service: &WorktreeService, id: &str, hours: i64) {
+        let mut registry = service.load_registry().await.unwrap();
+        let record = registry
+            .records
+            .iter_mut()
+            .find(|record| record.meta.id == id)
+            .unwrap();
+        let ts = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        record.created_at = ts.clone();
+        record.updated_at = ts.clone();
+        record.last_seen_at = Some(ts);
+        service.save_registry(&registry).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn worktree_hygiene_classifies_clean_dirty_stale_shared_and_conflicted() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let clean = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-clean".to_string()),
+                chat_id: Some("chat-clean".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &clean.worktree.meta.id, 48).await;
+        service
+            .add_reference(
+                &clean.worktree.meta.id,
+                WorktreeReference {
+                    kind: "chat".to_string(),
+                    chat_id: Some("chat-clean-2".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let dirty = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-dirty".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &dirty.worktree.meta.id, 48).await;
+        std::fs::write(dirty.worktree.meta.root.join("dirty.txt"), "dirty\n").unwrap();
+        let conflicted = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-conflict".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &conflicted.worktree.meta.id, 48).await;
+        commit_file(&source, "file.txt", "target\n", "target");
+        commit_file(
+            &conflicted.worktree.meta.root,
+            "file.txt",
+            "source\n",
+            "source",
+        );
+        let _ = Command::new("git")
+            .args(["merge", "main"])
+            .current_dir(&conflicted.worktree.meta.root)
+            .output()
+            .unwrap();
+        let mut registry = service.load_registry().await.unwrap();
+        registry.records.push(sample_record(&service, "stale_1"));
+        service.save_registry(&registry).await.unwrap();
+
+        let inventory = service.inspect_worktrees_with_min_age(24).await.unwrap();
+
+        assert_eq!(inventory.summary.total_registered, 4);
+        assert!(inventory.summary.dirty >= 1);
+        assert!(inventory.summary.stale >= 1);
+        assert!(inventory.summary.conflicted >= 1);
+        assert!(inventory.summary.shared >= 1);
+        assert!(inventory
+            .worktrees
+            .iter()
+            .any(|item| item.id == dirty.worktree.meta.id && item.changed_files > 0));
+    }
+
+    #[tokio::test]
+    async fn worktree_hygiene_changed_file_count_aggregation_and_candidate_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let clean = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-candidate".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &clean.worktree.meta.id, 48).await;
+        let dirty = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-aggregate".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &dirty.worktree.meta.id, 48).await;
+        std::fs::write(dirty.worktree.meta.root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(dirty.worktree.meta.root.join("b.txt"), "b\n").unwrap();
+
+        let inventory = service.inspect_worktrees_with_min_age(24).await.unwrap();
+
+        assert!(inventory.summary.changed_files >= 2);
+        assert!(inventory.summary.additions >= 2);
+        assert!(inventory.cleanup_candidates.contains(&clean.worktree.meta.id));
+        assert!(!inventory.cleanup_candidates.contains(&dirty.worktree.meta.id));
+    }
+
+    #[tokio::test]
+    async fn worktree_hygiene_cleanup_dry_run_does_not_delete_and_blocks_shared_dirty() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let clean = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-dry-clean".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &clean.worktree.meta.id, 48).await;
+        let shared = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-dry-shared".to_string()),
+                chat_id: Some("chat-shared".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &shared.worktree.meta.id, 48).await;
+        service
+            .add_reference(
+                &shared.worktree.meta.id,
+                WorktreeReference {
+                    kind: "chat".to_string(),
+                    chat_id: Some("chat-shared-2".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let dirty = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-dry-dirty".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &dirty.worktree.meta.id, 48).await;
+        std::fs::write(dirty.worktree.meta.root.join("dirty.txt"), "dirty\n").unwrap();
+
+        let plan = service
+            .cleanup_worktrees_dry_run(WorktreeCleanupRequest {
+                ids: vec![
+                    clean.worktree.meta.id.clone(),
+                    shared.worktree.meta.id.clone(),
+                    dirty.worktree.meta.id.clone(),
+                ],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].id, clean.worktree.meta.id);
+        assert!(plan.skipped.iter().any(|item| item.reason == "shared"));
+        assert!(plan.skipped.iter().any(|item| item.reason == "dirty"));
+        assert!(clean.worktree.meta.root.exists());
+        assert!(service.get_worktree(&clean.worktree.meta.id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn worktree_hygiene_cleanup_actual_deletes_only_selected_safe_worktrees() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let clean = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-delete-clean".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &clean.worktree.meta.id, 48).await;
+        let dirty = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/hygiene-delete-dirty".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mark_worktree_old(&service, &dirty.worktree.meta.id, 48).await;
+        std::fs::write(dirty.worktree.meta.root.join("dirty.txt"), "dirty\n").unwrap();
+        let clean_root = clean.worktree.meta.root.clone();
+        let dirty_root = dirty.worktree.meta.root.clone();
+        let branch = clean.worktree.meta.branch.clone().unwrap();
+
+        let result = service
+            .cleanup_worktrees(WorktreeCleanupRequest {
+                ids: vec![clean.worktree.meta.id.clone(), dirty.worktree.meta.id.clone()],
+                delete_branches: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.deleted.len(), 1);
+        assert_eq!(result.deleted[0].id, clean.worktree.meta.id);
+        assert!(result.deleted[0].worktree_deleted);
+        assert!(result.deleted[0].branch_deleted);
+        assert!(result.skipped.iter().any(|item| item.reason == "dirty"));
+        assert!(!clean_root.exists());
+        assert!(dirty_root.exists());
+        assert!(!branch_exists(&source, &branch));
+        assert!(service.get_worktree(&clean.worktree.meta.id).await.is_err());
     }
 
     #[tokio::test]

@@ -580,7 +580,8 @@ export type BuddyFactKind =
   | "diagnostic_cluster"
   | "frontend_error_burst"
   | "git_diff_widening"
-  | "uncommitted_pressure";
+  | "uncommitted_pressure"
+  | "worktree_hygiene";
 
 export interface BuddyFact {
   kind: BuddyFactKind;
@@ -601,7 +602,8 @@ export type BuddyOpportunityKind =
   | "provider_tuning"
   | "integration_fix"
   | "diagnostic_investigation"
-  | "git_hygiene";
+  | "git_hygiene"
+  | "worktree_cleanup";
 
 export type BuddyPriority = "low" | "normal" | "high" | "critical";
 
@@ -637,7 +639,8 @@ export type PulseScope =
   | "mcp"
   | "customization"
   | "diagnostics"
-  | "git";
+  | "git"
+  | "worktrees";
 
 export type BuddyPage =
   | { type: "buddy" }
@@ -655,6 +658,7 @@ export type BuddyPage =
   | { type: "tasks_list" }
   | { type: "task_workspace"; task_id: string }
   | { type: "knowledge_graph" }
+  | { type: "worktrees" }
   | { type: "setup_mode"; mode: string };
 
 export interface InvestigationContext {
@@ -793,6 +797,27 @@ export interface GitPulse {
   branches: number;
 }
 
+export interface WorktreePulse {
+  total_registered: number;
+  total_discovered: number;
+  total: number;
+  clean: number;
+  dirty: number;
+  stale: number;
+  conflicted: number;
+  shared: number;
+  abandoned_clean: number;
+  changed_files: number;
+  additions: number;
+  deletions: number;
+  missing_registry_paths: number;
+  unregistered_cache_dirs: number;
+  merged_branches: number;
+  newest_age_hours?: number | null;
+  oldest_age_hours?: number | null;
+  disk_usage_bytes?: number | null;
+}
+
 export interface BuddyPulse {
   generated_at?: string | null;
   tasks: TaskPulse;
@@ -803,6 +828,7 @@ export interface BuddyPulse {
   customization: CustomizationPulse;
   diagnostics: DiagnosticPulse;
   git: GitPulse;
+  worktrees: WorktreePulse;
   humor?: string | null;
 }
 

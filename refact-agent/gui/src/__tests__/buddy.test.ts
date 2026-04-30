@@ -1595,6 +1595,23 @@ describe("buddy opportunities, pulse, and drafts", () => {
       },
       diagnostics: { last_hour: 0, top_error_types: [] },
       git: { uncommitted_files: 2, diff_lines_4h: 100, branches: 3 },
+      worktrees: {
+        total_registered: 1,
+        total_discovered: 0,
+        total: 1,
+        clean: 1,
+        dirty: 0,
+        stale: 0,
+        conflicted: 0,
+        shared: 0,
+        abandoned_clean: 1,
+        changed_files: 0,
+        additions: 0,
+        deletions: 0,
+        missing_registry_paths: 0,
+        unregistered_cache_dirs: 0,
+        merged_branches: 1,
+      },
     };
   }
 
@@ -1893,12 +1910,14 @@ describe("buddy opportunities, pulse, and drafts", () => {
       { type: "buddy" },
       { type: "task_workspace", task_id: "task-123" },
       { type: "knowledge_graph" },
+      { type: "worktrees" },
       { type: "setup_mode", mode: "setup_mcp" },
     ];
     const types = pages.map((p) => p.type);
     expect(types).toContain("buddy");
     expect(types).toContain("task_workspace");
     expect(types).toContain("knowledge_graph");
+    expect(types).toContain("worktrees");
     expect(types).toContain("setup_mode");
     for (const page of pages) {
       if (page.type === "task_workspace") {
