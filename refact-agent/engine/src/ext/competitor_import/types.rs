@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -237,8 +237,18 @@ impl ImportReportCounts {
 pub struct ImportReportIssue {
     pub competitor: Option<Competitor>,
     pub kind: Option<ImportKind>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_report_issue_scope"
+    )]
     pub scope: Option<ImportScope>,
-    pub path: Option<PathBuf>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_report_issue_path"
+    )]
+    pub path: Option<String>,
     pub status: ImportStatus,
     pub message: String,
 }
@@ -248,8 +258,8 @@ impl ImportReportIssue {
         Self {
             competitor: issue.competitor,
             kind: issue.kind,
-            scope: issue.scope.clone(),
-            path: issue.path.clone(),
+            scope: issue.scope.as_ref().map(sanitize_report_scope),
+            path: issue.path.as_deref().map(sanitize_report_path),
             status: issue.status.clone(),
             message: sanitize_report_message(&issue.message),
         }
@@ -259,8 +269,8 @@ impl ImportReportIssue {
         Self {
             competitor: Some(outcome.candidate.competitor),
             kind: Some(outcome.candidate.kind),
-            scope: Some(outcome.candidate.scope.clone()),
-            path: Some(outcome.candidate.destination_path.clone()),
+            scope: Some(sanitize_report_scope(&outcome.candidate.scope)),
+            path: Some(sanitize_report_path(&outcome.candidate.destination_path)),
             status: outcome.status.clone(),
             message: sanitize_report_message(&outcome.message),
         }
@@ -544,14 +554,73 @@ fn issue_matches_outcome_refs(issue: &ImportIssue, outcomes: &[&ImportOutcome]) 
     })
 }
 
+fn deserialize_report_issue_scope<'de, D>(deserializer: D) -> Result<Option<ImportScope>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<ImportScope>::deserialize(deserializer)
+        .map(|scope| scope.map(|scope| sanitize_report_scope(&scope)))
+}
+
+fn deserialize_report_issue_path<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+        .map(|path| path.map(|path| sanitize_report_path_value(&path)))
+}
+
+fn sanitize_report_scope(scope: &ImportScope) -> ImportScope {
+    match scope {
+        ImportScope::Global => ImportScope::Global,
+        ImportScope::Project { .. } => ImportScope::Project {
+            root: PathBuf::from("<redacted>"),
+        },
+    }
+}
+
+fn sanitize_report_path(path: &Path) -> String {
+    sanitize_report_path_value(&path.to_string_lossy())
+}
+
+fn sanitize_report_path_value(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if !is_absolute_path_value(path) {
+        return normalized;
+    }
+    let basename = normalized
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("path");
+    format!("<redacted>/.../{basename}")
+}
+
+fn is_absolute_path_value(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with('\\') || path.as_bytes().get(1) == Some(&b':')
+}
+
 fn sanitize_report_message(message: &str) -> String {
     let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= 240 {
-        return compact;
+    let sanitized = compact
+        .split_whitespace()
+        .map(sanitize_report_message_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if sanitized.chars().count() <= 240 {
+        return sanitized;
     }
-    let mut truncated = compact.chars().take(240).collect::<String>();
+    let mut truncated = sanitized.chars().take(240).collect::<String>();
     truncated.push('…');
     truncated
+}
+
+fn sanitize_report_message_token(token: &str) -> String {
+    let trimmed =
+        token.trim_matches(|ch: char| matches!(ch, '(' | ')' | ',' | ';' | ':' | '\'' | '"'));
+    if trimmed.is_empty() || !is_absolute_path_value(trimmed) {
+        return token.to_string();
+    }
+    token.replacen(trimmed, "<redacted-path>", 1)
 }
 
 #[cfg(test)]
@@ -681,6 +750,53 @@ mod tests {
         assert_eq!(report.kind_counts[&ImportKind::Command].created, 1);
         assert!(!json.contains("secret artifact content"));
         assert!(!json.contains("original_description"));
+    }
+
+    #[test]
+    fn report_serialization_sanitizes_top_issue_paths() {
+        let project_scope = ImportScope::Project {
+            root: PathBuf::from("/home/user/private-project"),
+        };
+        let mut summary = ImportSummary::default();
+        summary.add_issue(ImportIssue {
+            competitor: Some(Competitor::ClaudeCode),
+            kind: Some(ImportKind::Command),
+            scope: Some(project_scope),
+            path: Some(PathBuf::from(
+                "/home/user/private-project/.claude/commands/secret.md",
+            )),
+            status: ImportStatus::Error,
+            message: "failed to import command".to_string(),
+        });
+
+        let report = ImportReport::from_summary(&summary);
+        let json = serde_json::to_string(&report).unwrap();
+
+        assert_eq!(report.top_issues.len(), 1);
+        assert_eq!(
+            report.top_issues[0].path.as_deref(),
+            Some("<redacted>/.../secret.md")
+        );
+        assert!(!json.contains("/home/user/private-project/.claude/commands/secret.md"));
+        assert!(!json.contains("/home/user"));
+        assert!(!json.contains("private-project"));
+        assert!(json.contains("secret.md"));
+
+        let mut relative_summary = ImportSummary::default();
+        relative_summary.add_issue(ImportIssue {
+            competitor: Some(Competitor::ClaudeCode),
+            kind: Some(ImportKind::Command),
+            scope: Some(ImportScope::Global),
+            path: Some(PathBuf::from("commands/public.md")),
+            status: ImportStatus::Conflict,
+            message: "conflict".to_string(),
+        });
+        let relative_report = ImportReport::from_summary(&relative_summary);
+
+        assert_eq!(
+            relative_report.top_issues[0].path.as_deref(),
+            Some("commands/public.md")
+        );
     }
 
     #[test]
