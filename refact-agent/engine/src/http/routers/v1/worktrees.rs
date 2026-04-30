@@ -50,7 +50,10 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         StatusCode::CONFLICT => "conflict",
         _ => "worktree_error",
     };
-    (status, Json(json!({ "code": code, "error": message.into() })))
+    (
+        status,
+        Json(json!({ "code": code, "error": message.into() })),
+    )
 }
 
 fn status_for_error(error: &str) -> StatusCode {

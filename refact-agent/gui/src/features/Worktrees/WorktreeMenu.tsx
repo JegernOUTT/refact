@@ -226,7 +226,8 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
             )}
           </Flex>
           <Text size="1" color="gray" className={styles.menuHint}>
-            Paths warn/remap; shell uses scoped cwd; shared refs affect all chats.
+            Paths warn/remap; shell uses scoped cwd; shared refs affect all
+            chats.
           </Text>
 
           {hasFeedback && (
