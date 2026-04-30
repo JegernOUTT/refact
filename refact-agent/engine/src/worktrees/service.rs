@@ -572,7 +572,12 @@ impl WorktreeService {
             {
                 let record = registry.records[index].clone();
                 let removal = self
-                    .cleanup_registered_worktree(&mut registry, index, &record, target.delete_branch)
+                    .cleanup_registered_worktree(
+                        &mut registry,
+                        index,
+                        &record,
+                        target.delete_branch,
+                    )
                     .await?;
                 deleted.push(WorktreeCleanupDeleted {
                     id: target.id,
@@ -586,7 +591,8 @@ impl WorktreeService {
                 });
             } else {
                 let stale_path = !target.root.exists();
-                let mut item_warnings = git::remove_worktree_path(&self.source_workspace_root, &target.root);
+                let mut item_warnings =
+                    git::remove_worktree_path(&self.source_workspace_root, &target.root);
                 let mut branch_deleted = false;
                 if target.delete_branch {
                     if let Some(branch) = target.branch.as_deref() {
@@ -662,7 +668,8 @@ impl WorktreeService {
                         continue;
                     }
                     let root_key = normalize_lexical(&path)?;
-                    if registered_roots.contains(&root_key) || discovered_roots.contains(&root_key) {
+                    if registered_roots.contains(&root_key) || discovered_roots.contains(&root_key)
+                    {
                         continue;
                     }
                     if !discovered_roots.insert(root_key.clone()) {
@@ -797,8 +804,13 @@ impl WorktreeService {
         let changed_files = diff_stats
             .as_ref()
             .map(|stats| stats.files_changed)
-            .unwrap_or_else(|| status.staged_count + status.unstaged_count + status.untracked_count);
-        let committed_files = diff_stats.as_ref().map(|stats| stats.committed_files).unwrap_or(0);
+            .unwrap_or_else(|| {
+                status.staged_count + status.unstaged_count + status.untracked_count
+            });
+        let committed_files = diff_stats
+            .as_ref()
+            .map(|stats| stats.committed_files)
+            .unwrap_or(0);
         let staged_files = diff_stats
             .as_ref()
             .map(|stats| stats.staged_files)
@@ -811,12 +823,18 @@ impl WorktreeService {
             .as_ref()
             .map(|stats| stats.untracked_files)
             .unwrap_or(status.untracked_count);
-        let additions = diff_stats.as_ref().map(|stats| stats.additions).unwrap_or(0);
-        let deletions = diff_stats.as_ref().map(|stats| stats.deletions).unwrap_or(0);
+        let additions = diff_stats
+            .as_ref()
+            .map(|stats| stats.additions)
+            .unwrap_or(0);
+        let deletions = diff_stats
+            .as_ref()
+            .map(|stats| stats.deletions)
+            .unwrap_or(0);
         let branch_merged = branch.as_deref().and_then(|branch| {
-            base_branch.as_deref().map(|base| {
-                git::branch_merged_into(&self.source_workspace_root, branch, base)
-            })
+            base_branch
+                .as_deref()
+                .map(|base| git::branch_merged_into(&self.source_workspace_root, branch, base))
         });
         let mut item = WorktreeInspection {
             id,
@@ -2108,8 +2126,12 @@ mod worktree_registry_tests {
 
         assert!(inventory.summary.changed_files >= 2);
         assert!(inventory.summary.additions >= 2);
-        assert!(inventory.cleanup_candidates.contains(&clean.worktree.meta.id));
-        assert!(!inventory.cleanup_candidates.contains(&dirty.worktree.meta.id));
+        assert!(inventory
+            .cleanup_candidates
+            .contains(&clean.worktree.meta.id));
+        assert!(!inventory
+            .cleanup_candidates
+            .contains(&dirty.worktree.meta.id));
     }
 
     #[tokio::test]
@@ -2214,7 +2236,10 @@ mod worktree_registry_tests {
 
         let result = service
             .cleanup_worktrees(WorktreeCleanupRequest {
-                ids: vec![clean.worktree.meta.id.clone(), dirty.worktree.meta.id.clone()],
+                ids: vec![
+                    clean.worktree.meta.id.clone(),
+                    dirty.worktree.meta.id.clone(),
+                ],
                 delete_branches: true,
                 ..Default::default()
             })

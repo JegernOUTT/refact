@@ -3942,11 +3942,8 @@ fn buddy_worktree_opportunity_generated_when_abandoned_clean_exists() {
     )
     .remove(0);
     store.ingest(fact);
-    let opps = OpportunityDetector::new().detect(
-        &store,
-        &BuddyPulse::default(),
-        &OpportunityQueue::new(),
-    );
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
     let opp = opps
         .iter()
         .find(|(opp, _)| opp.kind == BuddyOpportunityKind::WorktreeCleanup)
@@ -3965,11 +3962,8 @@ fn buddy_worktree_no_opportunity_when_no_candidates() {
     )
     .remove(0);
     store.ingest(fact);
-    let opps = OpportunityDetector::new().detect(
-        &store,
-        &BuddyPulse::default(),
-        &OpportunityQueue::new(),
-    );
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
     assert!(!opps
         .iter()
         .any(|(opp, _)| opp.kind == BuddyOpportunityKind::WorktreeCleanup));
@@ -3978,10 +3972,9 @@ fn buddy_worktree_no_opportunity_when_no_candidates() {
 #[test]
 fn buddy_worktree_suggestion_text_includes_counts() {
     let inventory = buddy_worktree_inventory(5, 2, 2, 1);
-    let suggestion = super::jobs::proactive_suggestions::worktree_hygiene_suggestion_from_inventory(
-        &inventory,
-    )
-    .expect("suggestion");
+    let suggestion =
+        super::jobs::proactive_suggestions::worktree_hygiene_suggestion_from_inventory(&inventory)
+            .expect("suggestion");
     assert!(suggestion.description.contains("5 worktrees"));
     assert!(suggestion.description.contains("2 clean abandoned"));
     assert!(suggestion
@@ -4024,8 +4017,8 @@ async fn buddy_worktree_pulse_includes_worktree_stats() {
         .unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let cache_dir = gcx.read().await.cache_dir.clone();
-    let service = crate::worktrees::service::WorktreeService::new(cache_dir, source.clone())
-        .unwrap();
+    let service =
+        crate::worktrees::service::WorktreeService::new(cache_dir, source.clone()).unwrap();
     let created = service
         .create_worktree(CreateWorktreeRequest {
             branch: Some("refact/chat/buddy-worktree-pulse".to_string()),

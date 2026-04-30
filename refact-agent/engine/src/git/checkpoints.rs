@@ -744,8 +744,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(fs::read_to_string(f.worktree.join("src/file.txt")).unwrap(), "before\n");
-        assert_eq!(fs::read_to_string(f.source.join("src/file.txt")).unwrap(), "source\n");
+        assert_eq!(
+            fs::read_to_string(f.worktree.join("src/file.txt")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(
+            fs::read_to_string(f.source.join("src/file.txt")).unwrap(),
+            "source\n"
+        );
     }
 
     #[tokio::test]
@@ -794,22 +800,15 @@ mod tests {
     async fn checkpoint_worktree_legacy_no_worktree_uses_active_workspace() {
         let f = fixture().await;
         write_file(&f.source.join("src/legacy.txt"), "legacy before\n");
-        let (checkpoint, _) = create_workspace_checkpoint(
-            f.gcx.clone(),
-            None,
-            "checkpoint_worktree_legacy",
-        )
-        .await
-        .unwrap();
+        let (checkpoint, _) =
+            create_workspace_checkpoint(f.gcx.clone(), None, "checkpoint_worktree_legacy")
+                .await
+                .unwrap();
         assert_eq!(checkpoint.workspace_folder, f.source);
         write_file(&f.source.join("src/legacy.txt"), "legacy after\n");
-        restore_workspace_checkpoint(
-            f.gcx.clone(),
-            &checkpoint,
-            "checkpoint_worktree_legacy",
-        )
-        .await
-        .unwrap();
+        restore_workspace_checkpoint(f.gcx.clone(), &checkpoint, "checkpoint_worktree_legacy")
+            .await
+            .unwrap();
         assert_eq!(
             fs::read_to_string(f.source.join("src/legacy.txt")).unwrap(),
             "legacy before\n"

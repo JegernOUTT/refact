@@ -89,10 +89,10 @@ use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_bootstrap,
 };
 use crate::http::routers::v1::worktrees::{
-    handle_v1_worktrees_cleanup, handle_v1_worktrees_cleanup_dry_run,
-    handle_v1_worktrees_create, handle_v1_worktrees_delete, handle_v1_worktrees_diff,
-    handle_v1_worktrees_get, handle_v1_worktrees_list, handle_v1_worktrees_merge,
-    handle_v1_worktrees_open, handle_v1_worktrees_summary,
+    handle_v1_worktrees_cleanup, handle_v1_worktrees_cleanup_dry_run, handle_v1_worktrees_create,
+    handle_v1_worktrees_delete, handle_v1_worktrees_diff, handle_v1_worktrees_get,
+    handle_v1_worktrees_list, handle_v1_worktrees_merge, handle_v1_worktrees_open,
+    handle_v1_worktrees_summary,
 };
 
 mod ast;

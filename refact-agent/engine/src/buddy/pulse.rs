@@ -278,10 +278,9 @@ async fn build_worktree_pulse(
     project_root: &std::path::Path,
 ) -> WorktreePulse {
     let cache_dir = gcx.read().await.cache_dir.clone();
-    let Ok(service) = crate::worktrees::service::WorktreeService::new(
-        cache_dir,
-        project_root.to_path_buf(),
-    ) else {
+    let Ok(service) =
+        crate::worktrees::service::WorktreeService::new(cache_dir, project_root.to_path_buf())
+    else {
         return WorktreePulse::default();
     };
     let Ok(inventory) = service.inspect_worktrees().await else {

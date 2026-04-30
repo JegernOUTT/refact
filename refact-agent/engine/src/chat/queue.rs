@@ -1530,9 +1530,7 @@ async fn create_checkpoint_async(
     chat_id: &str,
     worktree: Option<&crate::worktrees::types::WorktreeMeta>,
 ) -> Vec<crate::git::checkpoints::Checkpoint> {
-    use crate::git::checkpoints::{
-        create_workspace_checkpoint, create_workspace_checkpoint_for_root,
-    };
+    use crate::git::checkpoints::{create_workspace_checkpoint, create_workspace_checkpoint_for_root};
 
     let result = if let Some(worktree) = worktree {
         create_workspace_checkpoint_for_root(gcx, &worktree.root, latest_checkpoint, chat_id).await

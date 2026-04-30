@@ -32,10 +32,9 @@ impl BuddyObserver for WorktreeHygieneObserver {
         ctx: &ObserverContext,
     ) -> Vec<BuddyFact> {
         let cache_dir = gcx.read().await.cache_dir.clone();
-        let Ok(service) = crate::worktrees::service::WorktreeService::new(
-            cache_dir,
-            ctx.project_root.clone(),
-        ) else {
+        let Ok(service) =
+            crate::worktrees::service::WorktreeService::new(cache_dir, ctx.project_root.clone())
+        else {
             return Vec::new();
         };
         let Ok(inventory) = service.inspect_worktrees().await else {

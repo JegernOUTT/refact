@@ -81,11 +81,9 @@ async fn worktree_cleanup_suggestion(
     project_root: &std::path::Path,
 ) -> Option<BuddySuggestion> {
     let cache_dir = gcx.read().await.cache_dir.clone();
-    let service = crate::worktrees::service::WorktreeService::new(
-        cache_dir,
-        project_root.to_path_buf(),
-    )
-    .ok()?;
+    let service =
+        crate::worktrees::service::WorktreeService::new(cache_dir, project_root.to_path_buf())
+            .ok()?;
     let inventory = service.inspect_worktrees().await.ok()?;
     worktree_hygiene_suggestion_from_inventory(&inventory)
 }

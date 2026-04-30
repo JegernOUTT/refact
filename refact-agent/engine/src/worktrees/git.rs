@@ -357,7 +357,12 @@ pub fn list_git_worktrees(source_root: &Path) -> Vec<GitWorktreeEntry> {
         } else if let Some(value) = line.strip_prefix("HEAD ") {
             head = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("branch ") {
-            branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string());
+            branch = Some(
+                value
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(value)
+                    .to_string(),
+            );
         }
     }
     entries
