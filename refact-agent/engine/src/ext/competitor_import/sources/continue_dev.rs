@@ -5,11 +5,12 @@ use walkdir::WalkDir;
 
 use super::super::converters::{
     convert_command_markdown, convert_skill_package, convert_subagent, read_markdown_file_limited,
+    validate_skill_package_privacy,
 };
 use super::super::markdown::{first_useful_line_or_heading, yaml_string};
 use super::super::types::{
     Competitor, ConversionContext, ConversionError, ImportCandidate, ImportIssue, ImportKind,
-    ImportScope, ImportStatus, ImportSummary, NormalizedSubagent, ToolPolicy,
+    ImportPrivacyFilter, ImportScope, ImportStatus, ImportSummary, NormalizedSubagent, ToolPolicy,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -35,21 +36,43 @@ struct ParsedMarkdown {
 }
 
 pub fn scan_global_root(home_dir: &Path, staging_root: &Path) -> ContinueScanResult {
-    scan_continue_root(
+    scan_global_root_with_filter(home_dir, staging_root, &ImportPrivacyFilter::allow_all())
+}
+
+pub(crate) fn scan_global_root_with_filter(
+    home_dir: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> ContinueScanResult {
+    scan_continue_root_with_filter(
         &home_dir.join(".continue"),
         ImportScope::Global,
         staging_root,
+        filter,
     )
 }
 
 pub fn scan_project_root(workspace_root: &Path, staging_root: &Path) -> ContinueScanResult {
+    scan_project_root_with_filter(
+        workspace_root,
+        staging_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn scan_project_root_with_filter(
+    workspace_root: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> ContinueScanResult {
     let scope = ImportScope::Project {
         root: workspace_root.to_path_buf(),
     };
-    let mut result = scan_continue_root(
+    let mut result = scan_continue_root_with_filter(
         &workspace_root.join(".continue"),
         scope.clone(),
         staging_root,
+        filter,
     );
     report_workspace_rule_files(workspace_root, &scope, &mut result);
     result
@@ -59,6 +82,20 @@ pub fn scan_continue_root(
     source_root: &Path,
     scope: ImportScope,
     staging_root: &Path,
+) -> ContinueScanResult {
+    scan_continue_root_with_filter(
+        source_root,
+        scope,
+        staging_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn scan_continue_root_with_filter(
+    source_root: &Path,
+    scope: ImportScope,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
 ) -> ContinueScanResult {
     let context = ConversionContext {
         competitor: Competitor::ContinueDev,
@@ -80,14 +117,19 @@ pub fn scan_continue_root(
         }
     }
 
-    scan_skills(&context, staging_root, &mut result);
-    scan_prompts(&context, &mut result);
-    scan_checks(&context, &mut result);
+    scan_skills(&context, staging_root, filter, &mut result);
+    scan_prompts(&context, filter, &mut result);
+    scan_checks(&context, filter, &mut result);
     report_continue_rule_files(&context, &mut result);
     result
 }
 
-fn scan_skills(context: &ConversionContext, staging_root: &Path, result: &mut ContinueScanResult) {
+fn scan_skills(
+    context: &ConversionContext,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+    result: &mut ContinueScanResult,
+) {
     let skills_root = context.source_root.join("skills");
     match super::scan_root_allowed(context, &skills_root) {
         Ok(true) => {}
@@ -103,27 +145,33 @@ fn scan_skills(context: &ConversionContext, staging_root: &Path, result: &mut Co
         }
     }
     for skill_md in collect_named_files_at_depth(&skills_root, "SKILL.md", 2) {
-        match read_parsed_markdown(&skill_md) {
-            Ok(_) => {
-                let Some(skill_dir) = skill_md.parent() else {
-                    continue;
-                };
-                match convert_skill_package(context, skill_dir, staging_root) {
-                    Ok(candidate) => result.add_candidate(candidate),
-                    Err(err) => result.add_issue(err.into_issue()),
-                }
-            }
-            Err(message) => result.add_issue(error_issue(
+        let Some(skill_dir) = skill_md.parent() else {
+            continue;
+        };
+        if let Err(message) = validate_skill_package_privacy(skill_dir, filter) {
+            result.add_issue(super::privacy_skip_issue(
                 context,
                 ImportKind::Skill,
-                &skill_md,
-                format!("invalid Continue skill markdown: {message}"),
-            )),
+                skill_dir,
+                message,
+            ));
+            continue;
+        }
+        match read_parsed_markdown(&skill_md, filter, context, ImportKind::Skill, "skill") {
+            Ok(_) => match convert_skill_package(context, skill_dir, staging_root) {
+                Ok(candidate) => result.add_candidate(candidate),
+                Err(err) => result.add_issue(err.into_issue()),
+            },
+            Err(issue) => result.add_issue(issue),
         }
     }
 }
 
-fn scan_prompts(context: &ConversionContext, result: &mut ContinueScanResult) {
+fn scan_prompts(
+    context: &ConversionContext,
+    filter: &ImportPrivacyFilter,
+    result: &mut ContinueScanResult,
+) {
     let prompts_root = context.source_root.join("prompts");
     match super::scan_root_allowed(context, &prompts_root) {
         Ok(true) => {}
@@ -139,7 +187,7 @@ fn scan_prompts(context: &ConversionContext, result: &mut ContinueScanResult) {
         }
     }
     for prompt_path in collect_markdown_files(&prompts_root) {
-        match read_parsed_markdown(&prompt_path) {
+        match read_parsed_markdown(&prompt_path, filter, context, ImportKind::Command, "prompt") {
             Ok((content, parsed)) => {
                 if !yaml_bool_true(&parsed.frontmatter, "invokable") {
                     result.add_issue(unsupported_issue(
@@ -163,17 +211,16 @@ fn scan_prompts(context: &ConversionContext, result: &mut ContinueScanResult) {
                     Err(err) => result.add_issue(err.into_issue()),
                 }
             }
-            Err(message) => result.add_issue(error_issue(
-                context,
-                ImportKind::Command,
-                &prompt_path,
-                format!("invalid Continue prompt markdown: {message}"),
-            )),
+            Err(issue) => result.add_issue(issue),
         }
     }
 }
 
-fn scan_checks(context: &ConversionContext, result: &mut ContinueScanResult) {
+fn scan_checks(
+    context: &ConversionContext,
+    filter: &ImportPrivacyFilter,
+    result: &mut ContinueScanResult,
+) {
     let checks_root = context.source_root.join("checks");
     match super::scan_root_allowed(context, &checks_root) {
         Ok(true) => {}
@@ -189,7 +236,7 @@ fn scan_checks(context: &ConversionContext, result: &mut ContinueScanResult) {
         }
     }
     for check_path in collect_markdown_files(&checks_root) {
-        match read_parsed_markdown(&check_path) {
+        match read_parsed_markdown(&check_path, filter, context, ImportKind::Subagent, "check") {
             Ok((_, parsed)) => {
                 let fallback_name = relative_stem_name(&check_path, &checks_root);
                 let name = yaml_string(&parsed.frontmatter, "name");
@@ -223,12 +270,7 @@ fn scan_checks(context: &ConversionContext, result: &mut ContinueScanResult) {
                     Err(err) => result.add_issue(err.into_issue()),
                 }
             }
-            Err(message) => result.add_issue(error_issue(
-                context,
-                ImportKind::Subagent,
-                &check_path,
-                format!("invalid Continue check markdown: {message}"),
-            )),
+            Err(issue) => result.add_issue(issue),
         }
     }
 }
@@ -285,10 +327,30 @@ fn report_workspace_rule_files(
     }
 }
 
-fn read_parsed_markdown(path: &Path) -> Result<(String, ParsedMarkdown), String> {
-    let content =
-        read_markdown_file_limited(path).map_err(|err| format!("failed to read file: {err}"))?;
-    let parsed = parse_markdown_with_errors(&content)?;
+fn read_parsed_markdown(
+    path: &Path,
+    filter: &ImportPrivacyFilter,
+    context: &ConversionContext,
+    kind: ImportKind,
+    label: &str,
+) -> Result<(String, ParsedMarkdown), ImportIssue> {
+    super::check_privacy(filter, context, kind, path)?;
+    let content = read_markdown_file_limited(path).map_err(|err| {
+        error_issue(
+            context,
+            kind,
+            path,
+            format!("invalid Continue {label} markdown: failed to read file: {err}"),
+        )
+    })?;
+    let parsed = parse_markdown_with_errors(&content).map_err(|message| {
+        error_issue(
+            context,
+            kind,
+            path,
+            format!("invalid Continue {label} markdown: {message}"),
+        )
+    })?;
     Ok((content, parsed))
 }
 

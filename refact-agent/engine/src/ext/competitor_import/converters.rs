@@ -17,7 +17,7 @@ use super::markdown::{
 use super::tools::{map_allowed_tools, resolve_subagent_tools, ToolMappingResult};
 use super::types::{
     ConversionContext, ConversionError, ImportArtifact, ImportCandidate, ImportKind,
-    NormalizedSubagent,
+    ImportPrivacyFilter, NormalizedSubagent,
 };
 
 pub(crate) const MAX_MARKDOWN_FILE_BYTES: u64 = 1024 * 1024;
@@ -353,6 +353,36 @@ fn render_subagent_yaml(
         }
     }
     Ok(yaml)
+}
+
+pub(crate) fn validate_skill_package_privacy(
+    skill_dir: &Path,
+    filter: &ImportPrivacyFilter,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(skill_dir).map_err(|err| err.to_string())?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() || !file_type.is_dir() {
+        return Err(format!(
+            "skill package is not a regular directory: {}",
+            skill_dir.display()
+        ));
+    }
+    for entry in walkdir::WalkDir::new(skill_dir)
+        .follow_links(false)
+        .sort_by_file_name()
+    {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        if path == skill_dir || !entry.file_type().is_file() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(path).map_err(|err| err.to_string())?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            continue;
+        }
+        filter.check_path(path)?;
+    }
+    Ok(())
 }
 
 fn validate_skill_package_limits(skill_dir: &Path) -> IoResult<()> {

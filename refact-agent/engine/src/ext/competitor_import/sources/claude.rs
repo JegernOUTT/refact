@@ -6,30 +6,50 @@ use serde_yaml::{Mapping, Value as YamlValue};
 
 use super::super::converters::{
     convert_command_markdown, convert_skill_package, convert_subagent, read_markdown_file_limited,
+    validate_skill_package_privacy,
 };
 use super::super::markdown::{
     first_useful_line_or_heading, sanitize_subagent_id, yaml_string, yaml_string_any,
     yaml_string_list_any,
 };
 use super::super::types::{
-    Competitor, ConversionContext, ImportCandidate, ImportIssue, ImportKind, ImportScope,
-    ImportStatus, NormalizedSubagent, ToolPolicy,
+    Competitor, ConversionContext, ImportCandidate, ImportIssue, ImportKind, ImportPrivacyFilter,
+    ImportScope, ImportStatus, NormalizedSubagent, ToolPolicy,
 };
 
 pub fn collect_global_candidates(
     home_dir: &Path,
     refact_config_dir: &Path,
 ) -> (Vec<ImportCandidate>, Vec<ImportIssue>) {
+    collect_global_candidates_with_filter(
+        home_dir,
+        refact_config_dir,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn collect_global_candidates_with_filter(
+    home_dir: &Path,
+    refact_config_dir: &Path,
+    filter: &ImportPrivacyFilter,
+) -> (Vec<ImportCandidate>, Vec<ImportIssue>) {
     let source_root = home_dir.join(".claude");
     let staging_root = refact_config_dir
         .join("imports")
         .join("staging")
         .join("claude");
-    collect_candidates(&source_root, ImportScope::Global, &staging_root)
+    collect_candidates_with_filter(&source_root, ImportScope::Global, &staging_root, filter)
 }
 
 pub fn collect_project_candidates(
     workspace_root: &Path,
+) -> (Vec<ImportCandidate>, Vec<ImportIssue>) {
+    collect_project_candidates_with_filter(workspace_root, &ImportPrivacyFilter::allow_all())
+}
+
+pub(crate) fn collect_project_candidates_with_filter(
+    workspace_root: &Path,
+    filter: &ImportPrivacyFilter,
 ) -> (Vec<ImportCandidate>, Vec<ImportIssue>) {
     let source_root = workspace_root.join(".claude");
     let staging_root = workspace_root
@@ -37,12 +57,13 @@ pub fn collect_project_candidates(
         .join("imports")
         .join("staging")
         .join("claude");
-    collect_candidates(
+    collect_candidates_with_filter(
         &source_root,
         ImportScope::Project {
             root: workspace_root.to_path_buf(),
         },
         &staging_root,
+        filter,
     )
 }
 
@@ -50,6 +71,20 @@ pub fn collect_candidates(
     source_root: &Path,
     scope: ImportScope,
     staging_root: &Path,
+) -> (Vec<ImportCandidate>, Vec<ImportIssue>) {
+    collect_candidates_with_filter(
+        source_root,
+        scope,
+        staging_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn collect_candidates_with_filter(
+    source_root: &Path,
+    scope: ImportScope,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
 ) -> (Vec<ImportCandidate>, Vec<ImportIssue>) {
     let mut candidates = Vec::new();
     let mut issues = Vec::new();
@@ -76,18 +111,21 @@ pub fn collect_candidates(
         &context,
         &source_root.join("skills"),
         staging_root,
+        filter,
         &mut candidates,
         &mut issues,
     );
     collect_command_candidates(
         &context,
         &source_root.join("commands"),
+        filter,
         &mut candidates,
         &mut issues,
     );
     collect_agent_candidates(
         &context,
         &source_root.join("agents"),
+        filter,
         &mut candidates,
         &mut issues,
     );
@@ -99,6 +137,7 @@ fn collect_skill_candidates(
     context: &ConversionContext,
     skills_root: &Path,
     staging_root: &Path,
+    filter: &ImportPrivacyFilter,
     candidates: &mut Vec<ImportCandidate>,
     issues: &mut Vec<ImportIssue>,
 ) {
@@ -138,7 +177,16 @@ fn collect_skill_candidates(
         if !is_regular_file(&skill_md) {
             continue;
         }
-        if let Err(issue) = read_valid_markdown(context, ImportKind::Skill, &skill_md) {
+        if let Err(message) = validate_skill_package_privacy(&skill_dir, filter) {
+            issues.push(super::privacy_skip_issue(
+                context,
+                ImportKind::Skill,
+                &skill_dir,
+                message,
+            ));
+            continue;
+        }
+        if let Err(issue) = read_valid_markdown(context, ImportKind::Skill, &skill_md, filter) {
             issues.push(issue);
             continue;
         }
@@ -152,11 +200,13 @@ fn collect_skill_candidates(
 fn collect_command_candidates(
     context: &ConversionContext,
     commands_root: &Path,
+    filter: &ImportPrivacyFilter,
     candidates: &mut Vec<ImportCandidate>,
     issues: &mut Vec<ImportIssue>,
 ) {
     for path in markdown_files(context, ImportKind::Command, commands_root, issues) {
-        let (_, _, content) = match read_valid_markdown(context, ImportKind::Command, &path) {
+        let (_, _, content) = match read_valid_markdown(context, ImportKind::Command, &path, filter)
+        {
             Ok(parsed) => parsed,
             Err(issue) => {
                 issues.push(issue);
@@ -174,18 +224,19 @@ fn collect_command_candidates(
 fn collect_agent_candidates(
     context: &ConversionContext,
     agents_root: &Path,
+    filter: &ImportPrivacyFilter,
     candidates: &mut Vec<ImportCandidate>,
     issues: &mut Vec<ImportIssue>,
 ) {
     for path in markdown_files(context, ImportKind::Subagent, agents_root, issues) {
-        let (frontmatter, body, _) = match read_valid_markdown(context, ImportKind::Subagent, &path)
-        {
-            Ok(parsed) => parsed,
-            Err(issue) => {
-                issues.push(issue);
-                continue;
-            }
-        };
+        let (frontmatter, body, _) =
+            match read_valid_markdown(context, ImportKind::Subagent, &path, filter) {
+                Ok(parsed) => parsed,
+                Err(issue) => {
+                    issues.push(issue);
+                    continue;
+                }
+            };
         let input = normalized_agent(agents_root, &path, &frontmatter, &body);
         match convert_subagent(context, &path, &input) {
             Ok(candidate) => candidates.push(candidate),
@@ -318,7 +369,9 @@ fn read_valid_markdown(
     context: &ConversionContext,
     kind: ImportKind,
     path: &Path,
+    filter: &ImportPrivacyFilter,
 ) -> Result<(YamlValue, String, String), ImportIssue> {
+    super::check_privacy(filter, context, kind, path)?;
     let content = read_markdown_file_limited(path).map_err(|err| {
         issue(
             context,

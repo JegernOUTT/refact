@@ -2,25 +2,44 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use super::opencode::{scan_compatible_roots, CompatibleScanRoots, OpenCodeScan};
+use super::opencode::{scan_compatible_roots_with_filter, CompatibleScanRoots, OpenCodeScan};
 use super::super::types::{
-    Competitor, ConversionContext, ImportIssue, ImportKind, ImportScope, ImportStatus,
-    ImportSummary,
+    Competitor, ConversionContext, ImportIssue, ImportKind, ImportPrivacyFilter, ImportScope,
+    ImportStatus, ImportSummary,
 };
 use super::super::writer::write_candidates;
 
 pub type KiloScan = OpenCodeScan;
 
 pub fn scan_project_root(workspace_root: &Path) -> KiloScan {
+    scan_project_root_with_filter(workspace_root, &ImportPrivacyFilter::allow_all())
+}
+
+pub(crate) fn scan_project_root_with_filter(
+    workspace_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> KiloScan {
     let staging_root = workspace_root
         .join(".refact")
         .join("imports")
         .join("staging")
         .join("kilo");
-    scan_project_root_with_staging(workspace_root, &staging_root)
+    scan_project_root_with_staging_and_filter(workspace_root, &staging_root, filter)
 }
 
 pub fn scan_project_root_with_staging(workspace_root: &Path, staging_root: &Path) -> KiloScan {
+    scan_project_root_with_staging_and_filter(
+        workspace_root,
+        staging_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn scan_project_root_with_staging_and_filter(
+    workspace_root: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> KiloScan {
     let context = ConversionContext {
         competitor: Competitor::KiloCode,
         scope: ImportScope::Project {
@@ -28,7 +47,7 @@ pub fn scan_project_root_with_staging(workspace_root: &Path, staging_root: &Path
         },
         source_root: workspace_root.to_path_buf(),
     };
-    let mut scan = scan_compatible_roots(
+    let mut scan = scan_compatible_roots_with_filter(
         &context,
         CompatibleScanRoots {
             display_name: "Kilo Code",
@@ -50,6 +69,7 @@ pub fn scan_project_root_with_staging(workspace_root: &Path, staging_root: &Path
             ],
         },
         staging_root,
+        filter,
     );
     report_project_rule_files(&mut scan, &context, workspace_root);
     scan
@@ -60,11 +80,25 @@ pub fn scan_global_root(
     config_root: &Path,
     refact_config_root: &Path,
 ) -> KiloScan {
+    scan_global_root_with_filter(
+        home_dir,
+        config_root,
+        refact_config_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn scan_global_root_with_filter(
+    home_dir: &Path,
+    config_root: &Path,
+    refact_config_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> KiloScan {
     let staging_root = refact_config_root
         .join("imports")
         .join("staging")
         .join("kilo");
-    scan_global_root_with_staging(home_dir, config_root, &staging_root)
+    scan_global_root_with_staging_and_filter(home_dir, config_root, &staging_root, filter)
 }
 
 pub fn scan_global_root_with_staging(
@@ -72,18 +106,32 @@ pub fn scan_global_root_with_staging(
     config_root: &Path,
     staging_root: &Path,
 ) -> KiloScan {
+    scan_global_root_with_staging_and_filter(
+        home_dir,
+        config_root,
+        staging_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn scan_global_root_with_staging_and_filter(
+    home_dir: &Path,
+    config_root: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> KiloScan {
     let mut scan = KiloScan::default();
     append_scan(
         &mut scan,
-        scan_global_config_root(&config_root.join("kilo"), staging_root),
+        scan_global_config_root(&config_root.join("kilo"), staging_root, filter),
     );
     append_scan(
         &mut scan,
-        scan_global_home_kilo_root(&home_dir.join(".kilo"), staging_root),
+        scan_global_home_kilo_root(&home_dir.join(".kilo"), staging_root, filter),
     );
     append_scan(
         &mut scan,
-        scan_global_legacy_root(&home_dir.join(".kilocode"), staging_root),
+        scan_global_legacy_root(&home_dir.join(".kilocode"), staging_root, filter),
     );
     scan
 }
@@ -108,13 +156,17 @@ pub async fn import_global_root(
     summary
 }
 
-fn scan_global_config_root(config_kilo_root: &Path, staging_root: &Path) -> KiloScan {
+fn scan_global_config_root(
+    config_kilo_root: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> KiloScan {
     let context = ConversionContext {
         competitor: Competitor::KiloCode,
         scope: ImportScope::Global,
         source_root: config_kilo_root.to_path_buf(),
     };
-    let mut scan = scan_compatible_roots(
+    let mut scan = scan_compatible_roots_with_filter(
         &context,
         CompatibleScanRoots {
             display_name: "Kilo Code",
@@ -127,18 +179,23 @@ fn scan_global_config_root(config_kilo_root: &Path, staging_root: &Path) -> Kilo
             ],
         },
         staging_root,
+        filter,
     );
     report_global_rule_files(&mut scan, &context, config_kilo_root);
     scan
 }
 
-fn scan_global_home_kilo_root(home_kilo_root: &Path, staging_root: &Path) -> KiloScan {
+fn scan_global_home_kilo_root(
+    home_kilo_root: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> KiloScan {
     let context = ConversionContext {
         competitor: Competitor::KiloCode,
         scope: ImportScope::Global,
         source_root: home_kilo_root.to_path_buf(),
     };
-    let mut scan = scan_compatible_roots(
+    let mut scan = scan_compatible_roots_with_filter(
         &context,
         CompatibleScanRoots {
             display_name: "Kilo Code",
@@ -148,18 +205,23 @@ fn scan_global_home_kilo_root(home_kilo_root: &Path, staging_root: &Path) -> Kil
             config_files: Vec::new(),
         },
         staging_root,
+        filter,
     );
     report_global_rule_files(&mut scan, &context, home_kilo_root);
     scan
 }
 
-fn scan_global_legacy_root(legacy_root: &Path, staging_root: &Path) -> KiloScan {
+fn scan_global_legacy_root(
+    legacy_root: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> KiloScan {
     let context = ConversionContext {
         competitor: Competitor::KiloCode,
         scope: ImportScope::Global,
         source_root: legacy_root.to_path_buf(),
     };
-    let mut scan = scan_compatible_roots(
+    let mut scan = scan_compatible_roots_with_filter(
         &context,
         CompatibleScanRoots {
             display_name: "Kilo Code",
@@ -169,6 +231,7 @@ fn scan_global_legacy_root(legacy_root: &Path, staging_root: &Path) -> KiloScan 
             config_files: Vec::new(),
         },
         staging_root,
+        filter,
     );
     report_global_rule_files(&mut scan, &context, legacy_root);
     scan

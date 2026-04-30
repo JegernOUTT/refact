@@ -7,15 +7,15 @@ use serde_yaml::Value as YamlValue;
 
 use super::super::converters::{
     convert_command_markdown, convert_skill_package, convert_subagent, read_config_file_limited,
-    read_markdown_file_limited,
+    read_markdown_file_limited, validate_skill_package_privacy,
 };
 use super::super::markdown::{
     parse_markdown_frontmatter, render_markdown_with_frontmatter, set_yaml_string,
     set_yaml_string_list, yaml_string,
 };
 use super::super::types::{
-    Competitor, ConversionContext, ImportCandidate, ImportIssue, ImportKind, ImportScope,
-    ImportStatus, ImportSummary, NormalizedSubagent, ToolPolicy,
+    Competitor, ConversionContext, ImportCandidate, ImportIssue, ImportKind, ImportPrivacyFilter,
+    ImportScope, ImportStatus, ImportSummary, NormalizedSubagent, ToolPolicy,
 };
 use super::super::writer::write_candidates;
 
@@ -73,6 +73,20 @@ pub(super) fn scan_compatible_roots(
     roots: CompatibleScanRoots,
     staging_root: &Path,
 ) -> OpenCodeScan {
+    scan_compatible_roots_with_filter(
+        context,
+        roots,
+        staging_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(super) fn scan_compatible_roots_with_filter(
+    context: &ConversionContext,
+    roots: CompatibleScanRoots,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> OpenCodeScan {
     let mut scan = OpenCodeScan::default();
     for skills_root in roots.skill_roots {
         scan_skills(
@@ -80,29 +94,61 @@ pub(super) fn scan_compatible_roots(
             context,
             &skills_root,
             staging_root,
+            filter,
             roots.display_name,
         );
     }
     for command_root in roots.command_roots {
-        scan_markdown_commands(&mut scan, context, &command_root, roots.display_name);
+        scan_markdown_commands(
+            &mut scan,
+            context,
+            &command_root,
+            filter,
+            roots.display_name,
+        );
     }
     for agent_root in roots.agent_roots {
-        scan_markdown_agents(&mut scan, context, &agent_root, roots.display_name);
+        scan_markdown_agents(&mut scan, context, &agent_root, filter, roots.display_name);
     }
-    scan_config_files(&mut scan, context, &roots.config_files, roots.display_name);
+    scan_config_files(
+        &mut scan,
+        context,
+        &roots.config_files,
+        filter,
+        roots.display_name,
+    );
     scan
 }
 
 pub fn scan_project_root(workspace_root: &Path) -> OpenCodeScan {
+    scan_project_root_with_filter(workspace_root, &ImportPrivacyFilter::allow_all())
+}
+
+pub(crate) fn scan_project_root_with_filter(
+    workspace_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> OpenCodeScan {
     let staging_root = workspace_root
         .join(".refact")
         .join("imports")
         .join("staging")
         .join("opencode");
-    scan_project_root_with_staging(workspace_root, &staging_root)
+    scan_project_root_with_staging_and_filter(workspace_root, &staging_root, filter)
 }
 
 pub fn scan_project_root_with_staging(workspace_root: &Path, staging_root: &Path) -> OpenCodeScan {
+    scan_project_root_with_staging_and_filter(
+        workspace_root,
+        staging_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn scan_project_root_with_staging_and_filter(
+    workspace_root: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> OpenCodeScan {
     let context = ConversionContext {
         competitor: Competitor::OpenCode,
         scope: ImportScope::Project {
@@ -116,10 +162,16 @@ pub fn scan_project_root_with_staging(workspace_root: &Path, staging_root: &Path
         workspace_root.join("opencode.jsonc"),
     ];
     match super::project_scan_root_allowed(&opencode_root, workspace_root) {
-        Ok(true) => scan_root(&context, &opencode_root, &config_files, staging_root),
+        Ok(true) => scan_root(
+            &context,
+            &opencode_root,
+            &config_files,
+            staging_root,
+            filter,
+        ),
         Ok(false) => {
             let mut scan = OpenCodeScan::default();
-            scan_config_files(&mut scan, &context, &config_files, "OpenCode");
+            scan_config_files(&mut scan, &context, &config_files, filter, "OpenCode");
             scan
         }
         Err(message) => {
@@ -130,21 +182,45 @@ pub fn scan_project_root_with_staging(workspace_root: &Path, staging_root: &Path
                 &opencode_root,
                 message,
             ));
-            scan_config_files(&mut scan, &context, &config_files, "OpenCode");
+            scan_config_files(&mut scan, &context, &config_files, filter, "OpenCode");
             scan
         }
     }
 }
 
 pub fn scan_global_root(config_root: &Path, refact_config_root: &Path) -> OpenCodeScan {
+    scan_global_root_with_filter(
+        config_root,
+        refact_config_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn scan_global_root_with_filter(
+    config_root: &Path,
+    refact_config_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> OpenCodeScan {
     let staging_root = refact_config_root
         .join("imports")
         .join("staging")
         .join("opencode");
-    scan_global_root_with_staging(config_root, &staging_root)
+    scan_global_root_with_staging_and_filter(config_root, &staging_root, filter)
 }
 
 pub fn scan_global_root_with_staging(config_root: &Path, staging_root: &Path) -> OpenCodeScan {
+    scan_global_root_with_staging_and_filter(
+        config_root,
+        staging_root,
+        &ImportPrivacyFilter::allow_all(),
+    )
+}
+
+pub(crate) fn scan_global_root_with_staging_and_filter(
+    config_root: &Path,
+    staging_root: &Path,
+    filter: &ImportPrivacyFilter,
+) -> OpenCodeScan {
     let context = ConversionContext {
         competitor: Competitor::OpenCode,
         scope: ImportScope::Global,
@@ -155,7 +231,7 @@ pub fn scan_global_root_with_staging(config_root: &Path, staging_root: &Path) ->
         config_root.join("opencode.jsonc"),
         config_root.join("config.json"),
     ];
-    scan_root(&context, config_root, &config_files, staging_root)
+    scan_root(&context, config_root, &config_files, staging_root, filter)
 }
 
 pub async fn import_project_root(workspace_root: &Path) -> ImportSummary {
@@ -179,8 +255,9 @@ fn scan_root(
     opencode_root: &Path,
     config_files: &[PathBuf],
     staging_root: &Path,
+    filter: &ImportPrivacyFilter,
 ) -> OpenCodeScan {
-    scan_compatible_roots(
+    scan_compatible_roots_with_filter(
         context,
         CompatibleScanRoots {
             display_name: "OpenCode",
@@ -193,6 +270,7 @@ fn scan_root(
             config_files: config_files.to_vec(),
         },
         staging_root,
+        filter,
     )
 }
 
@@ -201,6 +279,7 @@ fn scan_skills(
     context: &ConversionContext,
     skills_root: &Path,
     staging_root: &Path,
+    filter: &ImportPrivacyFilter,
     display_name: &str,
 ) {
     match super::scan_root_allowed(context, skills_root) {
@@ -229,9 +308,19 @@ fn scan_skills(
         }
     };
     for skill_dir in skill_dirs {
-        if is_regular_file(&skill_dir.join("SKILL.md")) {
-            scan.push_candidate_result(convert_skill_package(context, &skill_dir, staging_root));
+        if !is_regular_file(&skill_dir.join("SKILL.md")) {
+            continue;
         }
+        if let Err(message) = validate_skill_package_privacy(&skill_dir, filter) {
+            scan.push_issue(super::privacy_skip_issue(
+                context,
+                ImportKind::Skill,
+                &skill_dir,
+                message,
+            ));
+            continue;
+        }
+        scan.push_candidate_result(convert_skill_package(context, &skill_dir, staging_root));
     }
 }
 
@@ -239,6 +328,7 @@ fn scan_markdown_commands(
     scan: &mut OpenCodeScan,
     context: &ConversionContext,
     command_root: &Path,
+    filter: &ImportPrivacyFilter,
     display_name: &str,
 ) {
     match super::scan_root_allowed(context, command_root) {
@@ -267,6 +357,12 @@ fn scan_markdown_commands(
         }
     };
     for command_path in command_paths {
+        if let Err(issue) =
+            super::check_privacy(filter, context, ImportKind::Command, &command_path)
+        {
+            scan.push_issue(issue);
+            continue;
+        }
         match read_markdown_file_limited(&command_path) {
             Ok(content) => {
                 let name = relative_markdown_name(command_root, &command_path);
@@ -291,6 +387,7 @@ fn scan_markdown_agents(
     scan: &mut OpenCodeScan,
     context: &ConversionContext,
     agent_root: &Path,
+    filter: &ImportPrivacyFilter,
     display_name: &str,
 ) {
     match super::scan_root_allowed(context, agent_root) {
@@ -319,7 +416,7 @@ fn scan_markdown_agents(
         }
     };
     for agent_path in agent_paths {
-        match normalized_markdown_agent(context, agent_root, &agent_path, display_name) {
+        match normalized_markdown_agent(context, agent_root, &agent_path, filter, display_name) {
             Ok(agent) => scan.push_candidate_result(convert_subagent(context, &agent_path, &agent)),
             Err(issue) => scan.push_issue(issue),
         }
@@ -330,10 +427,16 @@ fn scan_config_files(
     scan: &mut OpenCodeScan,
     context: &ConversionContext,
     config_files: &[PathBuf],
+    filter: &ImportPrivacyFilter,
     display_name: &str,
 ) {
     for config_path in config_files {
         if !is_regular_file(config_path) {
+            continue;
+        }
+        if let Err(issue) = super::check_privacy(filter, context, ImportKind::Command, config_path)
+        {
+            scan.push_issue(issue);
             continue;
         }
         match read_json_or_jsonc(config_path) {
@@ -440,8 +543,10 @@ fn normalized_markdown_agent(
     context: &ConversionContext,
     agent_root: &Path,
     agent_path: &Path,
+    filter: &ImportPrivacyFilter,
     display_name: &str,
 ) -> Result<NormalizedSubagent, ImportIssue> {
+    super::check_privacy(filter, context, ImportKind::Subagent, agent_path)?;
     let content = read_markdown_file_limited(agent_path).map_err(|err| {
         error_issue(
             context,

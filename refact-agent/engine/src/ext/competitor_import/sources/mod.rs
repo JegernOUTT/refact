@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::files_correction::canonical_path;
 
 use super::types::{
-    Competitor, ConversionContext, ImportIssue, ImportKind, ImportScope, ImportSourceRoot,
-    ImportStatus,
+    Competitor, ConversionContext, ImportIssue, ImportKind, ImportPrivacyFilter, ImportScope,
+    ImportSourceRoot, ImportStatus,
 };
 
 pub mod claude;
@@ -166,6 +166,33 @@ pub(super) fn skipped_root_issue(
         path: Some(path.to_path_buf()),
         status: ImportStatus::Unsupported,
         message: message.into(),
+    }
+}
+
+pub(super) fn check_privacy(
+    filter: &ImportPrivacyFilter,
+    context: &ConversionContext,
+    kind: ImportKind,
+    path: &Path,
+) -> Result<(), ImportIssue> {
+    filter
+        .check_path(path)
+        .map_err(|message| privacy_skip_issue(context, kind, path, message))
+}
+
+pub(super) fn privacy_skip_issue(
+    context: &ConversionContext,
+    kind: ImportKind,
+    path: &Path,
+    message: impl Into<String>,
+) -> ImportIssue {
+    ImportIssue {
+        competitor: Some(context.competitor),
+        kind: Some(kind),
+        scope: Some(context.scope.clone()),
+        path: Some(path.to_path_buf()),
+        status: ImportStatus::Unsupported,
+        message: format!("privacy blocked import: {}", message.into()),
     }
 }
 

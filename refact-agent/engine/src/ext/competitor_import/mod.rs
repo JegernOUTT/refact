@@ -16,17 +16,23 @@ pub mod types;
 pub mod writer;
 
 use types::{
-    ImportCandidate, ImportIssue, ImportReport, ImportReportScopeKind, ImportScope, ImportStatus,
-    ImportSummary,
+    ImportCandidate, ImportIssue, ImportPrivacyFilter, ImportReport, ImportReportScopeKind,
+    ImportScope, ImportStatus, ImportSummary,
 };
 
 pub async fn run_global_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSummary {
-    let refact_config_dir = {
+    let (refact_config_dir, privacy_settings) = {
         let gcx_locked = gcx.read().await;
-        gcx_locked.config_dir.clone()
+        (
+            gcx_locked.config_dir.clone(),
+            gcx_locked.privacy_settings.clone(),
+        )
     };
     let home_dir = home::home_dir();
-    let summary = run_global_import_with_paths(&refact_config_dir, home_dir.as_deref()).await;
+    let filter = ImportPrivacyFilter::from_settings(privacy_settings);
+    let summary =
+        run_global_import_with_paths_and_filter(&refact_config_dir, home_dir.as_deref(), &filter)
+            .await;
     apply_cache_invalidation(gcx.clone(), &summary).await;
     log_import_summary("global", &summary);
     emit_buddy_import_events(gcx, &summary).await;
@@ -36,6 +42,19 @@ pub async fn run_global_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSummar
 pub(crate) async fn run_global_import_with_paths(
     refact_config_dir: &Path,
     home_dir: Option<&Path>,
+) -> ImportSummary {
+    run_global_import_with_paths_and_filter(
+        refact_config_dir,
+        home_dir,
+        &ImportPrivacyFilter::allow_all(),
+    )
+    .await
+}
+
+pub(crate) async fn run_global_import_with_paths_and_filter(
+    refact_config_dir: &Path,
+    home_dir: Option<&Path>,
+    filter: &ImportPrivacyFilter,
 ) -> ImportSummary {
     let mut summary = ImportSummary::from_scopes(vec![ImportScope::Global]);
     let Some(home_dir) = home_dir else {
@@ -55,22 +74,34 @@ pub(crate) async fn run_global_import_with_paths(
     let mut candidates = Vec::new();
 
     let (claude_candidates, claude_issues) =
-        sources::claude::collect_global_candidates(home_dir, refact_config_dir);
+        sources::claude::collect_global_candidates_with_filter(home_dir, refact_config_dir, filter);
     candidates.extend(claude_candidates);
     add_issues(&mut summary, claude_issues);
 
-    let opencode_scan =
-        sources::opencode::scan_global_root(&config_dir.join("opencode"), refact_config_dir);
+    let opencode_scan = sources::opencode::scan_global_root_with_filter(
+        &config_dir.join("opencode"),
+        refact_config_dir,
+        filter,
+    );
     collect_opencode_scan(&mut summary, &mut candidates, opencode_scan);
 
-    let kilo_scan = sources::kilo::scan_global_root(home_dir, &config_dir, refact_config_dir);
+    let kilo_scan = sources::kilo::scan_global_root_with_filter(
+        home_dir,
+        &config_dir,
+        refact_config_dir,
+        filter,
+    );
     collect_opencode_scan(&mut summary, &mut candidates, kilo_scan);
 
     let continue_staging_root = refact_config_dir
         .join("imports")
         .join("staging")
         .join("continue");
-    let continue_scan = sources::continue_dev::scan_global_root(home_dir, &continue_staging_root);
+    let continue_scan = sources::continue_dev::scan_global_root_with_filter(
+        home_dir,
+        &continue_staging_root,
+        filter,
+    );
     collect_continue_scan(&mut summary, &mut candidates, continue_scan);
 
     write_candidates_and_merge(refact_config_dir, &mut summary, &candidates).await;
@@ -79,9 +110,12 @@ pub(crate) async fn run_global_import_with_paths(
 }
 
 pub async fn run_project_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSummary {
-    let workspace_folders = {
+    let (workspace_folders, privacy_settings) = {
         let gcx_locked = gcx.read().await;
-        gcx_locked.documents_state.workspace_folders.clone()
+        (
+            gcx_locked.documents_state.workspace_folders.clone(),
+            gcx_locked.privacy_settings.clone(),
+        )
     };
     let workspace_roots_result = workspace_folders
         .lock()
@@ -104,7 +138,8 @@ pub async fn run_project_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSumma
             return summary;
         }
     };
-    let summary = run_project_import_with_paths(&workspace_roots).await;
+    let filter = ImportPrivacyFilter::from_settings(privacy_settings);
+    let summary = run_project_import_with_paths_and_filter(&workspace_roots, &filter).await;
     apply_cache_invalidation(gcx.clone(), &summary).await;
     log_import_summary("project", &summary);
     emit_buddy_import_events(gcx, &summary).await;
@@ -112,6 +147,14 @@ pub async fn run_project_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSumma
 }
 
 pub(crate) async fn run_project_import_with_paths(workspace_roots: &[PathBuf]) -> ImportSummary {
+    run_project_import_with_paths_and_filter(workspace_roots, &ImportPrivacyFilter::allow_all())
+        .await
+}
+
+pub(crate) async fn run_project_import_with_paths_and_filter(
+    workspace_roots: &[PathBuf],
+    filter: &ImportPrivacyFilter,
+) -> ImportSummary {
     let discovered_scopes = sources::discover_project_scopes(workspace_roots);
     let mut summary = ImportSummary::default();
 
@@ -124,14 +167,15 @@ pub(crate) async fn run_project_import_with_paths(workspace_roots: &[PathBuf]) -
         scope_summary.discovered_sources = sources::discover_project_sources(&root);
         let mut candidates = Vec::new();
 
-        let (claude_candidates, claude_issues) = sources::claude::collect_project_candidates(&root);
+        let (claude_candidates, claude_issues) =
+            sources::claude::collect_project_candidates_with_filter(&root, filter);
         candidates.extend(claude_candidates);
         add_issues(&mut scope_summary, claude_issues);
 
-        let opencode_scan = sources::opencode::scan_project_root(&root);
+        let opencode_scan = sources::opencode::scan_project_root_with_filter(&root, filter);
         collect_opencode_scan(&mut scope_summary, &mut candidates, opencode_scan);
 
-        let kilo_scan = sources::kilo::scan_project_root(&root);
+        let kilo_scan = sources::kilo::scan_project_root_with_filter(&root, filter);
         collect_opencode_scan(&mut scope_summary, &mut candidates, kilo_scan);
 
         let continue_staging_root = root
@@ -139,7 +183,11 @@ pub(crate) async fn run_project_import_with_paths(workspace_roots: &[PathBuf]) -
             .join("imports")
             .join("staging")
             .join("continue");
-        let continue_scan = sources::continue_dev::scan_project_root(&root, &continue_staging_root);
+        let continue_scan = sources::continue_dev::scan_project_root_with_filter(
+            &root,
+            &continue_staging_root,
+            filter,
+        );
         collect_continue_scan(&mut scope_summary, &mut candidates, continue_scan);
 
         let scope_root = root.join(".refact");
@@ -504,6 +552,7 @@ mod tests {
     use crate::ext::competitor_import::types::{
         Competitor, ImportCandidateSummary, ImportKind, ImportOutcome,
     };
+    use crate::privacy::{FilePrivacySettings, PrivacySettings};
     use crate::yaml_configs::customization_types::SubagentConfig;
 
     fn write(path: &Path, content: &str) {
@@ -531,6 +580,29 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn privacy_filter(blocked: &[PathBuf]) -> ImportPrivacyFilter {
+        ImportPrivacyFilter::from_settings(Arc::new(PrivacySettings {
+            privacy_rules: FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked: blocked
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+            },
+            loaded_ts: 0,
+        }))
+    }
+
+    async fn set_allow_all_privacy(gcx: Arc<ARwLock<GlobalContext>>) {
+        gcx.write().await.privacy_settings = Arc::new(PrivacySettings {
+            privacy_rules: FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked: Vec::new(),
+            },
+            loaded_ts: 0,
+        });
     }
 
     #[tokio::test]
@@ -641,6 +713,116 @@ mod tests {
         let report = manifest.last_report.unwrap();
         assert_eq!(report.reported_sources.len(), 5);
         assert_eq!(report.status_counts.get(&ImportStatus::Created), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn privacy_blocked_claude_command_is_skipped_without_blocking_public_command() {
+        let workspace = tempfile::tempdir().unwrap();
+        let private_path = workspace.path().join(".claude/commands/private.md");
+        let public_path = workspace.path().join(".claude/commands/public.md");
+        write(&private_path, "Private command body must not leak.");
+        write(&public_path, "Public command body.");
+        let filter = privacy_filter(&[private_path.clone()]);
+
+        let summary =
+            run_project_import_with_paths_and_filter(&[workspace.path().to_path_buf()], &filter)
+                .await;
+
+        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
+        assert_eq!(status_count(&summary, ImportStatus::Unsupported), 1);
+        assert!(!workspace
+            .path()
+            .join(".refact/commands/private.md")
+            .exists());
+        assert_eq!(
+            fs::read_to_string(workspace.path().join(".refact/commands/public.md")).unwrap(),
+            "Public command body."
+        );
+        assert!(summary.issues.iter().any(|issue| {
+            issue.status == ImportStatus::Unsupported
+                && issue.kind == Some(ImportKind::Command)
+                && issue.path.as_deref() == Some(private_path.as_path())
+        }));
+        let report = ImportReport::from_summary(&summary);
+        let report_json = serde_json::to_string(&report).unwrap();
+        let manifest_json = fs::read_to_string(manifest_path_for_scope_root(
+            &workspace.path().join(".refact"),
+        ))
+        .unwrap();
+        assert!(!report_json.contains("Private command body must not leak"));
+        assert!(!manifest_json.contains("Private command body must not leak"));
+        assert!(!manifest_json.contains(&private_path.to_string_lossy().to_string()));
+    }
+
+    #[tokio::test]
+    async fn privacy_blocked_continue_check_is_skipped_without_blocking_public_check() {
+        let workspace = tempfile::tempdir().unwrap();
+        let blocked_path = workspace.path().join(".continue/checks/security.md");
+        let public_path = workspace.path().join(".continue/checks/style.md");
+        write(
+            &blocked_path,
+            "---\nname: Security\ndescription: Security\n---\nBlocked check body.",
+        );
+        write(
+            &public_path,
+            "---\nname: Style\ndescription: Style\n---\nPublic check body.",
+        );
+        let filter = privacy_filter(&[blocked_path.clone()]);
+
+        let summary =
+            run_project_import_with_paths_and_filter(&[workspace.path().to_path_buf()], &filter)
+                .await;
+
+        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
+        assert_eq!(status_count(&summary, ImportStatus::Unsupported), 1);
+        assert!(!workspace
+            .path()
+            .join(".refact/subagents/security.yaml")
+            .exists());
+        assert!(workspace
+            .path()
+            .join(".refact/subagents/style.yaml")
+            .exists());
+        assert!(summary.issues.iter().any(|issue| {
+            issue.status == ImportStatus::Unsupported
+                && issue.kind == Some(ImportKind::Subagent)
+                && issue.path.as_deref() == Some(blocked_path.as_path())
+        }));
+    }
+
+    #[tokio::test]
+    async fn privacy_blocked_skill_support_file_skips_whole_package_without_staging() {
+        let workspace = tempfile::tempdir().unwrap();
+        let skill_dir = workspace.path().join(".claude/skills/private-skill");
+        let blocked_support = skill_dir.join("secret.txt");
+        write(
+            &skill_dir.join("SKILL.md"),
+            "---\nname: Private Skill\n---\nUse private skill.",
+        );
+        write(&blocked_support, "Blocked supporting file body.");
+        write(
+            &workspace.path().join(".claude/commands/public.md"),
+            "Public command body.",
+        );
+        let filter = privacy_filter(&[blocked_support]);
+
+        let summary =
+            run_project_import_with_paths_and_filter(&[workspace.path().to_path_buf()], &filter)
+                .await;
+
+        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
+        assert_eq!(status_count(&summary, ImportStatus::Unsupported), 1);
+        assert!(!workspace
+            .path()
+            .join(".refact/skills/private-skill")
+            .exists());
+        assert!(workspace.path().join(".refact/commands/public.md").exists());
+        assert!(!workspace
+            .path()
+            .join(".refact/imports/staging/claude")
+            .exists());
+        let report_json = serde_json::to_string(&ImportReport::from_summary(&summary)).unwrap();
+        assert!(!report_json.contains("Blocked supporting file body"));
     }
 
     #[tokio::test]
@@ -924,6 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn import_changes_drive_cache_invalidation_flags() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_allow_all_privacy(gcx.clone()).await;
         let workspace = tempfile::tempdir().unwrap();
         write(
             &workspace

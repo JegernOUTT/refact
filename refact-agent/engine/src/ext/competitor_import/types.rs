@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -54,6 +55,34 @@ pub struct ConversionContext {
     pub competitor: Competitor,
     pub scope: ImportScope,
     pub source_root: PathBuf,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ImportPrivacyFilter {
+    settings: Option<Arc<crate::privacy::PrivacySettings>>,
+}
+
+impl ImportPrivacyFilter {
+    pub fn allow_all() -> Self {
+        Self { settings: None }
+    }
+
+    pub fn from_settings(settings: Arc<crate::privacy::PrivacySettings>) -> Self {
+        Self {
+            settings: Some(settings),
+        }
+    }
+
+    pub fn check_path(&self, path: &Path) -> Result<(), String> {
+        let Some(settings) = &self.settings else {
+            return Ok(());
+        };
+        crate::privacy::check_file_privacy(
+            settings.clone(),
+            path,
+            &crate::privacy::FilePrivacyLevel::AllowToSendAnywhere,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
