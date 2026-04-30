@@ -11,8 +11,8 @@ use super::git;
 use super::types::{
     CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
     MergeWorktreeResponse, OpenWorktreeResponse, WorktreeCleanupResult, WorktreeConflictState,
-    WorktreeDiffResponse, WorktreeListResponse, WorktreeMergeStrategy, WorktreeMeta,
-    WorktreeRecordView, WorktreeReference, WorktreeRegistry, WorktreeRegistryRecord,
+    WorktreeDiffResponse, WorktreeListResponse, WorktreeMeta, WorktreeRecordView,
+    WorktreeReference, WorktreeRegistry, WorktreeRegistryRecord,
 };
 
 const DEFAULT_MAX_PATCH_BYTES: usize = 200_000;
