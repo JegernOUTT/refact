@@ -1,34 +1,26 @@
 ---
-title: GitLab Tool
-description: Configure and use GitLab integration
+title: GitLab Integration
+description: Use the GitLab CLI from Refact Agent.
 ---
 
-The GitLab Tool integration allows interaction with GitLab repositories using the GitLab CLI. This integration supports various GitLab operations, such as creating issues, managing merge requests, and more.
+The GitLab integration exposes the `gitlab` tool to the agent. It runs GitLab CLI (`glab`) commands in the relevant project directory with the token configured in Refact settings.
 
-## Basic Configurations
+## Setup
 
-### Glab Token
-- The tool requires a GitLab Personal Access Token for authentication
-- You can generate a token directly from your GitLab account
-- To enhance security, store the token in a secrets.yaml file and reference it with `$MY_SECRET_VARIABLE`
+Configure:
 
-### Actions
-- Use the Test button to verify if the GitLab integration is functioning correctly
+- **GitLab token**: a personal access token with the scopes needed for issues, merge requests, and repository operations.
+- **GitLab CLI path**: optional path to `glab`; leave empty to use `glab` from `PATH`.
 
-## Advanced Configuration
+Tokens can be referenced from secrets instead of being written directly into the integration file.
 
-### Glab Binary Path
-- Specifies the path to the GitLab CLI binary (glab)
-- Leave this field empty to use the default glab command if it is available in your system's PATH
-- On Windows, if you experience issues, install glab via Chocolatey, Winget, or from the official GitLab website
+## What it is useful for
 
-### Confirmation Rules
-Define command patterns to control execution and safeguard critical operations:
+- Listing issues and merge requests.
+- Creating issues or merge requests.
+- Reading project metadata.
+- Running other `glab` commands that fit your confirmation rules.
 
-#### Ask User
-Commands requiring confirmation, example:
-- `glab * delete *`: Prompts confirmation for delete operations
+## Confirmation rules
 
-#### Deny
-Commands to block, example:
-- `glab auth token *`: Blocks authentication token commands for security
+Use confirmation rules to ask before destructive commands and deny commands that expose authentication tokens.

@@ -1,46 +1,37 @@
 ---
 title: Agent Integrations
-description: Overview of available integrations for the Refact.ai Agent
+description: Configure external services and built-in runtime tools for Refact Agent.
 ---
 
-The Refact.ai Agent supports various integrations to enhance your development workflow. These integrations extend the Agent's [core tools](../tools) with external services and capabilities.
+Integrations extend Refact Agent beyond the local codebase. Some tools are built in, while others become available after you configure an integration in settings.
 
-## Development Tools
-- [Chrome](./chrome) - Browser automation (built-in, no configuration needed)
-- [Command-line Tool](./command-line-tool) - Configure and use custom command-line tools
-- [Command-line Service](./command-line-service) - Run and manage background processes
-- [Shell Commands](./shell-commands) - Execute terminal commands with user confirmation
+## Built-in runtime tools
 
-## Version Control
-- [GitHub](./github) - Interact with GitHub repositories through GitHub CLI
-- [GitLab](./gitlab) - Work with GitLab repositories using GitLab CLI
+- [Chrome and browser automation](./chrome/) — browser tabs, screenshots, DOM inspection, element interaction, console logs, and page extraction.
+- [Shell commands](./shell-commands/) — one-off local commands with timeout, output filtering, and confirmation rules.
 
-## Container Management
-- [Docker](./docker) - Manage Docker containers and environments
+## Version control and code hosting
 
-## Databases
-- [PostgreSQL](./postgresql) - Work with PostgreSQL databases
-- [MySQL](./mysql) - Work with MySQL databases
+- [GitHub](./github/) — GitHub CLI operations such as issues and pull requests.
+- [GitLab](./gitlab/) — GitLab CLI operations such as issues and merge requests.
+- [Bitbucket](./bitbucket/) — Bitbucket Cloud API operations for repositories and pull requests.
 
-## Debugging
-- [Pdb](./pdb) - Allows interaction with the Python debugger
+## Databases and debugging
 
-Each integration can be configured and customized to suit your specific needs. Click on the links above to learn more about each integration's features and configuration options.
+- [PostgreSQL](./postgresql/) — execute a single `psql` query per tool call.
+- [MySQL](./mysql/) — execute a single `mysql` query per tool call.
+- [PDB](./pdb/) — control an interactive Python debugger session.
 
-## Configuring Integrations
+## Custom tools and protocols
 
-You can configure the integrations in two ways:
+- [Command-line Tool](./command-line-tool/) — expose one blocking command with model-filled parameters.
+- [Command-line Service](./command-line-service/) — start, stop, restart, and check long-running processes.
+- [MCP Server](./mcp/) — connect local stdio or remote HTTP/SSE MCP servers.
 
-### 1. Through Chat Interface
+## How to configure
 
-Click on the integrations button in the chat interface to quickly enable or disable specific integrations.
+Open integrations from Refact settings or the integrations control in chat. Configure credentials, command paths, working directories, parameters, output filters, and confirmation rules as needed. After saving, switch to a mode that allows integrations and ask the agent to test the tool.
 
-### 2. Through Settings
+## Safety
 
-Access integrations through the settings menu for more detailed configuration options.
-
-## Next Steps
-
-- Review our [security best practices](../security) when setting up integrations
-- Learn about [authentication methods](../authentication) for different services
-- Check the [troubleshooting guide](../troubleshooting) if you encounter any issues
+Use confirmation rules for commands, queries, and external service operations that can mutate data. Prefer secrets or variables for tokens and passwords. Keep destructive actions denied unless you intentionally need them.

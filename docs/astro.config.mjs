@@ -166,7 +166,7 @@ export default defineConfig({
             },
             { label: 'GitHub', link: '/features/autonomous-agent/integrations/github/' },
             { label: 'GitLab', link: '/features/autonomous-agent/integrations/gitlab/' },
-            { label: 'Docker', link: '/features/autonomous-agent/integrations/docker/' },
+            { label: 'Bitbucket', link: '/features/autonomous-agent/integrations/bitbucket/' },
             { label: 'PostgreSQL', link: '/features/autonomous-agent/integrations/postgresql/' },
             { label: 'MySQL', link: '/features/autonomous-agent/integrations/mysql/' },
             { label: 'PDB', link: '/features/autonomous-agent/integrations/pdb/' },

@@ -1,31 +1,27 @@
 ---
-title: MySQL Tool
-description: Configure and use MySQL database integration
+title: MySQL Integration
+description: Run MySQL queries from Refact Agent.
 ---
 
-The MySQL Tool integration allows the AI model to interact with MySQL databases, enabling it to query, inspect data, and make changes. This tool can also integrate with Docker containers running MySQL servers.
+The MySQL integration exposes the `mysql` tool to the agent. It runs one SQL query per tool call through the `mysql` client using the connection settings configured in Refact.
 
-## Basic Configurations
+## Setup
 
-### Connection Settings
-- **Host**: Specify the host to connect to, such as 127.0.0.1 or the name of a Docker container
-- **Port**: Define the port used for the connection (Default: 3306)
-- **User and Password**: Set the username and password for database access
-  - Can be entered directly or referenced from environment variables (e.g., `$MYSQL_USER` and `$MYSQL_PASSWORD`)
-- **Database**: Enter the name of the database you want the tool to connect to
+Configure:
 
-### Actions
-- **Test**: Verifies the connection and functionality of the MySQL integration
-- **Look at the project, help me set it up**: Assists in configuring the tool by analyzing project settings
+- **Host and port**: where MySQL is reachable.
+- **User, password, and database**: connection credentials and target database.
+- **mysql path**: optional path to the `mysql` binary; leave empty to use `mysql` from `PATH`.
 
-## Advanced Configuration
+Values can reference variables or secrets so credentials do not need to be written directly into prompts.
 
-### MySQL Binary Path
-- Specifies the path to the mysql binary
-- Leave this field blank if mysql is available in the system's PATH
-- If the binary is located elsewhere, provide the full path (e.g., `/usr/local/bin/mysql`)
+## Query behavior
 
-### Confirmation Rules
-Define command patterns to control execution:
-- **Ask User**: Commands matching these patterns will prompt the user for confirmation before execution
-- **Deny**: Commands matching these patterns are automatically blocked
+- Each tool call runs a single query.
+- Queries time out after a short fixed timeout.
+- Large result sets and long cells are truncated before being returned to chat.
+- Errors from `mysql` are shown to the agent for debugging.
+
+## Safety
+
+Configure confirmation rules for writes, schema changes, and maintenance commands. Use read-only credentials when the agent only needs to inspect data.

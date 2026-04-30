@@ -1,13 +1,15 @@
 ---
 title: Improve Code
-description: A page about improve code feature.
+description: Use toolbox commands to rewrite selected code for clarity.
 ---
 
-Do you have a piece of code that needs to be shorter and be more clear?
+Improvement workflows are best handled as custom toolbox commands or by the default `/shorter` command when the goal is concision. They operate on the selected code and return a focused rewrite.
 
-Works best for: 
-- Nested ifs
-- Verbose or unclear code
-- Complex conditions or expressions
+Use this style of command for:
 
-Select a block of code or an entire function body.
+- Reducing unnecessary nesting.
+- Simplifying conditionals.
+- Removing repeated expressions.
+- Making a small block easier to read.
+
+Use Agent mode for larger refactors that must update call sites, tests, or multiple files.

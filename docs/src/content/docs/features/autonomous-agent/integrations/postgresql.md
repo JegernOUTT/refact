@@ -1,32 +1,27 @@
 ---
-title: PostgreSQL Tool
-description: Configure and use PostgreSQL database integration
+title: PostgreSQL Integration
+description: Run PostgreSQL queries from Refact Agent.
 ---
 
-The PostgreSQL Tool integration allows the Refact.ai Agent to interact with Postgres databases, enabling it to query, inspect data, and make changes. This tool can also integrate with Docker containers running Postgres servers.
+The PostgreSQL integration exposes the `postgres` tool to the agent. It runs one SQL query per tool call through `psql` using the connection settings configured in Refact.
 
-## Basic Configurations
+## Setup
 
-### Connection Settings
-- **Host**: Specify the host to connect to, such as 127.0.0.1 or the name of a Docker container
-- **Port**: Define the port used for the connection (Default: 5432)
-- **User and Password**: Set the username and password for database access
-  - Can be entered directly or referenced from environment variables (e.g., `$POSTGRES_USER` and `$POSTGRES_PASSWORD`)
-- **Database**: Enter the name of the database you want the tool to connect to
+Configure:
 
-### Actions
-- **Test**: Verifies the connection and functionality of the Postgres integration
-- **Look at the project, help me set it up**: Assists in configuring the tool by analyzing project settings
+- **Host and port**: where PostgreSQL is reachable.
+- **User, password, and database**: connection credentials and target database.
+- **psql path**: optional path to the `psql` binary; leave empty to use `psql` from `PATH`.
 
-## Advanced Configuration
+Values can reference variables or secrets so credentials do not need to be written directly into prompts.
 
-### PSQL Binary Path
-- Specifies the path to the psql binary
-- Leave this field blank if psql is available in the system's PATH
-- If the binary is located elsewhere, provide the full path (e.g., `/usr/local/bin/psql`)
+## Query behavior
 
-### Confirmation Rules
-Define command patterns to control execution:
-- **Ask User**: Commands requiring confirmation, example:
-  - `psql*[!SELECT]*`: Prompts for confirmation for commands other than SELECT
-- **Deny**: Commands matching these patterns are automatically blocked
+- Each tool call runs a single query.
+- Queries time out after a short fixed timeout.
+- Large result sets and long cells are truncated before being returned to chat.
+- Errors from `psql` are shown to the agent for debugging.
+
+## Safety
+
+Configure confirmation rules for write queries, schema changes, or maintenance commands. The default configuration asks before commands that are not simple `SELECT`-style reads; adjust it to fit your environment.

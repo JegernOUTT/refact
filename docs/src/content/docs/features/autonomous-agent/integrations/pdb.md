@@ -1,23 +1,21 @@
 ---
-title: PDB Tool
-description: Configure PDB
+title: PDB Integration
+description: Control Python debugger sessions from Refact Agent.
 ---
 
-## PDB Tool
+The PDB integration exposes the `pdb` tool to the agent. It starts and controls a Python debugger session so the agent can inspect stack frames, variables, and execution flow.
 
-The PDB Tool integration allows interaction with the Python debugger for inspecting variables and exploring program execution. It provides functionality for debugging Python scripts and applications.
+## Setup
 
-### Configurations
+Configure the Python interpreter path if Refact should use a specific virtual environment or Python installation. Leave it empty to use the default `python3` command.
 
-#### Python Interpreter Path
-- Specifies the path to the Python interpreter
-- Leave this field empty to use the default python3 command
-- If the Python executable is located in a non-standard directory, provide its full path
+## How it works
 
-#### Actions
-- Use the Test button to verify if the PDB integration is functioning correctly
+- Start a session with a command such as `python -m pdb script.py`.
+- Send one debugger command at a time, such as `break`, `continue`, `list`, `where`, `print`, or `quit`.
+- Use a working directory when the script should run from a specific project path.
+- If the debugged process is still running, the agent can wait or stop the session.
 
-#### Confirmation Rules
-Define command patterns to control execution:
-- **Ask User**: Commands matching these patterns will prompt the user for confirmation before execution
-- **Deny**: Commands matching these patterns are automatically blocked
+## Safety
+
+PDB runs Python code from your project. Use the same caution you would use when running scripts manually, especially if the program touches files, services, or databases.

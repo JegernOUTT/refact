@@ -1,94 +1,57 @@
 ---
 title: Agent Tools
-description: Overview of available tools and use cases for the autonomous Refact.ai Agent
+description: Built-in and configured tools available to Refact Agent.
 ---
 
-The Refact.ai Agent is designed to operate autonomously, extending its capabilities beyond simple integrations. While integrations allow external services to be connected, Agent Tools empower the agent to perform key operations using built-in functionalities. Below is an overview of the available Agent Tools, typical use cases, and how they can enhance your development workflow.
+Agent tools let Refact inspect your project, edit files, run commands, browse the web, and connect to configured services. The exact tool list depends on the selected mode, model capabilities, privacy settings, and integration configuration.
 
-## Core Tools
+## Codebase search
 
-The Agent has access to several powerful tools that help it understand and modify your codebase:
+The agent can gather local project context with tools for:
 
-### Context and Search Tools
+- Project tree and file listings.
+- Reading files and images.
+- Regex/text search.
+- Semantic vector search when the vector database is enabled.
+- AST symbol definitions when syntax parsing is enabled.
 
-- **search**  
-  Find similar pieces of code or text using vector database.  
-  *Use Case:* When you ask the Agent to modify code, it uses this tool to find similar patterns across your codebase to maintain consistency.
+These tools are used heavily by Explore, Review, Debug, and Agent workflows.
 
-- **definition**  
-  Read definition of symbols in the project using AST.  
-  *Use Case:* The Agent uses this to understand function signatures, class structures, and type definitions when working with your code.
+## Codebase changes
 
-- **references**  
-  Find usages of symbols within the project using AST.  
-  *Use Case:* Before modifying a function or class, the Agent checks all its usages to ensure changes won't break existing code.
+Editing tools can:
 
-- **tree**  
-  Get a files tree with symbols for the project.  
-  *Use Case:* The Agent uses this to understand project structure and locate relevant files.
+- Create new text files.
+- Update files by exact text, line range, regex, or anchors.
+- Apply patches.
+- Move or remove files.
+- Undo recent text edits.
 
-### File Operations
+Patch-like edits are shown in chat and can require confirmation depending on the mode and settings.
 
-- **cat**  
-  Read multiple files and understand their content.  
-  *Use Case:* The Agent can read and analyze multiple files at once, including images and skeletonized code views.
+## Web and browser tools
 
-- **locate**  
-  Find relevant files for a specific task.  
-  *Use Case:* When given a task, the Agent can quickly identify which files need to be modified.
+Refact includes tools to fetch web pages, search the web when the selected provider does not handle web search itself, and automate Chrome. Browser automation can navigate pages, click and fill elements, wait for page changes, capture screenshots, extract text/HTML/tables/links, inspect accessibility snapshots, run JavaScript, and read console logs.
 
-### Code Modification
+## System tools
 
-- **patch**  
-  Apply changes to files in a controlled manner.  
-  *Use Case:* The Agent uses this to make actual changes to your codebase, with your approval.
+System tools can run shell commands, manage configured long-running command-line services, and add workspace folders. Use them for tests, builds, local scripts, dev servers, and diagnostics. Destructive or sensitive commands should be controlled with confirmation rules.
 
-### Planning and Analysis
+## Planning, review, research, and subagents
 
-- **think**  
-  Analyze complex problems and create execution plans using o3 mini reasoning model.  
-  *Use Case:* Before making changes, the Agent plans out the steps needed to complete a task successfully. The o3 mini model helps break down complex problems into manageable steps and create a clear execution strategy.
+Higher-level tools help the agent split work into steps, perform code review, research unfamiliar systems, and delegate focused sub-tasks to subagents. Project-defined subagents can also be exposed as tools.
 
-### Web Interaction
+## Knowledge and tasks
 
-- **web**  
-  Fetch and read web pages in plain text format.  
-  *Use Case:* The Agent can read documentation, specifications, or other web resources to help solve problems.
+The agent can activate skills, search and save project knowledge, use previous trajectories as context, manage task boards, spawn task agents, and record task memories.
 
-## How Agent Tools Work Together
+## Integrations and MCP
 
-The Agent combines these tools strategically to complete complex tasks. Here's a typical workflow:
+Configured integrations add tools for GitHub, GitLab, Bitbucket, PostgreSQL, MySQL, PDB, custom command-line tools, command-line services, and MCP servers. MCP servers with many tools may be exposed through lazy discovery tools so the model can search for a tool schema before calling it.
 
-1. **Understanding Phase**
-   - Uses `tree` to understand project structure
-   - Uses `locate` to find relevant files
-   - Uses `search` to find similar patterns
-   - Uses `definition` and `references` to understand code context
+## Best practices
 
-2. **Planning Phase**
-   - Uses `think` to create a detailed plan
-   - Uses `web` if external documentation is needed
-
-3. **Execution Phase**
-   - Uses `cat` to read necessary files
-   - Creates changes using `patch` tool
-   - Verifies changes using `search` and `references`
-
-## Best Practices
-
-When working with the Agent, consider these tips:
-
-- Let the Agent gather context before making changes
-- Review proposed patches carefully before approving
-- Use the Agent's planning capabilities for complex tasks
-- Provide clear, specific instructions for best results
-
-## Next Steps
-
-Once you're familiar with the core tools, you might want to explore:
-
-- [Agent Overview](../overview) - Learn more about the Agent's capabilities
-- [Getting Started](../getting-started) - Start using the Agent effectively
-- [Integrations](../integrations) - Connect with external services and tools
-
-For specific integration guides and advanced usage scenarios, refer to our detailed documentation sections.
+- Let the agent inspect relevant files before editing.
+- Keep confirmation rules strict for shell, database, and external service tools.
+- Ask for verification commands to run after code changes.
+- Use checkpoints when working on large or risky changes.

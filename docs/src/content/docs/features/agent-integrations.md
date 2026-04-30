@@ -1,51 +1,27 @@
 ---
 title: Agent Integrations
-description: Overview of available integrations for Refact.ai Agent
+description: Built-in and configured integrations available to Refact Agent.
 ---
 
-Integrations help you to manage the access of agent to the tools. 
+Refact Agent combines built-in tools with optional configured integrations. Built-in tools such as shell and Chrome are available through modes that enable them. Configured integrations add service-specific tools after you provide credentials or command settings.
 
-## Available Integrations
+## Built-in tools
 
-The Agent currently supports the following integrations:
+- [Chrome and browser automation](/features/autonomous-agent/integrations/chrome/) — launch or connect to Chrome, navigate pages, capture screenshots, and inspect DOM or console output.
+- [Shell commands](/features/autonomous-agent/integrations/shell-commands/) — run one-off local commands with timeout, output filtering, and confirmation rules.
 
-- [Chrome](./integrations/chrome) - Browser automation (built-in, no configuration needed)
-- [Shell](./integrations/shell) - Execute terminal commands with user confirmation
-- [Github](./integrations/github) - Interact with GitHub repositories
-- [Gitlab](./integrations/gitlab) - Manage GitLab repositories and issues
-- [PDB](./integrations/pdb) - Python debugger integration
-- [Postgres](./integrations/postgres) - PostgreSQL database interaction
-- [MySQL](./integrations/mysql) - MySQL database management
-- [Command-line Tool](./integrations/cmdline-tool) - Custom command-line tool integration
-- [Command-line Service](./integrations/cmdline-service) - Background service management
-- [Docker](./integrations/docker) - Docker container management
+## Configured integrations
 
-## Configuring Integrations
+- [GitHub](/features/autonomous-agent/integrations/github/) — run GitHub CLI workflows with a configured token.
+- [GitLab](/features/autonomous-agent/integrations/gitlab/) — run GitLab CLI workflows with a configured token.
+- [Bitbucket](/features/autonomous-agent/integrations/bitbucket/) — use the Bitbucket Cloud API for repositories and pull requests.
+- [PostgreSQL](/features/autonomous-agent/integrations/postgresql/) — run one SQL query per tool call through `psql`.
+- [MySQL](/features/autonomous-agent/integrations/mysql/) — run one SQL query per tool call through `mysql`.
+- [PDB](/features/autonomous-agent/integrations/pdb/) — start and control Python debugger sessions.
+- [Command-line Tool](/features/autonomous-agent/integrations/command-line-tool/) — expose a one-shot command as a model-callable tool.
+- [Command-line Service](/features/autonomous-agent/integrations/command-line-service/) — manage long-running local processes such as dev servers.
+- [MCP Server](/features/autonomous-agent/integrations/mcp/) — connect local stdio or remote HTTP/SSE Model Context Protocol servers.
 
-You can configure the Integrations in two ways:
+## Configuration and confirmations
 
-### 1. Through Chat Interface
-
-Click on the integrations button in the chat:
-
-<div class="video-frame">
-  <video controls width="100%">
-    <source src="/videos/Configure_Integrations_Chat.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
-</div>
-
-### 2. Through Settings
-
-Access integrations through the settings menu:
-
-<div class="video-frame">
-  <video controls width="100%">
-    <source src="/videos/Configure_Integrations_Settings.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
-</div>
-
-## Next Steps
-
-Click on any integration in the list above to learn more about its specific configuration and usage.
+Use the integrations settings to enable or edit integrations. Many integrations support secrets or variables so credentials do not need to be written directly in prompts. Confirmation rules decide which commands or queries require approval and which are denied automatically.

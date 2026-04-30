@@ -1,111 +1,58 @@
 ---
 title: AI Chat
-description: A reference page for AI Chat.
+description: Ask questions, explore code, and run agent workflows with Refact chat.
 ---
 
-You can ask questions about your code in the integrated AI chat, and it can provide you with answers about your code or generate new code for you based on the context of your current file.
+Refact chat is the main interface for working with your project. It can answer questions, explain code, gather local context, make edits, run tools, and coordinate longer agent workflows.
 
-### **Context Length**
-Refact analyzes the code up to a certain length to provide suggestions.
-Context length depends on the plan you have chosen for your account:
-- **Free**: 8000 tokens
-- **Pro**: 32000 tokens
+## What chat can do
 
-## Modes of Operation
+- Explain files, symbols, errors, and selected snippets.
+- Gather context from the project tree, file contents, AST symbols, semantic search, previous trajectories, tasks, and saved knowledge.
+- Fetch web pages or search the web when the selected mode and model configuration allow it.
+- Propose and apply file edits, patches, moves, removals, and undo operations in agent workflows.
+- Run shell commands, command-line services, browser automation, and configured integrations with the appropriate confirmations.
+- Continue a conversation while work is running by queueing additional messages for the same thread.
 
-With Refact.ai, you have access to three distinct modes that enhance your interaction with the AI chat: **Quick**, **Explore**, and **Agent**.
+## Modes and workflows
 
-### Quick Mode
-In **Quick Mode**, the model responds instantly without accessing external tools. This mode is ideal for rapid interactions and quick queries. You can enrich your experience with the following @-commands:
+Mode names can be customized, but Refact commonly separates chat into these product-level workflows:
 
-- **@web**: Convert any webpage into plain text for quick summarization and interaction. Simply use `@web` followed by the URL (e.g., `@web https://refact.ai/`) to fetch and convert the content into text that can be used within your chat.
-  
-- **@search**: Quickly locate similar code or text within your workspace, directory, or file. Use `@search` followed by your query (e.g., `@search create table`) to find matching content for seamless exploration and interaction.
+### Ask and quick Q&A
 
-### Explore Mode
-**Explore Mode** is more advanced than Quick Mode, utilizing exploration tools to gather context about the project before answering questions. This mode automatically employs @-commands such as:
+Use a direct chat mode for explanations, small questions, and lightweight help. The model answers from the conversation, IDE context, attached files, and any explicitly enabled tools. This is the best choice when you want a fast answer and do not need the agent to edit files.
 
-- **@definition**: Fetch definitions of symbols within the codebase.
-  
-- **@reference**: Locate usages of specific functions or classes throughout the project.
-  
-- **@tree**: View the project structure and navigate through multiple files to understand the context better.
+### Explore, learn, debug, review, and plan
 
-Explore Mode allows for a deeper understanding of the codebase, enabling the model to provide more informed answers.
+Exploration-style modes focus on gathering context before answering. They can inspect the project tree, read files, search text or vectors, inspect symbol definitions, and use specialized analysis tools. Use these modes when you want the assistant to understand the codebase, investigate a bug, review a change, or draft an implementation plan before editing.
 
-### Agent Mode
-**Agent Mode** introduces agent capabilities that significantly enhance the way you program. While responses may take longer, this mode offers higher-quality solutions for complex challenges. Key features include:
+### Agent and task workflows
 
-- **Contextual Awareness**: The model can analyze and understand the broader context of your code, leading to more relevant suggestions and solutions.
-  
-- **Task Automation**: Agent Mode can assist in automating repetitive tasks, allowing you to focus on more critical aspects of your project.
+Agent modes can take multi-step actions. They may read and edit files, apply patches, run checks, call browser or web tools, use integrations, spawn subagents, and update task boards. The agent reports tool calls and patch previews in chat so you can follow and approve sensitive steps.
 
-- **Complex Problem Solving**: It is designed to tackle intricate programming challenges by leveraging its understanding of the codebase and available resources.
+## Context sources
 
-While we are still refining Agent Mode, it already provides valuable assistance for developers looking to enhance their productivity and code quality.
+Refact builds context locally before sending a request to the configured provider or local runtime. Depending on settings and mode, context can include:
 
+- Open files, the current cursor location, and selected snippets from the IDE.
+- Files and directories allowed by privacy settings.
+- Project tree and file summaries.
+- AST definitions and references when syntax parsing is enabled.
+- Semantic search results when the vector database is enabled.
+- Chat history, saved knowledge, trajectories, and task metadata.
+- Tool results such as shell output, browser screenshots, web pages, and integration responses.
 
-## @-commands
+## Context windows
 
-This section outlines various commands that can be used in the AI chat. Below you can find information about functionality and usage of each command.
+The amount of context available depends on the selected model and provider. Refact prepares and compresses local context to fit the model's context window, but larger models and local runtimes can behave differently. If a thread becomes large, Refact may compress older messages or ask for confirmation before including very large tool results.
 
-![Chat Commands](../../../assets/chat-commands.png)
+## Tool confirmations
 
-#### `@help`
+Potentially sensitive actions are shown as tool calls. File patches, shell commands, integration calls, database queries, and browser actions can require confirmation depending on the selected mode and configured rules. You can allow a single action, allow similar actions for the chat, or stop the workflow.
 
-- **Description**: Provides information about available commands and their usage.
-- **Usage**: Type `@help`.
+## Tips
 
-#### `@file`
-
-- **Description**: Attaches a file to the chat.
-- **Usage**: 
-  - To attach a whole file, use the command followed by the file name, e.g., `@file example.ext`.
-  - To specify a particular section of a file, include the line numbers, e.g., `@file large_file.ext:42` or for a range, `@file large_file.ext:42-56`.
-
-#### `@definition`
-
-- **Description**: Retrieves the definition of a symbol.
-- **Usage**: Type `@definition` followed by the symbol name, e.g., `@definition MyClass`.
-
-#### `@references`
-
-- **Description**: Returns references for a symbol, including usage examples.
-- **Usage**: Type `@references` followed by the symbol name, e.g., `@references MyClass`.
-
-#### `@symbols-at`
-
-- **Description**: Searches for and adds symbols near a specified line in a file to the chat context.
-- **Usage**: Specify both the file and the line number, e.g., `@symbols-at some_file.ext:42`.
-
-#### `@search`
-
-- **Description**: Find similar pieces of code or text using the vector database.
-- **Usage**: Type `@search` followed by your query and scope, e.g., `@search "function definition" workspace`.
-
-#### `@tree`
-
-- **Description**: Get a files tree with symbols for the project. Use it to get familiar with the project, file names, and symbols.
-- **Usage**: Type `@tree` followed by an optional path, e.g., `@tree some_directory/`.
-
-#### `@web`
-
-- **Description**: Fetch a web page and convert to readable plain text.
-- **Usage**: Type `@web` followed by the URL, e.g., `@web http://example.com`.
-
-## Chat Initialization Options
-
-Upon starting a new chat, several options are available that mimic the above commands:
-
-- `Search workspace`: Equivalent to using `@search`. It uses the entered query to perform a search. 
-- `Attach current_file.ext`: Similar to the `@file` command. It attaches the file at the current cursor position (CURSOR_LINE), useful for dealing with large files.
-- `Lookup symbols`: Corresponds to the `@symbols-at` command. It extracts symbols around the cursor position and searches them in the AST index.
-- `Selected N lines`: Adds the currently selected lines as a snippet for analysis or modification. This is similar to embedding code within backticks ``` in the chat.
-
-## Enabling commands
-
-To use @-commands in the AI chat, you need to enable specific settings:
-- `@search` - enable the `Enable vector database` checkbox under the `Refactai: Vecdb` section.
-- `@definition`, `@file`, `@references`, `@symbols-at` - enable the `Enable syntax parsing` checkbox under the `Refactai: Ast` section.
-
-Read more in the [Enabling RAG Documentation](https://docs.refact.ai/features/context/).
+- Attach the exact file or snippet when you know where the issue is.
+- Use Explore or Plan before asking for a broad refactor.
+- Ask the agent to run the project's normal checks after it edits code.
+- Review patches before applying them, especially when the task touches generated files, migrations, or production configuration.

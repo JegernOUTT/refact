@@ -1,61 +1,39 @@
 ---
 title: Agent Overview
-description: Comprehensive overview of Refact.ai Agent capabilities and features
+description: What Refact Agent can do in autonomous development workflows.
 ---
 
-Refact.ai Agent is now available, bringing autonomous capabilities to your development workflow. The agent can independently gather context, create and edit documents, execute shell commands, and much more.
+Refact Agent turns chat into a multi-step development workflow. It can gather local context, reason about a task, edit files, run checks, use browser and web tools, call configured integrations, and report progress in the thread.
 
-## Real-time Collaboration
-A standout feature of Refact.ai Agent is its real-time awareness of your actions. The agent automatically stays in sync with your codebase, eliminating the need to manually provide context about recent changes.
+## Core capabilities
 
-Watch how our Agent can read and understand recently created files:
+- **Context gathering**: inspect project trees, read files, search text and vectors, and look up AST symbols.
+- **Code changes**: create files, update text, apply patches, move or remove files, and undo recent edits.
+- **Tool confirmations**: show sensitive actions before they run, with configurable allow and deny rules.
+- **Shell and services**: run one-off commands, tests, linters, builds, or manage configured background services.
+- **Web and browser work**: fetch pages, search the web when needed, and automate Chrome for screenshots, forms, DOM inspection, and console logs.
+- **Review and research**: use planning, code review, deep research, and subagents for larger tasks.
+- **Tasks and knowledge**: update task boards, save reusable knowledge, and search previous trajectories.
+- **Rollback**: preview and restore workspace checkpoints when checkpointing is enabled.
 
-<div class="video-frame">
-  <video controls width="100%">
-    <source src="/videos/Access_Context.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
-</div>
+## How agent workflows run
 
-## Autonomous Patching
-Refact.ai Agent can autonomously create and edit files. The process works in two steps:
+The agent alternates between reasoning, tool calls, and responses. Tool calls produce visible results in chat. File edits are shown as patches or diffs so you can inspect what changed. Commands and integrations follow confirmation rules, so you remain in control of actions that affect your machine or external services.
 
-1. The Agent provides the code changes it wants to make
-2. You approve the "Patches" before they're applied
+## When to use Agent mode
 
-Watch how Refact.ai Agent is rewrite file from python to php:
-<div class="video-frame">
-  <video controls width="100%">
-    <source src="/videos/Patch.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
-</div>
+Use Agent mode for tasks that require more than a single answer:
 
-You can streamline the process by enabling automatic patch approval.
-Toggle the "Allow Patches" option to let the Agent make changes without requiring permission each time:
+- Fixing bugs across multiple files.
+- Implementing a feature with tests.
+- Running verification commands.
+- Reviewing a diff or pull request.
+- Investigating browser, API, database, or integration behavior.
 
-<div class="video-frame">
-  <video controls width="100%">
-    <source src="/videos/Auto_Apply.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
-</div>
+For quick explanations or small selected-code transformations, use [AI Chat](/features/ai-chat/) or [AI Toolbox](/features/ai-toolbox/).
 
-## Shell Command Execution
+## Related pages
 
-<div style="display: grid; grid-template-columns: 1fr 2fr; gap: 1rem; align-items: center;">
-  <div>
-    The Agent can execute terminal commands on your behalf
-  </div>
-  <div class="video-frame">
-    <video controls width="100%">
-      <source src="/videos/Terminal_Commands.mp4" type="video/mp4">
-      Your browser does not support the video tag.
-    </video>
-  </div>
-</div>
-
-See an example of the Agent creating a virtual environment and installing numpy.
-
-
-For setup instructions, visit the [Agent Integrations](/features/autonomous-agent/integrations/) page.
+- [Agent Tools](/features/autonomous-agent/tools/)
+- [Agent Integrations](/features/autonomous-agent/integrations/)
+- [Agent Rollback](/features/autonomous-agent/rollback/)

@@ -1,44 +1,28 @@
 ---
-title: Command Line Tool
-description: Configure and use custom command-line tools
+title: Command-line Tool
+description: Expose a one-shot command as a Refact integration tool.
 ---
 
-The Command-Line Tool integration allows you to add and adapt any command-line tool for use by the Refact.ai Agent. This tool can be configured with specific parameters, commands, and restrictions, enabling tailored functionality for your workflows.
+Command-line tool integrations let you adapt an existing local command into a model-callable tool. They are for commands that start, finish, and return output in a single call.
 
-## Basic Configurations
+## Configuration
 
-### Command Settings
-- **Command**: Specify the command to execute
-  - Use `%param_name%` notation to allow dynamic parameter substitution by the model
-  - Example: `echo %message%`
-- **Command Workdir**: Define the working directory for the command
-  - If left empty, the workspace directory will be used by default
-- **Description**: Provide a description to explain the purpose of this command
-  - This helps the Refact.ai Agent understand when and why to use the tool
+A `cmdline_*` integration defines:
 
-### Parameters
-- Add parameters the model should fill out when using the tool
-- Define a Name and Description for each parameter to guide the model
+- **Command**: the shell command to run. Use `%param_name%` placeholders for model-filled values.
+- **Working directory**: optional command workdir. If empty, Refact uses the workspace directory.
+- **Description**: what the model sees when deciding whether to call the tool.
+- **Parameters**: names, types, and descriptions for values the model must provide.
+- **Timeout**: how long the command may run before Refact terminates it.
+- **Output filter**: limits, top/bottom prioritization, regex filtering, and cleanup for large output.
 
-### Timeout
-- Set the maximum time (in seconds) the command is allowed to run
-- If the command exceeds this duration, it will be terminated, and its output (stdout/stderr) will be returned
+## Example uses
 
-### Actions
-- **Test**: Runs the command to verify its functionality
-- **Auto Configure**: Assists in setting up the command by analyzing the context and suggesting configurations
+- Project-specific build or test wrappers.
+- Log parsing commands.
+- Internal CLIs with narrow, safe parameters.
+- Data extraction scripts that print results and exit.
 
-## Advanced Configuration
+## Safety
 
-### Output Filter
-Manage how the command's output is processed and displayed:
-- Limit the number of lines or characters in the output
-- Prioritize output from the start (top) or end (bottom)
-- Use regular expressions (regex) to extract relevant portions of the output
-- Remove unwanted parts of the output for cleaner results
-
-### Confirmation Rules
-Define rules to control execution:
-- **Ask User**: Commands matching these patterns will prompt the user for confirmation before execution
-- **Deny**: Commands matching these patterns are automatically blocked
-  - Example: `sudo*`: Blocks commands requiring elevated privileges
+Configure confirmation rules for commands that can mutate files, call external services, or expose secrets. Use command-line services instead when the process is meant to keep running, such as a dev server or `tail -f`.

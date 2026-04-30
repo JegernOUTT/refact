@@ -1,42 +1,31 @@
 ---
-title: How to Start Using Refact.ai Agent
-description: A step-by-step guide to start using the Refact.ai Agent in your IDE
+title: How to Start Using Refact Agent
+description: Start an agent workflow in your IDE.
 ---
 
-Getting started with Refact.ai Agent is simple and straightforward. Follow these steps to begin using the autonomous agent capabilities:
+Refact Agent is the chat workflow for tasks that require multiple steps, tools, and code changes.
 
-## Step 1: Open Refact.ai Chat
-Launch the Refact.ai Chat interface in your IDE.
+## Start a workflow
 
-<div class="video-frame">
-  <video controls width="100%">
-    <source src="/videos/Open_Refact_Chat.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
-</div>
+1. Open Refact chat in your IDE.
+2. Choose an agent-capable mode, such as Agent, Quick Agent, Review, Debug, Plan, or a project-specific mode.
+3. Describe the goal and include constraints, files, commands, or acceptance criteria.
+4. Let the agent gather context. It may read files, search symbols, inspect history, or ask a clarifying question.
+5. Review tool confirmations and patch previews before applying sensitive changes.
+6. Ask the agent to run the project's normal verification command before you finish.
 
-## Step 2: Choose Agent Mode
-Select the Agent Mode from the available options.
+## Good prompts
 
-<div class="video-frame">
-  <video controls width="100%">
-    <source src="/videos/Switch_To_The_Agent.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
-</div>
+Be specific about the outcome you want:
 
-## Step 3: Write Your Prompt
-Start interacting with the agent by writing your prompt and watch the magic happen!
+- "Find why this test fails, fix it, and run the test again."
+- "Refactor this component without changing behavior; update tests if needed."
+- "Review the current diff for correctness and security issues."
+- "Plan the migration first, then wait before editing files."
 
-<div class="video-frame">
-  <video controls width="100%">
-    <source src="/videos/Write_Prompt.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
-</div>
+## Tips
 
-## Tips for Getting Started
-- Be specific in your prompts for better results
-- Start with simple tasks to understand the agent's capabilities
-- Experiment with different types of requests to learn what works best
-- Pay attention to the agent's feedback and suggestions
+- Start with Explore or Plan if the task is broad or risky.
+- Attach the current file or selected snippet when the problem is local.
+- Keep generated files, migrations, and credentials out of scope unless the agent specifically needs them.
+- Use checkpoints or rollback when experimenting with large edits.
