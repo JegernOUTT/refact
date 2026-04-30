@@ -257,6 +257,31 @@ mod tests {
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
     }
 
+    #[test]
+    fn custom_qwen_like_model_has_no_provider_fields() {
+        let req = LlmRequest::new("custom/qwen3".to_string(), vec![])
+            .with_reasoning(ReasoningIntent::BudgetTokens(2048));
+        let mut body = json!({"reasoning_effort": "high"});
+
+        apply_openai_chat_body_quirks(&mut body, &req, &settings());
+
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("enable_thinking").is_none());
+        assert!(body.get("thinking_budget").is_none());
+    }
+
+    #[test]
+    fn custom_zhipu_like_model_has_no_provider_fields() {
+        let req = LlmRequest::new("custom/glm-4.7".to_string(), vec![])
+            .with_reasoning(ReasoningIntent::High);
+        let mut body = json!({"reasoning_effort": "high"});
+
+        apply_openai_chat_body_quirks(&mut body, &req, &settings());
+
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("thinking").is_none());
+    }
+
     fn contains_key_recursively(value: &Value, key: &str) -> bool {
         match value {
             Value::Object(obj) => {

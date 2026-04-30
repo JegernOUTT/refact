@@ -1123,6 +1123,34 @@ mod tests {
     }
 
     #[test]
+    fn test_anthropic_supported_flags_keep_cache_control_tools_and_reasoning() {
+        use crate::llm::params::ReasoningIntent;
+
+        let adapter = AnthropicAdapter;
+        let req = LlmRequest::new(
+            "claude".to_string(),
+            vec![ChatMessage::new("user".to_string(), "test".to_string())],
+        )
+        .with_cache_control(CacheControl::Ephemeral)
+        .with_reasoning(ReasoningIntent::High)
+        .with_tools(
+            vec![json!({
+                "type": "function",
+                "function": {"name": "tool", "parameters": {}}
+            })],
+            Some(CanonicalToolChoice::Required),
+        );
+
+        let http = adapter.build_http(&req, &settings()).unwrap();
+
+        assert_eq!(http.body["cache_control"]["type"], "ephemeral");
+        assert!(http.body.get("tools").is_some());
+        assert_eq!(http.body["tool_choice"], json!({"type": "any"}));
+        assert_eq!(http.body["thinking"]["type"], "enabled");
+        assert!(http.headers.get("anthropic-beta").is_some());
+    }
+
+    #[test]
     fn test_no_beta_header_when_reasoning_not_supported() {
         use crate::llm::params::ReasoningIntent;
 

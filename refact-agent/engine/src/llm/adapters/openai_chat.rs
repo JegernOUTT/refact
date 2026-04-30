@@ -708,9 +708,24 @@ fn parse_openai_usage(usage: &Value) -> Option<ChatUsage> {
         .filter(|&v| v > 0)
         .map(|v| v as usize);
 
+    let dashscope_cache_hit = usage
+        .get("prompt_cache_hit_tokens")
+        .and_then(|t| t.as_u64())
+        .filter(|&v| v > 0)
+        .map(|v| v as usize);
+
+    let dashscope_cache_miss = usage
+        .get("prompt_cache_miss_tokens")
+        .and_then(|t| t.as_u64())
+        .filter(|&v| v > 0)
+        .map(|v| v as usize);
+
     // Merge: prefer Anthropic fields (when routing via OpenRouter), fall back to OpenAI fields
-    let cache_creation = anthropic_cache_creation;
-    let cache_read = anthropic_cache_read.or(openai_cached).or(moonshot_cached);
+    let cache_creation = anthropic_cache_creation.or(dashscope_cache_miss);
+    let cache_read = anthropic_cache_read
+        .or(openai_cached)
+        .or(moonshot_cached)
+        .or(dashscope_cache_hit);
 
     let raw_prompt = usage
         .get("prompt_tokens")
@@ -1070,6 +1085,20 @@ mod tests {
                 assert_eq!(text, "I can’t help with that.")
             }
             _ => panic!("expected AppendContent"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_chunk_reasoning_content() {
+        let adapter = OpenAiChatAdapter;
+        let chunk = r#"{"choices":[{"delta":{"reasoning_content":"Reasoning step"}}]}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        match &deltas[0] {
+            LlmStreamDelta::AppendReasoning { text, .. } => assert_eq!(text, "Reasoning step"),
+            _ => panic!("expected AppendReasoning"),
         }
     }
 
@@ -1561,6 +1590,24 @@ mod tests {
         assert_eq!(result.completion_tokens, 100);
         assert_eq!(result.cache_creation_tokens, None);
         assert_eq!(result.cache_read_tokens, Some(300));
+        assert_eq!(result.total_tokens, 1100);
+    }
+
+    #[test]
+    fn test_parse_openai_usage_with_dashscope_cache_metrics() {
+        let usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "prompt_cache_hit_tokens": 700,
+            "prompt_cache_miss_tokens": 200
+        });
+
+        let result = parse_openai_usage(&usage).unwrap();
+
+        assert_eq!(result.prompt_tokens, 100);
+        assert_eq!(result.completion_tokens, 100);
+        assert_eq!(result.cache_creation_tokens, Some(200));
+        assert_eq!(result.cache_read_tokens, Some(700));
         assert_eq!(result.total_tokens, 1100);
     }
 
