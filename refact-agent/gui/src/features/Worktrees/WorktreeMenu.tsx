@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useState, type ReactNode } from "react";
 import {
   Button,
   Checkbox,
@@ -8,6 +8,15 @@ import {
   Separator,
   Text,
 } from "@radix-ui/themes";
+import {
+  CopyIcon,
+  DoubleArrowRightIcon,
+  ExitIcon,
+  FileTextIcon,
+  OpenInNewWindowIcon,
+  PlusIcon,
+  TrashIcon,
+} from "@radix-ui/react-icons";
 import {
   useDeleteWorktreeMutation,
   type MergeWorktreeResponse,
@@ -38,6 +47,56 @@ type WorktreeMenuProps = {
   onCopyPath: () => void;
 };
 
+type ActionButtonProps = {
+  label: string;
+  title: string;
+  icon: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  primary?: boolean;
+};
+
+function ActionButton({
+  label,
+  title,
+  icon,
+  onClick,
+  disabled = false,
+  danger = false,
+  primary = false,
+}: ActionButtonProps) {
+  const className = [
+    styles.actionButton,
+    primary ? styles.actionPrimary : "",
+    danger && !disabled ? styles.actionDanger : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <button
+      type="button"
+      className={className}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={title}
+      title={title}
+    >
+      <span className={styles.actionIcon} aria-hidden="true">
+        {icon}
+      </span>
+      <Text
+        size="1"
+        weight={primary ? "medium" : "regular"}
+        className={styles.actionLabel}
+      >
+        {label}
+      </Text>
+    </button>
+  );
+}
+
 function compactPath(path: string): string {
   const normalized = path.replace(/[\\/]+$/, "");
   const parts = normalized.split(/[\\/]/).filter(Boolean);
@@ -54,8 +113,8 @@ function displayName(worktree: WorktreeMeta): string {
 
 function referencesLabel(record: WorktreeRecordView): string {
   if (record.reference_count === 0) return "unused";
-  if (record.reference_count === 1) return "1 reference";
-  return `${record.reference_count} references`;
+  if (record.reference_count === 1) return "1 ref";
+  return `${record.reference_count} refs`;
 }
 
 function referenceCount(
@@ -107,6 +166,10 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   const worktreeAvailable = Boolean(currentWorktree);
   const hasFeedback =
     (feedback?.length ?? 0) > 0 || (localFeedback?.length ?? 0) > 0;
+  const detachLabel = currentWorktree ? "Detach" : "Main";
+  const detachTitle = currentWorktree
+    ? "Detach worktree and use main workspace"
+    : "Already using main workspace";
 
   const handleAskRefact = useCallback(
     async (files: string[], response: MergeWorktreeResponse) => {
@@ -161,13 +224,20 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         sideOffset={8}
       >
         <div className={styles.menu}>
-          <Flex direction="column" gap="1" className={styles.sectionHeader}>
+          <Flex
+            align="center"
+            justify="between"
+            className={styles.sectionHeader}
+          >
             <Text size="2" weight="bold">
               Worktrees
             </Text>
-            <Text size="1" color="gray">
-              Create or share an isolated branch workspace for this chat.
-            </Text>
+            {currentWorktree && currentRecord && (
+              <WorktreeStatusBadge
+                worktree={currentWorktree}
+                record={currentRecord}
+              />
+            )}
           </Flex>
 
           {hasFeedback && (
@@ -185,47 +255,42 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
             </Flex>
           )}
 
-          <div className={styles.actions}>
-            <Button type="button" size="1" variant="soft" onClick={onCreate}>
-              Create worktree for this chat
-            </Button>
-            <Button
-              type="button"
-              size="1"
-              variant="soft"
-              color="gray"
+          <div className={styles.actionGrid}>
+            <ActionButton
+              label="Create"
+              title="Create worktree"
+              icon={<PlusIcon />}
+              onClick={onCreate}
+              primary
+            />
+            <ActionButton
+              label={detachLabel}
+              title={detachTitle}
+              icon={<ExitIcon />}
               onClick={onDetach}
               disabled={!currentWorktree}
-            >
-              Detach / use main workspace
-            </Button>
-            <Button
-              type="button"
-              size="1"
-              variant="soft"
-              color="gray"
+            />
+            <ActionButton
+              label="Open"
+              title="Open worktree in new window"
+              icon={<OpenInNewWindowIcon />}
               onClick={onOpenInNewWindow}
               disabled={!currentWorktree}
-            >
-              Open in new window
-            </Button>
-            <Button
-              type="button"
-              size="1"
-              variant="soft"
-              color="gray"
+            />
+            <ActionButton
+              label="Copy"
+              title="Copy workspace path"
+              icon={<CopyIcon />}
               onClick={onCopyPath}
               disabled={!canCopyPath}
-            >
-              Copy path
-            </Button>
+            />
           </div>
 
           <Separator size="4" />
 
           <div className={styles.section}>
             <Text size="1" color="gray" className={styles.sectionHeader}>
-              Existing worktrees
+              Existing
             </Text>
             <div className={styles.list}>
               {isLoading && (
@@ -235,7 +300,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
               )}
               {!isLoading && records.length === 0 && (
                 <Text size="1" color="gray" className={styles.sectionHeader}>
-                  No worktrees yet.
+                  None yet
                 </Text>
               )}
               {records.map((record) => {
@@ -256,6 +321,8 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
                     }`}
                     onClick={() => onSelect(record)}
                     aria-label={`Select worktree ${title}`}
+                    aria-current={selected ? "true" : undefined}
+                    title={`Use ${title}`}
                   >
                     <Flex
                       direction="column"
@@ -287,43 +354,35 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
 
           <Separator size="4" />
 
-          <div className={styles.actions}>
-            <Button
-              type="button"
-              size="1"
-              variant="soft"
-              color="gray"
+          <div className={styles.reviewActions}>
+            <ActionButton
+              label="Diff"
+              title="View worktree diff"
+              icon={<FileTextIcon />}
               onClick={() => setDiffOpen(true)}
               disabled={!worktreeAvailable}
-            >
-              View Diff
-            </Button>
-            <Button
-              type="button"
-              size="1"
-              variant="soft"
-              color="gray"
+            />
+            <ActionButton
+              label="Merge"
+              title="Merge worktree"
+              icon={<DoubleArrowRightIcon />}
               onClick={() => setMergeOpen(true)}
               disabled={!worktreeAvailable}
-            >
-              Merge
-            </Button>
-            <Button
-              type="button"
-              size="1"
-              variant="soft"
-              color="red"
+            />
+            <ActionButton
+              label="Delete"
+              title="Delete or discard worktree"
+              icon={<TrashIcon />}
               onClick={() => setDeleteOpen(true)}
               disabled={!worktreeAvailable}
-            >
-              Discard/Delete
-            </Button>
+              danger={worktreeAvailable}
+            />
           </div>
 
           {sharedCount > 1 ? (
             <Text size="1" color="gray" className={styles.feedback}>
-              This worktree is shared by {sharedCount} references. Delete and
-              discard actions can affect other chats.
+              Shared by {sharedCount} references. Delete and discard actions can
+              affect other chats.
             </Text>
           ) : null}
         </div>

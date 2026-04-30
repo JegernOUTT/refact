@@ -310,14 +310,58 @@ describe("WorktreeControl", () => {
     });
   });
 
-  test("no-worktree label shows main workspace fallback", async () => {
+  test("no-worktree label shows compact main workspace fallback", async () => {
     renderControl([]);
 
     await waitFor(() => {
       expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
-        "Main workspace",
+        "Main",
       );
     });
+  });
+
+  test("menu renders compact actions and disables current-worktree actions on main", async () => {
+    const { user } = renderControl([]);
+
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+
+    const create = await screen.findByRole("button", {
+      name: "Create worktree",
+    });
+    expect(create).toHaveTextContent("Create");
+    expect(create).toHaveAttribute("title", "Create worktree");
+
+    const main = screen.getByRole("button", {
+      name: "Already using main workspace",
+    });
+    expect(main).toHaveTextContent("Main");
+    expect(main).toBeDisabled();
+
+    const open = screen.getByRole("button", {
+      name: "Open worktree in new window",
+    });
+    expect(open).toHaveTextContent("Open");
+    expect(open).toBeDisabled();
+
+    const copy = screen.getByRole("button", { name: "Copy workspace path" });
+    expect(copy).toHaveTextContent("Copy");
+    await waitFor(() => expect(copy).toBeEnabled());
+
+    const diff = screen.getByRole("button", { name: "View worktree diff" });
+    expect(diff).toHaveTextContent("Diff");
+    expect(diff).toBeDisabled();
+
+    const merge = screen.getByRole("button", { name: "Merge worktree" });
+    expect(merge).toHaveTextContent("Merge");
+    expect(merge).toBeDisabled();
+
+    const deleteAction = screen.getByRole("button", {
+      name: "Delete or discard worktree",
+    });
+    expect(deleteAction).toHaveTextContent("Delete");
+    expect(deleteAction).toBeDisabled();
+    expect(screen.getByText("Existing")).toBeInTheDocument();
+    expect(screen.getByText("None yet")).toBeInTheDocument();
   });
 
   test("create modal submits API call and attaches worktree", async () => {
@@ -335,7 +379,7 @@ describe("WorktreeControl", () => {
     await user.click(screen.getByTestId("worktree-control-trigger"));
     await user.click(
       await screen.findByRole("button", {
-        name: /Create worktree for this chat/,
+        name: "Create worktree",
       }),
     );
     const branchInput = await screen.findByLabelText(/Branch name/);
@@ -398,7 +442,9 @@ describe("WorktreeControl", () => {
 
     await user.click(screen.getByTestId("worktree-control-trigger"));
     await user.click(
-      await screen.findByRole("button", { name: /Open in new window/ }),
+      await screen.findByRole("button", {
+        name: "Open worktree in new window",
+      }),
     );
 
     await waitFor(() => expect(openCalls).toEqual(["wt-open"]));
@@ -422,7 +468,7 @@ describe("WorktreeControl", () => {
     await user.click(screen.getByTestId("worktree-control-trigger"));
     await user.click(
       await screen.findByRole("button", {
-        name: /Detach \/ use main workspace/,
+        name: "Detach worktree and use main workspace",
       }),
     );
 
@@ -433,7 +479,7 @@ describe("WorktreeControl", () => {
     });
     expect(deleteCalls).toHaveLength(0);
     expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
-      "Main workspace",
+      "Main",
     );
   });
 });

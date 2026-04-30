@@ -392,6 +392,74 @@ describe("Worktree lifecycle GUI", () => {
     );
   });
 
+  test("menu review row opens diff and merge flows", async () => {
+    const record = makeRecord("wt-menu", "refact/task/menu");
+    const mergeCalls: JsonObject[] = [];
+    server.use(
+      diffHandler(makeDiff(record.meta.id)),
+      mergeHandler(
+        {
+          id: record.meta.id,
+          status: "merged",
+          merged: true,
+          strategy: "squash",
+          source_branch: record.meta.branch ?? "refact/task/menu",
+          target_branch: "main",
+          cleanup: null,
+          conflict: null,
+          affected_references: [],
+          affected_reference_count: 1,
+          warnings: [],
+        },
+        mergeCalls,
+      ),
+    );
+
+    const { user } = render(
+      <Popover.Root open>
+        <WorktreeMenu
+          currentWorktree={record.meta}
+          currentRecord={record}
+          records={[record]}
+          isLoading={false}
+          canCopyPath
+          onCreate={() => undefined}
+          onSelect={() => undefined}
+          onDetach={() => undefined}
+          onOpenInNewWindow={() => undefined}
+          onCopyPath={() => undefined}
+        />
+      </Popover.Root>,
+      {
+        preloadedState: {
+          config: configState(),
+          chat: makeChatState("chat-1", record.meta),
+        },
+      },
+    );
+
+    const diffButton = screen.getByRole("button", {
+      name: "View worktree diff",
+    });
+    expect(diffButton).toHaveTextContent("Diff");
+    await user.click(diffButton);
+    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close" }));
+
+    const mergeButton = screen.getByRole("button", { name: "Merge worktree" });
+    expect(mergeButton).toHaveTextContent("Merge");
+    await user.click(mergeButton);
+    await user.click(await screen.findByRole("button", { name: "Merge" }));
+
+    expect(await screen.findByText("Merge completed.")).toBeInTheDocument();
+    expect(mergeCalls[0]).toMatchObject({
+      strategy: "squash",
+      target_branch: "main",
+      delete_after_merge: true,
+      include_uncommitted: false,
+    });
+  });
+
   test("delete confirmation calls endpoint and shows shared-use warning", async () => {
     const record = makeRecord("wt-shared", "refact/task/shared", 2);
     const deleteCalls: string[] = [];
@@ -433,7 +501,9 @@ describe("Worktree lifecycle GUI", () => {
       },
     );
 
-    await user.click(screen.getByRole("button", { name: "Discard/Delete" }));
+    await user.click(
+      screen.getByRole("button", { name: "Delete or discard worktree" }),
+    );
 
     expect(
       await screen.findByRole("heading", { name: "Delete worktree" }),

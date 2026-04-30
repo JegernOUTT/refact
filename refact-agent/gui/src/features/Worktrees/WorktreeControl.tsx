@@ -36,7 +36,7 @@ function compactPath(path: string): string {
 }
 
 function worktreeLabel(worktree: WorktreeMeta | null): string {
-  if (!worktree) return "Main workspace";
+  if (!worktree) return "Main";
   const branch = worktree.branch?.trim();
   return branch !== undefined && branch.length > 0
     ? branch
@@ -206,7 +206,10 @@ export const WorktreeControl: React.FC = () => {
             className={`${styles.trigger} ${
               currentWorktree ? styles.triggerActive : ""
             }`}
-            title={label}
+            title={currentWorktree ? label : "Main workspace"}
+            aria-label={`Worktree scope: ${
+              currentWorktree ? label : "Main workspace"
+            }`}
           >
             <Flex align="center" gap="1">
               <Text size="1" className={styles.triggerText}>
