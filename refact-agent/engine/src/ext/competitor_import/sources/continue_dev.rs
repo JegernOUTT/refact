@@ -36,6 +36,8 @@ struct ParsedMarkdown {
     body: String,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn scan_global_root(home_dir: &Path, staging_root: &Path) -> ContinueScanResult {
     scan_global_root_with_filter(home_dir, staging_root, &ImportPrivacyFilter::allow_all())
 }
@@ -53,6 +55,8 @@ pub(crate) fn scan_global_root_with_filter(
     )
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn scan_project_root(workspace_root: &Path, staging_root: &Path) -> ContinueScanResult {
     scan_project_root_with_filter(
         workspace_root,
@@ -79,6 +83,8 @@ pub(crate) fn scan_project_root_with_filter(
     result
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn scan_continue_root(
     source_root: &Path,
     scope: ImportScope,

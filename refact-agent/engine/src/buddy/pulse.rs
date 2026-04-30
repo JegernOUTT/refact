@@ -203,6 +203,9 @@ fn merge_import_report_into_pulse(pulse: &mut CompetitorImportPulse, report: &Im
     pulse.updated = pulse
         .updated
         .saturating_add(saturating_u32(report.status_count(&ImportStatus::Updated)));
+    pulse.stale = pulse
+        .stale
+        .saturating_add(saturating_u32(report.status_count(&ImportStatus::Stale)));
     pulse.conflicts = pulse
         .conflicts
         .saturating_add(saturating_u32(report.status_count(&ImportStatus::Conflict)));
@@ -237,6 +240,7 @@ fn report_counts_have_activity(counts: &ImportReportCounts) -> bool {
         || counts.created > 0
         || counts.updated > 0
         || counts.unchanged > 0
+        || counts.stale > 0
         || counts.conflicts > 0
         || counts.user_modified > 0
         || counts.unsupported > 0
@@ -468,6 +472,36 @@ mod tests {
         assert!(!pulse.sources_seen.contains_key("opencode"));
         assert!(!pulse.sources_seen.contains_key("kilo_code"));
         assert!(!pulse.sources_seen.contains_key("continue_dev"));
+    }
+
+    #[tokio::test]
+    async fn competitor_import_pulse_includes_stale_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let refact_config = temp.path().join("config").join("refact");
+        let workspace = temp.path().join("workspace");
+        let project_scope = ImportScope::Project {
+            root: workspace.clone(),
+        };
+        let stale_candidate = candidate(
+            Competitor::OpenCode,
+            ImportKind::Command,
+            project_scope.clone(),
+            "stale",
+        );
+        let mut summary = ImportSummary::from_scopes(vec![project_scope]);
+        summary.add_outcome(ImportOutcome {
+            candidate: stale_candidate,
+            status: ImportStatus::Stale,
+            message: "source no longer exists; generated destination preserved".to_string(),
+        });
+        write_summary_report(&workspace.join(".refact"), summary).await;
+
+        let pulse = build_competitor_import_pulse(&refact_config, &[workspace]).await;
+
+        assert_eq!(pulse.stale, 1);
+        assert_eq!(pulse.attention_items, 0);
+        assert!(!pulse.has_attention_items);
+        assert_eq!(pulse.sources_seen.get("opencode"), Some(&1));
     }
 
     #[tokio::test]

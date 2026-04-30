@@ -16,8 +16,11 @@ use super::super::markdown::{
 };
 use super::super::types::{
     Competitor, ConversionContext, ImportCandidate, ImportIssue, ImportKind, ImportPrivacyFilter,
-    ImportScope, ImportStatus, ImportSummary, NormalizedSubagent, ToolPolicy,
+    ImportScope, ImportStatus, NormalizedSubagent, ToolPolicy,
 };
+#[cfg(test)]
+use super::super::types::ImportSummary;
+#[cfg(test)]
 use super::super::writer::write_candidates;
 
 #[derive(Debug, Default)]
@@ -27,6 +30,7 @@ pub struct OpenCodeScan {
 }
 
 impl OpenCodeScan {
+    #[cfg(test)]
     pub fn to_summary(&self) -> ImportSummary {
         let mut summary = ImportSummary::default();
         for candidate in &self.candidates {
@@ -38,6 +42,7 @@ impl OpenCodeScan {
         summary
     }
 
+    #[cfg(test)]
     fn issues_summary(&self) -> ImportSummary {
         let mut summary = ImportSummary::default();
         for issue in &self.issues {
@@ -69,6 +74,8 @@ pub(super) struct CompatibleScanRoots {
     pub config_files: Vec<PathBuf>,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(super) fn scan_compatible_roots(
     context: &ConversionContext,
     roots: CompatibleScanRoots,
@@ -121,6 +128,7 @@ pub(super) fn scan_compatible_roots_with_filter(
     scan
 }
 
+#[cfg(test)]
 pub fn scan_project_root(workspace_root: &Path) -> OpenCodeScan {
     scan_project_root_with_filter(workspace_root, &ImportPrivacyFilter::allow_all())
 }
@@ -137,6 +145,7 @@ pub(crate) fn scan_project_root_with_filter(
     scan_project_root_with_staging_and_filter(workspace_root, &staging_root, filter)
 }
 
+#[cfg(test)]
 pub fn scan_project_root_with_staging(workspace_root: &Path, staging_root: &Path) -> OpenCodeScan {
     scan_project_root_with_staging_and_filter(
         workspace_root,
@@ -189,6 +198,8 @@ pub(crate) fn scan_project_root_with_staging_and_filter(
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn scan_global_root(config_root: &Path, refact_config_root: &Path) -> OpenCodeScan {
     scan_global_root_with_filter(
         config_root,
@@ -209,6 +220,7 @@ pub(crate) fn scan_global_root_with_filter(
     scan_global_root_with_staging_and_filter(config_root, &staging_root, filter)
 }
 
+#[cfg(test)]
 pub fn scan_global_root_with_staging(config_root: &Path, staging_root: &Path) -> OpenCodeScan {
     scan_global_root_with_staging_and_filter(
         config_root,
@@ -235,6 +247,7 @@ pub(crate) fn scan_global_root_with_staging_and_filter(
     scan_root(&context, config_root, &config_files, staging_root, filter)
 }
 
+#[cfg(test)]
 pub async fn import_project_root(workspace_root: &Path) -> ImportSummary {
     let scan = scan_project_root(workspace_root);
     let mut summary = scan.issues_summary();
@@ -243,6 +256,8 @@ pub async fn import_project_root(workspace_root: &Path) -> ImportSummary {
     summary
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub async fn import_global_root(config_root: &Path, refact_config_root: &Path) -> ImportSummary {
     let scan = scan_global_root(config_root, refact_config_root);
     let mut summary = scan.issues_summary();

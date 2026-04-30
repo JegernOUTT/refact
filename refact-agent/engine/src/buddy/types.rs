@@ -655,6 +655,7 @@ pub struct CompetitorImportPulse {
     pub discovered_candidates: u32,
     pub created: u32,
     pub updated: u32,
+    pub stale: u32,
     pub conflicts: u32,
     pub user_modified: u32,
     pub unsupported: u32,

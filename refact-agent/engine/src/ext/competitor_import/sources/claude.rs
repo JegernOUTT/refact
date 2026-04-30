@@ -18,6 +18,8 @@ use super::super::types::{
     ImportScope, ImportStatus, NormalizedSubagent, ToolPolicy,
 };
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn collect_global_candidates(
     home_dir: &Path,
     refact_config_dir: &Path,
@@ -42,6 +44,8 @@ pub(crate) fn collect_global_candidates_with_filter(
     collect_candidates_with_filter(&source_root, ImportScope::Global, &staging_root, filter)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn collect_project_candidates(
     workspace_root: &Path,
 ) -> (Vec<ImportCandidate>, Vec<ImportIssue>) {
@@ -68,6 +72,8 @@ pub(crate) fn collect_project_candidates_with_filter(
     )
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn collect_candidates(
     source_root: &Path,
     scope: ImportScope,

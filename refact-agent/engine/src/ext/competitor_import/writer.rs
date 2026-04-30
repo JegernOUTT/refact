@@ -3,6 +3,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
+use serde_json::Value;
 
 use super::manifest::{
     hash_directory, hash_file, is_hash_limit_error, manifest_path_for_scope_root,
@@ -13,7 +14,16 @@ use super::types::{
     ImportReport, ImportScope, ImportStatus, ImportSummary,
 };
 
+#[cfg(test)]
 pub async fn write_candidates(scope_root: &Path, candidates: &[ImportCandidate]) -> ImportSummary {
+    write_candidates_for_scope(scope_root, &ImportScope::Global, candidates).await
+}
+
+pub async fn write_candidates_for_scope(
+    scope_root: &Path,
+    scope: &ImportScope,
+    candidates: &[ImportCandidate],
+) -> ImportSummary {
     let mut summary = ImportSummary::default();
     let manifest_path = manifest_path_for_scope_root(scope_root);
     if candidates.is_empty() && !manifest_path.exists() {
@@ -38,6 +48,7 @@ pub async fn write_candidates(scope_root: &Path, candidates: &[ImportCandidate])
         }
     };
 
+    record_stale_entries(scope_root, scope, &manifest, candidates, &mut summary);
     for candidate in candidates {
         match write_candidate(scope_root, &mut manifest, candidate).await {
             CandidateWriteResult::Outcome(outcome) => summary.add_outcome(outcome),
@@ -70,6 +81,62 @@ enum CandidateWriteResult {
         outcome: ImportOutcome,
         issue: ImportIssue,
     },
+}
+
+fn record_stale_entries(
+    scope_root: &Path,
+    scope: &ImportScope,
+    manifest: &ImportManifest,
+    candidates: &[ImportCandidate],
+    summary: &mut ImportSummary,
+) {
+    for entry in &manifest.entries {
+        if candidates
+            .iter()
+            .any(|candidate| manifest_entry_matches_candidate(entry, candidate))
+        {
+            continue;
+        }
+        summary.add_outcome(stale_outcome(scope_root, scope, entry));
+    }
+}
+
+fn stale_outcome(
+    scope_root: &Path,
+    scope: &ImportScope,
+    entry: &ImportManifestEntry,
+) -> ImportOutcome {
+    let destination_path = entry
+        .dest_path
+        .strip_prefix(scope_root)
+        .unwrap_or(&entry.dest_path)
+        .to_path_buf();
+    ImportOutcome {
+        candidate: ImportCandidateSummary {
+            competitor: entry.competitor,
+            kind: entry.kind,
+            scope: scope.clone(),
+            source_root: entry
+                .source_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            source_path: entry.source_path.clone(),
+            dest_name: dest_name_from_path(&destination_path),
+            destination_path,
+            metadata: entry.metadata.clone().unwrap_or(Value::Null),
+        },
+        status: ImportStatus::Stale,
+        message: "source no longer exists; generated destination preserved".to_string(),
+    }
+}
+
+fn dest_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "generated".to_string())
 }
 
 async fn write_candidate(
@@ -917,7 +984,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_manifest_does_not_delete_generated_destination() {
+    async fn stale_manifest_reports_stale_and_preserves_generated_destination() {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("hello.md");
@@ -928,10 +995,26 @@ mod tests {
             &[file_candidate(source_path, dest_rel, "hello")],
         )
         .await;
+        let before_entries =
+            ImportManifest::read_from_path(&manifest_path_for_scope_root(&scope_root))
+                .await
+                .unwrap()
+                .entries;
 
         let summary = write_candidates(&scope_root, &[]).await;
+        let after_entries =
+            ImportManifest::read_from_path(&manifest_path_for_scope_root(&scope_root))
+                .await
+                .unwrap()
+                .entries;
 
-        assert!(summary.is_empty());
+        assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Stale));
+        assert_eq!(summary.status_counts.get(&ImportStatus::Stale), Some(&1));
+        assert_eq!(
+            summary.outcomes[0].message,
+            "source no longer exists; generated destination preserved"
+        );
+        assert_eq!(before_entries, after_entries);
         assert_eq!(
             tokio::fs::read_to_string(&dest_path).await.unwrap(),
             "hello"

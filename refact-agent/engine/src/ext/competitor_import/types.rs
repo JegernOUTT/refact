@@ -63,6 +63,7 @@ pub(crate) struct ImportPrivacyFilter {
 }
 
 impl ImportPrivacyFilter {
+    #[cfg(test)]
     pub fn allow_all() -> Self {
         Self { settings: None }
     }
@@ -136,6 +137,7 @@ impl ToolPolicy {
         }
     }
 
+    #[cfg(test)]
     pub fn allow(allowed: Vec<String>) -> Self {
         Self {
             allowed: Some(allowed),
@@ -209,6 +211,7 @@ pub enum ImportStatus {
     Created,
     Updated,
     Unchanged,
+    Stale,
     Conflict,
     UserModified,
     Unsupported,
@@ -239,6 +242,7 @@ pub struct ImportReportCounts {
     pub created: usize,
     pub updated: usize,
     pub unchanged: usize,
+    pub stale: usize,
     pub conflicts: usize,
     pub user_modified: usize,
     pub unsupported: usize,
@@ -251,15 +255,12 @@ impl ImportReportCounts {
             ImportStatus::Created => self.created += 1,
             ImportStatus::Updated => self.updated += 1,
             ImportStatus::Unchanged => self.unchanged += 1,
+            ImportStatus::Stale => self.stale += 1,
             ImportStatus::Conflict => self.conflicts += 1,
             ImportStatus::UserModified => self.user_modified += 1,
             ImportStatus::Unsupported => self.unsupported += 1,
             ImportStatus::Error => self.errors += 1,
         }
-    }
-
-    pub fn attention_items(&self) -> usize {
-        self.conflicts + self.user_modified + self.errors
     }
 }
 
@@ -640,7 +641,8 @@ fn collect_top_issues(
 fn is_top_issue_status(status: &ImportStatus) -> bool {
     matches!(
         status,
-        ImportStatus::Conflict
+        ImportStatus::Stale
+            | ImportStatus::Conflict
             | ImportStatus::UserModified
             | ImportStatus::Unsupported
             | ImportStatus::Error
@@ -833,6 +835,13 @@ mod tests {
         assert!(!summary.has_imported_changes());
 
         summary.add_outcome(ImportOutcome {
+            candidate: candidate.clone(),
+            status: ImportStatus::Stale,
+            message: "source no longer exists; generated destination preserved".to_string(),
+        });
+        assert!(!summary.has_imported_changes());
+
+        summary.add_outcome(ImportOutcome {
             candidate,
             status: ImportStatus::Updated,
             message: "updated".to_string(),
@@ -958,6 +967,29 @@ mod tests {
 
         assert!(report.reported_scopes.is_empty());
         assert!(report.reported_sources.is_empty());
+    }
+
+    #[test]
+    fn report_serialization_handles_stale_status() {
+        let candidate = candidate_summary();
+        let mut summary = ImportSummary::default();
+        summary.add_outcome(ImportOutcome {
+            candidate,
+            status: ImportStatus::Stale,
+            message: "source no longer exists; generated destination preserved".to_string(),
+        });
+
+        let report = ImportReport::from_summary(&summary);
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: ImportReport = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(report.status_count(&ImportStatus::Stale), 1);
+        assert_eq!(report.competitor_counts[&Competitor::ClaudeCode].stale, 1);
+        assert_eq!(report.kind_counts[&ImportKind::Command].stale, 1);
+        assert_eq!(report.top_issues.len(), 1);
+        assert_eq!(decoded.status_count(&ImportStatus::Stale), 1);
+        assert!(json.contains("stale"));
+        assert!(!json.contains("/dest/review.md"));
     }
 
     #[test]

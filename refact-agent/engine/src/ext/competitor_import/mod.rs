@@ -39,6 +39,7 @@ pub async fn run_global_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSummar
     summary
 }
 
+#[cfg(test)]
 pub(crate) async fn run_global_import_with_paths(
     refact_config_dir: &Path,
     home_dir: Option<&Path>,
@@ -56,7 +57,8 @@ pub(crate) async fn run_global_import_with_paths_and_filter(
     home_dir: Option<&Path>,
     filter: &ImportPrivacyFilter,
 ) -> ImportSummary {
-    let mut summary = ImportSummary::from_scopes(vec![ImportScope::Global]);
+    let scope = ImportScope::Global;
+    let mut summary = ImportSummary::from_scopes(vec![scope.clone()]);
     let Some(home_dir) = home_dir else {
         summary.add_issue(ImportIssue {
             competitor: None,
@@ -104,7 +106,7 @@ pub(crate) async fn run_global_import_with_paths_and_filter(
     );
     collect_continue_scan(&mut summary, &mut candidates, continue_scan);
 
-    write_candidates_and_merge(refact_config_dir, &mut summary, &candidates).await;
+    write_candidates_and_merge(refact_config_dir, &scope, &mut summary, &candidates).await;
     persist_last_report_if_needed(refact_config_dir, &mut summary).await;
     summary
 }
@@ -146,6 +148,7 @@ pub async fn run_project_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSumma
     summary
 }
 
+#[cfg(test)]
 pub(crate) async fn run_project_import_with_paths(workspace_roots: &[PathBuf]) -> ImportSummary {
     run_project_import_with_paths_and_filter(workspace_roots, &ImportPrivacyFilter::allow_all())
         .await
@@ -163,7 +166,7 @@ pub(crate) async fn run_project_import_with_paths_and_filter(
             continue;
         };
         let scope = ImportScope::Project { root: root.clone() };
-        let mut scope_summary = ImportSummary::from_scopes(vec![scope]);
+        let mut scope_summary = ImportSummary::from_scopes(vec![scope.clone()]);
         scope_summary.discovered_sources = sources::discover_project_sources(&root);
         let mut candidates = Vec::new();
 
@@ -191,7 +194,7 @@ pub(crate) async fn run_project_import_with_paths_and_filter(
         collect_continue_scan(&mut scope_summary, &mut candidates, continue_scan);
 
         let scope_root = root.join(".refact");
-        write_candidates_and_merge(&scope_root, &mut scope_summary, &candidates).await;
+        write_candidates_and_merge(&scope_root, &scope, &mut scope_summary, &candidates).await;
         persist_last_report_if_needed(&scope_root, &mut scope_summary).await;
         summary.merge(scope_summary);
     }
@@ -225,13 +228,11 @@ fn collect_continue_scan(
 
 async fn write_candidates_and_merge(
     scope_root: &Path,
+    scope: &ImportScope,
     summary: &mut ImportSummary,
     candidates: &[ImportCandidate],
 ) {
-    if candidates.is_empty() {
-        return;
-    }
-    summary.merge(writer::write_candidates(scope_root, candidates).await);
+    summary.merge(writer::write_candidates_for_scope(scope_root, scope, candidates).await);
 }
 
 async fn persist_last_report_if_needed(scope_root: &Path, summary: &mut ImportSummary) {
@@ -344,6 +345,7 @@ pub(crate) fn buddy_runtime_event_for_import_report(report: &ImportReport) -> Bu
     let created = report.status_count(&ImportStatus::Created);
     let updated = report.status_count(&ImportStatus::Updated);
     let unchanged = report.status_count(&ImportStatus::Unchanged);
+    let stale = report.status_count(&ImportStatus::Stale);
     let conflicts = report.status_count(&ImportStatus::Conflict);
     let user_modified = report.status_count(&ImportStatus::UserModified);
     let unsupported = report.status_count(&ImportStatus::Unsupported);
@@ -351,14 +353,14 @@ pub(crate) fn buddy_runtime_event_for_import_report(report: &ImportReport) -> Bu
     let attention = conflicts + user_modified + errors;
     let status = if errors > 0 {
         "error"
-    } else if conflicts + user_modified + unsupported > 0 {
+    } else if stale + conflicts + user_modified + unsupported > 0 {
         "warning"
     } else {
         "completed"
     };
     let priority = if attention > 0 {
         "high"
-    } else if created + updated > 0 || unsupported > 0 {
+    } else if created + updated > 0 || stale > 0 || unsupported > 0 {
         "normal"
     } else {
         "low"
@@ -371,16 +373,23 @@ pub(crate) fn buddy_runtime_event_for_import_report(report: &ImportReport) -> Bu
             created + updated,
             plural_suffix(created + updated)
         )
+    } else if stale > 0 {
+        format!(
+            "Competitor import found {} stale generated customization{}",
+            stale,
+            plural_suffix(stale)
+        )
     } else {
         "Competitor import checked customizations".to_string()
     };
     let description = format!(
-        "{}: discovered {}, created {}, updated {}, unchanged {}, conflicts {}, user-modified {}, unsupported {}, errors {}.",
+        "{}: discovered {}, created {}, updated {}, unchanged {}, stale {}, conflicts {}, user-modified {}, unsupported {}, errors {}.",
         runtime_scope_label(report),
         report.discovered_candidates,
         created,
         updated,
         unchanged,
+        stale,
         conflicts,
         user_modified,
         unsupported,
@@ -476,11 +485,12 @@ fn log_import_summary(label: &str, summary: &ImportSummary) {
     }
     for scope in &summary.discovered_scopes {
         tracing::info!(
-            "competitor import {label} {}: created={} updated={} unchanged={} conflict={} user_modified={} unsupported={} errors={}",
+            "competitor import {label} {}: created={} updated={} unchanged={} stale={} conflict={} user_modified={} unsupported={} errors={}",
             scope_label(scope),
             status_count_for_scope(summary, scope, &ImportStatus::Created),
             status_count_for_scope(summary, scope, &ImportStatus::Updated),
             status_count_for_scope(summary, scope, &ImportStatus::Unchanged),
+            status_count_for_scope(summary, scope, &ImportStatus::Stale),
             status_count_for_scope(summary, scope, &ImportStatus::Conflict),
             status_count_for_scope(summary, scope, &ImportStatus::UserModified),
             status_count_for_scope(summary, scope, &ImportStatus::Unsupported),
@@ -1149,6 +1159,36 @@ mod tests {
         assert_eq!(generation_after_first, 1);
         assert!(!repeated.has_imported_changes());
         assert_eq!(generation_after_second, 1);
+    }
+
+    #[tokio::test]
+    async fn stale_project_import_does_not_drive_cache_invalidation() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_allow_all_privacy(gcx.clone()).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let source_path = workspace.path().join(".claude/commands/review.md");
+        let dest_path = workspace.path().join(".refact/commands/review.md");
+        write(&source_path, "Review.");
+        {
+            let gcx_locked = gcx.read().await;
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() =
+                vec![workspace.path().to_path_buf()];
+        }
+
+        let first = run_project_import(gcx.clone()).await;
+        fs::remove_file(&source_path).unwrap();
+        let stale = run_project_import(gcx.clone()).await;
+        let generation = gcx
+            .read()
+            .await
+            .ext_cache_generation
+            .load(Ordering::Relaxed);
+
+        assert_eq!(status_count(&first, ImportStatus::Created), 1);
+        assert_eq!(status_count(&stale, ImportStatus::Stale), 1);
+        assert!(!stale.has_imported_changes());
+        assert_eq!(generation, 1);
+        assert_eq!(fs::read_to_string(dest_path).unwrap(), "Review.");
     }
 
     fn runtime_event_summary(status: ImportStatus, scope: ImportScope) -> ImportSummary {

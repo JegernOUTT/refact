@@ -101,10 +101,6 @@ pub fn set_yaml_string_list(mapping: &mut Mapping, key: &str, values: &[String])
     }
 }
 
-pub fn remove_yaml_key(mapping: &mut Mapping, key: &str) {
-    mapping.remove(&Value::String(key.to_string()));
-}
-
 pub fn render_markdown_with_frontmatter(
     frontmatter: &Mapping,
     body: &str,

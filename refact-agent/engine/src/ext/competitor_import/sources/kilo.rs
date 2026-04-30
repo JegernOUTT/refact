@@ -6,12 +6,16 @@ use super::opencode::{scan_compatible_roots_with_filter, CompatibleScanRoots, Op
 use super::super::manifest::{MAX_SCAN_DEPTH, MAX_UNSUPPORTED_RULE_REPORTS};
 use super::super::types::{
     Competitor, ConversionContext, ImportIssue, ImportKind, ImportPrivacyFilter, ImportScope,
-    ImportStatus, ImportSummary,
+    ImportStatus,
 };
+#[cfg(test)]
+use super::super::types::ImportSummary;
+#[cfg(test)]
 use super::super::writer::write_candidates;
 
 pub type KiloScan = OpenCodeScan;
 
+#[cfg(test)]
 pub fn scan_project_root(workspace_root: &Path) -> KiloScan {
     scan_project_root_with_filter(workspace_root, &ImportPrivacyFilter::allow_all())
 }
@@ -28,6 +32,7 @@ pub(crate) fn scan_project_root_with_filter(
     scan_project_root_with_staging_and_filter(workspace_root, &staging_root, filter)
 }
 
+#[cfg(test)]
 pub fn scan_project_root_with_staging(workspace_root: &Path, staging_root: &Path) -> KiloScan {
     scan_project_root_with_staging_and_filter(
         workspace_root,
@@ -76,6 +81,8 @@ pub(crate) fn scan_project_root_with_staging_and_filter(
     scan
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn scan_global_root(
     home_dir: &Path,
     config_root: &Path,
@@ -102,6 +109,7 @@ pub(crate) fn scan_global_root_with_filter(
     scan_global_root_with_staging_and_filter(home_dir, config_root, &staging_root, filter)
 }
 
+#[cfg(test)]
 pub fn scan_global_root_with_staging(
     home_dir: &Path,
     config_root: &Path,
@@ -137,6 +145,7 @@ pub(crate) fn scan_global_root_with_staging_and_filter(
     scan
 }
 
+#[cfg(test)]
 pub async fn import_project_root(workspace_root: &Path) -> ImportSummary {
     let scan = scan_project_root(workspace_root);
     let mut summary = issues_summary(&scan);
@@ -145,6 +154,8 @@ pub async fn import_project_root(workspace_root: &Path) -> ImportSummary {
     summary
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub async fn import_global_root(
     home_dir: &Path,
     config_root: &Path,
@@ -243,6 +254,7 @@ fn append_scan(scan: &mut KiloScan, mut other: KiloScan) {
     scan.issues.append(&mut other.issues);
 }
 
+#[cfg(test)]
 fn issues_summary(scan: &KiloScan) -> ImportSummary {
     let mut summary = ImportSummary::default();
     for issue in &scan.issues {
