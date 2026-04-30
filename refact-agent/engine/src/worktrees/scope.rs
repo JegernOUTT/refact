@@ -65,6 +65,10 @@ impl ExecutionScope {
         self.repo_root.as_path()
     }
 
+    pub fn source_workspace_root(&self) -> &Path {
+        self.source_workspace_root.as_path()
+    }
+
     pub fn resolve_path(&self, raw: &Path) -> Result<ScopedPath, String> {
         let candidate = self.candidate_for_raw_path(raw)?;
         self.finalize_candidate(raw, candidate, false, false)

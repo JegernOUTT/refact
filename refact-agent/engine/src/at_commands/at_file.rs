@@ -9,11 +9,13 @@ use crate::at_commands::at_commands::{
 };
 use crate::at_commands::execute_at::{AtCommandMember, correct_at_arg};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
-use crate::call_validation::{ContextFile, ContextEnum};
+use crate::call_validation::{ChatMessage, ContextFile, ContextEnum};
 use crate::files_correction::{
     correct_to_nearest_filename, correct_to_nearest_dir_path, shortify_paths, get_project_dirs,
 };
 use crate::global_context::GlobalContext;
+use crate::tools::scope_utils::{format_scope_notices, resolve_existing_path_with_execution_scope};
+use crate::worktrees::scope::ExecutionScope;
 
 pub async fn resolve_file_path_directly(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -50,6 +52,28 @@ pub async fn resolve_file_path_directly(
     }
 
     None
+}
+
+pub async fn resolve_file_path_directly_with_scope(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    execution_scope: Option<&ExecutionScope>,
+    path_with_colon: &str,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    let mut path_str = path_with_colon.to_string();
+    let colon_range = colon_lines_range_from_arg(&mut path_str);
+    if let Some(resolved) =
+        resolve_existing_path_with_execution_scope(gcx.clone(), execution_scope, &path_str).await?
+    {
+        if !resolved.path.is_file() {
+            return Err(format!("Path '{}' is not a file", resolved.path.display()));
+        }
+        let mut result = resolved.path.to_string_lossy().to_string();
+        put_colon_back_to_arg(&mut result, &colon_range);
+        return Ok(Some((result, resolved.notices)));
+    }
+    Ok(resolve_file_path_directly(gcx, path_with_colon)
+        .await
+        .map(|path| (path, vec![])))
 }
 
 pub struct AtFile {
@@ -405,12 +429,13 @@ impl AtCommand for AtFile {
         cmd: &mut AtCommandMember,
         args: &mut Vec<AtCommandMember>,
     ) -> Result<(Vec<ContextEnum>, String), String> {
-        let (gcx, top_n, is_preview) = {
+        let (gcx, top_n, is_preview, execution_scope) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.global_context.clone(),
                 ccx_lock.top_n,
                 ccx_lock.is_preview,
+                ccx_lock.execution_scope.clone(),
             )
         };
 
@@ -430,24 +455,55 @@ impl AtCommand for AtFile {
         args.clear();
         args.push(arg0.clone());
 
-        if let Some(resolved) = resolve_file_path_directly(gcx.clone(), &arg0.text).await {
-            arg0.text = resolved.clone();
-            arg0.ok = true;
-            args[0] = arg0.clone();
+        match resolve_file_path_directly_with_scope(
+            gcx.clone(),
+            execution_scope.as_ref(),
+            &arg0.text,
+        )
+        .await
+        {
+            Ok(Some((resolved, notices))) => {
+                arg0.text = resolved.clone();
+                arg0.ok = true;
+                args[0] = arg0.clone();
 
-            match context_file_from_file_path(gcx.clone(), resolved).await {
-                Ok(context_file) => {
-                    let replacement_text = if cmd.pos1 == 0 {
-                        "".to_string()
-                    } else {
-                        arg0.text.clone()
-                    };
-                    return Ok((
-                        vec_context_file_to_context_tools(vec![context_file]),
-                        replacement_text,
-                    ));
+                match context_file_from_file_path(gcx.clone(), resolved).await {
+                    Ok(context_file) => {
+                        let replacement_text = if cmd.pos1 == 0 {
+                            "".to_string()
+                        } else {
+                            arg0.text.clone()
+                        };
+                        let mut result = vec_context_file_to_context_tools(vec![context_file]);
+                        let notice_text = format_scope_notices(&notices);
+                        if !notice_text.is_empty() {
+                            result.insert(
+                                0,
+                                ContextEnum::ChatMessage(ChatMessage::new(
+                                    "plain_text".to_string(),
+                                    notice_text,
+                                )),
+                            );
+                        }
+                        return Ok((result, replacement_text));
+                    }
+                    Err(e) => {
+                        if is_preview {
+                            cmd.ok = false;
+                            cmd.reason = Some(e);
+                            return Ok((vec![], "".to_string()));
+                        }
+                        return Err(e);
+                    }
                 }
-                Err(e) => {
+            }
+            Ok(None) => {
+                if execution_scope
+                    .as_ref()
+                    .map(|scope| scope.is_enforced())
+                    .unwrap_or(false)
+                {
+                    let e = format!("cannot find {:?} inside active worktree scope", arg0.text);
                     if is_preview {
                         cmd.ok = false;
                         cmd.reason = Some(e);
@@ -456,8 +512,15 @@ impl AtCommand for AtFile {
                     return Err(e);
                 }
             }
+            Err(e) => {
+                if is_preview {
+                    cmd.ok = false;
+                    cmd.reason = Some(e);
+                    return Ok((vec![], "".to_string()));
+                }
+                return Err(e);
+            }
         }
-
         correct_at_arg(ccx.clone(), &self.params[0], &mut arg0).await;
         args[0] = arg0.clone();
 

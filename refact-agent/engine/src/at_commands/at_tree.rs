@@ -13,6 +13,9 @@ use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::at_commands::execute_at::AtCommandMember;
 use crate::call_validation::{ChatMessage, ContextEnum};
 use crate::files_correction::{correct_to_nearest_dir_path, get_project_dirs, paths_from_anywhere};
+use crate::tools::scope_utils::{
+    format_scope_notices, list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
+};
 
 const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "mp3", "mp4", "wav", "avi", "mov",
@@ -341,8 +344,22 @@ impl AtCommand for AtTree {
         cmd: &mut AtCommandMember,
         args: &mut Vec<AtCommandMember>,
     ) -> Result<(Vec<ContextEnum>, String), String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let paths_from_anywhere = paths_from_anywhere(gcx.clone()).await;
+        let (gcx, execution_scope) = {
+            let ccx_locked = ccx.lock().await;
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+            )
+        };
+        let scoped_enforced = execution_scope
+            .as_ref()
+            .map(|scope| scope.is_enforced())
+            .unwrap_or(false);
+        let paths_from_anywhere = if scoped_enforced {
+            vec![]
+        } else {
+            paths_from_anywhere(gcx.clone()).await
+        };
         let project_dirs = get_project_dirs(gcx.clone()).await;
         let filtered_paths: Vec<PathBuf> = paths_from_anywhere
             .into_iter()
@@ -356,32 +373,75 @@ impl AtCommand for AtTree {
             .cloned()
             .collect();
 
-        let (tree, is_root_query) = match args.iter().find(|x| x.text != "--ast") {
-            None => (TreeNode::build(&filtered_paths), true),
-            Some(arg) => {
-                let path = arg.text.clone();
-                let candidates = correct_to_nearest_dir_path(gcx.clone(), &path, false, 10).await;
-                let candidate = return_one_candidate_or_a_good_error(
-                    gcx.clone(),
-                    &path,
-                    &candidates,
-                    &project_dirs,
-                    true,
-                )
-                .await
-                .map_err(|e| {
-                    cmd.ok = false;
-                    cmd.reason = Some(e.clone());
-                    args.clear();
-                    e
-                })?;
-                let start_dir = PathBuf::from(candidate);
-                let paths = filtered_paths
-                    .iter()
-                    .filter(|f| f.starts_with(&start_dir))
-                    .cloned()
-                    .collect();
-                (TreeNode::build(&paths), false)
+        let mut scope_notices = vec![];
+        let (tree, is_root_query) = if scoped_enforced {
+            match args.iter().find(|x| x.text != "--ast") {
+                None => {
+                    let root = execution_scope
+                        .as_ref()
+                        .unwrap()
+                        .effective_root()
+                        .to_path_buf();
+                    let paths =
+                        list_scoped_files_under_dir(gcx.clone(), &root, true, false).await?;
+                    (TreeNode::build(&paths), true)
+                }
+                Some(arg) => {
+                    let path = arg.text.clone();
+                    let resolved = resolve_existing_path_with_execution_scope(
+                        gcx.clone(),
+                        execution_scope.as_ref(),
+                        &path,
+                    )
+                    .await?
+                    .ok_or_else(|| format!("Failed to resolve scoped path '{}'", path))?;
+                    scope_notices.extend(resolved.notices);
+                    if !resolved.path.is_dir() {
+                        let e = format!("Path '{}' is not a directory", resolved.path.display());
+                        cmd.ok = false;
+                        cmd.reason = Some(e.clone());
+                        args.clear();
+                        return Err(e);
+                    }
+                    let paths = list_scoped_files_under_dir(
+                        gcx.clone(),
+                        &resolved.path,
+                        true,
+                        resolved.outside_absolute_path,
+                    )
+                    .await?;
+                    (TreeNode::build(&paths), false)
+                }
+            }
+        } else {
+            match args.iter().find(|x| x.text != "--ast") {
+                None => (TreeNode::build(&filtered_paths), true),
+                Some(arg) => {
+                    let path = arg.text.clone();
+                    let candidates =
+                        correct_to_nearest_dir_path(gcx.clone(), &path, false, 10).await;
+                    let candidate = return_one_candidate_or_a_good_error(
+                        gcx.clone(),
+                        &path,
+                        &candidates,
+                        &project_dirs,
+                        true,
+                    )
+                    .await
+                    .map_err(|e| {
+                        cmd.ok = false;
+                        cmd.reason = Some(e.clone());
+                        args.clear();
+                        e
+                    })?;
+                    let start_dir = PathBuf::from(candidate);
+                    let paths = filtered_paths
+                        .iter()
+                        .filter(|f| f.starts_with(&start_dir))
+                        .cloned()
+                        .collect();
+                    (TreeNode::build(&paths), false)
+                }
             }
         };
 
@@ -398,6 +458,7 @@ impl AtCommand for AtTree {
         } else {
             tree
         };
+        let tree = format!("{}{}", format_scope_notices(&scope_notices), tree);
         Ok((
             vec![ContextEnum::ChatMessage(ChatMessage::new(
                 "plain_text".to_string(),

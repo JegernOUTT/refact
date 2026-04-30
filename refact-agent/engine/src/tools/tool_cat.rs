@@ -20,6 +20,9 @@ use crate::files_correction::{
 use crate::files_in_workspace::{get_file_text_from_memory_or_disk, ls_files};
 use crate::scratchpads::multimodality::MultimodalElement;
 use crate::knowledge_index::format_related_memories_section;
+use crate::tools::scope_utils::{
+    format_scope_notices, list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
+};
 
 use std::io::Cursor;
 use image::imageops::FilterType;
@@ -143,11 +146,22 @@ impl Tool for ToolCat {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let mut corrections = false;
         let (paths, path_line_ranges, symbols) = parse_cat_args(args)?;
-        let (filenames_present, symbols_not_found, not_found_messages, context_enums, multimodal) =
-            paths_and_symbols_to_cat_with_path_ranges(ccx.clone(), paths, path_line_ranges, symbols)
-                .await;
+        let (
+            filenames_present,
+            symbols_not_found,
+            not_found_messages,
+            context_enums,
+            multimodal,
+            scope_notices,
+        ) = paths_and_symbols_to_cat_with_path_ranges(
+            ccx.clone(),
+            paths,
+            path_line_ranges,
+            symbols,
+        )
+        .await;
 
-        let mut content = "".to_string();
+        let mut content = format_scope_notices(&scope_notices);
         if !filenames_present.is_empty() {
             content.push_str(&format!(
                 "Paths found:\n{}\n\n",
@@ -346,18 +360,76 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
     Vec<String>,
     Vec<ContextEnum>,
     Vec<MultimodalElement>,
+    Vec<String>,
 ) {
-    let (gcx, top_n) = {
+    let (gcx, top_n, execution_scope) = {
         let ccx_locked = ccx.lock().await;
-        (ccx_locked.global_context.clone(), ccx_locked.top_n)
+        (
+            ccx_locked.global_context.clone(),
+            ccx_locked.top_n,
+            ccx_locked.execution_scope.clone(),
+        )
     };
     let ast_service_opt = gcx.read().await.ast_service.clone();
 
     let mut not_found_messages = vec![];
+    let mut scope_notices = vec![];
     let mut corrected_paths = vec![];
     let mut corrected_path_to_original = HashMap::new();
 
     for p in paths {
+        if execution_scope
+            .as_ref()
+            .map(|scope| scope.is_enforced())
+            .unwrap_or(false)
+        {
+            match resolve_existing_path_with_execution_scope(
+                gcx.clone(),
+                execution_scope.as_ref(),
+                &p,
+            )
+            .await
+            {
+                Ok(Some(resolved)) => {
+                    scope_notices.extend(resolved.notices);
+                    if resolved.path.is_dir() {
+                        match list_scoped_files_under_dir(
+                            gcx.clone(),
+                            &resolved.path,
+                            false,
+                            resolved.outside_absolute_path,
+                        )
+                        .await
+                        {
+                            Ok(files_in_dir) => {
+                                for file in files_in_dir {
+                                    let file_str = file.to_string_lossy().to_string();
+                                    corrected_paths.push(file_str.clone());
+                                    corrected_path_to_original.insert(file_str, p.clone());
+                                }
+                            }
+                            Err(e) => not_found_messages.push(e),
+                        }
+                    } else if resolved.path.is_file() {
+                        let file_str = resolved.path.to_string_lossy().to_string();
+                        corrected_paths.push(file_str.clone());
+                        corrected_path_to_original.insert(file_str, p.clone());
+                    } else {
+                        not_found_messages.push(format!(
+                            "Path '{}' is not a file or directory",
+                            resolved.path.display()
+                        ));
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    not_found_messages.push(e);
+                    continue;
+                }
+            }
+        }
+
         let path = if PathBuf::from(&p).is_absolute() {
             canonical_path(p).to_string_lossy().to_string()
         } else {
@@ -591,5 +663,6 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
         not_found_messages,
         context_enums,
         multimodal,
+        scope_notices,
     )
 }

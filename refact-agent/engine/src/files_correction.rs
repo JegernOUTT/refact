@@ -10,6 +10,7 @@ use crate::global_context::GlobalContext;
 use crate::custom_error::MapErrToString;
 use crate::files_in_workspace::{detect_vcs_for_a_file_path, CacheCorrection};
 use crate::fuzzy_search::fuzzy_search;
+use crate::worktrees::scope::ExecutionScope;
 
 pub async fn paths_from_anywhere(global_context: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
     let (file_paths_from_memory, paths_from_workspace, paths_from_jsonl) = {
@@ -196,6 +197,19 @@ pub async fn get_project_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> 
     let workspace_folders = gcx.read().await.documents_state.workspace_folders.clone();
     let workspace_folders_locked = workspace_folders.lock().unwrap();
     workspace_folders_locked.iter().cloned().collect::<Vec<_>>()
+}
+
+#[allow(dead_code)]
+pub async fn get_project_dirs_with_execution_scope(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    execution_scope: Option<&ExecutionScope>,
+) -> Vec<PathBuf> {
+    if let Some(scope) = execution_scope {
+        if scope.is_enforced() {
+            return scope.effective_project_dirs();
+        }
+    }
+    get_project_dirs(gcx).await
 }
 
 pub async fn get_active_project_path(gcx: Arc<ARwLock<GlobalContext>>) -> Option<PathBuf> {

@@ -9,7 +9,10 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::{vec_context_file_to_context_tools, AtCommandsContext};
 use crate::at_commands::at_search::execute_at_search;
-use crate::tools::scope_utils::create_scope_filter;
+use crate::tools::scope_utils::{
+    create_scope_filter_with_execution_scope, format_scope_notices,
+    remap_context_files_for_execution_scope,
+};
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
@@ -46,13 +49,30 @@ async fn execute_att_search(
     ccx: Arc<AMutex<AtCommandsContext>>,
     query: &String,
     scope: &String,
-) -> Result<Vec<ContextFile>, String> {
-    let gcx = ccx.lock().await.global_context.clone();
+) -> Result<(Vec<ContextFile>, Vec<String>), String> {
+    let (gcx, execution_scope) = {
+        let ccx_locked = ccx.lock().await;
+        (
+            ccx_locked.global_context.clone(),
+            ccx_locked.execution_scope.clone(),
+        )
+    };
 
-    let filter = create_scope_filter(gcx.clone(), scope).await?;
+    let scoped_filter =
+        create_scope_filter_with_execution_scope(gcx.clone(), execution_scope.as_ref(), scope)
+            .await?;
 
-    info!("att-search: filter: {:?}", filter);
-    execute_at_search(ccx.clone(), &query, filter).await
+    info!("att-search: filter: {:?}", scoped_filter.filter);
+    let context_files = execute_at_search(ccx.clone(), &query, scoped_filter.filter).await?;
+    let (context_files, remap_notices) = remap_context_files_for_execution_scope(
+        gcx.clone(),
+        execution_scope.as_ref(),
+        context_files,
+    )
+    .await?;
+    let mut notices = scoped_filter.notices;
+    notices.extend(remap_notices);
+    Ok((context_files, notices))
 }
 
 #[async_trait]
@@ -123,7 +143,9 @@ impl Tool for ToolSearch {
 
             all_content.push_str(&format!("Results for query: \"{}\"\n", query));
 
-            let vector_of_context_file = execute_att_search(ccx.clone(), query, &scope).await?;
+            let (vector_of_context_file, scope_notices) =
+                execute_att_search(ccx.clone(), query, &scope).await?;
+            all_content.push_str(&format_scope_notices(&scope_notices));
             info!(
                 "att-search: vector_of_context_file={:?}",
                 vector_of_context_file

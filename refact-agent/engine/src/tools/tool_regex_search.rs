@@ -17,7 +17,9 @@ use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::files_correction::shortify_paths;
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
-use crate::tools::scope_utils::{resolve_scope, validate_scope_files};
+use crate::tools::scope_utils::{
+    format_scope_notices, resolve_scope_with_execution_scope, validate_scope_files,
+};
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
@@ -291,13 +293,20 @@ impl Tool for ToolRegexSearch {
         let max_total_matches =
             parse_usize_arg(args, "max_total_matches")?.unwrap_or(DEFAULT_MAX_TOTAL_MATCHES);
 
-        let gcx = ccx.lock().await.global_context.clone();
+        let (gcx, execution_scope) = {
+            let ccx_locked = ccx.lock().await;
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+            )
+        };
 
-        let files_in_scope = resolve_scope(gcx.clone(), &scope)
-            .await
-            .and_then(|files| validate_scope_files(files, &scope))?;
+        let scoped_files =
+            resolve_scope_with_execution_scope(gcx.clone(), execution_scope.as_ref(), &scope)
+                .await?;
+        let files_in_scope = validate_scope_files(scoped_files.files, &scope)?;
 
-        let mut all_content = String::new();
+        let mut all_content = format_scope_notices(&scoped_files.notices);
         let mut all_search_results = Vec::new();
 
         // 1. Path matches

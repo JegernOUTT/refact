@@ -14,6 +14,7 @@ use crate::tools::tools_description::{
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::knowledge_index::format_related_memories_section;
+use crate::tools::scope_utils::{format_scope_notices, remap_context_files_for_execution_scope};
 use regex::Regex;
 
 pub struct ToolAstDefinition {
@@ -45,7 +46,13 @@ impl Tool for ToolAstDefinition {
             return Err("No valid symbols provided".to_string());
         }
 
-        let gcx = ccx.lock().await.global_context.clone();
+        let (gcx, execution_scope) = {
+            let ccx_locked = ccx.lock().await;
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+            )
+        };
         let ast_service_opt = gcx.read().await.ast_service.clone();
         if let Some(ast_service) = ast_service_opt {
             let ast_index = ast_service.lock().await.ast_index.clone();
@@ -59,43 +66,60 @@ impl Tool for ToolAstDefinition {
 
             let mut all_messages = Vec::new();
             let mut all_context_files = Vec::new();
+            let mut all_scope_notices = Vec::new();
 
             for symbol in symbols {
                 let defs =
                     crate::ast::ast_db::definitions(ast_index.clone(), &symbol).unwrap_or_default();
 
-                let file_paths = defs.iter().map(|x| x.cpath.clone()).collect::<Vec<_>>();
-                let short_file_paths =
-                    crate::files_correction::shortify_paths(gcx.clone(), &file_paths).await;
-
                 if !defs.is_empty() {
                     const DEFS_LIMIT: usize = 20;
-                    let mut tool_message = format!("Definitions for `{}`:\n", symbol).to_string();
-                    let context_files: Vec<ContextEnum> = defs
+                    let raw_context_files: Vec<ContextFile> = defs
                         .iter()
-                        .zip(short_file_paths.iter())
                         .take(DEFS_LIMIT)
-                        .map(|(res, short_path)| {
-                            tool_message.push_str(&format!(
-                                "{} defined at {}:{}-{}\n",
-                                res.path_drop0(),
-                                short_path,
-                                res.full_line1(),
-                                res.full_line2()
-                            ));
-                            ContextEnum::ContextFile(ContextFile {
-                                file_name: res.cpath.clone(),
-                                file_content: "".to_string(),
-                                line1: res.full_line1(),
-                                line2: res.full_line2(),
-                                file_rev: None,
-                                symbols: vec![res.path_drop0()],
-                                gradient_type: 5,
-                                usefulness: 100.0,
-                                skip_pp: false,
-                            })
+                        .map(|res| ContextFile {
+                            file_name: res.cpath.clone(),
+                            file_content: "".to_string(),
+                            line1: res.full_line1(),
+                            line2: res.full_line2(),
+                            file_rev: None,
+                            symbols: vec![res.path_drop0()],
+                            gradient_type: 5,
+                            usefulness: 100.0,
+                            skip_pp: false,
                         })
                         .collect();
+                    let (context_files, scope_notices) = remap_context_files_for_execution_scope(
+                        gcx.clone(),
+                        execution_scope.as_ref(),
+                        raw_context_files,
+                    )
+                    .await?;
+                    all_scope_notices.extend(scope_notices);
+
+                    if context_files.is_empty() {
+                        corrections = true;
+                        all_messages.push(format!(
+                            "For symbol `{}`:\n⚠️ Definitions were found in the source checkout, but none have files inside the active worktree scope.\n",
+                            symbol
+                        ));
+                        continue;
+                    }
+
+                    let file_paths = context_files
+                        .iter()
+                        .map(|cf| cf.file_name.clone())
+                        .collect::<Vec<_>>();
+                    let short_file_paths =
+                        crate::files_correction::shortify_paths(gcx.clone(), &file_paths).await;
+                    let mut tool_message = format!("Definitions for `{}`:\n", symbol).to_string();
+                    for (cf, short_path) in context_files.iter().zip(short_file_paths.iter()) {
+                        let symbol_path = cf.symbols.get(0).cloned().unwrap_or_default();
+                        tool_message.push_str(&format!(
+                            "{} defined at {}:{}-{}\n",
+                            symbol_path, short_path, cf.line1, cf.line2
+                        ));
+                    }
 
                     if defs.len() > DEFS_LIMIT {
                         tool_message.push_str(&format!(
@@ -105,7 +129,8 @@ impl Tool for ToolAstDefinition {
                     }
 
                     all_messages.push(tool_message);
-                    all_context_files.extend(context_files);
+                    all_context_files
+                        .extend(context_files.into_iter().map(ContextEnum::ContextFile));
                 } else {
                     corrections = true;
                     let tool_message =
@@ -115,7 +140,11 @@ impl Tool for ToolAstDefinition {
                 }
             }
 
-            let combined_message = all_messages.join("\n");
+            let combined_message = format!(
+                "{}{}",
+                format_scope_notices(&all_scope_notices),
+                all_messages.join("\n")
+            );
 
             // Append related memories based on involved file paths.
             let related_section = {

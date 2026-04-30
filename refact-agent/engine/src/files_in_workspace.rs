@@ -80,6 +80,35 @@ pub async fn get_file_text_from_memory_or_disk(
         .map_err(|e| format!("Not found in memory, not found on disk: {}", e))
 }
 
+pub async fn check_file_privacy_for_send(
+    global_context: Arc<ARwLock<GlobalContext>>,
+    file_path: &PathBuf,
+) -> Result<(), String> {
+    check_file_privacy(
+        load_privacy_if_needed(global_context).await,
+        file_path,
+        &FilePrivacyLevel::AllowToSendAnywhere,
+    )
+}
+
+pub async fn filter_privacy_allowed_files(
+    global_context: Arc<ARwLock<GlobalContext>>,
+    files: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let privacy = load_privacy_if_needed(global_context).await;
+    files
+        .into_iter()
+        .filter(|path| {
+            check_file_privacy(
+                privacy.clone(),
+                path,
+                &FilePrivacyLevel::AllowToSendAnywhere,
+            )
+            .is_ok()
+        })
+        .collect()
+}
+
 impl Document {
     pub fn new(doc_path: &PathBuf) -> Self {
         Self {
