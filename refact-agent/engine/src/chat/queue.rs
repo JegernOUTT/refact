@@ -1745,7 +1745,8 @@ mod tests {
     }
 
     fn init_repo(root: &Path) {
-        run_git(root, &["init", "-b", "main"]);
+        run_git(root, &["init"]);
+        run_git(root, &["checkout", "-b", "main"]);
         run_git(root, &["config", "user.email", "test@example.com"]);
         run_git(root, &["config", "user.name", "Test User"]);
         std::fs::create_dir_all(root.join("src")).unwrap();

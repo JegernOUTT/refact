@@ -3990,7 +3990,12 @@ async fn buddy_worktree_pulse_includes_worktree_stats() {
     let source = temp.path().join("repo");
     std::fs::create_dir_all(&source).unwrap();
     std::process::Command::new("git")
-        .args(["init", "-b", "main"])
+        .args(["init"])
+        .current_dir(&source)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["checkout", "-b", "main"])
         .current_dir(&source)
         .output()
         .unwrap();

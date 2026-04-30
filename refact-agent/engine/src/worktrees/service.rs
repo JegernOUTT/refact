@@ -1639,7 +1639,8 @@ mod worktree_registry_tests {
     }
 
     fn init_repo(root: &Path) {
-        run_git(root, &["init", "-b", "main"]);
+        run_git(root, &["init"]);
+        run_git(root, &["checkout", "-b", "main"]);
         run_git(root, &["config", "user.email", "test@example.com"]);
         run_git(root, &["config", "user.name", "Test User"]);
         std::fs::write(root.join("file.txt"), "hello\n").unwrap();
