@@ -95,6 +95,13 @@ async fn try_write_candidate(
 
     let manifest_entry = manifest.entry_for_dest(&dest_path).cloned();
     if let Some(entry) = manifest_entry {
+        if dest_meta.is_some() && !manifest_entry_matches_candidate(&entry, candidate) {
+            return Ok(outcome(
+                candidate,
+                ImportStatus::Conflict,
+                "destination is owned by a different import source".to_string(),
+            ));
+        }
         if dest_meta.is_some() {
             let current_dest_hash = hash_existing_path(&dest_path)?;
             if current_dest_hash != entry.dest_hash {
@@ -156,6 +163,15 @@ fn resolve_destination_path(scope_root: &Path, destination_path: &Path) -> PathB
     } else {
         scope_root.join(destination_path)
     }
+}
+
+fn manifest_entry_matches_candidate(
+    entry: &ImportManifestEntry,
+    candidate: &ImportCandidate,
+) -> bool {
+    entry.competitor == candidate.competitor
+        && entry.kind == candidate.kind
+        && entry.source_path == candidate.source_path
 }
 
 fn candidate_source_hash(candidate: &ImportCandidate) -> Result<String> {
@@ -488,6 +504,37 @@ mod tests {
             .await
             .unwrap();
         assert!(manifest.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generated_destination_owned_by_other_source_is_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope_root = temp.path().join("refact");
+        let dest_path = scope_root.join("commands").join("hello.md");
+        let first = file_candidate(
+            temp.path().join("claude").join("hello.md"),
+            dest_path.clone(),
+            "first",
+        );
+        let second = file_candidate(
+            temp.path().join("opencode").join("hello.md"),
+            dest_path.clone(),
+            "second",
+        );
+
+        let summary = write_candidates(&scope_root, &[first, second]).await;
+
+        assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Created));
+        assert_eq!(outcome_status(&summary, 1), Some(ImportStatus::Conflict));
+        assert_eq!(
+            tokio::fs::read_to_string(&dest_path).await.unwrap(),
+            "first"
+        );
+        let manifest = ImportManifest::read_from_path(&manifest_path_for_scope_root(&scope_root))
+            .await
+            .unwrap();
+        assert_eq!(manifest.entries.len(), 1);
+        assert!(manifest.entries[0].source_path.ends_with("claude/hello.md"));
     }
 
     #[tokio::test]

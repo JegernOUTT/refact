@@ -290,6 +290,7 @@ mod tests {
     use crate::ext::competitor_import::types::{
         Competitor, ImportCandidateSummary, ImportKind, ImportOutcome,
     };
+    use crate::yaml_configs::customization_types::SubagentConfig;
 
     fn write(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
@@ -302,6 +303,20 @@ mod tests {
         ImportManifest::read_from_path(&manifest_path_for_scope_root(scope_root))
             .await
             .unwrap()
+    }
+
+    fn status_count(summary: &ImportSummary, status: ImportStatus) -> usize {
+        summary.status_counts.get(&status).copied().unwrap_or(0)
+    }
+
+    fn read_subagent_config(scope_root: &Path, id: &str) -> SubagentConfig {
+        let content =
+            fs::read_to_string(scope_root.join("subagents").join(format!("{id}.yaml"))).unwrap();
+        serde_yaml::from_str(&content).unwrap()
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
     }
 
     #[tokio::test]
@@ -437,6 +452,225 @@ mod tests {
             fs::read_to_string(second.path().join(".refact/commands/deploy.md")).unwrap(),
             "---\ndescription: Deploy\n---\nDeploy second."
         );
+    }
+
+    #[tokio::test]
+    async fn cross_source_same_command_name_first_write_wins_and_conflict_is_reported() {
+        let workspace = tempfile::tempdir().unwrap();
+        write(
+            &workspace.path().join(".claude/commands/review.md"),
+            "Claude review.",
+        );
+        write(
+            &workspace.path().join(".opencode/commands/review.md"),
+            "OpenCode review.",
+        );
+
+        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+
+        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
+        assert_eq!(status_count(&summary, ImportStatus::Conflict), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join(".refact/commands/review.md")).unwrap(),
+            "Claude review."
+        );
+        let review_outcomes = summary
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.candidate.dest_name == "review")
+            .map(|outcome| outcome.status.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            review_outcomes,
+            vec![ImportStatus::Created, ImportStatus::Conflict]
+        );
+        let manifest = read_manifest(&workspace.path().join(".refact")).await;
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].competitor, Competitor::ClaudeCode);
+        let summary_json = serde_json::to_string(&summary).unwrap();
+        let manifest_json = fs::read_to_string(manifest_path_for_scope_root(
+            &workspace.path().join(".refact"),
+        ))
+        .unwrap();
+        assert!(!summary_json.contains("Claude review."));
+        assert!(!summary_json.contains("OpenCode review."));
+        assert!(!manifest_json.contains("Claude review."));
+        assert!(!manifest_json.contains("OpenCode review."));
+    }
+
+    #[tokio::test]
+    async fn source_change_updates_only_unedited_generated_destination() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source_path = workspace.path().join(".claude/commands/update.md");
+        let dest_path = workspace.path().join(".refact/commands/update.md");
+        write(&source_path, "one");
+
+        let first = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+        write(&source_path, "two");
+        let second = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+        fs::write(&dest_path, "user edit").unwrap();
+        write(&source_path, "three");
+        let third = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+
+        assert_eq!(status_count(&first, ImportStatus::Created), 1);
+        assert_eq!(status_count(&second, ImportStatus::Updated), 1);
+        assert_eq!(status_count(&third, ImportStatus::UserModified), 1);
+        assert_eq!(fs::read_to_string(dest_path).unwrap(), "user edit");
+    }
+
+    #[tokio::test]
+    async fn global_and_project_imports_with_same_names_do_not_interfere() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let config = temp.path().join("config");
+        let refact_config = config.join("refact");
+        let workspace = temp.path().join("workspace");
+        write(
+            &home.join(".claude/commands/shared.md"),
+            "Global shared command.",
+        );
+        write(
+            &workspace.join(".claude/commands/shared.md"),
+            "Project shared command.",
+        );
+
+        let global_summary = run_global_import_with_paths(&refact_config, Some(&home)).await;
+        let project_summary = run_project_import_with_paths(&[workspace.clone()]).await;
+        let global_repeated = run_global_import_with_paths(&refact_config, Some(&home)).await;
+
+        assert_eq!(status_count(&global_summary, ImportStatus::Created), 1);
+        assert_eq!(status_count(&project_summary, ImportStatus::Created), 1);
+        assert_eq!(status_count(&global_repeated, ImportStatus::Unchanged), 1);
+        assert_eq!(
+            fs::read_to_string(refact_config.join("commands/shared.md")).unwrap(),
+            "Global shared command."
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join(".refact/commands/shared.md")).unwrap(),
+            "Project shared command."
+        );
+        assert_eq!(read_manifest(&refact_config).await.entries.len(), 1);
+        assert_eq!(
+            read_manifest(&workspace.join(".refact"))
+                .await
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn continue_rules_are_skipped_while_checks_import() {
+        let workspace = tempfile::tempdir().unwrap();
+        write(
+            &workspace.path().join(".continue/rules/security.md"),
+            "# Security rules",
+        );
+        write(
+            &workspace.path().join(".continue/checks/security.md"),
+            "---\nname: Security Check\ndescription: Review security\n---\nFind issues.",
+        );
+
+        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+
+        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
+        assert_eq!(status_count(&summary, ImportStatus::Unsupported), 1);
+        assert!(workspace
+            .path()
+            .join(".refact/subagents/security-check.yaml")
+            .exists());
+        assert!(!workspace.path().join(".refact/rules/security.md").exists());
+        assert!(summary.issues.iter().any(|issue| {
+            issue.kind == Some(ImportKind::UnsupportedRules)
+                && issue
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.ends_with(".continue/rules/security.md"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn kilo_legacy_workflows_import_as_commands() {
+        let workspace = tempfile::tempdir().unwrap();
+        write(
+            &workspace.path().join(".kilocode/workflows/deploy.md"),
+            "Deploy legacy workflow.",
+        );
+
+        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+
+        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join(".refact/commands/deploy.md")).unwrap(),
+            "Deploy legacy workflow."
+        );
+        assert!(summary.candidates.iter().any(|candidate| {
+            candidate.competitor == Competitor::KiloCode
+                && candidate.kind == ImportKind::Command
+                && candidate.dest_name == "deploy"
+        }));
+    }
+
+    #[tokio::test]
+    async fn malformed_source_reports_error_without_blocking_other_sources() {
+        let workspace = tempfile::tempdir().unwrap();
+        write(&workspace.path().join("opencode.jsonc"), "{ command: [ }");
+        write(
+            &workspace.path().join(".claude/commands/good.md"),
+            "Good command.",
+        );
+
+        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+
+        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
+        assert_eq!(status_count(&summary, ImportStatus::Error), 1);
+        assert_eq!(summary.errors.len(), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join(".refact/commands/good.md")).unwrap(),
+            "Good command."
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_subagent_yaml_from_every_importer_parses_and_uses_conservative_tools() {
+        let workspace = tempfile::tempdir().unwrap();
+        write(
+            &workspace.path().join(".claude/agents/claude-agent.md"),
+            "---\nname: Claude Agent\ndescription: Claude helper\ntools:\n  - Read\n  - Edit\n  - Bash\n  - UnknownDanger\ndenied-tools:\n  - Bash\nmaxTurns: 4\n---\nHelp from Claude.",
+        );
+        write(
+            &workspace.path().join(".opencode/agents/open-agent.md"),
+            "---\ndescription: Open helper\ntools:\n  - read\n  - grep\n  - bash\n  - unknownDanger\npermission:\n  bash: deny\nsteps: 5\n---\nHelp from OpenCode.",
+        );
+        write(
+            &workspace.path().join(".kilo/agents/kilo-agent.md"),
+            "---\ndescription: Kilo helper\npermission:\n  edit: allow\n  bash: deny\nsteps: 6\n---\nHelp from Kilo.",
+        );
+        write(
+            &workspace.path().join(".continue/checks/continue-check.md"),
+            "---\nname: Continue Check\ndescription: Continue helper\n---\nHelp from Continue.",
+        );
+
+        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+
+        assert_eq!(status_count(&summary, ImportStatus::Created), 4);
+        let scope_root = workspace.path().join(".refact");
+        let claude = read_subagent_config(&scope_root, "claude-agent");
+        let opencode = read_subagent_config(&scope_root, "open-agent");
+        let kilo = read_subagent_config(&scope_root, "kilo-agent");
+        let continue_check = read_subagent_config(&scope_root, "continue-check");
+        assert_eq!(claude.tools, strings(&["cat", "apply_patch"]));
+        assert_eq!(opencode.tools, strings(&["cat", "search_pattern"]));
+        assert_eq!(kilo.tools, strings(&["apply_patch"]));
+        assert_eq!(
+            continue_check.tools,
+            strings(&["tree", "cat", "search_pattern"])
+        );
+        for config in [&claude, &opencode, &kilo, &continue_check] {
+            assert!(!config.tools.contains(&"shell".to_string()));
+            assert!(!config.tools.contains(&"unknownDanger".to_string()));
+            assert!(config.expose_as_tool);
+        }
     }
 
     #[tokio::test]
