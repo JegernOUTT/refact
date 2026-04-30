@@ -22,6 +22,7 @@ pub async fn write_candidates(scope_root: &Path, candidates: &[ImportCandidate])
     write_candidates_for_scope(scope_root, &ImportScope::Global, candidates).await
 }
 
+#[cfg(test)]
 pub async fn write_candidates_for_scope(
     scope_root: &Path,
     scope: &ImportScope,

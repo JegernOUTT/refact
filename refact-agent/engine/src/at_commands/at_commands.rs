@@ -1,6 +1,5 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
@@ -150,13 +149,15 @@ impl AtCommandsContext {
         }
     }
 
-    pub fn execution_scope_root(&self) -> Option<PathBuf> {
+    #[cfg(test)]
+    pub fn execution_scope_root(&self) -> Option<std::path::PathBuf> {
         self.execution_scope
             .as_ref()
             .map(|scope| scope.effective_root().to_path_buf())
     }
 
-    pub fn effective_project_dirs(&self) -> Vec<PathBuf> {
+    #[cfg(test)]
+    pub fn effective_project_dirs(&self) -> Vec<std::path::PathBuf> {
         self.execution_scope
             .as_ref()
             .map(|scope| scope.effective_project_dirs())
