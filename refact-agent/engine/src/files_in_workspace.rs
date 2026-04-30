@@ -548,12 +548,44 @@ fn path_has_allowed_hidden_component(path: &Path) -> bool {
     })
 }
 
+fn path_is_refact_import_internal(path: &Path) -> bool {
+    let mut last_was_refact = false;
+    for component in path.components() {
+        if last_was_refact && component == Component::Normal("imports".as_ref()) {
+            return true;
+        }
+        last_was_refact = component == Component::Normal(".refact".as_ref());
+    }
+    false
+}
+
+fn path_triggers_registry_reload(path: &Path) -> bool {
+    if path_is_refact_import_internal(path) {
+        return false;
+    }
+    if !path
+        .components()
+        .any(|c| c == Component::Normal(".refact".as_ref()))
+    {
+        return false;
+    }
+    path.components().any(|c| {
+        c == Component::Normal("modes".as_ref())
+            || c == Component::Normal("subagents".as_ref())
+            || c == Component::Normal("toolbox_commands".as_ref())
+            || c == Component::Normal("code_lens".as_ref())
+    })
+}
+
 fn is_valid_file_for_scan(
     path: &PathBuf,
     scan_root: &Path,
     allow_hidden_folders: bool,
     ignore_size_thresholds: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if path_is_refact_import_internal(path) {
+        return Err(".refact/imports is internal".into());
+    }
     is_valid_file(path, true, ignore_size_thresholds)?;
     if !allow_hidden_folders {
         let rel_path = path.strip_prefix(scan_root).unwrap_or(path.as_path());
@@ -1086,6 +1118,9 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
             }
         }
         for p in &event.paths {
+            if path_is_refact_import_internal(p) {
+                continue;
+            }
             let indexing_settings = indexing_everywhere_arc.indexing_for_path(p);
             if is_blocklisted(&indexing_settings, &p) {
                 // important to filter BEFORE canonical_path
@@ -1105,21 +1140,6 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
         if let Some(gcx) = gcx_weak.clone().upgrade() {
             enqueue_some_docs(gcx, &docs, false).await;
         }
-    }
-
-    fn path_triggers_registry_reload(path: &PathBuf) -> bool {
-        if !path
-            .components()
-            .any(|c| c == Component::Normal(".refact".as_ref()))
-        {
-            return false;
-        }
-        path.components().any(|c| {
-            c == Component::Normal("modes".as_ref())
-                || c == Component::Normal("subagents".as_ref())
-                || c == Component::Normal("toolbox_commands".as_ref())
-                || c == Component::Normal("code_lens".as_ref())
-        })
     }
 
     async fn on_dot_git_dir_change(gcx_weak: Weak<ARwLock<GlobalContext>>, event: Event) {
@@ -1228,4 +1248,109 @@ pub async fn files_in_workspace_init_task(gcx: Arc<ARwLock<GlobalContext>>) {
         None,
     );
     crate::buddy::actor::buddy_enqueue_event(gcx, ev).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_file(path: &Path, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn normalized(path: &Path) -> PathBuf {
+        crate::files_correction::canonical_path(path.to_string_lossy().to_string())
+    }
+
+    async fn scan_workspace(root: &Path) -> Vec<PathBuf> {
+        let mut indexing_everywhere = IndexingEverywhere::default();
+        let (files, _) = retrieve_files_in_workspace_folders(
+            vec![root.to_path_buf()],
+            &mut indexing_everywhere,
+            false,
+            false,
+        )
+        .await;
+        files
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_excludes_refact_import_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let regular = temp.path().join("src").join("main.rs");
+        let manifest = temp
+            .path()
+            .join(".refact")
+            .join("imports")
+            .join("competitors.json");
+        write_file(&regular, "fn main() {}\n");
+        write_file(&manifest, "{\"ok\":true}");
+
+        let files = scan_workspace(temp.path()).await;
+
+        assert!(files.contains(&normalized(&regular)));
+        assert!(!files.contains(&normalized(&manifest)));
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_excludes_refact_import_staging_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let regular = temp.path().join("src").join("lib.rs");
+        let staged = temp
+            .path()
+            .join(".refact")
+            .join("imports")
+            .join("staging")
+            .join("skill")
+            .join("SKILL.md");
+        write_file(&regular, "pub fn ok() {}\n");
+        write_file(&staged, "staged skill content\n");
+
+        let files = scan_workspace(temp.path()).await;
+
+        assert!(files.contains(&normalized(&regular)));
+        assert!(!files.contains(&normalized(&staged)));
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_keeps_refact_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill = temp
+            .path()
+            .join(".refact")
+            .join("skills")
+            .join("example")
+            .join("SKILL.md");
+        write_file(&skill, "# Example skill\nUse this skill.\n");
+
+        let files = scan_workspace(temp.path()).await;
+
+        assert!(files.contains(&normalized(&skill)));
+    }
+
+    #[test]
+    fn registry_reload_ignores_refact_import_paths() {
+        assert!(path_is_refact_import_internal(Path::new(
+            "/repo/.refact/imports/competitors.json"
+        )));
+        assert!(!path_is_refact_import_internal(Path::new(
+            "/repo/.refact/skills/example/SKILL.md"
+        )));
+        assert!(!path_triggers_registry_reload(Path::new(
+            "/repo/.refact/imports/staging/source/.refact/subagents/agent.yaml"
+        )));
+        assert!(path_triggers_registry_reload(Path::new(
+            "/repo/.refact/modes/agent.yaml"
+        )));
+        assert!(path_triggers_registry_reload(Path::new(
+            "/repo/.refact/subagents/agent.yaml"
+        )));
+        assert!(path_triggers_registry_reload(Path::new(
+            "/repo/.refact/toolbox_commands/command.yaml"
+        )));
+        assert!(path_triggers_registry_reload(Path::new(
+            "/repo/.refact/code_lens/lens.yaml"
+        )));
+    }
 }
