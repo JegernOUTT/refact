@@ -5,8 +5,9 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::load_privacy_if_needed;
 use crate::tools::file_edit::auxiliary::{
-    await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary, normalize_line_endings,
-    parse_path_for_create, parse_string_arg, restore_line_endings, sync_documents_ast, write_file,
+    append_scope_warnings, await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary,
+    normalize_line_endings, parse_path_for_create, parse_string_arg, restore_line_endings,
+    scope_warnings_to_tool_message, sync_documents_ast, write_file,
 };
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -16,6 +17,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use crate::worktrees::scope::ExecutionScope;
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
 use tokio::sync::RwLock as ARwLock;
@@ -28,10 +30,11 @@ pub struct ToolCreateTextDoc {
 async fn parse_args(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    code_workdir: &Option<PathBuf>,
-) -> Result<(PathBuf, String, bool), String> {
+    execution_scope: Option<&ExecutionScope>,
+) -> Result<(PathBuf, String, bool, Vec<String>), String> {
     let privacy = load_privacy_if_needed(gcx.clone()).await;
-    let path = parse_path_for_create(gcx.clone(), args, privacy, code_workdir).await?;
+    let resolved = parse_path_for_create(gcx.clone(), args, privacy, execution_scope).await?;
+    let path = resolved.path;
 
     let has_crlf = if path.exists() {
         let existing = get_file_text_from_memory_or_disk(gcx, &path)
@@ -49,16 +52,16 @@ async fn parse_args(
     }
     let content = restore_line_endings(&content, has_crlf);
 
-    Ok((path, content, has_crlf))
+    Ok((path, content, has_crlf, resolved.warnings))
 }
 
 pub async fn tool_create_text_doc_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     dry: bool,
-    code_workdir: &Option<PathBuf>,
+    execution_scope: Option<&ExecutionScope>,
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
-    let (path, content, _) = parse_args(gcx.clone(), args, code_workdir).await?;
+    let (path, content, _, scope_warnings) = parse_args(gcx.clone(), args, execution_scope).await?;
     await_ast_indexing(gcx.clone()).await?;
     let (before, after) = write_file(gcx.clone(), &path, &content, dry, None).await?;
     sync_documents_ast(gcx.clone(), &path).await?;
@@ -72,7 +75,12 @@ pub async fn tool_create_text_doc_exec(
     } else {
         edit_result_summary(&before, &after, &path)
     };
-    Ok((before, after, chunks, summary))
+    Ok((
+        before,
+        after,
+        chunks,
+        append_scope_warnings(summary, &scope_warnings),
+    ))
 }
 
 #[async_trait]
@@ -83,12 +91,15 @@ impl Tool for ToolCreateTextDoc {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = {
+        let (gcx, execution_scope) = {
             let ccx_locked = ccx.lock().await;
-            ccx_locked.global_context.clone()
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+            )
         };
-        let (_, _, chunks, _summary) =
-            tool_create_text_doc_exec(gcx.clone(), args, false, &None).await?;
+        let (_, _, chunks, summary) =
+            tool_create_text_doc_exec(gcx.clone(), args, false, execution_scope.as_ref()).await?;
 
         let related_section = {
             let idx_arc = { gcx.read().await.knowledge_index.clone() };
@@ -121,6 +132,10 @@ impl Tool for ToolCreateTextDoc {
             ..Default::default()
         })];
 
+        if let Some(message) = scope_warnings_to_tool_message(&summary, tool_call_id) {
+            out.push(message);
+        }
+
         if !related_section.trim().is_empty() {
             out.push(ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
@@ -139,12 +154,17 @@ impl Tool for ToolCreateTextDoc {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
-        let gcx = {
+        let (gcx, execution_scope, msgs_len) = {
             let ccx_locked = ccx.lock().await;
-            ccx_locked.global_context.clone()
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+                ccx_locked.messages.len(),
+            )
         };
-        let can_exec = parse_args(gcx.clone(), args, &None).await.is_ok();
-        let msgs_len = ccx.lock().await.messages.len();
+        let can_exec = parse_args(gcx.clone(), args, execution_scope.as_ref())
+            .await
+            .is_ok();
         if msgs_len != 0 && !can_exec {
             return Ok(MatchConfirmDeny {
                 result: MatchConfirmDenyResult::PASS,

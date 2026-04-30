@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use serde_json::Value;
 use tokio::fs;
@@ -20,6 +21,7 @@ use crate::tools::tools_description::{
 };
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::{FilePrivacyLevel, load_privacy_if_needed, check_file_privacy};
+use crate::tools::file_edit::auxiliary::resolve_path_with_scope;
 
 pub struct ToolMv {
     pub config_path: String,
@@ -73,115 +75,176 @@ impl Tool for ToolMv {
         let dst_str = preprocess_path_for_normalization(dst_str);
         let overwrite = Self::parse_overwrite(args)?;
 
-        let gcx = ccx.lock().await.global_context.clone();
-        let project_dirs = get_project_dirs(gcx.clone()).await;
-
-        let src_file_candidates =
-            correct_to_nearest_filename(gcx.clone(), &src_str, false, ccx.lock().await.top_n).await;
-        let src_dir_candidates =
-            correct_to_nearest_dir_path(gcx.clone(), &src_str, false, ccx.lock().await.top_n).await;
-        let (src_corrected_path, src_is_dir) = if !src_file_candidates.is_empty() {
+        let (gcx, execution_scope, top_n) = {
+            let ccx_locked = ccx.lock().await;
             (
-                return_one_candidate_or_a_good_error(
-                    gcx.clone(),
-                    &src_str,
-                    &src_file_candidates,
-                    &project_dirs,
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+                ccx_locked.top_n,
+            )
+        };
+
+        let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
+        let scoped_src = resolve_path_with_scope(
+            Path::new(&src_str),
+            privacy_settings.clone(),
+            execution_scope.as_ref(),
+            true,
+        )
+        .transpose()?;
+        let scoped_dst = resolve_path_with_scope(
+            Path::new(&dst_str),
+            privacy_settings.clone(),
+            execution_scope.as_ref(),
+            false,
+        )
+        .transpose()?;
+
+        let (
+            src_corrected_path,
+            dst_corrected_path,
+            src_true_path,
+            dst_true_path,
+            src_is_dir,
+            scope_warnings,
+            corrections,
+        ) = if let (Some(src), Some(dst)) = (scoped_src, scoped_dst) {
+            let mut scope_warnings = src.warnings;
+            scope_warnings.extend(dst.warnings);
+            let src_corrected_path = src.path.to_string_lossy().to_string();
+            let dst_corrected_path = dst.path.to_string_lossy().to_string();
+            let src_is_dir = src.path.is_dir();
+            let corrections = src_str != src_corrected_path
+                || dst_str != dst_corrected_path
+                || !scope_warnings.is_empty();
+            (
+                src_corrected_path,
+                dst_corrected_path,
+                src.path,
+                dst.path,
+                src_is_dir,
+                scope_warnings,
+                corrections,
+            )
+        } else {
+            let project_dirs = get_project_dirs(gcx.clone()).await;
+
+            let src_file_candidates =
+                correct_to_nearest_filename(gcx.clone(), &src_str, false, top_n).await;
+            let src_dir_candidates =
+                correct_to_nearest_dir_path(gcx.clone(), &src_str, false, top_n).await;
+            let (src_corrected_path, src_is_dir) = if !src_file_candidates.is_empty() {
+                (
+                    return_one_candidate_or_a_good_error(
+                        gcx.clone(),
+                        &src_str,
+                        &src_file_candidates,
+                        &project_dirs,
+                        false,
+                    )
+                    .await?,
                     false,
                 )
-                .await?,
-                false,
-            )
-        } else if !src_dir_candidates.is_empty() {
-            (
+            } else if !src_dir_candidates.is_empty() {
+                (
+                    return_one_candidate_or_a_good_error(
+                        gcx.clone(),
+                        &src_str,
+                        &src_dir_candidates,
+                        &project_dirs,
+                        true,
+                    )
+                    .await?,
+                    true,
+                )
+            } else {
+                return Err(format!(
+                    "⚠️ Source '{}' not found. 💡 Use tree() to explore or check spelling",
+                    src_str
+                ));
+            };
+
+            let dst_parent = if let Some(p) = std::path::Path::new(&dst_str).parent() {
+                if cfg!(target_os = "windows") {
+                    p.to_string_lossy().replace("/", "\\")
+                } else {
+                    p.to_string_lossy().to_string()
+                }
+            } else {
+                dst_str.clone()
+            };
+
+            let dst_dir_candidates =
+                correct_to_nearest_dir_path(gcx.clone(), &dst_parent, false, top_n).await;
+            let dst_parent_path = if !dst_dir_candidates.is_empty() {
                 return_one_candidate_or_a_good_error(
                     gcx.clone(),
-                    &src_str,
-                    &src_dir_candidates,
+                    &dst_parent,
+                    &dst_dir_candidates,
                     &project_dirs,
                     true,
                 )
-                .await?,
-                true,
-            )
-        } else {
-            return Err(format!(
-                "⚠️ Source '{}' not found. 💡 Use tree() to explore or check spelling",
-                src_str
-            ));
-        };
-
-        let dst_parent = if let Some(p) = std::path::Path::new(&dst_str).parent() {
-            if cfg!(target_os = "windows") {
-                p.to_string_lossy().replace("/", "\\")
+                .await?
             } else {
-                p.to_string_lossy().to_string()
+                return Err(format!(
+                    "⚠️ Destination directory '{}' not found. 💡 Use tree() to find valid path",
+                    dst_parent
+                ));
+            };
+
+            let dst_name = std::path::Path::new(&dst_str)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or(dst_str.clone());
+            let dst_corrected_path = std::path::PathBuf::from(&dst_parent_path)
+                .join(&dst_name)
+                .to_string_lossy()
+                .to_string();
+
+            let src_true_path = canonical_path(&src_corrected_path);
+            let dst_true_path = canonical_path(&dst_corrected_path);
+
+            if let Err(e) = check_file_privacy(
+                privacy_settings.clone(),
+                &src_true_path,
+                &FilePrivacyLevel::AllowToSendAnywhere,
+            ) {
+                return Err(format!("Cannot move '{}': {}", src_str, e));
             }
-        } else {
-            dst_str.clone()
-        };
+            if let Err(e) = check_file_privacy(
+                privacy_settings.clone(),
+                &dst_true_path,
+                &FilePrivacyLevel::AllowToSendAnywhere,
+            ) {
+                return Err(format!("Cannot move to '{}': {}", src_str, e));
+            }
 
-        let dst_dir_candidates =
-            correct_to_nearest_dir_path(gcx.clone(), &dst_parent, false, ccx.lock().await.top_n)
-                .await;
-        let dst_parent_path = if !dst_dir_candidates.is_empty() {
-            return_one_candidate_or_a_good_error(
-                gcx.clone(),
-                &dst_parent,
-                &dst_dir_candidates,
-                &project_dirs,
-                true,
+            let src_within_project = project_dirs.iter().any(|p| src_true_path.starts_with(p));
+            let dst_within_project = project_dirs.iter().any(|p| dst_true_path.starts_with(p));
+            if !src_within_project && !gcx.read().await.cmdline.inside_container {
+                return Err(format!(
+                    "⚠️ Source '{}' is outside project. 💡 mv() only works within workspace",
+                    src_str
+                ));
+            }
+            if !dst_within_project && !gcx.read().await.cmdline.inside_container {
+                return Err(format!(
+                    "⚠️ Destination '{}' is outside project. 💡 mv() only works within workspace",
+                    dst_str
+                ));
+            }
+
+            let corrections = src_str != src_corrected_path || dst_str != dst_corrected_path;
+            (
+                src_corrected_path,
+                dst_corrected_path,
+                src_true_path,
+                dst_true_path,
+                src_is_dir,
+                Vec::new(),
+                corrections,
             )
-            .await?
-        } else {
-            return Err(format!(
-                "⚠️ Destination directory '{}' not found. 💡 Use tree() to find valid path",
-                dst_parent
-            ));
         };
-
-        let dst_name = std::path::Path::new(&dst_str)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or(dst_str.clone());
-        let dst_corrected_path = std::path::PathBuf::from(&dst_parent_path)
-            .join(&dst_name)
-            .to_string_lossy()
-            .to_string();
-
-        let src_true_path = canonical_path(&src_corrected_path);
-        let dst_true_path = canonical_path(&dst_corrected_path);
-
-        let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
-        if let Err(e) = check_file_privacy(
-            privacy_settings.clone(),
-            &src_true_path,
-            &FilePrivacyLevel::AllowToSendAnywhere,
-        ) {
-            return Err(format!("Cannot move '{}': {}", src_str, e));
-        }
-        if let Err(e) = check_file_privacy(
-            privacy_settings.clone(),
-            &dst_true_path,
-            &FilePrivacyLevel::AllowToSendAnywhere,
-        ) {
-            return Err(format!("Cannot move to '{}': {}", src_str, e));
-        }
-
-        let src_within_project = project_dirs.iter().any(|p| src_true_path.starts_with(p));
-        let dst_within_project = project_dirs.iter().any(|p| dst_true_path.starts_with(p));
-        if !src_within_project && !gcx.read().await.cmdline.inside_container {
-            return Err(format!(
-                "⚠️ Source '{}' is outside project. 💡 mv() only works within workspace",
-                src_str
-            ));
-        }
-        if !dst_within_project && !gcx.read().await.cmdline.inside_container {
-            return Err(format!(
-                "⚠️ Destination '{}' is outside project. 💡 mv() only works within workspace",
-                dst_str
-            ));
-        }
 
         let _src_metadata = fs::symlink_metadata(&src_true_path).await.map_err(|e| {
             format!(
@@ -274,8 +337,16 @@ impl Tool for ToolMv {
                 .remove(&dst_true_path);
         }
 
-        let corrections = src_str != src_corrected_path || dst_str != dst_corrected_path;
         let mut messages = vec![];
+        if !scope_warnings.is_empty() {
+            messages.push(ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(scope_warnings.join("\n")),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            }));
+        }
 
         if src_is_dir {
             messages.push(ContextEnum::ChatMessage(ChatMessage {

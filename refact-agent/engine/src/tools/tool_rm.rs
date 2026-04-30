@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use serde_json::Value;
 use tokio::fs;
@@ -15,6 +16,7 @@ use crate::files_correction::{
 };
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
+use crate::tools::file_edit::auxiliary::resolve_path_with_scope;
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
     json_schema_from_params,
@@ -138,60 +140,87 @@ impl Tool for ToolRm {
         }
 
         let (recursive, _max_depth, dry_run) = Self::parse_recursive(args)?;
-        let gcx = ccx.lock().await.global_context.clone();
-        let project_dirs = get_project_dirs(gcx.clone()).await;
-
-        // Use file correction to get a candidate path.
-        let file_candidates =
-            correct_to_nearest_filename(gcx.clone(), &path_str, false, ccx.lock().await.top_n)
-                .await;
-        let dir_candidates =
-            correct_to_nearest_dir_path(gcx.clone(), &path_str, false, ccx.lock().await.top_n)
-                .await;
-        let corrected_path = if !file_candidates.is_empty() {
-            return_one_candidate_or_a_good_error(
-                gcx.clone(),
-                &path_str,
-                &file_candidates,
-                &project_dirs,
-                false,
+        let (gcx, execution_scope, top_n) = {
+            let ccx_locked = ccx.lock().await;
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+                ccx_locked.top_n,
             )
-            .await?
-        } else if !dir_candidates.is_empty() {
-            return_one_candidate_or_a_good_error(
-                gcx.clone(),
-                &path_str,
-                &dir_candidates,
-                &project_dirs,
-                true,
-            )
-            .await?
-        } else {
-            return Err(format!(
-                "⚠️ Path '{}' not found. 💡 Use tree() to explore or check spelling",
-                path_str
-            ));
         };
 
-        let true_path = canonical_path(&corrected_path);
-
         let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
-        if let Err(e) = check_file_privacy(
+        let scoped_path = resolve_path_with_scope(
+            Path::new(&path_str),
             privacy_settings.clone(),
-            &true_path,
-            &FilePrivacyLevel::AllowToSendAnywhere,
-        ) {
-            return Err(format!("Cannot rm '{}': {}", path_str, e));
-        }
+            execution_scope.as_ref(),
+            true,
+        )
+        .transpose()?;
 
-        // Check that the true_path is within project directories.
-        let is_within_project = project_dirs.iter().any(|p| true_path.starts_with(p));
-        if !is_within_project && !gcx.read().await.cmdline.inside_container {
-            return Err(format!(
-                "⚠️ '{}' is outside project directories. 💡 rm() only works within workspace",
-                path_str
-            ));
-        }
+        let (true_path, corrected_path, scope_warnings, corrections) =
+            if let Some(resolved) = scoped_path {
+                let corrected_path = resolved.path.to_string_lossy().to_string();
+                let corrections = path_str != corrected_path || !resolved.warnings.is_empty();
+                (
+                    resolved.path,
+                    corrected_path,
+                    resolved.warnings,
+                    corrections,
+                )
+            } else {
+                let project_dirs = get_project_dirs(gcx.clone()).await;
+
+                let file_candidates =
+                    correct_to_nearest_filename(gcx.clone(), &path_str, false, top_n).await;
+                let dir_candidates =
+                    correct_to_nearest_dir_path(gcx.clone(), &path_str, false, top_n).await;
+                let corrected_path = if !file_candidates.is_empty() {
+                    return_one_candidate_or_a_good_error(
+                        gcx.clone(),
+                        &path_str,
+                        &file_candidates,
+                        &project_dirs,
+                        false,
+                    )
+                    .await?
+                } else if !dir_candidates.is_empty() {
+                    return_one_candidate_or_a_good_error(
+                        gcx.clone(),
+                        &path_str,
+                        &dir_candidates,
+                        &project_dirs,
+                        true,
+                    )
+                    .await?
+                } else {
+                    return Err(format!(
+                        "⚠️ Path '{}' not found. 💡 Use tree() to explore or check spelling",
+                        path_str
+                    ));
+                };
+
+                let true_path = canonical_path(&corrected_path);
+
+                if let Err(e) = check_file_privacy(
+                    privacy_settings.clone(),
+                    &true_path,
+                    &FilePrivacyLevel::AllowToSendAnywhere,
+                ) {
+                    return Err(format!("Cannot rm '{}': {}", path_str, e));
+                }
+
+                let is_within_project = project_dirs.iter().any(|p| true_path.starts_with(p));
+                if !is_within_project && !gcx.read().await.cmdline.inside_container {
+                    return Err(format!(
+                    "⚠️ '{}' is outside project directories. 💡 rm() only works within workspace",
+                    path_str
+                ));
+                }
+
+                let corrections = path_str != corrected_path;
+                (true_path, corrected_path, Vec::new(), corrections)
+            };
 
         // Check if path exists.
         if !true_path.exists() {
@@ -227,7 +256,15 @@ impl Tool for ToolRm {
             }
         }
         let mut messages: Vec<ContextEnum> = Vec::new();
-        let corrections = path_str != corrected_path;
+        if !scope_warnings.is_empty() {
+            messages.push(ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(scope_warnings.join("\n")),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            }));
+        }
         if is_dir {
             if !recursive {
                 return Err(format!(

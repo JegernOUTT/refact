@@ -4,7 +4,8 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::load_privacy_if_needed;
 use crate::tools::file_edit::auxiliary::{
-    convert_edit_to_diffchunks, parse_path_for_update, sync_documents_ast,
+    append_scope_warnings, convert_edit_to_diffchunks, parse_path_for_update,
+    scope_warnings_to_tool_message, sync_documents_ast,
 };
 use crate::tools::file_edit::undo_history::{get_undo_history, UndoEntry};
 use crate::tools::tools_description::{
@@ -16,6 +17,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use crate::worktrees::scope::ExecutionScope;
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
 use tokio::sync::RwLock as ARwLock;
@@ -28,15 +30,17 @@ pub struct ToolUndoTextDoc {
 struct Args {
     path: PathBuf,
     steps: usize,
+    scope_warnings: Vec<String>,
 }
 
 async fn parse_args(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    code_workdir: &Option<PathBuf>,
+    execution_scope: Option<&ExecutionScope>,
 ) -> Result<Args, String> {
     let privacy = load_privacy_if_needed(gcx.clone()).await;
-    let path = parse_path_for_update(gcx, args, privacy, code_workdir).await?;
+    let resolved = parse_path_for_update(gcx, args, privacy, execution_scope).await?;
+    let path = resolved.path;
     let steps = match args.get("steps") {
         Some(Value::Number(n)) => n.as_u64().unwrap_or(1) as usize,
         Some(Value::String(s)) => s.parse().unwrap_or(1),
@@ -45,15 +49,19 @@ async fn parse_args(
     if steps == 0 {
         return Err("⚠️ steps must be >= 1".to_string());
     }
-    Ok(Args { path, steps })
+    Ok(Args {
+        path,
+        steps,
+        scope_warnings: resolved.warnings,
+    })
 }
 
 pub async fn tool_undo_text_doc_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
-    code_workdir: &Option<PathBuf>,
+    execution_scope: Option<&ExecutionScope>,
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
-    let a = parse_args(gcx.clone(), args, code_workdir).await?;
+    let a = parse_args(gcx.clone(), args, execution_scope).await?;
 
     let history = get_undo_history();
     let entries: Vec<UndoEntry> = {
@@ -118,6 +126,7 @@ pub async fn tool_undo_text_doc_exec(
     };
 
     let chunks = convert_edit_to_diffchunks(a.path.clone(), &current_content, target_content)?;
+    let summary = append_scope_warnings(summary, &a.scope_warnings);
     Ok((current_content, target_content.clone(), chunks, summary))
 }
 
@@ -129,11 +138,15 @@ impl Tool for ToolUndoTextDoc {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = {
+        let (gcx, execution_scope) = {
             let ccx_locked = ccx.lock().await;
-            ccx_locked.global_context.clone()
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+            )
         };
-        let (_, _, chunks, _) = tool_undo_text_doc_exec(gcx.clone(), args, &None).await?;
+        let (_, _, chunks, summary) =
+            tool_undo_text_doc_exec(gcx.clone(), args, execution_scope.as_ref()).await?;
 
         let related_section = {
             let idx_arc = { gcx.read().await.knowledge_index.clone() };
@@ -166,6 +179,10 @@ impl Tool for ToolUndoTextDoc {
             ..Default::default()
         })];
 
+        if let Some(message) = scope_warnings_to_tool_message(&summary, tool_call_id) {
+            out.push(message);
+        }
+
         if !related_section.trim().is_empty() {
             out.push(ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
@@ -184,11 +201,16 @@ impl Tool for ToolUndoTextDoc {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
-        let gcx = {
+        let (gcx, execution_scope) = {
             let ccx_locked = ccx.lock().await;
-            ccx_locked.global_context.clone()
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+            )
         };
-        let can_exec = parse_args(gcx, args, &None).await.is_ok();
+        let can_exec = parse_args(gcx, args, execution_scope.as_ref())
+            .await
+            .is_ok();
         if !can_exec {
             return Ok(MatchConfirmDeny {
                 result: MatchConfirmDenyResult::PASS,

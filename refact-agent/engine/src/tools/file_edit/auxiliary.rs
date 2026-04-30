@@ -1,6 +1,6 @@
 use crate::ast::ast_indexer_thread::{ast_indexer_block_until_finished, ast_indexer_enqueue_files};
 use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
-use crate::call_validation::DiffChunk;
+use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, DiffChunk};
 use crate::files_correction::{
     canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
     correct_to_nearest_dir_path, get_project_dirs, preprocess_path_for_normalization,
@@ -8,58 +8,135 @@ use crate::files_correction::{
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
 use crate::privacy::{check_file_privacy, FilePrivacyLevel, PrivacySettings};
+use crate::worktrees::scope::{ExecutionScope, ScopedPath};
 use regex::{Match, Regex};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 
-fn resolve_path_with_workdir(
-    path: &PathBuf,
-    code_workdir: &Option<PathBuf>,
-) -> Result<PathBuf, String> {
-    let Some(workdir) = code_workdir else {
-        return Ok(path.clone());
+#[derive(Debug, Clone)]
+pub struct ResolvedToolPath {
+    pub path: PathBuf,
+    pub warnings: Vec<String>,
+}
+
+pub fn active_execution_scope(scope: Option<&ExecutionScope>) -> Option<&ExecutionScope> {
+    scope.filter(|scope| scope.is_enforced())
+}
+
+pub fn scoped_path_warnings(scoped: &ScopedPath, scope: &ExecutionScope) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(source_path) = &scoped.remapped_from {
+        warnings.push(format!(
+            "⚠️ Worktree scope: absolute source path '{}' was mapped to active worktree: '{}' -> '{}'",
+            source_path.display(),
+            source_path.display(),
+            scoped.path.display()
+        ));
+    } else if scoped.outside_absolute_path {
+        warnings.push(format!(
+            "⚠️ Worktree scope: strong warning: operation targeted privacy-permitted absolute path outside active worktree '{}': '{}'",
+            scope.effective_root().display(),
+            scoped.path.display()
+        ));
+    } else if scoped.used_absolute_path {
+        warnings.push(format!(
+            "⚠️ Worktree scope: absolute path was used in a worktree-scoped chat and resolved under active worktree '{}': '{}'",
+            scope.effective_root().display(),
+            scoped.path.display()
+        ));
+    }
+    warnings
+}
+
+pub fn append_scope_warnings(summary: String, warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        summary
+    } else {
+        format!("{}\n{}", warnings.join("\n"), summary)
+    }
+}
+
+pub fn scope_warnings_to_tool_message(summary: &str, tool_call_id: &str) -> Option<ContextEnum> {
+    let warnings = summary
+        .lines()
+        .filter(|line| line.contains("Worktree scope:"))
+        .collect::<Vec<_>>();
+    if warnings.is_empty() {
+        None
+    } else {
+        Some(ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(warnings.join("\n")),
+            tool_calls: None,
+            tool_call_id: tool_call_id.to_string(),
+            ..Default::default()
+        }))
+    }
+}
+
+pub fn resolve_path_with_scope(
+    raw_path: &Path,
+    privacy_settings: Arc<PrivacySettings>,
+    execution_scope: Option<&ExecutionScope>,
+    require_existing: bool,
+) -> Option<Result<ResolvedToolPath, String>> {
+    let scope = active_execution_scope(execution_scope)?;
+    let scoped = if require_existing {
+        scope.resolve_existing_path(raw_path)
+    } else {
+        scope.resolve_path(raw_path)
     };
-
-    if !path.has_root() {
-        return Ok(workdir.join(path));
-    }
-
-    if path.starts_with(workdir) {
-        return Ok(path.clone());
-    }
-
-    if let Some(workspace_root) = workdir
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-    {
-        if path.starts_with(&workspace_root) {
-            if let Ok(relative) = path.strip_prefix(&workspace_root) {
-                return Ok(workdir.join(relative));
-            }
+    let scoped = match scoped {
+        Ok(scoped) => scoped,
+        Err(e) => {
+            return Some(Err(format!(
+                "⚠️ Cannot resolve '{}' in active worktree '{}': {}",
+                raw_path.display(),
+                scope.effective_root().display(),
+                e
+            )))
         }
+    };
+    if let Err(e) = check_file_privacy(
+        privacy_settings,
+        &scoped.path,
+        &FilePrivacyLevel::AllowToSendAnywhere,
+    ) {
+        return Some(Err(format!(
+            "⚠️ Cannot access '{}' (blocked by privacy: {}). Active worktree root: '{}'",
+            scoped.path.display(),
+            e,
+            scope.effective_root().display()
+        )));
     }
-
-    Err(format!(
-        "⚠️ Cannot resolve {:?} into worktree {:?}. 💡 Use a path inside the worktree",
-        path, workdir
-    ))
+    let warnings = scoped_path_warnings(&scoped, scope);
+    Some(Ok(ResolvedToolPath {
+        path: scoped.path,
+        warnings,
+    }))
 }
 
 pub async fn parse_path_for_update(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     privacy_settings: Arc<PrivacySettings>,
-    code_workdir: &Option<PathBuf>,
-) -> Result<PathBuf, String> {
+    execution_scope: Option<&ExecutionScope>,
+) -> Result<ResolvedToolPath, String> {
     let s = parse_string_arg(args, "path", "Provide absolute path to file")?;
     let raw_path = preprocess_path_for_normalization(s.trim().to_string());
+    if let Some(resolved) = resolve_path_with_scope(
+        Path::new(&raw_path),
+        privacy_settings.clone(),
+        execution_scope,
+        true,
+    ) {
+        return resolved;
+    }
+
     let candidates = file_repair_candidates(gcx.clone(), &raw_path, 3, false).await;
     let path = return_one_candidate_or_a_good_error(
         gcx.clone(),
@@ -71,37 +148,52 @@ pub async fn parse_path_for_update(
     .await
     .map(|f| canonicalize_normalized_path(PathBuf::from(f)))?;
 
-    let resolved_path = resolve_path_with_workdir(&path, code_workdir)?;
-
     if check_file_privacy(
         privacy_settings,
-        &resolved_path,
+        &path,
         &FilePrivacyLevel::AllowToSendAnywhere,
     )
     .is_err()
     {
         return Err(format!(
             "⚠️ Cannot update {:?} (blocked by privacy). 💡 Choose file in allowed directory",
-            resolved_path
+            path
         ));
     }
-    if !resolved_path.exists() {
+    if !path.exists() {
         return Err(format!(
             "⚠️ File {:?} not found. 💡 Use create_textdoc() for new files",
-            resolved_path
+            path
         ));
     }
-    Ok(resolved_path)
+    Ok(ResolvedToolPath {
+        path,
+        warnings: Vec::new(),
+    })
 }
 
 pub async fn parse_path_for_create(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     privacy_settings: Arc<PrivacySettings>,
-    code_workdir: &Option<PathBuf>,
-) -> Result<PathBuf, String> {
+    execution_scope: Option<&ExecutionScope>,
+) -> Result<ResolvedToolPath, String> {
     let s = parse_string_arg(args, "path", "Provide absolute path for new file")?;
-    let raw_path = PathBuf::from(preprocess_path_for_normalization(s.trim().to_string()));
+    let raw_string = preprocess_path_for_normalization(s.trim().to_string());
+    let raw_path = PathBuf::from(&raw_string);
+
+    raw_path.file_name().ok_or_else(|| {
+        format!(
+            "⚠️ Path '{}' has no filename. 💡 Include filename: /path/to/file.ext",
+            s.trim()
+        )
+    })?;
+
+    if let Some(resolved) =
+        resolve_path_with_scope(&raw_path, privacy_settings.clone(), execution_scope, false)
+    {
+        return resolved;
+    }
 
     let filename = raw_path
         .file_name()
@@ -139,21 +231,22 @@ pub async fn parse_path_for_create(
         path
     };
 
-    let resolved_path = resolve_path_with_workdir(&path, code_workdir)?;
-
     if check_file_privacy(
         privacy_settings,
-        &resolved_path,
+        &path,
         &FilePrivacyLevel::AllowToSendAnywhere,
     )
     .is_err()
     {
         return Err(format!(
             "⚠️ Cannot create {:?} (blocked by privacy). 💡 Choose path in allowed directory",
-            resolved_path
+            path
         ));
     }
-    Ok(resolved_path)
+    Ok(ResolvedToolPath {
+        path,
+        warnings: Vec::new(),
+    })
 }
 
 pub fn parse_string_arg(
@@ -1087,40 +1180,643 @@ mod tests {
         assert!(parse_line_ranges("2:2", 0).is_err());
     }
 
-    // --- resolve_path_with_workdir: hard error, no silent fallback ---
+    mod worktree_scope_tools {
+        use crate::at_commands::at_commands::AtCommandsContext;
+        use crate::call_validation::{ChatContent, ContextEnum};
+        use crate::global_context::GlobalContext;
+        use crate::privacy::{FilePrivacySettings, PrivacySettings};
+        use crate::tools::file_edit::tool_apply_patch::tool_apply_patch_exec;
+        use crate::tools::file_edit::tool_create_textdoc::tool_create_text_doc_exec;
+        use crate::tools::file_edit::tool_undo_textdoc::tool_undo_text_doc_exec;
+        use crate::tools::file_edit::tool_update_textdoc::tool_update_text_doc_exec;
+        use crate::tools::file_edit::tool_update_textdoc_anchored::tool_update_text_doc_anchored_exec;
+        use crate::tools::file_edit::tool_update_textdoc_by_lines::tool_update_text_doc_by_lines_exec;
+        use crate::tools::file_edit::tool_update_textdoc_regex::tool_update_text_doc_regex_exec;
+        use crate::tools::tool_mv::ToolMv;
+        use crate::tools::tool_rm::ToolRm;
+        use crate::tools::tool_shell::ToolShell;
+        use crate::tools::tools_description::Tool;
+        use crate::worktrees::scope::ExecutionScope;
+        use crate::worktrees::types::WorktreeMeta;
+        use serde_json::{json, Value};
+        use std::collections::HashMap;
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use std::sync::Arc;
+        use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
-    #[test]
-    fn test_resolve_path_workdir_none_returns_path() {
-        let p = PathBuf::from("/absolute/path/file.rs");
-        assert_eq!(resolve_path_with_workdir(&p, &None).unwrap(), p);
-    }
+        struct Fixture {
+            _temp: tempfile::TempDir,
+            root: PathBuf,
+            source: PathBuf,
+            outside: PathBuf,
+            scope: ExecutionScope,
+            worktree: WorktreeMeta,
+            gcx: Arc<ARwLock<GlobalContext>>,
+        }
 
-    #[test]
-    fn test_resolve_path_workdir_absolute_inside_workdir() {
-        let workdir = PathBuf::from("/project/worktree");
-        let path = PathBuf::from("/project/worktree/src/file.rs");
-        assert_eq!(
-            resolve_path_with_workdir(&path, &Some(workdir)).unwrap(),
-            path
-        );
-    }
+        fn now_plus_hour() -> u64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600
+        }
 
-    #[test]
-    fn test_resolve_path_workdir_relative_joined() {
-        let workdir = PathBuf::from("/project/worktree");
-        let path = PathBuf::from("src/file.rs");
-        assert_eq!(
-            resolve_path_with_workdir(&path, &Some(workdir)).unwrap(),
-            PathBuf::from("/project/worktree/src/file.rs")
-        );
-    }
+        async fn set_privacy(gcx: Arc<ARwLock<GlobalContext>>, blocked: Vec<String>) {
+            gcx.write().await.privacy_settings = Arc::new(PrivacySettings {
+                privacy_rules: FilePrivacySettings {
+                    only_send_to_servers_I_control: Vec::new(),
+                    blocked,
+                },
+                loaded_ts: now_plus_hour(),
+            });
+        }
 
-    #[test]
-    fn test_resolve_path_workdir_unresolvable_returns_error() {
-        let workdir = PathBuf::from("/project/worktree");
-        let path = PathBuf::from("/completely/different/tree/file.rs");
-        let result = resolve_path_with_workdir(&path, &Some(workdir));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Cannot resolve"));
+        async fn fixture() -> Fixture {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("worktree");
+            let source = temp.path().join("source");
+            let outside = temp.path().join("outside");
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(source.join("src")).unwrap();
+            fs::create_dir_all(&outside).unwrap();
+            let root = fs::canonicalize(root).unwrap();
+            let source = fs::canonicalize(source).unwrap();
+            let outside = fs::canonicalize(outside).unwrap();
+            let worktree = WorktreeMeta {
+                id: "wt-tools".to_string(),
+                kind: "task_agent".to_string(),
+                root: root.clone(),
+                source_workspace_root: source.clone(),
+                repo_root: source.clone(),
+                branch: Some("feature".to_string()),
+                base_branch: Some("main".to_string()),
+                base_commit: Some("base".to_string()),
+                task_id: Some("task".to_string()),
+                card_id: Some("card".to_string()),
+                agent_id: Some("agent".to_string()),
+                enforce: true,
+            };
+            let scope = ExecutionScope::from_worktree(&worktree);
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            set_privacy(gcx.clone(), Vec::new()).await;
+            Fixture {
+                _temp: temp,
+                root,
+                source,
+                outside,
+                scope,
+                worktree,
+                gcx,
+            }
+        }
+
+        fn path_value(path: &Path) -> Value {
+            json!(path.to_string_lossy().to_string())
+        }
+
+        fn args(entries: Vec<(&str, Value)>) -> HashMap<String, Value> {
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect()
+        }
+
+        async fn ccx(f: &Fixture) -> Arc<AMutex<AtCommandsContext>> {
+            Arc::new(AMutex::new(
+                AtCommandsContext::new(
+                    f.gcx.clone(),
+                    4096,
+                    20,
+                    false,
+                    Vec::new(),
+                    "chat".to_string(),
+                    None,
+                    "model".to_string(),
+                    None,
+                    Some(f.worktree.clone()),
+                )
+                .await,
+            ))
+        }
+
+        fn tool_text(messages: &[ContextEnum]) -> String {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    ContextEnum::ChatMessage(message) => match &message.content {
+                        ChatContent::SimpleText(text) => Some(text.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn pwd_command() -> String {
+            if cfg!(target_os = "windows") {
+                "Get-Location | Select-Object -ExpandProperty Path".to_string()
+            } else {
+                "pwd".to_string()
+            }
+        }
+
+        #[tokio::test]
+        async fn worktree_scope_tools_edit_helpers_modify_scoped_files() {
+            let f = fixture().await;
+
+            fs::write(f.root.join("src/update.txt"), "old\n").unwrap();
+            fs::write(f.source.join("src/update.txt"), "source\n").unwrap();
+            let update_args = args(vec![
+                ("path", json!("src/update.txt")),
+                ("old_str", json!("old")),
+                ("replacement", json!("new")),
+            ]);
+            tool_update_text_doc_exec(f.gcx.clone(), &update_args, false, Some(&f.scope))
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/update.txt")).unwrap(),
+                "new\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/update.txt")).unwrap(),
+                "source\n"
+            );
+            let update_source_args = args(vec![
+                ("path", path_value(&f.source.join("src/update.txt"))),
+                ("old_str", json!("new")),
+                ("replacement", json!("mapped")),
+            ]);
+            let (_, _, _, summary) = tool_update_text_doc_exec(
+                f.gcx.clone(),
+                &update_source_args,
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(summary.contains("mapped to active worktree"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/update.txt")).unwrap(),
+                "mapped\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/update.txt")).unwrap(),
+                "source\n"
+            );
+
+            let create_args = args(vec![
+                ("path", json!("src/create_relative.txt")),
+                ("content", json!("created")),
+            ]);
+            tool_create_text_doc_exec(f.gcx.clone(), &create_args, false, Some(&f.scope))
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/create_relative.txt")).unwrap(),
+                "created\n"
+            );
+            let create_source_args = args(vec![
+                ("path", path_value(&f.source.join("src/create_source.txt"))),
+                ("content", json!("created source")),
+            ]);
+            let (_, _, _, summary) = tool_create_text_doc_exec(
+                f.gcx.clone(),
+                &create_source_args,
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(summary.contains("mapped to active worktree"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/create_source.txt")).unwrap(),
+                "created source\n"
+            );
+            assert!(!f.source.join("src/create_source.txt").exists());
+
+            fs::write(f.root.join("src/anchored.txt"), "A\nanchor\nB\n").unwrap();
+            fs::write(f.source.join("src/anchored.txt"), "source\n").unwrap();
+            let anchored_args = args(vec![
+                ("path", json!("src/anchored.txt")),
+                ("mode", json!("insert_after")),
+                ("anchor", json!("anchor")),
+                ("content", json!("\nrelative")),
+            ]);
+            tool_update_text_doc_anchored_exec(
+                f.gcx.clone(),
+                &anchored_args,
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            let anchored_source_args = args(vec![
+                ("path", path_value(&f.source.join("src/anchored.txt"))),
+                ("mode", json!("insert_before")),
+                ("anchor", json!("anchor")),
+                ("content", json!("source\n")),
+            ]);
+            let (_, _, _, summary) = tool_update_text_doc_anchored_exec(
+                f.gcx.clone(),
+                &anchored_source_args,
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(summary.contains("mapped to active worktree"));
+            assert!(fs::read_to_string(f.root.join("src/anchored.txt"))
+                .unwrap()
+                .contains("source\nanchor\nrelative"));
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/anchored.txt")).unwrap(),
+                "source\n"
+            );
+
+            fs::write(f.root.join("src/regex.txt"), "alpha\n").unwrap();
+            fs::write(f.source.join("src/regex.txt"), "source\n").unwrap();
+            let regex_args = args(vec![
+                ("path", json!("src/regex.txt")),
+                ("pattern", json!("alpha")),
+                ("replacement", json!("beta")),
+            ]);
+            tool_update_text_doc_regex_exec(f.gcx.clone(), &regex_args, false, Some(&f.scope))
+                .await
+                .unwrap();
+            let regex_source_args = args(vec![
+                ("path", path_value(&f.source.join("src/regex.txt"))),
+                ("pattern", json!("beta")),
+                ("replacement", json!("gamma")),
+            ]);
+            let (_, _, _, summary) = tool_update_text_doc_regex_exec(
+                f.gcx.clone(),
+                &regex_source_args,
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(summary.contains("mapped to active worktree"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/regex.txt")).unwrap(),
+                "gamma\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/regex.txt")).unwrap(),
+                "source\n"
+            );
+
+            fs::write(f.root.join("src/lines.txt"), "one\ntwo\n").unwrap();
+            fs::write(f.source.join("src/lines.txt"), "source\n").unwrap();
+            let lines_args = args(vec![
+                ("path", json!("src/lines.txt")),
+                ("content", json!("TWO")),
+                ("ranges", json!("2")),
+            ]);
+            tool_update_text_doc_by_lines_exec(f.gcx.clone(), &lines_args, false, Some(&f.scope))
+                .await
+                .unwrap();
+            let lines_source_args = args(vec![
+                ("path", path_value(&f.source.join("src/lines.txt"))),
+                ("content", json!("ONE")),
+                ("ranges", json!("1")),
+            ]);
+            let (_, _, _, summary) = tool_update_text_doc_by_lines_exec(
+                f.gcx.clone(),
+                &lines_source_args,
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(summary.contains("mapped to active worktree"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/lines.txt")).unwrap(),
+                "ONE\nTWO\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/lines.txt")).unwrap(),
+                "source\n"
+            );
+
+            fs::write(f.root.join("src/undo.txt"), "base\n").unwrap();
+            fs::write(f.source.join("src/undo.txt"), "source\n").unwrap();
+            let undo_update_args = args(vec![
+                ("path", json!("src/undo.txt")),
+                ("old_str", json!("base")),
+                ("replacement", json!("changed")),
+            ]);
+            tool_update_text_doc_exec(f.gcx.clone(), &undo_update_args, false, Some(&f.scope))
+                .await
+                .unwrap();
+            let undo_args = args(vec![("path", path_value(&f.source.join("src/undo.txt")))]);
+            let (_, _, _, summary) =
+                tool_undo_text_doc_exec(f.gcx.clone(), &undo_args, Some(&f.scope))
+                    .await
+                    .unwrap();
+            assert!(summary.contains("mapped to active worktree"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/undo.txt")).unwrap(),
+                "base\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/undo.txt")).unwrap(),
+                "source\n"
+            );
+        }
+
+        #[tokio::test]
+        async fn worktree_scope_tools_absolute_warnings_and_privacy() {
+            let f = fixture().await;
+            fs::write(f.root.join("src/absolute.txt"), "old\n").unwrap();
+            let absolute_args = args(vec![
+                ("path", path_value(&f.root.join("src/absolute.txt"))),
+                ("old_str", json!("old")),
+                ("replacement", json!("absolute")),
+            ]);
+            let (_, _, _, summary) =
+                tool_update_text_doc_exec(f.gcx.clone(), &absolute_args, false, Some(&f.scope))
+                    .await
+                    .unwrap();
+            assert!(summary.contains("absolute path was used"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/absolute.txt")).unwrap(),
+                "absolute\n"
+            );
+
+            let outside_file = f.outside.join("outside.txt");
+            fs::write(&outside_file, "old\n").unwrap();
+            let outside_args = args(vec![
+                ("path", path_value(&outside_file)),
+                ("old_str", json!("old")),
+                ("replacement", json!("outside")),
+            ]);
+            let (_, _, _, summary) =
+                tool_update_text_doc_exec(f.gcx.clone(), &outside_args, false, Some(&f.scope))
+                    .await
+                    .unwrap();
+            assert!(summary.contains("outside active worktree"));
+            assert_eq!(fs::read_to_string(&outside_file).unwrap(), "outside\n");
+
+            let blocked_file = f.outside.join("blocked.txt");
+            fs::write(&blocked_file, "old\n").unwrap();
+            set_privacy(
+                f.gcx.clone(),
+                vec![blocked_file.to_string_lossy().to_string()],
+            )
+            .await;
+            let blocked_args = args(vec![
+                ("path", path_value(&blocked_file)),
+                ("old_str", json!("old")),
+                ("replacement", json!("blocked")),
+            ]);
+            let error =
+                tool_update_text_doc_exec(f.gcx.clone(), &blocked_args, false, Some(&f.scope))
+                    .await
+                    .unwrap_err();
+            assert!(error.contains("blocked by privacy"));
+        }
+
+        #[tokio::test]
+        async fn worktree_scope_tools_apply_patch_resolves_all_path_kinds() {
+            let f = fixture().await;
+            fs::write(f.root.join("src/patch_source.txt"), "old\n").unwrap();
+            fs::write(f.source.join("src/patch_source.txt"), "source\n").unwrap();
+            let patch = format!(
+                "*** Begin Patch\n*** Update File: {}\n@@\n-old\n+mapped\n*** End Patch",
+                f.source.join("src/patch_source.txt").display()
+            );
+            let result = tool_apply_patch_exec(
+                f.gcx.clone(),
+                &args(vec![("patch", json!(patch))]),
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(result
+                .warnings
+                .join("\n")
+                .contains("mapped to active worktree"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/patch_source.txt")).unwrap(),
+                "mapped\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/patch_source.txt")).unwrap(),
+                "source\n"
+            );
+
+            let patch = format!(
+                "*** Begin Patch\n*** Add File: {}\n+absolute\n*** End Patch",
+                f.root.join("src/patch_absolute.txt").display()
+            );
+            let result = tool_apply_patch_exec(
+                f.gcx.clone(),
+                &args(vec![("patch", json!(patch))]),
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(result
+                .warnings
+                .join("\n")
+                .contains("absolute path was used"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/patch_absolute.txt")).unwrap(),
+                "absolute\n"
+            );
+
+            fs::write(f.root.join("src/patch_move.txt"), "move old\n").unwrap();
+            fs::write(f.source.join("src/patch_move.txt"), "source\n").unwrap();
+            let patch = format!(
+                "*** Begin Patch\n*** Update File: {}\n*** Move to: {}\n@@\n-move old\n+move new\n*** End Patch",
+                f.source.join("src/patch_move.txt").display(),
+                f.source.join("src/patch_moved.txt").display()
+            );
+            let result = tool_apply_patch_exec(
+                f.gcx.clone(),
+                &args(vec![("patch", json!(patch))]),
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(result
+                .warnings
+                .join("\n")
+                .contains("mapped to active worktree"));
+            assert!(!f.root.join("src/patch_move.txt").exists());
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/patch_moved.txt")).unwrap(),
+                "move new\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/patch_move.txt")).unwrap(),
+                "source\n"
+            );
+            assert!(!f.source.join("src/patch_moved.txt").exists());
+
+            let outside_file = f.outside.join("patch_outside.txt");
+            fs::write(&outside_file, "outside old\n").unwrap();
+            let patch = format!(
+                "*** Begin Patch\n*** Update File: {}\n@@\n-outside old\n+outside new\n*** End Patch",
+                outside_file.display()
+            );
+            let result = tool_apply_patch_exec(
+                f.gcx.clone(),
+                &args(vec![("patch", json!(patch))]),
+                false,
+                Some(&f.scope),
+            )
+            .await
+            .unwrap();
+            assert!(result
+                .warnings
+                .join("\n")
+                .contains("outside active worktree"));
+            assert_eq!(fs::read_to_string(&outside_file).unwrap(), "outside new\n");
+        }
+
+        #[tokio::test]
+        async fn worktree_scope_tools_rm_mv_resolve_and_warn() {
+            let f = fixture().await;
+            let ccx = ccx(&f).await;
+            let tool_call_id = "tool".to_string();
+
+            fs::write(f.root.join("src/remove.txt"), "remove\n").unwrap();
+            fs::write(f.source.join("src/remove.txt"), "source\n").unwrap();
+            let mut rm = ToolRm {
+                config_path: String::new(),
+            };
+            let (_, messages) = rm
+                .tool_execute(
+                    ccx.clone(),
+                    &tool_call_id,
+                    &args(vec![
+                        ("path", path_value(&f.source.join("src/remove.txt"))),
+                        ("dry_run", json!(true)),
+                    ]),
+                )
+                .await
+                .unwrap();
+            assert!(tool_text(&messages).contains("mapped to active worktree"));
+            assert!(f.root.join("src/remove.txt").exists());
+            let (_, messages) = rm
+                .tool_execute(
+                    ccx.clone(),
+                    &tool_call_id,
+                    &args(vec![("path", path_value(&f.source.join("src/remove.txt")))]),
+                )
+                .await
+                .unwrap();
+            assert!(tool_text(&messages).contains("mapped to active worktree"));
+            assert!(!f.root.join("src/remove.txt").exists());
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/remove.txt")).unwrap(),
+                "source\n"
+            );
+
+            fs::write(f.root.join("src/move.txt"), "move\n").unwrap();
+            fs::write(f.source.join("src/move.txt"), "source\n").unwrap();
+            let mut mv = ToolMv {
+                config_path: String::new(),
+            };
+            let (_, messages) = mv
+                .tool_execute(
+                    ccx.clone(),
+                    &tool_call_id,
+                    &args(vec![
+                        ("source", path_value(&f.source.join("src/move.txt"))),
+                        ("destination", path_value(&f.source.join("src/moved.txt"))),
+                    ]),
+                )
+                .await
+                .unwrap();
+            assert!(tool_text(&messages).contains("mapped to active worktree"));
+            assert!(!f.root.join("src/move.txt").exists());
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/moved.txt")).unwrap(),
+                "move\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("src/move.txt")).unwrap(),
+                "source\n"
+            );
+            assert!(!f.source.join("src/moved.txt").exists());
+
+            let outside_src = f.outside.join("outside_move.txt");
+            let outside_dst = f.outside.join("outside_moved.txt");
+            fs::write(&outside_src, "outside\n").unwrap();
+            let (_, messages) = mv
+                .tool_execute(
+                    ccx,
+                    &tool_call_id,
+                    &args(vec![
+                        ("source", path_value(&outside_src)),
+                        ("destination", path_value(&outside_dst)),
+                    ]),
+                )
+                .await
+                .unwrap();
+            assert!(tool_text(&messages).contains("outside active worktree"));
+            assert!(!outside_src.exists());
+            assert_eq!(fs::read_to_string(&outside_dst).unwrap(), "outside\n");
+        }
+
+        #[tokio::test]
+        async fn worktree_scope_tools_shell_defaults_and_workdirs() {
+            let f = fixture().await;
+            let ccx = ccx(&f).await;
+            let tool_call_id = "shell".to_string();
+            let mut shell = ToolShell::default();
+
+            let (_, messages) = shell
+                .tool_execute(
+                    ccx.clone(),
+                    &tool_call_id,
+                    &args(vec![("command", json!(pwd_command()))]),
+                )
+                .await
+                .unwrap();
+            let text = tool_text(&messages);
+            assert!(text.contains(&f.root.to_string_lossy().to_string()));
+            assert!(text.contains("shell cwd/workdir is enforced"));
+
+            let (_, messages) = shell
+                .tool_execute(
+                    ccx.clone(),
+                    &tool_call_id,
+                    &args(vec![
+                        ("command", json!(pwd_command())),
+                        ("workdir", path_value(&f.source.join("src"))),
+                    ]),
+                )
+                .await
+                .unwrap();
+            let text = tool_text(&messages);
+            assert!(text.contains(&f.root.join("src").to_string_lossy().to_string()));
+            assert!(text.contains("mapped to active worktree"));
+
+            let (_, messages) = shell
+                .tool_execute(
+                    ccx,
+                    &tool_call_id,
+                    &args(vec![
+                        ("command", json!(pwd_command())),
+                        ("workdir", path_value(&f.outside)),
+                    ]),
+                )
+                .await
+                .unwrap();
+            let text = tool_text(&messages);
+            assert!(text.contains(&f.outside.to_string_lossy().to_string()));
+            assert!(text.contains("outside active worktree"));
+        }
     }
 }

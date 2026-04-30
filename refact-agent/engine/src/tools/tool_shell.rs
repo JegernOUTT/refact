@@ -22,6 +22,9 @@ use crate::files_correction::get_project_dirs;
 use crate::files_correction::preprocess_path_for_normalization;
 use crate::files_correction::CommandSimplifiedDirExt;
 use crate::global_context::GlobalContext;
+use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
+use crate::tools::file_edit::auxiliary::{active_execution_scope, scoped_path_warnings};
+use crate::worktrees::scope::ExecutionScope;
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
@@ -148,16 +151,23 @@ impl Tool for ToolShell {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, subchat_tx, abort_flag) = {
+        let (gcx, subchat_tx, abort_flag, execution_scope) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.global_context.clone(),
                 ccx_lock.subchat_tx.clone(),
                 ccx_lock.abort_flag.clone(),
+                ccx_lock.execution_scope.clone(),
             )
         };
-        let (command, workdir_maybe, custom_filter, timeout_override) =
-            parse_args_with_filter(gcx.clone(), args, &self.cfg.output_filter).await?;
+        let (command, workdir_maybe, custom_filter, timeout_override, scope_warnings) =
+            parse_args_with_filter(
+                gcx.clone(),
+                args,
+                &self.cfg.output_filter,
+                execution_scope.as_ref(),
+            )
+            .await?;
         let timeout =
             timeout_override.unwrap_or_else(|| self.cfg.timeout.parse::<u64>().unwrap_or(10));
 
@@ -188,6 +198,9 @@ impl Tool for ToolShell {
 
         let mut out =
             crate::integrations::integr_cmdline::format_output(&filtered_stdout, &filtered_stderr);
+        if !scope_warnings.is_empty() {
+            out = format!("{}\n{}", scope_warnings.join("\n"), out);
+        }
         if result.interrupted {
             out.push_str(&format!(
                 "⚠️ The command was interrupted by user after {:.3}s (process killed). Output above may be incomplete.\n",
@@ -239,8 +252,14 @@ impl Tool for ToolShell {
         ccx: Arc<AMutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<String, String> {
-        let gcx = ccx.lock().await.global_context.clone();
-        let (command, _) = parse_args(gcx, args).await?;
+        let (gcx, execution_scope) = {
+            let ccx_locked = ccx.lock().await;
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+            )
+        };
+        let (command, _) = parse_args(gcx, args, execution_scope.as_ref()).await?;
         Ok(command)
     }
 
@@ -571,9 +590,10 @@ pub async fn execute_shell_command_with_streaming(
 async fn parse_args(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
+    execution_scope: Option<&ExecutionScope>,
 ) -> Result<(String, Option<PathBuf>), String> {
-    let (command, workdir, _, _) =
-        parse_args_with_filter(gcx, args, &OutputFilter::default()).await?;
+    let (command, workdir, _, _, _) =
+        parse_args_with_filter(gcx, args, &OutputFilter::default(), execution_scope).await?;
     Ok((command, workdir))
 }
 
@@ -581,7 +601,17 @@ async fn parse_args_with_filter(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     config_filter: &OutputFilter,
-) -> Result<(String, Option<PathBuf>, Option<OutputFilter>, Option<u64>), String> {
+    execution_scope: Option<&ExecutionScope>,
+) -> Result<
+    (
+        String,
+        Option<PathBuf>,
+        Option<OutputFilter>,
+        Option<u64>,
+        Vec<String>,
+    ),
+    String,
+> {
     let command = match args.get("command") {
         Some(Value::String(s)) => {
             if s.is_empty() {
@@ -594,17 +624,14 @@ async fn parse_args_with_filter(
         None => return Err("Missing argument `command`".to_string()),
     };
 
-    let workdir = match args.get("workdir") {
-        Some(Value::String(s)) => {
-            if s.is_empty() {
-                None
-            } else {
-                Some(resolve_shell_workdir(gcx.clone(), s).await?)
-            }
-        }
+    let raw_workdir = match args.get("workdir") {
+        Some(Value::String(s)) if s.is_empty() => None,
+        Some(Value::String(s)) => Some(s.as_str()),
         Some(v) => return Err(format!("argument `workdir` is not a string: {:?}", v)),
         None => None,
     };
+    let (workdir, scope_warnings) =
+        resolve_shell_workdir(gcx.clone(), raw_workdir, execution_scope).await?;
 
     let has_filter_override =
         args.get("output_filter").is_some() || args.get("output_limit").is_some();
@@ -619,13 +646,52 @@ async fn parse_args_with_filter(
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<u64>().ok());
 
-    Ok((command, workdir, custom_filter, timeout_override))
+    Ok((
+        command,
+        workdir,
+        custom_filter,
+        timeout_override,
+        scope_warnings,
+    ))
 }
 
 async fn resolve_shell_workdir(
     gcx: Arc<ARwLock<GlobalContext>>,
-    raw_path: &str,
-) -> Result<PathBuf, String> {
+    raw_path: Option<&str>,
+    execution_scope: Option<&ExecutionScope>,
+) -> Result<(Option<PathBuf>, Vec<String>), String> {
+    if let Some(scope) = active_execution_scope(execution_scope) {
+        let scoped = scope.resolve_workdir(raw_path).map_err(|e| {
+            format!(
+                "⚠️ Cannot resolve shell workdir in active worktree '{}': {}",
+                scope.effective_root().display(),
+                e
+            )
+        })?;
+        let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
+        if let Err(e) = check_file_privacy(
+            privacy_settings,
+            &scoped.path,
+            &FilePrivacyLevel::AllowToSendAnywhere,
+        ) {
+            return Err(format!(
+                "⚠️ Cannot use shell workdir '{}' (blocked by privacy: {}). Active worktree root: '{}'",
+                scoped.path.display(),
+                e,
+                scope.effective_root().display()
+            ));
+        }
+        let mut warnings = scoped_path_warnings(&scoped, scope);
+        warnings.push(format!(
+            "⚠️ Worktree scope: shell cwd/workdir is enforced as '{}', but shell command text is not OS-sandboxed",
+            scoped.path.display()
+        ));
+        return Ok((Some(scoped.path), warnings));
+    }
+
+    let Some(raw_path) = raw_path else {
+        return Ok((None, Vec::new()));
+    };
     let path_str = preprocess_path_for_normalization(raw_path.to_string());
     let path = PathBuf::from(&path_str);
 
@@ -650,6 +716,6 @@ async fn resolve_shell_workdir(
     if !workdir.exists() {
         Err("Workdir doesn't exist".to_string())
     } else {
-        Ok(workdir)
+        Ok((Some(workdir), Vec::new()))
     }
 }

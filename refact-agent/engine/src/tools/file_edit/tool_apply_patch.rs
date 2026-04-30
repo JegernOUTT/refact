@@ -4,10 +4,12 @@ use crate::files_correction::{check_if_its_inside_a_workspace_or_config, get_pro
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
-use crate::privacy::{check_file_privacy, FilePrivacyLevel};
+use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
+use crate::worktrees::scope::ExecutionScope;
 use crate::tools::file_edit::auxiliary::{
-    await_ast_indexing, convert_edit_to_diffchunks, normalize_line_endings, restore_line_endings,
-    sync_documents_ast, write_file,
+    await_ast_indexing, convert_edit_to_diffchunks, normalize_line_endings,
+    resolve_path_with_scope, restore_line_endings, sync_documents_ast, write_file,
+    ResolvedToolPath,
 };
 use crate::tools::file_edit::openai_apply_patch::{
     apply_update_chunks, parse_patch, validate_relative_path, FileOperation, ParsedPatch,
@@ -20,7 +22,7 @@ use crate::tools::tools_description::{
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
 use tokio::sync::RwLock as ARwLock;
@@ -34,6 +36,7 @@ pub struct ToolApplyPatch {
 pub struct ApplyPatchResult {
     pub file_results: Vec<SingleFileResult>,
     pub all_chunks: Vec<DiffChunk>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -72,13 +75,24 @@ async fn resolve_patch_path(
     gcx: Arc<ARwLock<GlobalContext>>,
     rel_path: &str,
     must_exist: bool,
-) -> Result<PathBuf, String> {
+    execution_scope: Option<&ExecutionScope>,
+) -> Result<ResolvedToolPath, String> {
+    let requested_path = rel_path.trim();
+    let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
+    if let Some(resolved) = resolve_path_with_scope(
+        Path::new(requested_path),
+        privacy_settings.clone(),
+        execution_scope,
+        must_exist,
+    ) {
+        return resolved;
+    }
+
     let project_dirs = get_project_dirs(gcx.clone()).await;
     if project_dirs.is_empty() {
         return Err("No workspace found".to_string());
     }
 
-    let requested_path = rel_path.trim();
     let full_path = if let Some(absolute_path) =
         absolute_path_inside_workspace(requested_path, &project_dirs)
     {
@@ -153,7 +167,10 @@ async fn resolve_patch_path(
         ));
     }
 
-    Ok(canonical)
+    Ok(ResolvedToolPath {
+        path: canonical,
+        warnings: Vec::new(),
+    })
 }
 
 enum OverlayState {
@@ -165,18 +182,23 @@ pub async fn tool_apply_patch_exec(
     gcx: Arc<ARwLock<GlobalContext>>,
     args: &HashMap<String, Value>,
     dry: bool,
+    execution_scope: Option<&ExecutionScope>,
 ) -> Result<ApplyPatchResult, String> {
     let parsed = parse_patch_arg(args)?;
     await_ast_indexing(gcx.clone()).await?;
 
     let mut file_results = Vec::new();
     let mut all_chunks = Vec::new();
+    let mut warnings = Vec::new();
     let mut overlay: HashMap<PathBuf, OverlayState> = HashMap::new();
 
     for op in parsed.operations {
         match op {
             FileOperation::Add { path, contents } => {
-                let full_path = resolve_patch_path(gcx.clone(), &path, false).await?;
+                let resolved_path =
+                    resolve_patch_path(gcx.clone(), &path, false, execution_scope).await?;
+                warnings.extend(resolved_path.warnings);
+                let full_path = resolved_path.path;
 
                 let exists = match overlay.get(&full_path) {
                     Some(OverlayState::Present(_)) => true,
@@ -207,7 +229,10 @@ pub async fn tool_apply_patch_exec(
             }
 
             FileOperation::Delete { path } => {
-                let full_path = resolve_patch_path(gcx.clone(), &path, true).await?;
+                let resolved_path =
+                    resolve_patch_path(gcx.clone(), &path, true, execution_scope).await?;
+                warnings.extend(resolved_path.warnings);
+                let full_path = resolved_path.path;
 
                 let file_content = match overlay.get(&full_path) {
                     Some(OverlayState::Present(content)) => content.clone(),
@@ -263,7 +288,10 @@ pub async fn tool_apply_patch_exec(
                 move_to,
                 chunks,
             } => {
-                let full_path = resolve_patch_path(gcx.clone(), &path, true).await?;
+                let resolved_path =
+                    resolve_patch_path(gcx.clone(), &path, true, execution_scope).await?;
+                warnings.extend(resolved_path.warnings);
+                let full_path = resolved_path.path;
 
                 let file_content = match overlay.get(&full_path) {
                     Some(OverlayState::Present(content)) => content.clone(),
@@ -284,7 +312,10 @@ pub async fn tool_apply_patch_exec(
                 let new_file_content = restore_line_endings(&new_content, has_crlf);
 
                 if let Some(move_path) = move_to {
-                    let dest_path = resolve_patch_path(gcx.clone(), &move_path, false).await?;
+                    let resolved_dest =
+                        resolve_patch_path(gcx.clone(), &move_path, false, execution_scope).await?;
+                    warnings.extend(resolved_dest.warnings);
+                    let dest_path = resolved_dest.path;
 
                     let dest_exists = match overlay.get(&dest_path) {
                         Some(OverlayState::Present(_)) => true,
@@ -366,6 +397,7 @@ pub async fn tool_apply_patch_exec(
     Ok(ApplyPatchResult {
         file_results,
         all_chunks,
+        warnings,
     })
 }
 
@@ -377,9 +409,16 @@ impl Tool for ToolApplyPatch {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = ccx.lock().await.global_context.clone();
+        let (gcx, execution_scope) = {
+            let ccx_locked = ccx.lock().await;
+            (
+                ccx_locked.global_context.clone(),
+                ccx_locked.execution_scope.clone(),
+            )
+        };
 
-        let result = tool_apply_patch_exec(gcx.clone(), args, false).await?;
+        let result =
+            tool_apply_patch_exec(gcx.clone(), args, false, execution_scope.as_ref()).await?;
 
         let related_section = {
             let idx_arc = { gcx.read().await.knowledge_index.clone() };
@@ -405,6 +444,16 @@ impl Tool for ToolApplyPatch {
             tool_call_id: tool_call_id.clone(),
             ..Default::default()
         })];
+
+        if !result.warnings.is_empty() {
+            out.push(ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(result.warnings.join("\n")),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            }));
+        }
 
         if !related_section.trim().is_empty() {
             out.push(ContextEnum::ChatMessage(ChatMessage {
