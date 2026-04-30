@@ -44,7 +44,7 @@ pub(crate) async fn run_global_import_with_paths(
             status: ImportStatus::Error,
             message: "home directory unavailable".to_string(),
         });
-        persist_last_report(refact_config_dir, &mut summary).await;
+        persist_last_report_if_needed(refact_config_dir, &mut summary).await;
         return summary;
     };
     let config_dir = sources::config_root_from_refact_config_dir(refact_config_dir);
@@ -71,7 +71,7 @@ pub(crate) async fn run_global_import_with_paths(
     collect_continue_scan(&mut summary, &mut candidates, continue_scan);
 
     write_candidates_and_merge(refact_config_dir, &mut summary, &candidates).await;
-    persist_last_report(refact_config_dir, &mut summary).await;
+    persist_last_report_if_needed(refact_config_dir, &mut summary).await;
     summary
 }
 
@@ -135,7 +135,7 @@ pub(crate) async fn run_project_import_with_paths(workspace_roots: &[PathBuf]) -
 
         let scope_root = root.join(".refact");
         write_candidates_and_merge(&scope_root, &mut scope_summary, &candidates).await;
-        persist_last_report(&scope_root, &mut scope_summary).await;
+        persist_last_report_if_needed(&scope_root, &mut scope_summary).await;
         summary.merge(scope_summary);
     }
 
@@ -175,6 +175,28 @@ async fn write_candidates_and_merge(
         return;
     }
     summary.merge(writer::write_candidates(scope_root, candidates).await);
+}
+
+async fn persist_last_report_if_needed(scope_root: &Path, summary: &mut ImportSummary) {
+    if !should_persist_last_report(scope_root, summary).await {
+        return;
+    }
+    persist_last_report(scope_root, summary).await;
+}
+
+async fn should_persist_last_report(scope_root: &Path, summary: &ImportSummary) -> bool {
+    has_report_activity(summary)
+        || tokio::fs::try_exists(manifest::manifest_path_for_scope_root(scope_root))
+            .await
+            .unwrap_or(false)
+}
+
+fn has_report_activity(summary: &ImportSummary) -> bool {
+    !summary.candidates.is_empty()
+        || !summary.outcomes.is_empty()
+        || !summary.issues.is_empty()
+        || !summary.errors.is_empty()
+        || !summary.status_counts.is_empty()
 }
 
 async fn persist_last_report(scope_root: &Path, summary: &mut ImportSummary) {
@@ -326,6 +348,20 @@ mod tests {
         let summary = run_project_import(gcx).await;
 
         assert!(summary.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_project_import_does_not_create_manifest() {
+        let workspace = tempfile::tempdir().unwrap();
+        let scope_root = workspace.path().join(".refact");
+
+        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
+
+        assert_eq!(summary.discovered_scopes.len(), 1);
+        assert!(summary.candidates.is_empty());
+        assert!(summary.issues.is_empty());
+        assert!(summary.outcomes.is_empty());
+        assert!(!manifest_path_for_scope_root(&scope_root).exists());
     }
 
     #[tokio::test]

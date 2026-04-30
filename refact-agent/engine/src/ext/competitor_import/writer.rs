@@ -1,5 +1,6 @@
+use std::ffi::OsString;
 use std::io::{Error, ErrorKind, Result};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 
@@ -9,12 +10,15 @@ use super::manifest::{
 };
 use super::types::{
     ImportArtifact, ImportCandidate, ImportCandidateSummary, ImportIssue, ImportOutcome,
-    ImportStatus, ImportSummary,
+    ImportScope, ImportStatus, ImportSummary,
 };
 
 pub async fn write_candidates(scope_root: &Path, candidates: &[ImportCandidate]) -> ImportSummary {
     let mut summary = ImportSummary::default();
     let manifest_path = manifest_path_for_scope_root(scope_root);
+    if candidates.is_empty() && !manifest_path.exists() {
+        return summary;
+    }
     let mut manifest = match ImportManifest::read_from_path(&manifest_path).await {
         Ok(manifest) => manifest,
         Err(err) => {
@@ -86,7 +90,8 @@ async fn try_write_candidate(
     manifest: &mut ImportManifest,
     candidate: &ImportCandidate,
 ) -> Result<ImportOutcome> {
-    let dest_path = resolve_destination_path(scope_root, &candidate.destination_path);
+    let dest_path = resolve_destination_path(scope_root, &candidate.destination_path)?;
+    validate_source_containment(scope_root, candidate)?;
     let dest_meta = match tokio::fs::symlink_metadata(&dest_path).await {
         Ok(meta) => Some(meta),
         Err(err) if err.kind() == ErrorKind::NotFound => None,
@@ -157,12 +162,180 @@ async fn try_write_candidate(
     ))
 }
 
-fn resolve_destination_path(scope_root: &Path, destination_path: &Path) -> PathBuf {
-    if destination_path.is_absolute() {
-        destination_path.to_path_buf()
-    } else {
-        scope_root.join(destination_path)
+fn resolve_destination_path(scope_root: &Path, destination_path: &Path) -> Result<PathBuf> {
+    let relative_path = clean_relative_destination_path(destination_path)?;
+    let dest_path = scope_root.join(relative_path);
+    let lexical_scope = lexical_absolute(scope_root)?;
+    let lexical_dest = lexical_absolute(&dest_path)?;
+    if !lexical_dest.starts_with(&lexical_scope) {
+        return Err(invalid_path_error(format!(
+            "destination path escapes import scope: {}",
+            destination_path.display()
+        )));
     }
+    let canonical_scope = canonicalize_existing_prefix(scope_root)?;
+    let canonical_dest = canonicalize_existing_prefix(&dest_path)?;
+    if !canonical_dest.starts_with(&canonical_scope) {
+        return Err(invalid_path_error(format!(
+            "destination path escapes import scope through existing path components: {}",
+            destination_path.display()
+        )));
+    }
+    Ok(dest_path)
+}
+
+fn clean_relative_destination_path(destination_path: &Path) -> Result<PathBuf> {
+    if destination_path.is_absolute() {
+        return Err(invalid_path_error(format!(
+            "destination path must be relative: {}",
+            destination_path.display()
+        )));
+    }
+    let mut clean = PathBuf::new();
+    for component in destination_path.components() {
+        match component {
+            Component::Normal(value) => clean.push(value),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(invalid_path_error(format!(
+                    "destination path contains unsupported components: {}",
+                    destination_path.display()
+                )));
+            }
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err(invalid_path_error("destination path is empty"));
+    }
+    Ok(clean)
+}
+
+fn validate_source_containment(scope_root: &Path, candidate: &ImportCandidate) -> Result<()> {
+    validate_project_source_root(candidate)?;
+    validate_source_path_under_root(
+        "source path",
+        &candidate.source_path,
+        &candidate.source_root,
+    )?;
+    if let ImportArtifact::DirectoryCopy { source_dir } = &candidate.artifact {
+        validate_directory_source_path(scope_root, source_dir, &candidate.source_root)?;
+    }
+    Ok(())
+}
+
+fn validate_project_source_root(candidate: &ImportCandidate) -> Result<()> {
+    let ImportScope::Project { root } = &candidate.scope else {
+        return Ok(());
+    };
+    match existing_path_is_under_root(&candidate.source_root, root)? {
+        None | Some(true) => Ok(()),
+        Some(false) => Err(invalid_path_error(format!(
+            "source root is outside project scope: {}",
+            candidate.source_root.display()
+        ))),
+    }
+}
+
+fn validate_source_path_under_root(label: &str, path: &Path, root: &Path) -> Result<()> {
+    match existing_path_is_under_root(path, root)? {
+        None | Some(true) => Ok(()),
+        Some(false) => Err(invalid_path_error(format!(
+            "{label} is outside source root: {}",
+            path.display()
+        ))),
+    }
+}
+
+fn validate_directory_source_path(
+    scope_root: &Path,
+    source_dir: &Path,
+    source_root: &Path,
+) -> Result<()> {
+    match existing_path_is_under_root(source_dir, source_root)? {
+        None | Some(true) => return Ok(()),
+        Some(false) => {}
+    }
+    let staging_root = scope_root.join("imports").join("staging");
+    match existing_path_is_under_root(source_dir, &staging_root)? {
+        Some(true) => Ok(()),
+        None | Some(false) => Err(invalid_path_error(format!(
+            "directory source is outside source root: {}",
+            source_dir.display()
+        ))),
+    }
+}
+
+fn existing_path_is_under_root(path: &Path, root: &Path) -> Result<Option<bool>> {
+    let Some(path) = canonical_path_if_exists(path)? else {
+        return Ok(None);
+    };
+    let Some(root) = canonical_path_if_exists(root)? else {
+        return Ok(Some(false));
+    };
+    Ok(Some(path.starts_with(root)))
+}
+
+fn canonical_path_if_exists(path: &Path) -> Result<Option<PathBuf>> {
+    match std::fs::canonicalize(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf> {
+    let absolute = lexical_absolute(path)?;
+    let mut probe = absolute.clone();
+    let mut suffix = Vec::<OsString>::new();
+    loop {
+        match std::fs::canonicalize(&probe) {
+            Ok(mut canonical) => {
+                for component in suffix.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                let Some(name) = probe.file_name().map(|name| name.to_os_string()) else {
+                    return Ok(absolute);
+                };
+                suffix.push(name);
+                if !probe.pop() {
+                    return Ok(absolute);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn lexical_absolute(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(lexical_normalize(&absolute))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
+}
+
+fn invalid_path_error(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::InvalidInput, message.into())
 }
 
 fn manifest_entry_matches_candidate(
@@ -337,6 +510,10 @@ mod tests {
     use super::super::manifest::{hash_directory, hash_file, manifest_path_for_scope_root};
     use super::super::types::{Competitor, ImportKind, ImportScope};
 
+    fn command_destination() -> PathBuf {
+        PathBuf::from("commands").join("hello.md")
+    }
+
     fn file_candidate(source_path: PathBuf, dest_path: PathBuf, content: &str) -> ImportCandidate {
         if let Some(parent) = source_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -389,8 +566,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("hello.md");
-        let dest_path = scope_root.join("commands").join("hello.md");
-        let candidate = file_candidate(source_path, dest_path.clone(), "hello");
+        let dest_rel = command_destination();
+        let dest_path = scope_root.join(&dest_rel);
+        let candidate = file_candidate(source_path, dest_rel, "hello");
 
         let summary = write_candidates(&scope_root, &[candidate]).await;
 
@@ -411,8 +589,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("hello.md");
-        let dest_path = scope_root.join("commands").join("hello.md");
-        let candidate = file_candidate(source_path, dest_path.clone(), "hello");
+        let dest_rel = command_destination();
+        let dest_path = scope_root.join(&dest_rel);
+        let candidate = file_candidate(source_path, dest_rel, "hello");
         write_candidates(&scope_root, &[candidate.clone()]).await;
         let first_hash = hash_file(&dest_path).unwrap();
 
@@ -427,22 +606,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("hello.md");
-        let dest_path = scope_root.join("commands").join("hello.md");
+        let dest_rel = command_destination();
+        let dest_path = scope_root.join(&dest_rel);
         write_candidates(
             &scope_root,
-            &[file_candidate(
-                source_path.clone(),
-                dest_path.clone(),
-                "one",
-            )],
+            &[file_candidate(source_path.clone(), dest_rel.clone(), "one")],
         )
         .await;
 
-        let summary = write_candidates(
-            &scope_root,
-            &[file_candidate(source_path, dest_path.clone(), "two")],
-        )
-        .await;
+        let summary =
+            write_candidates(&scope_root, &[file_candidate(source_path, dest_rel, "two")]).await;
 
         assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Updated));
         assert_eq!(tokio::fs::read_to_string(&dest_path).await.unwrap(), "two");
@@ -453,23 +626,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("hello.md");
-        let dest_path = scope_root.join("commands").join("hello.md");
+        let dest_rel = command_destination();
+        let dest_path = scope_root.join(&dest_rel);
         write_candidates(
             &scope_root,
-            &[file_candidate(
-                source_path.clone(),
-                dest_path.clone(),
-                "one",
-            )],
+            &[file_candidate(source_path.clone(), dest_rel.clone(), "one")],
         )
         .await;
         tokio::fs::write(&dest_path, "user edit").await.unwrap();
 
-        let summary = write_candidates(
-            &scope_root,
-            &[file_candidate(source_path, dest_path.clone(), "two")],
-        )
-        .await;
+        let summary =
+            write_candidates(&scope_root, &[file_candidate(source_path, dest_rel, "two")]).await;
 
         assert_eq!(
             outcome_status(&summary, 0),
@@ -486,12 +653,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("hello.md");
-        let dest_path = scope_root.join("commands").join("hello.md");
+        let dest_rel = command_destination();
+        let dest_path = scope_root.join(&dest_rel);
         tokio::fs::create_dir_all(dest_path.parent().unwrap())
             .await
             .unwrap();
         tokio::fs::write(&dest_path, "existing").await.unwrap();
-        let candidate = file_candidate(source_path, dest_path.clone(), "new");
+        let candidate = file_candidate(source_path, dest_rel, "new");
 
         let summary = write_candidates(&scope_root, &[candidate]).await;
 
@@ -510,15 +678,16 @@ mod tests {
     async fn generated_destination_owned_by_other_source_is_conflict() {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
-        let dest_path = scope_root.join("commands").join("hello.md");
+        let dest_rel = command_destination();
+        let dest_path = scope_root.join(&dest_rel);
         let first = file_candidate(
             temp.path().join("claude").join("hello.md"),
-            dest_path.clone(),
+            dest_rel.clone(),
             "first",
         );
         let second = file_candidate(
             temp.path().join("opencode").join("hello.md"),
-            dest_path.clone(),
+            dest_rel,
             "second",
         );
 
@@ -554,8 +723,9 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(source_dir.join("SKILL.md"), source_dir.join("link.md"))
             .unwrap();
-        let dest_path = scope_root.join("skills").join("skill");
-        let candidate = directory_candidate(source_dir.clone(), dest_path.clone());
+        let dest_rel = PathBuf::from("skills").join("skill");
+        let dest_path = scope_root.join(&dest_rel);
+        let candidate = directory_candidate(source_dir.clone(), dest_rel);
 
         let summary = write_candidates(&scope_root, &[candidate]).await;
 
@@ -575,14 +745,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn absolute_destination_path_is_rejected_without_writing_outside_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope_root = temp.path().join("refact");
+        let source_path = temp.path().join("source").join("hello.md");
+        let outside = temp.path().join("outside.md");
+        let candidate = file_candidate(source_path, outside.clone(), "hello");
+
+        let summary = write_candidates(&scope_root, &[candidate]).await;
+
+        assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Error));
+        assert!(!outside.exists());
+    }
+
+    #[tokio::test]
+    async fn traversing_destination_path_is_rejected_without_writing_outside_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope_root = temp.path().join("refact");
+        let source_path = temp.path().join("source").join("hello.md");
+        let outside = temp.path().join("escape.md");
+        let candidate = file_candidate(source_path, PathBuf::from("../escape.md"), "hello");
+
+        let summary = write_candidates(&scope_root, &[candidate]).await;
+
+        assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Error));
+        assert!(!outside.exists());
+    }
+
+    #[tokio::test]
+    async fn directory_copy_destination_traversal_does_not_remove_existing_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope_root = temp.path().join("refact");
+        let source_dir = temp.path().join("source_skill");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        tokio::fs::write(source_dir.join("SKILL.md"), "skill")
+            .await
+            .unwrap();
+        let victim = temp.path().join("victim");
+        tokio::fs::create_dir_all(&victim).await.unwrap();
+        tokio::fs::write(victim.join("keep.txt"), "keep")
+            .await
+            .unwrap();
+        let candidate = directory_candidate(source_dir, PathBuf::from("../victim"));
+
+        let summary = write_candidates(&scope_root, &[candidate]).await;
+
+        assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Error));
+        assert_eq!(
+            tokio::fs::read_to_string(victim.join("keep.txt"))
+                .await
+                .unwrap(),
+            "keep"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_path_outside_source_root_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope_root = temp.path().join("refact");
+        let source_root = temp.path().join("source_root");
+        let outside_source = temp.path().join("outside").join("hello.md");
+        tokio::fs::create_dir_all(&source_root).await.unwrap();
+        tokio::fs::create_dir_all(outside_source.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&outside_source, "source").await.unwrap();
+        let candidate = ImportCandidate {
+            competitor: Competitor::ClaudeCode,
+            kind: ImportKind::Command,
+            scope: ImportScope::Global,
+            source_root,
+            source_path: outside_source,
+            dest_name: "hello".to_string(),
+            destination_path: command_destination(),
+            artifact: ImportArtifact::FileContent {
+                content: "generated".to_string(),
+            },
+            metadata: serde_json::json!({"original_name": "hello"}),
+        };
+
+        let summary = write_candidates(&scope_root, &[candidate]).await;
+
+        assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Error));
+        assert!(!scope_root.join(command_destination()).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_source_root_symlink_outside_workspace_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let outside_root = temp.path().join("outside_continue");
+        let linked_root = workspace.join(".continue");
+        let source_path = linked_root.join("prompts").join("hello.md");
+        tokio::fs::create_dir_all(outside_root.join("prompts"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(outside_root.join("prompts").join("hello.md"), "source")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&outside_root, &linked_root).unwrap();
+        let scope_root = workspace.join(".refact");
+        let candidate = ImportCandidate {
+            competitor: Competitor::ContinueDev,
+            kind: ImportKind::Command,
+            scope: ImportScope::Project {
+                root: workspace.clone(),
+            },
+            source_root: linked_root,
+            source_path,
+            dest_name: "hello".to_string(),
+            destination_path: command_destination(),
+            artifact: ImportArtifact::FileContent {
+                content: "generated".to_string(),
+            },
+            metadata: serde_json::json!({"original_name": "hello"}),
+        };
+
+        let summary = write_candidates(&scope_root, &[candidate]).await;
+
+        assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Error));
+        assert!(!scope_root.join(command_destination()).exists());
+    }
+
+    #[tokio::test]
     async fn stale_manifest_does_not_delete_generated_destination() {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("hello.md");
-        let dest_path = scope_root.join("commands").join("hello.md");
+        let dest_rel = command_destination();
+        let dest_path = scope_root.join(&dest_rel);
         write_candidates(
             &scope_root,
-            &[file_candidate(source_path, dest_path.clone(), "hello")],
+            &[file_candidate(source_path, dest_rel, "hello")],
         )
         .await;
 
@@ -600,12 +896,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("hello.md");
-        let dest_path = scope_root.join("commands").join("hello.md");
+        let dest_rel = command_destination();
+        let dest_path = scope_root.join(&dest_rel);
         write_candidates(
             &scope_root,
             &[file_candidate(
                 source_path.clone(),
-                dest_path.clone(),
+                dest_rel.clone(),
                 "hello",
             )],
         )
@@ -621,7 +918,7 @@ mod tests {
                 .unwrap_or_default(),
             source_path,
             dest_name: "hello".to_string(),
-            destination_path: dest_path.clone(),
+            destination_path: dest_rel,
             artifact: ImportArtifact::FileContent {
                 content: "changed".to_string(),
             },
@@ -632,6 +929,7 @@ mod tests {
 
         assert_eq!(outcome_status(&summary, 0), Some(ImportStatus::Error));
         assert_eq!(summary.errors.len(), 1);
+        assert!(!summary.errors[0].message.contains("outside source root"));
         assert_eq!(
             tokio::fs::read_to_string(&dest_path).await.unwrap(),
             "hello"
@@ -643,8 +941,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let scope_root = temp.path().join("refact");
         let source_path = temp.path().join("source").join("secret.md");
-        let dest_path = scope_root.join("commands").join("secret.md");
-        let candidate = file_candidate(source_path, dest_path, "sensitive generated body");
+        let dest_rel = PathBuf::from("commands").join("secret.md");
+        let candidate = file_candidate(source_path, dest_rel, "sensitive generated body");
 
         let summary = write_candidates(&scope_root, &[candidate]).await;
         let summary_json = serde_json::to_string(&summary).unwrap();
