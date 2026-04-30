@@ -1,17 +1,30 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::caps::model_caps::ModelCapabilities;
 use crate::llm::adapter::WireFormat;
 use crate::providers::traits::{
-    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    merge_custom_models, normalize_endpoint, derive_endpoint_from_chat_url, parse_enabled_models,
-    parse_custom_models, set_model_enabled_impl,
+    derive_endpoint_from_chat_url, merge_custom_models, normalize_endpoint, parse_custom_models,
+    parse_enabled_models, set_model_enabled_impl, AvailableModel, CustomModelConfig, ModelPricing,
+    ModelSource, ProviderRuntime, ProviderTrait,
 };
+
+const DEFAULT_OLLAMA_N_CTX: usize = 32_768;
+
+#[derive(Debug, Clone, Default)]
+struct OllamaModelMetadata {
+    n_ctx: Option<usize>,
+    supports_tools: Option<bool>,
+    supports_multimodality: Option<bool>,
+    family: Option<String>,
+    families: Vec<String>,
+    parameter_size: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OllamaProvider {
@@ -37,44 +50,46 @@ impl Default for OllamaProvider {
 }
 
 impl OllamaProvider {
-    fn parse_ollama_model(model: &serde_json::Value, enabled: bool) -> Option<AvailableModel> {
-        let name = model.get("name")?.as_str()?.to_string();
-        let details = model.get("details");
-        let capabilities = model
-            .get("capabilities")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let family = details
-            .and_then(|d| d.get("family"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let families: Vec<String> = details
-            .and_then(|d| d.get("families"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let parameter_size = details
-            .and_then(|d| d.get("parameter_size"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let n_ctx = model
-            .get("context_length")
-            .or_else(|| details.and_then(|d| d.get("context_length")))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(32_768);
+    fn parse_ollama_model(
+        model: &Value,
+        show_model: Option<&Value>,
+        enabled: bool,
+    ) -> Option<AvailableModel> {
+        let name = Self::model_name(model)?.to_string();
+        let tags_metadata = Self::parse_model_metadata(model);
+        let show_metadata = show_model.map(Self::parse_model_metadata);
 
-        let supports_tools = capabilities.iter().any(|c| c.as_str() == Some("tools"))
-            || Self::family_supports_tools(family, &families);
-        let supports_multimodality = capabilities
-            .iter()
-            .any(|c| matches!(c.as_str(), Some("vision") | Some("image")))
-            || Self::family_supports_vision(family, &families);
+        let n_ctx = show_metadata
+            .as_ref()
+            .and_then(|m| m.n_ctx)
+            .or(tags_metadata.n_ctx)
+            .unwrap_or(DEFAULT_OLLAMA_N_CTX);
+        let family = show_metadata
+            .as_ref()
+            .and_then(|m| m.family.as_deref())
+            .or(tags_metadata.family.as_deref())
+            .unwrap_or("");
+        let families = show_metadata
+            .as_ref()
+            .filter(|m| !m.families.is_empty())
+            .map(|m| m.families.as_slice())
+            .unwrap_or(tags_metadata.families.as_slice());
+        let parameter_size = show_metadata
+            .as_ref()
+            .and_then(|m| m.parameter_size.as_deref())
+            .or(tags_metadata.parameter_size.as_deref())
+            .unwrap_or("");
+
+        let supports_tools = show_metadata
+            .as_ref()
+            .and_then(|m| m.supports_tools)
+            .or(tags_metadata.supports_tools)
+            .unwrap_or_else(|| Self::family_supports_tools(family, families));
+        let supports_multimodality = show_metadata
+            .as_ref()
+            .and_then(|m| m.supports_multimodality)
+            .or(tags_metadata.supports_multimodality)
+            .unwrap_or_else(|| Self::family_supports_vision(family, families));
 
         let display_name = if parameter_size.is_empty() {
             None
@@ -107,6 +122,126 @@ impl OllamaProvider {
         })
     }
 
+    fn model_name(model: &Value) -> Option<&str> {
+        model
+            .get("name")
+            .or_else(|| model.get("model"))
+            .and_then(|v| v.as_str())
+    }
+
+    fn parse_model_metadata(model: &Value) -> OllamaModelMetadata {
+        let details = model.get("details");
+        let (supports_tools, supports_multimodality) = Self::parse_capabilities(model);
+
+        OllamaModelMetadata {
+            n_ctx: Self::parse_model_context(model),
+            supports_tools,
+            supports_multimodality,
+            family: details
+                .and_then(|d| d.get("family"))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string),
+            families: details
+                .and_then(|d| d.get("families"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .filter(|v| !v.is_empty())
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            parameter_size: details
+                .and_then(|d| d.get("parameter_size"))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string),
+        }
+    }
+
+    fn parse_capabilities(model: &Value) -> (Option<bool>, Option<bool>) {
+        let capabilities = match model.get("capabilities").and_then(|v| v.as_array()) {
+            Some(capabilities) => capabilities,
+            None => return (None, None),
+        };
+
+        let supports_tools = capabilities
+            .iter()
+            .any(|c| Self::capability_matches(c, &["tools"]));
+        let supports_multimodality = capabilities
+            .iter()
+            .any(|c| Self::capability_matches(c, &["vision", "image"]));
+
+        (Some(supports_tools), Some(supports_multimodality))
+    }
+
+    fn capability_matches(capability: &Value, names: &[&str]) -> bool {
+        matches!(
+            capability.as_str(),
+            Some(capability) if names.iter().any(|name| capability.eq_ignore_ascii_case(name))
+        )
+    }
+
+    fn parse_model_context(model: &Value) -> Option<usize> {
+        Self::parse_model_info_context(model)
+            .or_else(|| {
+                model
+                    .get("context_length")
+                    .and_then(Self::parse_usize_value)
+            })
+            .or_else(|| {
+                model
+                    .get("details")
+                    .and_then(|d| d.get("context_length"))
+                    .and_then(Self::parse_usize_value)
+            })
+            .or_else(|| {
+                model
+                    .get("parameters")
+                    .and_then(|v| v.as_str())
+                    .and_then(Self::parse_num_ctx_parameter)
+            })
+    }
+
+    fn parse_model_info_context(model: &Value) -> Option<usize> {
+        model
+            .get("model_info")
+            .and_then(|v| v.as_object())
+            .and_then(|model_info| {
+                model_info.iter().find_map(|(key, value)| {
+                    if key.to_ascii_lowercase().contains("context_length") {
+                        Self::parse_usize_value(value)
+                    } else {
+                        None
+                    }
+                })
+            })
+    }
+
+    fn parse_num_ctx_parameter(parameters: &str) -> Option<usize> {
+        parameters.lines().find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let key = parts.next()?;
+            if key != "num_ctx" {
+                return None;
+            }
+            let value = parts.next()?.trim_matches('"');
+            value.parse::<usize>().ok().filter(|v| *v > 0)
+        })
+    }
+
+    fn parse_usize_value(value: &Value) -> Option<usize> {
+        if let Some(value) = value.as_u64() {
+            return usize::try_from(value).ok().filter(|v| *v > 0);
+        }
+        value
+            .as_str()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+    }
+
     fn family_supports_tools(family: &str, families: &[String]) -> bool {
         let tool_families = [
             "llama",
@@ -128,6 +263,62 @@ impl OllamaProvider {
         let vision_families = ["llava", "gemma3", "phi4"];
         let check = |f: &str| vision_families.iter().any(|vf| f.contains(vf));
         check(family) || families.iter().any(|f| check(f))
+    }
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.api_key.is_empty() {
+            request
+        } else {
+            request.header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", self.api_key),
+            )
+        }
+    }
+
+    async fn fetch_ollama_show_model(
+        &self,
+        http_client: &reqwest::Client,
+        show_url: &str,
+        model_name: &str,
+    ) -> Option<Value> {
+        if let Ok(model) = self
+            .fetch_ollama_show_model_body(http_client, show_url, json!({ "model": model_name }))
+            .await
+        {
+            return Some(model);
+        }
+
+        match self
+            .fetch_ollama_show_model_body(http_client, show_url, json!({ "name": model_name }))
+            .await
+        {
+            Ok(model) => Some(model),
+            Err(e) => {
+                tracing::warn!("Ollama: /api/show failed for {}: {}", model_name, e);
+                None
+            }
+        }
+    }
+
+    async fn fetch_ollama_show_model_body(
+        &self,
+        http_client: &reqwest::Client,
+        show_url: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        let request = self.apply_auth(
+            http_client
+                .post(show_url)
+                .timeout(Duration::from_secs(5))
+                .json(&body),
+        );
+        let response = request.send().await.map_err(|e| e.to_string())?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("status {}", status));
+        }
+        response.json().await.map_err(|e| e.to_string())
     }
 }
 
@@ -280,15 +471,7 @@ available:
         let base_url = normalize_endpoint(&self.endpoint);
         let tags_url = format!("{}/api/tags", base_url);
 
-        let mut request = http_client
-            .get(&tags_url)
-            .timeout(std::time::Duration::from_secs(5));
-        if !self.api_key.is_empty() {
-            request = request.header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", self.api_key),
-            );
-        }
+        let request = self.apply_auth(http_client.get(&tags_url).timeout(Duration::from_secs(5)));
 
         let response = match request.send().await {
             Ok(resp) => resp,
@@ -303,7 +486,7 @@ available:
             return self.get_custom_models_only();
         }
 
-        let json: serde_json::Value = match response.json().await {
+        let json: Value = match response.json().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Ollama: failed to parse /api/tags response: {}", e);
@@ -314,22 +497,151 @@ available:
         let enabled_set: std::collections::HashSet<&str> =
             self.enabled_models.iter().map(|s| s.as_str()).collect();
 
-        let mut models: Vec<AvailableModel> = json
+        let tag_models = json
             .get("models")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| {
-                        let name = m.get("name").and_then(|v| v.as_str())?;
-                        let enabled = enabled_set.contains(name);
-                        Self::parse_ollama_model(m, enabled)
-                    })
-                    .collect()
-            })
+            .cloned()
             .unwrap_or_default();
+        let show_url = format!("{}/api/show", base_url);
+        let mut models = Vec::new();
+
+        for tag_model in tag_models {
+            let name = match Self::model_name(&tag_model) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            let enabled = enabled_set.contains(name.as_str());
+            let show_model = self
+                .fetch_ollama_show_model(http_client, &show_url, &name)
+                .await;
+            if let Some(model) = Self::parse_ollama_model(&tag_model, show_model.as_ref(), enabled)
+            {
+                models.push(model);
+            }
+        }
 
         merge_custom_models(&mut models, &self.custom_models, &enabled_set);
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ollama_show_model_info_context_length_sets_n_ctx() {
+        let tags = json!({
+            "name": "llama3.1:8b",
+            "details": {
+                "family": "llama",
+                "parameter_size": "8B"
+            }
+        });
+        let show = json!({
+            "model_info": {
+                "llama.context_length": 131072
+            },
+            "details": {
+                "family": "llama",
+                "parameter_size": "8B"
+            }
+        });
+
+        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false).unwrap();
+
+        assert_eq!(model.n_ctx, 131_072);
+    }
+
+    #[test]
+    fn ollama_show_parameters_num_ctx_sets_n_ctx() {
+        let tags = json!({
+            "name": "mistral:7b",
+            "details": {
+                "family": "mistral",
+                "context_length": 4096
+            }
+        });
+        let show = json!({
+            "parameters": "num_ctx 65536\nstop \"</s>\"",
+            "details": {
+                "family": "mistral",
+                "parameter_size": "7B"
+            }
+        });
+
+        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false).unwrap();
+
+        assert_eq!(model.n_ctx, 65_536);
+    }
+
+    #[test]
+    fn ollama_show_capabilities_set_tools_and_vision() {
+        let tags = json!({
+            "name": "llava:latest",
+            "details": {
+                "family": "unknown"
+            }
+        });
+        let show = json!({
+            "capabilities": ["tools", "vision"],
+            "details": {
+                "family": "unknown"
+            }
+        });
+
+        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false).unwrap();
+
+        assert!(model.supports_tools);
+        assert!(model.supports_parallel_tools);
+        assert!(model.supports_multimodality);
+    }
+
+    #[test]
+    fn ollama_show_empty_capabilities_disable_family_heuristic() {
+        let tags = json!({
+            "name": "gemma3:4b",
+            "details": {
+                "family": "gemma3",
+                "families": ["gemma3"]
+            }
+        });
+        let show = json!({
+            "capabilities": [],
+            "details": {
+                "family": "gemma3",
+                "families": ["gemma3"]
+            }
+        });
+
+        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false).unwrap();
+
+        assert!(!model.supports_tools);
+        assert!(!model.supports_parallel_tools);
+        assert!(!model.supports_multimodality);
+    }
+
+    #[test]
+    fn ollama_tags_only_fixture_uses_fallback_behavior() {
+        let tags = json!({
+            "name": "llama3.1:8b",
+            "details": {
+                "family": "llama",
+                "families": ["llama"],
+                "parameter_size": "8B",
+                "context_length": 4096
+            }
+        });
+
+        let model = OllamaProvider::parse_ollama_model(&tags, None, true).unwrap();
+
+        assert_eq!(model.id, "llama3.1:8b");
+        assert_eq!(model.display_name.as_deref(), Some("llama3.1:8b (8B)"));
+        assert_eq!(model.n_ctx, 4096);
+        assert!(model.supports_tools);
+        assert!(model.supports_parallel_tools);
+        assert!(!model.supports_multimodality);
+        assert!(model.enabled);
     }
 }
