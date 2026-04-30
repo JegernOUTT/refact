@@ -369,7 +369,14 @@ impl GitHubCopilotProvider {
             return;
         };
         let endpoint_values: Vec<&str> = endpoints.iter().filter_map(Value::as_str).collect();
+        let api_base = api_base.trim_end_matches('/');
         if endpoint_values
+            .iter()
+            .any(|endpoint| *endpoint == "/v1/messages")
+        {
+            available.wire_format_override = Some(WireFormat::AnthropicMessages);
+            available.endpoint_override = Some(format!("{}/v1/messages", api_base));
+        } else if endpoint_values
             .iter()
             .any(|endpoint| *endpoint == "/v1/chat/completions")
         {
@@ -779,6 +786,69 @@ mod tests {
         assert_eq!(
             model.endpoint_override.as_deref(),
             Some("https://api.githubcopilot.com/v1/responses")
+        );
+    }
+
+    #[test]
+    fn github_copilot_live_messages_endpoint_maps_anthropic_wire_format() {
+        let mut provider = provider_with_token();
+        provider.enabled_models = vec!["claude-sonnet-4".to_string()];
+        let live = json!({
+            "data": [{
+                "model_picker_enabled": true,
+                "id": "claude-sonnet-4",
+                "name": "Claude Sonnet 4",
+                "supported_endpoints": ["/v1/messages"],
+                "policy": {"state": "enabled"},
+                "capabilities": {"limits": {}, "supports": {"tool_calls": true}}
+            }]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&live, &caps_map(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let model = models
+            .iter()
+            .find(|model| model.id == "claude-sonnet-4")
+            .unwrap();
+
+        assert!(model.enabled);
+        assert_eq!(
+            model.wire_format_override,
+            Some(WireFormat::AnthropicMessages)
+        );
+        assert_eq!(
+            model.endpoint_override.as_deref(),
+            Some("https://api.githubcopilot.com/v1/messages")
+        );
+    }
+
+    #[test]
+    fn github_copilot_live_chat_endpoint_still_maps_openai_chat() {
+        let provider = provider_with_token();
+        let live = json!({
+            "data": [{
+                "model_picker_enabled": true,
+                "id": "gpt-4.1",
+                "name": "GPT 4.1",
+                "supported_endpoints": ["/v1/chat/completions"],
+                "policy": {"state": "enabled"},
+                "capabilities": {"limits": {}, "supports": {"tool_calls": true}}
+            }]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&live, &caps_map(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let model = models.iter().find(|model| model.id == "gpt-4.1").unwrap();
+
+        assert_eq!(
+            model.wire_format_override,
+            Some(WireFormat::OpenaiChatCompletions)
+        );
+        assert_eq!(
+            model.endpoint_override.as_deref(),
+            Some("https://api.githubcopilot.com/v1/chat/completions")
         );
     }
 

@@ -60,6 +60,11 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         );
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
+        crate::llm::provider_quirks::apply_github_copilot_request_headers(
+            &mut headers,
+            req,
+            settings,
+        );
 
         let (input, instructions) = convert_to_responses_format(&req.messages);
         let mut body = json!({
@@ -1352,6 +1357,48 @@ mod tests {
         assert_eq!(http.body["model"], "gpt-4.1");
         assert_eq!(http.body["instructions"], "You are helpful");
         assert!(http.body["input"].is_array());
+    }
+
+    #[test]
+    fn github_copilot_openai_responses_adds_vision_header_only_for_images() {
+        use crate::call_validation::ChatContent;
+        use crate::scratchpads::multimodality::MultimodalElement;
+
+        let adapter = OpenAiResponsesAdapter;
+        let image_message = ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::Multimodal(vec![MultimodalElement {
+                m_type: "image/png".to_string(),
+                m_content: "base64data".to_string(),
+            }]),
+            ..Default::default()
+        };
+        let req = LlmRequest::new("github_copilot/gpt-4.1".to_string(), vec![image_message]);
+        let mut settings = default_settings();
+        settings.endpoint = "https://api.githubcopilot.com/v1/responses".to_string();
+        settings.api_key = "copilot-token".to_string();
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(
+            http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer copilot-token"
+        );
+        assert_eq!(
+            http.headers
+                .get("Copilot-Vision-Request")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "true"
+        );
+
+        let text_req = LlmRequest::new(
+            "github_copilot/gpt-4.1".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        let text_http = adapter.build_http(&text_req, &settings).unwrap();
+        assert!(text_http.headers.get("Copilot-Vision-Request").is_none());
     }
 
     #[test]

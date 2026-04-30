@@ -1,5 +1,7 @@
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{json, Value};
 
+use crate::call_validation::ChatContent;
 use crate::llm::adapter::AdapterSettings;
 use crate::llm::canonical::LlmRequest;
 use crate::llm::params::ReasoningIntent;
@@ -21,6 +23,76 @@ fn refact_provider(model_id: &str) -> Option<RefactProvider> {
 
 fn reasoning_requested(intent: &ReasoningIntent) -> bool {
     !matches!(intent, ReasoningIntent::Off | ReasoningIntent::NoReasoning)
+}
+
+fn is_github_copilot_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    host == "api.githubcopilot.com" || host.starts_with("copilot-api.")
+}
+
+pub fn is_github_copilot_request(req: &LlmRequest, settings: &AdapterSettings) -> bool {
+    req.model_id.starts_with("github_copilot/")
+        || req.model_id.starts_with("github-copilot/")
+        || is_github_copilot_endpoint(&settings.endpoint)
+}
+
+fn content_has_image(content: &ChatContent) -> bool {
+    match content {
+        ChatContent::Multimodal(elements) => elements.iter().any(|element| element.is_image()),
+        _ => false,
+    }
+}
+
+fn request_has_image(req: &LlmRequest) -> bool {
+    req.messages
+        .iter()
+        .any(|message| content_has_image(&message.content))
+}
+
+fn github_copilot_initiator(req: &LlmRequest) -> &'static str {
+    req.messages
+        .iter()
+        .rev()
+        .find(|message| message.role != "context_file")
+        .map(|message| {
+            if message.role == "user" {
+                "user"
+            } else {
+                "agent"
+            }
+        })
+        .unwrap_or("user")
+}
+
+pub fn apply_github_copilot_request_headers(
+    headers: &mut HeaderMap,
+    req: &LlmRequest,
+    settings: &AdapterSettings,
+) {
+    if !is_github_copilot_request(req, settings) {
+        return;
+    }
+
+    headers.insert(
+        "Openai-Intent",
+        HeaderValue::from_static("conversation-edits"),
+    );
+    headers.insert(
+        "x-initiator",
+        HeaderValue::from_static(github_copilot_initiator(req)),
+    );
+
+    if request_has_image(req) {
+        headers.insert("Copilot-Vision-Request", HeaderValue::from_static("true"));
+    } else {
+        headers.remove("Copilot-Vision-Request");
+    }
 }
 
 pub fn uses_openai_provider_reasoning_controls(req: &LlmRequest) -> bool {

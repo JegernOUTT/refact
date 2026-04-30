@@ -119,6 +119,11 @@ impl LlmWireAdapter for OpenAiChatAdapter {
         );
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
+        crate::llm::provider_quirks::apply_github_copilot_request_headers(
+            &mut headers,
+            req,
+            settings,
+        );
 
         let mut messages = convert_messages_to_openai(&req.messages);
 
@@ -775,6 +780,109 @@ mod tests {
         assert_eq!(http.body["messages"][0]["role"], "user");
         assert_eq!(http.body["messages"][0]["content"], "Hello");
         assert!((http.body["top_p"].as_f64().unwrap() - 0.9).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn github_copilot_openai_chat_adds_vision_header_only_for_images() {
+        use crate::call_validation::ChatContent;
+        use crate::scratchpads::multimodality::MultimodalElement;
+
+        let adapter = OpenAiChatAdapter;
+        let image_message = ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::Multimodal(vec![MultimodalElement {
+                m_type: "image/png".to_string(),
+                m_content: "base64data".to_string(),
+            }]),
+            ..Default::default()
+        };
+        let req = LlmRequest::new("github_copilot/gpt-4.1".to_string(), vec![image_message]);
+        let mut settings = default_settings();
+        settings.endpoint = "https://api.githubcopilot.com/v1/chat/completions".to_string();
+        settings.api_key = "copilot-token".to_string();
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(
+            http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer copilot-token"
+        );
+        assert_eq!(
+            http.headers
+                .get("Copilot-Vision-Request")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            http.headers.get("Openai-Intent").unwrap().to_str().unwrap(),
+            "conversation-edits"
+        );
+        assert_eq!(
+            http.headers.get("x-initiator").unwrap().to_str().unwrap(),
+            "user"
+        );
+
+        let text_req = LlmRequest::new(
+            "github_copilot/gpt-4.1".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        let text_http = adapter.build_http(&text_req, &settings).unwrap();
+        assert!(text_http.headers.get("Copilot-Vision-Request").is_none());
+    }
+
+    #[test]
+    fn github_copilot_openai_chat_protected_headers_remain_unoverridable() {
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new(
+            "github_copilot/gpt-4.1".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        let mut settings = default_settings();
+        settings.endpoint = "https://api.githubcopilot.com/v1/chat/completions".to_string();
+        settings.api_key = "copilot-token".to_string();
+        settings
+            .extra_headers
+            .insert("Authorization".to_string(), "Bearer hacked".to_string());
+        settings
+            .extra_headers
+            .insert("x-api-key".to_string(), "hacked".to_string());
+        settings
+            .extra_headers
+            .insert("Copilot-Vision-Request".to_string(), "true".to_string());
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(
+            http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer copilot-token"
+        );
+        assert!(http.headers.get("x-api-key").is_none());
+        assert!(http.headers.get("Copilot-Vision-Request").is_none());
+    }
+
+    #[test]
+    fn github_copilot_openai_chat_marks_tool_continuation_as_agent() {
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new(
+            "github_copilot/gpt-4.1".to_string(),
+            vec![ChatMessage {
+                role: "tool".to_string(),
+                content: crate::call_validation::ChatContent::SimpleText("done".to_string()),
+                tool_call_id: "call_1".to_string(),
+                ..Default::default()
+            }],
+        );
+        let mut settings = default_settings();
+        settings.endpoint = "https://api.githubcopilot.com/v1/chat/completions".to_string();
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(
+            http.headers.get("x-initiator").unwrap().to_str().unwrap(),
+            "agent"
+        );
     }
 
     #[test]

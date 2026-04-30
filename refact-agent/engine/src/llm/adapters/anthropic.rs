@@ -1,4 +1,4 @@
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
 use crate::call_validation::ChatUsage;
@@ -36,9 +36,17 @@ impl LlmWireAdapter for AnthropicAdapter {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         let is_cc = claude_code_compat::is_claude_code_oauth(&settings.auth_token);
+        let is_github_copilot =
+            crate::llm::provider_quirks::is_github_copilot_request(req, settings);
         if is_cc {
             claude_code_compat::apply_oauth_headers(&mut headers, &settings.auth_token)?;
             claude_code_compat::apply_stainless_headers(&mut headers)?;
+        } else if is_github_copilot && !settings.api_key.is_empty() {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", settings.api_key))
+                    .map_err(|e| format!("invalid api_key for header: {e}"))?,
+            );
         } else if !settings.api_key.is_empty() {
             headers.insert(
                 "x-api-key",
@@ -55,6 +63,11 @@ impl LlmWireAdapter for AnthropicAdapter {
         let is_effort_mode = settings.reasoning_type.as_deref() == Some("anthropic_effort");
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
+        crate::llm::provider_quirks::apply_github_copilot_request_headers(
+            &mut headers,
+            req,
+            settings,
+        );
 
         let context_sanitizer: Option<Box<dyn Fn(&str) -> String>> = if is_cc {
             Some(Box::new(|text: &str| {
@@ -906,6 +919,69 @@ mod tests {
         let http = adapter.build_http(&req, &settings()).unwrap();
         assert!(http.headers.get("x-api-key").is_some());
         assert!(http.headers.get("anthropic-version").is_some());
+    }
+
+    #[test]
+    fn github_copilot_anthropic_messages_uses_bearer_auth_and_copilot_headers() {
+        use crate::call_validation::ChatContent;
+        use crate::scratchpads::multimodality::MultimodalElement;
+
+        let adapter = AnthropicAdapter;
+        let req = LlmRequest::new(
+            "github_copilot/claude-sonnet-4".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        let mut settings = settings();
+        settings.endpoint = "https://api.githubcopilot.com/v1/messages".to_string();
+        settings.api_key = "copilot-token".to_string();
+        settings
+            .extra_headers
+            .insert("Authorization".to_string(), "Bearer hacked".to_string());
+        settings
+            .extra_headers
+            .insert("x-api-key".to_string(), "hacked".to_string());
+        settings
+            .extra_headers
+            .insert("Copilot-Vision-Request".to_string(), "true".to_string());
+
+        let http = adapter.build_http(&req, &settings).unwrap();
+
+        assert_eq!(
+            http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer copilot-token"
+        );
+        assert!(http.headers.get("x-api-key").is_none());
+        assert_eq!(
+            http.headers.get("Openai-Intent").unwrap().to_str().unwrap(),
+            "conversation-edits"
+        );
+        assert_eq!(
+            http.headers.get("x-initiator").unwrap().to_str().unwrap(),
+            "user"
+        );
+        assert!(http.headers.get("Copilot-Vision-Request").is_none());
+
+        let image_req = LlmRequest::new(
+            "github_copilot/claude-sonnet-4".to_string(),
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::Multimodal(vec![MultimodalElement {
+                    m_type: "image/png".to_string(),
+                    m_content: "base64data".to_string(),
+                }]),
+                ..Default::default()
+            }],
+        );
+        let image_http = adapter.build_http(&image_req, &settings).unwrap();
+        assert_eq!(
+            image_http
+                .headers
+                .get("Copilot-Vision-Request")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "true"
+        );
     }
 
     #[test]
