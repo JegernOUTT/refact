@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use super::types::{Competitor, ImportScope, ImportSourceRoot};
 
 pub mod claude;
+pub mod continue_dev;
 pub mod opencode;
 
 pub fn config_root_from_refact_config_dir(refact_config_dir: &Path) -> PathBuf {
