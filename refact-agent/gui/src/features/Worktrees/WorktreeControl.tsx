@@ -1,5 +1,4 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Share1Icon } from "@radix-ui/react-icons";
 import { Flex, Popover, Text } from "@radix-ui/themes";
 import {
   DEFAULT_MODE,
@@ -30,6 +29,31 @@ import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
 
 const EMPTY_WORKTREE_RECORDS: WorktreeRecordView[] = [];
+
+const BranchIcon: React.FC = () => (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 16 16"
+    fill="none"
+    aria-hidden="true"
+  >
+    <path
+      d="M5 3.5A1.5 1.5 0 1 1 2 3.5A1.5 1.5 0 0 1 5 3.5ZM5 12.5A1.5 1.5 0 1 1 2 12.5A1.5 1.5 0 0 1 5 12.5ZM14 4.5A1.5 1.5 0 1 1 11 4.5A1.5 1.5 0 0 1 14 4.5Z"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M3.5 5v6M5 12.5h2.5A4.5 4.5 0 0 0 12 8V6"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
 
 function compactPath(path: string): string {
   const normalized = path.replace(/[\\/]+$/, "");
@@ -254,7 +278,7 @@ export const WorktreeControl: React.FC = () => {
             <Flex align="center" gap="1" className={styles.triggerInner}>
               {!currentWorktree && sourceBranch && (
                 <span className={styles.branchIcon} aria-hidden="true">
-                  <Share1Icon width={12} height={12} />
+                  <BranchIcon />
                 </span>
               )}
               <Text size="1" className={styles.triggerText}>

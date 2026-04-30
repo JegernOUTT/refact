@@ -30,11 +30,15 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
 }) => {
   const [branchName, setBranchName] = useState(defaultBranch);
   const [baseBranch, setBaseBranch] = useState(defaultBaseBranch);
+  const [baseBranchPickerOpen, setBaseBranchPickerOpen] = useState(false);
+  const [baseBranchSearchTouched, setBaseBranchSearchTouched] = useState(false);
 
   useEffect(() => {
     if (open) {
       setBranchName(defaultBranch);
       setBaseBranch(defaultBaseBranch);
+      setBaseBranchPickerOpen(false);
+      setBaseBranchSearchTouched(false);
     }
   }, [open, defaultBranch, defaultBaseBranch]);
 
@@ -59,10 +63,21 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
   }, [baseBranch, branchName, onCreate]);
 
   const canCreate = !isCreating && baseBranch.trim().length > 0;
+  const filteredBaseOptions = useMemo(() => {
+    const query = baseBranchSearchTouched
+      ? baseBranch.trim().toLowerCase()
+      : "";
+    const options = query
+      ? normalizedBaseOptions.filter((branch) =>
+          branch.toLowerCase().includes(query),
+        )
+      : normalizedBaseOptions;
+    return options.slice(0, 8);
+  }, [baseBranch, baseBranchSearchTouched, normalizedBaseOptions]);
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content maxWidth="420px">
+      <Dialog.Content className={styles.createDialog} maxWidth="420px">
         <Dialog.Title>Create worktree</Dialog.Title>
         <Dialog.Description size="2" color="gray">
           Create a new git worktree and attach it to this chat.
@@ -89,21 +104,45 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
             <Text size="1" color="gray">
               Worktree will be created from this branch.
             </Text>
-            <TextField.Root
-              aria-label="Base branch"
-              list="worktree-base-branch-options"
-              value={baseBranch}
-              placeholder="Current branch unavailable"
-              onChange={(event) => setBaseBranch(event.target.value)}
-              disabled={isCreating}
-            />
-            {normalizedBaseOptions.length > 0 && (
-              <datalist id="worktree-base-branch-options">
-                {normalizedBaseOptions.map((branch) => (
-                  <option key={branch} value={branch} />
-                ))}
-              </datalist>
-            )}
+            <div className={styles.branchPicker}>
+              <TextField.Root
+                aria-label="Base branch"
+                value={baseBranch}
+                placeholder="Current branch unavailable"
+                onFocus={() => {
+                  setBaseBranchSearchTouched(false);
+                  setBaseBranchPickerOpen(true);
+                }}
+                onBlur={() => {
+                  window.setTimeout(() => setBaseBranchPickerOpen(false), 120);
+                }}
+                onChange={(event) => {
+                  setBaseBranch(event.target.value);
+                  setBaseBranchSearchTouched(true);
+                  setBaseBranchPickerOpen(true);
+                }}
+                disabled={isCreating}
+              />
+              {baseBranchPickerOpen && filteredBaseOptions.length > 0 && (
+                <div className={styles.branchOptions} role="listbox">
+                  {filteredBaseOptions.map((branch) => (
+                    <button
+                      key={branch}
+                      type="button"
+                      className={styles.branchOption}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        setBaseBranch(branch);
+                        setBaseBranchSearchTouched(false);
+                        setBaseBranchPickerOpen(false);
+                      }}
+                    >
+                      {branch}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           {error && (

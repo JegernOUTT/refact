@@ -451,8 +451,8 @@ describe("WorktreeControl", () => {
       }),
     );
     const baseBranchInput = screen.getByLabelText("Base branch");
-    await user.clear(baseBranchInput);
-    await user.type(baseBranchInput, "feature/base");
+    await user.click(baseBranchInput);
+    await user.click(screen.getByRole("button", { name: "feature/base" }));
     await user.click(screen.getByRole("button", { name: /^Create$/ }));
 
     await waitFor(() => expect(createCalls).toHaveLength(1));
