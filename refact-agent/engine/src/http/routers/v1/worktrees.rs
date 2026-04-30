@@ -13,8 +13,9 @@ use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{
-    CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, OpenWorktreeResponse,
-    WorktreeDiffResponse, WorktreeListResponse, WorktreeRecordView,
+    CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
+    MergeWorktreeResponse, OpenWorktreeResponse, WorktreeDiffResponse, WorktreeListResponse,
+    WorktreeRecordView,
 };
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
@@ -49,6 +50,8 @@ fn status_for_error(error: &str) -> StatusCode {
     let lower = error.to_lowercase();
     if lower.contains("not found") {
         StatusCode::NOT_FOUND
+    } else if lower.contains("conflict") || lower.contains("merge in progress") {
+        StatusCode::CONFLICT
     } else if lower.contains("invalid")
         || lower.contains("not a git repository")
         || lower.contains("no project root")
@@ -177,6 +180,20 @@ pub async fn handle_v1_worktrees_diff(
             .map(Json)
             .map_err(map_service_error),
     }
+}
+
+pub async fn handle_v1_worktrees_merge(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Path(id): Path<String>,
+    Query(query): Query<WorktreeQuery>,
+    Json(request): Json<MergeWorktreeRequest>,
+) -> ApiResult<MergeWorktreeResponse> {
+    let service = service_for_request(gcx, query.source_workspace_root).await?;
+    service
+        .merge_worktree(&id, request)
+        .await
+        .map(Json)
+        .map_err(map_service_error)
 }
 
 pub async fn handle_v1_worktrees_delete(

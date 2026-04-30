@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -276,7 +277,7 @@ pub fn status_for_path(path: &Path) -> WorktreeStatus {
     }
 }
 
-fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
+pub fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(path)
@@ -289,11 +290,28 @@ fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn run_git_lossy(path: &Path, args: &[&str]) -> String {
+pub fn run_git_lossy(path: &Path, args: &[&str]) -> String {
     run_git(path, args).unwrap_or_default()
 }
 
-fn parse_name_status(output: &str, source: &str) -> Vec<WorktreeDiffFile> {
+fn parse_numstat(output: &str) -> HashMap<String, (Option<usize>, Option<usize>)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 {
+                return None;
+            }
+            let additions = parts[0].parse::<usize>().ok();
+            let deletions = parts[1].parse::<usize>().ok();
+            let path = parts.last().unwrap_or(&parts[2]).to_string();
+            Some((path, (additions, deletions)))
+        })
+        .collect()
+}
+
+fn parse_name_status(output: &str, numstat: &str, source: &str) -> Vec<WorktreeDiffFile> {
+    let stats = parse_numstat(numstat);
     output
         .lines()
         .filter_map(|line| {
@@ -303,13 +321,22 @@ fn parse_name_status(output: &str, source: &str) -> Vec<WorktreeDiffFile> {
             }
             let status = parts[0].chars().next().unwrap_or('M').to_string();
             let path = parts.last().unwrap_or(&parts[1]).to_string();
+            let (additions, deletions) = stats.get(&path).cloned().unwrap_or((None, None));
             Some(WorktreeDiffFile {
                 path,
                 status,
                 source: source.to_string(),
+                additions,
+                deletions,
             })
         })
         .collect()
+}
+
+fn count_file_lines(path: &Path) -> Option<usize> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|content| content.lines().count())
 }
 
 fn list_untracked(path: &Path) -> Vec<WorktreeDiffFile> {
@@ -320,6 +347,8 @@ fn list_untracked(path: &Path) -> Vec<WorktreeDiffFile> {
             path: line.to_string(),
             status: "A".to_string(),
             source: "untracked".to_string(),
+            additions: count_file_lines(&path.join(line)),
+            deletions: Some(0),
         })
         .collect()
 }
@@ -406,14 +435,13 @@ pub fn diff_for_path(
     let mut patch_truncated = false;
 
     if let Some(base) = base_commit {
-        let committed = parse_name_status(
-            &run_git_lossy(root, &["diff", "--name-status", &format!("{}..HEAD", base)]),
-            "committed",
-        );
+        let range = format!("{}..HEAD", base);
+        let committed_name_status = run_git_lossy(root, &["diff", "--name-status", &range]);
+        let committed_numstat = run_git_lossy(root, &["diff", "--numstat", &range]);
+        let committed = parse_name_status(&committed_name_status, &committed_numstat, "committed");
         stats.committed_files = committed.len();
         files.extend(committed);
-        let committed_patch =
-            run_git_lossy(root, &["diff", "--no-ext-diff", &format!("{}..HEAD", base)]);
+        let committed_patch = run_git_lossy(root, &["diff", "--no-ext-diff", &range]);
         append_patch_section(
             &mut patch,
             "committed",
@@ -423,10 +451,9 @@ pub fn diff_for_path(
         );
     }
 
-    let staged = parse_name_status(
-        &run_git_lossy(root, &["diff", "--cached", "--name-status"]),
-        "staged",
-    );
+    let staged_name_status = run_git_lossy(root, &["diff", "--cached", "--name-status"]);
+    let staged_numstat = run_git_lossy(root, &["diff", "--cached", "--numstat"]);
+    let staged = parse_name_status(&staged_name_status, &staged_numstat, "staged");
     stats.staged_files = staged.len();
     files.extend(staged);
     let staged_patch = run_git_lossy(root, &["diff", "--no-ext-diff", "--cached"]);
@@ -438,7 +465,9 @@ pub fn diff_for_path(
         &mut patch_truncated,
     );
 
-    let unstaged = parse_name_status(&run_git_lossy(root, &["diff", "--name-status"]), "unstaged");
+    let unstaged_name_status = run_git_lossy(root, &["diff", "--name-status"]);
+    let unstaged_numstat = run_git_lossy(root, &["diff", "--numstat"]);
+    let unstaged = parse_name_status(&unstaged_name_status, &unstaged_numstat, "unstaged");
     stats.unstaged_files = unstaged.len();
     files.extend(unstaged);
     let unstaged_patch = run_git_lossy(root, &["diff", "--no-ext-diff"]);
@@ -477,6 +506,152 @@ pub fn diff_for_path(
         patch,
         patch_truncated,
     })
+}
+
+pub fn branch_exists(root: &Path, branch: &str) -> Result<bool, String> {
+    let reference = format!("refs/heads/{}", branch);
+    Ok(run_git(root, &["rev-parse", "--verify", &reference]).is_ok())
+}
+
+pub fn ensure_clean_worktree(root: &Path, label: &str) -> Result<(), String> {
+    discover_repo(root)?;
+    if run_git(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok() {
+        return Err(format!("{} has a merge in progress", label));
+    }
+    let status = run_git(root, &["status", "--porcelain"])?;
+    if status.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{} has uncommitted changes", label))
+    }
+}
+
+pub fn commits_ahead(root: &Path, base: &str, branch: &str) -> Result<u32, String> {
+    let range = format!("{}..{}", base, branch);
+    let output = run_git(root, &["rev-list", "--count", &range])?;
+    output
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| format!("Failed to parse commits ahead count: {}", e))
+}
+
+pub fn head_rev(root: &Path) -> Result<String, String> {
+    Ok(run_git(root, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
+pub fn checkout_branch(root: &Path, branch: &str) -> Result<(), String> {
+    run_git(root, &["checkout", branch]).map(|_| ())
+}
+
+pub fn diff_between(root: &Path, base: &str, branch: &str) -> String {
+    let range = format!("{}...{}", base, branch);
+    run_git_lossy(root, &["diff", &range])
+}
+
+pub fn commit_all(root: &Path, message: &str) -> Result<Option<String>, String> {
+    let status = run_git(root, &["status", "--porcelain"])?;
+    if status.trim().is_empty() {
+        return Ok(None);
+    }
+    run_git(root, &["add", "-A"])?;
+    let commit_result = run_git(
+        root,
+        &[
+            "-c",
+            "user.name=Refact Agent",
+            "-c",
+            "user.email=agent@refact.ai",
+            "commit",
+            "-m",
+            message,
+            "--no-gpg-sign",
+        ],
+    );
+    match commit_result {
+        Ok(_) => head_rev(root).map(Some),
+        Err(e) if e.contains("nothing to commit") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn parse_conflict_files(status: &str) -> Vec<String> {
+    status
+        .lines()
+        .filter(|line| {
+            let bytes = line.as_bytes();
+            bytes.len() >= 2
+                && (bytes[0] == b'U'
+                    || bytes[1] == b'U'
+                    || (bytes[0] == b'A' && bytes[1] == b'A')
+                    || (bytes[0] == b'D' && bytes[1] == b'D'))
+        })
+        .filter_map(|line| line.get(3..).map(|path| path.to_string()))
+        .collect()
+}
+
+pub fn conflict_files_for_path(root: &Path) -> Vec<String> {
+    parse_conflict_files(&run_git_lossy(root, &["status", "--porcelain"]))
+}
+
+pub fn abort_merge(root: &Path) -> bool {
+    run_git(root, &["merge", "--abort"]).is_ok()
+        || run_git(root, &["reset", "--hard", "HEAD"]).is_ok()
+}
+
+pub fn preflight_merge_conflicts(
+    source_root: &Path,
+    target_branch: &str,
+    source_branch: &str,
+    strategy: &str,
+) -> Result<Vec<String>, String> {
+    let temp = tempfile::Builder::new()
+        .prefix("refact-merge-preflight-")
+        .tempdir()
+        .map_err(|e| format!("Failed to create merge preflight directory: {}", e))?;
+    let preflight_path = temp.path().join("worktree");
+    let preflight_str = preflight_path
+        .to_str()
+        .ok_or_else(|| "Merge preflight path is not valid UTF-8".to_string())?;
+    run_git(
+        source_root,
+        &["worktree", "add", "--detach", preflight_str, target_branch],
+    )?;
+    let merge_result = if strategy == "squash" {
+        run_git(&preflight_path, &["merge", "--squash", source_branch])
+    } else {
+        run_git(
+            &preflight_path,
+            &["merge", "--no-commit", "--no-ff", source_branch],
+        )
+    };
+    let conflicts = conflict_files_for_path(&preflight_path);
+    let mut remove_warnings = Vec::new();
+    if let Err(e) = run_git(
+        source_root,
+        &["worktree", "remove", "--force", preflight_str],
+    ) {
+        remove_warnings.push(e);
+    }
+    if preflight_path.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&preflight_path) {
+            remove_warnings.push(e.to_string());
+        }
+    }
+    match merge_result {
+        Ok(_) => Ok(Vec::new()),
+        Err(e) if !conflicts.is_empty() => Ok(conflicts),
+        Err(e) => {
+            if remove_warnings.is_empty() {
+                Err(format!("Merge preflight failed: {}", e))
+            } else {
+                Err(format!(
+                    "Merge preflight failed: {}; cleanup warnings: {}",
+                    e,
+                    remove_warnings.join("; ")
+                ))
+            }
+        }
+    }
 }
 
 #[allow(dead_code)]

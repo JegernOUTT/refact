@@ -9,17 +9,23 @@ use uuid::Uuid;
 
 use super::git;
 use super::types::{
-    CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, OpenWorktreeResponse,
-    WorktreeDiffResponse, WorktreeListResponse, WorktreeMeta, WorktreeRecordView,
-    WorktreeReference, WorktreeRegistry, WorktreeRegistryRecord,
+    CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
+    MergeWorktreeResponse, OpenWorktreeResponse, WorktreeCleanupResult, WorktreeConflictState,
+    WorktreeDiffResponse, WorktreeListResponse, WorktreeMergeStrategy, WorktreeMeta,
+    WorktreeRecordView, WorktreeReference, WorktreeRegistry, WorktreeRegistryRecord,
 };
 
 const DEFAULT_MAX_PATCH_BYTES: usize = 200_000;
 
 static REGISTRY_WRITE_LOCK: OnceLock<AMutex<()>> = OnceLock::new();
+static MERGE_LOCK: OnceLock<AMutex<()>> = OnceLock::new();
 
 fn registry_write_lock() -> &'static AMutex<()> {
     REGISTRY_WRITE_LOCK.get_or_init(|| AMutex::new(()))
+}
+
+pub fn worktree_merge_lock() -> &'static AMutex<()> {
+    MERGE_LOCK.get_or_init(|| AMutex::new(()))
 }
 
 #[derive(Debug, Clone)]
@@ -258,10 +264,206 @@ impl WorktreeService {
             branch: record.meta.branch.clone(),
             base_branch: record.meta.base_branch.clone(),
             base_commit: record.meta.base_commit.clone(),
+            status: git::status_for_path(&record.meta.root),
             files: diff.files,
             stats: diff.stats,
             patch: diff.patch,
             patch_truncated: diff.patch_truncated,
+        })
+    }
+
+    pub async fn merge_worktree(
+        &self,
+        id: &str,
+        request: MergeWorktreeRequest,
+    ) -> Result<MergeWorktreeResponse, String> {
+        validate_worktree_id(id)?;
+        if let Some(target_branch) = request.target_branch.as_deref() {
+            validate_branch_name(target_branch)?;
+        }
+        let _merge_guard = worktree_merge_lock().lock().await;
+        let _registry_guard = registry_write_lock().lock().await;
+        let mut registry = self.load_registry_unlocked().await?;
+        let index = registry
+            .records
+            .iter()
+            .position(|record| record.meta.id == id)
+            .ok_or_else(|| format!("Worktree '{}' not found", id))?;
+        let record = registry.records[index].clone();
+        if !record.meta.root.exists() {
+            return Err(format!(
+                "Worktree '{}' path '{}' does not exist",
+                id,
+                record.meta.root.display()
+            ));
+        }
+        let source_branch = record
+            .meta
+            .branch
+            .clone()
+            .ok_or_else(|| format!("Worktree '{}' has no source branch", id))?;
+        validate_branch_name(&source_branch)?;
+        let target_branch = request
+            .target_branch
+            .clone()
+            .or_else(|| record.meta.base_branch.clone())
+            .ok_or_else(|| format!("Worktree '{}' has no base branch", id))?;
+        validate_branch_name(&target_branch)?;
+        if !git::branch_exists(&record.meta.source_workspace_root, &source_branch)? {
+            return Err(format!("Source branch '{}' not found", source_branch));
+        }
+        if !git::branch_exists(&record.meta.source_workspace_root, &target_branch)? {
+            return Err(format!("Target branch '{}' not found", target_branch));
+        }
+        git::ensure_clean_worktree(&record.meta.source_workspace_root, "Target workspace")?;
+        let status = git::status_for_path(&record.meta.root);
+        if !status.is_git_worktree {
+            return Err(format!("Worktree '{}' is not a git worktree", id));
+        }
+        let commit_message = request
+            .commit_message
+            .clone()
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| fallback_merge_message(&record, &source_branch));
+        let mut committed_uncommitted = None;
+        if status.dirty {
+            if !request.include_uncommitted {
+                return Err(format!(
+                    "Worktree '{}' has uncommitted changes; set include_uncommitted=true to auto-commit them first",
+                    id
+                ));
+            }
+            committed_uncommitted = git::commit_all(&record.meta.root, &commit_message)?;
+        }
+        git::ensure_clean_worktree(&record.meta.root, "Source worktree")?;
+        let ahead = git::commits_ahead(
+            &record.meta.source_workspace_root,
+            &target_branch,
+            &source_branch,
+        )?;
+        let affected_references = record.references.clone();
+        let affected_reference_count = affected_references.len();
+        if ahead == 0 {
+            let cleanup = if request.delete_after_merge && source_branch != target_branch {
+                Some(
+                    self.cleanup_registered_worktree(&mut registry, index, &record, true)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            return Ok(MergeWorktreeResponse {
+                id: id.to_string(),
+                status: "nothing_to_merge".to_string(),
+                merged: false,
+                strategy: request.strategy.as_str().to_string(),
+                source_branch,
+                target_branch,
+                committed_uncommitted,
+                merge_commit: None,
+                cleanup,
+                conflict: None,
+                affected_references,
+                affected_reference_count,
+                warnings: Vec::new(),
+            });
+        }
+        let conflicts = git::preflight_merge_conflicts(
+            &record.meta.source_workspace_root,
+            &target_branch,
+            &source_branch,
+            request.strategy.as_str(),
+        )?;
+        if !conflicts.is_empty() {
+            return Ok(MergeWorktreeResponse {
+                id: id.to_string(),
+                status: "conflict".to_string(),
+                merged: false,
+                strategy: request.strategy.as_str().to_string(),
+                source_branch,
+                target_branch,
+                committed_uncommitted,
+                merge_commit: None,
+                cleanup: None,
+                conflict: Some(conflict_state(conflicts, true, false)),
+                affected_references,
+                affected_reference_count,
+                warnings: Vec::new(),
+            });
+        }
+        git::checkout_branch(&record.meta.source_workspace_root, &target_branch).map_err(|e| {
+            format!(
+                "Failed to checkout target branch '{}': {}",
+                target_branch, e
+            )
+        })?;
+        let merge_result = if request.strategy.as_str() == "squash" {
+            git::run_git(
+                &record.meta.source_workspace_root,
+                &["merge", "--squash", &source_branch],
+            )
+        } else {
+            git::run_git(
+                &record.meta.source_workspace_root,
+                &["merge", "--no-ff", &source_branch, "-m", &commit_message],
+            )
+        };
+        if let Err(e) = merge_result {
+            let conflict_files = git::conflict_files_for_path(&record.meta.source_workspace_root);
+            if !conflict_files.is_empty() {
+                let aborted = git::abort_merge(&record.meta.source_workspace_root);
+                return Ok(MergeWorktreeResponse {
+                    id: id.to_string(),
+                    status: "conflict".to_string(),
+                    merged: false,
+                    strategy: request.strategy.as_str().to_string(),
+                    source_branch,
+                    target_branch,
+                    committed_uncommitted,
+                    merge_commit: None,
+                    cleanup: None,
+                    conflict: Some(conflict_state(conflict_files, aborted, !aborted)),
+                    affected_references,
+                    affected_reference_count,
+                    warnings: Vec::new(),
+                });
+            }
+            return Err(format!("Merge failed: {}", e));
+        }
+        if request.strategy.as_str() == "squash" {
+            git::run_git(
+                &record.meta.source_workspace_root,
+                &["commit", "-m", &commit_message, "--no-gpg-sign"],
+            )
+            .map_err(|e| format!("Failed to commit squash merge: {}", e))?;
+        }
+        let merge_commit = Some(git::head_rev(&record.meta.source_workspace_root)?);
+        let cleanup = if request.delete_after_merge && source_branch != target_branch {
+            Some(
+                self.cleanup_registered_worktree(&mut registry, index, &record, true)
+                    .await?,
+            )
+        } else {
+            registry.records[index].last_known_status =
+                Some(git::status_for_path(&record.meta.root));
+            registry.records[index].updated_at = Utc::now().to_rfc3339();
+            self.save_registry_unlocked(&registry).await?;
+            None
+        };
+        Ok(MergeWorktreeResponse {
+            id: id.to_string(),
+            status: "merged".to_string(),
+            merged: true,
+            strategy: request.strategy.as_str().to_string(),
+            source_branch,
+            target_branch,
+            committed_uncommitted,
+            merge_commit,
+            cleanup,
+            conflict: None,
+            affected_references,
+            affected_reference_count,
+            warnings: Vec::new(),
         })
     }
 
@@ -322,6 +524,46 @@ impl WorktreeService {
             path: view.meta.root,
             branch: view.meta.branch,
             can_open_folder: view.status.path_exists && view.status.is_git_worktree,
+        })
+    }
+
+    async fn cleanup_registered_worktree(
+        &self,
+        registry: &mut WorktreeRegistry,
+        index: usize,
+        record: &WorktreeRegistryRecord,
+        delete_branch: bool,
+    ) -> Result<WorktreeCleanupResult, String> {
+        let stale_path = !record.meta.root.exists();
+        let mut warnings = git::remove_worktree(
+            &record.meta.source_workspace_root,
+            &record.meta.id,
+            &record.meta.root,
+        );
+        let worktree_deleted = !record.meta.root.exists();
+        let mut branch_deleted = false;
+        if delete_branch {
+            if let Some(branch) = record.meta.branch.as_deref() {
+                match git::delete_branch(&record.meta.source_workspace_root, branch) {
+                    Ok(deleted) => branch_deleted = deleted,
+                    Err(e) => warnings.push(e),
+                }
+            }
+        }
+        let registry_deleted = worktree_deleted;
+        if registry_deleted {
+            registry.records.remove(index);
+        } else if let Some(record) = registry.records.get_mut(index) {
+            record.last_known_status = Some(git::status_for_path(&record.meta.root));
+            record.updated_at = Utc::now().to_rfc3339();
+        }
+        self.save_registry_unlocked(registry).await?;
+        Ok(WorktreeCleanupResult {
+            worktree_deleted,
+            branch_deleted,
+            registry_deleted,
+            stale_path,
+            warnings,
         })
     }
 
@@ -600,6 +842,33 @@ fn reference_key(reference: &WorktreeReference) -> String {
     )
 }
 
+fn fallback_merge_message(record: &WorktreeRegistryRecord, branch: &str) -> String {
+    if let Some(card_id) = record.meta.card_id.as_deref() {
+        format!("Merge worktree {} for card {}", branch, card_id)
+    } else if let Some(task_id) = record.meta.task_id.as_deref() {
+        format!("Merge worktree {} for task {}", branch, task_id)
+    } else {
+        format!("Merge worktree {}", branch)
+    }
+}
+
+fn conflict_state(
+    files: Vec<String>,
+    aborted: bool,
+    merge_in_progress: bool,
+) -> WorktreeConflictState {
+    WorktreeConflictState {
+        files,
+        aborted,
+        merge_in_progress,
+        instructions: if aborted {
+            "Merge conflicts were detected during preflight or were aborted; resolve the source branch against the target branch and retry.".to_string()
+        } else {
+            "Merge conflicts remain in the target workspace; resolve or abort the merge before retrying.".to_string()
+        },
+    }
+}
+
 #[cfg(test)]
 mod worktree_registry_tests {
     use std::process::Command;
@@ -629,6 +898,25 @@ mod worktree_registry_tests {
         std::fs::write(root.join("file.txt"), "hello\n").unwrap();
         run_git(root, &["add", "file.txt"]);
         run_git(root, &["commit", "-m", "initial"]);
+    }
+
+    fn commit_file(root: &Path, file: &str, content: &str, message: &str) {
+        std::fs::write(root.join(file), content).unwrap();
+        run_git(root, &["add", file]);
+        run_git(root, &["commit", "-m", message]);
+    }
+
+    fn branch_exists(root: &Path, branch: &str) -> bool {
+        !run_git(root, &["branch", "--list", branch])
+            .trim()
+            .is_empty()
+    }
+
+    fn head_parent_count(root: &Path) -> usize {
+        run_git(root, &["rev-list", "--parents", "-n", "1", "HEAD"])
+            .split_whitespace()
+            .count()
+            .saturating_sub(1)
     }
 
     fn sample_record(service: &WorktreeService, id: &str) -> WorktreeRegistryRecord {
@@ -785,6 +1073,336 @@ mod worktree_registry_tests {
         assert!(diff.patch.contains("hello committed"));
         assert!(diff.patch.contains("new content"));
         assert!(!diff.patch_truncated);
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_diff_returns_committed_branch_patch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/merge-diff-committed".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "committed change\n",
+            "committed change",
+        );
+
+        let diff = service
+            .diff_worktree_with_limit(&created.worktree.meta.id, 50_000)
+            .await
+            .unwrap();
+
+        assert!(diff.files.iter().any(|file| {
+            file.path == "file.txt" && file.source == "committed" && file.additions == Some(1)
+        }));
+        assert!(diff.patch.contains("committed change"));
+        assert!(!diff.status.dirty);
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_diff_includes_uncommitted_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/merge-diff-uncommitted".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        std::fs::write(
+            created.worktree.meta.root.join("file.txt"),
+            "dirty change\n",
+        )
+        .unwrap();
+        std::fs::write(created.worktree.meta.root.join("new.txt"), "new dirty\n").unwrap();
+
+        let diff = service
+            .diff_worktree_with_limit(&created.worktree.meta.id, 50_000)
+            .await
+            .unwrap();
+
+        assert!(diff.status.dirty);
+        assert!(diff
+            .files
+            .iter()
+            .any(|file| file.path == "file.txt" && file.source == "unstaged"));
+        assert!(diff
+            .files
+            .iter()
+            .any(|file| file.path == "new.txt" && file.source == "untracked"));
+        assert!(diff.patch.contains("dirty change"));
+        assert!(diff.patch.contains("new dirty"));
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_squash_creates_single_parent_change_on_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/squash-merge".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "squash change\n",
+            "agent change",
+        );
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("squash merge".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(merged.merged);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "squash change\n"
+        );
+        assert_eq!(head_parent_count(&source), 1);
+        assert!(created.worktree.meta.root.exists());
+        assert!(service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_regular_no_ff_merge_works() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/regular-merge".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "regular change\n",
+            "agent change",
+        );
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Merge,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("regular merge".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(merged.merged);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "regular change\n"
+        );
+        assert_eq!(head_parent_count(&source), 2);
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_delete_after_merge_removes_registry_and_reports_references() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/delete-after-merge".to_string()),
+                kind: Some("task_agent".to_string()),
+                chat_id: Some("chat-1".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        service
+            .add_reference(
+                &created.worktree.meta.id,
+                WorktreeReference {
+                    kind: "chat".to_string(),
+                    chat_id: Some("chat-2".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "delete after merge\n",
+            "agent change",
+        );
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: true,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("delete after merge".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let cleanup = merged.cleanup.unwrap();
+        assert!(cleanup.worktree_deleted);
+        assert!(cleanup.registry_deleted);
+        assert!(cleanup.branch_deleted);
+        assert_eq!(merged.affected_reference_count, 2);
+        assert!(!root.exists());
+        assert!(!branch_exists(&source, &branch));
+        assert!(service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_discard_delete_unmerged_worktree_removes_path_and_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/delete-unmerged".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "unmerged change\n",
+            "agent change",
+        );
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+
+        let deleted = service
+            .delete_worktree(&created.worktree.meta.id, true)
+            .await
+            .unwrap();
+
+        assert!(deleted.deleted);
+        assert!(deleted.branch_deleted);
+        assert!(!root.exists());
+        assert!(!branch_exists(&source, &branch));
+        assert!(service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_conflict_returns_files_and_keeps_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/conflict-merge".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(&source, "file.txt", "target change\n", "target change");
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "source change\n",
+            "source change",
+        );
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Merge,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("conflict merge".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(merged.status, "conflict");
+        assert!(!merged.merged);
+        assert!(merged
+            .conflict
+            .unwrap()
+            .files
+            .contains(&"file.txt".to_string()));
+        assert!(created.worktree.meta.root.exists());
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "target change\n"
+        );
+        assert!(service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

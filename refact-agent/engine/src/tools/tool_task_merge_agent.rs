@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::process::Command;
 use serde_json::Value;
-use tokio::sync::Mutex as AMutex;
+use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use async_trait::async_trait;
 
 use crate::tools::tools_description::{
@@ -10,11 +10,198 @@ use crate::tools::tools_description::{
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::global_context::GlobalContext;
 use crate::tasks::storage;
+use crate::worktrees::service::{worktree_merge_lock, WorktreeService};
+use crate::worktrees::types::{MergeWorktreeRequest, MergeWorktreeResponse, WorktreeMergeStrategy};
 
-static GIT_MERGE_LOCK: OnceLock<AMutex<()>> = OnceLock::new();
 fn git_merge_lock() -> &'static AMutex<()> {
-    GIT_MERGE_LOCK.get_or_init(|| AMutex::new(()))
+    worktree_merge_lock()
+}
+
+fn strategy_from_str(strategy: &str) -> Result<WorktreeMergeStrategy, String> {
+    match strategy {
+        "merge" => Ok(WorktreeMergeStrategy::Merge),
+        "squash" => Ok(WorktreeMergeStrategy::Squash),
+        _ => Err(format!(
+            "Invalid strategy '{}', must be 'merge' or 'squash'",
+            strategy
+        )),
+    }
+}
+
+fn cleanup_summary(response: &MergeWorktreeResponse) -> String {
+    match response.cleanup.as_ref() {
+        Some(cleanup) => format!(
+            "worktree_deleted={}, branch_deleted={}, registry_deleted={}, affected_references={}",
+            cleanup.worktree_deleted,
+            cleanup.branch_deleted,
+            cleanup.registry_deleted,
+            response.affected_reference_count
+        ),
+        None => format!(
+            "no cleanup requested, affected_references={}",
+            response.affected_reference_count
+        ),
+    }
+}
+
+fn merge_response_message(card_id: &str, response: &MergeWorktreeResponse) -> String {
+    if let Some(conflict) = response.conflict.as_ref() {
+        return format!(
+            "# Merge Conflicts Detected\n\n**Card:** {}\n**Branch:** {} → {}\n**Strategy:** {}\n**Aborted:** {}\n\n## Conflicting Files\n{}\n\n{}",
+            card_id,
+            response.source_branch,
+            response.target_branch,
+            response.strategy,
+            conflict.aborted,
+            if conflict.files.is_empty() {
+                "None detected".to_string()
+            } else {
+                conflict
+                    .files
+                    .iter()
+                    .map(|file| format!("- {}", file))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            conflict.instructions
+        );
+    }
+    if response.status == "nothing_to_merge" {
+        return format!(
+            "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {} → {}\n**Commits ahead of base:** 0\n\nCleanup: {}.",
+            card_id,
+            response.source_branch,
+            response.target_branch,
+            cleanup_summary(response)
+        );
+    }
+    format!(
+        "# Agent Work Merged\n\n**Card:** {}\n**Strategy:** {}\n**Branch:** {} → {}\n**Cleanup:** {}\n\nThe agent's work has been successfully merged back to the target branch.",
+        card_id,
+        response.strategy,
+        response.source_branch,
+        response.target_branch,
+        cleanup_summary(response)
+    )
+}
+
+async fn clear_board_mirrors_after_registered_merge(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    task_id: &str,
+    card_id: &str,
+    response: &MergeWorktreeResponse,
+) -> Result<(), String> {
+    let Some(cleanup) = response.cleanup.as_ref() else {
+        return Ok(());
+    };
+    if !cleanup.worktree_deleted && !cleanup.branch_deleted && !cleanup.registry_deleted {
+        return Ok(());
+    }
+    let card_id_owned = card_id.to_string();
+    let clear_worktree = cleanup.worktree_deleted || cleanup.registry_deleted;
+    let clear_branch = cleanup.branch_deleted;
+    storage::update_board_atomic(gcx, task_id, move |board| {
+        if let Some(card) = board.get_card_mut(&card_id_owned) {
+            if clear_branch {
+                card.agent_branch = None;
+            }
+            if clear_worktree {
+                card.agent_worktree = None;
+                card.agent_worktree_name = None;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map(|_| ())
+}
+
+async fn merge_registered_task_worktree(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    workspace_root: &std::path::Path,
+    task_id: &str,
+    card_id: &str,
+    strategy: &str,
+    tool_call_id: &str,
+    commit_message_override: Option<String>,
+) -> Result<Option<(bool, Vec<ContextEnum>)>, String> {
+    let board = storage::load_board(gcx.clone(), task_id).await?;
+    let Some(card) = board.get_card(card_id) else {
+        return Err(format!("Card {} not found", card_id));
+    };
+    let Some(worktree_id) = card.agent_worktree_name.clone() else {
+        return Ok(None);
+    };
+    let task_meta = storage::load_task_meta(gcx.clone(), task_id).await?;
+    let target_branch = task_meta
+        .base_branch
+        .clone()
+        .ok_or("Task has no base branch set")?;
+    let cache_dir = gcx.read().await.cache_dir.clone();
+    let service = WorktreeService::new(cache_dir, workspace_root.to_path_buf())?;
+    let diff = service.diff_worktree(&worktree_id).await.ok();
+    let changed_files = diff
+        .as_ref()
+        .map(|diff| {
+            diff.files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let commit_message = match commit_message_override {
+        Some(message) if !message.trim().is_empty() => message,
+        _ => {
+            let diff_text = diff
+                .as_ref()
+                .map(|diff| diff.patch.clone())
+                .unwrap_or_default();
+            match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
+                gcx.clone(),
+                &diff_text,
+                &Some(card.title.clone()),
+            )
+            .await
+            {
+                Ok(message) if !message.trim().is_empty() => message,
+                _ => format!("Card {}: {}", card_id, card.title),
+            }
+        }
+    };
+    let response = service
+        .merge_worktree(
+            &worktree_id,
+            MergeWorktreeRequest {
+                strategy: strategy_from_str(strategy)?,
+                delete_after_merge: true,
+                include_uncommitted: false,
+                target_branch: Some(target_branch),
+                commit_message: Some(commit_message),
+            },
+        )
+        .await?;
+    if response.merged && !changed_files.is_empty() {
+        let _ = crate::chat::task_agent_monitor::append_card_target_files(
+            gcx.clone(),
+            task_id,
+            card_id,
+            changed_files,
+        )
+        .await;
+    }
+    clear_board_mirrors_after_registered_merge(gcx, task_id, card_id, &response).await?;
+    Ok(Some((
+        false,
+        vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(merge_response_message(card_id, &response)),
+            tool_calls: None,
+            tool_call_id: tool_call_id.to_string(),
+            ..Default::default()
+        })],
+    )))
 }
 
 pub struct ToolTaskMergeAgent;
@@ -110,6 +297,28 @@ impl Tool for ToolTaskMergeAgent {
             .get_card(card_id)
             .ok_or(format!("Card {} not found", card_id))?;
 
+        let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
+        let base_branch = task_meta
+            .base_branch
+            .as_ref()
+            .ok_or("Task has no base branch set")?;
+
+        if card.agent_worktree_name.is_some() {
+            if let Some(result) = merge_registered_task_worktree(
+                gcx.clone(),
+                workspace_root,
+                &task_id,
+                card_id,
+                strategy,
+                tool_call_id,
+                None,
+            )
+            .await?
+            {
+                return Ok(result);
+            }
+        }
+
         let agent_branch = card
             .agent_branch
             .as_ref()
@@ -119,11 +328,6 @@ impl Tool for ToolTaskMergeAgent {
             .as_ref()
             .ok_or(format!("Card {} has no agent worktree", card_id))?;
 
-        let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
-        let base_branch = task_meta
-            .base_branch
-            .as_ref()
-            .ok_or("Task has no base branch set")?;
         let changed_files = crate::chat::task_agent_monitor::git_diff_name_only(
             std::path::Path::new(agent_worktree),
             base_branch,
@@ -498,5 +702,175 @@ The agent's work has been successfully merged back to the main branch."#,
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod worktree_merge_tool_tests {
+    use super::*;
+    use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
+    use crate::worktrees::types::CreateWorktreeRequest;
+    use std::path::Path;
+
+    fn run_git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run git {:?}: {}", args, e));
+        if !output.status.success() {
+            panic!(
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    fn init_repo(root: &Path) {
+        run_git(root, &["init", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test User"]);
+        std::fs::write(root.join("file.txt"), "hello\n").unwrap();
+        std::fs::write(root.join(".gitignore"), ".refact/\n").unwrap();
+        run_git(root, &["add", "file.txt", ".gitignore"]);
+        run_git(root, &["commit", "-m", "initial"]);
+    }
+
+    fn commit_file(root: &Path, file: &str, content: &str, message: &str) {
+        std::fs::write(root.join(file), content).unwrap();
+        run_git(root, &["add", file]);
+        run_git(root, &["commit", "-m", message]);
+    }
+
+    async fn set_workspace(gcx: Arc<ARwLock<GlobalContext>>, root: &Path) {
+        let root = root.canonicalize().unwrap();
+        let gcx_locked = gcx.read().await;
+        *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![root];
+    }
+
+    fn test_card(worktree_id: &str, branch: &str, root: &Path) -> BoardCard {
+        BoardCard {
+            id: "T-1".to_string(),
+            title: "Card T-1".to_string(),
+            column: "done".to_string(),
+            priority: "P1".to_string(),
+            depends_on: vec![],
+            instructions: String::new(),
+            assignee: Some("agent-1".to_string()),
+            agent_chat_id: Some("agent-chat-1".to_string()),
+            status_updates: vec![],
+            final_report: Some("done".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            started_at: None,
+            last_heartbeat_at: None,
+            completed_at: Some(chrono::Utc::now().to_rfc3339()),
+            agent_branch: Some(branch.to_string()),
+            agent_worktree: Some(root.to_string_lossy().to_string()),
+            agent_worktree_name: Some(worktree_id.to_string()),
+            target_files: vec![],
+        }
+    }
+
+    async fn write_task(gcx: Arc<ARwLock<GlobalContext>>, source: &Path, card: BoardCard) {
+        let task_dir = source.join(".refact").join("tasks").join("task-1");
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let meta = TaskMeta {
+            schema_version: 1,
+            id: "task-1".to_string(),
+            name: "Task".to_string(),
+            status: TaskStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            cards_total: 1,
+            cards_done: 1,
+            cards_failed: 0,
+            agents_active: 0,
+            base_branch: Some("main".to_string()),
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+        };
+        let mut board = TaskBoard::default();
+        board.cards.push(card);
+        tokio::fs::write(
+            task_dir.join("meta.yaml"),
+            serde_yaml::to_string(&meta).unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            task_dir.join("board.yaml"),
+            serde_yaml::to_string(&board).unwrap(),
+        )
+        .await
+        .unwrap();
+        set_workspace(gcx, source).await;
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_task_merge_agent_uses_service_and_clears_board_mirrors() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let cache_dir = gcx.read().await.cache_dir.clone();
+        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/task/task-1/card/T-1/agent".to_string()),
+                kind: Some("task_agent".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                chat_id: Some("agent-chat-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+        commit_file(&root, "file.txt", "merged by task tool\n", "agent change");
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card(&created.worktree.meta.id, &branch, &root),
+        )
+        .await;
+
+        let result = merge_registered_task_worktree(
+            gcx.clone(),
+            &source.canonicalize().unwrap(),
+            "task-1",
+            "T-1",
+            "squash",
+            "tool-call",
+            Some("task merge".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "merged by task tool\n"
+        );
+        assert!(!root.exists());
+        assert!(service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .is_err());
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(card.target_files.contains(&"file.txt".to_string()));
     }
 }

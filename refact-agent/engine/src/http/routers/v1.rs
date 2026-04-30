@@ -90,7 +90,8 @@ use crate::http::routers::v1::project_configs::{
 };
 use crate::http::routers::v1::worktrees::{
     handle_v1_worktrees_create, handle_v1_worktrees_delete, handle_v1_worktrees_diff,
-    handle_v1_worktrees_get, handle_v1_worktrees_list, handle_v1_worktrees_open,
+    handle_v1_worktrees_get, handle_v1_worktrees_list, handle_v1_worktrees_merge,
+    handle_v1_worktrees_open,
 };
 
 mod ast;
@@ -257,6 +258,7 @@ pub fn make_v1_router() -> Router {
         .route("/worktrees/:id", get(handle_v1_worktrees_get))
         .route("/worktrees/:id", delete(handle_v1_worktrees_delete))
         .route("/worktrees/:id/diff", get(handle_v1_worktrees_diff))
+        .route("/worktrees/:id/merge", post(handle_v1_worktrees_merge))
         .route("/worktrees/:id/open", post(handle_v1_worktrees_open))
         .route("/chat-modes", get(handle_v1_chat_modes))
         .route(

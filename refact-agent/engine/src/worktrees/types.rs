@@ -188,6 +188,80 @@ pub struct DeleteWorktreeResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupResult {
+    pub worktree_deleted: bool,
+    pub branch_deleted: bool,
+    pub registry_deleted: bool,
+    pub stale_path: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeMergeStrategy {
+    Merge,
+    Squash,
+}
+
+impl Default for WorktreeMergeStrategy {
+    fn default() -> Self {
+        Self::Merge
+    }
+}
+
+impl WorktreeMergeStrategy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MergeWorktreeRequest {
+    #[serde(default)]
+    pub strategy: WorktreeMergeStrategy,
+    #[serde(default)]
+    pub delete_after_merge: bool,
+    #[serde(default)]
+    pub include_uncommitted: bool,
+    #[serde(default)]
+    pub target_branch: Option<String>,
+    #[serde(default)]
+    pub commit_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeConflictState {
+    pub files: Vec<String>,
+    pub aborted: bool,
+    pub merge_in_progress: bool,
+    pub instructions: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeWorktreeResponse {
+    pub id: String,
+    pub status: String,
+    pub merged: bool,
+    pub strategy: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_uncommitted: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<WorktreeCleanupResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<WorktreeConflictState>,
+    pub affected_references: Vec<WorktreeReference>,
+    pub affected_reference_count: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenWorktreeResponse {
     pub id: String,
     #[serde(
@@ -205,6 +279,10 @@ pub struct WorktreeDiffFile {
     pub path: String,
     pub status: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additions: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -225,6 +303,7 @@ pub struct WorktreeDiffResponse {
     pub base_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+    pub status: WorktreeStatus,
     pub files: Vec<WorktreeDiffFile>,
     pub stats: WorktreeDiffStats,
     pub patch: String,
