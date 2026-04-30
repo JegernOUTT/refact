@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::files_correction::canonical_path;
+
 use super::types::{Competitor, ImportScope, ImportSourceRoot};
 
 pub mod claude;
@@ -50,12 +52,52 @@ pub fn discover_global_sources(home_dir: &Path, config_dir: &Path) -> Vec<Import
     ]
 }
 
+pub fn discover_project_sources(workspace_root: &Path) -> Vec<ImportSourceRoot> {
+    let scope = ImportScope::Project {
+        root: workspace_root.to_path_buf(),
+    };
+    vec![
+        ImportSourceRoot {
+            competitor: Competitor::ClaudeCode,
+            scope: scope.clone(),
+            path: workspace_root.join(".claude"),
+        },
+        ImportSourceRoot {
+            competitor: Competitor::OpenCode,
+            scope: scope.clone(),
+            path: workspace_root.join(".opencode"),
+        },
+        ImportSourceRoot {
+            competitor: Competitor::KiloCode,
+            scope: scope.clone(),
+            path: workspace_root.join(".kilo"),
+        },
+        ImportSourceRoot {
+            competitor: Competitor::KiloCode,
+            scope: scope.clone(),
+            path: workspace_root.join(".kilocode"),
+        },
+        ImportSourceRoot {
+            competitor: Competitor::ContinueDev,
+            scope,
+            path: workspace_root.join(".continue"),
+        },
+    ]
+}
+
+pub fn normalize_project_root(root: &Path) -> PathBuf {
+    canonical_path(root.to_string_lossy().to_string())
+}
+
 pub fn discover_project_scopes(workspace_roots: &[PathBuf]) -> Vec<ImportScope> {
     let mut seen = HashSet::new();
     let mut scopes = Vec::new();
     for root in workspace_roots {
-        if seen.insert(root.clone()) {
-            scopes.push(ImportScope::Project { root: root.clone() });
+        let normalized_root = normalize_project_root(root);
+        if seen.insert(normalized_root.clone()) {
+            scopes.push(ImportScope::Project {
+                root: normalized_root,
+            });
         }
     }
     scopes
@@ -97,15 +139,68 @@ mod tests {
     fn project_discovery_returns_one_scope_per_workspace() {
         let root_a = PathBuf::from("/workspace/a");
         let root_b = PathBuf::from("/workspace/b");
-        let scopes = discover_project_scopes(&[root_a.clone(), root_b.clone(), root_a.clone()]);
+        let canonical_a = normalize_project_root(&root_a);
+        let canonical_b = normalize_project_root(&root_b);
+        let scopes = discover_project_scopes(&[root_a.clone(), root_b.clone(), root_a]);
 
         assert_eq!(
             scopes,
             vec![
-                ImportScope::Project { root: root_a },
-                ImportScope::Project { root: root_b }
+                ImportScope::Project { root: canonical_a },
+                ImportScope::Project { root: canonical_b }
             ]
         );
+    }
+
+    #[test]
+    fn project_discovery_normalizes_equivalent_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut roots = vec![
+            root.clone(),
+            root.join("."),
+            PathBuf::from(format!("{}/", root.display())),
+        ];
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("repo-link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            roots.push(link);
+        }
+
+        let scopes = discover_project_scopes(&roots);
+
+        assert_eq!(
+            scopes,
+            vec![ImportScope::Project {
+                root: normalize_project_root(&root)
+            }]
+        );
+    }
+
+    #[test]
+    fn project_source_discovery_lists_supported_roots() {
+        let root = PathBuf::from("/workspace/project");
+
+        let sources = discover_project_sources(&root);
+
+        assert_eq!(sources.len(), 5);
+        assert!(sources
+            .iter()
+            .any(|source| source.path == root.join(".claude")));
+        assert!(sources
+            .iter()
+            .any(|source| source.path == root.join(".opencode")));
+        assert!(sources
+            .iter()
+            .any(|source| source.path == root.join(".kilo")));
+        assert!(sources
+            .iter()
+            .any(|source| source.path == root.join(".kilocode")));
+        assert!(sources
+            .iter()
+            .any(|source| source.path == root.join(".continue")));
     }
 
     #[test]

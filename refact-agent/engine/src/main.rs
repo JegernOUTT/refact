@@ -179,6 +179,8 @@ async fn main() {
         std::process::exit(0);
     }
 
+    let _ = ext::competitor_import::run_global_import(gcx.clone()).await;
+
     if cmdline.print_customization {
         if let Some(registry) = get_project_registry(gcx.clone()).await {
             for e in registry.errors.iter() {

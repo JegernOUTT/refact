@@ -251,6 +251,27 @@ impl ImportSummary {
             && self.errors.is_empty()
             && self.status_counts.is_empty()
     }
+
+    pub fn has_created_or_updated(&self, kinds: &[ImportKind]) -> bool {
+        self.outcomes.iter().any(|outcome| {
+            matches!(
+                outcome.status,
+                ImportStatus::Created | ImportStatus::Updated
+            ) && kinds.contains(&outcome.candidate.kind)
+        })
+    }
+
+    pub fn has_command_or_skill_changes(&self) -> bool {
+        self.has_created_or_updated(&[ImportKind::Command, ImportKind::Skill])
+    }
+
+    pub fn has_subagent_changes(&self) -> bool {
+        self.has_created_or_updated(&[ImportKind::Subagent])
+    }
+
+    pub fn has_imported_changes(&self) -> bool {
+        self.has_command_or_skill_changes() || self.has_subagent_changes()
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +304,37 @@ mod tests {
         assert_eq!(left.status_counts.get(&ImportStatus::Created), Some(&2));
         assert_eq!(left.status_counts.get(&ImportStatus::Unchanged), Some(&1));
         assert_eq!(left.status_counts.get(&ImportStatus::Unsupported), Some(&1));
+    }
+
+    #[test]
+    fn summary_change_flags_only_track_created_or_updated_outputs() {
+        let candidate = ImportCandidateSummary {
+            competitor: Competitor::ClaudeCode,
+            kind: ImportKind::Command,
+            scope: ImportScope::Global,
+            source_root: PathBuf::from("/source"),
+            source_path: PathBuf::from("/source/review.md"),
+            dest_name: "review".to_string(),
+            destination_path: PathBuf::from("/dest/review.md"),
+            metadata: Value::Null,
+        };
+        let mut summary = ImportSummary::default();
+        summary.add_outcome(ImportOutcome {
+            candidate: candidate.clone(),
+            status: ImportStatus::Unchanged,
+            message: "unchanged".to_string(),
+        });
+        assert!(!summary.has_imported_changes());
+
+        summary.add_outcome(ImportOutcome {
+            candidate,
+            status: ImportStatus::Updated,
+            message: "updated".to_string(),
+        });
+
+        assert!(summary.has_command_or_skill_changes());
+        assert!(!summary.has_subagent_changes());
+        assert!(summary.has_imported_changes());
     }
 
     #[test]

@@ -93,6 +93,13 @@ pub fn manifest_path_for_scope_root(scope_root: &Path) -> PathBuf {
     scope_root.join("imports").join("competitors.json")
 }
 
+pub async fn write_last_report(scope_root: &Path, summary: &ImportSummary) -> Result<()> {
+    let path = manifest_path_for_scope_root(scope_root);
+    let mut manifest = ImportManifest::read_from_path(&path).await?;
+    manifest.last_report = Some(summary.clone());
+    manifest.write_to_path(&path).await
+}
+
 pub fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
