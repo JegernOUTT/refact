@@ -57,6 +57,39 @@ impl OpenCodeScan {
     }
 }
 
+pub(super) struct CompatibleScanRoots {
+    pub display_name: &'static str,
+    pub skill_roots: Vec<PathBuf>,
+    pub command_roots: Vec<PathBuf>,
+    pub agent_roots: Vec<PathBuf>,
+    pub config_files: Vec<PathBuf>,
+}
+
+pub(super) fn scan_compatible_roots(
+    context: &ConversionContext,
+    roots: CompatibleScanRoots,
+    staging_root: &Path,
+) -> OpenCodeScan {
+    let mut scan = OpenCodeScan::default();
+    for skills_root in roots.skill_roots {
+        scan_skills(
+            &mut scan,
+            context,
+            &skills_root,
+            staging_root,
+            roots.display_name,
+        );
+    }
+    for command_root in roots.command_roots {
+        scan_markdown_commands(&mut scan, context, &command_root, roots.display_name);
+    }
+    for agent_root in roots.agent_roots {
+        scan_markdown_agents(&mut scan, context, &agent_root, roots.display_name);
+    }
+    scan_config_files(&mut scan, context, &roots.config_files, roots.display_name);
+    scan
+}
+
 pub fn scan_project_root(workspace_root: &Path) -> OpenCodeScan {
     let staging_root = workspace_root
         .join(".refact")
@@ -126,17 +159,20 @@ fn scan_root(
     config_files: &[PathBuf],
     staging_root: &Path,
 ) -> OpenCodeScan {
-    let mut scan = OpenCodeScan::default();
-    scan_skills(
-        &mut scan,
+    scan_compatible_roots(
         context,
-        &opencode_root.join("skills"),
+        CompatibleScanRoots {
+            display_name: "OpenCode",
+            skill_roots: vec![opencode_root.join("skills")],
+            command_roots: vec![
+                opencode_root.join("commands"),
+                opencode_root.join("command"),
+            ],
+            agent_roots: vec![opencode_root.join("agents"), opencode_root.join("agent")],
+            config_files: config_files.to_vec(),
+        },
         staging_root,
-    );
-    scan_commands(&mut scan, context, opencode_root);
-    scan_agents(&mut scan, context, opencode_root);
-    scan_config_files(&mut scan, context, config_files);
-    scan
+    )
 }
 
 fn scan_skills(
@@ -144,6 +180,7 @@ fn scan_skills(
     context: &ConversionContext,
     skills_root: &Path,
     staging_root: &Path,
+    display_name: &str,
 ) {
     let skill_dirs = match direct_child_dirs(skills_root) {
         Ok(skill_dirs) => skill_dirs,
@@ -152,7 +189,7 @@ fn scan_skills(
                 context,
                 ImportKind::Skill,
                 skills_root,
-                format!("failed to scan skills directory: {err}"),
+                format!("failed to scan {display_name} skills directory: {err}"),
             ));
             return;
         }
@@ -164,19 +201,11 @@ fn scan_skills(
     }
 }
 
-fn scan_commands(scan: &mut OpenCodeScan, context: &ConversionContext, opencode_root: &Path) {
-    for command_root in [
-        opencode_root.join("commands"),
-        opencode_root.join("command"),
-    ] {
-        scan_markdown_commands(scan, context, &command_root);
-    }
-}
-
 fn scan_markdown_commands(
     scan: &mut OpenCodeScan,
     context: &ConversionContext,
     command_root: &Path,
+    display_name: &str,
 ) {
     let command_paths = match recursive_markdown_files(command_root) {
         Ok(command_paths) => command_paths,
@@ -185,7 +214,7 @@ fn scan_markdown_commands(
                 context,
                 ImportKind::Command,
                 command_root,
-                format!("failed to scan commands directory: {err}"),
+                format!("failed to scan {display_name} commands directory: {err}"),
             ));
             return;
         }
@@ -205,19 +234,18 @@ fn scan_markdown_commands(
                 context,
                 ImportKind::Command,
                 &command_path,
-                format!("failed to read command markdown: {err}"),
+                format!("failed to read {display_name} command markdown: {err}"),
             )),
         }
     }
 }
 
-fn scan_agents(scan: &mut OpenCodeScan, context: &ConversionContext, opencode_root: &Path) {
-    for agent_root in [opencode_root.join("agents"), opencode_root.join("agent")] {
-        scan_markdown_agents(scan, context, &agent_root);
-    }
-}
-
-fn scan_markdown_agents(scan: &mut OpenCodeScan, context: &ConversionContext, agent_root: &Path) {
+fn scan_markdown_agents(
+    scan: &mut OpenCodeScan,
+    context: &ConversionContext,
+    agent_root: &Path,
+    display_name: &str,
+) {
     let agent_paths = match recursive_markdown_files(agent_root) {
         Ok(agent_paths) => agent_paths,
         Err(err) => {
@@ -225,13 +253,13 @@ fn scan_markdown_agents(scan: &mut OpenCodeScan, context: &ConversionContext, ag
                 context,
                 ImportKind::Subagent,
                 agent_root,
-                format!("failed to scan agents directory: {err}"),
+                format!("failed to scan {display_name} agents directory: {err}"),
             ));
             return;
         }
     };
     for agent_path in agent_paths {
-        match normalized_markdown_agent(context, agent_root, &agent_path) {
+        match normalized_markdown_agent(context, agent_root, &agent_path, display_name) {
             Ok(agent) => scan.push_candidate_result(convert_subagent(context, &agent_path, &agent)),
             Err(issue) => scan.push_issue(issue),
         }
@@ -242,18 +270,19 @@ fn scan_config_files(
     scan: &mut OpenCodeScan,
     context: &ConversionContext,
     config_files: &[PathBuf],
+    display_name: &str,
 ) {
     for config_path in config_files {
         if !is_regular_file(config_path) {
             continue;
         }
         match read_json_or_jsonc(config_path) {
-            Ok(config) => scan_config_value(scan, context, config_path, &config),
+            Ok(config) => scan_config_value(scan, context, config_path, &config, display_name),
             Err(err) => scan.push_issue(error_issue(
                 context,
                 ImportKind::Command,
                 config_path,
-                format!("failed to parse OpenCode config: {err}"),
+                format!("failed to parse {display_name} config: {err}"),
             )),
         }
     }
@@ -264,26 +293,29 @@ fn scan_config_value(
     context: &ConversionContext,
     config_path: &Path,
     config: &JsonValue,
+    display_name: &str,
 ) {
     match config.get("command") {
         Some(JsonValue::Object(commands)) => {
-            scan_config_commands(scan, context, config_path, commands)
+            scan_config_commands(scan, context, config_path, commands, display_name)
         }
         Some(_) => scan.push_issue(unsupported_issue(
             context,
             ImportKind::Command,
             config_path,
-            "OpenCode command config is not an object",
+            format!("{display_name} command config is not an object"),
         )),
         None => {}
     }
     match config.get("agent") {
-        Some(JsonValue::Object(agents)) => scan_config_agents(scan, context, config_path, agents),
+        Some(JsonValue::Object(agents)) => {
+            scan_config_agents(scan, context, config_path, agents, display_name)
+        }
         Some(_) => scan.push_issue(unsupported_issue(
             context,
             ImportKind::Subagent,
             config_path,
-            "OpenCode agent config is not an object",
+            format!("{display_name} agent config is not an object"),
         )),
         None => {}
     }
@@ -294,6 +326,7 @@ fn scan_config_commands(
     context: &ConversionContext,
     config_path: &Path,
     commands: &JsonMap<String, JsonValue>,
+    display_name: &str,
 ) {
     let mut names = commands.keys().collect::<Vec<_>>();
     names.sort();
@@ -312,7 +345,7 @@ fn scan_config_commands(
                 context,
                 ImportKind::Command,
                 config_path,
-                format!("OpenCode command {name} skipped: {message}"),
+                format!("{display_name} command {name} skipped: {message}"),
             )),
         }
     }
@@ -323,6 +356,7 @@ fn scan_config_agents(
     context: &ConversionContext,
     config_path: &Path,
     agents: &JsonMap<String, JsonValue>,
+    display_name: &str,
 ) {
     let mut names = agents.keys().collect::<Vec<_>>();
     names.sort();
@@ -336,7 +370,7 @@ fn scan_config_agents(
                 context,
                 ImportKind::Subagent,
                 config_path,
-                format!("OpenCode agent {name} skipped: {message}"),
+                format!("{display_name} agent {name} skipped: {message}"),
             )),
         }
     }
@@ -346,13 +380,14 @@ fn normalized_markdown_agent(
     context: &ConversionContext,
     agent_root: &Path,
     agent_path: &Path,
+    display_name: &str,
 ) -> Result<NormalizedSubagent, ImportIssue> {
     let content = fs::read_to_string(agent_path).map_err(|err| {
         error_issue(
             context,
             ImportKind::Subagent,
             agent_path,
-            format!("failed to read agent markdown: {err}"),
+            format!("failed to read {display_name} agent markdown: {err}"),
         )
     })?;
     let (frontmatter, body) = parse_markdown_frontmatter(&content);
@@ -362,7 +397,7 @@ fn normalized_markdown_agent(
             context,
             ImportKind::Subagent,
             agent_path,
-            "OpenCode markdown agent has no prompt body",
+            format!("{display_name} markdown agent has no prompt body"),
         ));
     }
 
