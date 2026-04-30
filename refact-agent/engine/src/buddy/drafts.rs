@@ -22,11 +22,9 @@ impl fmt::Display for DraftCreateError {
             DraftCreateError::TitleTooLong { max, actual } => {
                 write!(f, "draft title too large: {} chars > {}", actual, max)
             }
-            DraftCreateError::ExplanationTooLong { max, actual } => write!(
-                f,
-                "draft explanation too large: {} chars > {}",
-                actual, max
-            ),
+            DraftCreateError::ExplanationTooLong { max, actual } => {
+                write!(f, "draft explanation too large: {} chars > {}", actual, max)
+            }
             DraftCreateError::ContentTooLarge { max, actual } => {
                 write!(f, "draft content too large: {} bytes > {}", actual, max)
             }

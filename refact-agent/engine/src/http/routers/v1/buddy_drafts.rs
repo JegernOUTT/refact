@@ -128,5 +128,7 @@ pub async fn handle_v1_buddy_draft_delete(
         )
     })?;
     let deleted = svc.delete_draft(&id).is_some();
-    Ok(axum::Json(serde_json::json!({ "ok": true, "deleted": deleted })))
+    Ok(axum::Json(
+        serde_json::json!({ "ok": true, "deleted": deleted }),
+    ))
 }

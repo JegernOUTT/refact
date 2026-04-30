@@ -15,9 +15,7 @@ pub mod tools;
 pub mod types;
 pub mod writer;
 
-use types::{
-    Competitor, ImportIssue, ImportScope, ImportSourceRoot, ImportStatus, ImportSummary,
-};
+use types::{Competitor, ImportIssue, ImportScope, ImportSourceRoot, ImportStatus, ImportSummary};
 
 pub async fn run_global_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSummary {
     let refact_config_dir = {

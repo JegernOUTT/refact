@@ -393,7 +393,9 @@ impl BuddyService {
         explanation: String,
     ) -> Result<BuddyDraft, DraftCreateError> {
         validate_draft_payload(&title, &yaml_or_json, &explanation)?;
-        let draft = self.draft_store.create(kind, title, yaml_or_json, explanation);
+        let draft = self
+            .draft_store
+            .create(kind, title, yaml_or_json, explanation);
         let _ = self.events_tx.send(BuddyEvent::DraftCreated {
             draft: draft.clone(),
         });

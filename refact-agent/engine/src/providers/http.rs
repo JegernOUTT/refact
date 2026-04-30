@@ -451,7 +451,10 @@ fn defaults_draft_validation_error(err: DraftValidationError) -> ScratchError {
         ),
         DraftValidationError::TargetMismatch { expected, actual } => ScratchError::new(
             StatusCode::CONFLICT,
-            format!("draft_target_mismatch: expected {}, got {}", expected, actual),
+            format!(
+                "draft_target_mismatch: expected {}, got {}",
+                expected, actual
+            ),
         ),
         DraftValidationError::Parse(err) => ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

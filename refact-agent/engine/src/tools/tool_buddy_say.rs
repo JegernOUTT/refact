@@ -268,9 +268,10 @@ impl Tool for ToolBuddyRenderControls {
                 ));
             }
             if c.action == "open_setup_mode" {
-                let mode = c.action_param.as_deref().ok_or_else(|| {
-                    format!("action_param is required for control '{}'", c.id)
-                })?;
+                let mode = c
+                    .action_param
+                    .as_deref()
+                    .ok_or_else(|| format!("action_param is required for control '{}'", c.id))?;
                 if !VALID_SETUP_MODES.contains(&mode) {
                     return Err(format!(
                         "invalid setup mode '{}' for control '{}'",

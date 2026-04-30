@@ -282,17 +282,20 @@ async fn detect_provider(
 
 async fn github_mcp_issue_tool(gcx: Arc<ARwLock<GlobalContext>>) -> Option<String> {
     let groups = crate::tools::tools_list::get_integration_tools(gcx).await;
-    groups.into_iter().flat_map(|group| group.tools).find_map(|tool| {
-        let desc = tool.tool_description();
-        let name = desc.name;
-        let cfg = desc.source.config_path;
-        let is_github = name.contains("github") || cfg.contains("github");
-        if is_github && name.ends_with("_create_issue") {
-            Some(name)
-        } else {
-            None
-        }
-    })
+    groups
+        .into_iter()
+        .flat_map(|group| group.tools)
+        .find_map(|tool| {
+            let desc = tool.tool_description();
+            let name = desc.name;
+            let cfg = desc.source.config_path;
+            let is_github = name.contains("github") || cfg.contains("github");
+            if is_github && name.ends_with("_create_issue") {
+                Some(name)
+            } else {
+                None
+            }
+        })
 }
 
 pub async fn has_github_mcp(gcx: Arc<ARwLock<GlobalContext>>) -> bool {
@@ -461,7 +464,13 @@ pub async fn create_issue_via_mcp(
     args.insert("tool_name".to_string(), serde_json::json!(mcp_tool));
     args.insert(
         "args".to_string(),
-        mcp_issue_args(&repo.owner, &repo.repo, &prepared.title, &prepared.body, labels),
+        mcp_issue_args(
+            &repo.owner,
+            &repo.repo,
+            &prepared.title,
+            &prepared.body,
+            labels,
+        ),
     );
     let (_, out) = tool
         .tool_execute(ccx, &"buddy_mcp_issue".to_string(), &args)
@@ -490,19 +499,17 @@ pub async fn resolve_issue_context(
     collected_at: Option<String>,
     error: Option<String>,
 ) -> Result<DiagnosticContext, String> {
-    let pre_diag = if diagnostic_index.is_none()
-        && diagnostic_id.is_none()
-        && collected_at.is_none()
-    {
-        match error.as_ref() {
-            Some(err) => {
-                Some(crate::buddy::diagnostics::collect_diagnostics(gcx.clone(), err).await)
+    let pre_diag =
+        if diagnostic_index.is_none() && diagnostic_id.is_none() && collected_at.is_none() {
+            match error.as_ref() {
+                Some(err) => {
+                    Some(crate::buddy::diagnostics::collect_diagnostics(gcx.clone(), err).await)
+                }
+                None => None,
             }
-            None => None,
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     crate::buddy::actor::resolve_diagnostic(
         gcx,

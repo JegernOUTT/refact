@@ -480,8 +480,12 @@ async fn synthesize_legacy_task_agent_worktree(
         source_workspace_root: source_workspace_root.clone(),
         repo_root: source_workspace_root,
         branch: card.agent_branch.clone(),
-        base_branch: task_record.as_ref().and_then(|meta| meta.base_branch.clone()),
-        base_commit: task_record.as_ref().and_then(|meta| meta.base_commit.clone()),
+        base_branch: task_record
+            .as_ref()
+            .and_then(|meta| meta.base_branch.clone()),
+        base_commit: task_record
+            .as_ref()
+            .and_then(|meta| meta.base_commit.clone()),
         task_id: Some(task_meta.task_id.clone()),
         card_id: Some(card.id.clone()),
         agent_id: task_meta.agent_id.clone().or_else(|| card.assignee.clone()),
@@ -537,8 +541,8 @@ pub async fn load_trajectory_for_chat(
 
     let mut worktree = t.get("worktree").and_then(parse_worktree_meta);
     if worktree.is_none() {
-        worktree = synthesize_legacy_task_agent_worktree(gcx.clone(), chat_id, task_meta.as_ref())
-            .await;
+        worktree =
+            synthesize_legacy_task_agent_worktree(gcx.clone(), chat_id, task_meta.as_ref()).await;
     }
 
     let thread = ThreadParams {
@@ -3322,7 +3326,10 @@ mod tests {
     fn trajectory_worktree_meta_creation_includes_worktree() {
         let worktree = trajectory_worktree_sample();
         let mut extra = serde_json::Map::new();
-        extra.insert("worktree".to_string(), serde_json::to_value(&worktree).unwrap());
+        extra.insert(
+            "worktree".to_string(),
+            serde_json::to_value(&worktree).unwrap(),
+        );
         let data = TrajectoryData {
             id: "meta-chat".to_string(),
             title: "Meta".to_string(),
@@ -3395,7 +3402,9 @@ mod tests {
             buddy_meta: None,
         };
 
-        save_trajectory_snapshot(gcx.clone(), snapshot).await.unwrap();
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
         let path = dir
             .path()
             .join(".refact")
@@ -3468,9 +3477,12 @@ mod tests {
             last_agents_summary_at: None,
             planner_session_state: None,
         };
-        tokio::fs::write(task_dir.join("meta.yaml"), serde_yaml::to_string(&meta).unwrap())
-            .await
-            .unwrap();
+        tokio::fs::write(
+            task_dir.join("meta.yaml"),
+            serde_yaml::to_string(&meta).unwrap(),
+        )
+        .await
+        .unwrap();
         let agent_worktree = dir.path().join("agent-worktree");
         let board = crate::tasks::types::TaskBoard {
             schema_version: 1,
@@ -3497,9 +3509,12 @@ mod tests {
                 target_files: Vec::new(),
             }],
         };
-        tokio::fs::write(task_dir.join("board.yaml"), serde_yaml::to_string(&board).unwrap())
-            .await
-            .unwrap();
+        tokio::fs::write(
+            task_dir.join("board.yaml"),
+            serde_yaml::to_string(&board).unwrap(),
+        )
+        .await
+        .unwrap();
         let trajectory = json!({
             "id": chat_id,
             "title": "Legacy Agent",

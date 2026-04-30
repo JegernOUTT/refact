@@ -451,9 +451,7 @@ fn issue(
 mod tests {
     use super::*;
     use crate::ext::competitor_import::markdown::{parse_markdown_frontmatter, yaml_string_list};
-    use crate::ext::competitor_import::{
-        run_global_import_with_paths, run_project_import_with_paths,
-    };
+    use crate::ext::competitor_import::{run_global_import_with_paths, run_project_import_with_paths};
     use crate::yaml_configs::customization_types::SubagentConfig;
 
     fn write_file(path: &Path, content: &str) {

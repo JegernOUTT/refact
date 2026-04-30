@@ -382,7 +382,7 @@ mod rules {
                             page: BuddyPage::TaskWorkspace {
                                 task_id: task_id.clone(),
                             },
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -419,7 +419,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::TasksList,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -474,7 +474,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::TasksList,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -571,7 +571,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::DefaultModels,
-                                        },
+                        },
                         BuddyAction::DraftDefaultsChange {
                             defaults_kind,
                             patch,
@@ -620,7 +620,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::DefaultModels,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -668,7 +668,7 @@ mod rules {
             vec![
                 BuddyAction::OpenPage {
                     page: BuddyPage::KnowledgeGraph,
-                        },
+                },
                 BuddyAction::CreatePulseReport {
                     scope: PulseScope::Memory,
                 },
@@ -719,7 +719,7 @@ mod rules {
                         },
                         BuddyAction::OpenPage {
                             page: BuddyPage::Buddy,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -767,7 +767,7 @@ mod rules {
                         },
                         BuddyAction::OpenPage {
                             page: BuddyPage::Buddy,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -800,7 +800,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::Stats,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -830,7 +830,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::Stats,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -866,7 +866,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::Customization,
-                                        },
+                        },
                         BuddyAction::DraftCustomizationChange {
                             customization_kind: CustomizationKind::Mode,
                             id: id.clone(),
@@ -909,7 +909,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::Customization,
-                                        },
+                        },
                         BuddyAction::DraftCustomizationChange {
                             customization_kind: CustomizationKind::Skill,
                             id: id.clone(),
@@ -983,7 +983,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::Integrations,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -1020,7 +1020,7 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::Integrations,
-                                        },
+                        },
                         BuddyAction::Dismiss,
                     ],
                     now,

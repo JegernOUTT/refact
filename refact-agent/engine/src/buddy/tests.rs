@@ -3612,9 +3612,9 @@ fn provider_health_ignores_completion_default() {
         "openai/gpt-4o-mini".to_string(),
     ];
     let facts = detect_provider_health_facts(&defaults, &chat_models, &[], now);
-    assert!(!facts.iter().any(|f| {
-        f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model")
-    }));
+    assert!(!facts
+        .iter()
+        .any(|f| { f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model") }));
 }
 
 #[test]
@@ -5975,12 +5975,7 @@ async fn accept_route_response_shape_for_defaults_draft() {
         .to_string();
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
-    let draft = lock
-        .as_ref()
-        .unwrap()
-        .draft_store
-        .get(&draft_id)
-        .unwrap();
+    let draft = lock.as_ref().unwrap().draft_store.get(&draft_id).unwrap();
     let content: serde_json::Value = serde_json::from_str(&draft.yaml_or_json).unwrap();
     assert_eq!(
         content
@@ -6044,12 +6039,7 @@ async fn defaults_update_with_valid_draft_consumes_after_save() {
     );
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
-    assert!(lock
-        .as_ref()
-        .unwrap()
-        .draft_store
-        .get(&draft_id)
-        .is_none());
+    assert!(lock.as_ref().unwrap().draft_store.get(&draft_id).is_none());
 }
 
 #[tokio::test]
@@ -6089,12 +6079,7 @@ async fn defaults_update_wrong_draft_kind_returns_conflict_and_keeps_draft() {
     assert_eq!(err.status_code, StatusCode::CONFLICT);
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
-    assert!(lock
-        .as_ref()
-        .unwrap()
-        .draft_store
-        .get(&draft_id)
-        .is_some());
+    assert!(lock.as_ref().unwrap().draft_store.get(&draft_id).is_some());
 }
 
 #[tokio::test]
@@ -6134,12 +6119,7 @@ async fn defaults_update_parse_invalid_draft_returns_422_and_keeps_draft() {
     assert_eq!(err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
-    assert!(lock
-        .as_ref()
-        .unwrap()
-        .draft_store
-        .get(&draft_id)
-        .is_some());
+    assert!(lock.as_ref().unwrap().draft_store.get(&draft_id).is_some());
 }
 
 #[tokio::test]
@@ -6752,7 +6732,11 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
         ("chat_model", "chat", "chat_model"),
         ("chat_light_model", "chat_light", "chat_light_model"),
         ("chat_buddy_model", "chat_buddy", "chat_buddy_model"),
-        ("chat_thinking_model", "chat_thinking", "chat_thinking_model"),
+        (
+            "chat_thinking_model",
+            "chat_thinking",
+            "chat_thinking_model",
+        ),
     ];
 
     for (field, patch_key, expected_kind_str) in cases {
@@ -7250,9 +7234,7 @@ fn investigation_chat_log_excerpt_in_user_message_not_system() {
 
 #[tokio::test]
 async fn launch_investigation_action_writes_static_prompt_and_envelope() {
-    use crate::http::routers::v1::buddy_opportunities::{
-        dispatch_action, INVESTIGATION_SYSTEM_PROMPT,
-    };
+    use crate::http::routers::v1::buddy_opportunities::{dispatch_action, INVESTIGATION_SYSTEM_PROMPT};
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -7265,11 +7247,8 @@ async fn launch_investigation_action_writes_static_prompt_and_envelope() {
             .join("missing.log")
             .to_string_lossy()
             .into_owned();
-        *gcx_lock
-            .documents_state
-            .workspace_folders
-            .lock()
-            .unwrap() = vec![dir.path().to_path_buf()];
+        *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            vec![dir.path().to_path_buf()];
     }
 
     let outcome = dispatch_action(
@@ -7600,9 +7579,9 @@ fn provider_health_checks_chat_light_and_ignores_completion_models() {
         f.kind == BuddyFactKind::DefaultModelMissing
             && f.payload.get("field").and_then(|v| v.as_str()) == Some("chat_light_model")
     }));
-    assert!(!facts.iter().any(|f| {
-        f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model")
-    }));
+    assert!(!facts
+        .iter()
+        .any(|f| { f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model") }));
 }
 
 #[test]
