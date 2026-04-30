@@ -602,8 +602,7 @@ fn build_chat_model_record(
                 .as_ref()
                 .map(|r| r.caps.supports_web_search)
                 .unwrap_or(false),
-            supports_cache_control: runtime_supports_cache_control
-                && model.supports_cache_control,
+            supports_cache_control: runtime_supports_cache_control && model.supports_cache_control,
             removable: model.is_custom,
             user_configured: model.is_custom,
         },
@@ -1347,6 +1346,7 @@ mod tests {
             reasoning_effort_options: None,
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
+            supports_cache_control: true,
             tokenizer: None,
             enabled: true,
             is_custom: false,

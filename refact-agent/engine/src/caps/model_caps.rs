@@ -487,6 +487,7 @@ mod tests {
                         ..Default::default()
                     }),
                     tool_call: Some(true),
+                    structured_output: Some(true),
                     temperature: None,
                     reasoning: Some(true),
                     modalities: Some(ModelsDevModalities {
@@ -522,6 +523,8 @@ mod tests {
         assert_eq!(model.n_ctx, 128_000);
         assert_eq!(model.max_output_tokens, 16_384);
         assert!(model.supports_tools);
+        assert!(model.supports_parallel_tools);
+        assert!(model.supports_strict_tools);
         assert!(model.supports_temperature);
         assert!(model.supports_vision);
         assert!(model.supports_video);
@@ -540,6 +543,67 @@ mod tests {
             model.raw_cost.unwrap()["context_over_200k"]["input"],
             serde_json::json!(5.0)
         );
+    }
+
+    #[test]
+    fn test_models_dev_reasoning_maps_openai_effort_and_anthropic_budget() {
+        let catalog = catalog_with_providers(vec![
+            (
+                "openai",
+                vec![(
+                    "gpt-5.1",
+                    ModelsDevModel {
+                        reasoning: Some(true),
+                        ..models_dev_model("gpt-5.1")
+                    },
+                )],
+            ),
+            (
+                "anthropic",
+                vec![(
+                    "claude-opus-4-6",
+                    ModelsDevModel {
+                        reasoning: Some(true),
+                        ..models_dev_model("claude-opus-4-6")
+                    },
+                )],
+            ),
+            (
+                "provider-a",
+                vec![(
+                    "unknown-thinking",
+                    ModelsDevModel {
+                        reasoning: Some(true),
+                        ..models_dev_model("unknown-thinking")
+                    },
+                )],
+            ),
+        ]);
+
+        let caps = model_caps_from_models_dev_catalog(&catalog).unwrap();
+
+        let openai = resolve_model_caps(&caps, "openai/gpt-5.1").unwrap().caps;
+        assert_eq!(
+            openai.reasoning_effort_options,
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
+        );
+        assert!(!openai.supports_thinking_budget);
+
+        let anthropic = resolve_model_caps(&caps, "anthropic/claude-opus-4-6")
+            .unwrap()
+            .caps;
+        assert!(anthropic.reasoning_effort_options.is_none());
+        assert!(anthropic.supports_thinking_budget);
+
+        let unknown = resolve_model_caps(&caps, "provider-a/unknown-thinking")
+            .unwrap()
+            .caps;
+        assert!(unknown.reasoning_effort_options.is_none());
+        assert!(!unknown.supports_thinking_budget);
     }
 
     #[test]

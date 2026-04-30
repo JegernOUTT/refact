@@ -106,6 +106,7 @@ impl VLLMProvider {
             reasoning_effort_options: None,
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
+            supports_cache_control: false,
             tokenizer: None,
             enabled,
             is_custom: false,

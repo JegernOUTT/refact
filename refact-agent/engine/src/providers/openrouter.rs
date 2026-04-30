@@ -272,6 +272,7 @@ impl OpenRouterProvider {
             reasoning_effort_options,
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
+            supports_cache_control: true,
             tokenizer: None,
             enabled,
             is_custom: false,

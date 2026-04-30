@@ -672,6 +672,7 @@ fn claude_code_api_model_without_caps(model_id: &str, enabled: bool) -> Availabl
         reasoning_effort_options: None,
         supports_thinking_budget: true,
         supports_adaptive_thinking_budget: false,
+        supports_cache_control: true,
         tokenizer: Some("claude".to_string()),
         enabled,
         is_custom: false,
@@ -743,7 +744,10 @@ pub async fn fetch_claude_code_model_ids(
                             .collect()
                     })
                     .ok_or_else(|| "Claude Code models response missing data array".to_string()),
-                Err(e) => Err(format!("Failed to parse Claude Code models response: {}", e)),
+                Err(e) => Err(format!(
+                    "Failed to parse Claude Code models response: {}",
+                    e
+                )),
             }
         }
         Err(e) => Err(format!("Failed to fetch Claude Code models: {}", e)),
@@ -757,8 +761,8 @@ mod tests {
     #[test]
     fn claude_code_resolves_real_api_ids_from_models_dev_snapshot() {
         let catalog = crate::caps::models_dev::load_models_dev_snapshot_catalog().unwrap();
-        let model_caps = crate::caps::model_caps::model_caps_from_models_dev_catalog(&catalog)
-            .unwrap();
+        let model_caps =
+            crate::caps::model_caps::model_caps_from_models_dev_catalog(&catalog).unwrap();
 
         for model_id in [
             "claude-opus-4-7",

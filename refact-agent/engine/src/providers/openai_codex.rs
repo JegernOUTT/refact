@@ -1209,6 +1209,7 @@ impl OpenAICodexProvider {
             reasoning_effort_options: Self::live_model_reasoning_levels(model),
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
+            supports_cache_control: true,
             tokenizer: None,
             enabled,
             is_custom: false,

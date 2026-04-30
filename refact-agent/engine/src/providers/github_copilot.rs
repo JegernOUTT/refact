@@ -440,6 +440,7 @@ impl GitHubCopilotProvider {
             reasoning_effort_options: Self::live_reasoning_effort(model),
             supports_thinking_budget,
             supports_adaptive_thinking_budget,
+            supports_cache_control: true,
             tokenizer: None,
             enabled,
             is_custom: false,

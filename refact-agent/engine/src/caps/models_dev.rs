@@ -67,6 +67,10 @@ pub struct ModelsDevModel {
     #[serde(default)]
     pub tool_call: Option<bool>,
     #[serde(default)]
+    pub structured_output: Option<bool>,
+    #[serde(default)]
+    pub attachment: Option<bool>,
+    #[serde(default)]
     pub cost: Option<ModelsDevCost>,
     #[serde(default)]
     pub limit: Option<ModelsDevLimit>,
@@ -76,6 +80,8 @@ pub struct ModelsDevModel {
     pub provider: Option<ModelsDevModelProvider>,
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub interleaved: Option<serde_json::Value>,
     #[serde(default)]
     pub experimental: Option<serde_json::Value>,
 }
@@ -334,7 +340,7 @@ pub fn models_dev_catalog_to_model_caps(
 
             let model_aliases = model_aliases(model_key, model);
             let owner = model_owner_key(provider_key, model_key);
-            let model_caps = models_dev_model_to_model_caps(model);
+            let model_caps = models_dev_model_to_model_caps(provider_key, provider, model);
 
             for provider_alias in &provider_aliases {
                 for model_alias in &model_aliases {
@@ -365,22 +371,36 @@ pub fn models_dev_catalog_to_model_caps(
     Ok(caps)
 }
 
-fn models_dev_model_to_model_caps(model: &ModelsDevModel) -> ModelCapabilities {
+fn models_dev_model_to_model_caps(
+    provider_key: &str,
+    provider: &ModelsDevProvider,
+    model: &ModelsDevModel,
+) -> ModelCapabilities {
     let limit = model.limit.as_ref();
     let input_modalities = model
         .modalities
         .as_ref()
         .map(|modalities| modalities.input.as_slice())
         .unwrap_or(&[]);
+    let supports_reasoning = model.reasoning == Some(true);
+    let reasoning_effort_options = supports_openai_reasoning_effort(provider_key, provider, model)
+        .then(|| vec!["low".to_string(), "medium".to_string(), "high".to_string()]);
+    let supports_thinking_budget = supports_reasoning
+        && reasoning_effort_options.is_none()
+        && supports_anthropic_thinking_budget(provider_key, provider, model);
     ModelCapabilities {
         n_ctx: limit.and_then(|limit| limit.context).unwrap_or_default(),
         max_output_tokens: limit.and_then(|limit| limit.output).unwrap_or_default(),
         supports_tools: model.tool_call == Some(true),
+        supports_parallel_tools: model.tool_call == Some(true),
+        supports_strict_tools: model.structured_output == Some(true),
         supports_vision: has_modality(input_modalities, "image"),
         supports_video: has_modality(input_modalities, "video"),
         supports_audio: has_modality(input_modalities, "audio"),
         supports_pdf: has_modality(input_modalities, "pdf"),
         supports_temperature: model.temperature.unwrap_or(true),
+        reasoning_effort_options,
+        supports_thinking_budget,
         tokenizer: "fake".to_string(),
         pricing: model_cost_to_pricing(model),
         raw_cost: model
@@ -390,6 +410,69 @@ fn models_dev_model_to_model_caps(model: &ModelsDevModel) -> ModelCapabilities {
         status: non_empty_status(model.status.as_deref()),
         ..Default::default()
     }
+}
+
+fn supports_openai_reasoning_effort(
+    provider_key: &str,
+    provider: &ModelsDevProvider,
+    model: &ModelsDevModel,
+) -> bool {
+    if model.reasoning != Some(true) {
+        return false;
+    }
+
+    let model_id = model.id.to_ascii_lowercase();
+    let provider_id = provider.id.to_ascii_lowercase();
+    let provider_key = provider_key.to_ascii_lowercase();
+
+    provider_key == "openai"
+        || provider_id == "openai"
+        || provider_key == "openrouter"
+        || provider_id == "openrouter"
+        || model_id.starts_with("gpt-")
+        || model_id.starts_with("o1")
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4")
+        || model_id.starts_with("o5")
+}
+
+fn supports_anthropic_thinking_budget(
+    provider_key: &str,
+    provider: &ModelsDevProvider,
+    model: &ModelsDevModel,
+) -> bool {
+    if model.reasoning != Some(true) {
+        return false;
+    }
+
+    let model_id = model.id.to_ascii_lowercase();
+    let provider_key = provider_key.to_ascii_lowercase();
+    let provider_id = provider.id.to_ascii_lowercase();
+    let provider_npm = provider
+        .npm
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let model_npm = model
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.npm.as_deref())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let model_api = model
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.api.as_deref())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    provider_key == "anthropic"
+        || provider_id == "anthropic"
+        || provider_npm.contains("anthropic")
+        || model_npm.contains("anthropic")
+        || model_api.contains("/anthropic/")
+        || model_api.ends_with("/messages")
+        || model_id.starts_with("claude-")
 }
 
 fn is_active_chat_model(model: &ModelsDevModel) -> bool {
