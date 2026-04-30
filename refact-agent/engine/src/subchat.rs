@@ -21,7 +21,8 @@ use crate::chat::stream_core::{
     run_llm_stream, StreamRunParams, ChoiceFinal, StreamCollector, normalize_tool_call,
 };
 use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
-use crate::chat::types::ThreadParams;
+use crate::chat::types::{TaskMeta, ThreadParams};
+use crate::worktrees::types::WorktreeMeta;
 use crate::chat::trajectories::save_trajectory_as;
 use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
 use crate::stats::event::{LlmCallEvent, canonicalize_mode_for_stats, split_model_provider};
@@ -109,6 +110,8 @@ pub struct SubchatConfig {
     pub max_steps: usize,
     pub prepend_system_prompt: bool,
     pub wrap_up: Option<WrapUpConfig>,
+    pub task_meta: Option<TaskMeta>,
+    pub worktree: Option<WorktreeMeta>,
     pub model: String,
     pub mode: String,
     pub n_ctx: usize,
@@ -598,6 +601,8 @@ pub async fn resolve_subchat_config(
         None,
         None,
         None,
+        None,
+        None,
         0,
     )
     .await
@@ -617,6 +622,8 @@ pub async fn resolve_subchat_config_with_parent(
     prepend_system_prompt: bool,
     wrap_up: Option<WrapUpConfig>,
     mode: String,
+    task_meta: Option<TaskMeta>,
+    worktree: Option<WorktreeMeta>,
     parent_tool_call_id: Option<String>,
     parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     abort_flag: Option<Arc<AtomicBool>>,
@@ -660,6 +667,8 @@ pub async fn resolve_subchat_config_with_parent(
         max_steps,
         prepend_system_prompt,
         wrap_up,
+        task_meta,
+        worktree,
         model,
         mode,
         n_ctx: params.subchat_n_ctx,
@@ -680,6 +689,30 @@ fn has_final_answer(messages: &[ChatMessage]) -> bool {
         .find(|m| m.role == "assistant")
         .map(|m| m.tool_calls.as_ref().map_or(true, |tc| tc.is_empty()))
         .unwrap_or(false)
+}
+
+fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadParams {
+    let tool_use = match &config.tools {
+        ToolsPolicy::All => "agent".to_string(),
+        ToolsPolicy::None => "none".to_string(),
+        ToolsPolicy::Only(v) => v.join(","),
+    };
+
+    ThreadParams {
+        id: chat_id.to_string(),
+        title: config
+            .title
+            .clone()
+            .unwrap_or_else(|| "Subchat".to_string()),
+        model: config.model.clone(),
+        mode: config.mode.clone(),
+        tool_use,
+        task_meta: config.task_meta.clone(),
+        worktree: config.worktree.clone(),
+        parent_id: config.parent_id.clone(),
+        link_type: config.link_type.clone(),
+        ..Default::default()
+    }
 }
 
 pub async fn run_subchat(
@@ -708,7 +741,8 @@ pub async fn run_subchat(
             chat_id.clone(),
             config.root_chat_id.clone(),
             config.model.clone(),
-            None,
+            config.task_meta.clone(),
+            config.worktree.clone(),
             config.abort_flag.clone(),
         )
         .await,
@@ -745,26 +779,7 @@ pub async fn run_subchat(
     }
 
     if config.stateful {
-        let tool_use_str = match &config.tools {
-            ToolsPolicy::All => "agent".to_string(),
-            ToolsPolicy::None => "none".to_string(),
-            ToolsPolicy::Only(v) => v.join(","),
-        };
-
-        let thread = ThreadParams {
-            id: chat_id.clone(),
-            title: config
-                .title
-                .clone()
-                .unwrap_or_else(|| "Subchat".to_string()),
-            model: config.model.clone(),
-            mode: config.mode.clone(),
-            tool_use: tool_use_str,
-            parent_id: config.parent_id.clone(),
-            link_type: config.link_type.clone(),
-            ..Default::default()
-        };
-
+        let thread = stateful_thread_from_config(&chat_id, &config);
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
     }
 
@@ -813,6 +828,7 @@ pub async fn run_subchat_once(
             config.root_chat_id.clone(),
             config.model.clone(),
             None,
+            None,
         )
         .await,
     ));
@@ -852,6 +868,8 @@ pub async fn run_subchat_once_with_parent(
     parent_subchat_tx: Arc<AMutex<mpsc::UnboundedSender<Value>>>,
     parent_abort_flag: Arc<AtomicBool>,
     parent_depth: usize,
+    parent_task_meta: Option<TaskMeta>,
+    parent_worktree: Option<WorktreeMeta>,
 ) -> Result<SubchatResult, String> {
     let config = resolve_subchat_config_with_parent(
         gcx.clone(),
@@ -867,6 +885,8 @@ pub async fn run_subchat_once_with_parent(
         false,
         None,
         "agent".to_string(),
+        parent_task_meta,
+        parent_worktree,
         Some(parent_tool_call_id),
         Some(parent_subchat_tx),
         Some(parent_abort_flag),
@@ -1111,9 +1131,14 @@ async fn execute_pending_tool_calls(
     max_steps: usize,
     tx_toolid_mb: Option<String>,
 ) -> Result<Vec<ChatMessage>, String> {
-    let (gcx, n_ctx) = {
+    let (gcx, n_ctx, task_meta, worktree) = {
         let ccx_locked = ccx.lock().await;
-        (ccx_locked.global_context.clone(), ccx_locked.n_ctx)
+        (
+            ccx_locked.global_context.clone(),
+            ccx_locked.n_ctx,
+            ccx_locked.task_meta.clone(),
+            ccx_locked.execution_scope_worktree(),
+        )
     };
     let last = match messages.last() {
         Some(m) => m,
@@ -1150,6 +1175,8 @@ async fn execute_pending_tool_calls(
         model: model_id.to_string(),
         mode: mode_id.to_string(),
         context_tokens_cap: Some(n_ctx),
+        task_meta,
+        worktree,
         ..Default::default()
     };
 
@@ -1234,12 +1261,14 @@ async fn subchat_stream(
     only_deterministic_messages: bool,
     progress_tool_call_id: Option<&str>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
-    let (gcx, effective_n_ctx, abort_flag) = {
+    let (gcx, effective_n_ctx, abort_flag, task_meta, worktree) = {
         let ccx_locked = ccx.lock().await;
         (
             ccx_locked.global_context.clone(),
             ccx_locked.n_ctx,
             ccx_locked.abort_flag.clone(),
+            ccx_locked.task_meta.clone(),
+            ccx_locked.execution_scope_worktree(),
         )
     };
 
@@ -1265,7 +1294,7 @@ async fn subchat_stream(
         context_tokens_cap: Some(capped_n_ctx),
         include_project_info: true,
         request_attempt_id: Uuid::new_v4().to_string(),
-        worktree: None,
+        worktree: worktree.clone(),
     };
 
     let thread = ThreadParams {
@@ -1273,6 +1302,8 @@ async fn subchat_stream(
         model: model_id.to_string(),
         mode: mode_id.to_string(),
         context_tokens_cap: Some(capped_n_ctx),
+        task_meta,
+        worktree,
         ..Default::default()
     };
 
@@ -1597,11 +1628,17 @@ async fn subchat_single_internal(
 }
 #[cfg(test)]
 mod subchat_tests {
-    use super::{resolve_subchat_model, resolve_subchat_params};
-    use crate::call_validation::{ChatModelType, SubchatParameters};
+    use super::{
+        resolve_subchat_model, resolve_subchat_params, stateful_thread_from_config, SubchatConfig,
+        ToolsPolicy,
+    };
+    use crate::call_validation::{ChatModelType, ReasoningEffort, SubchatParameters};
+    use crate::chat::types::TaskMeta;
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
+    use crate::worktrees::types::WorktreeMeta;
     use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+    use std::fs;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1619,6 +1656,33 @@ mod subchat_tests {
         })
     }
 
+    fn sample_worktree() -> (tempfile::TempDir, WorktreeMeta) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("worktree");
+        let source = temp.path().join("source");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let source = fs::canonicalize(source).unwrap();
+        (
+            temp,
+            WorktreeMeta {
+                id: "wt-subchat".to_string(),
+                kind: "task_agent".to_string(),
+                root,
+                source_workspace_root: source.clone(),
+                repo_root: source,
+                branch: Some("feature".to_string()),
+                base_branch: Some("main".to_string()),
+                base_commit: Some("base".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("card-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                enforce: true,
+            },
+        )
+    }
+
     async fn install_caps(
         gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
         caps: CodeAssistantCaps,
@@ -1631,6 +1695,89 @@ mod subchat_tests {
         let mut gcx_locked = gcx.write().await;
         gcx_locked.caps = Some(Arc::new(caps));
         gcx_locked.caps_last_attempted_ts = now;
+    }
+
+    #[test]
+    fn subchat_worktree_stateful_thread_from_config_carries_scope() {
+        let (_temp, worktree) = sample_worktree();
+        let task_meta = TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "agents".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            card_id: Some("card-1".to_string()),
+        };
+        let config = SubchatConfig {
+            tool_name: "subagent".to_string(),
+            stateful: true,
+            chat_id: None,
+            title: Some("Subchat".to_string()),
+            parent_id: Some("parent".to_string()),
+            link_type: Some("subagent".to_string()),
+            root_chat_id: Some("root".to_string()),
+            tools: ToolsPolicy::Only(vec!["cat".to_string()]),
+            max_steps: 3,
+            prepend_system_prompt: false,
+            wrap_up: None,
+            task_meta: Some(task_meta.clone()),
+            worktree: Some(worktree.clone()),
+            model: "model".to_string(),
+            mode: "agent".to_string(),
+            n_ctx: 4096,
+            max_new_tokens: 512,
+            temperature: None,
+            reasoning_effort: Some(ReasoningEffort::Low),
+            parent_tool_call_id: None,
+            parent_subchat_tx: None,
+            abort_flag: None,
+            subchat_depth: 1,
+        };
+
+        let thread = stateful_thread_from_config("subchat-1", &config);
+
+        assert_eq!(thread.id, "subchat-1");
+        assert_eq!(thread.task_meta, Some(task_meta));
+        assert_eq!(thread.worktree, Some(worktree));
+        assert_eq!(thread.tool_use, "cat");
+        assert_eq!(thread.parent_id.as_deref(), Some("parent"));
+    }
+
+    #[test]
+    fn subchat_worktree_config_fields_carry_parent_scope() {
+        let (_temp, worktree) = sample_worktree();
+        let task_meta = TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "agents".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            card_id: Some("card-1".to_string()),
+        };
+        let config = SubchatConfig {
+            tool_name: "subagent".to_string(),
+            stateful: false,
+            chat_id: None,
+            title: None,
+            parent_id: None,
+            link_type: None,
+            root_chat_id: None,
+            tools: ToolsPolicy::All,
+            max_steps: 1,
+            prepend_system_prompt: false,
+            wrap_up: None,
+            task_meta: Some(task_meta.clone()),
+            worktree: Some(worktree.clone()),
+            model: "model".to_string(),
+            mode: "agent".to_string(),
+            n_ctx: 4096,
+            max_new_tokens: 512,
+            temperature: None,
+            reasoning_effort: None,
+            parent_tool_call_id: None,
+            parent_subchat_tx: None,
+            abort_flag: None,
+            subchat_depth: 1,
+        };
+
+        assert_eq!(config.task_meta, Some(task_meta));
+        assert_eq!(config.worktree, Some(worktree));
     }
 
     #[tokio::test]

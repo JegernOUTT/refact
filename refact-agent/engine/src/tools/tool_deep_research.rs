@@ -32,6 +32,8 @@ async fn execute_deep_research(
     tool_call_id: String,
     abort_flag: Arc<std::sync::atomic::AtomicBool>,
     parent_depth: usize,
+    parent_task_meta: Option<crate::chat::types::TaskMeta>,
+    parent_worktree: Option<crate::worktrees::types::WorktreeMeta>,
 ) -> Result<(ChatMessage, serde_json::Map<String, serde_json::Value>), String> {
     let subagent_config = get_subagent_config(gcx.clone(), SUBAGENT_ID, None)
         .await
@@ -61,6 +63,8 @@ async fn execute_deep_research(
         subchat_tx,
         abort_flag,
         parent_depth,
+        parent_task_meta,
+        parent_worktree,
     )
     .await?;
     let reply = subchat_result
@@ -113,9 +117,14 @@ impl Tool for ToolDeepResearch {
             (ccx_lock.global_context.clone(), ccx_lock.subchat_tx.clone())
         };
 
-        let (abort_flag, parent_depth) = {
+        let (abort_flag, parent_depth, parent_task_meta, parent_worktree) = {
             let ccx_lock = ccx.lock().await;
-            (ccx_lock.abort_flag.clone(), ccx_lock.subchat_depth)
+            (
+                ccx_lock.abort_flag.clone(),
+                ccx_lock.subchat_depth,
+                ccx_lock.task_meta.clone(),
+                ccx_lock.execution_scope_worktree(),
+            )
         };
 
         tracing::info!("Starting deep research for query: {}", research_query);
@@ -127,6 +136,8 @@ impl Tool for ToolDeepResearch {
             tool_call_id.clone(),
             abort_flag,
             parent_depth,
+            parent_task_meta,
+            parent_worktree,
         )
         .await?;
 

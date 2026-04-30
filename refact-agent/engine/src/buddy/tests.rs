@@ -3693,6 +3693,7 @@ async fn make_tool_ccx(
             None,
             String::new(),
             None,
+            None,
         )
         .await,
     ))
@@ -4334,6 +4335,7 @@ async fn tool_buddy_create_draft_rejects_oversized_content() {
             String::new(),
             None,
             String::new(),
+            None,
             None,
         )
         .await,

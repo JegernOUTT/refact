@@ -55,6 +55,31 @@ async fn get_effective_n_ctx(gcx: Arc<ARwLock<GlobalContext>>, thread: &ThreadPa
     }
 }
 
+async fn build_tool_execution_context(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    n_ctx: usize,
+    messages: &[ChatMessage],
+    thread: &ThreadParams,
+    abort_flag: Option<Arc<AtomicBool>>,
+) -> Arc<AMutex<AtCommandsContext>> {
+    Arc::new(AMutex::new(
+        AtCommandsContext::new_with_abort(
+            gcx,
+            n_ctx,
+            CHAT_TOP_N,
+            false,
+            messages.to_vec(),
+            thread.id.clone(),
+            thread.root_chat_id.clone(),
+            thread.model.clone(),
+            thread.task_meta.clone(),
+            thread.worktree.clone(),
+            abort_flag,
+        )
+        .await,
+    ))
+}
+
 fn is_server_executed_tool(tool_call_id: &str) -> bool {
     tool_call_id.starts_with("srvtoolu_")
 }
@@ -265,6 +290,60 @@ fn spawn_subchat_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn sample_worktree() -> (tempfile::TempDir, crate::worktrees::types::WorktreeMeta) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("worktree");
+        let source = temp.path().join("source");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let source = fs::canonicalize(source).unwrap();
+        (
+            temp,
+            crate::worktrees::types::WorktreeMeta {
+                id: "wt-tools".to_string(),
+                kind: "chat".to_string(),
+                root,
+                source_workspace_root: source.clone(),
+                repo_root: source,
+                branch: Some("feature".to_string()),
+                base_branch: Some("main".to_string()),
+                base_commit: Some("base".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("card-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                enforce: true,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn subchat_worktree_tool_execution_context_inherits_thread_scope() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (_temp, worktree) = sample_worktree();
+        let task_meta = TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "agents".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            card_id: Some("card-1".to_string()),
+        };
+        let thread = ThreadParams {
+            id: "chat-tools".to_string(),
+            model: "model".to_string(),
+            task_meta: Some(task_meta.clone()),
+            worktree: Some(worktree.clone()),
+            ..Default::default()
+        };
+
+        let ccx = build_tool_execution_context(gcx, 4096, &[], &thread, None).await;
+        let ccx = ccx.lock().await;
+
+        assert_eq!(ccx.task_meta, Some(task_meta));
+        assert_eq!(ccx.execution_scope_root(), Some(worktree.root.clone()));
+        assert_eq!(ccx.execution_scope_worktree(), Some(worktree));
+    }
 
     #[test]
     fn test_is_server_executed_tool_with_prefix() {
@@ -737,6 +816,7 @@ pub async fn process_tool_calls_once(
         gcx.clone(),
         &tool_calls,
         &messages,
+        &thread,
         mode_id,
         model_id,
         &allowed_tools,
@@ -762,10 +842,9 @@ pub async fn process_tool_calls_once(
     }
 
     if !confirmations.is_empty() {
-        let (auto_approved, remaining): (Vec<_>, Vec<_>) =
-            confirmations
-                .into_iter()
-                .partition(|c| should_auto_approve_confirmation(&thread, &c.tool_name));
+        let (auto_approved, remaining): (Vec<_>, Vec<_>) = confirmations
+            .into_iter()
+            .partition(|c| should_auto_approve_confirmation(&thread, &c.tool_name));
 
         if !remaining.is_empty() {
             let mut auto_approved_ids: Vec<String> = auto_approved
@@ -1007,6 +1086,7 @@ pub async fn check_tools_confirmation(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_calls: &[crate::call_validation::ChatToolCall],
     messages: &[ChatMessage],
+    thread: &ThreadParams,
     mode_id: &str,
     model_id: Option<&str>,
     allowed_tools: &[String],
@@ -1024,10 +1104,11 @@ pub async fn check_tools_confirmation(
             1,
             false,
             messages.to_vec(),
-            String::new(),
-            None,
-            String::new(),
-            None,
+            thread.id.clone(),
+            thread.root_chat_id.clone(),
+            thread.model.clone(),
+            thread.task_meta.clone(),
+            thread.worktree.clone(),
         )
         .await,
     ));
@@ -1201,21 +1282,14 @@ pub async fn execute_tools_with_session(
         }
     };
 
-    let ccx = Arc::new(AMutex::new(
-        AtCommandsContext::new_with_abort(
-            gcx.clone(),
-            n_ctx,
-            CHAT_TOP_N,
-            false,
-            messages.to_vec(),
-            thread.id.clone(),
-            thread.root_chat_id.clone(),
-            thread.model.clone(),
-            thread.task_meta.clone(),
-            Some(session_abort_flag),
-        )
-        .await,
-    ));
+    let ccx = build_tool_execution_context(
+        gcx.clone(),
+        n_ctx,
+        messages,
+        thread,
+        Some(session_abort_flag),
+    )
+    .await;
 
     {
         let mut ccx_locked = ccx.lock().await;
@@ -1257,10 +1331,7 @@ pub async fn execute_tools_with_session(
     result
 }
 
-async fn wait_for_tool_abort(
-    session_arc: Arc<AMutex<ChatSession>>,
-    abort_flag: Arc<AtomicBool>,
-) {
+async fn wait_for_tool_abort(session_arc: Arc<AMutex<ChatSession>>, abort_flag: Arc<AtomicBool>) {
     loop {
         if abort_flag.load(Ordering::Relaxed) {
             return;
@@ -1749,20 +1820,7 @@ pub async fn execute_tools(
         }
     };
 
-    let ccx = Arc::new(AMutex::new(
-        AtCommandsContext::new(
-            gcx.clone(),
-            n_ctx,
-            CHAT_TOP_N,
-            false,
-            messages.to_vec(),
-            thread.id.clone(),
-            thread.root_chat_id.clone(),
-            thread.model.clone(),
-            thread.task_meta.clone(),
-        )
-        .await,
-    ));
+    let ccx = build_tool_execution_context(gcx.clone(), n_ctx, messages, thread, None).await;
 
     {
         let mut ccx_locked = ccx.lock().await;

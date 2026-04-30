@@ -174,12 +174,14 @@ async fn execute_strategic_planning(
     tool_call_id: String,
     config: &CodeSubagentConfig,
 ) -> Result<(String, serde_json::Map<String, serde_json::Value>), String> {
-    let (subchat_tx, abort_flag, parent_depth) = {
+    let (subchat_tx, abort_flag, parent_depth, parent_task_meta, parent_worktree) = {
         let ccx_lock = ccx.lock().await;
         (
             ccx_lock.subchat_tx.clone(),
             ccx_lock.abort_flag.clone(),
             ccx_lock.subchat_depth,
+            ccx_lock.task_meta.clone(),
+            ccx_lock.execution_scope_worktree(),
         )
     };
 
@@ -204,6 +206,8 @@ async fn execute_strategic_planning(
         subchat_tx,
         abort_flag,
         parent_depth,
+        parent_task_meta,
+        parent_worktree,
     )
     .await?;
     let initial_solution = result

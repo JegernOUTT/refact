@@ -8,7 +8,9 @@ use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
+use crate::chat::types::TaskMeta;
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::worktrees::types::WorktreeMeta;
 use crate::subchat::run_subchat;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::yaml_configs::customization_registry::get_subagent_config;
@@ -30,6 +32,36 @@ fn tools_contain_file_editing(tools: &[String]) -> bool {
     tools
         .iter()
         .any(|t| FILE_EDITING_TOOLS.contains(&t.as_str()))
+}
+
+fn tools_allow_editing_or_shell(tools: &[String]) -> bool {
+    tools.is_empty()
+        || tools
+            .iter()
+            .any(|t| t == "shell" || FILE_EDITING_TOOLS.contains(&t.as_str()))
+}
+
+fn parent_is_task_agent(task_meta: &Option<TaskMeta>) -> bool {
+    task_meta
+        .as_ref()
+        .map(|meta| meta.role == "agent" || meta.role == "agents")
+        .unwrap_or(false)
+}
+
+fn task_agent_scope_guard_error(
+    task_meta: &Option<TaskMeta>,
+    worktree: &Option<WorktreeMeta>,
+    tools: &[String],
+) -> Option<String> {
+    if parent_is_task_agent(task_meta) && worktree.is_none() && tools_allow_editing_or_shell(tools)
+    {
+        Some(
+            "Task-agent subagents with editing or shell tools require an active worktree scope"
+                .to_string(),
+        )
+    } else {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -133,6 +165,8 @@ impl Tool for ToolSubagent {
             parent_subchat_tx,
             parent_abort_flag,
             current_depth,
+            parent_task_meta,
+            parent_worktree,
         ) = {
             let ccx_lock = ccx.lock().await;
             (
@@ -142,6 +176,8 @@ impl Tool for ToolSubagent {
                 ccx_lock.subchat_tx.clone(),
                 ccx_lock.abort_flag.clone(),
                 ccx_lock.subchat_depth,
+                ccx_lock.task_meta.clone(),
+                ccx_lock.execution_scope_worktree(),
             )
         };
 
@@ -163,6 +199,11 @@ impl Tool for ToolSubagent {
         }
 
         let session_id_hook = parent_chat_id.clone();
+        if let Some(error) =
+            task_agent_scope_guard_error(&parent_task_meta, &parent_worktree, &tools)
+        {
+            return Err(error);
+        }
 
         let has_editing_tools = tools_contain_file_editing(&tools);
         let config_name = if has_editing_tools {
@@ -201,6 +242,8 @@ impl Tool for ToolSubagent {
             false,
             None,
             "agent".to_string(),
+            parent_task_meta,
+            parent_worktree,
             Some(tool_call_id.clone()),
             Some(parent_subchat_tx),
             Some(parent_abort_flag),
@@ -372,5 +415,58 @@ impl Tool for ToolSubagent {
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn task_meta(role: &str) -> Option<TaskMeta> {
+        Some(TaskMeta {
+            task_id: "task-1".to_string(),
+            role: role.to_string(),
+            agent_id: Some("agent-1".to_string()),
+            card_id: Some("card-1".to_string()),
+        })
+    }
+
+    fn worktree() -> Option<WorktreeMeta> {
+        Some(WorktreeMeta {
+            id: "wt-subagent".to_string(),
+            kind: "task_agent".to_string(),
+            root: PathBuf::from("/tmp/wt"),
+            source_workspace_root: PathBuf::from("/tmp/src"),
+            repo_root: PathBuf::from("/tmp/src"),
+            branch: Some("feature".to_string()),
+            base_branch: Some("main".to_string()),
+            base_commit: Some("base".to_string()),
+            task_id: Some("task-1".to_string()),
+            card_id: Some("card-1".to_string()),
+            agent_id: Some("agent-1".to_string()),
+            enforce: true,
+        })
+    }
+
+    #[test]
+    fn subchat_worktree_tool_subagent_requires_scope_for_task_agent_shell() {
+        let tools = vec!["shell".to_string()];
+        let error = task_agent_scope_guard_error(&task_meta("agents"), &None, &tools).unwrap();
+        assert!(error.contains("worktree scope"));
+    }
+
+    #[test]
+    fn subchat_worktree_tool_subagent_inherits_parent_scope_policy() {
+        let tools = vec!["shell".to_string()];
+        assert!(task_agent_scope_guard_error(&task_meta("agents"), &worktree(), &tools).is_none());
+        assert!(task_agent_scope_guard_error(&task_meta("planner"), &None, &tools).is_none());
+        assert!(task_agent_scope_guard_error(
+            &task_meta("agents"),
+            &None,
+            &vec!["cat".to_string()]
+        )
+        .is_none());
+        assert!(task_agent_scope_guard_error(&task_meta("agents"), &None, &Vec::new()).is_some());
     }
 }

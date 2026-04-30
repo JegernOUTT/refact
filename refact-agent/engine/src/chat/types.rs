@@ -116,7 +116,7 @@ impl std::fmt::Display for SessionState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct TaskMeta {
     pub task_id: String,
     pub role: String,

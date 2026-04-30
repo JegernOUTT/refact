@@ -49,6 +49,10 @@ impl ExecutionScope {
         self.worktree.enforce
     }
 
+    pub fn worktree(&self) -> &WorktreeMeta {
+        &self.worktree
+    }
+
     pub fn effective_root(&self) -> &Path {
         self.root.as_path()
     }

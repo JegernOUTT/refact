@@ -110,7 +110,15 @@ pub async fn gather_files_phase(
     main_config: &CodeSubagentConfig,
     params: &GatherFilesParams<'_>,
 ) -> Result<Vec<PathBuf>, String> {
-    let (parent_chat_id, parent_root_chat_id, parent_subchat_tx, parent_abort_flag, current_depth) = {
+    let (
+        parent_chat_id,
+        parent_root_chat_id,
+        parent_subchat_tx,
+        parent_abort_flag,
+        current_depth,
+        parent_task_meta,
+        parent_worktree,
+    ) = {
         let ccx_lock = ccx.lock().await;
         (
             ccx_lock.chat_id.clone(),
@@ -118,6 +126,8 @@ pub async fn gather_files_phase(
             ccx_lock.subchat_tx.clone(),
             ccx_lock.abort_flag.clone(),
             ccx_lock.subchat_depth,
+            ccx_lock.task_meta.clone(),
+            ccx_lock.execution_scope_worktree(),
         )
     };
 
@@ -183,6 +193,8 @@ pub async fn gather_files_phase(
         false,
         None,
         "agent".to_string(),
+        parent_task_meta.clone(),
+        parent_worktree.clone(),
         Some(tool_call_id.clone()),
         Some(parent_subchat_tx.clone()),
         Some(parent_abort_flag.clone()),
@@ -234,6 +246,8 @@ pub async fn gather_files_phase(
             parent_subchat_tx.clone(),
             parent_abort_flag.clone(),
             current_depth,
+            parent_task_meta.clone(),
+            parent_worktree.clone(),
         )
         .await?;
         let retry_response = get_last_assistant_content(&retry_result.messages);

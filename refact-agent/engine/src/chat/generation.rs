@@ -5,7 +5,7 @@ use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::subchat::{resolve_subchat_config, run_subchat};
+use crate::subchat::{resolve_subchat_config_with_parent, run_subchat};
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
@@ -446,7 +446,7 @@ async fn run_fork_subchat(
     thread: &ThreadParams,
     parent_chat_id: &str,
 ) -> Result<String, String> {
-    let config = resolve_subchat_config(
+    let config = resolve_subchat_config_with_parent(
         gcx.clone(),
         agent_name,
         false,
@@ -454,12 +454,18 @@ async fn run_fork_subchat(
         Some(format!("Fork: {}", agent_name)),
         Some(parent_chat_id.to_string()),
         Some("fork".to_string()),
-        None,
+        thread.root_chat_id.clone(),
         None,
         10,
         true,
         None,
         thread.mode.clone(),
+        thread.task_meta.clone(),
+        thread.worktree.clone(),
+        None,
+        None,
+        None,
+        0,
     )
     .await?;
 
@@ -948,6 +954,7 @@ pub async fn run_llm_generation(
         thread.root_chat_id.clone(),
         model_rec.base.id.clone(),
         thread.task_meta.clone(),
+        thread.worktree.clone(),
     )
     .await;
     let ccx_arc = Arc::new(AMutex::new(ccx));

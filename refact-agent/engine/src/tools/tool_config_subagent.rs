@@ -108,6 +108,8 @@ impl Tool for ToolConfigSubagent {
             parent_subchat_tx,
             parent_abort_flag,
             current_depth,
+            parent_task_meta,
+            parent_worktree,
         ) = {
             let ccx_lock = ccx.lock().await;
             (
@@ -117,6 +119,8 @@ impl Tool for ToolConfigSubagent {
                 ccx_lock.subchat_tx.clone(),
                 ccx_lock.abort_flag.clone(),
                 ccx_lock.subchat_depth,
+                ccx_lock.task_meta.clone(),
+                ccx_lock.execution_scope_worktree(),
             )
         };
 
@@ -161,6 +165,8 @@ impl Tool for ToolConfigSubagent {
             false,
             None,
             "agent".to_string(),
+            parent_task_meta,
+            parent_worktree,
             Some(tool_call_id.clone()),
             Some(parent_subchat_tx),
             Some(parent_abort_flag),

@@ -315,6 +315,7 @@ pub async fn investigation_logs(
             None,
             String::new(),
             None,
+            None,
         )
         .await,
     ));
@@ -362,6 +363,7 @@ pub async fn investigation_internal_context(
             String::new(),
             None,
             String::new(),
+            None,
             None,
         )
         .await,
@@ -449,6 +451,7 @@ pub async fn create_issue_via_mcp(
             String::new(),
             None,
             String::new(),
+            None,
             None,
         )
         .await,
