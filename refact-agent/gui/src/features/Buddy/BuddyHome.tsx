@@ -575,7 +575,14 @@ export const BuddyHome: React.FC = () => {
         onPromptChange={(prompt) => void handlePromptChange(prompt)}
       />
 
-      <div className={classNames(styles.row, styles.row3, styles.rowFlex)}>
+      <div
+        className={classNames(
+          styles.row,
+          styles.row3,
+          styles.rowFlex,
+          styles.rowFlexBottom,
+        )}
+      >
         <BuddyActivityPanel activities={activities} />
         <BuddyRecentErrorsPanel
           recentErrors={recentErrors}

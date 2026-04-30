@@ -2017,6 +2017,7 @@ mod tests {
                     generated: 4.0,
                     cache_read: Some(1.0),
                     cache_creation: Some(3.0),
+                    context_over_200k: None,
                 }),
                 ..Default::default()
             },

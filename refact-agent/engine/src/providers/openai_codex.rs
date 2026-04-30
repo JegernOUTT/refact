@@ -1572,6 +1572,7 @@ mod tests {
                 generated: 12.0,
                 cache_read: Some(1.5),
                 cache_creation: Some(4.5),
+                context_over_200k: None,
             }),
             ..Default::default()
         }
@@ -1917,6 +1918,7 @@ mod tests {
                     generated: 202.0,
                     cache_read: Some(303.0),
                     cache_creation: Some(404.0),
+                    context_over_200k: None,
                 }),
                 ..Default::default()
             },

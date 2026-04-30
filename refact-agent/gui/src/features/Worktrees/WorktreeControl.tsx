@@ -37,11 +37,18 @@ function compactPath(path: string): string {
   return parts.slice(-2).join("/");
 }
 
+function compactWorktreeLabel(label: string): string {
+  const normalized = label.replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 3) return normalized || label;
+  return parts.slice(-3).join("/");
+}
+
 function worktreeLabel(worktree: WorktreeMeta | null): string {
   if (!worktree) return "Main";
   const branch = worktree.branch?.trim();
   return branch !== undefined && branch.length > 0
-    ? branch
+    ? compactWorktreeLabel(branch)
     : compactPath(worktree.root);
 }
 
@@ -89,6 +96,9 @@ export const WorktreeControl: React.FC = () => {
   const mainWorkspacePath = data?.source_workspace_root;
   const copyPath = currentWorktree?.root ?? mainWorkspacePath ?? null;
   const label = worktreeLabel(currentWorktree);
+  const branchLabel = currentWorktree?.branch?.trim();
+  const fullLabel =
+    branchLabel !== undefined && branchLabel.length > 0 ? branchLabel : label;
   const hostCanOpenFolder =
     host === "vscode" || host === "jetbrains" || host === "ide";
   const branchSuggestion = useMemo(
@@ -218,12 +228,12 @@ export const WorktreeControl: React.FC = () => {
             className={`${styles.trigger} ${
               currentWorktree ? styles.triggerActive : ""
             }`}
-            title={currentWorktree ? label : "Main workspace"}
+            title={currentWorktree ? fullLabel : "Main workspace"}
             aria-label={`Worktree scope: ${
-              currentWorktree ? label : "Main workspace"
+              currentWorktree ? fullLabel : "Main workspace"
             }`}
           >
-            <Flex align="center" gap="1">
+            <Flex align="center" gap="1" className={styles.triggerInner}>
               <Text size="1" className={styles.triggerText}>
                 {label}
               </Text>

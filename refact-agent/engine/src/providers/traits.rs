@@ -45,6 +45,28 @@ pub enum ModelSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelPricingTier {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<f64>,
+}
+
+impl ModelPricingTier {
+    pub fn is_valid(&self) -> bool {
+        let valid_price = |p: f64| p.is_finite() && p >= 0.0;
+        self.prompt.map_or(true, valid_price)
+            && self.generated.map_or(true, valid_price)
+            && self.cache_read.map_or(true, valid_price)
+            && self.cache_creation.map_or(true, valid_price)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelPricing {
     pub prompt: f64,
     pub generated: f64,
@@ -52,6 +74,8 @@ pub struct ModelPricing {
     pub cache_read: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_creation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_over_200k: Option<ModelPricingTier>,
 }
 
 impl ModelPricing {
@@ -62,6 +86,10 @@ impl ModelPricing {
             && valid_price(self.generated)
             && valid_opt(self.cache_read)
             && valid_opt(self.cache_creation)
+            && self
+                .context_over_200k
+                .as_ref()
+                .map_or(true, ModelPricingTier::is_valid)
     }
 }
 

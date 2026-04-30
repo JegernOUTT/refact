@@ -11,7 +11,7 @@ use crate::llm::adapter::WireFormat;
 use crate::providers::claude_code_oauth::OAuthTokens;
 use crate::providers::traits::{
     AvailableModel, CustomModelConfig, ModelSource, ProviderRuntime, ProviderTrait,
-    merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -535,20 +535,21 @@ available:
         http_client: &reqwest::Client,
         model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
+        let mut models = self.get_available_models_from_caps(model_caps);
         let auth_token = match self.resolve_auth() {
             Ok(token) => token,
             Err(e) => {
                 tracing::warn!("Claude Code: cannot fetch models, auth failed: {}", e);
-                return self.get_custom_models_only();
+                return models;
             }
         };
 
         let api_model_ids = fetch_claude_code_model_ids(http_client, &auth_token).await;
         if api_model_ids.is_empty() {
             tracing::warn!(
-                "Claude Code: API returned no models, falling back to custom models only"
+                "Claude Code: API returned no models, falling back to model capabilities catalog"
             );
-            return self.get_custom_models_only();
+            return models;
         }
 
         tracing::info!("Claude Code: API returned {} models", api_model_ids.len());
@@ -560,14 +561,15 @@ available:
             .and_then(|p| regex::Regex::new(p).ok());
 
         let date_regex = regex::Regex::new(r"^(.+?)-\d{8}$").expect("valid static regex");
-        let mut models: Vec<AvailableModel> = Vec::new();
-
         for api_id in &api_model_ids {
             let matches_filter = match &regex_opt {
                 Some(regex) => regex.is_match(api_id),
                 None => true,
             };
             if !matches_filter {
+                continue;
+            }
+            if models.iter().any(|model| model.id == *api_id) {
                 continue;
             }
             let api_id_without_date = date_regex
@@ -588,8 +590,6 @@ available:
                 models.push(model);
             }
         }
-
-        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
 
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models

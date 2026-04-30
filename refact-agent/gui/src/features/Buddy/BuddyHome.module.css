@@ -301,6 +301,10 @@
   min-height: 0;
 }
 
+.rowFlexBottom {
+  min-height: 132px;
+}
+
 /* Slim chip strip used for project-setup quick actions placed inline
  * below the summary; intentionally has no panel chrome of its own. */
 .chipStrip {
@@ -373,6 +377,26 @@
   .row,
   .row3 {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .rowFlex {
+    flex: 0 0 auto;
+  }
+  .rowFlexBottom {
+    min-height: 0;
+  }
+  .panelScroll {
+    overflow: visible;
+  }
+  .scrollList {
+    overflow-y: visible;
+    overflow-x: hidden;
+    flex: 0 0 auto;
+  }
+}
+
+@media (max-height: 860px) {
+  .page {
+    overflow-y: auto;
   }
   .rowFlex {
     flex: 0 0 auto;

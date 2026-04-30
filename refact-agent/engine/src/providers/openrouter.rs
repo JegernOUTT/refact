@@ -74,6 +74,7 @@ impl OpenRouterProvider {
             generated,
             cache_read,
             cache_creation,
+            context_over_200k: None,
         })
     }
 

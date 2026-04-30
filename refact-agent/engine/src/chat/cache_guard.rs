@@ -359,6 +359,7 @@ mod tests {
                     generated: 10.0,
                     cache_read: Some(1.25),
                     cache_creation: None,
+                    context_over_200k: None,
                 }),
                 ..Default::default()
             },

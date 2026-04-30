@@ -13,7 +13,7 @@ use tracing::warn;
 
 use crate::caps::model_caps::ModelCapabilities;
 use crate::global_context::GlobalContext;
-use crate::providers::traits::ModelPricing;
+use crate::providers::traits::{ModelPricing, ModelPricingTier};
 
 pub const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 const MODELS_DEV_CACHE_DIR: &str = "models_dev";
@@ -309,6 +309,12 @@ pub fn cost_to_pricing(cost: &ModelsDevCost) -> Option<ModelPricing> {
         generated: cost.output?,
         cache_read: cost.cache_read,
         cache_creation: cost.cache_write,
+        context_over_200k: cost.context_over_200k.map(|tier| ModelPricingTier {
+            prompt: tier.input,
+            generated: tier.output,
+            cache_read: tier.cache_read,
+            cache_creation: tier.cache_write,
+        }),
     };
     pricing.is_valid().then_some(pricing)
 }

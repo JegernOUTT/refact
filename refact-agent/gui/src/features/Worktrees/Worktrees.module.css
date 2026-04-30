@@ -10,6 +10,11 @@
   color: var(--gray-12);
   transition: background-color 0.15s ease;
   max-width: 220px;
+  min-width: 0;
+}
+
+.triggerInner {
+  min-width: 0;
 }
 
 .trigger:hover:not(:disabled) {
@@ -29,6 +34,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .content {
