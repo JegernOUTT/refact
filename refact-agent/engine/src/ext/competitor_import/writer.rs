@@ -10,7 +10,7 @@ use super::manifest::{
 };
 use super::types::{
     ImportArtifact, ImportCandidate, ImportCandidateSummary, ImportIssue, ImportOutcome,
-    ImportScope, ImportStatus, ImportSummary,
+    ImportReport, ImportScope, ImportStatus, ImportSummary,
 };
 
 pub async fn write_candidates(scope_root: &Path, candidates: &[ImportCandidate]) -> ImportSummary {
@@ -46,7 +46,8 @@ pub async fn write_candidates(scope_root: &Path, candidates: &[ImportCandidate])
         }
     }
 
-    manifest.last_report = Some(summary.clone());
+    summary.mark_completed();
+    manifest.last_report = Some(ImportReport::from_summary(&summary));
     if let Err(err) = manifest.write_to_path(&manifest_path).await {
         summary.add_issue(ImportIssue {
             competitor: None,

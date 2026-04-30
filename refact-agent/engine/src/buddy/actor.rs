@@ -1286,6 +1286,14 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
 
     let buddy_arc = gcx.read().await.buddy.clone();
     *buddy_arc.lock().await = Some(service);
+    let initial_pulse =
+        super::pulse::build_pulse(gcx.clone(), &project_root, &FactStore::new()).await;
+    {
+        let mut buddy = buddy_arc.lock().await;
+        if let Some(svc) = buddy.as_mut() {
+            svc.set_pulse(initial_pulse);
+        }
+    }
 
     let agents_md = project_root.join("AGENTS.md");
     let setup_done = tokio::fs::try_exists(&agents_md).await.unwrap_or(false);

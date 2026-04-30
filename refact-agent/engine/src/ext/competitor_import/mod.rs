@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 
 use tokio::sync::RwLock as ARwLock;
 
+use crate::buddy::types::{BuddyControl, BuddyRuntimeEvent};
 use crate::global_context::GlobalContext;
 
 pub mod converters;
@@ -16,7 +17,7 @@ pub mod tools;
 pub mod types;
 pub mod writer;
 
-use types::{ImportCandidate, ImportIssue, ImportScope, ImportStatus, ImportSummary};
+use types::{ImportCandidate, ImportIssue, ImportReport, ImportScope, ImportStatus, ImportSummary};
 
 pub async fn run_global_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSummary {
     let refact_config_dir = {
@@ -25,8 +26,9 @@ pub async fn run_global_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSummar
     };
     let home_dir = home::home_dir();
     let summary = run_global_import_with_paths(&refact_config_dir, home_dir.as_deref()).await;
-    apply_cache_invalidation(gcx, &summary).await;
+    apply_cache_invalidation(gcx.clone(), &summary).await;
     log_import_summary("global", &summary);
+    emit_buddy_import_events(gcx, &summary).await;
     summary
 }
 
@@ -80,8 +82,12 @@ pub async fn run_project_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSumma
         let gcx_locked = gcx.read().await;
         gcx_locked.documents_state.workspace_folders.clone()
     };
-    let workspace_roots = match workspace_folders.lock() {
-        Ok(workspace_folders) => workspace_folders.clone(),
+    let workspace_roots_result = workspace_folders
+        .lock()
+        .map(|workspace_folders| workspace_folders.clone())
+        .map_err(|err| err.to_string());
+    let workspace_roots = match workspace_roots_result {
+        Ok(workspace_roots) => workspace_roots,
         Err(err) => {
             let mut summary = ImportSummary::default();
             summary.add_issue(ImportIssue {
@@ -93,12 +99,14 @@ pub async fn run_project_import(gcx: Arc<ARwLock<GlobalContext>>) -> ImportSumma
                 message: format!("workspace folders unavailable: {err}"),
             });
             log_import_summary("project", &summary);
+            emit_buddy_import_events(gcx, &summary).await;
             return summary;
         }
     };
     let summary = run_project_import_with_paths(&workspace_roots).await;
-    apply_cache_invalidation(gcx, &summary).await;
+    apply_cache_invalidation(gcx.clone(), &summary).await;
     log_import_summary("project", &summary);
+    emit_buddy_import_events(gcx, &summary).await;
     summary
 }
 
@@ -200,6 +208,7 @@ fn has_report_activity(summary: &ImportSummary) -> bool {
 }
 
 async fn persist_last_report(scope_root: &Path, summary: &mut ImportSummary) {
+    summary.mark_completed();
     if let Err(err) = manifest::write_last_report(scope_root, summary).await {
         summary.add_issue(ImportIssue {
             competitor: None,
@@ -226,6 +235,145 @@ async fn apply_cache_invalidation(gcx: Arc<ARwLock<GlobalContext>>, summary: &Im
     }
     if summary.has_subagent_changes() {
         crate::yaml_configs::customization_registry::invalidate_all_registry_caches(gcx).await;
+    }
+}
+
+async fn emit_buddy_import_events(gcx: Arc<ARwLock<GlobalContext>>, summary: &ImportSummary) {
+    let reports = import_reports_for_runtime_events(summary);
+    if reports.is_empty() {
+        return;
+    }
+    let buddy_arc = {
+        let gcx_locked = gcx.read().await;
+        gcx_locked.buddy.clone()
+    };
+    let mut buddy = buddy_arc.lock().await;
+    let Some(service) = buddy.as_mut() else {
+        return;
+    };
+    for report in reports {
+        service.enqueue_runtime_event(buddy_runtime_event_for_import_report(&report));
+    }
+}
+
+fn import_reports_for_runtime_events(summary: &ImportSummary) -> Vec<ImportReport> {
+    if summary.discovered_scopes.is_empty() {
+        return vec![ImportReport::from_summary(summary)];
+    }
+    summary
+        .discovered_scopes
+        .iter()
+        .map(|scope| ImportReport::from_summary_for_scope(summary, scope))
+        .collect()
+}
+
+pub(crate) fn buddy_runtime_event_for_import_report(report: &ImportReport) -> BuddyRuntimeEvent {
+    let created = report.status_count(&ImportStatus::Created);
+    let updated = report.status_count(&ImportStatus::Updated);
+    let unchanged = report.status_count(&ImportStatus::Unchanged);
+    let conflicts = report.status_count(&ImportStatus::Conflict);
+    let user_modified = report.status_count(&ImportStatus::UserModified);
+    let unsupported = report.status_count(&ImportStatus::Unsupported);
+    let errors = report.status_count(&ImportStatus::Error);
+    let attention = conflicts + user_modified + errors;
+    let status = if errors > 0 {
+        "error"
+    } else if conflicts + user_modified + unsupported > 0 {
+        "warning"
+    } else {
+        "completed"
+    };
+    let priority = if attention > 0 {
+        "high"
+    } else if created + updated > 0 || unsupported > 0 {
+        "normal"
+    } else {
+        "low"
+    };
+    let title = if attention > 0 {
+        format!("Competitor import needs attention ({attention})")
+    } else if created + updated > 0 {
+        format!(
+            "Competitor import added {} customization{}",
+            created + updated,
+            plural_suffix(created + updated)
+        )
+    } else {
+        "Competitor import checked customizations".to_string()
+    };
+    let description = format!(
+        "{}: discovered {}, created {}, updated {}, unchanged {}, conflicts {}, user-modified {}, unsupported {}, errors {}.",
+        runtime_scope_label(report),
+        report.discovered_candidates,
+        created,
+        updated,
+        unchanged,
+        conflicts,
+        user_modified,
+        unsupported,
+        errors
+    );
+    let mut event = crate::buddy::actor::make_runtime_event(
+        "competitor_import",
+        &title,
+        "competitor_import",
+        &runtime_dedupe_key(report),
+        status,
+        Some(priority),
+    );
+    event.description = Some(description);
+    event.persistent = attention > 0;
+    event.ttl_ms = if attention > 0 {
+        None
+    } else if priority == "low" {
+        Some(6000)
+    } else {
+        Some(12000)
+    };
+    event.speech_text = if attention > 0 { Some(title) } else { None };
+    event.controls = vec![
+        BuddyControl {
+            id: "open-buddy".to_string(),
+            label: "Open Buddy".to_string(),
+            action: "open_buddy".to_string(),
+            action_param: None,
+            style: "primary".to_string(),
+        },
+        BuddyControl {
+            id: "dismiss".to_string(),
+            label: "Dismiss".to_string(),
+            action: "dismiss".to_string(),
+            action_param: None,
+            style: "secondary".to_string(),
+        },
+    ];
+    event
+}
+
+fn runtime_scope_label(report: &ImportReport) -> &'static str {
+    match report.discovered_scopes.first() {
+        Some(ImportScope::Global) => "global settings",
+        Some(ImportScope::Project { .. }) => "project workspace",
+        None => "workspace",
+    }
+}
+
+fn runtime_dedupe_key(report: &ImportReport) -> String {
+    match report.discovered_scopes.first() {
+        Some(ImportScope::Global) => "competitor_import:global".to_string(),
+        Some(ImportScope::Project { root }) => {
+            let hash = manifest::hash_string(&root.to_string_lossy());
+            format!("competitor_import:project:{}", &hash[..16])
+        }
+        None => "competitor_import:workspace".to_string(),
+    }
+}
+
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
     }
 }
 
@@ -773,6 +921,131 @@ mod tests {
         assert_eq!(generation_after_first, 1);
         assert!(!repeated.has_imported_changes());
         assert_eq!(generation_after_second, 1);
+    }
+
+    fn runtime_event_summary(status: ImportStatus, scope: ImportScope) -> ImportSummary {
+        let mut summary = ImportSummary::from_scopes(vec![scope.clone()]);
+        let candidate = ImportCandidateSummary {
+            competitor: Competitor::ClaudeCode,
+            kind: ImportKind::Command,
+            scope,
+            source_root: PathBuf::from("/source"),
+            source_path: PathBuf::from("/source/secret.md"),
+            dest_name: "secret".to_string(),
+            destination_path: PathBuf::from("commands/secret.md"),
+            metadata: serde_json::json!({"artifact_body": "secret body"}),
+        };
+        summary.add_outcome(ImportOutcome {
+            candidate,
+            status,
+            message: "generated output changed".to_string(),
+        });
+        summary.mark_completed();
+        summary
+    }
+
+    #[test]
+    fn runtime_event_for_unchanged_import_is_low_transient() {
+        let summary = runtime_event_summary(ImportStatus::Unchanged, ImportScope::Global);
+        let report = ImportReport::from_summary(&summary);
+
+        let event = buddy_runtime_event_for_import_report(&report);
+
+        assert_eq!(event.signal_type, "competitor_import");
+        assert_eq!(event.source, "competitor_import");
+        assert_eq!(event.status, "completed");
+        assert_eq!(event.priority, "low");
+        assert!(!event.persistent);
+        assert_eq!(event.ttl_ms, Some(6000));
+        assert_eq!(
+            event.dedupe_key.as_deref(),
+            Some("competitor_import:global")
+        );
+    }
+
+    #[test]
+    fn runtime_event_for_created_import_is_normal_completed() {
+        let summary = runtime_event_summary(ImportStatus::Created, ImportScope::Global);
+        let report = ImportReport::from_summary(&summary);
+
+        let event = buddy_runtime_event_for_import_report(&report);
+
+        assert_eq!(event.status, "completed");
+        assert_eq!(event.priority, "normal");
+        assert!(!event.persistent);
+        assert!(event.title.contains("added 1"));
+        assert_eq!(event.controls[0].action, "open_buddy");
+    }
+
+    #[test]
+    fn runtime_event_for_conflicts_and_errors_is_sanitized_attention() {
+        let scope = ImportScope::Project {
+            root: PathBuf::from("/home/user/private-project"),
+        };
+        let mut summary = runtime_event_summary(ImportStatus::Conflict, scope);
+        summary.add_issue(ImportIssue {
+            competitor: Some(Competitor::OpenCode),
+            kind: Some(ImportKind::Command),
+            scope: summary.discovered_scopes.first().cloned(),
+            path: Some(PathBuf::from("commands/other.md")),
+            status: ImportStatus::Error,
+            message: "failed without leaking body".to_string(),
+        });
+        summary.mark_completed();
+        let report = ImportReport::from_summary(&summary);
+
+        let event = buddy_runtime_event_for_import_report(&report);
+        let event_json = serde_json::to_string(&event).unwrap();
+
+        assert_eq!(event.status, "error");
+        assert_eq!(event.priority, "high");
+        assert!(event.persistent);
+        assert!(event.ttl_ms.is_none());
+        assert!(event.speech_text.is_some());
+        assert!(!event_json.contains("secret body"));
+        assert!(!event_json.contains("private-project"));
+        assert!(event
+            .dedupe_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("competitor_import:project:")));
+    }
+
+    #[tokio::test]
+    async fn runtime_event_emit_is_noop_without_buddy_service() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let summary = runtime_event_summary(ImportStatus::Created, ImportScope::Global);
+
+        emit_buddy_import_events(gcx.clone(), &summary).await;
+
+        assert!(gcx.read().await.buddy.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_event_emit_enqueues_when_buddy_service_exists() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let service = crate::buddy::actor::BuddyService::new(
+            std::env::temp_dir().join(format!("buddy-import-test-{}", uuid::Uuid::new_v4())),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        *gcx.read().await.buddy.lock().await = Some(service);
+        let summary = runtime_event_summary(ImportStatus::Created, ImportScope::Global);
+
+        emit_buddy_import_events(gcx.clone(), &summary).await;
+
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        let service = lock.as_ref().unwrap();
+        assert_eq!(service.runtime_queue.items.len(), 1);
+        assert_eq!(
+            service.runtime_queue.items[0].signal_type,
+            "competitor_import"
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -643,13 +643,32 @@ pub struct McpPulse {
     pub auth_expiring: u32,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CompetitorImportPulse {
+    pub last_run_at: Option<String>,
+    pub discovered_candidates: u32,
+    pub created: u32,
+    pub updated: u32,
+    pub conflicts: u32,
+    pub user_modified: u32,
+    pub unsupported: u32,
+    pub errors: u32,
+    pub sources_seen: BTreeMap<String, u32>,
+    pub attention_items: u32,
+    pub has_attention_items: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CustomizationPulse {
     pub modes: u32,
     pub skills: u32,
     pub commands: u32,
     pub subagents: u32,
     pub hooks: u32,
+    #[serde(default)]
+    pub competitor_import: CompetitorImportPulse,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use super::types::{Competitor, ImportKind, ImportSummary};
+use super::types::{Competitor, ImportKind, ImportReport, ImportSummary};
 
 pub const IMPORTER_VERSION: &str = "competitor_import_v1";
 const MANIFEST_VERSION: u32 = 1;
@@ -17,7 +17,7 @@ pub struct ImportManifest {
     #[serde(default)]
     pub entries: Vec<ImportManifestEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_report: Option<ImportSummary>,
+    pub last_report: Option<ImportReport>,
 }
 
 impl Default for ImportManifest {
@@ -96,7 +96,7 @@ pub fn manifest_path_for_scope_root(scope_root: &Path) -> PathBuf {
 pub async fn write_last_report(scope_root: &Path, summary: &ImportSummary) -> Result<()> {
     let path = manifest_path_for_scope_root(scope_root);
     let mut manifest = ImportManifest::read_from_path(&path).await?;
-    manifest.last_report = Some(summary.clone());
+    manifest.last_report = Some(ImportReport::from_summary(summary));
     manifest.write_to_path(&path).await
 }
 
