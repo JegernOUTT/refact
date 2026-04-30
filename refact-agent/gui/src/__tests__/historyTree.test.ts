@@ -312,17 +312,14 @@ describe("buildHistoryTree", () => {
         a: createItem("a", { updatedAt: "2024-01-04T00:00:00Z" }),
         b: createItem("b", {
           parent_id: "a",
-          link_type: "branch",
           updatedAt: "2024-01-01T00:00:00Z",
         }),
         c: createItem("c", {
           parent_id: "a",
-          link_type: "branch",
           updatedAt: "2024-01-03T00:00:00Z",
         }),
         d: createItem("d", {
           parent_id: "a",
-          link_type: "branch",
           updatedAt: "2024-01-02T00:00:00Z",
         }),
       };
