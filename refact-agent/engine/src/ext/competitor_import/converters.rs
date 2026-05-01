@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Error, ErrorKind, Read, Result as IoResult, Write};
 use std::path::{Component, Path, PathBuf};
@@ -535,17 +536,16 @@ fn stage_skill_package(
     skill_id: &str,
     normalized_skill_md: &str,
 ) -> IoResult<PathBuf> {
-    create_dir_all_no_symlinks(staging_root)?;
-    let canonical_staging_root = fs::canonicalize(staging_root)?;
+    let canonical_staging_root = create_dir_all_no_symlinks(staging_root)?;
     let hash = hash_string(&format!(
         "{}\n{}\n{}",
         skill_dir.to_string_lossy(),
         skill_id,
         normalized_skill_md
     ));
-    let staged = staging_root.join(format!("{}-{}", skill_id, &hash[..16]));
+    let staged = canonical_staging_root.join(format!("{}-{}", skill_id, &hash[..16]));
     ensure_existing_components_are_not_symlinks(&staged)?;
-    let canonical_parent = fs::canonicalize(staged.parent().unwrap_or(staging_root))?;
+    let canonical_parent = fs::canonicalize(staged.parent().unwrap_or(&canonical_staging_root))?;
     if !canonical_parent.starts_with(&canonical_staging_root) {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -562,24 +562,52 @@ fn stage_skill_package(
     Ok(staged)
 }
 
-fn create_dir_all_no_symlinks(path: &Path) -> IoResult<()> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            Component::RootDir => current.push(component.as_os_str()),
-            Component::CurDir => continue,
-            Component::ParentDir => {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("staging path contains parent component: {}", path.display()),
-                ));
+fn create_dir_all_no_symlinks(path: &Path) -> IoResult<PathBuf> {
+    reject_parent_components(path)?;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut existing = absolute.clone();
+    let mut missing = Vec::<OsString>::new();
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "staging path component is not a regular directory: {}",
+                            existing.display()
+                        ),
+                    ));
+                }
+                break;
             }
-            Component::Normal(value) => current.push(value),
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                let Some(name) = existing.file_name().map(|name| name.to_os_string()) else {
+                    return Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!("staging path has no existing parent: {}", path.display()),
+                    ));
+                };
+                missing.push(name);
+                if !existing.pop() {
+                    return Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!("staging path has no existing parent: {}", path.display()),
+                    ));
+                }
+            }
+            Err(err) => return Err(err),
         }
-        if current.as_os_str().is_empty() {
-            continue;
-        }
+    }
+
+    let mut current = fs::canonicalize(existing)?;
+    for component in missing.iter().rev() {
+        current.push(component);
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
@@ -594,6 +622,18 @@ fn create_dir_all_no_symlinks(path: &Path) -> IoResult<()> {
             }
             Err(err) if err.kind() == ErrorKind::NotFound => fs::create_dir(&current)?,
             Err(err) => return Err(err),
+        }
+    }
+    Ok(current)
+}
+
+fn reject_parent_components(path: &Path) -> IoResult<()> {
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("staging path contains parent component: {}", path.display()),
+            ));
         }
     }
     Ok(())
