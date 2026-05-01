@@ -707,8 +707,10 @@ function buildDisplayItemsFromIndex(
     if (isErrorMessage(head)) {
       const errors = [head.content];
       let j = i + 1;
-      while (j < messages.length && isErrorMessage(messages[j])) {
-        errors.push(messages[j].content);
+      while (j < messages.length) {
+        const candidate = messages[j];
+        if (!isErrorMessage(candidate)) break;
+        errors.push(candidate.content);
         j++;
       }
       items.push({
@@ -1043,8 +1045,10 @@ function buildDisplayItems(
     if (isErrorMessage(head)) {
       const errors = [head.content];
       let j = i + 1;
-      while (j < messages.length && isErrorMessage(messages[j])) {
-        errors.push(messages[j].content);
+      while (j < messages.length) {
+        const candidate = messages[j];
+        if (!isErrorMessage(candidate)) break;
+        errors.push(candidate.content);
         j++;
       }
       items.push({
