@@ -91,7 +91,6 @@
   flex-direction: column;
   gap: 0;
   padding: 0;
-  border-bottom: 1px solid var(--gray-a4);
 }
 
 .panelsHeader,
@@ -115,6 +114,10 @@
   min-height: 120px;
   max-height: 240px;
   overflow: hidden;
+}
+
+.panelsCollapse {
+  flex-shrink: 0;
 }
 
 .panelList {
@@ -171,10 +174,6 @@
   overflow: hidden;
 }
 
-.chatHeader {
-  border-bottom: 1px solid var(--gray-a4);
-}
-
 .chevron {
   transition: transform 0.3s ease;
   display: flex;
@@ -186,8 +185,7 @@
   transform: rotate(180deg);
 }
 
-.sectionHeaderToggle,
-.sectionHeaderIconButton {
+.sectionHeaderToggle {
   appearance: none;
   display: flex;
   align-items: center;
@@ -198,36 +196,19 @@
   cursor: pointer;
   font: inherit;
   padding: 0;
-}
-
-.sectionHeaderToggle {
   gap: var(--space-2);
   min-width: 0;
   flex: 1;
   text-align: left;
 }
 
-.sectionHeaderIconButton {
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
+.chatHeaderToggle {
+  align-self: stretch;
 }
 
-.sectionHeaderToggle:hover,
-.sectionHeaderIconButton:hover {
-  background: var(--gray-a3);
-}
-
-.sectionHeaderToggle:focus-visible,
-.sectionHeaderIconButton:focus-visible {
+.sectionHeaderToggle:focus-visible {
   outline: 2px solid var(--accent-8);
   outline-offset: 1px;
-}
-
-.sectionHeaderTitle {
-  flex: 1;
-  min-width: 0;
 }
 
 .sectionHeaderLabel {

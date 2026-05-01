@@ -33,6 +33,7 @@ import {
 } from "../../services/refact/tasks";
 import { ModelPickerPopover } from "../../components/ChatForm/ModelPickerPopover";
 import { Markdown } from "../../components/Markdown";
+import { CollapsePanel } from "../../components/shared/CollapsePanel";
 import styles from "./Tasks.module.css";
 import { Chat } from "../Chat";
 import { selectConfig } from "../Config/configSlice";
@@ -1239,7 +1240,10 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               </Flex>
             </div>
 
-            {panelsExpanded && (
+            <CollapsePanel
+              collapsed={!panelsExpanded}
+              className={styles.panelsCollapse}
+            >
               <Flex className={styles.panelsSection}>
                 <PlannerPanel
                   plannerChats={plannerChats}
@@ -1256,28 +1260,26 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                   onModelChange={handleModelChange}
                 />
               </Flex>
-            )}
+            </CollapsePanel>
           </Box>
         </>
       )}
 
       <Box className={styles.chatSection}>
         <div className={styles.chatHeader}>
-          <Flex align="center" gap="2" className={styles.sectionHeaderTitle}>
-            <button
-              type="button"
-              onClick={handleToggleChatExpanded}
-              aria-expanded={chatExpanded}
-              aria-label={chatToggleLabel}
-              title={chatToggleLabel}
-              className={styles.sectionHeaderIconButton}
-            >
-              <ChevronDownIcon
-                className={`${styles.chevron} ${
-                  chatExpanded ? styles.chevronExpanded : ""
-                }`}
-              />
-            </button>
+          <button
+            type="button"
+            onClick={handleToggleChatExpanded}
+            aria-expanded={chatExpanded}
+            aria-label={chatToggleLabel}
+            title={chatToggleLabel}
+            className={`${styles.sectionHeaderToggle} ${styles.chatHeaderToggle}`}
+          >
+            <ChevronDownIcon
+              className={`${styles.chevron} ${
+                chatExpanded ? styles.chevronExpanded : ""
+              }`}
+            />
             <Text
               size="1"
               weight="bold"
@@ -1286,10 +1288,10 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
             >
               Chat
             </Text>
-          </Flex>
-          <Text size="1" color="gray" className={styles.chatHeaderLabel}>
-            {chatLabel}
-          </Text>
+            <Text size="1" color="gray" className={styles.chatHeaderLabel}>
+              {chatLabel}
+            </Text>
+          </button>
         </div>
         <Box className={styles.chatContent}>
           {activeChat ? (
