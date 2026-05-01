@@ -47,6 +47,7 @@ import {
 } from "./executeBuddyAction";
 import {
   buildBuddySceneSpeechCandidates,
+  pickBuddySceneSpeechCandidate,
   type BuddySceneSpeech,
 } from "./buddySceneSpeech";
 import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
@@ -399,10 +400,13 @@ export const BuddyHome: React.FC = () => {
     setSpeechIndex(0);
   }, [heroSpeechCandidates.length, speechIndex]);
 
-  const heroSpeech =
-    heroSpeechCandidates.length > 0
-      ? heroSpeechCandidates[speechIndex % heroSpeechCandidates.length]
-      : null;
+  const heroSpeech = useMemo(() => {
+    if (heroSpeechCandidates.length === 0) return null;
+    if (activeSpeech) return heroSpeechCandidates[0] ?? null;
+    return pickBuddySceneSpeechCandidate([
+      heroSpeechCandidates[speechIndex % heroSpeechCandidates.length],
+    ]);
+  }, [activeSpeech, heroSpeechCandidates, speechIndex]);
 
   const activeDiagnostic = heroSpeech?.chat_id
     ? diagnostics.find((diag) => diag.chat_id === heroSpeech.chat_id)
@@ -496,8 +500,20 @@ export const BuddyHome: React.FC = () => {
       return tb - ta;
     });
 
+    const cutoff = Date.now() - 60 * 60 * 1000;
     const sigMap = new Map<string, RecentBuddyError>();
     for (const e of collected) {
+      const createdAt = Date.parse(e.created_at);
+      if (
+        Number.isFinite(createdAt) &&
+        createdAt < cutoff &&
+        !e.dismissed &&
+        e.status !== "started" &&
+        e.status !== "progress" &&
+        e.status !== "streaming"
+      ) {
+        continue;
+      }
       const sig = `${e.source}|${e.title}|${e.description ?? ""}`;
       const existing = sigMap.get(sig);
       if (existing) {

@@ -21,7 +21,11 @@ import {
 } from "./executeBuddyAction";
 import { useBuddyState } from "./hooks/useBuddyState";
 import { BuddyWorld } from "./BuddyWorld";
-import { buildBuddySceneSpeech } from "./buddySceneSpeech";
+import {
+  buildBuddySceneSpeech,
+  buildBuddySceneSpeechCandidates,
+  pickBuddySceneSpeechCandidate,
+} from "./buddySceneSpeech";
 import { useDismissBuddyRuntimeEventMutation } from "../../services/refact/buddy";
 import type { BuddyCareAction, BuddyControl, BuddyPage } from "./types";
 
@@ -55,12 +59,20 @@ export const BuddyDashboardScene: React.FC = () => {
 
   const activeSuggestion =
     suggestions.find((suggestion) => !suggestion.dismissed) ?? null;
-  const sceneSpeech = buildBuddySceneSpeech({
-    activeSpeech,
-    nowPlaying,
-    runtimeQueue,
-    activeSuggestion,
-  });
+  const sceneSpeech = activeSpeech
+    ? buildBuddySceneSpeech({
+        activeSpeech,
+        nowPlaying,
+        runtimeQueue,
+        activeSuggestion,
+      })
+    : pickBuddySceneSpeechCandidate(
+        buildBuddySceneSpeechCandidates({
+          nowPlaying,
+          runtimeQueue,
+          activeSuggestion,
+        }),
+      );
   const activeDiagnostic = sceneSpeech?.chat_id
     ? diagnostics.find((diag) => diag.chat_id === sceneSpeech.chat_id)
     : undefined;

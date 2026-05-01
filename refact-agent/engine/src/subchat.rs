@@ -122,6 +122,7 @@ pub struct SubchatConfig {
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub subchat_depth: usize,
+    pub buddy_meta: Option<crate::buddy::types::BuddyThreadMeta>,
 }
 
 fn should_stream_thinking_progress(tool_name: &str) -> bool {
@@ -679,6 +680,7 @@ pub async fn resolve_subchat_config_with_parent(
         parent_subchat_tx,
         abort_flag,
         subchat_depth,
+        buddy_meta: None,
     })
 }
 
@@ -713,6 +715,7 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         parent_id: config.parent_id.clone(),
         link_type: config.link_type.clone(),
         root_chat_id: config.root_chat_id.clone(),
+        buddy_meta: config.buddy_meta.clone(),
         ..Default::default()
     }
 }
@@ -1750,6 +1753,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             subchat_depth: 1,
+            buddy_meta: None,
         };
 
         let thread = stateful_thread_from_config("subchat-1", &config);
@@ -1794,6 +1798,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             subchat_depth: 1,
+            buddy_meta: None,
         };
 
         let thread = stateful_thread_from_config("subchat-1", &config);
@@ -1844,6 +1849,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             subchat_depth: 1,
+            buddy_meta: None,
         };
 
         assert_eq!(config.task_meta, Some(task_meta));

@@ -189,6 +189,7 @@ pub struct BuddyService {
     pub last_issue_at: Option<Instant>,
     pub recent_issue_errors: Vec<(String, DateTime<Utc>)>,
     pub runtime_queue: RuntimeQueue,
+    pub dismissed_runtime_keys: HashMap<String, DateTime<Utc>>,
     pub dirty: bool,
     pub active_speech: Option<BuddySpeechItem>,
     pub queue_writer: Option<mpsc::UnboundedSender<RuntimeQueueWriteOp>>,
@@ -216,6 +217,13 @@ impl BuddyService {
             state.opportunities.clone(),
             state.dismissed_history.clone(),
         );
+        let dismissed_runtime_keys = runtime_queue
+            .items
+            .iter()
+            .chain(runtime_queue.now_playing.iter())
+            .filter(|event| event.dismissed)
+            .filter_map(|event| event.dedupe_key.clone().map(|key| (key, Utc::now())))
+            .collect();
         let opportunity_snapshot = opportunity_queue.snapshot();
         let dismissed_snapshot = opportunity_queue.dismissed_history_snapshot();
         let state_changed = state.opportunities.len() != opportunity_snapshot.len()
@@ -232,6 +240,7 @@ impl BuddyService {
             last_issue_at: None,
             recent_issue_errors: Vec::new(),
             runtime_queue,
+            dismissed_runtime_keys,
             dirty: state_changed,
             active_speech: None,
             queue_writer,
@@ -469,6 +478,7 @@ impl BuddyService {
     }
 
     pub fn enqueue_runtime_event(&mut self, event: BuddyRuntimeEvent) {
+        let event = self.apply_runtime_dismissal_memory(event);
         let _ = self.events_tx.send(BuddyEvent::RuntimeEvent {
             event: event.clone(),
         });
@@ -515,6 +525,27 @@ impl BuddyService {
         for id in evicted {
             self.persist_removal(id);
         }
+    }
+
+    fn apply_runtime_dismissal_memory(
+        &mut self,
+        mut event: BuddyRuntimeEvent,
+    ) -> BuddyRuntimeEvent {
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::hours(24);
+        self.dismissed_runtime_keys
+            .retain(|_, dismissed_at| *dismissed_at >= cutoff);
+        if let Some(key) = event.dedupe_key.as_deref() {
+            if self
+                .dismissed_runtime_keys
+                .get(key)
+                .map(|dismissed_at| *dismissed_at >= cutoff)
+                .unwrap_or(false)
+            {
+                event.dismissed = true;
+            }
+        }
+        event
     }
 
     #[allow(dead_code)]
@@ -591,6 +622,9 @@ impl BuddyService {
             }
         }
         if let Some(event) = updated_event {
+            if let Some(key) = event.dedupe_key.as_ref() {
+                self.dismissed_runtime_keys.insert(key.clone(), Utc::now());
+            }
             self.dirty = true;
             let _ = self.events_tx.send(BuddyEvent::RuntimeEvent {
                 event: event.clone(),

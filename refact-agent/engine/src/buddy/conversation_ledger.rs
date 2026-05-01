@@ -6,6 +6,7 @@ use super::types::BuddyConversationEntry;
 
 fn workflow_id_to_kind(id: &str) -> (&str, &str, Option<&str>) {
     match id {
+        "buddy_humor" => ("system", "🎭", Some("Humor")),
         "commit_message" => ("workflow", "🔄", Some("Commit Msg")),
         "follow_up" => ("workflow", "💡", Some("Follow-up")),
         "compress_trajectory" => ("system", "🤖", Some("Compress")),
@@ -51,6 +52,11 @@ pub async fn list_all_buddy_conversations(
             let kind = val
                 .get("kind")
                 .and_then(|v| v.as_str())
+                .or_else(|| {
+                    val.get("buddy_meta")
+                        .and_then(|meta| meta.get("buddy_chat_kind"))
+                        .and_then(|v| v.as_str())
+                })
                 .unwrap_or("chat")
                 .to_string();
             let title = val
@@ -76,10 +82,23 @@ pub async fn list_all_buddy_conversations(
             let badge = val
                 .get("badge")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    val.get("buddy_meta")
+                        .and_then(|meta| meta.get("workflow_id"))
+                        .and_then(|workflow_id| workflow_id.as_str())
+                        .and_then(|workflow_id| workflow_id_to_kind(workflow_id).2)
+                        .map(|s| s.to_string())
+                });
             let icon = match kind.as_str() {
                 "setup" => "⚙️".to_string(),
                 "analysis" => "🔍".to_string(),
+                "system" => val
+                    .get("buddy_meta")
+                    .and_then(|meta| meta.get("workflow_id"))
+                    .and_then(|workflow_id| workflow_id.as_str())
+                    .map(|workflow_id| workflow_id_to_kind(workflow_id).1.to_string())
+                    .unwrap_or_else(|| "🤖".to_string()),
                 _ => "💬".to_string(),
             };
             entries.push(BuddyConversationEntry {

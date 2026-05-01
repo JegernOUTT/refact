@@ -27,6 +27,8 @@ export interface BuddySceneSpeech {
   opportunityId?: string;
 }
 
+const SPEECH_SILENCE_CHANCE = 0.35;
+
 function normalizeRuntimeText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -81,7 +83,7 @@ function defaultRuntimeControls(event: BuddyRuntimeEvent): BuddyControl[] {
   return [
     {
       id: `investigate-${event.id}`,
-      label: "Help me fix it",
+      label: event.source === "frontend" ? "Report this" : "Investigate",
       action: "investigate_error",
       style: "primary",
     },
@@ -97,7 +99,7 @@ function defaultRuntimeControls(event: BuddyRuntimeEvent): BuddyControl[] {
 function runtimeEventToSpeech(
   event: BuddyRuntimeEvent | null | undefined,
 ): BuddySceneSpeech | null {
-  if (!event || event.dismissed) return null;
+  if (!event || event.dismissed || isRuntimeEventExpired(event)) return null;
   const text = runtimeEventText(event).trim();
   if (!text) return null;
   const controls = event.controls?.length
@@ -111,6 +113,21 @@ function runtimeEventToSpeech(
     source: "runtime",
     runtimeEventId: event.id,
   };
+}
+
+function isRuntimeEventExpired(event: BuddyRuntimeEvent): boolean {
+  if (event.persistent) return false;
+  if (event.ttl_ms == null) return false;
+  const createdAt = Date.parse(event.created_at);
+  if (!Number.isFinite(createdAt)) return false;
+  return Date.now() - createdAt > event.ttl_ms;
+}
+
+function isSpeechExpired(speech: BuddySpeechItem): boolean {
+  if (speech.persistent) return false;
+  const createdAt = Date.parse(speech.created_at);
+  if (!Number.isFinite(createdAt)) return false;
+  return Date.now() - createdAt > speech.ttl_seconds * 1000;
 }
 
 function suggestionToSpeech(
@@ -161,6 +178,7 @@ function runtimeCandidatesFromQueue(
     (event): event is BuddyRuntimeEvent =>
       event !== null &&
       !event.dismissed &&
+      !isRuntimeEventExpired(event) &&
       runtimeEventText(event).trim() !== "",
   );
 
@@ -216,6 +234,31 @@ function compareRuntimeEvents(
   return runtimeCreatedAtMs(right) - runtimeCreatedAtMs(left);
 }
 
+function stableHash(text: string): number {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+function bucketedRandom(seed: string, bucketMs: number): number {
+  const bucket = Math.floor(Date.now() / bucketMs);
+  return (stableHash(`${seed}:${bucket}`) % 10_000) / 10_000;
+}
+
+function shuffleCandidates(candidates: BuddySceneSpeech[]): BuddySceneSpeech[] {
+  const bucket = Math.floor(Date.now() / 45_000);
+  return [...candidates]
+    .map((candidate, index) => ({
+      candidate,
+      score: stableHash(`${candidate.id}:${bucket}`),
+      index,
+    }))
+    .sort((left, right) => left.score - right.score || left.index - right.index)
+    .map(({ candidate }) => candidate);
+}
+
 export function buildBuddySceneSpeech(args: {
   activeSpeech: BuddySpeechItem | null;
   nowPlaying: BuddyRuntimeEvent | null;
@@ -223,7 +266,7 @@ export function buildBuddySceneSpeech(args: {
   activeSuggestion?: BuddySuggestion | null;
   activeOpportunities?: BuddyOpportunity[];
 }): BuddySceneSpeech | null {
-  if (args.activeSpeech) {
+  if (args.activeSpeech && !isSpeechExpired(args.activeSpeech)) {
     return {
       id: `speech-${args.activeSpeech.id}`,
       text: args.activeSpeech.text,
@@ -234,6 +277,15 @@ export function buildBuddySceneSpeech(args: {
   }
 
   return buildBuddySceneSpeechCandidates(args)[0] ?? null;
+}
+
+export function pickBuddySceneSpeechCandidate(
+  candidates: BuddySceneSpeech[],
+): BuddySceneSpeech | null {
+  if (bucketedRandom("buddy-scene-silence", 30_000) < SPEECH_SILENCE_CHANCE) {
+    return null;
+  }
+  return shuffleCandidates(candidates)[0] ?? null;
 }
 
 export function buildBuddySceneSpeechCandidates(args: {

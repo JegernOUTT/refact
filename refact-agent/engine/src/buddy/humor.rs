@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
 use tracing::debug;
+use uuid::Uuid;
 
 use crate::buddy::types::{BuddyFactKind, BuddyPulse};
 use crate::global_context::GlobalContext;
@@ -225,7 +226,39 @@ async fn generate_via_llm(
         prompt,
     )];
 
-    let result = match crate::subchat::run_subchat_once(gcx, "buddy_humor", messages).await {
+    let config = match crate::subchat::resolve_subchat_config(
+        gcx.clone(),
+        "buddy_humor",
+        true,
+        Some(format!("buddy-humor-{}", Uuid::new_v4())),
+        Some(format!("Humor for {:?}", kind)),
+        None,
+        None,
+        None,
+        Some(vec![]),
+        1,
+        false,
+        None,
+        "agent".to_string(),
+    )
+    .await
+    {
+        Ok(mut config) => {
+            config.mode = "buddy".to_string();
+            config.buddy_meta = Some(crate::buddy::types::BuddyThreadMeta {
+                is_buddy_chat: true,
+                buddy_chat_kind: "system".to_string(),
+                workflow_id: Some("buddy_humor".to_string()),
+            });
+            config
+        }
+        Err(e) => {
+            debug!("buddy humor: failed to resolve subchat config: {}", e);
+            return vec![];
+        }
+    };
+
+    let result = match crate::subchat::run_subchat(gcx, messages, config).await {
         Ok(r) => r,
         Err(e) => {
             debug!("buddy humor: LLM call failed: {}", e);
