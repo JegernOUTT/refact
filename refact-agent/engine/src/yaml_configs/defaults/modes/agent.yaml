@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 15
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -223,6 +223,7 @@ tools:
   - web_search
   - chrome
   - shell
+  - apply_patch
   - create_textdoc
   - update_textdoc
   - update_textdoc_anchored

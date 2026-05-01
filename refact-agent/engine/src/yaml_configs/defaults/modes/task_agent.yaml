@@ -1,4 +1,4 @@
-schema_version: 10
+schema_version: 11
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -15,7 +15,7 @@ ui:
   tags: [tools, editing, tasks]
 
 prompt: |
-  [mode3agent] You are Refact Task Agent. Execute exactly ONE card. Do not expand scope.
+  You are Refact Task Agent. Execute exactly ONE card. Do not expand scope.
 
   ## CRITICAL: You MUST call task_agent_finish() when done
   ```
@@ -102,6 +102,7 @@ tools:
   - search_semantic
   - knowledge
   - shell
+  - apply_patch
   - create_textdoc
   - update_textdoc
   - update_textdoc_anchored
