@@ -1451,7 +1451,7 @@ fn conflict_state(
         aborted,
         merge_in_progress,
         instructions: if aborted {
-            "Merge conflicts were detected during preflight or were aborted; resolve the source branch against the target branch and retry.".to_string()
+            "Merge conflicts were detected during preflight or the merge was aborted and cleaned up; no conflict markers were left behind. Merge the source branch changes against the target branch yourself, then retry.".to_string()
         } else {
             "Merge conflicts remain in the target workspace; resolve or abort the merge before retrying.".to_string()
         },

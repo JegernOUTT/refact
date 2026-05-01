@@ -39,6 +39,13 @@ export function buildWorktreeConflictPrompt({
     ? `Task: ${taskId}${cardId ? ` / ${cardId}` : ""}\n`
     : "";
   const instructions = response?.conflict?.instructions;
+  const mergeWasStopped = response?.conflict?.aborted === true;
+  const resolutionInstructions = mergeWasStopped
+    ? [
+        "The merge was stopped and cleaned up after conflict detection, so conflict markers will not be present in these files.",
+        "Please merge it yourself by applying the intended source branch changes against the target branch, then verify the result.",
+      ].join(" ")
+    : "Please inspect the conflict markers, preserve the intended changes, update the files, and verify the result.";
   return `${taskLine}Resolve the git merge conflicts in worktree ${root}.
 
 Branch: ${branch}
@@ -47,7 +54,7 @@ Target: ${target}
 Conflicted files:
 ${fileLines}
 
-Please inspect the conflict markers, preserve the intended changes, update the files, and verify the result.${
+${resolutionInstructions}${
     instructions ? `\n\nBackend instructions:\n${instructions}` : ""
   }`;
 }
