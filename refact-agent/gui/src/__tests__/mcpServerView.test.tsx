@@ -179,7 +179,7 @@ describe("MCPToolsList", () => {
 
   test("renders destructive badge for destructive tools", () => {
     render(<MCPToolsList tools={tools} />);
-    expect(screen.getByText("⚠️ destructive")).toBeInTheDocument();
+    expect(screen.getByText("destructive")).toBeInTheDocument();
   });
 
   test("renders empty state when no tools", () => {

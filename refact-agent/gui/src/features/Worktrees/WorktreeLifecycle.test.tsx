@@ -563,7 +563,7 @@ describe("Worktree lifecycle GUI", () => {
 
     const worktreeTitles = await screen.findAllByText("Implement worktree");
     expect(worktreeTitles.length).toBeGreaterThan(0);
-    expect(screen.getByText("🌿 agent-wt")).toBeInTheDocument();
+    expect(screen.getByText("agent-wt")).toBeInTheDocument();
 
     await user.click(worktreeTitles[0]);
 
