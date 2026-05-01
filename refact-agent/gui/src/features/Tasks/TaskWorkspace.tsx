@@ -12,7 +12,6 @@ import {
 } from "@radix-ui/themes";
 import {
   PlusIcon,
-  PersonIcon,
   Cross2Icon,
   ChevronDownIcon,
   FileTextIcon,
@@ -911,6 +910,15 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     [board, taskId, dispatch, task?.default_agent_model],
   );
 
+  const handleCardAgentClick = useCallback(
+    (card: BoardCard) => {
+      if (!card.agent_chat_id) return;
+      handleSelectAgent(card.id, card.agent_chat_id);
+      setSelectedCard(null);
+    },
+    [handleSelectAgent],
+  );
+
   const handleInternalLink = useCallback(
     (url: string): boolean => {
       const parsed = parseRefactLink(url);
@@ -1181,6 +1189,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           activeChat.cardId,
           board.cards.find((c) => c.id === activeChat.cardId)?.title ?? "",
         );
+  const chatToggleLabel = chatExpanded ? "Collapse chat" : "Expand chat";
 
   return (
     <Box
@@ -1191,7 +1200,11 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       {!chatExpanded && (
         <>
           <Box className={styles.boardSection}>
-            <KanbanBoard board={board} onCardClick={handleCardClick} />
+            <KanbanBoard
+              board={board}
+              onCardClick={handleCardClick}
+              onAgentClick={handleCardAgentClick}
+            />
           </Box>
 
           <Flex className={styles.panelsSection}>
@@ -1219,36 +1232,46 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           className={styles.chatHeader}
           align="center"
           gap="2"
-          px="3"
-          py="2"
-          onClick={handleToggleChatExpanded}
-          style={{ cursor: "pointer" }}
+          px="2"
+          py="1"
         >
-          <ChevronDownIcon
-            className={`${styles.chevron} ${
-              chatExpanded ? styles.chevronExpanded : ""
-            }`}
-          />
-          <PersonIcon />
-          <Text size="2" weight="medium">
+          <Button
+            type="button"
+            size="1"
+            variant="ghost"
+            color="gray"
+            onClick={handleToggleChatExpanded}
+            aria-label={chatToggleLabel}
+            title={chatToggleLabel}
+            className={styles.chatExpandButton}
+          >
+            <ChevronDownIcon
+              className={`${styles.chevron} ${
+                chatExpanded ? styles.chevronExpanded : ""
+              }`}
+            />
+          </Button>
+          <Text size="1" color="gray" className={styles.chatHeaderLabel}>
             {chatLabel}
           </Text>
         </Flex>
-        <Box className={styles.chatContent}>
-          {activeChat ? (
-            <InternalLinkProvider onInternalLink={handleInternalLink}>
-              <Chat
-                host={config.host}
-                tabbed={false}
-                backFromChat={handleBack}
-              />
-            </InternalLinkProvider>
-          ) : (
-            <Flex align="center" justify="center" style={{ height: "100%" }}>
-              <Text color="gray">Create a planner chat to get started</Text>
-            </Flex>
-          )}
-        </Box>
+        {chatExpanded && (
+          <Box className={styles.chatContent}>
+            {activeChat ? (
+              <InternalLinkProvider onInternalLink={handleInternalLink}>
+                <Chat
+                  host={config.host}
+                  tabbed={false}
+                  backFromChat={handleBack}
+                />
+              </InternalLinkProvider>
+            ) : (
+              <Flex align="center" justify="center" style={{ height: "100%" }}>
+                <Text color="gray">Create a planner chat to get started</Text>
+              </Flex>
+            )}
+          </Box>
+        )}
       </Box>
 
       {selectedCard && (

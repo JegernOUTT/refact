@@ -48,6 +48,18 @@
   min-width: 0;
 }
 
+.agentBadgeButton {
+  appearance: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.agentBadgeButton:hover {
+  background: var(--blue-4);
+}
+
 .kanbanColumnHeader {
   padding: var(--space-1) var(--space-2);
   border-bottom: 1px solid var(--gray-4);
@@ -111,11 +123,15 @@
 }
 
 .chatSection {
-  flex: 1;
+  flex: 0 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.taskWorkspace.expanded .chatSection {
+  flex: 1;
 }
 
 .chatHeader {
@@ -123,12 +139,7 @@
   border-bottom: 1px solid var(--gray-4);
   background: var(--gray-2);
   user-select: none;
-  transition: background-color 0.2s ease;
-  cursor: pointer;
-}
-
-.chatHeader:hover {
-  background: var(--gray-3);
+  min-height: 28px;
 }
 
 .chevron {
@@ -140,6 +151,18 @@
 
 .chevron.chevronExpanded {
   transform: rotate(180deg);
+}
+
+.chatExpandButton {
+  min-width: 22px;
+  height: 22px;
+}
+
+.chatHeaderLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chatContent {
