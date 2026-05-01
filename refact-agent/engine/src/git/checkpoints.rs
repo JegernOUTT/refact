@@ -200,6 +200,7 @@ fn workspace_folder_hash(workspace_folder: &Path) -> String {
 
 fn shadow_repo_hash(workspace_folder: &Path) -> String {
     let hash_path = std::fs::canonicalize(workspace_folder)
+        .map(|path| dunce::simplified(&path).to_path_buf())
         .unwrap_or_else(|_| normalize_shadow_path(workspace_folder));
     official_text_hashing_function(&hash_path.to_string_lossy().to_string())
 }

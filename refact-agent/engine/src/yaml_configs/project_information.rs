@@ -233,6 +233,8 @@ pub fn is_safe_relative_path(path: &str, project_roots: &[PathBuf]) -> bool {
         let full_path = root.join(path);
         if let Ok(canonical) = full_path.canonicalize() {
             if let Ok(root_canonical) = root.canonicalize() {
+                let canonical = dunce::simplified(&canonical).to_path_buf();
+                let root_canonical = dunce::simplified(&root_canonical).to_path_buf();
                 if canonical.starts_with(&root_canonical) {
                     return true;
                 }
@@ -252,6 +254,8 @@ pub fn to_relative_path(absolute_path: &str, project_roots: &[PathBuf]) -> Optio
     for root in project_roots {
         if let Ok(root_canonical) = root.canonicalize() {
             if let Ok(path_canonical) = abs_path.canonicalize() {
+                let root_canonical = dunce::simplified(&root_canonical).to_path_buf();
+                let path_canonical = dunce::simplified(&path_canonical).to_path_buf();
                 if let Ok(relative) = path_canonical.strip_prefix(&root_canonical) {
                     return Some(relative.to_string_lossy().replace('\\', "/"));
                 }

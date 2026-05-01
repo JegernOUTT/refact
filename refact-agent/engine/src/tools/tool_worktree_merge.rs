@@ -118,9 +118,10 @@ async fn service_from_gcx(
                 e
             )
         })?;
+        let requested = dunce::simplified(&requested).to_path_buf();
         let matches = project_dirs.iter().any(|dir| {
             std::fs::canonicalize(dir)
-                .map(|canonical| canonical == requested)
+                .map(|canonical| dunce::simplified(&canonical).to_path_buf() == requested)
                 .unwrap_or(false)
         });
         if !matches {

@@ -54,10 +54,14 @@ async fn validate_project_root(
             let requested_path = std::path::PathBuf::from(&path);
             let canonical_requested = requested_path
                 .canonicalize()
+                .map(|path| dunce::simplified(&path).to_path_buf())
                 .unwrap_or_else(|_| requested_path.clone());
-            let matched = dirs
-                .iter()
-                .any(|d| d.canonicalize().unwrap_or_else(|_| d.clone()) == canonical_requested);
+            let matched = dirs.iter().any(|d| {
+                d.canonicalize()
+                    .map(|path| dunce::simplified(&path).to_path_buf())
+                    .unwrap_or_else(|_| d.clone())
+                    == canonical_requested
+            });
             if matched {
                 Ok(requested_path)
             } else {

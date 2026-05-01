@@ -1323,7 +1323,7 @@ fn canonicalize_existing_dir(path: &Path) -> Result<PathBuf, String> {
             canonical.display()
         ));
     }
-    Ok(canonical)
+    Ok(dunce::simplified(&canonical).to_path_buf())
 }
 
 fn normalize_existing_or_parent(path: &Path) -> PathBuf {

@@ -669,8 +669,10 @@ fn resolve_repo_path(repo_dir: &Path, relative: &str) -> Result<PathBuf, String>
         _ => {}
     }
     let repo_canon = std::fs::canonicalize(repo_dir)
+        .map(|path| dunce::simplified(&path).to_path_buf())
         .map_err(|e| format!("canonicalize repo {:?}: {}", repo_dir, e))?;
     let joined_canon = std::fs::canonicalize(&joined)
+        .map(|path| dunce::simplified(&path).to_path_buf())
         .map_err(|e| format!("canonicalize marketplace source {:?}: {}", joined, e))?;
     if !joined_canon.starts_with(&repo_canon) {
         return Err(format!(

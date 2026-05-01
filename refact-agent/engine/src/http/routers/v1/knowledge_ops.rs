@@ -159,6 +159,7 @@ async fn validate_knowledge_path(
 ) -> Result<PathBuf, ScratchError> {
     let canonical = tokio::fs::canonicalize(file_path)
         .await
+        .map(|path| dunce::simplified(&path).to_path_buf())
         .map_err(|_| ScratchError::new(StatusCode::NOT_FOUND, "File not found".to_string()))?;
 
     let root_canonical = tokio::fs::canonicalize(workspace_root).await.map_err(|_| {
@@ -167,6 +168,7 @@ async fn validate_knowledge_path(
             "Cannot access workspace".to_string(),
         )
     })?;
+    let root_canonical = dunce::simplified(&root_canonical).to_path_buf();
 
     if !canonical.starts_with(&root_canonical) {
         return Err(ScratchError::new(

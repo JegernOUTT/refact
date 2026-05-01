@@ -100,9 +100,12 @@ async fn resolve_source_root(
                     format!("Invalid source workspace root: {}", e),
                 )
             })?;
+            let requested_canonical = dunce::simplified(&requested_canonical).to_path_buf();
             let matches = project_dirs.iter().any(|dir| {
                 dir.canonicalize()
-                    .map(|canonical| canonical == requested_canonical)
+                    .map(|canonical| {
+                        dunce::simplified(&canonical).to_path_buf() == requested_canonical
+                    })
                     .unwrap_or(false)
             });
             if matches {
@@ -119,6 +122,7 @@ async fn resolve_source_root(
             .next()
             .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "No project root available"))?
             .canonicalize()
+            .map(|path| dunce::simplified(&path).to_path_buf())
             .map_err(|e| {
                 api_error(
                     StatusCode::BAD_REQUEST,

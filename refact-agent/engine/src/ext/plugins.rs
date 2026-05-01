@@ -511,8 +511,10 @@ fn resolve_plugin_source_dir(
                 _ => {}
             }
             let marketplace_canon = std::fs::canonicalize(marketplace_dir)
+                .map(|path| dunce::simplified(&path).to_path_buf())
                 .map_err(|e| format!("canonicalize marketplace {:?}: {}", marketplace_dir, e))?;
             let joined_canon = std::fs::canonicalize(&joined)
+                .map(|path| dunce::simplified(&path).to_path_buf())
                 .map_err(|e| format!("canonicalize plugin source {:?}: {}", joined, e))?;
             if !joined_canon.starts_with(&marketplace_canon) {
                 return Err(format!(

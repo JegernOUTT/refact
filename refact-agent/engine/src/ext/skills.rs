@@ -226,11 +226,11 @@ pub async fn load_skill_full(ext_dirs: &ExtDirs, name: &str) -> Option<SkillFull
         let source = source_for_dir(dir, &ext_dirs.global_dirs, &ext_dirs.installed_dirs);
         let candidate = skills_dir.join(name);
         let candidate_canon = match tokio::fs::canonicalize(&candidate).await {
-            Ok(p) => p,
+            Ok(p) => dunce::simplified(&p).to_path_buf(),
             Err(_) => continue,
         };
         let skills_dir_canon = match tokio::fs::canonicalize(&skills_dir).await {
-            Ok(p) => p,
+            Ok(p) => dunce::simplified(&p).to_path_buf(),
             Err(_) => continue,
         };
         if !candidate_canon.starts_with(&skills_dir_canon) {
@@ -272,14 +272,14 @@ pub async fn load_skill_linked_file(skill_dir: &Path, relative_path: &str) -> Op
     }
     let full_path = skill_dir.join(relative_path);
     let canonical = match tokio::fs::canonicalize(&full_path).await {
-        Ok(p) => p,
+        Ok(p) => dunce::simplified(&p).to_path_buf(),
         Err(e) => {
             tracing::warn!("Failed to resolve @include path {:?}: {}", full_path, e);
             return None;
         }
     };
     let canonical_dir = match tokio::fs::canonicalize(skill_dir).await {
-        Ok(p) => p,
+        Ok(p) => dunce::simplified(&p).to_path_buf(),
         Err(_) => return None,
     };
     if !canonical.starts_with(&canonical_dir) {

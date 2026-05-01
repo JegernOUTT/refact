@@ -140,11 +140,13 @@ async fn resolve_patch_path(
     let canonical = if full_path.exists() {
         full_path
             .canonicalize()
+            .map(|path| dunce::simplified(&path).to_path_buf())
             .map_err(|e| format!("Failed to canonicalize: {}", e))?
     } else if let Some(parent) = full_path.parent() {
         if parent.exists() {
             let canonical_parent = parent
                 .canonicalize()
+                .map(|path| dunce::simplified(&path).to_path_buf())
                 .map_err(|e| format!("Failed to canonicalize parent: {}", e))?;
             canonical_parent.join(full_path.file_name().unwrap())
         } else {

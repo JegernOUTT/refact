@@ -755,17 +755,21 @@ async fn read_file_content_safe(
 
     let canonical_path = full_path
         .canonicalize()
+        .map(|path| dunce::simplified(&path).to_path_buf())
         .map_err(|e| format!("Failed to canonicalize path {}: {}", full_path.display(), e))?;
 
     let is_in_workspace = workspace_dirs.iter().any(|ws| {
         if let Ok(canonical_ws) = ws.canonicalize() {
+            let canonical_ws = dunce::simplified(&canonical_ws).to_path_buf();
             canonical_path.starts_with(&canonical_ws)
         } else {
             false
         }
     });
 
-    let is_refact_path = canonical_path.to_string_lossy().contains(".refact/");
+    let is_refact_path = canonical_path.components().any(
+        |component| matches!(component, std::path::Component::Normal(name) if name == ".refact"),
+    );
 
     if !is_in_workspace && !is_refact_path {
         return Err(format!(

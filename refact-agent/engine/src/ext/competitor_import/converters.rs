@@ -545,7 +545,8 @@ fn stage_skill_package(
     ));
     let staged = canonical_staging_root.join(format!("{}-{}", skill_id, &hash[..16]));
     ensure_existing_components_are_not_symlinks(&staged)?;
-    let canonical_parent = fs::canonicalize(staged.parent().unwrap_or(&canonical_staging_root))?;
+    let canonical_parent = fs::canonicalize(staged.parent().unwrap_or(&canonical_staging_root))
+        .map(|path| dunce::simplified(&path).to_path_buf())?;
     if !canonical_parent.starts_with(&canonical_staging_root) {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -605,7 +606,8 @@ fn create_dir_all_no_symlinks(path: &Path) -> IoResult<PathBuf> {
         }
     }
 
-    let mut current = fs::canonicalize(existing)?;
+    let mut current =
+        fs::canonicalize(existing).map(|path| dunce::simplified(&path).to_path_buf())?;
     for component in missing.iter().rev() {
         current.push(component);
         match fs::symlink_metadata(&current) {

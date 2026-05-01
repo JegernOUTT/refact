@@ -475,7 +475,8 @@ fn validate_staged_directory_source(
             source_dir.display()
         )));
     }
-    let canonical_source = std::fs::canonicalize(source_dir)?;
+    let canonical_source =
+        std::fs::canonicalize(source_dir).map(|path| dunce::simplified(&path).to_path_buf())?;
     if canonical_source.starts_with(&canonical_staging) {
         Ok(())
     } else {
@@ -1244,6 +1245,17 @@ mod tests {
         );
         assert_eq!(manifest.entries[0].source_hash, candidate.source_hash);
         assert_eq!(manifest.entries[0].dest_hash, candidate.artifact_hash);
+    }
+
+    #[test]
+    fn staged_directory_source_under_import_staging_is_allowed() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope_root = temp.path().join("refact");
+        let staging_root = scope_root.join("imports").join("staging");
+        let source_dir = staging_root.join("claude").join("skill");
+        std::fs::create_dir_all(&source_dir).unwrap();
+
+        validate_staged_directory_source(&scope_root, &staging_root, &source_dir).unwrap();
     }
 
     #[tokio::test]
