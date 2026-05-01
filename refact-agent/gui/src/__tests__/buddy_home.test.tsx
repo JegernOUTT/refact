@@ -898,6 +898,7 @@ describe("BuddyWorld_dynamic_environment", () => {
   it("keeps showcase speech ahead of local hotspot reactions from travel onward", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2024-01-01T00:00:40Z"));
+    const onCare = vi.fn();
     try {
       render(
         <BuddyWorld
@@ -926,7 +927,7 @@ describe("BuddyWorld_dynamic_environment", () => {
           setupNeeded={false}
           now={new Date("2024-01-01T14:00:00")}
           onCanvasEvent={vi.fn()}
-          onCare={vi.fn()}
+          onCare={onCare}
           onOpenPage={vi.fn()}
           onRunMode={vi.fn()}
           onDismissSetup={vi.fn()}
@@ -946,12 +947,16 @@ describe("BuddyWorld_dynamic_environment", () => {
         "travel",
       );
       fireEvent.click(screen.getByRole("button", { name: /play in sun/i }));
+      expect(onCare).toHaveBeenCalledWith("play", "scroll");
 
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-source",
         "showcase",
       );
-      expect(screen.getByTestId("buddy-world-character").textContent).toBe("");
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-speech-priority",
+        "backend-showcase-local",
+      );
 
       await vi.advanceTimersByTimeAsync(3817);
       expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(

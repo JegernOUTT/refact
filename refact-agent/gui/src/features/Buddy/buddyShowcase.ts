@@ -42,12 +42,19 @@ const PROVIDER_SIGNAL_PATTERNS = [
   /\bbroken[-_\s]?refs?\b/,
   /\bmodel[-_\s]?not[-_\s]?found\b/,
 ] as const;
-const PROVIDER_STRONG_CUE_PATTERNS = [
+const PROVIDER_PROBLEM_CUE_PATTERNS = [
   /\bquotas?\b/,
   /\bdefault[-_\s]?models?\b/,
   /\bprovider[-_\s]?sources?\b/,
   /\bbroken[-_\s]?refs?\b/,
   /\bmodel[-_\s]?not[-_\s]?found\b/,
+  /\bfail(?:ed|ing|ure)?\b/,
+  /\berrors?\b/,
+  /\bproblems?\b/,
+  /\bwarnings?\b/,
+  /\bmissing\b/,
+  /\binvalid\b/,
+  /\brejected\b/,
 ] as const;
 const IDLE_SHOWCASE_BASE_WEIGHT = 18;
 const IDLE_SHOWCASE_REPEAT_WEIGHT = 0.34;
@@ -105,7 +112,7 @@ export interface ChooseBuddyShowcaseArgs {
   runtimeCooldownUntilMs?: number;
   idleGraceUntilMs?: number;
   lastShowcaseKind?: BuddyShowcaseKind | null;
-  lastRuntimeShowcaseEventId?: string | null;
+  runtimeShowcaseEventIds?: readonly string[];
   strongRuntimeTrigger?: boolean;
   world?: BuddyShowcaseWorldContext;
   pulse?: BuddyPulse | null;
@@ -133,9 +140,15 @@ function hasProviderSignal(event: BuddyRuntimeEvent | null): boolean {
   if (!PROVIDER_SIGNAL_PATTERNS.some((pattern) => pattern.test(haystack))) {
     return false;
   }
+  const problemHaystack = [event.title, event.description ?? "", event.source]
+    .join(" ")
+    .toLowerCase();
+  const hasProblemCue = PROVIDER_PROBLEM_CUE_PATTERNS.some((pattern) =>
+    pattern.test(problemHaystack),
+  );
   if (event.status === "failed") return true;
-  if (event.priority === "critical" || event.priority === "high") return true;
-  return PROVIDER_STRONG_CUE_PATTERNS.some((pattern) => pattern.test(haystack));
+  if (event.priority === "critical") return true;
+  return hasProblemCue;
 }
 
 function hasProviderPulseIssue(pulse: BuddyPulse | null | undefined): boolean {
@@ -343,7 +356,7 @@ export function chooseBuddyShowcase(
   if (runtimeKind) {
     if (
       args.nowPlaying?.id &&
-      args.nowPlaying.id === args.lastRuntimeShowcaseEventId
+      args.runtimeShowcaseEventIds?.includes(args.nowPlaying.id)
     ) {
       return null;
     }

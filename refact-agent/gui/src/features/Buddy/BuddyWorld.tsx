@@ -84,6 +84,7 @@ const HOME_HOTSPOT = { x: 8.5, y: 67 } as const;
 const BUDDY_CENTER_X = 50;
 const BUDDY_MIN_X = 33;
 const BUDDY_MAX_X = 67;
+const MAX_RUNTIME_SHOWCASE_EVENT_IDS = 16;
 
 const RANDOM_IDLE_REACTIONS = [
   "Buddy does a tiny spin.",
@@ -862,9 +863,10 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   const [showcaseRun, setShowcaseRun] = useState<BuddyShowcaseRun | null>(null);
   const [lastShowcaseKind, setLastShowcaseKind] =
     useState<BuddyShowcaseKind | null>(null);
-  const [lastRuntimeShowcaseEventId, setLastRuntimeShowcaseEventId] = useState<
-    string | null
-  >(null);
+  const [runtimeShowcaseEventIds, setRuntimeShowcaseEventIds] = useState<
+    string[]
+  >([]);
+  const [idleTick, setIdleTick] = useState(0);
   const [idleGraceUntilMs] = useState(
     () => Date.now() + BUDDY_SHOWCASE_INITIAL_GRACE_MS,
   );
@@ -967,7 +969,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         runtimeCooldownUntilMs: nextRuntimeShowcaseAtMs,
         idleGraceUntilMs,
         lastShowcaseKind,
-        lastRuntimeShowcaseEventId,
+        runtimeShowcaseEventIds,
         strongRuntimeTrigger,
         world: {
           phase: world.phase,
@@ -980,7 +982,12 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       setLastWaypoint(null);
       setLastShowcaseKind(run.kind);
       if (strongRuntimeTrigger && nowPlaying?.id) {
-        setLastRuntimeShowcaseEventId(nowPlaying.id);
+        setRuntimeShowcaseEventIds((eventIds) =>
+          [
+            nowPlaying.id,
+            ...eventIds.filter((eventId) => eventId !== nowPlaying.id),
+          ].slice(0, MAX_RUNTIME_SHOWCASE_EVENT_IDS),
+        );
       }
       if (strongRuntimeTrigger) {
         setNextRuntimeShowcaseAtMs(nowMs + BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS);
@@ -993,7 +1000,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       activeSpeech,
       idleGraceUntilMs,
       lastShowcaseKind,
-      lastRuntimeShowcaseEventId,
+      runtimeShowcaseEventIds,
       nextIdleShowcaseAtMs,
       nextRuntimeShowcaseAtMs,
       nowPlaying,
@@ -1019,21 +1026,18 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           RANDOM_POSES[Math.floor(Math.random() * RANDOM_POSES.length)],
         );
         setReaction(randomIdleReaction());
-        return;
-      }
-
-      if (roll < 0.46) {
+      } else if (roll < 0.46) {
         setLastWaypoint(null);
-        return;
+      } else {
+        setLastWaypoint(null);
+        setActiveWaypointIndex((index) =>
+          pickNextWaypointIndex(waypoints, index),
+        );
       }
-
-      setLastWaypoint(null);
-      setActiveWaypointIndex((index) =>
-        pickNextWaypointIndex(waypoints, index),
-      );
+      setIdleTick((tick) => tick + 1);
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [activeSpeech, reaction, showcaseRun, startShowcase, waypoints]);
+  }, [activeSpeech, idleTick, reaction, showcaseRun, startShowcase, waypoints]);
 
   useEffect(() => {
     if (activeSpeech ?? reaction ?? showcaseRun) return;
@@ -1057,7 +1061,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     ) {
       return;
     }
-    if (nowPlaying.id && nowPlaying.id === lastRuntimeShowcaseEventId) {
+    if (nowPlaying.id && runtimeShowcaseEventIds.includes(nowPlaying.id)) {
       return;
     }
 
@@ -1073,7 +1077,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     startShowcase(true);
   }, [
     activeSpeech,
-    lastRuntimeShowcaseEventId,
+    runtimeShowcaseEventIds,
     nextRuntimeShowcaseAtMs,
     nowPlaying,
     reaction,
@@ -1152,55 +1156,75 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   }, [compact, palette, reducedMotion, showcaseRun, world]);
 
   const handleCelestialClick = () => {
-    setActiveWaypointIndex(
-      Math.max(
-        0,
-        waypoints.findIndex((point) => point.id === "celestial"),
-      ),
-    );
+    if (!showcaseRun) {
+      setActiveWaypointIndex(
+        Math.max(
+          0,
+          waypoints.findIndex((point) => point.id === "celestial"),
+        ),
+      );
+    }
     if (world.phase === "night") {
       onCare("sleep");
-      setReaction("Buddy curls up under the moon and saves energy.");
+      if (!showcaseRun) {
+        setReaction("Buddy curls up under the moon and saves energy.");
+      }
       return;
     }
     onCare("play", "scroll");
-    setReaction("Buddy catches a warm sunbeam and opens the focus scroll.");
+    if (!showcaseRun) {
+      setReaction("Buddy catches a warm sunbeam and opens the focus scroll.");
+    }
   };
 
   const handleWeatherClick = () => {
-    setActiveWaypointIndex(
-      Math.max(
-        0,
-        waypoints.findIndex((point) => point.id === "weather"),
-      ),
-    );
+    if (!showcaseRun) {
+      setActiveWaypointIndex(
+        Math.max(
+          0,
+          waypoints.findIndex((point) => point.id === "weather"),
+        ),
+      );
+    }
     if (world.weather === "storm") {
       onOpenPage({ type: "stats" });
-      setReaction("Buddy marked the storm front for investigation.");
+      if (!showcaseRun) {
+        setReaction("Buddy marked the storm front for investigation.");
+      }
       return;
     }
     if (world.weather === "rain") {
       onOpenPage({ type: "knowledge_graph" });
-      setReaction("Buddy follows the rain into the memory garden.");
+      if (!showcaseRun) {
+        setReaction("Buddy follows the rain into the memory garden.");
+      }
       return;
     }
     onCare("pet");
-    setReaction("Buddy chirps back at the sky.");
+    if (!showcaseRun) {
+      setReaction("Buddy chirps back at the sky.");
+    }
   };
 
   const handleHomeClick = () => {
-    setActiveWaypointIndex(
-      Math.max(
-        0,
-        waypoints.findIndex((point) => point.id === "home"),
-      ),
-    );
+    if (!showcaseRun) {
+      setActiveWaypointIndex(
+        Math.max(
+          0,
+          waypoints.findIndex((point) => point.id === "home"),
+        ),
+      );
+    }
     if (homeDoorDisabled) {
-      setReaction("Buddy is already home.");
+      if (!showcaseRun) {
+        setReaction("Buddy is already home.");
+      }
       return;
     }
     onOpenPage({ type: "buddy" });
-    setReaction("Buddy opens the front door.");
+    if (!showcaseRun) {
+      setReaction("Buddy opens the front door.");
+    }
   };
 
   const showcasePose =
@@ -1277,14 +1301,18 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           className={classNames(styles.objectHotspot, TONE_CLASS[item.tone])}
           style={{ left: `${item.x}%`, top: `${item.y}%` }}
           onClick={() => {
-            setActiveWaypointIndex(
-              Math.max(
-                0,
-                waypoints.findIndex((point) => point.id === item.id),
-              ),
-            );
+            if (!showcaseRun) {
+              setActiveWaypointIndex(
+                Math.max(
+                  0,
+                  waypoints.findIndex((point) => point.id === item.id),
+                ),
+              );
+            }
             onOpenPage(item.page);
-            setReaction(`Buddy hops toward ${item.label.toLowerCase()}.`);
+            if (!showcaseRun) {
+              setReaction(`Buddy hops toward ${item.label.toLowerCase()}.`);
+            }
           }}
           aria-label={`Open ${item.label}`}
           title={`${item.label}: ${item.description}`}

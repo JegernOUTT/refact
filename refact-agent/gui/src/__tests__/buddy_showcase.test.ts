@@ -727,7 +727,7 @@ describe("buddy showcase director", () => {
       }),
       idleCooldownUntilMs: baseArgs.nowMs + BUDDY_SHOWCASE_IDLE_COOLDOWN_MS,
       runtimeCooldownUntilMs: baseArgs.nowMs - 1,
-      lastRuntimeShowcaseEventId: "runtime-old",
+      runtimeShowcaseEventIds: ["runtime-old"],
       strongRuntimeTrigger: true,
     };
 
@@ -759,7 +759,7 @@ describe("buddy showcase director", () => {
       pet: makePet(),
       nowMs: 44_000,
       runtimeCooldownUntilMs: 44_000 - BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS,
-      lastRuntimeShowcaseEventId: "runtime-same",
+      runtimeShowcaseEventIds: ["runtime-other", "runtime-same"],
       lastShowcaseKind: null,
       strongRuntimeTrigger: true,
       pulse: makePulse(),
@@ -768,6 +768,27 @@ describe("buddy showcase director", () => {
 
     expect(chooseBuddyShowcase(args)).toBeNull();
     expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
+  it("allows a new runtime event between remembered runtime event ids", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        id: "runtime-new",
+        signal_type: "memory_extract",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 45_000,
+      runtimeCooldownUntilMs: 45_000 - BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS,
+      runtimeShowcaseEventIds: ["runtime-a", "runtime-b"],
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    expect(chooseBuddyShowcase(args)?.kind).toBe("memory_firefly_night");
   });
 
   it("returns null for unmapped strong runtime signals", () => {
@@ -804,6 +825,29 @@ describe("buddy showcase director", () => {
       activeSpeechVisible: false,
       pet: makePet(),
       nowMs: 26_000,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "evening" as const, weather: "clear" as const },
+    };
+
+    expect(chooseBuddyShowcase(args)).toBeNull();
+    expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
+  it("ignores benign high-priority provider notifications", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "provider_sync",
+        title: "Provider settings saved",
+        description: "Provider configuration completed successfully.",
+        status: "completed",
+        priority: "high",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 27_000,
       lastShowcaseKind: null,
       strongRuntimeTrigger: true,
       pulse: makePulse(),
@@ -1033,6 +1077,39 @@ describe("buddy showcase director", () => {
       "stargazing_constellation",
     );
     expect(chooseBuddyShowcase(strongArgs)?.kind).toBe("memory_firefly_night");
+  });
+
+  it("suppresses runtime ids with bounded recent runtime memory", () => {
+    const recentIds = Array.from(
+      { length: 20 },
+      (_, index) => `runtime-${index}`,
+    );
+    const currentArgs = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        id: "runtime-12",
+        signal_type: "knowledge_update",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 48_000,
+      runtimeCooldownUntilMs: 48_000 - BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS,
+      runtimeShowcaseEventIds: recentIds.slice(0, 16),
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+    const expiredArgs = {
+      ...currentArgs,
+      nowPlaying: makeRuntimeEvent({
+        id: "runtime-19",
+        signal_type: "knowledge_update",
+      }),
+    };
+
+    expect(chooseBuddyShowcase(currentArgs)).toBeNull();
+    expect(chooseBuddyShowcase(expiredArgs)?.kind).toBe("memory_firefly_night");
   });
 
   it("phase advancement reaches null after cooldown", () => {

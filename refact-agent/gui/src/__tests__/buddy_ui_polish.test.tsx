@@ -303,6 +303,19 @@ describe("buddy UI polish", () => {
     expect(source).not.toContain(forbiddenBoost);
   });
 
+  it("BuddyWorld_reschedules_idle_loop_after_noop_branch", async () => {
+    const buddyWorldSource = await import(
+      "../features/Buddy/BuddyWorld.tsx?raw"
+    );
+    const source = buddyWorldSource.default;
+
+    expect(source).toContain("const [idleTick, setIdleTick]");
+    expect(source).toContain("setIdleTick((tick) => tick + 1)");
+    expect(source).toContain(
+      "[activeSpeech, idleTick, reaction, showcaseRun, startShowcase, waypoints]",
+    );
+  });
+
   it("BuddyHome_container_renders_split_subcomponents", async () => {
     server.use(
       http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
