@@ -8,7 +8,6 @@ use hyper::Body;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
-use tokio::fs;
 use chrono::Local;
 use tempfile::NamedTempFile;
 
@@ -238,6 +237,28 @@ pub async fn handle_v1_knowledge_update_memory(
                     ),
                 ));
             }
+            if status != "active" {
+                crate::memories::delete_document_from_disk(gcx.clone(), &file_path)
+                    .await
+                    .map_err(|e| {
+                        ScratchError::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to delete inactive memory: {}", e),
+                        )
+                    })?;
+
+                return Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&MemoryOperationResponse {
+                            success: true,
+                            error: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap());
+            }
             frontmatter.status = Some(status);
         }
     }
@@ -350,37 +371,21 @@ pub async fn handle_v1_knowledge_delete_memory(
     let file_path = validate_knowledge_path(Path::new(&post.file_path), &knowledge_root).await?;
 
     if post.archive {
-        crate::memories::archive_document(gcx.clone(), &file_path)
+        crate::memories::delete_document_from_disk(gcx.clone(), &file_path)
             .await
             .map_err(|e| {
                 ScratchError::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to archive memory: {}", e),
+                    format!("Failed to delete memory: {}", e),
                 )
             })?;
-        tracing::info!("Archived memory: {}", file_path.display());
+        tracing::info!("Deleted inactive memory: {}", file_path.display());
     } else {
-        fs::remove_file(&file_path).await.map_err(|e| {
-            ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to delete memory file: {}", e),
-            )
-        })?;
+        crate::memories::delete_document_from_disk(gcx.clone(), &file_path)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         tracing::info!("Deleted memory: {}", file_path.display());
     }
-
-    let vec_db = gcx.read().await.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.as_ref() {
-        vecdb
-            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true)
-            .await;
-    }
-
-    gcx.write()
-        .await
-        .documents_state
-        .memory_document_map
-        .remove(&file_path);
 
     Ok(Response::builder()
         .status(StatusCode::OK)

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use tokio::fs;
@@ -6,7 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::global_context::GlobalContext;
-use crate::memories::archive_document;
+use crate::memories::delete_document_from_disk;
 use super::kg_builder::build_knowledge_graph;
 
 const CLEANUP_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
@@ -47,9 +48,10 @@ pub async fn knowledge_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>)
 
             match run_cleanup(gcx.clone()).await {
                 Ok(report) => {
-                    info!("knowledge_cleanup: completed - archived {} trajectories, {} deprecated docs, {} orphan warnings",
-                        report.archived_trajectories,
-                        report.archived_deprecated,
+                    info!("knowledge_cleanup: completed - deleted {} trajectories, {} inactive docs, {} stale docs, {} orphan warnings",
+                        report.deleted_trajectories,
+                        report.deleted_inactive,
+                        report.deleted_stale,
                         report.orphan_warnings,
                     );
                 }
@@ -79,8 +81,9 @@ pub async fn knowledge_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>)
 
 #[derive(Debug, Default)]
 struct CleanupReport {
-    archived_trajectories: usize,
-    archived_deprecated: usize,
+    deleted_trajectories: usize,
+    deleted_inactive: usize,
+    deleted_stale: usize,
     orphan_warnings: usize,
 }
 
@@ -90,16 +93,45 @@ async fn run_cleanup(gcx: Arc<ARwLock<GlobalContext>>) -> Result<CleanupReport, 
     let mut report = CleanupReport::default();
 
     for path in staleness.stale_trajectories {
-        match archive_document(gcx.clone(), &path).await {
-            Ok(_) => report.archived_trajectories += 1,
-            Err(e) => warn!("Failed to archive trajectory {}: {}", path.display(), e),
+        match delete_document_from_disk(gcx.clone(), &path).await {
+            Ok(_) => report.deleted_trajectories += 1,
+            Err(e) => warn!(
+                "Failed to delete stale trajectory {}: {}",
+                path.display(),
+                e
+            ),
         }
     }
 
-    for path in staleness.deprecated_ready_to_archive {
-        match archive_document(gcx.clone(), &path).await {
-            Ok(_) => report.archived_deprecated += 1,
-            Err(e) => warn!("Failed to archive deprecated doc {}: {}", path.display(), e),
+    for path in staleness.inactive_docs {
+        match delete_document_from_disk(gcx.clone(), &path).await {
+            Ok(_) => report.deleted_inactive += 1,
+            Err(e) => warn!("Failed to delete inactive doc {}: {}", path.display(), e),
+        }
+    }
+
+    let mut stale_docs = Vec::new();
+    let mut seen_stale_docs = HashSet::new();
+    for (path, age_days) in staleness.stale_by_age {
+        if seen_stale_docs.insert(path.clone()) {
+            stale_docs.push((path, format!("{} days old", age_days)));
+        }
+    }
+    for path in staleness.past_review {
+        if seen_stale_docs.insert(path.clone()) {
+            stale_docs.push((path, "past review date".to_string()));
+        }
+    }
+
+    for (path, reason) in stale_docs {
+        match delete_document_from_disk(gcx.clone(), &path).await {
+            Ok(_) => report.deleted_stale += 1,
+            Err(e) => warn!(
+                "Failed to delete stale doc {} ({}): {}",
+                path.display(),
+                reason,
+                e
+            ),
         }
     }
 
@@ -110,10 +142,6 @@ async fn run_cleanup(gcx: Arc<ARwLock<GlobalContext>>) -> Result<CleanupReport, 
             path.display(),
             missing_files
         );
-    }
-
-    for path in &staleness.past_review {
-        info!("knowledge_cleanup: {} is past review date", path.display());
     }
 
     Ok(report)

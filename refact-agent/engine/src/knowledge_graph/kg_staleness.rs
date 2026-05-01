@@ -10,7 +10,7 @@ pub struct StalenessReport {
     pub orphan_docs: Vec<PathBuf>,
     pub stale_by_age: Vec<(PathBuf, i64)>,
     pub past_review: Vec<PathBuf>,
-    pub deprecated_ready_to_archive: Vec<PathBuf>,
+    pub inactive_docs: Vec<PathBuf>,
     pub stale_trajectories: Vec<PathBuf>,
 }
 
@@ -26,6 +26,11 @@ impl KnowledgeGraph {
         for doc in self.docs.values() {
             let kind = doc.frontmatter.kind_or_default();
 
+            if !doc.frontmatter.is_active() {
+                report.inactive_docs.push(doc.path.clone());
+                continue;
+            }
+
             if let Some(created) = &doc.frontmatter.created {
                 if let Ok(created_date) = NaiveDate::parse_from_str(created, "%Y-%m-%d") {
                     let age_days = (today - created_date).num_days();
@@ -35,7 +40,7 @@ impl KnowledgeGraph {
                         continue;
                     }
 
-                    if age_days > max_age_days && doc.frontmatter.is_active() {
+                    if age_days > max_age_days {
                         report.stale_by_age.push((doc.path.clone(), age_days));
                     }
                 }
@@ -43,21 +48,8 @@ impl KnowledgeGraph {
 
             if let Some(review_after) = &doc.frontmatter.review_after {
                 if let Ok(review_date) = NaiveDate::parse_from_str(review_after, "%Y-%m-%d") {
-                    if today > review_date && doc.frontmatter.is_active() {
+                    if today > review_date {
                         report.past_review.push(doc.path.clone());
-                    }
-                }
-            }
-
-            if doc.frontmatter.is_deprecated() {
-                if let Some(deprecated_at) = &doc.frontmatter.deprecated_at {
-                    if let Ok(deprecated_date) =
-                        NaiveDate::parse_from_str(deprecated_at, "%Y-%m-%d")
-                    {
-                        let days_deprecated = (today - deprecated_date).num_days();
-                        if days_deprecated > 60 {
-                            report.deprecated_ready_to_archive.push(doc.path.clone());
-                        }
                     }
                 }
             }
@@ -109,5 +101,74 @@ impl KnowledgeGraph {
         }
 
         report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+
+    use super::*;
+    use super::super::kg_structs::{KnowledgeDoc, KnowledgeFrontmatter, KnowledgeGraph};
+
+    fn doc(path: &str, frontmatter: KnowledgeFrontmatter) -> KnowledgeDoc {
+        KnowledgeDoc {
+            path: PathBuf::from(path),
+            frontmatter,
+            content: String::new(),
+            entities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn inactive_docs_are_reported_for_removal() {
+        let mut graph = KnowledgeGraph::new();
+        graph.add_doc(doc(
+            "/tmp/deprecated.md",
+            KnowledgeFrontmatter {
+                id: Some("deprecated".to_string()),
+                status: Some("deprecated".to_string()),
+                ..Default::default()
+            },
+        ));
+        graph.add_doc(doc(
+            "/tmp/archived.md",
+            KnowledgeFrontmatter {
+                id: Some("archived".to_string()),
+                status: Some("archived".to_string()),
+                ..Default::default()
+            },
+        ));
+
+        let report = graph.check_staleness(180, 90);
+
+        assert!(report
+            .inactive_docs
+            .contains(&PathBuf::from("/tmp/deprecated.md")));
+        assert!(report
+            .inactive_docs
+            .contains(&PathBuf::from("/tmp/archived.md")));
+    }
+
+    #[test]
+    fn active_docs_past_max_age_are_stale() {
+        let old_date = (Utc::now() - Duration::days(181))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut graph = KnowledgeGraph::new();
+        graph.add_doc(doc(
+            "/tmp/stale.md",
+            KnowledgeFrontmatter {
+                id: Some("stale".to_string()),
+                status: Some("active".to_string()),
+                created: Some(old_date),
+                ..Default::default()
+            },
+        ));
+
+        let report = graph.check_staleness(180, 90);
+
+        assert_eq!(report.stale_by_age.len(), 1);
+        assert_eq!(report.stale_by_age[0].0, PathBuf::from("/tmp/stale.md"));
     }
 }

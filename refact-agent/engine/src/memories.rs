@@ -936,84 +936,36 @@ async fn memories_search_fallback(
 pub async fn deprecate_document(
     gcx: Arc<ARwLock<GlobalContext>>,
     doc_path: &PathBuf,
-    superseded_by: Option<&str>,
-    reason: &str,
+    _superseded_by: Option<&str>,
+    _reason: &str,
 ) -> Result<(), String> {
-    let text = get_file_text_from_memory_or_disk(gcx.clone(), doc_path)
-        .await
-        .map_err(|e| format!("Failed to read document: {}", e))?;
-
-    let (mut frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
-    let content = &text[content_start..];
-
-    frontmatter.status = Some("deprecated".to_string());
-    frontmatter.deprecated_at = Some(Local::now().format("%Y-%m-%d").to_string());
-    if let Some(new_id) = superseded_by {
-        frontmatter.superseded_by = Some(new_id.to_string());
-    }
-
-    let deprecated_banner = format!("\n\n> ⚠️ **DEPRECATED**: {}\n", reason);
-    let new_content = format!(
-        "{}\n{}{}",
-        frontmatter.to_yaml(),
-        deprecated_banner,
-        content
-    );
-
-    fs::write(doc_path, new_content)
-        .await
-        .map_err(|e| format!("Failed to write: {}", e))?;
-
-    info!("Deprecated document: {}", doc_path.display());
-
-    let vec_db = gcx.read().await.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.as_ref() {
-        vecdb
-            .vectorizer_enqueue_files(&vec![doc_path.to_string_lossy().to_string()], true)
-            .await;
-    }
-
-    Ok(())
+    delete_document_from_disk(gcx, doc_path).await
 }
 
-pub async fn archive_document(
+pub async fn delete_document_from_disk(
     gcx: Arc<ARwLock<GlobalContext>>,
     doc_path: &PathBuf,
-) -> Result<PathBuf, String> {
-    // Archive under the document's own knowledge root to support both local and global
-    // knowledge directories, and multi-root workspaces.
-    let archive_dir = doc_path
-        .parent()
-        .map(|p| p.join("archive"))
-        .ok_or("Invalid document path: no parent")?;
-    fs::create_dir_all(&archive_dir)
-        .await
-        .map_err(|e| format!("Failed to create archive dir: {}", e))?;
-
-    let filename = doc_path.file_name().ok_or("Invalid filename")?;
-    let archive_path = archive_dir.join(filename);
-
-    let old_path_str = doc_path.to_string_lossy().to_string();
-    fs::rename(doc_path, &archive_path)
-        .await
-        .map_err(|e| format!("Failed to move to archive: {}", e))?;
-
-    info!(
-        "Archived document: {} -> {}",
-        doc_path.display(),
-        archive_path.display()
-    );
-
-    // Keep VecDB consistent with the rename (remove old path, enqueue new path).
-    let vec_db = gcx.read().await.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.as_ref() {
-        let _ = vecdb.remove_file(&PathBuf::from(old_path_str)).await;
-        vecdb
-            .vectorizer_enqueue_files(&vec![archive_path.to_string_lossy().to_string()], true)
-            .await;
+) -> Result<(), String> {
+    match fs::remove_file(doc_path).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to delete document: {}", e)),
     }
 
-    Ok(archive_path)
+    info!("Deleted document from disk: {}", doc_path.display());
+
+    let vec_db = gcx.read().await.vec_db.clone();
+    if let Some(vecdb) = vec_db.lock().await.as_ref() {
+        let _ = vecdb.remove_file(doc_path).await;
+    }
+
+    gcx.write()
+        .await
+        .documents_state
+        .memory_document_map
+        .remove(doc_path);
+
+    Ok(())
 }
 
 pub fn extract_entities(content: &str) -> Vec<String> {
