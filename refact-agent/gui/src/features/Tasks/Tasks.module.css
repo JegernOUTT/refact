@@ -89,8 +89,8 @@
 .panelsWrapper {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
   border-bottom: 1px solid var(--gray-a4);
 }
 
@@ -101,25 +101,6 @@
   user-select: none;
   min-height: 22px;
   padding: 0;
-}
-
-.panelsSearchRow {
-  display: flex;
-  flex-shrink: 0;
-}
-
-.panelsSearchBox {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  width: 160px;
-  min-width: 0;
-  height: 20px;
-  padding: 0 var(--space-1);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-2);
-  color: var(--gray-10);
-  background: transparent;
 }
 
 .panelsSection {
@@ -203,9 +184,10 @@
 .chatHeader {
   flex-shrink: 0;
   border-bottom: 1px solid var(--gray-a4);
-  background: var(--gray-2);
+  background: transparent;
   user-select: none;
-  min-height: 28px;
+  min-height: 22px;
+  padding: 0 var(--space-3);
 }
 
 .chevron {
@@ -232,6 +214,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chatPanelLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
 }
 
 .chatContent {

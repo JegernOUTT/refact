@@ -15,7 +15,6 @@ import {
   Cross2Icon,
   ChevronDownIcon,
   FileTextIcon,
-  MagnifyingGlassIcon,
 } from "@radix-ui/react-icons";
 import { AgentStatusDot } from "./AgentStatusDot";
 import { ScrollArea } from "../../components/ScrollArea";
@@ -1224,15 +1223,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           </Box>
 
           <Box className={styles.panelsWrapper}>
-            <Flex className={styles.panelsSearchRow}>
-              <Box className={styles.panelsSearchBox}>
-                <MagnifyingGlassIcon width={12} height={12} />
-                <Text size="1" color="gray">
-                  Planners and agents
-                </Text>
-              </Box>
-            </Flex>
-
             <Flex
               className={styles.panelsHeader}
               align="center"
@@ -1317,6 +1307,9 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               }`}
             />
           </Button>
+          <Text size="1" color="gray" className={styles.chatPanelLabel}>
+            Chat
+          </Text>
           <Text size="1" color="gray" className={styles.chatHeaderLabel}>
             {chatLabel}
           </Text>
