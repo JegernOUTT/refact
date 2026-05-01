@@ -228,6 +228,7 @@ impl Tool for ToolWorktreeMerge {
                     include_uncommitted,
                     target_branch,
                     commit_message,
+                    generate_commit_message: false,
                 },
             )
             .await?;

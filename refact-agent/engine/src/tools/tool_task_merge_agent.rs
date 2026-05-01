@@ -179,6 +179,7 @@ async fn merge_registered_task_worktree(
                 include_uncommitted: false,
                 target_branch: Some(target_branch),
                 commit_message: Some(commit_message),
+                generate_commit_message: false,
             },
         )
         .await?;
