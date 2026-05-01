@@ -430,6 +430,16 @@ pub fn get_task_trajectory_dir(task_dir: &PathBuf, role: &str, agent_id: Option<
     }
 }
 
+fn should_list_task_trajectory(role: &str, data: &serde_json::Value) -> bool {
+    if role != "planner" {
+        return true;
+    }
+    match data.get("link_type").and_then(|v| v.as_str()) {
+        Some("handoff" | "mode_transition" | "branch") | None => true,
+        Some(_) => false,
+    }
+}
+
 /// Compute the next planner chat id in the standard `planner-{task_id}-{n}` format.
 ///
 /// NOTE: this is not strictly atomic — concurrent callers can pick the same
@@ -473,6 +483,9 @@ pub async fn list_task_trajectories(
                 let id = stem.to_string_lossy().to_string();
                 if let Ok(content) = fs::read_to_string(&path).await {
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if !should_list_task_trajectory(role, &data) {
+                            continue;
+                        }
                         let title = data
                             .get("title")
                             .and_then(|v| v.as_str())
@@ -549,4 +562,43 @@ pub async fn get_planner_chat_id(
         .map(|t| t.id.clone())
         .ok_or_else(|| format!("plan-{}", task_id))
         .or_else(|default| Ok(default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_list_task_trajectory;
+    use serde_json::json;
+
+    #[test]
+    fn planner_listing_hides_subagentic_child_links() {
+        assert!(!should_list_task_trajectory(
+            "planner",
+            &json!({"link_type": "gather_files"})
+        ));
+        assert!(!should_list_task_trajectory(
+            "planner",
+            &json!({"link_type": "subagent"})
+        ));
+    }
+
+    #[test]
+    fn planner_listing_keeps_real_planner_chats() {
+        assert!(should_list_task_trajectory("planner", &json!({})));
+        assert!(should_list_task_trajectory(
+            "planner",
+            &json!({"link_type": "handoff"})
+        ));
+        assert!(should_list_task_trajectory(
+            "planner",
+            &json!({"link_type": "mode_transition"})
+        ));
+    }
+
+    #[test]
+    fn non_planner_listing_keeps_child_links() {
+        assert!(should_list_task_trajectory(
+            "subchats",
+            &json!({"link_type": "gather_files"})
+        ));
+    }
 }

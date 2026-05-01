@@ -697,6 +697,7 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         ToolsPolicy::None => "none".to_string(),
         ToolsPolicy::Only(v) => v.join(","),
     };
+    let task_meta = task_meta_for_stateful_subchat(config);
 
     ThreadParams {
         id: chat_id.to_string(),
@@ -707,12 +708,31 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         model: config.model.clone(),
         mode: config.mode.clone(),
         tool_use,
-        task_meta: config.task_meta.clone(),
+        task_meta,
         worktree: config.worktree.clone(),
         parent_id: config.parent_id.clone(),
         link_type: config.link_type.clone(),
+        root_chat_id: config.root_chat_id.clone(),
         ..Default::default()
     }
+}
+
+fn is_subagentic_link_type(link_type: &str) -> bool {
+    !matches!(link_type, "handoff" | "mode_transition" | "branch")
+}
+
+fn task_meta_for_stateful_subchat(config: &SubchatConfig) -> Option<TaskMeta> {
+    let mut task_meta = config.task_meta.clone()?;
+    if task_meta.role == "planner"
+        && config
+            .link_type
+            .as_deref()
+            .map(is_subagentic_link_type)
+            .unwrap_or(false)
+    {
+        task_meta.role = "subchats".to_string();
+    }
+    Some(task_meta)
 }
 
 pub async fn run_subchat(
@@ -1739,6 +1759,56 @@ mod subchat_tests {
         assert_eq!(thread.worktree, Some(worktree));
         assert_eq!(thread.tool_use, "cat");
         assert_eq!(thread.parent_id.as_deref(), Some("parent"));
+        assert_eq!(thread.root_chat_id.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn stateful_subchat_from_planner_uses_hidden_task_role() {
+        let task_meta = TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+        };
+        let config = SubchatConfig {
+            tool_name: "strategic_planning_gather_files".to_string(),
+            stateful: true,
+            chat_id: None,
+            title: Some("Strategic Planning: Gathering Files".to_string()),
+            parent_id: Some("planner-task-1-1".to_string()),
+            link_type: Some("gather_files".to_string()),
+            root_chat_id: Some("planner-task-1-1".to_string()),
+            tools: ToolsPolicy::Only(vec!["cat".to_string(), "tree".to_string()]),
+            max_steps: 3,
+            prepend_system_prompt: false,
+            wrap_up: None,
+            task_meta: Some(task_meta),
+            worktree: None,
+            model: "model".to_string(),
+            mode: "agent".to_string(),
+            n_ctx: 4096,
+            max_new_tokens: 512,
+            temperature: None,
+            reasoning_effort: None,
+            parent_tool_call_id: None,
+            parent_subchat_tx: None,
+            abort_flag: None,
+            subchat_depth: 1,
+        };
+
+        let thread = stateful_thread_from_config("subchat-1", &config);
+
+        assert_eq!(
+            thread.task_meta.as_ref().map(|m| m.role.as_str()),
+            Some("subchats")
+        );
+        assert_eq!(
+            thread.task_meta.as_ref().map(|m| m.task_id.as_str()),
+            Some("task-1")
+        );
+        assert_eq!(thread.parent_id.as_deref(), Some("planner-task-1-1"));
+        assert_eq!(thread.link_type.as_deref(), Some("gather_files"));
+        assert_eq!(thread.root_chat_id.as_deref(), Some("planner-task-1-1"));
     }
 
     #[test]
