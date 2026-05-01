@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   advanceBuddyShowcasePhase,
+  BUDDY_SHOWCASE_INITIAL_GRACE_MS,
+  BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS,
   BUDDY_SHOWCASE_PHASE_DURATIONS_MS,
   chooseBuddyShowcase,
   createBuddyShowcaseRun,
@@ -255,6 +257,7 @@ describe("buddy showcase director", () => {
       pet: makePet(),
       nowMs: 10_000,
       lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "night" as const, weather: "rain" as const },
     };
@@ -287,6 +290,7 @@ describe("buddy showcase director", () => {
       pet: makePet(),
       nowMs: 20_000,
       lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "evening" as const, weather: "busy" as const },
     };
@@ -309,6 +313,71 @@ describe("buddy showcase director", () => {
     );
   });
 
+  it("ignores completed active-work runtime signals", () => {
+    const args = {
+      targets: [OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "streaming",
+        title: "Streaming finished",
+        status: "completed",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 21_000,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "evening" as const, weather: "busy" as const },
+    };
+
+    expect(chooseBuddyShowcase(args)).toBeNull();
+    expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
+  it("initial idle grace blocks idle starts but not explicit runtime triggers", () => {
+    const idleArgs = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: null,
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 2_000,
+      idleGraceUntilMs: BUDDY_SHOWCASE_INITIAL_GRACE_MS,
+      lastShowcaseKind: null,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+    const runtimeArgs = {
+      ...idleArgs,
+      nowPlaying: makeRuntimeEvent({ signal_type: "memory_extract" }),
+      strongRuntimeTrigger: true,
+    };
+
+    expect(chooseBuddyShowcase(idleArgs)).toBeNull();
+    expect(chooseBuddyShowcase(runtimeArgs)?.kind).toBe("memory_firefly_night");
+  });
+
+  it("suppresses repeated showcases for the same runtime event id", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        id: "runtime-same",
+        signal_type: "memory_extract",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 44_000,
+      cooldownUntilMs: 44_000 - BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS,
+      lastRuntimeShowcaseEventId: "runtime-same",
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    expect(chooseBuddyShowcase(args)).toBeNull();
+    expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
   it("returns null for unmapped strong runtime signals", () => {
     const args = {
       targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
@@ -324,6 +393,29 @@ describe("buddy showcase director", () => {
       strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "night" as const, weather: "aurora" as const },
+    };
+
+    expect(chooseBuddyShowcase(args)).toBeNull();
+    expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
+  it("does not treat generic model mentions as provider runtime triggers", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "error",
+        title: "Model answered slowly",
+        description: "A generic model note without provider details.",
+        status: "info",
+        priority: "normal",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 26_000,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "evening" as const, weather: "clear" as const },
     };
 
     expect(chooseBuddyShowcase(args)).toBeNull();
@@ -366,6 +458,27 @@ describe("buddy showcase director", () => {
     expect(createBuddyShowcaseRun(args)?.target.id).toBe("memory");
   });
 
+  it("idle weighted selection is deterministic without always following highest score", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: null,
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 156_000,
+      lastShowcaseKind: null,
+      pulse: makePulse({
+        memory: { total: 50, orphan: 3, stale_conflicts: 1 },
+      }),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    const firstChoice = chooseBuddyShowcase(args)?.kind;
+    const secondChoice = chooseBuddyShowcase(args)?.kind;
+
+    expect(secondChoice).toBe(firstChoice);
+    expect(firstChoice).toBe("stargazing_constellation");
+  });
+
   it("active speech suppresses chooser and run creation", () => {
     const args = {
       targets: [MEMORY_TARGET],
@@ -374,6 +487,7 @@ describe("buddy showcase director", () => {
       pet: makePet(),
       nowMs: 30_000,
       lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "night" as const, weather: "rain" as const },
     };
@@ -390,6 +504,7 @@ describe("buddy showcase director", () => {
       pet: makePet(),
       nowMs: 32_000,
       lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "evening" as const, weather: "clear" as const },
     };
@@ -406,6 +521,7 @@ describe("buddy showcase director", () => {
       pet: makePet(true),
       nowMs: 35_000,
       lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "night" as const, weather: "rain" as const },
     };
@@ -429,6 +545,7 @@ describe("buddy showcase director", () => {
       pet: makePet(),
       nowMs: 40_000,
       lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "night" as const, weather: "rain" as const },
     };
@@ -443,7 +560,7 @@ describe("buddy showcase director", () => {
       nowPlaying: null,
       activeSpeechVisible: false,
       pet: makePet(),
-      nowMs: 50_000,
+      nowMs: 350_000,
       lastShowcaseKind: "memory_firefly_night" as const,
       pulse: makePulse(),
       world: { phase: "day" as const, weather: "clear" as const },
@@ -452,6 +569,7 @@ describe("buddy showcase director", () => {
       ...idleArgs,
       targets: [MEMORY_TARGET],
       nowPlaying: makeRuntimeEvent({ signal_type: "memory_extract" }),
+      strongRuntimeTrigger: true,
     };
 
     expect(chooseBuddyShowcase(idleArgs)?.kind).toBe(
@@ -468,6 +586,7 @@ describe("buddy showcase director", () => {
       pet: makePet(),
       nowMs: 60_000,
       lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "night" as const, weather: "rain" as const },
     });

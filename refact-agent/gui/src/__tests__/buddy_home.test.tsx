@@ -31,8 +31,9 @@ import type {
   BuddySuggestion,
   BuddyDraft,
   BuddyPulse,
-  BuddySnapshot,
   BuddyRuntimeEvent,
+  BuddySemanticState,
+  BuddySnapshot,
 } from "../features/Buddy/types";
 import type React from "react";
 
@@ -109,6 +110,43 @@ function makeSuggestion(overrides?: Partial<BuddySuggestion>): BuddySuggestion {
     dismissed: false,
     controls: [],
     quest: null,
+    ...overrides,
+  };
+}
+
+function makeSemanticState(
+  overrides?: Partial<BuddySemanticState>,
+): BuddySemanticState {
+  return {
+    name: "Buddy",
+    paletteIndex: 0,
+    born: 0,
+    mood: {
+      happiness: 80,
+      energy: 80,
+      curiosity: 70,
+      anxiety: 0,
+      boredom: 10,
+      affection: 80,
+    },
+    personality: {
+      playfulness: 70,
+      confidence: 60,
+      clinginess: 70,
+      resilience: 60,
+      chaos: 30,
+      sociability: 70,
+      curiosity: 70,
+    },
+    progress: { xp: 0, stage: 2 },
+    activity: {
+      mood: "idle",
+      animationType: "idle",
+      lastSignalTime: 0,
+      lastSignalType: null,
+    },
+    skills: [],
+    log: [],
     ...overrides,
   };
 }
@@ -348,6 +386,49 @@ describe("BuddyHome_renders_all_sections", () => {
 });
 
 describe("BuddyWorld_dynamic_environment", () => {
+  it("renders when matchMedia is unavailable", () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: undefined,
+    });
+
+    try {
+      expect(() =>
+        render(
+          <BuddyWorld
+            palette={PALETTES[0]}
+            stage={STAGES[2]}
+            state={makeSemanticState()}
+            pulse={makePulse()}
+            pet={makeSnapshot().state.pet}
+            nowPlaying={null}
+            activeQuest={null}
+            activeSpeech={null}
+            setupNeeded={false}
+            now={new Date("2024-01-01T14:00:00")}
+            onCanvasEvent={vi.fn()}
+            onCare={vi.fn()}
+            onOpenPage={vi.fn()}
+            onRunMode={vi.fn()}
+            onDismissSetup={vi.fn()}
+            onSpeechControl={vi.fn()}
+          />,
+          { preloadedState: CONFIG_STATE },
+        ),
+      ).not.toThrow();
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-showcase",
+        "none",
+      );
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
   it("builds time-dependent sun and moon phases", () => {
     const morning = buildBuddyWorldState({
       now: new Date("2024-01-01T08:00:00"),
@@ -399,37 +480,7 @@ describe("BuddyWorld_dynamic_environment", () => {
       <BuddyWorld
         palette={PALETTES[0]}
         stage={STAGES[2]}
-        state={{
-          name: "Buddy",
-          paletteIndex: 0,
-          born: 0,
-          mood: {
-            happiness: 80,
-            energy: 80,
-            curiosity: 70,
-            anxiety: 0,
-            boredom: 10,
-            affection: 80,
-          },
-          personality: {
-            playfulness: 70,
-            confidence: 60,
-            clinginess: 70,
-            resilience: 60,
-            chaos: 30,
-            sociability: 70,
-            curiosity: 70,
-          },
-          progress: { xp: 0, stage: 2 },
-          activity: {
-            mood: "idle",
-            animationType: "idle",
-            lastSignalTime: 0,
-            lastSignalType: null,
-          },
-          skills: [],
-          log: [],
-        }}
+        state={makeSemanticState()}
         pulse={makePulse()}
         pet={makeSnapshot().state.pet}
         nowPlaying={null}
@@ -470,6 +521,96 @@ describe("BuddyWorld_dynamic_environment", () => {
 
     await user.click(screen.getByRole("button", { name: /open task grove/i }));
     expect(onOpenPage).toHaveBeenCalledWith({ type: "tasks_list" });
+  });
+
+  it("keeps active showcase through ordinary headline changes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T00:00:40Z"));
+    try {
+      const { rerender } = render(
+        <BuddyWorld
+          palette={PALETTES[0]}
+          stage={STAGES[2]}
+          state={makeSemanticState()}
+          pulse={{
+            ...makePulse(),
+            diagnostics: { last_hour: 0, top_error_types: [] },
+            git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+            mcp: { total: 4, failing: 0, auth_expiring: 0 },
+            memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+          }}
+          pet={makeSnapshot().state.pet}
+          nowPlaying={{
+            id: "runtime-showcase-1",
+            signal_type: "memory_extract",
+            title: "Memory extracted",
+            source: "test",
+            status: "completed",
+            priority: "normal",
+            created_at: "2024-01-01T00:00:00Z",
+          }}
+          activeQuest={null}
+          activeSpeech={null}
+          setupNeeded={false}
+          now={new Date("2024-01-01T14:00:00")}
+          onCanvasEvent={vi.fn()}
+          onCare={vi.fn()}
+          onOpenPage={vi.fn()}
+          onRunMode={vi.fn()}
+          onDismissSetup={vi.fn()}
+          onSpeechControl={vi.fn()}
+        />,
+        { preloadedState: CONFIG_STATE },
+      );
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-showcase",
+        "memory_firefly_night",
+      );
+
+      rerender(
+        <BuddyWorld
+          palette={PALETTES[0]}
+          stage={STAGES[2]}
+          state={makeSemanticState()}
+          pulse={{
+            ...makePulse(),
+            diagnostics: { last_hour: 0, top_error_types: [] },
+            git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+            mcp: { total: 4, failing: 0, auth_expiring: 0 },
+            memory: { total: 10, orphan: 0, stale_conflicts: 4 },
+          }}
+          pet={makeSnapshot().state.pet}
+          nowPlaying={{
+            id: "runtime-showcase-1",
+            signal_type: "memory_extract",
+            title: "Memory extracted",
+            source: "test",
+            status: "completed",
+            priority: "normal",
+            created_at: "2024-01-01T00:00:00Z",
+          }}
+          activeQuest={null}
+          activeSpeech={null}
+          setupNeeded={false}
+          now={new Date("2024-01-01T14:00:00")}
+          onCanvasEvent={vi.fn()}
+          onCare={vi.fn()}
+          onOpenPage={vi.fn()}
+          onRunMode={vi.fn()}
+          onDismissSetup={vi.fn()}
+          onSpeechControl={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-showcase",
+        "memory_firefly_night",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses active runtime work as busy weather", () => {

@@ -755,6 +755,7 @@ function randomIdleReaction(): string {
 
 function prefersReducedMotion(): boolean {
   if (typeof window === "undefined") return false;
+  if (typeof window.matchMedia !== "function") return false;
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
@@ -850,9 +851,34 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   const [showcaseRun, setShowcaseRun] = useState<BuddyShowcaseRun | null>(null);
   const [lastShowcaseKind, setLastShowcaseKind] =
     useState<BuddyShowcaseKind | null>(null);
-  const [nextShowcaseAtMs, setNextShowcaseAtMs] = useState(
+  const [lastRuntimeShowcaseEventId, setLastRuntimeShowcaseEventId] = useState<
+    string | null
+  >(null);
+  const [idleGraceUntilMs] = useState(
     () => Date.now() + BUDDY_SHOWCASE_INITIAL_GRACE_MS,
   );
+  const [nextShowcaseAtMs, setNextShowcaseAtMs] = useState(0);
+  const [reducedMotion, setReducedMotion] = useState(prefersReducedMotion);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (typeof window.matchMedia !== "function") {
+      setReducedMotion(false);
+      return;
+    }
+
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const updateReducedMotion = () => setReducedMotion(media.matches);
+    updateReducedMotion();
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", updateReducedMotion);
+      return () => media.removeEventListener("change", updateReducedMotion);
+    }
+    if (typeof media.addListener === "function") {
+      media.addListener(updateReducedMotion);
+      return () => media.removeListener(updateReducedMotion);
+    }
+  }, []);
 
   useEffect(() => {
     if (now) {
@@ -899,7 +925,6 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   useEffect(() => {
     setActiveWaypointIndex(0);
     setLastWaypoint(null);
-    setShowcaseRun(null);
   }, [world.headline]);
 
   const startShowcase = useCallback(
@@ -913,7 +938,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         pet,
         nowMs,
         cooldownUntilMs: nextShowcaseAtMs,
+        idleGraceUntilMs,
         lastShowcaseKind,
+        lastRuntimeShowcaseEventId,
         strongRuntimeTrigger,
         world: {
           phase: world.phase,
@@ -925,6 +952,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       setShowcaseRun(run);
       setLastWaypoint(null);
       setLastShowcaseKind(run.kind);
+      if (strongRuntimeTrigger && nowPlaying?.id) {
+        setLastRuntimeShowcaseEventId(nowPlaying.id);
+      }
       setNextShowcaseAtMs(
         nowMs +
           (strongRuntimeTrigger
@@ -935,7 +965,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     },
     [
       activeSpeech,
+      idleGraceUntilMs,
       lastShowcaseKind,
+      lastRuntimeShowcaseEventId,
       nextShowcaseAtMs,
       nowPlaying,
       pet,
@@ -1061,15 +1093,15 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
             width: cssWidth,
             height: cssHeight,
             compact,
-            reducedMotion: prefersReducedMotion(),
+            reducedMotion,
           });
         }
       }
       raf = window.requestAnimationFrame(render);
     };
-    render();
+    raf = window.requestAnimationFrame(render);
     return () => window.cancelAnimationFrame(raf);
-  }, [compact, palette, showcaseRun, world]);
+  }, [compact, palette, reducedMotion, showcaseRun, world]);
 
   const handleCelestialClick = () => {
     setActiveWaypointIndex(
@@ -1124,9 +1156,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   };
 
   const showcasePose =
-    showcaseRun !== null &&
-    showcaseRun.phase !== "travel" &&
-    showcaseRun.phase !== "cooldown"
+    showcaseRun !== null && showcaseRun.phase !== "travel"
       ? showcaseRun.pose
       : null;
   const characterPose: BuddyScenePose = showcasePose ?? randomPose;

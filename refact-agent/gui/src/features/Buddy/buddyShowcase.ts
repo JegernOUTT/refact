@@ -25,18 +25,31 @@ export const BUDDY_SHOWCASE_INITIAL_GRACE_MS = 30_000;
 export const BUDDY_SHOWCASE_IDLE_COOLDOWN_MS = 78_000;
 export const BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS = 18_000;
 
+const UINT_MAX = 4_294_967_295;
 const MEMORY_RUNTIME_SIGNALS = new Set(["memory_extract", "knowledge_update"]);
 const STARGAZING_RUNTIME_SIGNALS = new Set([
   "generating",
   "streaming",
   "tool_used",
 ]);
-const PROVIDER_ERROR_TERMS = [
-  "provider",
-  "model",
-  "quota",
-  "defaults",
+const ACTIVE_RUNTIME_STATUSES = new Set(["started", "progress", "streaming"]);
+const PROVIDER_SIGNAL_PATTERNS = [
+  /\bproviders?\b/,
+  /\bquotas?\b/,
+  /\bdefault[-_\s]?models?\b/,
+  /\bprovider[-_\s]?sources?\b/,
+  /\bbroken[-_\s]?refs?\b/,
+  /\bmodel[-_\s]?not[-_\s]?found\b/,
 ] as const;
+const PROVIDER_STRONG_CUE_PATTERNS = [
+  /\bquotas?\b/,
+  /\bdefault[-_\s]?models?\b/,
+  /\bprovider[-_\s]?sources?\b/,
+  /\bbroken[-_\s]?refs?\b/,
+  /\bmodel[-_\s]?not[-_\s]?found\b/,
+] as const;
+const IDLE_SHOWCASE_BASE_WEIGHT = 18;
+const IDLE_SHOWCASE_REPEAT_WEIGHT = 0.34;
 const SHOWCASE_KIND_ORDER: Record<BuddyShowcaseKind, number> = {
   memory_firefly_night: 0,
   stargazing_constellation: 1,
@@ -88,7 +101,9 @@ export interface ChooseBuddyShowcaseArgs {
   pet: BuddyPetState | undefined;
   nowMs: number;
   cooldownUntilMs?: number;
+  idleGraceUntilMs?: number;
   lastShowcaseKind?: BuddyShowcaseKind | null;
+  lastRuntimeShowcaseEventId?: string | null;
   strongRuntimeTrigger?: boolean;
   world?: BuddyShowcaseWorldContext;
   pulse?: BuddyPulse | null;
@@ -113,7 +128,12 @@ function hasProviderSignal(event: BuddyRuntimeEvent | null): boolean {
   ]
     .join(" ")
     .toLowerCase();
-  return PROVIDER_ERROR_TERMS.some((term) => haystack.includes(term));
+  if (!PROVIDER_SIGNAL_PATTERNS.some((pattern) => pattern.test(haystack))) {
+    return false;
+  }
+  if (event.status === "failed") return true;
+  if (event.priority === "critical" || event.priority === "high") return true;
+  return PROVIDER_STRONG_CUE_PATTERNS.some((pattern) => pattern.test(haystack));
 }
 
 function hasProviderPulseIssue(pulse: BuddyPulse | null | undefined): boolean {
@@ -141,10 +161,12 @@ function kindForRuntime(
   if (MEMORY_RUNTIME_SIGNALS.has(event.signal_type)) {
     return "memory_firefly_night";
   }
-  if (
-    STARGAZING_RUNTIME_SIGNALS.has(event.signal_type) ||
-    hasProviderSignal(event)
-  ) {
+  if (STARGAZING_RUNTIME_SIGNALS.has(event.signal_type)) {
+    return ACTIVE_RUNTIME_STATUSES.has(event.status)
+      ? "stargazing_constellation"
+      : null;
+  }
+  if (hasProviderSignal(event)) {
     return "stargazing_constellation";
   }
   return null;
@@ -170,7 +192,11 @@ function findTarget(
 function canChooseShowcase(args: ChooseBuddyShowcaseArgs): boolean {
   if (args.activeSpeechVisible) return false;
   if (args.pet?.condition.sleeping) return false;
-  return args.nowMs >= (args.cooldownUntilMs ?? 0);
+  if (args.nowMs < (args.cooldownUntilMs ?? 0)) return false;
+  if (!args.strongRuntimeTrigger && args.nowMs < (args.idleGraceUntilMs ?? 0)) {
+    return false;
+  }
+  return true;
 }
 
 function worldScore(
@@ -220,22 +246,64 @@ function chooseWeightedDefinition(
   args: ChooseBuddyShowcaseArgs,
 ): BuddyShowcaseDefinition | null {
   const candidates = Object.values(BUDDY_SHOWCASE_DEFINITIONS)
-    .filter((definition) => definition.kind !== args.lastShowcaseKind)
     .filter((definition) => findTarget(args.targets, definition))
-    .map((definition) => ({
-      definition,
-      score: scoreDefinition(args, definition),
-    }))
+    .map((definition) => {
+      const score = scoreDefinition(args, definition);
+      return {
+        definition,
+        score,
+        weight:
+          Math.max(1, IDLE_SHOWCASE_BASE_WEIGHT + score) *
+          (definition.kind === args.lastShowcaseKind
+            ? IDLE_SHOWCASE_REPEAT_WEIGHT
+            : 1),
+      };
+    })
     .sort((a, b) => {
-      const scoreDiff = b.score - a.score;
-      if (scoreDiff !== 0) return scoreDiff;
+      const orderSeed = seedFromText(
+        `${args.nowMs}:${args.world?.phase ?? "none"}:${
+          args.world?.weather ?? "none"
+        }`,
+      );
+      const left = seededUnit(
+        orderSeed,
+        SHOWCASE_KIND_ORDER[a.definition.kind],
+      );
+      const right = seededUnit(
+        orderSeed,
+        SHOWCASE_KIND_ORDER[b.definition.kind],
+      );
+      const seededDiff = left - right;
+      if (seededDiff !== 0) return seededDiff;
       return (
         SHOWCASE_KIND_ORDER[a.definition.kind] -
         SHOWCASE_KIND_ORDER[b.definition.kind]
       );
     });
 
-  return candidates[0]?.definition ?? null;
+  const totalWeight = candidates.reduce(
+    (total, candidate) => total + candidate.weight,
+    0,
+  );
+  if (totalWeight <= 0) return null;
+
+  const bucket = Math.floor(args.nowMs / BUDDY_SHOWCASE_IDLE_COOLDOWN_MS);
+  const pulseKey = args.pulse
+    ? `${args.pulse.memory.total}:${args.pulse.memory.orphan}:${args.pulse.memory.stale_conflicts}:${args.pulse.providers.broken_refs}:${args.pulse.providers.quota_warnings}:${args.pulse.providers.defaults_ok}`
+    : "no-pulse";
+  const rollSeed = seedFromText(
+    `${bucket}:${args.lastShowcaseKind ?? "none"}:${
+      args.world?.phase ?? "none"
+    }:${args.world?.weather ?? "none"}:${pulseKey}`,
+  );
+  const roll = seededUnit(rollSeed, 19) * totalWeight;
+  let cursor = 0;
+  for (const candidate of candidates) {
+    cursor += candidate.weight;
+    if (roll <= cursor) return candidate.definition;
+  }
+
+  return candidates[candidates.length - 1]?.definition ?? null;
 }
 
 export function chooseBuddyShowcase(
@@ -243,8 +311,16 @@ export function chooseBuddyShowcase(
 ): BuddyShowcaseChoice | null {
   if (!canChooseShowcase(args)) return null;
 
-  const runtimeKind = kindForRuntime(args.nowPlaying);
+  const runtimeKind = args.strongRuntimeTrigger
+    ? kindForRuntime(args.nowPlaying)
+    : null;
   if (runtimeKind) {
+    if (
+      args.nowPlaying?.id &&
+      args.nowPlaying.id === args.lastRuntimeShowcaseEventId
+    ) {
+      return null;
+    }
     const definition = BUDDY_SHOWCASE_DEFINITIONS[runtimeKind];
     return findTarget(args.targets, definition) ? definition : null;
   }
@@ -266,6 +342,16 @@ function seedFromText(text: string): number {
     hash = Math.imul(hash, 16777619);
   }
   return hash >>> 0;
+}
+
+function seededUnit(seed: number, salt: number): number {
+  let value = (seed + Math.imul(salt + 1, 0x9e3779b9)) >>> 0;
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x85ebca6b) >>> 0;
+  value ^= value >>> 13;
+  value = Math.imul(value, 0xc2b2ae35) >>> 0;
+  value ^= value >>> 16;
+  return (value >>> 0) / UINT_MAX;
 }
 
 export function createBuddyShowcaseSeed(args: {

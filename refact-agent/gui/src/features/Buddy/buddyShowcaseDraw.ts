@@ -86,6 +86,10 @@ function eventAlpha(run: BuddyShowcaseRun, progress: number): number {
   }
 }
 
+function reducedAlpha(alpha: number, reducedMotion: boolean): number {
+  return reducedMotion ? alpha * 0.64 : alpha;
+}
+
 function timelineProgress(run: BuddyShowcaseRun, progress: number): number {
   switch (run.phase) {
     case "travel":
@@ -206,7 +210,7 @@ function drawMemoryFireflyNight(args: DrawShowcaseEventArgs): void {
   const { ctx, run, frame, width, height, compact, reducedMotion, world } =
     args;
   const progress = phaseProgress(run, args.nowMs);
-  const alpha = eventAlpha(run, progress);
+  const alpha = reducedAlpha(eventAlpha(run, progress), reducedMotion);
   if (alpha <= 0) return;
 
   const timeline = timelineProgress(run, progress);
@@ -215,7 +219,7 @@ function drawMemoryFireflyNight(args: DrawShowcaseEventArgs): void {
     y: pctY(height, run.target.y),
   };
   const anchor = memoryAnchor(args);
-  const nightBoost = world.phase === "night" ? 1.16 : 1;
+  const nightBoost = reducedMotion ? 0.94 : world.phase === "night" ? 1.16 : 1;
   const count = reducedMotion ? (compact ? 10 : 16) : compact ? 18 : 32;
   const speed = reducedMotion ? 180 : 72;
 
@@ -322,7 +326,8 @@ function drawMemoryFireflyNight(args: DrawShowcaseEventArgs): void {
 
   if (timeline > 0.55) {
     const swirlAlpha = alpha * clamp01((timeline - 0.55) / 0.45) * 0.28;
-    for (let index = 0; index < 3; index += 1) {
+    const swirlCount = reducedMotion ? 1 : 3;
+    for (let index = 0; index < swirlCount; index += 1) {
       const radius = compact ? 24 + index * 9 : 34 + index * 13;
       const y = anchor.y - 18 - index * 17 - timeline * 18;
       const from = {
@@ -477,7 +482,7 @@ function drawStargazingConstellation(args: DrawShowcaseEventArgs): void {
     palette,
   } = args;
   const progress = phaseProgress(run, args.nowMs);
-  const alpha = eventAlpha(run, progress);
+  const alpha = reducedAlpha(eventAlpha(run, progress), reducedMotion);
   if (alpha <= 0) return;
 
   const timeline = timelineProgress(run, progress);
@@ -505,15 +510,26 @@ function drawStargazingConstellation(args: DrawShowcaseEventArgs): void {
     sky.y + 7,
     compact ? 72 : 108,
     "#C4B5FD",
-    skyAlpha * 0.08,
+    skyAlpha * (reducedMotion ? 0.045 : 0.08),
   );
-  drawBeam(
-    ctx,
-    base,
-    sky,
-    lerp(20, compact ? 56 : 78, beamProgress),
-    skyAlpha * beamProgress,
-  );
+  if (!reducedMotion) {
+    drawBeam(
+      ctx,
+      base,
+      sky,
+      lerp(20, compact ? 56 : 78, beamProgress),
+      skyAlpha * beamProgress,
+    );
+  } else {
+    drawDottedLine(
+      ctx,
+      { x: base.x + 25, y: base.y - 17 },
+      sky,
+      "#DBEAFE",
+      skyAlpha * beamProgress * 0.28,
+      compact ? 7 : 10,
+    );
+  }
   drawTelescope(ctx, base, palette, alpha);
 
   const starCount = reducedMotion ? (compact ? 5 : 6) : compact ? 6 : 9;

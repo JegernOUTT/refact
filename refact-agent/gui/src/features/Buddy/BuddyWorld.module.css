@@ -183,6 +183,10 @@
   filter: drop-shadow(0 16px 22px rgba(0, 0, 0, 0.26));
 }
 
+.scene[data-showcase-phase="cooldown"] .character {
+  filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.16));
+}
+
 .character[data-pose="spin"] {
   animation: buddySceneSpin 1.4s ease-in-out;
 }
@@ -424,11 +428,25 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .hotspot,
+  .objectHotspot,
+  .objectTooltip,
+  .setupDock,
+  .careDock,
+  .sceneButton,
+  .sceneButtonGhost {
+    transition-duration: 0.01ms;
+  }
+
   .character,
   .character[data-pose] {
     animation-duration: 0.01ms;
     animation-iteration-count: 1;
     transition-duration: 0.01ms;
+  }
+
+  .waypointPing {
+    animation-duration: 0.01ms;
   }
 }
 
