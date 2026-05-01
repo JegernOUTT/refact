@@ -6,7 +6,12 @@ import React, {
   useState,
 } from "react";
 import { Flex, Text, Box, Spinner } from "@radix-ui/themes";
-import { CopyIcon, CheckIcon, FileTextIcon } from "@radix-ui/react-icons";
+import {
+  CopyIcon,
+  CheckIcon,
+  FileTextIcon,
+  ReaderIcon,
+} from "@radix-ui/react-icons";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
@@ -109,7 +114,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
 
   const summary = reportData?.summary
     ? variant === "taskDone"
-      ? `✅ ${reportData.summary}`
+      ? reportData.summary
       : reportData.summary
     : defaultSummary;
 
@@ -381,7 +386,10 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
                 as="p"
                 style={{ padding: "0 var(--space-1)" }}
               >
-                💾 Saved to knowledge
+                <Flex as="span" align="center" gap="1">
+                  <ReaderIcon />
+                  Saved to knowledge
+                </Flex>
               </Text>
             )}
           </div>

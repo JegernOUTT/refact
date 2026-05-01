@@ -1,4 +1,13 @@
 import { useEffect, useRef } from "react";
+import {
+  CounterClockwiseClockIcon,
+  FileIcon,
+  Link2Icon,
+  MagnifyingGlassIcon,
+  ReaderIcon,
+  StarIcon,
+  TargetIcon,
+} from "@radix-ui/react-icons";
 import type { KnowledgeMemoRecord } from "../../services/refact/types";
 import styles from "./MemoryListView.module.css";
 
@@ -10,17 +19,17 @@ interface MemoryListViewProps {
 }
 
 const KIND_CONFIG = {
-  code: { icon: "📄", color: "#3B82F6" },
-  decision: { icon: "🎯", color: "#8B5CF6" },
-  preference: { icon: "⭐", color: "#10B981" },
-  pattern: { icon: "🔄", color: "#F59E0B" },
-  lesson: { icon: "📚", color: "#06B6D4" },
+  code: { Icon: FileIcon, color: "#3B82F6" },
+  decision: { Icon: TargetIcon, color: "#8B5CF6" },
+  preference: { Icon: StarIcon, color: "#10B981" },
+  pattern: { Icon: CounterClockwiseClockIcon, color: "#F59E0B" },
+  lesson: { Icon: ReaderIcon, color: "#06B6D4" },
 } as const;
 
 type KindKey = keyof typeof KIND_CONFIG;
 
 function getKindConfig(kind: string | undefined): {
-  icon: string;
+  Icon: (typeof KIND_CONFIG)[KindKey]["Icon"];
   color: string;
 } {
   if (kind && kind in KIND_CONFIG) {
@@ -50,7 +59,9 @@ export function MemoryListView({
   if (memories.length === 0) {
     return (
       <div className={styles.emptyState}>
-        <div className={styles.emptyIcon}>🔍</div>
+        <div className={styles.emptyIcon}>
+          <MagnifyingGlassIcon />
+        </div>
         <p className={styles.emptyText}>No memories to display</p>
       </div>
     );
@@ -64,6 +75,7 @@ export function MemoryListView({
           const isLinked = linkedIds.has(memory.memid);
           const kind = memory.kind ?? "code";
           const kindConfig = getKindConfig(memory.kind);
+          const KindIcon = kindConfig.Icon;
 
           return (
             <button
@@ -87,7 +99,7 @@ export function MemoryListView({
                     style={{ backgroundColor: kindConfig.color }}
                     aria-label={`Kind: ${kind}`}
                   >
-                    {kindConfig.icon}
+                    <KindIcon />
                   </span>
                   <span className={styles.title}>
                     {memory.title ?? "Untitled"}
@@ -98,7 +110,7 @@ export function MemoryListView({
                     className={styles.linkBadge}
                     aria-label="Linked in graph"
                   >
-                    🔗
+                    <Link2Icon />
                   </span>
                 )}
               </div>

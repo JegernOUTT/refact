@@ -1,6 +1,6 @@
 import React from "react";
 import { Badge, Flex } from "@radix-ui/themes";
-import { GearIcon } from "@radix-ui/react-icons";
+import { ExclamationTriangleIcon, GearIcon } from "@radix-ui/react-icons";
 import type { ExtensionMarketplaceSource } from "../../services/refact/extensionsMarketplace";
 import styles from "./ExtensionsMarketplace.module.css";
 
@@ -49,7 +49,7 @@ export const MarketplaceSourceSelector: React.FC<
         >
           {source.label}
           {source.item_count !== undefined && ` (${source.item_count})`}
-          {source.error && " ⚠"}
+          {source.error && <ExclamationTriangleIcon />}
         </Badge>
       ))}
       <Badge

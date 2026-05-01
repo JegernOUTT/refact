@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import { Flex, Text, Slider, Switch } from "@radix-ui/themes";
+import { ChatBubbleIcon } from "@radix-ui/react-icons";
 import { useGetCapsQuery } from "../../services/refact/caps";
 import styles from "./ModelSamplingParams.module.css";
 
@@ -68,7 +69,9 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
         <div className={styles.reasoningSection}>
           <Flex align="center" justify="between" gap="3">
             <Flex align="center" gap="1">
-              <Text size={size}>🧠</Text>
+              <Text size={size}>
+                <ChatBubbleIcon />
+              </Text>
               <Text size={size} weight="medium">
                 Reasoning
               </Text>

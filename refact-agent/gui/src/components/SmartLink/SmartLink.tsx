@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import type { FC } from "react";
 import type { SmartLink as SmartLinkType } from "../../services/refact";
 import { Button } from "@radix-ui/themes";
+import { MagicWandIcon } from "@radix-ui/react-icons";
 import { useSmartLinks } from "../../hooks";
 import styles from "./SmartLink.module.css";
 
@@ -65,7 +66,7 @@ export const SmartLink: FC<{
         className={styles.magicButton}
         disabled={shouldBeDisabled}
       >
-        {smartlink.sl_chat ? "✨ " : ""}
+        {smartlink.sl_chat ? <MagicWandIcon /> : null}
         {smartlink.sl_label}
       </Button>
     </>

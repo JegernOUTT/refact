@@ -72,3 +72,17 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.modelDetailIcon {
+  line-height: 1;
+}
+
+.modelDetailIconGlyph,
+.modelDetailIconGlyphAccent {
+  display: inline-flex;
+  color: var(--gray-11);
+}
+
+.modelDetailIconGlyphAccent {
+  color: var(--blue-11);
+}

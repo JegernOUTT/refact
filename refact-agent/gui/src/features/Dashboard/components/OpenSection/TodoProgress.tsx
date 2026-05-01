@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import { Text } from "@radix-ui/themes";
+import { CheckboxIcon } from "@radix-ui/react-icons";
 import type { TodoItem, TodoStatus } from "../../../Chat/Thread/types";
 import type { DashboardBreakpoint } from "../../types";
 import styles from "./TodoProgress.module.css";
@@ -35,7 +36,7 @@ export const TodoProgress: React.FC<TodoProgressProps> = ({
     return (
       <div className={styles.compact}>
         <Text size="1" color="gray">
-          ☑{done}/{total}
+          <CheckboxIcon /> {done}/{total}
         </Text>
         <div className={styles.miniBar}>
           {sorted.slice(0, 12).map((t) => (

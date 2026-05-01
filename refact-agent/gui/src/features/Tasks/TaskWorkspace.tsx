@@ -16,6 +16,8 @@ import {
   PersonIcon,
   Cross2Icon,
   ChevronDownIcon,
+  CodeIcon,
+  FileTextIcon,
 } from "@radix-ui/react-icons";
 import { AgentStatusDot } from "./AgentStatusDot";
 import { ScrollArea } from "../../components/ScrollArea";
@@ -225,7 +227,7 @@ const PlannerItem: React.FC<PlannerItemProps> = ({
           </Badge>
         )}
         <Badge size="1" color="violet">
-          📋
+          <FileTextIcon />
         </Badge>
       </Flex>
       <Box className={styles.panelItemContent}>
@@ -472,7 +474,7 @@ const CardDetail: React.FC<CardDetailProps> = ({
               <Flex direction="column" gap="2" mt="1">
                 <Flex gap="2" align="center" wrap="wrap">
                   <Badge size="1" color="green" variant="soft">
-                    🌿 {worktreeLabel}
+                    <CodeIcon /> {worktreeLabel}
                   </Badge>
                   {worktree?.record ?? worktree?.meta ? (
                     <WorktreeStatusBadge
@@ -1211,7 +1213,9 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           >
             {task.status}
           </Badge>
-          <Badge color="gray">🌿 {branchDisplay}</Badge>
+          <Badge color="gray">
+            <CodeIcon /> {branchDisplay}
+          </Badge>
         </Flex>
         <Text size="1" color="gray">
           {task.cards_done}/{task.cards_total} done

@@ -1,5 +1,6 @@
 import { Flex, Heading, Text } from "@radix-ui/themes";
 import { FC } from "react";
+import { GearIcon } from "@radix-ui/react-icons";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
@@ -40,7 +41,7 @@ export const ProjectIntegrations: FC<ProjectIntegrationsProps> = ({
         >
           <Heading as="h4" size="3">
             <Flex align="start" gapX="3" gapY="1" justify="start" wrap="wrap">
-              ⚙️ In
+              <GearIcon /> In
               <Markdown>{formattedProjectName}</Markdown>
               configured {integrations.length}{" "}
               {integrations.length !== 1 ? "integrations" : "integration"}

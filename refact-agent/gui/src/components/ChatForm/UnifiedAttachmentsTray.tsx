@@ -53,12 +53,6 @@ function normalizeLine(line: number | null | undefined): number | undefined {
   return typeof line === "number" && line > 0 ? line : undefined;
 }
 
-const KIND_ICON: Record<string, string> = {
-  memory: "🧠",
-  trajectory: "📋",
-  file: "📄",
-};
-
 export const UnifiedAttachmentsTray: React.FC<UnifiedAttachmentsTrayProps> = ({
   attachedFiles,
   previewFiles,
@@ -74,11 +68,10 @@ export const UnifiedAttachmentsTray: React.FC<UnifiedAttachmentsTrayProps> = ({
     const addedFilePaths: string[] = [];
 
     manualPreviewItems?.forEach((item, index) => {
-      const icon = KIND_ICON[item.kind];
       result.push({
         kind: "file",
         id: `manual-preview-${item.context_file.file_name}-${index}`,
-        name: `${icon} ${item.label}`,
+        name: item.label,
         subtitle: item.kind,
         copyText: item.context_file.file_name,
         onRemove: onRemoveManualPreviewItem

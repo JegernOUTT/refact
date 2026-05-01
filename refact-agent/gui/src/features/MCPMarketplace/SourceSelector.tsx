@@ -1,6 +1,10 @@
 import React from "react";
 import { Badge, Flex } from "@radix-ui/themes";
-import { GearIcon } from "@radix-ui/react-icons";
+import {
+  ExclamationTriangleIcon,
+  GearIcon,
+  IdCardIcon,
+} from "@radix-ui/react-icons";
 import type { MarketplaceSource } from "../../services/refact/mcpMarketplace";
 import styles from "./MCPMarketplace.module.css";
 
@@ -51,8 +55,8 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({
         >
           {source.label}
           {source.server_count !== undefined && ` (${source.server_count})`}
-          {source.status === "error" && " ⚠"}
-          {source.needs_api_key && !source.has_api_key && " 🔑"}
+          {source.status === "error" && <ExclamationTriangleIcon />}
+          {source.needs_api_key && !source.has_api_key && <IdCardIcon />}
         </Badge>
       ))}
       <Badge

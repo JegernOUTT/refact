@@ -3,6 +3,7 @@ import { Badge, Flex, Text } from "@radix-ui/themes";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../../features/Pages/pagesSlice";
 import { useSkillsStatus } from "../../hooks/useSkillsStatus";
+import { ReaderIcon } from "@radix-ui/react-icons";
 import styles from "./SkillsIndicator.module.css";
 
 export type SkillsIndicatorProps = {
@@ -41,7 +42,7 @@ export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
       onKeyDown={handleKeyDown}
     >
       <Text size="1" color="gray">
-        🧠
+        <ReaderIcon />
       </Text>
       {activeSkill !== null ? (
         <>

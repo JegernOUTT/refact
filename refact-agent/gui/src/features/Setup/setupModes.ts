@@ -4,7 +4,7 @@ export interface SetupMode {
 }
 
 export const SETUP_MODES: SetupMode[] = [
-  { label: "⚙ Run Setup", mode: "setup" },
+  { label: "Run Setup", mode: "setup" },
   { label: "Create Skills", mode: "setup_skills" },
   { label: "Setup AGENTS.md", mode: "setup_agents_md" },
   { label: "Find MCPs", mode: "setup_mcp" },

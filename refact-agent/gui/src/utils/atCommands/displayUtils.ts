@@ -1,17 +1,6 @@
 import type { AtCommandType, AtCommandToken, ChipDisplayInfo } from "./types";
 import { formatLineRange } from "./parseAtCommands";
 
-const ICONS: Record<AtCommandType, string> = {
-  file: "📎",
-  web: "🌐",
-  tree: "🌲",
-  search: "🔍",
-  definition: "📍",
-  "knowledge-load": "🧠",
-  references: "📍",
-  help: "❓",
-};
-
 type CommandMeta = {
   argRequired: boolean;
   clickable: boolean;
@@ -97,7 +86,6 @@ export function tokenToChipInfo(
 ): ChipDisplayInfo {
   return {
     type: token.type,
-    icon: ICONS[token.type],
     label: getDisplayLabel(token, allTokens),
     fullPath: token.arg,
     lineRange: token.lineRange ? formatLineRange(token.lineRange) : undefined,

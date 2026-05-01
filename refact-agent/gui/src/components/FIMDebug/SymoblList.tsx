@@ -3,6 +3,7 @@ import { Flex, Text, Box } from "@radix-ui/themes";
 import type { Buckets } from "../../services/refact";
 import { TruncateLeft } from "../Text";
 import { Collapsible } from "../Collapsible";
+import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import styles from "./fim.module.css";
 
 const SymbolText: React.FC<{
@@ -25,7 +26,7 @@ const SymbolText: React.FC<{
       >
         {withIcon ? (
           <>
-            🔎&nbsp;
+            <MagnifyingGlassIcon />
             <TruncateLeft className={styles.symbol}>{children}</TruncateLeft>
           </>
         ) : (

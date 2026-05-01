@@ -1,6 +1,7 @@
 import React from "react";
 import { Flex } from "@radix-ui/themes";
 import { TruncateLeft, Text } from "../Text";
+import { FileIcon } from "@radix-ui/react-icons";
 import type { ChatContextFile } from "../../services/refact";
 import styles from "./file-list.module.css";
 
@@ -19,7 +20,7 @@ export const FileList: React.FC<FileListProps> = ({ files }) => {
             title={file.file_content}
             className={styles.file}
           >
-            📎&nbsp;<TruncateLeft>{name}</TruncateLeft>
+            <FileIcon /> <TruncateLeft>{name}</TruncateLeft>
           </Text>
         );
       })}

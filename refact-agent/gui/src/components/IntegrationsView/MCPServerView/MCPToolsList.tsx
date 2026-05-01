@@ -1,5 +1,10 @@
 import React, { useState } from "react";
 import { Badge, Box, Flex, Switch, Text } from "@radix-ui/themes";
+import {
+  CounterClockwiseClockIcon,
+  ExclamationTriangleIcon,
+  LockClosedIcon,
+} from "@radix-ui/react-icons";
 import type { MCPToolInfo } from "../../../services/refact/mcpServerInfo";
 import styles from "./MCPToolsList.module.css";
 
@@ -13,9 +18,21 @@ const AnnotationBadges: React.FC<{
   if (!annotations) return null;
   return (
     <Flex gap="1" wrap="wrap">
-      {annotations.readOnlyHint && <Badge size="1">🔒 readOnly</Badge>}
-      {annotations.destructiveHint && <Badge size="1">⚠️ destructive</Badge>}
-      {annotations.idempotentHint && <Badge size="1">🔄 idempotent</Badge>}
+      {annotations.readOnlyHint && (
+        <Badge size="1">
+          <LockClosedIcon /> readOnly
+        </Badge>
+      )}
+      {annotations.destructiveHint && (
+        <Badge size="1">
+          <ExclamationTriangleIcon /> destructive
+        </Badge>
+      )}
+      {annotations.idempotentHint && (
+        <Badge size="1">
+          <CounterClockwiseClockIcon /> idempotent
+        </Badge>
+      )}
     </Flex>
   );
 };

@@ -1,6 +1,7 @@
 import React, { useCallback } from "react";
 
 import { Flex, Text, Link } from "@radix-ui/themes";
+import { MagicWandIcon } from "@radix-ui/react-icons";
 
 import { useConfig, useAppSelector, useEventsBusForIDE } from "../../hooks";
 
@@ -10,11 +11,17 @@ const TipOfTheDay: React.FC = () => {
   const tip = useAppSelector(currentTipOfTheDay);
 
   return (
-    <Text>
-      💡 <b>Tip of the day</b>: {tip}
+    <Text as="div">
+      <Flex as="span" align="center" gap="1" display="inline-flex">
+        <MagicWandIcon />
+        <b>Tip of the day</b>:
+      </Flex>{" "}
+      {tip}
     </Text>
   );
 };
+
+const TipIcon: React.FC = () => <MagicWandIcon aria-hidden="true" />;
 
 export const PlaceHolderText: React.FC = () => {
   const config = useConfig();
@@ -42,7 +49,7 @@ export const PlaceHolderText: React.FC = () => {
       <Flex direction="column" gap="4">
         <Text>Welcome to Refact chat!</Text>
         <Text>
-          💡 You can turn on VecDB and AST in{" "}
+          <TipIcon /> You can turn on VecDB and AST in{" "}
           <Link onClick={handleOpenSettings}>settings</Link>.
         </Text>
         <TipOfTheDay />
@@ -53,7 +60,7 @@ export const PlaceHolderText: React.FC = () => {
       <Flex direction="column" gap="4">
         <Text>Welcome to Refact chat!</Text>
         <Text>
-          💡 You can turn on VecDB in{" "}
+          <TipIcon /> You can turn on VecDB in{" "}
           <Link onClick={handleOpenSettings}>settings</Link>.
         </Text>
         <TipOfTheDay />
@@ -64,7 +71,7 @@ export const PlaceHolderText: React.FC = () => {
       <Flex direction="column" gap="4">
         <Text>Welcome to Refact chat!</Text>
         <Text>
-          💡 You can turn on AST in{" "}
+          <TipIcon /> You can turn on AST in{" "}
           <Link onClick={handleOpenSettings}>settings</Link>.
         </Text>
         <TipOfTheDay />

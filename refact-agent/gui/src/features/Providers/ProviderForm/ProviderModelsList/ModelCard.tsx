@@ -12,7 +12,12 @@ import {
 import { DotsVerticalIcon } from "@radix-ui/react-icons";
 
 import { ModelCardPopup } from "./components/ModelCardPopup";
-import { CapabilityIcons } from "./components/CapabilityIcons";
+import {
+  CapabilityIcons,
+  ContextWindowIcon,
+  ModelDetailIcon,
+  PricingIcon,
+} from "./components/CapabilityIcons";
 import { useModelDialogState } from "./hooks/useModelDialogState";
 
 import type { ModelType } from "../../../../services/refact";
@@ -145,18 +150,18 @@ export const ModelCard: FC<ModelCardProps> = ({
           <Flex gap="2" align="center" wrap="wrap">
             {model.pricingLabel && (
               <Tooltip content="Price per 1M tokens (prompt/output)">
-                <Text as="span" size="1" color="gray">
-                  💰 {model.pricingLabel}
-                </Text>
+                <ModelDetailIcon icon={<PricingIcon />}>
+                  {model.pricingLabel}
+                </ModelDetailIcon>
               </Tooltip>
             )}
             {model.nCtxLabel && (
               <Tooltip
                 content={`Context window: ${model.nCtx?.toLocaleString()} tokens`}
               >
-                <Text as="span" size="1" color="gray">
-                  📏 {model.nCtxLabel}
-                </Text>
+                <ModelDetailIcon icon={<ContextWindowIcon />}>
+                  {model.nCtxLabel}
+                </ModelDetailIcon>
               </Tooltip>
             )}
             {model.capabilities && (

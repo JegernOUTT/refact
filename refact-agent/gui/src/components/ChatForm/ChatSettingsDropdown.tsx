@@ -16,7 +16,7 @@ import {
   Switch,
   Callout,
 } from "@radix-ui/themes";
-import { ChevronDownIcon } from "@radix-ui/react-icons";
+import { ChatBubbleIcon, ChevronDownIcon } from "@radix-ui/react-icons";
 import { useAppSelector, useAppDispatch, useCapsForToolUse } from "../../hooks";
 import { useGetCapsQuery, CapCost } from "../../services/refact/caps";
 import {
@@ -286,7 +286,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           <Text size="1" color="gray">
             ·
           </Text>
-          <Text size="1">🧠</Text>
+          <Text size="1">
+            <ChatBubbleIcon />
+          </Text>
         </>
       )}
       <ChevronDownIcon className={styles.chevron} />
@@ -470,7 +472,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           <div className={styles.section}>
             <Flex align="center" justify="between" gap="3">
               <Flex align="center" gap="1">
-                <Text size="1">🧠</Text>
+                <Text size="1">
+                  <ChatBubbleIcon />
+                </Text>
                 <Text size="1" weight="medium">
                   Reasoning
                 </Text>

@@ -40,6 +40,7 @@ import { ErrorCallout } from "../Callout";
 import { isRTKResponseErrorWithDetailMessage } from "../../utils";
 import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import classNames from "classnames";
+import { PlusIcon, ResetIcon } from "@radix-ui/react-icons";
 
 export const TextDocTool: React.FC<{
   toolCall: RawTextDocTool;
@@ -188,7 +189,10 @@ const TextDocHeader = forwardRef<HTMLDivElement, TextDocHeaderProps>(
             // title={`Apply`}
             className={classNames(styles.apply_button)}
           >
-            ➕ Diff
+            <Flex as="span" align="center" gap="1">
+              <PlusIcon />
+              Diff
+            </Flex>
           </Button>
           {replaceContent && (
             <Button
@@ -198,7 +202,10 @@ const TextDocHeader = forwardRef<HTMLDivElement, TextDocHeaderProps>(
               disabled={dryRunResult.isLoading || !canPaste}
               // title="Replace the current selection in the ide."
             >
-              ➕ Replace Selection
+              <Flex as="span" align="center" gap="1">
+                <PlusIcon />
+                Replace Selection
+              </Flex>
             </Button>
           )}
         </Flex>
@@ -456,7 +463,7 @@ const UndoTextDoc: React.FC<{
       <TextDocHeader toolCall={toolCall} ref={ref} />
       <Box px="2" py="1">
         <span style={{ fontSize: "12px" }}>
-          ↩️ Undo {steps} step{steps > 1 ? "s" : ""}
+          <ResetIcon /> Undo {steps} step{steps > 1 ? "s" : ""}
         </span>
       </Box>
     </Box>

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Button, Dialog, Flex, TextField } from "@radix-ui/themes";
+import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 import type { KnowledgeMemoRecord } from "../../services/refact/types";
 import {
   useUpdateMemoryMutation,
@@ -194,7 +195,8 @@ export function MemoryDetailsEditor({
           <div className={styles.readOnlyValue}>
             {memory.file_path ?? (
               <span className={styles.warning}>
-                ⚠️ This memory has no file path and cannot be edited
+                <ExclamationTriangleIcon /> This memory has no file path and
+                cannot be edited
               </span>
             )}
           </div>

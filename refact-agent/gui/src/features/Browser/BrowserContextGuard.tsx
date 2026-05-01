@@ -11,6 +11,7 @@ import {
   sendBrowserContextDecision,
 } from "../../services/refact/chatCommands";
 import { formatKB, estimateSize } from "./BrowserContextGuard.utils";
+import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 import styles from "./BrowserContextGuard.module.css";
 
 type BrowserContextGuardProps = {
@@ -157,7 +158,9 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
     <Card className={styles.guardCard}>
       <Flex direction="column" gap="3">
         <Flex align="baseline" gap="1" className={styles.heading}>
-          <Text as="span">⚠️</Text>
+          <Text as="span" color="amber">
+            <ExclamationTriangleIcon />
+          </Text>
           <Text>Browser context is large ({formatKB(info.total_bytes)})</Text>
         </Flex>
 

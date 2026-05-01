@@ -20,6 +20,16 @@ import {
 import { Pencil1Icon, TrashIcon } from "@radix-ui/react-icons";
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 
+import {
+  ContextWindowIcon,
+  MaxOutputIcon,
+  ModelDetailIcon,
+  PricingIcon,
+  ReasoningIcon,
+  ToolsIcon,
+  VisionIcon,
+} from "./components/CapabilityIcons";
+
 import type { AvailableModel } from "../../../../services/refact";
 import {
   useToggleModelMutation,
@@ -292,31 +302,25 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
             <Tooltip
               content={`Context window: ${model.n_ctx.toLocaleString()} tokens`}
             >
-              <Text as="span" size="1" color="gray">
-                📏 {formatContextSize(model.n_ctx)}
-              </Text>
+              <ModelDetailIcon icon={<ContextWindowIcon />}>
+                {formatContextSize(model.n_ctx)}
+              </ModelDetailIcon>
             </Tooltip>
             {model.supports_tools && (
               <Tooltip content="Supports tool/function calling">
-                <Text as="span" size="1" color="gray">
-                  🔧
-                </Text>
+                <ModelDetailIcon icon={<ToolsIcon />} />
               </Tooltip>
             )}
             {model.supports_multimodality && (
               <Tooltip content="Supports images/vision">
-                <Text as="span" size="1" color="gray">
-                  👁️
-                </Text>
+                <ModelDetailIcon icon={<VisionIcon />} />
               </Tooltip>
             )}
             {(!!model.reasoning_effort_options?.length ||
               !!model.supports_thinking_budget ||
               !!model.supports_adaptive_thinking_budget) && (
               <Tooltip content="Supports reasoning">
-                <Text as="span" size="1" color="gray">
-                  🧠
-                </Text>
+                <ModelDetailIcon icon={<ReasoningIcon />} tone="accent" />
               </Tooltip>
             )}
             {typeof model.max_output_tokens === "number" &&
@@ -324,17 +328,17 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                 <Tooltip
                   content={`Max output tokens: ${model.max_output_tokens.toLocaleString()}`}
                 >
-                  <Text as="span" size="1" color="gray">
-                    ✂️ {formatContextSize(model.max_output_tokens)} out
-                  </Text>
+                  <ModelDetailIcon icon={<MaxOutputIcon />}>
+                    {formatContextSize(model.max_output_tokens)} out
+                  </ModelDetailIcon>
                 </Tooltip>
               )}
             {model.pricing && (
               <Tooltip content="Pricing per 1M tokens (input/output)">
-                <Text as="span" size="1" color="gray">
-                  💲 ${model.pricing.prompt.toFixed(2)}/$
+                <ModelDetailIcon icon={<PricingIcon />}>
+                  ${model.pricing.prompt.toFixed(2)}/$
                   {model.pricing.generated.toFixed(2)}
-                </Text>
+                </ModelDetailIcon>
               </Tooltip>
             )}
           </Flex>

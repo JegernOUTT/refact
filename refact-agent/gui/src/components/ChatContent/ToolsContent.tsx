@@ -38,6 +38,7 @@ import { useCollapsibleStore } from "./useStoredOpen";
 import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import { Markdown } from "../Markdown";
 import classNames from "classnames";
+import { FileIcon, GearIcon, RowsIcon } from "@radix-ui/react-icons";
 import { AnimatedText } from "../Text";
 import {
   ReadTool,
@@ -1225,9 +1226,9 @@ type ToolUsageSummaryProps = {
   waiting: boolean;
 };
 
-function getFileIcon(path: string): string {
-  if (path.endsWith("/") || !path.includes(".")) return "📂";
-  return "📄";
+function getFileIcon(path: string): React.ReactNode {
+  if (path.endsWith("/") || !path.includes(".")) return <RowsIcon />;
+  return <FileIcon />;
 }
 
 function truncatePath(path: string, maxLen = 50): string {
@@ -1266,7 +1267,7 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
             style={{ cursor: "pointer" }}
           >
             <Flex gap="2" align="center" justify="center">
-              {waiting ? <Spinner /> : "🔨"}
+              {waiting ? <Spinner /> : <GearIcon />}
               {toolUsageAmount.map(({ functionName, amountOfCalls }, index) => (
                 <span key={functionName}>
                   <ToolUsageDisplay
@@ -1284,7 +1285,7 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
               </Text>
             )}
             {shownAttachedFiles?.map((file, index) => (
-              <Text weight="light" size="1" key={index} ml="4">
+              <Text weight="light" size="1" key={index} ml="4" as="div">
                 {getFileIcon(file)} {truncatePath(file)}
               </Text>
             ))}

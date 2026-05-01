@@ -4,6 +4,7 @@ import cytoscape from "cytoscape";
 import type Cytoscape from "cytoscape";
 import fcose from "cytoscape-fcose";
 import { Flex, Text } from "@radix-ui/themes";
+import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import type {
   KnowledgeGraphNode,
   KnowledgeGraphEdge,
@@ -295,7 +296,9 @@ export function KnowledgeGraphView({
   if (filteredNodes.length === 0) {
     return (
       <div className={styles.emptyState}>
-        <div className={styles.emptyStateIcon}>🔍</div>
+        <div className={styles.emptyStateIcon}>
+          <MagnifyingGlassIcon />
+        </div>
         <div className={styles.emptyStateText}>
           <p>No linked memories</p>
         </div>

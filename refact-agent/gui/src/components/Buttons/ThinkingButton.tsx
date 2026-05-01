@@ -3,6 +3,14 @@ import { useThinking } from "../../hooks/useThinking";
 import { useAppSelector } from "../../hooks";
 import { selectThreadBoostReasoning } from "../../features/Chat";
 import { Button, Flex, HoverCard, Skeleton, Text } from "@radix-ui/themes";
+import { MagicWandIcon } from "@radix-ui/react-icons";
+
+const ThinkButtonContent: React.FC = () => (
+  <Flex as="span" align="center" gap="1">
+    <MagicWandIcon />
+    Think
+  </Flex>
+);
 
 export const ThinkingButton: React.FC = () => {
   const isBoostReasoningEnabled = useAppSelector(selectThreadBoostReasoning);
@@ -16,7 +24,9 @@ export const ThinkingButton: React.FC = () => {
   if (!areCapsInitialized) {
     return (
       <Skeleton>
-        <Button size="1">💡 Think</Button>
+        <Button size="1">
+          <ThinkButtonContent />
+        </Button>
       </Skeleton>
     );
   }
@@ -37,7 +47,7 @@ export const ThinkingButton: React.FC = () => {
             variant={isBoostReasoningEnabled ? "solid" : "outline"}
             disabled={shouldBeDisabled}
           >
-            💡 Think
+            <ThinkButtonContent />
           </Button>
         </HoverCard.Trigger>
         <HoverCard.Content

@@ -8,6 +8,13 @@ import {
   Spinner,
   Text,
 } from "@radix-ui/themes";
+import {
+  FileTextIcon,
+  GearIcon,
+  LightningBoltIcon,
+  ReaderIcon,
+  RowsIcon,
+} from "@radix-ui/react-icons";
 import { useAppSelector } from "../../../hooks";
 import { selectLspPort } from "../../../features/Config/configSlice";
 import {
@@ -24,6 +31,7 @@ import { toPascalCase } from "../../../utils/toPascalCase";
 import styles from "./MCPServerView.module.css";
 
 type CollapsibleSectionProps = {
+  icon?: React.ReactNode;
   title: string;
   count?: number;
   defaultExpanded?: boolean;
@@ -31,6 +39,7 @@ type CollapsibleSectionProps = {
 };
 
 const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
+  icon,
   title,
   count,
   defaultExpanded = false,
@@ -47,6 +56,7 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
         aria-expanded={expanded}
       >
         <Flex align="center" gap="2">
+          {icon}
           <Text size="2" weight="medium">
             {title}
           </Text>
@@ -146,7 +156,11 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
 
       <MCPOAuth configPath={configPath} />
 
-      <CollapsibleSection title="⚡ Connection" defaultExpanded>
+      <CollapsibleSection
+        icon={<LightningBoltIcon />}
+        title="Connection"
+        defaultExpanded
+      >
         <MCPConnectionStatus
           status={data.status}
           onReconnect={handleReconnect}
@@ -157,7 +171,8 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
       <Separator size="4" />
 
       <CollapsibleSection
-        title="🔧 Tools"
+        icon={<GearIcon />}
+        title="Tools"
         count={data.tools.length}
         defaultExpanded
       >
@@ -168,7 +183,8 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
         <>
           <Separator size="4" />
           <CollapsibleSection
-            title="📁 Resources"
+            icon={<RowsIcon />}
+            title="Resources"
             count={data.resources.length}
           >
             <MCPResourcesList resources={data.resources} />
@@ -179,7 +195,11 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
       {data.prompts.length > 0 && (
         <>
           <Separator size="4" />
-          <CollapsibleSection title="📝 Prompts" count={data.prompts.length}>
+          <CollapsibleSection
+            icon={<FileTextIcon />}
+            title="Prompts"
+            count={data.prompts.length}
+          >
             <MCPPromptsList prompts={data.prompts} />
           </CollapsibleSection>
         </>
@@ -187,7 +207,7 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
 
       <Separator size="4" />
 
-      <CollapsibleSection title="📋 Logs">
+      <CollapsibleSection icon={<ReaderIcon />} title="Logs">
         <MCPLogs
           integrationPath={configPath}
           integrationName={toPascalCase(integrName)}

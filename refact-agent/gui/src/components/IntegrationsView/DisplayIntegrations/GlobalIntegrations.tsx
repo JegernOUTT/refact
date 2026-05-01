@@ -1,5 +1,6 @@
 import { Flex, Heading, Text } from "@radix-ui/themes";
 import { FC } from "react";
+import { GearIcon } from "@radix-ui/react-icons";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
@@ -28,7 +29,7 @@ export const GlobalIntegrations: FC<GlobalIntegrationsProps> = ({
       width="100%"
     >
       <Heading as="h4" size="3" style={{ width: "100%" }}>
-        ⚙️ Globally configured {globalIntegrations?.length ?? 0}{" "}
+        <GearIcon /> Globally configured {globalIntegrations?.length ?? 0}{" "}
         {(globalIntegrations?.length ?? 0) !== 1
           ? "integrations"
           : "integration"}

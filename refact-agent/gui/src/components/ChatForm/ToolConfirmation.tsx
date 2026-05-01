@@ -16,6 +16,7 @@ import {
   setAutoApproveEditingTools,
 } from "../../features/Chat";
 import { PATCH_LIKE_FUNCTIONS } from "./constants";
+import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 
 type ToolConfirmationProps = {
   pauseReasons: ToolConfirmationPauseReason[];
@@ -251,7 +252,9 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
             gap="1"
             className={styles.ToolConfirmationHeading}
           >
-            <Text as="span">⚠️</Text>
+            <Text as="span" color="amber">
+              <ExclamationTriangleIcon />
+            </Text>
             <Text>Model {allConfirmation ? "wants" : "tried"} to run:</Text>
           </Flex>
           {resolvedReasons.map((r) => (
@@ -341,7 +344,9 @@ const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
           gap="1"
           className={styles.ToolConfirmationHeading}
         >
-          <Text as="span">⚠️</Text>
+          <Text as="span" color="amber">
+            <ExclamationTriangleIcon />
+          </Text>
           <Text>Prompt cache may be broken</Text>
         </Flex>
 
@@ -432,7 +437,9 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
             gap="1"
             className={styles.ToolConfirmationHeading}
           >
-            <Text as="span">⚠️</Text>
+            <Text as="span" color="amber">
+              <ExclamationTriangleIcon />
+            </Text>
             <Text>Model wants to apply changes:</Text>
           </Flex>
           <Text className={styles.ToolConfirmationText}>

@@ -41,7 +41,6 @@ export type ParsedLine = {
 
 export type ChipDisplayInfo = {
   type: AtCommandType;
-  icon: string;
   label: string;
   fullPath?: string;
   lineRange?: string;

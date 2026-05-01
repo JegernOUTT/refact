@@ -16,6 +16,7 @@ import { fallbackCopying } from "../../utils/fallbackCopying";
 import { ReasoningContent } from "./ReasoningContent";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
 import { ServerContentBlocks } from "./ServerContentBlocks";
+import { GlobeIcon } from "@radix-ui/react-icons";
 import scrollbarStyles from "../shared/scrollbar.module.css";
 
 type ChatInputProps = {
@@ -134,7 +135,9 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
           <Flex direction="column" gap="2" p="2">
             {serverToolNames.length > 0 && (
               <Flex gap="2" align="center">
-                <Text size="2">☁️</Text>
+                <Text size="2" color="gray">
+                  <GlobeIcon />
+                </Text>
                 <Text size="2" color="gray">
                   {serverToolNames.join(", ")}
                 </Text>
