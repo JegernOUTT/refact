@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
 
-use crate::global_context::GlobalContext;
 use super::actor::BuddyService;
 use super::diagnostics::DiagnosticContext;
 use super::settings::BuddySettings;
@@ -10,8 +9,9 @@ use super::types::{
     BuddyActivity, BuddyFact, BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse,
     BuddyRuntimeEvent, BuddySpeechItem, BuddySuggestion,
 };
+use crate::global_context::GlobalContext;
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct BuddyJobContext {
     pub identity_name: String,
     pub onboarding: BuddyOnboarding,
@@ -54,6 +54,10 @@ impl BuddyJobResult {
             || self.activity.is_some()
             || self.runtime_event.is_some()
     }
+}
+
+fn next_last_result(existing: Option<&str>, result: Option<&str>) -> Option<String> {
+    result.or(existing).map(ToString::to_string)
 }
 
 #[async_trait::async_trait]
@@ -191,10 +195,8 @@ impl BuddyScheduler {
                     .clone();
                 js.last_run = Some(chrono::Utc::now().to_rfc3339());
                 js.run_count += 1;
-                js.last_result = result
-                    .last_result
-                    .clone()
-                    .or_else(|| Some(total_workflow_runs.to_string()));
+                js.last_result =
+                    next_last_result(js.last_result.as_deref(), result.last_result.as_deref());
                 svc.state.job_cooldowns.insert(job.id().to_string(), js);
                 svc.dirty = true;
                 if let Some(suggestion) = result.suggestion {
@@ -214,5 +216,23 @@ impl BuddyScheduler {
                 break; // max 1 visible job per tick
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_last_result_preserves_existing_when_job_returns_none() {
+        assert_eq!(
+            next_last_result(Some("existing-json"), None).as_deref(),
+            Some("existing-json")
+        );
+        assert_eq!(
+            next_last_result(Some("existing-json"), Some("new-json")).as_deref(),
+            Some("new-json")
+        );
+        assert_eq!(next_last_result(None, None), None);
     }
 }

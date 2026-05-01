@@ -106,6 +106,52 @@ pub fn workflow_id_to_mapping(id: &str) -> BuddyWorkflowMapping {
     }
 }
 
+fn buddy_meta<'a>(val: &'a serde_json::Value) -> Option<&'a serde_json::Value> {
+    let meta = val.get("buddy_meta")?;
+    meta.get("is_buddy_chat")?.as_bool()?.then_some(meta)
+}
+
+fn buddy_meta_workflow_id(meta: &serde_json::Value) -> Option<&str> {
+    meta.get("workflow_id").and_then(|v| v.as_str())
+}
+
+fn conversation_kind(val: &serde_json::Value) -> String {
+    buddy_meta(val)
+        .and_then(|meta| meta.get("buddy_chat_kind"))
+        .and_then(|v| v.as_str())
+        .or_else(|| val.get("kind").and_then(|v| v.as_str()))
+        .unwrap_or("chat")
+        .to_string()
+}
+
+fn conversation_badge(val: &serde_json::Value) -> Option<String> {
+    if let Some(meta) = buddy_meta(val) {
+        return buddy_meta_workflow_id(meta)
+            .and_then(|workflow_id| workflow_id_to_mapping(workflow_id).badge)
+            .map(ToString::to_string);
+    }
+
+    val.get("badge")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+fn conversation_icon(val: &serde_json::Value, kind: &str) -> String {
+    if let Some(icon) = buddy_meta(val)
+        .and_then(buddy_meta_workflow_id)
+        .map(|workflow_id| workflow_id_to_mapping(workflow_id).icon.to_string())
+    {
+        return icon;
+    }
+
+    match kind {
+        "setup" => "⚙️".to_string(),
+        "analysis" => "🔍".to_string(),
+        "system" => "🤖".to_string(),
+        _ => "💬".to_string(),
+    }
+}
+
 pub async fn list_all_buddy_conversations(
     project_root: &Path,
     kind_filter: Option<Vec<String>>,
@@ -139,16 +185,7 @@ pub async fn list_all_buddy_conversations(
                 warn!("buddy: conversation file missing chat_id: {:?}", path);
                 continue;
             }
-            let kind = val
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .or_else(|| {
-                    val.get("buddy_meta")
-                        .and_then(|meta| meta.get("buddy_chat_kind"))
-                        .and_then(|v| v.as_str())
-                })
-                .unwrap_or("chat")
-                .to_string();
+            let kind = conversation_kind(&val);
             let title = val
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -169,28 +206,8 @@ pub async fn list_all_buddy_conversations(
                 .and_then(|v| v.as_array())
                 .map(|a| a.len() as u32)
                 .unwrap_or(0);
-            let badge = val
-                .get("badge")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    val.get("buddy_meta")
-                        .and_then(|meta| meta.get("workflow_id"))
-                        .and_then(|workflow_id| workflow_id.as_str())
-                        .and_then(|workflow_id| workflow_id_to_mapping(workflow_id).badge)
-                        .map(|s| s.to_string())
-                });
-            let icon = match kind.as_str() {
-                "setup" => "⚙️".to_string(),
-                "analysis" => "🔍".to_string(),
-                "system" => val
-                    .get("buddy_meta")
-                    .and_then(|meta| meta.get("workflow_id"))
-                    .and_then(|workflow_id| workflow_id.as_str())
-                    .map(|workflow_id| workflow_id_to_mapping(workflow_id).icon.to_string())
-                    .unwrap_or_else(|| "🤖".to_string()),
-                _ => "💬".to_string(),
-            };
+            let badge = conversation_badge(&val);
+            let icon = conversation_icon(&val, &kind);
             entries.push(BuddyConversationEntry {
                 id,
                 kind,
@@ -306,5 +323,38 @@ mod tests {
         assert_eq!(mapping.kind, "workflow");
         assert_eq!(mapping.icon, "🔄");
         assert_eq!(mapping.badge, None);
+    }
+
+    #[tokio::test]
+    async fn buddy_meta_overrides_top_level_chat_kind_for_saved_conversations() {
+        let dir = tempfile::tempdir().unwrap();
+        let conv_dir = dir.path().join(".refact/buddy/chats/conversations");
+        tokio::fs::create_dir_all(&conv_dir).await.unwrap();
+        tokio::fs::write(
+            conv_dir.join("chat-a.json"),
+            serde_json::json!({
+                "chat_id": "chat-a",
+                "kind": "chat",
+                "title": "Security report",
+                "created_at": "2026-01-01T00:00:00Z",
+                "last_message_at": "2026-01-01T00:00:01Z",
+                "messages": [{"role": "user", "content": "hi"}],
+                "buddy_meta": {
+                    "is_buddy_chat": true,
+                    "buddy_chat_kind": "system",
+                    "workflow_id": "buddy_security_whisperer"
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let entries = list_all_buddy_conversations(dir.path(), None).await;
+        let entry = entries.iter().find(|entry| entry.id == "chat-a").unwrap();
+
+        assert_eq!(entry.kind, "system");
+        assert_eq!(entry.icon, "🛡️");
+        assert_eq!(entry.badge.as_deref(), Some("Security"));
     }
 }

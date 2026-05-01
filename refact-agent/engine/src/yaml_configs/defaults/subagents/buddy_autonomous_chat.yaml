@@ -7,7 +7,7 @@ has_code: false
 
 subchat:
   context_mode: bare
-  stateful: true
+  stateful: false
   max_steps: 1
   model_type: buddy
   n_ctx: 16000
@@ -22,6 +22,11 @@ messages:
     Do not invent files, commands, errors, dependencies, risks, or user preferences.
     Do not reveal secrets or raw credentials; if evidence contains sensitive values, refer to them only as redacted secrets.
     If evidence is insufficient, say so and list what would be needed.
+    Use exactly these sections:
+    - Summary
+    - Evidence
+    - Risk or opportunity
+    - Suggested next steps
     Keep the report short, practical, and evidence-only.
   user_template: |
     Workflow: {{workflow_id}}

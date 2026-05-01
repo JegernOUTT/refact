@@ -64,6 +64,7 @@ impl BuddyJob for StatsWatcherJob {
                     controls: vec![],
                     quest: None,
                 }),
+                last_result: Some(runs.to_string()),
                 ..Default::default()
             };
         }
@@ -99,11 +100,15 @@ impl BuddyJob for StatsWatcherJob {
                 return BuddyJobResult {
                     speech: Some(speech),
                     activity: Some(activity),
+                    last_result: Some(runs.to_string()),
                     ..Default::default()
                 };
             }
         }
 
-        BuddyJobResult::default()
+        BuddyJobResult {
+            last_result: Some(runs.to_string()),
+            ..Default::default()
+        }
     }
 }
