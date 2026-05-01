@@ -4,6 +4,7 @@ import { screen, waitFor, render } from "../../utils/test-utils";
 import { ChatForm } from "../../components/ChatForm/ChatForm";
 import type { Chat } from "../Chat/Thread/types";
 import type {
+  WorktreeDiffResponse,
   WorktreeListResponse,
   WorktreeMeta,
   WorktreeRecordView,
@@ -90,6 +91,44 @@ function worktreesList(
     HttpResponse.json(
       makeWorktreeList(records, sourceCurrentBranch, sourceBranches),
     ),
+  );
+}
+
+function worktreeDiff() {
+  return http.get(
+    "http://127.0.0.1:8001/v1/worktrees/:id/diff",
+    ({ params }) => {
+      const id = String(params.id);
+      const response: WorktreeDiffResponse = {
+        id,
+        branch: null,
+        base_branch: null,
+        base_commit: null,
+        status: {
+          path_exists: true,
+          is_git_worktree: true,
+          dirty: false,
+          staged_count: 0,
+          unstaged_count: 0,
+          untracked_count: 0,
+          branch: null,
+          head_commit: null,
+        },
+        files: [],
+        stats: {
+          committed_files: 0,
+          staged_files: 0,
+          unstaged_files: 0,
+          untracked_files: 0,
+          files_changed: 0,
+          additions: 0,
+          deletions: 0,
+        },
+        patch: "",
+        patch_truncated: false,
+      };
+      return HttpResponse.json(response);
+    },
   );
 }
 
@@ -269,7 +308,7 @@ function renderControl(
 }
 
 beforeEach(() => {
-  server.use(worktreesList([]), chatModes());
+  server.use(worktreesList([]), worktreeDiff(), chatModes());
 });
 
 describe("WorktreeControl", () => {

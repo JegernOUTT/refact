@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Flex, Popover, Text } from "@radix-ui/themes";
 import {
   DEFAULT_MODE,
@@ -30,6 +36,10 @@ import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
 
 const EMPTY_WORKTREE_RECORDS: WorktreeRecordView[] = [];
+
+type AttachWorktreeOptions = {
+  optimistic?: boolean;
+};
 
 const BranchIcon: React.FC = () => (
   <svg
@@ -107,6 +117,10 @@ export const WorktreeControl: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [pendingCreatedWorktreeId, setPendingCreatedWorktreeId] = useState<
+    string | null
+  >(null);
+  const pendingCreatedWorktreeIdRef = useRef<string | null>(null);
   const copyToClipboard = useCopyToClipboard();
   const { openFolderInNewWindow } = useEventsBusForIDE();
   const { data, isLoading } = useListWorktreesQuery(undefined, {
@@ -123,6 +137,10 @@ export const WorktreeControl: React.FC = () => {
     () => records.find((record) => record.meta.id === currentWorktree?.id),
     [currentWorktree?.id, records],
   );
+  const isPendingCreatedWorktree =
+    currentWorktree?.id !== undefined &&
+    (pendingCreatedWorktreeId === currentWorktree.id ||
+      pendingCreatedWorktreeIdRef.current === currentWorktree.id);
   const { data: currentDiff } = useGetWorktreeDiffQuery(
     {
       id: currentWorktree?.id ?? "",
@@ -130,7 +148,7 @@ export const WorktreeControl: React.FC = () => {
       max_patch_bytes: 1,
     },
     {
-      skip: !currentWorktree?.id,
+      skip: !currentWorktree?.id || !currentRecord,
       pollingInterval: 5000,
       refetchOnFocus: true,
       refetchOnReconnect: true,
@@ -173,11 +191,16 @@ export const WorktreeControl: React.FC = () => {
   }, [data?.source_branches, records, sourceBranch]);
 
   const attachWorktree = useCallback(
-    async (worktree: WorktreeMeta | null): Promise<boolean> => {
+    async (
+      worktree: WorktreeMeta | null,
+      { optimistic = true }: AttachWorktreeOptions = {},
+    ): Promise<boolean> => {
       if (!chatId || !lspPort) return false;
       const previousWorktree = currentWorktree;
-      dispatch(setThreadWorktree({ chatId, worktree }));
-      setFeedback(worktree ? "Worktree attached." : "Using main workspace.");
+      if (optimistic) {
+        dispatch(setThreadWorktree({ chatId, worktree }));
+        setFeedback(worktree ? "Worktree attached." : "Using main workspace.");
+      }
       try {
         await updateChatParams(
           chatId,
@@ -185,9 +208,17 @@ export const WorktreeControl: React.FC = () => {
           lspPort,
           apiKey,
         );
+        if (!optimistic) {
+          dispatch(setThreadWorktree({ chatId, worktree }));
+          setFeedback(
+            worktree ? "Worktree attached." : "Using main workspace.",
+          );
+        }
         return true;
       } catch (error) {
-        dispatch(setThreadWorktree({ chatId, worktree: previousWorktree }));
+        if (optimistic) {
+          dispatch(setThreadWorktree({ chatId, worktree: previousWorktree }));
+        }
         setFeedback(`Worktree update failed: ${worktreeErrorText(error)}`);
         return false;
       }
@@ -196,9 +227,29 @@ export const WorktreeControl: React.FC = () => {
   );
 
   useEffect(() => {
-    if (!currentWorktree || !data || currentRecord) return;
+    if (
+      !currentWorktree ||
+      !data ||
+      currentRecord !== undefined ||
+      isPendingCreatedWorktree
+    ) {
+      return;
+    }
     void attachWorktree(null);
-  }, [attachWorktree, currentRecord, currentWorktree, data]);
+  }, [
+    attachWorktree,
+    currentRecord,
+    currentWorktree,
+    data,
+    isPendingCreatedWorktree,
+  ]);
+
+  useEffect(() => {
+    if (currentRecord?.meta.id === pendingCreatedWorktreeId) {
+      pendingCreatedWorktreeIdRef.current = null;
+      setPendingCreatedWorktreeId(null);
+    }
+  }, [currentRecord?.meta.id, pendingCreatedWorktreeId]);
 
   const handleSelect = useCallback(
     (record: WorktreeRecordView) => {
@@ -226,11 +277,17 @@ export const WorktreeControl: React.FC = () => {
       };
       try {
         const response = await createWorktree(request).unwrap();
-        const attached = await attachWorktree(response.worktree.meta);
+        pendingCreatedWorktreeIdRef.current = response.worktree.meta.id;
+        setPendingCreatedWorktreeId(response.worktree.meta.id);
+        const attached = await attachWorktree(response.worktree.meta, {
+          optimistic: false,
+        });
         if (attached) {
           setCreateOpen(false);
           setMenuOpen(false);
         } else {
+          pendingCreatedWorktreeIdRef.current = null;
+          setPendingCreatedWorktreeId(null);
           await deleteWorktree({
             id: response.worktree.meta.id,
             delete_branch: true,
@@ -240,6 +297,8 @@ export const WorktreeControl: React.FC = () => {
           );
         }
       } catch (error) {
+        pendingCreatedWorktreeIdRef.current = null;
+        setPendingCreatedWorktreeId(null);
         setCreateError(worktreeErrorText(error));
       }
     },

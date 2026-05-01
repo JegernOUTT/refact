@@ -286,7 +286,8 @@ describe("Worktree lifecycle GUI", () => {
 
     expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
     expect(screen.getByText("committed · modified")).toBeInTheDocument();
-    expect(screen.getByText(/diff --git/)).toHaveTextContent("+new line");
+    expect(screen.getByText(/diff --git/)).toBeInTheDocument();
+    expect(screen.getByText("+new line")).toBeInTheDocument();
     expect(
       screen.getByText("Patch preview was truncated by the backend."),
     ).toBeInTheDocument();
