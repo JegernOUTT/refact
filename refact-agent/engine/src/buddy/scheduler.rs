@@ -101,6 +101,20 @@ impl BuddyScheduler {
             .push(Box::new(super::jobs::health_watcher::HealthWatcherJob));
         s.jobs
             .push(Box::new(super::jobs::quest_prompt::QuestPromptJob));
+        s.jobs
+            .push(Box::new(super::jobs::autonomous_chats::ErrorDetectiveJob));
+        s.jobs.push(Box::new(
+            super::jobs::autonomous_chats::SecurityWhispererJob,
+        ));
+        s.jobs
+            .push(Box::new(super::jobs::autonomous_chats::SetupCoachJob));
+        s.jobs
+            .push(Box::new(super::jobs::autonomous_chats::DependencyRadarJob));
+        s.jobs
+            .push(Box::new(super::jobs::autonomous_chats::DocsGardenerJob));
+        s.jobs.push(Box::new(
+            super::jobs::autonomous_chats::ArchitectureDriftWatcherJob,
+        ));
         s.jobs.push(Box::new(
             super::jobs::proactive_suggestions::ProactiveSuggestionsJob,
         ));
