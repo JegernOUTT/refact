@@ -104,11 +104,11 @@ impl KimiProvider {
 
 #[async_trait]
 impl ProviderTrait for KimiProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "kimi"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Moonshot / Kimi"
     }
 

@@ -30,11 +30,11 @@ pub struct OpenAIProvider {
 
 #[async_trait]
 impl ProviderTrait for OpenAIProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "openai"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "OpenAI"
     }
 

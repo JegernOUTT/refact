@@ -24,11 +24,11 @@ pub struct OpenAIResponsesProvider {
 
 #[async_trait]
 impl ProviderTrait for OpenAIResponsesProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "openai_responses"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "OpenAI (Responses API)"
     }
 

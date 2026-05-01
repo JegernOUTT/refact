@@ -158,11 +158,11 @@ impl DoubaoProvider {
 
 #[async_trait]
 impl ProviderTrait for DoubaoProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "doubao"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Doubao / Volcengine Ark"
     }
 

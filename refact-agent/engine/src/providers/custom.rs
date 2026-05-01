@@ -33,11 +33,11 @@ pub struct CustomProvider {
 
 #[async_trait]
 impl ProviderTrait for CustomProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "custom"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Custom"
     }
 

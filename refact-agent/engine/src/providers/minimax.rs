@@ -129,11 +129,11 @@ impl MiniMaxProvider {
 
 #[async_trait]
 impl ProviderTrait for MiniMaxProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "minimax"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "MiniMax"
     }
 

@@ -365,11 +365,11 @@ impl ClaudeCodeProvider {
 
 #[async_trait]
 impl ProviderTrait for ClaudeCodeProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "claude_code"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Claude Code"
     }
 

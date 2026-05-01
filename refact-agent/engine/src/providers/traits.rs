@@ -381,9 +381,13 @@ pub fn extra_headers_mapping_to_hash_map(
 
 #[async_trait]
 pub trait ProviderTrait: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
-    fn display_name(&self) -> &'static str;
+    fn display_name(&self) -> &str;
+
+    fn base_provider_name(&self) -> &str {
+        self.name()
+    }
 
     /// Downcast to concrete type. Used for provider-specific operations
     /// that aren't part of the trait interface (e.g., accessing provider-specific fields).
@@ -515,7 +519,7 @@ pub trait ProviderTrait: Send + Sync {
         let mut models_map: HashMap<String, AvailableModel> = HashMap::new();
 
         let regex_opt: Option<Regex> = self.model_filter_regex().and_then(get_cached_regex);
-        let provider_aliases = model_caps_provider_aliases(self.name());
+        let provider_aliases = model_caps_provider_aliases(self.base_provider_name());
         let has_provider_qualified_caps = model_caps
             .keys()
             .any(|key| model_caps_key_has_provider_alias(key, &provider_aliases));

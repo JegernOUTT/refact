@@ -334,11 +334,11 @@ impl OllamaProvider {
 
 #[async_trait]
 impl ProviderTrait for OllamaProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "ollama"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Ollama"
     }
 

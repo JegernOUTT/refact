@@ -124,11 +124,11 @@ impl QwenProvider {
 
 #[async_trait]
 impl ProviderTrait for QwenProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "qwen"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Qwen / Alibaba"
     }
 

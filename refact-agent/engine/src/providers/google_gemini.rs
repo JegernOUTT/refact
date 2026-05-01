@@ -142,11 +142,11 @@ impl GoogleGeminiProvider {
 
 #[async_trait]
 impl ProviderTrait for GoogleGeminiProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "google_gemini"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Google Gemini"
     }
 

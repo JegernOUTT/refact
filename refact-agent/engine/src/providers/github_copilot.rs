@@ -458,11 +458,11 @@ impl GitHubCopilotProvider {
 
 #[async_trait]
 impl ProviderTrait for GitHubCopilotProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "github_copilot"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "GitHub Copilot"
     }
 

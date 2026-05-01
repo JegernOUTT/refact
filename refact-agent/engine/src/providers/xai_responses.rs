@@ -24,11 +24,11 @@ pub struct XAIResponsesProvider {
 
 #[async_trait]
 impl ProviderTrait for XAIResponsesProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "xai_responses"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "xAI (Responses API)"
     }
 

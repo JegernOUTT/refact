@@ -108,11 +108,11 @@ impl ZhipuProvider {
 
 #[async_trait]
 impl ProviderTrait for ZhipuProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "zhipu"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Zhipu / Z.AI / GLM"
     }
 

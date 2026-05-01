@@ -24,11 +24,11 @@ pub struct GroqProvider {
 
 #[async_trait]
 impl ProviderTrait for GroqProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "groq"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "Groq"
     }
 

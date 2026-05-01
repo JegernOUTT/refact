@@ -64,8 +64,8 @@ fn html_escape(s: &str) -> String {
 
 #[derive(Serialize)]
 struct ProviderListItem {
-    name: &'static str,
-    display_name: &'static str,
+    name: String,
+    display_name: String,
     enabled: bool,
     readonly: bool,
     has_credentials: bool,
@@ -104,8 +104,8 @@ pub async fn handle_v1_providers_list(
                 "not_configured"
             };
             providers.push(ProviderListItem {
-                name: provider.name(),
-                display_name: provider.display_name(),
+                name: provider.name().to_string(),
+                display_name: provider.display_name().to_string(),
                 enabled,
                 readonly,
                 has_credentials: has_creds,
@@ -117,8 +117,8 @@ pub async fn handle_v1_providers_list(
                 continue;
             }
             providers.push(ProviderListItem {
-                name: default_provider.name(),
-                display_name: default_provider.display_name(),
+                name: default_provider.name().to_string(),
+                display_name: default_provider.display_name().to_string(),
                 enabled: false,
                 readonly: default_provider.is_readonly(),
                 has_credentials: false,

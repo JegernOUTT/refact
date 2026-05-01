@@ -155,11 +155,11 @@ mod tests {
 
 #[async_trait]
 impl ProviderTrait for VLLMProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "vllm"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "vLLM"
     }
 

@@ -1227,11 +1227,11 @@ impl OpenAICodexProvider {
 
 #[async_trait]
 impl ProviderTrait for OpenAICodexProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "openai_codex"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "OpenAI Codex"
     }
 

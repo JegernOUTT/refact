@@ -552,11 +552,11 @@ impl OpenRouterProvider {
 
 #[async_trait]
 impl ProviderTrait for OpenRouterProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "openrouter"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "OpenRouter"
     }
 

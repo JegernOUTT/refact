@@ -107,11 +107,11 @@ impl LMStudioProvider {
 
 #[async_trait]
 impl ProviderTrait for LMStudioProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "lmstudio"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "LM Studio"
     }
 
