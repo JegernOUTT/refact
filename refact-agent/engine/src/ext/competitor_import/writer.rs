@@ -460,8 +460,8 @@ fn validate_staged_directory_source(
     staging_root: &Path,
     source_dir: &Path,
 ) -> Result<()> {
-    let canonical_scope = canonical_directory_without_symlinks(scope_root)?;
-    let canonical_staging = canonical_directory_without_symlinks(staging_root)?;
+    let canonical_scope = canonical_existing_directory(scope_root)?;
+    let canonical_staging = canonical_existing_directory(staging_root)?;
     if !canonical_staging.starts_with(&canonical_scope) {
         return Err(invalid_path_error(format!(
             "staging root escapes import scope: {}",
@@ -486,30 +486,15 @@ fn validate_staged_directory_source(
     }
 }
 
-fn canonical_directory_without_symlinks(path: &Path) -> Result<PathBuf> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            Component::RootDir => current.push(component.as_os_str()),
-            Component::CurDir => continue,
-            Component::ParentDir => {
-                return Err(invalid_path_error(format!(
-                    "path contains parent component: {}",
-                    path.display()
-                )));
-            }
-            Component::Normal(value) => current.push(value),
-        }
-        let metadata = std::fs::symlink_metadata(&current)?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-            return Err(invalid_path_error(format!(
-                "path component is not a regular directory: {}",
-                current.display()
-            )));
-        }
+fn canonical_existing_directory(path: &Path) -> Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(invalid_path_error(format!(
+            "path is not a directory: {}",
+            path.display()
+        )));
     }
-    std::fs::canonicalize(path)
+    std::fs::canonicalize(path).map(|path| dunce::simplified(&path).to_path_buf())
 }
 
 fn existing_path_is_under_root(path: &Path, root: &Path) -> Result<Option<bool>> {
