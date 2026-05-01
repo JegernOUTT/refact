@@ -11,7 +11,6 @@ import {
   LspChatMode,
   PayloadWithChatAndMessageId,
   PayloadWithChatAndBoolean,
-  PayloadWithChatAndNumber,
 } from "./types";
 import type { ToolConfirmationPauseReason } from "../../../services/refact";
 import { type ChatMessages } from "../../../services/refact/types";
@@ -59,8 +58,6 @@ function buildThreadParamsPatch(
     patch.boost_reasoning = thread.boost_reasoning;
   if ("include_project_info" in thread)
     patch.include_project_info = thread.include_project_info;
-  if ("context_tokens_cap" in thread)
-    patch.context_tokens_cap = thread.context_tokens_cap;
   if ("temperature" in thread) patch.temperature = thread.temperature;
   if ("frequency_penalty" in thread)
     patch.frequency_penalty = thread.frequency_penalty;
@@ -436,10 +433,6 @@ export const setIncreaseMaxTokens = createAction<boolean>(
 
 export const setIncludeProjectInfo = createAction<PayloadWithChatAndBoolean>(
   "chatThread/setIncludeProjectInfo",
-);
-
-export const setContextTokensCap = createAction<PayloadWithChatAndNumber>(
-  "chatThread/setContextTokensCap",
 );
 
 export const setReasoningEffort = createAction<{

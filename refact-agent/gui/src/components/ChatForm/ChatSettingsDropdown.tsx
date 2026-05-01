@@ -16,13 +16,11 @@ import {
   Switch,
   Callout,
 } from "@radix-ui/themes";
-import { ChevronDownIcon, ChevronRightIcon } from "@radix-ui/react-icons";
-import * as Collapsible from "@radix-ui/react-collapsible";
+import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { useAppSelector, useAppDispatch, useCapsForToolUse } from "../../hooks";
 import { useGetCapsQuery, CapCost } from "../../services/refact/caps";
 import {
   selectChatId,
-  selectContextTokensCap,
   selectModel,
   selectMessages,
   selectIsStreaming,
@@ -30,9 +28,7 @@ import {
   selectThreadBoostReasoning,
   selectReasoningEffort,
   selectThinkingBudget,
-  selectTemperature,
   selectMaxTokens,
-  setContextTokensCap,
   setReasoningEffort,
   setThinkingBudget,
   setTemperature,
@@ -45,8 +41,7 @@ import { useThinking } from "../../hooks/useThinking";
 import { formatContextWindow } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import styles from "./ChatSettingsDropdown.module.css";
 
-const CAP_STEPS = [16000, 32000, 64000, 128000, 200000, 256000];
-const MIN_CAP = 16000;
+const MIN_OUTPUT_TOKENS = 1024;
 
 function formatTokens(tokens: number): string {
   if (tokens >= 1000000) {
@@ -76,33 +71,6 @@ function formatPricingDetailed(cost: CapCost): {
   };
 }
 
-function getSliderSteps(maxTokens: number): number[] {
-  const steps = CAP_STEPS.filter((s) => s <= maxTokens);
-  if (!steps.includes(maxTokens)) {
-    steps.push(maxTokens);
-  }
-  return steps.sort((a, b) => a - b);
-}
-
-function valueToSliderPosition(value: number, steps: number[]): number {
-  const idx = steps.findIndex((s) => s >= value);
-  if (idx === -1) return steps.length - 1;
-  if (steps[idx] === value) return idx;
-  if (idx === 0) return 0;
-  const prev = steps[idx - 1];
-  const next = steps[idx];
-  const ratio = (value - prev) / (next - prev);
-  return idx - 1 + ratio;
-}
-
-function sliderPositionToValue(position: number, steps: number[]): number {
-  const idx = Math.floor(position);
-  if (idx >= steps.length - 1) return steps[steps.length - 1];
-  const frac = position - idx;
-  if (frac === 0) return steps[idx];
-  return Math.round(steps[idx] + frac * (steps[idx + 1] - steps[idx]));
-}
-
 type ChatSettingsDropdownProps = {
   disabled?: boolean;
 };
@@ -114,18 +82,12 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   const chatId = useAppSelector(selectChatId);
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
-  const contextCap = useAppSelector(selectContextTokensCap);
   const threadModel = useAppSelector(selectModel);
   const messages = useAppSelector(selectMessages);
   const isBoostReasoningEnabled = useAppSelector(selectThreadBoostReasoning);
-  const threadTemperature = useAppSelector(selectTemperature);
   const threadMaxTokens = useAppSelector(selectMaxTokens);
   const threadReasoningEffort = useAppSelector(selectReasoningEffort);
   const threadThinkingBudget = useAppSelector(selectThinkingBudget);
-  const hasAnyReasoningConfigured =
-    (isBoostReasoningEnabled ?? false) ||
-    threadReasoningEffort != null ||
-    threadThinkingBudget != null;
 
   const caps = useCapsForToolUse();
   const capsQuery = useGetCapsQuery(undefined);
@@ -142,7 +104,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   // Model data
   const currentModelName = caps.currentModel || "Select model";
   const [isOpen, setIsOpen] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const selectedModelRef = useRef<HTMLButtonElement>(null);
   const modelListRef = useRef<HTMLDivElement>(null);
 
@@ -185,7 +146,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     const modelData = data.chat_models[caps.currentModel] as
       | {
           n_ctx: number;
-          default_temperature?: number;
           default_max_tokens?: number;
           max_output_tokens?: number;
           reasoning_effort_options?: string[] | null;
@@ -198,7 +158,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
       data.metadata?.pricing?.[caps.currentModel.replace(/^refact\//, "")];
     return {
       nCtx: modelData.n_ctx,
-      defaultTemperature: modelData.default_temperature,
       defaultMaxTokens: modelData.default_max_tokens,
       maxOutputTokens: modelData.max_output_tokens,
       reasoningEffortOptions: modelData.reasoning_effort_options,
@@ -217,39 +176,32 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     return chatModels[threadModel].n_ctx;
   }, [capsQuery.data, threadModel]);
 
-  const sliderSteps = useMemo(() => getSliderSteps(maxTokens), [maxTokens]);
-
-  const effectiveCap = useMemo(() => {
-    if (!contextCap || contextCap > maxTokens) return maxTokens;
-    if (contextCap < MIN_CAP) return MIN_CAP;
-    return contextCap;
-  }, [contextCap, maxTokens]);
-
-  const [localSliderValue, setLocalSliderValue] = useState<number | null>(null);
-  const displayCap = localSliderValue ?? effectiveCap;
-
-  const [localTemperature, setLocalTemperature] = useState<number | null>(null);
   const [localThinkingBudget, setLocalThinkingBudget] = useState<number | null>(
     null,
   );
   const [localMaxTokens, setLocalMaxTokens] = useState<number | null>(null);
-  const displayTemperature = localTemperature ?? threadTemperature;
   const displayThinkingBudget = localThinkingBudget ?? threadThinkingBudget;
   const displayMaxTokens = localMaxTokens ?? threadMaxTokens;
+  const maxOutputTokens = Math.max(
+    selectedModelDetail?.maxOutputTokens ?? 16384,
+    MIN_OUTPUT_TOKENS,
+  );
+  const defaultMaxTokens = selectedModelDetail?.defaultMaxTokens ?? 4096;
+  const effectiveMaxTokens = displayMaxTokens ?? defaultMaxTokens;
+  const clampedMaxTokens = Math.min(
+    Math.max(effectiveMaxTokens, MIN_OUTPUT_TOKENS),
+    maxOutputTokens,
+  );
 
   const isStartedChat = messages.length > 0;
 
   useEffect(() => {
-    setLocalSliderValue(null);
-    setLocalTemperature(null);
     setLocalThinkingBudget(null);
     setLocalMaxTokens(null);
   }, [chatId]);
 
   useEffect(() => {
     if (!isOpen) {
-      setLocalSliderValue(null);
-      setLocalTemperature(null);
       setLocalThinkingBudget(null);
       setLocalMaxTokens(null);
     }
@@ -265,23 +217,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
       caps.setCapModel(modelValue);
     },
     [caps, dispatch],
-  );
-
-  const handleSliderChange = useCallback(
-    (values: number[]) => {
-      const newValue = sliderPositionToValue(values[0], sliderSteps);
-      setLocalSliderValue(newValue);
-    },
-    [sliderSteps],
-  );
-
-  const handleSliderCommit = useCallback(
-    (values: number[]) => {
-      const newValue = sliderPositionToValue(values[0], sliderSteps);
-      dispatch(setContextTokensCap({ chatId, value: newValue }));
-      setLocalSliderValue(null);
-    },
-    [dispatch, chatId, sliderSteps],
   );
 
   const noop = useCallback(() => {
@@ -313,29 +248,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     [handleReasoningChange, noop, dispatch, chatId],
   );
 
-  const handleTemperatureChange = useCallback((values: number[]) => {
-    setLocalTemperature(values[0]);
-  }, []);
-
-  const handleTemperatureCommit = useCallback(
-    (values: number[]) => {
-      if (hasAnyReasoningConfigured) {
-        // UI should be disabled already, but keep commit a no-op defensively.
-        setLocalTemperature(null);
-        return;
-      }
-      dispatch(setTemperature({ chatId, value: values[0] }));
-      setLocalTemperature(null);
-    },
-    [dispatch, chatId, hasAnyReasoningConfigured],
-  );
-
-  const handleTemperatureReset = useCallback(() => {
-    if (hasAnyReasoningConfigured) return;
-    dispatch(setTemperature({ chatId, value: null }));
-    setLocalTemperature(null);
-  }, [dispatch, chatId, hasAnyReasoningConfigured]);
-
   const handleMaxTokensReset = useCallback(() => {
     dispatch(setMaxTokens({ chatId, value: null }));
     setLocalMaxTokens(null);
@@ -365,7 +277,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
             ·
           </Text>
           <Text size="1" color="gray">
-            {formatTokens(effectiveCap)}
+            {formatTokens(maxTokens)}
           </Text>
         </>
       )}
@@ -396,9 +308,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
       </Popover.Trigger>
 
       <Popover.Content
-        className={`${styles.content} ${
-          advancedOpen ? styles.contentAdvancedOpen : ""
-        }`}
+        className={styles.content}
         side="top"
         align="start"
         sideOffset={8}
@@ -500,8 +410,8 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
 
         <Separator size="4" />
 
-        {/* Context Cap Section with Slider */}
-        {sliderSteps.length > 1 && (
+        {/* Max Tokens Section with Slider */}
+        {selectedModelDetail && (
           <>
             <div className={styles.section}>
               <Flex justify="between" align="center" mb="2">
@@ -511,34 +421,47 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                   weight="medium"
                   className={styles.sectionHeader}
                 >
-                  Context window
+                  Max tokens
                 </Text>
                 <Text size="1" weight="medium">
-                  {formatTokens(displayCap)}
-                  {displayCap === maxTokens && " (max)"}
+                  {displayMaxTokens ?? `${defaultMaxTokens} (default)`}
                 </Text>
               </Flex>
               <Flex align="center" gap="2" className={styles.sliderContainer}>
                 <Text size="1" color="gray">
-                  {formatTokens(MIN_CAP)}
+                  1K
                 </Text>
                 <Slider
                   size="1"
-                  min={0}
-                  max={sliderSteps.length - 1}
-                  step={0.01}
-                  value={[valueToSliderPosition(displayCap, sliderSteps)]}
-                  onValueChange={handleSliderChange}
-                  onValueCommit={handleSliderCommit}
+                  min={MIN_OUTPUT_TOKENS}
+                  max={maxOutputTokens}
+                  step={MIN_OUTPUT_TOKENS}
+                  value={[clampedMaxTokens]}
+                  onValueChange={(values) => setLocalMaxTokens(values[0])}
+                  onValueCommit={(values) => {
+                    dispatch(setMaxTokens({ chatId, value: values[0] }));
+                    setLocalMaxTokens(null);
+                  }}
                   disabled={isInteractionDisabled}
                   className={styles.slider}
                 />
                 <Text size="1" color="gray">
-                  {formatTokens(maxTokens)}
+                  {formatTokens(maxOutputTokens)}
                 </Text>
+                {threadMaxTokens != null && (
+                  <button
+                    type="button"
+                    className={styles.resetButton}
+                    onClick={handleMaxTokensReset}
+                    disabled={isInteractionDisabled}
+                    aria-label="Reset max tokens"
+                  >
+                    ✕
+                  </button>
+                )}
               </Flex>
             </div>
-            <Separator size="4" />
+            {supportsBoostReasoning && <Separator size="4" />}
           </>
         )}
 
@@ -648,132 +571,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
             )}
           </div>
         )}
-
-        <Separator size="4" />
-
-        {/* Advanced Settings Section */}
-        <Collapsible.Root open={advancedOpen} onOpenChange={setAdvancedOpen}>
-          <Collapsible.Trigger asChild>
-            <button
-              className={styles.advancedTrigger}
-              type="button"
-              disabled={isInteractionDisabled}
-            >
-              <Flex align="center" gap="1">
-                <ChevronRightIcon
-                  className={`${styles.advancedChevron} ${
-                    advancedOpen ? styles.advancedChevronOpen : ""
-                  }`}
-                />
-                <Text size="1" weight="medium">
-                  Advanced settings
-                </Text>
-              </Flex>
-            </button>
-          </Collapsible.Trigger>
-          <Collapsible.Content>
-            <div className={styles.advancedContent}>
-              {/* Temperature */}
-              <div className={styles.advancedRow}>
-                <Flex justify="between" align="center" mb="1">
-                  <Text size="1" color="gray">
-                    Temperature
-                  </Text>
-                  <Flex align="center" gap="2">
-                    <Text size="1" weight="medium">
-                      {hasAnyReasoningConfigured
-                        ? "None"
-                        : displayTemperature?.toFixed(1) ??
-                          (selectedModelDetail?.defaultTemperature?.toFixed(
-                            1,
-                          ) ?? "0.7") + " (default)"}
-                    </Text>
-                    {threadTemperature != null && (
-                      <button
-                        type="button"
-                        className={styles.resetButton}
-                        onClick={handleTemperatureReset}
-                        disabled={
-                          isInteractionDisabled || hasAnyReasoningConfigured
-                        }
-                      >
-                        ✕
-                      </button>
-                    )}
-                  </Flex>
-                </Flex>
-                <Slider
-                  size="1"
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  value={[
-                    displayTemperature ??
-                      selectedModelDetail?.defaultTemperature ??
-                      0.7,
-                  ]}
-                  onValueChange={handleTemperatureChange}
-                  onValueCommit={handleTemperatureCommit}
-                  disabled={isInteractionDisabled || hasAnyReasoningConfigured}
-                />
-              </div>
-
-              {/* Max Tokens */}
-              <div className={styles.advancedRow}>
-                <Flex justify="between" align="center" mb="1">
-                  <Text size="1" color="gray">
-                    Max tokens
-                  </Text>
-                  <Flex align="center" gap="2">
-                    <Text size="1" weight="medium">
-                      {displayMaxTokens ??
-                        (selectedModelDetail?.defaultMaxTokens
-                          ? `${selectedModelDetail.defaultMaxTokens} (default)`
-                          : "4096 (default)")}
-                    </Text>
-                    {threadMaxTokens != null && (
-                      <button
-                        type="button"
-                        className={styles.resetButton}
-                        onClick={handleMaxTokensReset}
-                        disabled={isInteractionDisabled}
-                      >
-                        ✕
-                      </button>
-                    )}
-                  </Flex>
-                </Flex>
-                <Flex align="center" gap="2">
-                  <Text size="1" color="gray">
-                    1K
-                  </Text>
-                  <Slider
-                    size="1"
-                    min={1024}
-                    max={selectedModelDetail?.maxOutputTokens ?? 16384}
-                    step={1024}
-                    value={[
-                      displayMaxTokens ??
-                        selectedModelDetail?.defaultMaxTokens ??
-                        4096,
-                    ]}
-                    onValueChange={(values) => setLocalMaxTokens(values[0])}
-                    onValueCommit={(values) => {
-                      dispatch(setMaxTokens({ chatId, value: values[0] }));
-                      setLocalMaxTokens(null);
-                    }}
-                    disabled={isInteractionDisabled}
-                  />
-                  <Text size="1" color="gray">
-                    {formatTokens(
-                      selectedModelDetail?.maxOutputTokens ?? 16384,
-                    )}
-                  </Text>
-                </Flex>
-              </div>
-            </div>
-          </Collapsible.Content>
-        </Collapsible.Root>
       </Popover.Content>
     </Popover.Root>
   );

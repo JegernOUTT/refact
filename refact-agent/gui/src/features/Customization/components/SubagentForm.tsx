@@ -26,7 +26,6 @@ import {
   safeNumber,
   safeMessageArray,
   parseIntSafe,
-  parseFloatSafe,
 } from "./configUtils";
 import styles from "./editors.module.css";
 
@@ -426,20 +425,6 @@ const SubchatTab: React.FC<{
       </Flex>
 
       <Flex gap="4">
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            Temperature
-          </Text>
-          <TextField.Root
-            type="number"
-            step="0.1"
-            value={safeNumber(subchat.temperature)?.toString() ?? ""}
-            onChange={(e) =>
-              patch(["subchat", "temperature"], parseFloatSafe(e.target.value))
-            }
-            placeholder="Default"
-          />
-        </Flex>
         <Flex direction="column" gap="2" style={{ flex: 1 }}>
           <Text size="2" weight="medium">
             Reasoning Effort

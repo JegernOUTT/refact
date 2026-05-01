@@ -66,8 +66,6 @@ const ModelTypeSection: React.FC<ModelTypeSectionProps> = ({
 
   const samplingValues: SamplingValues = useMemo(
     () => ({
-      temperature:
-        typeof config.temperature === "number" ? config.temperature : undefined,
       max_new_tokens:
         typeof config.max_new_tokens === "number"
           ? config.max_new_tokens

@@ -45,7 +45,6 @@ import {
   setIncreaseMaxTokens,
   setAreFollowUpsEnabled,
   setIncludeProjectInfo,
-  setContextTokensCap,
   setReasoningEffort,
   setThinkingBudget,
   setTemperature,
@@ -333,7 +332,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       lastParams.boost_reasoning ?? currentRt?.thread.boost_reasoning ?? false;
     newRuntime.thread.reasoning_effort = lastParams.reasoning_effort;
     newRuntime.thread.thinking_budget = lastParams.thinking_budget;
-    newRuntime.thread.temperature = lastParams.temperature;
     newRuntime.thread.max_tokens = lastParams.max_tokens;
     newRuntime.thread.increase_max_tokens =
       lastParams.increase_max_tokens ??
@@ -343,8 +341,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       lastParams.include_project_info ??
       currentRt?.thread.include_project_info ??
       true;
-    newRuntime.thread.context_tokens_cap =
-      lastParams.context_tokens_cap ?? currentRt?.thread.context_tokens_cap;
 
     if (action.payload?.title) {
       newRuntime.thread.title = action.payload.title;
@@ -414,7 +410,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       lastParams.boost_reasoning ?? currentRt?.thread.boost_reasoning ?? false;
     newRuntime.thread.reasoning_effort = lastParams.reasoning_effort;
     newRuntime.thread.thinking_budget = lastParams.thinking_budget;
-    newRuntime.thread.temperature = lastParams.temperature;
     newRuntime.thread.max_tokens = lastParams.max_tokens;
     newRuntime.thread.increase_max_tokens =
       lastParams.increase_max_tokens ??
@@ -424,8 +419,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       lastParams.include_project_info ??
       currentRt?.thread.include_project_info ??
       true;
-    newRuntime.thread.context_tokens_cap =
-      lastParams.context_tokens_cap ?? currentRt?.thread.context_tokens_cap;
 
     if (title) {
       newRuntime.thread.title = title;
@@ -922,11 +915,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(setIncludeProjectInfo, (state, action) => {
     const rt = getRuntime(state, action.payload.chatId);
     if (rt) rt.thread.include_project_info = action.payload.value;
-  });
-
-  builder.addCase(setContextTokensCap, (state, action) => {
-    const rt = getRuntime(state, action.payload.chatId);
-    if (rt) rt.thread.context_tokens_cap = action.payload.value;
   });
 
   builder.addCase(setThreadPauseReasons, (state, action) => {

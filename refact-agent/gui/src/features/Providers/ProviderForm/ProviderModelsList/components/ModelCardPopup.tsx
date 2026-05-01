@@ -358,25 +358,6 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
   toggleCapability,
   handleFieldValueChange,
 }) => {
-  const handleTemperatureChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!editedModelData) return;
-    const value = parseFloat(e.target.value);
-    const digits = e.target.value
-      .split("")
-      .map((s) => (s === "." ? undefined : s));
-
-    if (value > 2 || digits.length > 8) {
-      e.target.value = "2";
-    }
-
-    setEditedModelData({
-      ...editedModelData,
-      type: "chat",
-      default_temperature:
-        e.target.value === "" ? null : Math.min(parseFloat(e.target.value), 2),
-    });
-  };
-
   const handleFrequencyPenaltyChange = (
     e: React.ChangeEvent<HTMLInputElement>,
   ) => {
@@ -426,14 +407,6 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
         value={editedModelData.tokenizer}
         onChange={(e) => handleFieldValueChange(e, "tokenizer")}
         placeholder="Tokenizer name"
-      />
-      <FormField
-        label="Default Temperature"
-        value={editedModelData.default_temperature?.toString() ?? ""}
-        placeholder="Default temperature (0-2)"
-        type="number"
-        max="2"
-        onChange={handleTemperatureChange}
       />
       <FormField
         label="Default Frequency Penalty"

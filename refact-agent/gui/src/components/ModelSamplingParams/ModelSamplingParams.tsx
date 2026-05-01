@@ -4,7 +4,6 @@ import { useGetCapsQuery } from "../../services/refact/caps";
 import styles from "./ModelSamplingParams.module.css";
 
 export type SamplingValues = {
-  temperature?: number;
   max_new_tokens?: number;
   top_p?: number;
   boost_reasoning?: boolean;
@@ -44,7 +43,6 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
     const m = capsData.chat_models[model] as
       | {
           n_ctx?: number;
-          default_temperature?: number | null;
           default_max_tokens?: number | null;
           max_output_tokens?: number | null;
           reasoning_effort_options?: string[] | null;
@@ -55,7 +53,6 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
     return m ?? null;
   }, [model, capsData]);
 
-  const defaultTemp = modelDetail?.default_temperature ?? 0.7;
   const defaultMaxTokens = modelDetail?.default_max_tokens ?? 4096;
   const maxOutputTokens = modelDetail?.max_output_tokens ?? 16384;
   const reasoningEffortOptions = modelDetail?.reasoning_effort_options;
@@ -63,11 +60,6 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
   const supportsReasoning =
     (reasoningEffortOptions != null && reasoningEffortOptions.length > 0) ||
     supportsThinkingBudget;
-
-  const hasAnyReasoningConfigured =
-    (values.boost_reasoning ?? false) ||
-    values.reasoning_effort != null ||
-    values.thinking_budget != null;
 
   return (
     <div className={styles.container}>
@@ -157,42 +149,6 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
           )}
         </div>
       )}
-
-      {/* Temperature */}
-      <div className={styles.sliderRow}>
-        <div className={styles.sliderHeader}>
-          <Text size={size} color="gray">
-            Temperature
-          </Text>
-          <Flex align="center" gap="2">
-            <Text size={size} weight="medium">
-              {hasAnyReasoningConfigured
-                ? "None"
-                : values.temperature?.toFixed(1) ??
-                  `${defaultTemp.toFixed(1)} (default)`}
-            </Text>
-            {values.temperature != null && (
-              <button
-                type="button"
-                className={styles.resetButton}
-                onClick={() => onChange("temperature", undefined)}
-                disabled={disabled || hasAnyReasoningConfigured}
-              >
-                ✕
-              </button>
-            )}
-          </Flex>
-        </div>
-        <Slider
-          size="1"
-          min={0}
-          max={2}
-          step={0.1}
-          value={[values.temperature ?? defaultTemp]}
-          onValueChange={(v) => onChange("temperature", v[0])}
-          disabled={disabled || hasAnyReasoningConfigured}
-        />
-      </div>
 
       {/* Max Tokens */}
       <div className={styles.sliderRow}>
