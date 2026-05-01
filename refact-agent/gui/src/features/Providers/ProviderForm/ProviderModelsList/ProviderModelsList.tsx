@@ -31,7 +31,8 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
   provider,
 }) => {
   const [searchQuery, setSearchQuery] = useState("");
-  const isCustomProvider = provider.name === "custom";
+  const baseProvider = provider.base_provider;
+  const isCustomProvider = baseProvider === "custom";
   const {
     data: modelsData,
     isSuccess,
@@ -45,9 +46,9 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
     AvailableModel | undefined
   >();
   const { data: openRouterAccount } = useGetOpenRouterAccountInfoQuery(
-    undefined,
+    { providerName: provider.name, useInstanceRoute: false },
     {
-      skip: provider.name !== "openrouter",
+      skip: baseProvider !== "openrouter",
     },
   );
 
@@ -84,7 +85,7 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
   }, [providerModels, searchQuery]);
 
   const groupedByFamily = useMemo(() => {
-    if (provider.name !== "openrouter") return null;
+    if (baseProvider !== "openrouter") return null;
     const groups = new Map<string, typeof filteredModels>();
 
     filteredModels.forEach((model) => {
@@ -95,7 +96,7 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
     });
 
     return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [filteredModels, provider.name]);
+  }, [baseProvider, filteredModels]);
 
   if (isLoading) return <Spinner spinning />;
 
@@ -177,7 +178,7 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
         </Callout.Root>
       )}
 
-      {provider.name === "openrouter" && openRouterAccount?.data && (
+      {baseProvider === "openrouter" && openRouterAccount?.data && (
         <Callout.Root color="blue" size="1">
           <Callout.Icon>
             <InfoCircledIcon />
@@ -222,6 +223,7 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
                       key={model.id}
                       model={model}
                       providerName={provider.name}
+                      baseProvider={baseProvider}
                       isReadonlyProvider={provider.readonly}
                       onEditModel={handleOpenEditModal}
                     />
@@ -233,6 +235,7 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({
                   key={model.id}
                   model={model}
                   providerName={provider.name}
+                  baseProvider={baseProvider}
                   isReadonlyProvider={provider.readonly}
                   onEditModel={handleOpenEditModal}
                 />

@@ -39,3 +39,12 @@ export const iconsMap: Record<string, JSX.Element> = {
   github_copilot: <GitHubCopilotIcon />,
   custom: <CustomIcon />,
 };
+
+export function getProviderIcon(provider: {
+  name: string;
+  base_provider?: string;
+}): JSX.Element | null {
+  const providerName = provider.base_provider ?? provider.name;
+  if (providerName in iconsMap) return iconsMap[providerName];
+  return null;
+}

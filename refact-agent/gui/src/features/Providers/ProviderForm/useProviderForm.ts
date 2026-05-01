@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ProviderDetailResponse } from "../../../services/refact";
+import { providerIdentitySettings } from "../../../services/refact";
 import {
   useGetConfiguredProvidersQuery,
   useGetProviderQuery,
@@ -14,6 +15,8 @@ import type { SchemaFieldDef } from "./SchemaField";
 export type ProviderFormValues = {
   enabled: boolean;
   readonly: boolean;
+  base_provider: string;
+  display_name: string;
   [key: string]: unknown;
 };
 
@@ -91,6 +94,8 @@ export function useProviderForm({ providerName }: { providerName: string }) {
     return {
       enabled: providerDetail.enabled,
       readonly: providerDetail.readonly,
+      base_provider: providerDetail.base_provider,
+      display_name: providerDetail.display_name,
       ...providerDetail.settings,
     };
   }, [providerDetail]);
@@ -114,10 +119,12 @@ export function useProviderForm({ providerName }: { providerName: string }) {
   const handleFieldSave = useCallback(
     async (key: string, value: unknown) => {
       if (!providerDetail) return;
-      // Send only the changed field (patch semantics) — backend merges with existing YAML
       const response = await updateProvider({
         providerName,
-        settings: { [key]: value },
+        settings: {
+          ...providerIdentitySettings(providerDetail),
+          [key]: value,
+        },
       });
       if (response.error) {
         throw new Error("Failed to save");

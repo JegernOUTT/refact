@@ -318,19 +318,29 @@ const ProviderDefaultModelsSetup: React.FC = () => {
 export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
 }) => {
-  const { data: openRouterHealth } = useGetOpenRouterHealthQuery(undefined, {
-    skip: currentProvider.name !== "openrouter",
-  });
+  const baseProvider = currentProvider.base_provider;
+  const { data: openRouterHealth } = useGetOpenRouterHealthQuery(
+    { providerName: currentProvider.name, useInstanceRoute: false },
+    {
+      skip: baseProvider !== "openrouter",
+    },
+  );
   const { data: claudeUsage, isError: claudeUsageError } =
-    useGetClaudeCodeUsageQuery(undefined, {
-      skip: currentProvider.name !== "claude_code",
-      pollingInterval: 60_000,
-    });
+    useGetClaudeCodeUsageQuery(
+      { providerName: currentProvider.name, useInstanceRoute: false },
+      {
+        skip: baseProvider !== "claude_code",
+        pollingInterval: 60_000,
+      },
+    );
   const { data: codexUsage, isError: codexUsageError } =
-    useGetOpenAICodexUsageQuery(undefined, {
-      skip: currentProvider.name !== "openai_codex",
-      pollingInterval: 60_000,
-    });
+    useGetOpenAICodexUsageQuery(
+      { providerName: currentProvider.name, useInstanceRoute: false },
+      {
+        skip: baseProvider !== "openai_codex",
+        pollingInterval: 60_000,
+      },
+    );
   const {
     areShowingExtraFields,
     formValues,
@@ -365,7 +375,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
     >
       <Flex align="center" gap="2">
         <StatusBadge status={status} />
-        {currentProvider.name === "openrouter" && openRouterHealth && (
+        {baseProvider === "openrouter" && openRouterHealth && (
           <Badge color={openRouterHealth.ok ? "green" : "red"} size="1">
             {openRouterHealth.ok ? "Key OK" : "Key Error"}
           </Badge>
@@ -490,6 +500,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
           <>
             <ProviderOAuth
               providerName={currentProvider.name}
+              baseProvider={baseProvider}
               oauthConnected={Boolean(
                 "oauth_connected" in formValues && formValues.oauth_connected,
               )}

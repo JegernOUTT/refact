@@ -55,7 +55,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
     allowUnset && !effectiveValue
       ? UNSET_MODEL_VALUE
       : effectiveValue || firstModelValue;
-  const currentModelName = effectiveValue.replace(/^refact\//, "");
+  const currentModelName = effectiveValue;
   const triggerLabel =
     allowUnset && !effectiveValue ? unsetLabel : currentModelName;
   const hasEffectiveValueInList = groupedModels.some((group) =>

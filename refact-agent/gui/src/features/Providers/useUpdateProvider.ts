@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 
-import { providersApi } from "../../services/refact";
+import { providerIdentitySettings, providersApi } from "../../services/refact";
 import { useAppDispatch } from "../../hooks";
 
 import { getProviderName } from "./getProviderName";
@@ -37,6 +37,7 @@ export const useUpdateProvider = ({
 
     const newSettings = {
       ...providerData.settings,
+      ...providerIdentitySettings(providerData),
       enabled: !providerData.enabled,
     };
 

@@ -79,6 +79,7 @@ export const goodUser: HttpHandler = http.get(
       providers: [
         {
           name: "openai",
+          base_provider: "openai",
           display_name: "OpenAI",
           enabled: true,
           readonly: false,

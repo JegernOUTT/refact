@@ -73,7 +73,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
     [dispatch, onValueChange],
   );
 
-  const displayName = value.replace(/^refact\//, "") || "Select model";
+  const displayName = value || "Select model";
 
   return (
     <Popover.Root open={isOpen} onOpenChange={setIsOpen}>

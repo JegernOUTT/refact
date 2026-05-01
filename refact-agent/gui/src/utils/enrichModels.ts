@@ -82,7 +82,7 @@ export function enrichModels(
   if (!caps) {
     return usableModels.map((model) => ({
       value: model.value,
-      displayName: model.textValue.replace(/^refact\//, ""),
+      displayName: model.textValue,
       disabled: model.disabled,
       provider: extractProvider(model.value),
     }));
@@ -90,7 +90,7 @@ export function enrichModels(
 
   return usableModels.map((model) => {
     const modelKey = model.value;
-    const displayName = model.textValue.replace(/^refact\//, "");
+    const displayName = model.textValue;
     const capsModel = caps.chat_models[modelKey];
 
     return {

@@ -1,9 +1,30 @@
 import { BEAUTIFUL_PROVIDER_NAMES } from "./constants";
 
-export function getProviderName(provider: { name: string } | string): string {
-  if (typeof provider === "string") return BEAUTIFUL_PROVIDER_NAMES[provider];
-  const maybeName = provider.name;
+export type ProviderNameInput = {
+  name: string;
+  base_provider?: string;
+  display_name?: string;
+};
+
+function getBeautifulProviderName(providerName: string): string | undefined {
+  return BEAUTIFUL_PROVIDER_NAMES[providerName] as string | undefined;
+}
+
+export function getProviderName(provider: ProviderNameInput | string): string {
+  if (typeof provider === "string") {
+    return getBeautifulProviderName(provider) ?? provider;
+  }
+
+  const displayName = provider.display_name?.trim();
+  if (displayName) return displayName;
+
+  const baseProvider = provider.base_provider?.trim();
+  if (baseProvider) {
+    const beautyName = getBeautifulProviderName(baseProvider);
+    if (beautyName) return beautyName;
+  }
+
+  const maybeName = provider.name.trim();
   if (!maybeName) return "Unknown Provider";
-  const beautyName = BEAUTIFUL_PROVIDER_NAMES[maybeName] as string | undefined;
-  return beautyName ? beautyName : maybeName;
+  return getBeautifulProviderName(maybeName) ?? maybeName;
 }

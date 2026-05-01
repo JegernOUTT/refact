@@ -100,7 +100,7 @@ export const EnhancedModelSelector: React.FC<EnhancedModelSelectorProps> = ({
     const enrichedModels: EnrichedModel[] =
       capsForToolUse.usableModelsForPlan.map((model) => {
         const modelKey = model.value;
-        const displayName = model.textValue.replace(/^refact\//, "");
+        const displayName = model.textValue;
         const capsModel = caps.chat_models[modelKey];
         const nCtx =
           // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
@@ -176,7 +176,7 @@ export const EnhancedModelSelector: React.FC<EnhancedModelSelectorProps> = ({
       });
   }, [capsForToolUse.usableModelsForPlan, capsForToolUse.data]);
 
-  const currentModelName = capsForToolUse.currentModel.replace(/^refact\//, "");
+  const currentModelName = capsForToolUse.currentModel;
 
   if (!capsForToolUse.data || groupedModels.length === 0) {
     return (

@@ -32,7 +32,7 @@ export const ProviderPreview: React.FC<ProviderPreviewProps> = ({
     dispatch(
       setInformation(
         `${getProviderName(
-          providerName,
+          currentProvider,
         )}'s Provider configuration was deleted successfully`,
       ),
     );

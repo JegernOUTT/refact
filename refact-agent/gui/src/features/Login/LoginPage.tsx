@@ -7,6 +7,7 @@ import { ProviderPreview } from "../Providers/ProviderPreview";
 import type { ProviderListItem } from "../../services/refact";
 import { useGetConfiguredProvidersView } from "../Providers/ProvidersView/useConfiguredProvidersView";
 import { push } from "../Pages/pagesSlice";
+import { getProviderName } from "../Providers/getProviderName";
 import { hasAnyUsableActiveProvider } from "./providerAccess";
 
 export const LoginPage: React.FC = () => {
@@ -117,7 +118,7 @@ export const LoginPage: React.FC = () => {
             <Card variant="surface" style={{ padding: "var(--space-4)" }}>
               <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
                 <Heading as="h4" size="3">
-                  {currentProvider.display_name}
+                  {getProviderName(currentProvider)}
                 </Heading>
                 <Button
                   variant="outline"

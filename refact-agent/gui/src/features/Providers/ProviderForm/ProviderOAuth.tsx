@@ -18,7 +18,7 @@ import styles from "./ProviderOAuth.module.css";
 
 const PROVIDERS_WITH_AUTO_CALLBACK = ["openai_codex"];
 
-const PROVIDER_LOGIN_LABELS: Record<string, string> = {
+const PROVIDER_LOGIN_LABELS: Partial<Record<string, string>> = {
   claude_code: "Login with Anthropic",
   openai_codex: "Login with OpenAI",
   github_copilot: "Login with GitHub Copilot",
@@ -26,6 +26,7 @@ const PROVIDER_LOGIN_LABELS: Record<string, string> = {
 
 type ProviderOAuthProps = {
   providerName: string;
+  baseProvider?: string;
   oauthConnected: boolean;
   authStatus: string;
 };
@@ -43,6 +44,7 @@ function inferOAuthMode(
 
 export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   providerName,
+  baseProvider = providerName,
   oauthConnected,
   authStatus,
 }) => {
@@ -72,7 +74,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   );
   const devicePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const loginLabel = PROVIDER_LOGIN_LABELS[providerName] || "Login";
+  const loginLabel = PROVIDER_LOGIN_LABELS[baseProvider] ?? "Login";
 
   const clearCallbackPollTimer = useCallback(() => {
     if (callbackPollTimerRef.current) {
@@ -133,7 +135,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     clearDevicePollTimer();
     try {
       const result = await oauthStart({ providerName, mode: "max" }).unwrap();
-      const mode = inferOAuthMode(providerName, result);
+      const mode = inferOAuthMode(baseProvider, result);
       setSessionId(result.session_id);
       setAuthorizeUrl(result.authorize_url);
       setOauthMode(mode);
@@ -154,7 +156,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       }
 
       if (mode === "device") {
-        setDeviceStatus("Waiting for GitHub device authorization");
+        setDeviceStatus("Waiting for device authorization");
         setIsDevicePolling(true);
         setDevicePollTick(0);
       } else {
@@ -182,9 +184,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
         invalidateProviderAndCaps();
         return;
       }
-      setDeviceStatus(
-        result.auth_status || "Waiting for GitHub device authorization",
-      );
+      setDeviceStatus(result.auth_status || "Waiting for device authorization");
       setPollIntervalSeconds(result.poll_interval ?? pollIntervalSeconds);
       setIsDevicePolling(true);
       setDevicePollTick((tick) => tick + 1);
@@ -320,7 +320,11 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       return (
         <Flex direction="column" gap="2" p="3" className={styles.container}>
           <Text size="2" weight="medium">
-            Authorize GitHub Copilot
+            Authorize{" "}
+            {(PROVIDER_LOGIN_LABELS[baseProvider] ?? "provider").replace(
+              "Login with ",
+              "",
+            )}
           </Text>
           <Text size="1" color="gray">
             {instructions ??
@@ -349,7 +353,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
             </Link>
           </Flex>
           <Text size="1" color="gray">
-            {deviceStatus ?? "Waiting for GitHub device authorization"}
+            {deviceStatus ?? "Waiting for device authorization"}
             {pollIntervalSeconds
               ? ` Checking every ${pollIntervalSeconds} seconds.`
               : ""}

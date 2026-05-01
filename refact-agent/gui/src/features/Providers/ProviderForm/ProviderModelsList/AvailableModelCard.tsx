@@ -43,6 +43,7 @@ import styles from "./ModelCard.module.css";
 export type AvailableModelCardProps = {
   model: AvailableModel;
   providerName: string;
+  baseProvider: string;
   isReadonlyProvider: boolean;
   onEditModel?: (model: AvailableModel) => void;
 };
@@ -53,6 +54,7 @@ export type AvailableModelCardProps = {
 export const AvailableModelCard: FC<AvailableModelCardProps> = ({
   model,
   providerName,
+  baseProvider,
   isReadonlyProvider,
   onEditModel,
 }) => {
@@ -90,13 +92,13 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
   }, [model.available_providers]);
 
   const shouldFetchEndpoints =
-    providerName === "openrouter" &&
+    baseProvider === "openrouter" &&
     detailsOpen &&
     providerVariants.length === 0 &&
     availableProviders.length === 0;
 
   const { data: endpointsData } = useGetOpenRouterModelEndpointsQuery(
-    { providerName, modelId: model.id },
+    { providerName, modelId: model.id, useInstanceRoute: false },
     { skip: !shouldFetchEndpoints },
   );
 
@@ -110,7 +112,7 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
       : endpointsData?.available_providers ?? [];
 
   const hasProviderRouting =
-    providerName === "openrouter" ||
+    baseProvider === "openrouter" ||
     resolvedProviderVariants.length > 0 ||
     resolvedAvailableProviders.length > 0 ||
     Boolean(model.selected_provider);

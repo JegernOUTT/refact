@@ -8,3 +8,10 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.providerName,
+.providerId {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -31,6 +31,7 @@ export type ProviderModel = {
 
 export type ProviderRuntime = {
   name: string;
+  base_provider: string;
   display_name: string;
   enabled: boolean;
   readonly: boolean;
@@ -47,6 +48,7 @@ export type ProviderStatus = "not_configured" | "configured" | "active";
 
 export type ProviderListItem = {
   name: string;
+  base_provider: string;
   display_name: string;
   enabled: boolean;
   readonly: boolean;
@@ -61,6 +63,7 @@ export type ProviderListResponse = {
 
 export type ProviderDetailResponse = {
   name: string;
+  base_provider: string;
   display_name: string;
   enabled: boolean;
   readonly: boolean;
@@ -207,6 +210,21 @@ export type OpenRouterModelEndpointsResponse = {
   available_providers: string[];
 };
 
+export type ProviderScopedQueryArg = {
+  providerName?: string;
+  useInstanceRoute?: boolean;
+};
+
+export type ProviderScopedQueryRequiredArg = {
+  providerName: string;
+  useInstanceRoute?: boolean;
+};
+
+export type ProviderIdentitySettings = Pick<
+  ProviderDetailResponse,
+  "base_provider" | "display_name"
+>;
+
 export type ModelPricing = NonNullable<AvailableModel["pricing"]>;
 
 export type ModelToggleRequest = {
@@ -288,6 +306,33 @@ export type ConfiguredProvidersResponse = {
   error_log?: ErrorLogInstance[];
 };
 
+function providerBaseName(provider: { name: string; base_provider?: string }) {
+  const baseProvider = provider.base_provider?.trim();
+  return baseProvider === "" || baseProvider === undefined
+    ? provider.name
+    : baseProvider;
+}
+
+function providerScopedPath(
+  basePath: string,
+  defaultProviderName: string,
+  args: ProviderScopedQueryArg | undefined,
+) {
+  if (!args?.useInstanceRoute) return basePath;
+  const providerName = args.providerName?.trim();
+  if (!providerName || providerName === defaultProviderName) return basePath;
+  return `${basePath}?provider_name=${encodeURIComponent(providerName)}`;
+}
+
+export function providerIdentitySettings(
+  provider: ProviderIdentitySettings,
+): ProviderIdentitySettings {
+  return {
+    base_provider: provider.base_provider,
+    display_name: provider.display_name,
+  };
+}
+
 export const providersApi = createApi({
   reducerPath: "providers",
   tagTypes: [
@@ -322,7 +367,7 @@ export const providersApi = createApi({
         if (result.error) {
           return { error: result.error };
         }
-        if (!isProviderListResponse(result.data)) {
+        if (!isProviderListResponseWire(result.data)) {
           return {
             meta: result.meta,
             error: {
@@ -333,7 +378,12 @@ export const providersApi = createApi({
           };
         }
 
-        return { data: { providers: result.data.providers, error_log: [] } };
+        return {
+          data: {
+            providers: normalizeProviderListResponse(result.data).providers,
+            error_log: [],
+          },
+        };
       },
       providesTags: [{ type: "PROVIDERS", id: "LIST" }],
     }),
@@ -362,7 +412,7 @@ export const providersApi = createApi({
           return { error: result.error };
         }
 
-        if (!isProviderDetailResponse(result.data)) {
+        if (!isProviderDetailResponseWire(result.data)) {
           return {
             meta: result.meta,
             error: {
@@ -373,7 +423,9 @@ export const providersApi = createApi({
           };
         }
 
-        return { data: result.data };
+        return {
+          data: normalizeProviderDetailResponse(result.data),
+        };
       },
     }),
 
@@ -497,14 +549,16 @@ export const providersApi = createApi({
 
     getOpenRouterModelEndpoints: builder.query<
       OpenRouterModelEndpointsResponse,
-      { providerName: string; modelId: string }
+      ProviderScopedQueryRequiredArg & { modelId: string }
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${
-          args.providerName
-        }/models/${encodeURIComponent(args.modelId)}/endpoints`;
+        const providerName =
+          args.useInstanceRoute === true ? args.providerName : "openrouter";
+        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${providerName}/models/${encodeURIComponent(
+          args.modelId,
+        )}/endpoints`;
 
         const result = await baseQuery({
           ...extraOptions,
@@ -535,12 +589,17 @@ export const providersApi = createApi({
 
     getOpenRouterAccountInfo: builder.query<
       OpenRouterAccountInfoResponse,
-      undefined
+      ProviderScopedQueryArg | undefined
     >({
-      queryFn: async (_args, api, extraOptions, baseQuery) => {
+      queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}/v1/openrouter/account-info`;
+        const path = providerScopedPath(
+          "/v1/openrouter/account-info",
+          "openrouter",
+          args,
+        );
+        const url = `http://127.0.0.1:${port}${path}`;
 
         const result = await baseQuery({
           ...extraOptions,
@@ -558,11 +617,19 @@ export const providersApi = createApi({
       },
     }),
 
-    getOpenRouterHealth: builder.query<OpenRouterHealthResponse, undefined>({
-      queryFn: async (_args, api, extraOptions, baseQuery) => {
+    getOpenRouterHealth: builder.query<
+      OpenRouterHealthResponse,
+      ProviderScopedQueryArg | undefined
+    >({
+      queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}/v1/openrouter/health`;
+        const path = providerScopedPath(
+          "/v1/openrouter/health",
+          "openrouter",
+          args,
+        );
+        const url = `http://127.0.0.1:${port}${path}`;
 
         const result = await baseQuery({
           ...extraOptions,
@@ -580,11 +647,19 @@ export const providersApi = createApi({
       },
     }),
 
-    getClaudeCodeUsage: builder.query<ClaudeCodeUsageResponse, undefined>({
-      queryFn: async (_args, api, extraOptions, baseQuery) => {
+    getClaudeCodeUsage: builder.query<
+      ClaudeCodeUsageResponse,
+      ProviderScopedQueryArg | undefined
+    >({
+      queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}/v1/claude-code/usage`;
+        const path = providerScopedPath(
+          "/v1/claude-code/usage",
+          "claude_code",
+          args,
+        );
+        const url = `http://127.0.0.1:${port}${path}`;
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10_000);
@@ -621,11 +696,19 @@ export const providersApi = createApi({
       },
     }),
 
-    getOpenAICodexUsage: builder.query<OpenAICodexUsageResponse, undefined>({
-      queryFn: async (_args, api, extraOptions, baseQuery) => {
+    getOpenAICodexUsage: builder.query<
+      OpenAICodexUsageResponse,
+      ProviderScopedQueryArg | undefined
+    >({
+      queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}/v1/openai-codex/usage`;
+        const path = providerScopedPath(
+          "/v1/openai-codex/usage",
+          "openai_codex",
+          args,
+        );
+        const url = `http://127.0.0.1:${port}${path}`;
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10_000);
@@ -1112,7 +1195,29 @@ export const providersApi = createApi({
   refetchOnMountOrArgChange: true,
 });
 
-function isProviderListResponse(data: unknown): data is ProviderListResponse {
+type ProviderListItemWire = Omit<ProviderListItem, "base_provider"> & {
+  base_provider?: string;
+};
+
+type ProviderListResponseWire = {
+  providers: ProviderListItemWire[];
+};
+
+type ProviderRuntimeWire = Omit<ProviderRuntime, "base_provider"> & {
+  base_provider?: string;
+};
+
+type ProviderDetailResponseWire = Omit<
+  ProviderDetailResponse,
+  "base_provider" | "runtime"
+> & {
+  base_provider?: string;
+  runtime?: ProviderRuntimeWire | null;
+};
+
+function isProviderListResponseWire(
+  data: unknown,
+): data is ProviderListResponseWire {
   if (typeof data !== "object" || data === null) return false;
   if (!hasProperty(data, "providers")) return false;
   if (!Array.isArray(data.providers)) return false;
@@ -1124,9 +1229,17 @@ function isProviderListResponse(data: unknown): data is ProviderListResponse {
   return true;
 }
 
-function isProviderListItem(data: unknown): data is ProviderListItem {
+function isOptionalBaseProviderField(data: object): boolean {
+  return (
+    !hasProperty(data, "base_provider") ||
+    typeof data.base_provider === "string"
+  );
+}
+
+function isProviderListItem(data: unknown): data is ProviderListItemWire {
   if (typeof data !== "object" || data === null) return false;
   if (!hasProperty(data, "name") || typeof data.name !== "string") return false;
+  if (!isOptionalBaseProviderField(data)) return false;
   if (
     !hasProperty(data, "display_name") ||
     typeof data.display_name !== "string"
@@ -1150,11 +1263,29 @@ function isProviderListItem(data: unknown): data is ProviderListItem {
   return true;
 }
 
-function isProviderDetailResponse(
+function normalizeProviderListItem(
+  provider: ProviderListItemWire,
+): ProviderListItem {
+  return {
+    ...provider,
+    base_provider: providerBaseName(provider),
+  };
+}
+
+function normalizeProviderListResponse(
+  response: ProviderListResponseWire,
+): ProviderListResponse {
+  return {
+    providers: response.providers.map(normalizeProviderListItem),
+  };
+}
+
+function isProviderDetailResponseWire(
   data: unknown,
-): data is ProviderDetailResponse {
+): data is ProviderDetailResponseWire {
   if (typeof data !== "object" || data === null) return false;
   if (!hasProperty(data, "name") || typeof data.name !== "string") return false;
+  if (!isOptionalBaseProviderField(data)) return false;
   if (
     !hasProperty(data, "display_name") ||
     typeof data.display_name !== "string"
@@ -1165,8 +1296,61 @@ function isProviderDetailResponse(
   if (!hasProperty(data, "readonly") || typeof data.readonly !== "boolean")
     return false;
   if (!hasProperty(data, "settings")) return false;
-  // runtime can be null
+  if (hasProperty(data, "runtime") && !isProviderRuntime(data.runtime)) {
+    return false;
+  }
   return true;
+}
+
+function isProviderRuntime(data: unknown): data is ProviderRuntimeWire | null {
+  if (data === null || data === undefined) return true;
+  if (typeof data !== "object") return false;
+  if (!hasProperty(data, "name") || typeof data.name !== "string") return false;
+  if (!isOptionalBaseProviderField(data)) return false;
+  if (
+    !hasProperty(data, "display_name") ||
+    typeof data.display_name !== "string"
+  )
+    return false;
+  return true;
+}
+
+function normalizeProviderRuntime(
+  runtime: ProviderDetailResponseWire["runtime"],
+  provider: Pick<ProviderDetailResponse, "base_provider">,
+): ProviderRuntime | null {
+  if (!runtime) return null;
+  return {
+    ...runtime,
+    base_provider: providerBaseName({
+      name: runtime.name,
+      base_provider: runtime.base_provider ?? provider.base_provider,
+    }),
+  };
+}
+
+function normalizeProviderDetailResponse(
+  provider: ProviderDetailResponseWire,
+): ProviderDetailResponse {
+  const base_provider = providerBaseName(provider);
+  return {
+    ...provider,
+    base_provider,
+    runtime: normalizeProviderRuntime(provider.runtime, { base_provider }),
+  };
+}
+
+export function isProviderListResponse(
+  data: unknown,
+): data is ProviderListResponse {
+  if (!isProviderListResponseWire(data)) return false;
+  return data.providers.every((provider) => Boolean(provider.base_provider));
+}
+
+export function isProviderDetailResponse(
+  data: unknown,
+): data is ProviderDetailResponse {
+  return isProviderDetailResponseWire(data) && Boolean(data.base_provider);
 }
 
 function isProviderSchemaResponse(
