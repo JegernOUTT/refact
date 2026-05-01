@@ -1,5 +1,8 @@
+use std::collections::HashSet;
 use std::path::Path;
 
+use crate::providers::identity::{provider_identity_from_yaml, validate_provider_instance_id};
+use crate::providers::instance::ProviderInstance;
 use crate::providers::traits::ProviderTrait;
 use crate::providers::{
     anthropic::AnthropicProvider, openai::OpenAIProvider,
@@ -74,9 +77,32 @@ impl ProviderRegistry {
     }
 
     pub fn add(&mut self, provider: Box<dyn ProviderTrait>) {
-        let name = provider.name();
-        self.providers.retain(|p| p.name() != name);
+        let name = provider.name().to_string();
+        if self.has_instance(&name) {
+            self.remove(&name);
+        }
         self.providers.push(provider);
+    }
+
+    pub fn remove(&mut self, instance_id: &str) -> Option<Box<dyn ProviderTrait>> {
+        self.providers
+            .iter()
+            .position(|provider| provider.name() == instance_id)
+            .map(|index| self.providers.remove(index))
+    }
+
+    pub fn has_instance(&self, instance_id: &str) -> bool {
+        self.providers
+            .iter()
+            .any(|provider| provider.name() == instance_id)
+    }
+
+    #[allow(dead_code)]
+    pub fn instances_for_base(&self, base_provider: &str) -> Vec<&dyn ProviderTrait> {
+        self.iter()
+            .filter(|(_, provider)| provider.base_provider_name() == base_provider)
+            .map(|(_, provider)| provider)
+            .collect()
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn ProviderTrait> {
@@ -116,6 +142,7 @@ pub async fn load_providers_from_config(
         Ok(e) => e,
         Err(_) => return Ok(registry),
     };
+    let mut seen_stems = HashSet::new();
 
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
@@ -126,26 +153,19 @@ pub async fn load_providers_from_config(
         if ext != Some("yaml") && ext != Some("yml") {
             continue;
         }
-        let name = match path.file_stem().and_then(|s| s.to_str()) {
+        let instance_id = match path.file_stem().and_then(|s| s.to_str()) {
             Some(n) => n,
             None => continue,
         };
-        if name == "defaults" {
-            continue;
-        }
-
-        if name == "refact" {
+        let duplicate_key = instance_id.to_ascii_lowercase();
+        if !seen_stems.insert(duplicate_key) {
             tracing::warn!(
-                "Ignoring deprecated Refact provider config at {}; configure BYOK/local providers instead",
+                "Ignoring duplicate provider config stem '{}' at {}",
+                instance_id,
                 path.display()
             );
             continue;
         }
-
-        let mut provider = match create_provider(name) {
-            Some(p) => p,
-            None => continue,
-        };
 
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
@@ -163,9 +183,41 @@ pub async fn load_providers_from_config(
             }
         };
 
+        let identity = match provider_identity_from_yaml(instance_id, &yaml) {
+            Ok(identity) => identity,
+            Err(e) => {
+                tracing::warn!("Ignoring provider config {}: {}", path.display(), e);
+                continue;
+            }
+        };
+
+        let mut provider = match create_provider(&identity.base_provider) {
+            Some(provider) => provider,
+            None => {
+                tracing::warn!(
+                    "Ignoring provider config {}: unknown base provider '{}'",
+                    path.display(),
+                    identity.base_provider
+                );
+                continue;
+            }
+        };
+
         if let Err(e) = provider.provider_settings_apply(yaml) {
             tracing::warn!("Failed to apply provider config {}: {}", path.display(), e);
             continue;
+        }
+
+        if identity.wrap_instance {
+            provider = match identity.display_name {
+                Some(display_name) => Box::new(ProviderInstance::new(
+                    identity.instance_id,
+                    identity.base_provider,
+                    display_name,
+                    provider,
+                )),
+                None => Box::new(ProviderInstance::from_inner(identity.instance_id, provider)),
+            };
         }
 
         registry.add(provider);
@@ -192,6 +244,8 @@ pub async fn save_provider_config(
     name: &str,
     settings: serde_yaml::Value,
 ) -> Result<(), String> {
+    validate_provider_instance_id(name)?;
+
     let providers_dir = config_dir.join("providers.d");
     tokio::fs::create_dir_all(&providers_dir)
         .await
@@ -207,6 +261,8 @@ pub async fn save_provider_config(
 }
 
 pub async fn delete_provider_config(config_dir: &Path, name: &str) -> Result<(), String> {
+    validate_provider_instance_id(name)?;
+
     let path = config_dir
         .join("providers.d")
         .join(format!("{}.yaml", name));
@@ -216,4 +272,166 @@ pub async fn delete_provider_config(config_dir: &Path, name: &str) -> Result<(),
     tokio::fs::remove_file(&path)
         .await
         .map_err(|e| format!("Failed to delete config: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn write_provider_config(temp: &TempDir, file_name: &str, yaml: &str) {
+        let providers_dir = temp.path().join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(providers_dir.join(file_name), yaml)
+            .await
+            .unwrap();
+    }
+
+    async fn load_registry(temp: &TempDir) -> ProviderRegistry {
+        load_providers_from_config(temp.path(), &reqwest::Client::new())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn loads_multiple_openai_instances_from_config_files() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "openai.yaml",
+            "api_key: sk-main\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
+        )
+        .await;
+        write_provider_config(
+            &temp,
+            "openai_2.yaml",
+            "base_provider: openai\ndisplay_name: OpenAI 2\napi_key: sk-two\nenabled: true\nenabled_models:\n  - gpt-4.1-mini\n",
+        )
+        .await;
+        write_provider_config(
+            &temp,
+            "openai_work.yaml",
+            "base_provider: openai\ndisplay_name: Work OpenAI\napi_key: sk-work\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
+        )
+        .await;
+
+        let registry = load_registry(&temp).await;
+
+        assert!(registry.has_instance("openai"));
+        assert!(registry.has_instance("openai_2"));
+        assert!(registry.has_instance("openai_work"));
+        let openai_2 = registry.get("openai_2").unwrap();
+        assert_eq!(openai_2.base_provider_name(), "openai");
+        assert_eq!(openai_2.display_name(), "OpenAI 2");
+        let openai_work = registry.get("openai_work").unwrap();
+        assert_eq!(openai_work.base_provider_name(), "openai");
+        assert_eq!(openai_work.display_name(), "Work OpenAI");
+        assert_eq!(registry.instances_for_base("openai").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn legacy_singleton_loading_still_uses_builtin_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "openai.yaml",
+            "api_key: sk-main\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
+        )
+        .await;
+
+        let registry = load_registry(&temp).await;
+        let provider = registry.get("openai").unwrap();
+
+        assert_eq!(provider.name(), "openai");
+        assert_eq!(provider.base_provider_name(), "openai");
+        assert_eq!(provider.display_name(), "OpenAI");
+    }
+
+    #[tokio::test]
+    async fn alias_without_base_provider_is_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "openai_2.yaml",
+            "api_key: sk-two\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
+        )
+        .await;
+
+        let registry = load_registry(&temp).await;
+
+        assert!(!registry.has_instance("openai_2"));
+    }
+
+    #[tokio::test]
+    async fn alias_with_empty_base_provider_is_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "openai_2.yaml",
+            "base_provider: ''\napi_key: sk-two\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
+        )
+        .await;
+
+        let registry = load_registry(&temp).await;
+
+        assert!(!registry.has_instance("openai_2"));
+    }
+
+    #[tokio::test]
+    async fn invalid_instance_ids_are_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "openai.bad.yaml",
+            "base_provider: openai\napi_key: sk-bad\n",
+        )
+        .await;
+        write_provider_config(
+            &temp,
+            "_openai.yaml",
+            "base_provider: openai\napi_key: sk-bad\n",
+        )
+        .await;
+        write_provider_config(
+            &temp,
+            "refact.yaml",
+            "base_provider: openai\napi_key: sk-bad\n",
+        )
+        .await;
+
+        let registry = load_registry(&temp).await;
+
+        assert_eq!(registry.iter().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn case_insensitive_duplicate_stems_are_skipped() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "openai.yaml",
+            "api_key: sk-main\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
+        )
+        .await;
+        write_provider_config(
+            &temp,
+            "OpenAI.yaml",
+            "base_provider: openai\napi_key: sk-dupe\nenabled: true\nenabled_models:\n  - gpt-4.1-mini\n",
+        )
+        .await;
+
+        let registry = load_registry(&temp).await;
+
+        assert_eq!(registry.iter().count(), 1);
+    }
+
+    #[test]
+    fn remove_returns_removed_provider() {
+        let mut registry = ProviderRegistry::new();
+        registry.add(create_provider("openai").unwrap());
+
+        assert!(registry.has_instance("openai"));
+        assert!(registry.remove("openai").is_some());
+        assert!(!registry.has_instance("openai"));
+    }
 }

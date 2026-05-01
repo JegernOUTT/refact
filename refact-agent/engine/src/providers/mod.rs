@@ -1,5 +1,6 @@
 pub mod config;
 pub mod http;
+pub mod identity;
 pub mod instance;
 pub mod models_dev_provider;
 pub mod pricing;
