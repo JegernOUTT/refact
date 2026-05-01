@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   advanceBuddyShowcasePhase,
+  BUDDY_SHOWCASE_IDLE_COOLDOWN_MS,
   BUDDY_SHOWCASE_INITIAL_GRACE_MS,
   BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS,
   BUDDY_SHOWCASE_PHASE_DURATIONS_MS,
@@ -50,41 +51,157 @@ type MockCanvasContext = Pick<
   | "moveTo"
   | "restore"
   | "save"
-  | "setTransform"
   | "stroke"
 > &
   Partial<CanvasRenderingContext2D>;
 
-function makeCanvasContext(): CanvasRenderingContext2D {
+type RecordedCanvasContext = CanvasRenderingContext2D & {
+  alphaWrites: number[];
+  drawOps: string[];
+};
+
+function makeCanvasContext(): RecordedCanvasContext {
   const gradient = { addColorStop: vi.fn() } as unknown as CanvasGradient;
-  const ctx: MockCanvasContext = {
-    arc: vi.fn(),
-    beginPath: vi.fn(),
-    bezierCurveTo: vi.fn(),
-    clearRect: vi.fn(),
-    closePath: vi.fn(),
-    createLinearGradient: vi.fn(() => gradient),
-    ellipse: vi.fn(),
-    fill: vi.fn(),
-    fillRect: vi.fn(),
-    fillText: vi.fn(),
-    lineTo: vi.fn(),
-    moveTo: vi.fn(),
-    restore: vi.fn(),
-    save: vi.fn(),
-    setTransform: vi.fn(),
-    stroke: vi.fn(),
-    fillStyle: "#000000",
+  const alphaWrites: number[] = [];
+  const drawOps: string[] = [];
+  let globalAlphaValue = 1;
+  let fillStyleValue: CanvasRenderingContext2D["fillStyle"] = "#000000";
+  let strokeStyleValue: CanvasRenderingContext2D["strokeStyle"] = "#000000";
+  const formatNumber = (value: number) => value.toFixed(3);
+  const ctx: MockCanvasContext & {
+    alphaWrites: number[];
+    drawOps: string[];
+  } = {
+    alphaWrites,
+    drawOps,
+    arc: vi.fn(
+      (
+        x: number,
+        y: number,
+        radius: number,
+        startAngle: number,
+        endAngle: number,
+      ) => {
+        drawOps.push(
+          `arc:${formatNumber(x)}:${formatNumber(y)}:${formatNumber(
+            radius,
+          )}:${formatNumber(startAngle)}:${formatNumber(endAngle)}`,
+        );
+      },
+    ),
+    beginPath: vi.fn(() => drawOps.push("beginPath")),
+    bezierCurveTo: vi.fn(
+      (
+        cp1x: number,
+        cp1y: number,
+        cp2x: number,
+        cp2y: number,
+        x: number,
+        y: number,
+      ) => {
+        drawOps.push(
+          `bezierCurveTo:${formatNumber(cp1x)}:${formatNumber(
+            cp1y,
+          )}:${formatNumber(cp2x)}:${formatNumber(cp2y)}:${formatNumber(
+            x,
+          )}:${formatNumber(y)}`,
+        );
+      },
+    ),
+    clearRect: vi.fn((x: number, y: number, width: number, height: number) => {
+      drawOps.push(
+        `clearRect:${formatNumber(x)}:${formatNumber(y)}:${formatNumber(
+          width,
+        )}:${formatNumber(height)}`,
+      );
+    }),
+    closePath: vi.fn(() => drawOps.push("closePath")),
+    createLinearGradient: vi.fn(
+      (x0: number, y0: number, x1: number, y1: number) => {
+        drawOps.push(
+          `createLinearGradient:${formatNumber(x0)}:${formatNumber(
+            y0,
+          )}:${formatNumber(x1)}:${formatNumber(y1)}`,
+        );
+        return gradient;
+      },
+    ),
+    ellipse: vi.fn(
+      (
+        x: number,
+        y: number,
+        radiusX: number,
+        radiusY: number,
+        rotation: number,
+        startAngle: number,
+        endAngle: number,
+      ) => {
+        drawOps.push(
+          `ellipse:${formatNumber(x)}:${formatNumber(y)}:${formatNumber(
+            radiusX,
+          )}:${formatNumber(radiusY)}:${formatNumber(rotation)}:${formatNumber(
+            startAngle,
+          )}:${formatNumber(endAngle)}`,
+        );
+      },
+    ),
+    fill: vi.fn(() =>
+      drawOps.push(`fill:${String(fillStyleValue)}:${globalAlphaValue}`),
+    ),
+    fillRect: vi.fn((x: number, y: number, width: number, height: number) => {
+      drawOps.push(
+        `fillRect:${formatNumber(x)}:${formatNumber(y)}:${formatNumber(
+          width,
+        )}:${formatNumber(height)}:${String(
+          fillStyleValue,
+        )}:${globalAlphaValue}`,
+      );
+    }),
+    fillText: vi.fn((text: string, x: number, y: number) => {
+      drawOps.push(
+        `fillText:${text}:${formatNumber(x)}:${formatNumber(y)}:${String(
+          fillStyleValue,
+        )}:${globalAlphaValue}`,
+      );
+    }),
+    lineTo: vi.fn((x: number, y: number) => {
+      drawOps.push(`lineTo:${formatNumber(x)}:${formatNumber(y)}`);
+    }),
+    moveTo: vi.fn((x: number, y: number) => {
+      drawOps.push(`moveTo:${formatNumber(x)}:${formatNumber(y)}`);
+    }),
+    restore: vi.fn(() => drawOps.push("restore")),
+    save: vi.fn(() => drawOps.push("save")),
+    stroke: vi.fn(() =>
+      drawOps.push(`stroke:${String(strokeStyleValue)}:${globalAlphaValue}`),
+    ),
     font: "10px monospace",
-    globalAlpha: 1,
+    get fillStyle() {
+      return fillStyleValue;
+    },
+    set fillStyle(value: CanvasRenderingContext2D["fillStyle"]) {
+      fillStyleValue = value;
+    },
+    get globalAlpha() {
+      return globalAlphaValue;
+    },
+    set globalAlpha(value: number) {
+      alphaWrites.push(value);
+      globalAlphaValue = value;
+    },
     imageSmoothingEnabled: false,
     lineCap: "round" as CanvasLineCap,
     lineWidth: 1,
-    strokeStyle: "#000000",
+    get strokeStyle() {
+      return strokeStyleValue;
+    },
+    set strokeStyle(value: CanvasRenderingContext2D["strokeStyle"]) {
+      strokeStyleValue = value;
+    },
     textAlign: "center" as CanvasTextAlign,
     textBaseline: "middle" as CanvasTextBaseline,
   };
-  return ctx as CanvasRenderingContext2D;
+  return ctx as RecordedCanvasContext;
 }
 
 function makePet(sleeping = false): BuddyPetState {
@@ -188,6 +305,11 @@ function makeShowcaseRun(
   };
 }
 
+function expectAlphaWritesClamped(ctx: RecordedCanvasContext): void {
+  expect(ctx.alphaWrites.length).toBeGreaterThan(0);
+  expect(ctx.alphaWrites.every((alpha) => alpha >= 0 && alpha <= 1)).toBe(true);
+}
+
 describe("buddy showcase director", () => {
   it("draws showcase overlay events for both supported kinds", () => {
     const world = makeWorld();
@@ -247,6 +369,89 @@ describe("buddy showcase director", () => {
         nowMs: 2_200,
       }),
     ).not.toThrow();
+  });
+
+  it("clamps all showcase draw alpha writes", () => {
+    const world = makeWorld();
+    const standardMemoryCtx = makeCanvasContext();
+    const standardStargazingCtx = makeCanvasContext();
+    const reducedCompactCtx = makeCanvasContext();
+
+    drawShowcaseEvent({
+      ctx: standardMemoryCtx,
+      run: makeShowcaseRun(),
+      world,
+      palette: PALETTES[0],
+      frame: 240,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      nowMs: 3_400,
+    });
+    drawShowcaseEvent({
+      ctx: standardStargazingCtx,
+      run: makeShowcaseRun({
+        kind: "stargazing_constellation",
+        target: OBSERVATORY_TARGET,
+        pose: "stargaze",
+      }),
+      world,
+      palette: PALETTES[0],
+      frame: 240,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      nowMs: 2_800,
+    });
+    drawShowcaseEvent({
+      ctx: reducedCompactCtx,
+      run: makeShowcaseRun({
+        kind: "stargazing_constellation",
+        target: OBSERVATORY_TARGET,
+        pose: "stargaze",
+      }),
+      world,
+      palette: PALETTES[0],
+      frame: 240,
+      width: 360,
+      height: 190,
+      compact: true,
+      reducedMotion: true,
+      nowMs: 2_800,
+    });
+
+    expectAlphaWritesClamped(standardMemoryCtx);
+    expectAlphaWritesClamped(standardStargazingCtx);
+    expectAlphaWritesClamped(reducedCompactCtx);
+  });
+
+  it("draws deterministic showcase output for the same seed and frame", () => {
+    const firstCtx = makeCanvasContext();
+    const secondCtx = makeCanvasContext();
+    const run = makeShowcaseRun({
+      kind: "stargazing_constellation",
+      target: OBSERVATORY_TARGET,
+      pose: "stargaze",
+      seed: 98765,
+    });
+    const args = {
+      run,
+      world: makeWorld(),
+      palette: PALETTES[0],
+      frame: 180,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      nowMs: 3_600,
+    };
+
+    drawShowcaseEvent({ ctx: firstCtx, ...args });
+    drawShowcaseEvent({ ctx: secondCtx, ...args });
+
+    expect(secondCtx.drawOps).toEqual(firstCtx.drawOps);
   });
 
   it("chooses and creates memory firefly night for memory runtime signals", () => {
@@ -328,6 +533,27 @@ describe("buddy showcase director", () => {
       strongRuntimeTrigger: true,
       pulse: makePulse(),
       world: { phase: "evening" as const, weather: "busy" as const },
+    };
+
+    expect(chooseBuddyShowcase(args)).toBeNull();
+    expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
+  it("ignores failed memory runtime signals", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "memory_extract",
+        title: "Memory extraction failed",
+        status: "failed",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 22_000,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
     };
 
     expect(chooseBuddyShowcase(args)).toBeNull();
@@ -440,6 +666,23 @@ describe("buddy showcase director", () => {
     expect(createBuddyShowcaseRun(args)?.target.id).toBe("providers");
   });
 
+  it("provider pulse issues respect repeat de-weighting", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: null,
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 156_000,
+      lastShowcaseKind: "stargazing_constellation" as const,
+      pulse: makePulse({
+        providers: { defaults_ok: false, broken_refs: 1, quota_warnings: 1 },
+      }),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    expect(chooseBuddyShowcase(args)?.kind).toBe("memory_firefly_night");
+  });
+
   it("memory pulse and night context prefer memory firefly night", () => {
     const args = {
       targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
@@ -477,6 +720,29 @@ describe("buddy showcase director", () => {
 
     expect(secondChoice).toBe(firstChoice);
     expect(firstChoice).toBe("stargazing_constellation");
+  });
+
+  it("idle weighted selection is stable within the same time bucket", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: null,
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: BUDDY_SHOWCASE_IDLE_COOLDOWN_MS * 4 + 10,
+      lastShowcaseKind: "memory_firefly_night" as const,
+      pulse: makePulse({
+        memory: { total: 18, orphan: 2, stale_conflicts: 1 },
+      }),
+      world: { phase: "evening" as const, weather: "aurora" as const },
+    };
+
+    const firstChoice = chooseBuddyShowcase(args)?.kind;
+    const secondChoice = chooseBuddyShowcase({
+      ...args,
+      nowMs: args.nowMs + BUDDY_SHOWCASE_IDLE_COOLDOWN_MS - 20,
+    })?.kind;
+
+    expect(secondChoice).toBe(firstChoice);
   });
 
   it("active speech suppresses chooser and run creation", () => {

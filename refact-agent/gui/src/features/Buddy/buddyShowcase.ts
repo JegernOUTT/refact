@@ -154,12 +154,22 @@ function memoryPulseScore(pulse: BuddyPulse | null | undefined): number {
   );
 }
 
+function providerPulseScore(pulse: BuddyPulse | null | undefined): number {
+  if (!pulse || !hasProviderPulseIssue(pulse)) return 0;
+  const providers = pulse.providers;
+  return (
+    (!providers.defaults_ok ? 42 : 0) +
+    providers.broken_refs * 16 +
+    providers.quota_warnings * 12
+  );
+}
+
 function kindForRuntime(
   event: BuddyRuntimeEvent | null,
 ): BuddyShowcaseKind | null {
   if (!event) return null;
   if (MEMORY_RUNTIME_SIGNALS.has(event.signal_type)) {
-    return "memory_firefly_night";
+    return event.status === "failed" ? null : "memory_firefly_night";
   }
   if (STARGAZING_RUNTIME_SIGNALS.has(event.signal_type)) {
     return ACTIVE_RUNTIME_STATUSES.has(event.status)
@@ -239,19 +249,25 @@ function scoreDefinition(
   if (definition.kind === "memory_firefly_night") {
     score += memoryPulseScore(args.pulse);
   }
+  if (definition.kind === "stargazing_constellation") {
+    score += providerPulseScore(args.pulse);
+  }
   return score;
 }
 
 function chooseWeightedDefinition(
   args: ChooseBuddyShowcaseArgs,
 ): BuddyShowcaseDefinition | null {
+  const bucket = Math.floor(args.nowMs / BUDDY_SHOWCASE_IDLE_COOLDOWN_MS);
+  const orderSeed = seedFromText(
+    `${bucket}:${args.world?.phase ?? "none"}:${args.world?.weather ?? "none"}`,
+  );
   const candidates = Object.values(BUDDY_SHOWCASE_DEFINITIONS)
     .filter((definition) => findTarget(args.targets, definition))
     .map((definition) => {
       const score = scoreDefinition(args, definition);
       return {
         definition,
-        score,
         weight:
           Math.max(1, IDLE_SHOWCASE_BASE_WEIGHT + score) *
           (definition.kind === args.lastShowcaseKind
@@ -260,11 +276,6 @@ function chooseWeightedDefinition(
       };
     })
     .sort((a, b) => {
-      const orderSeed = seedFromText(
-        `${args.nowMs}:${args.world?.phase ?? "none"}:${
-          args.world?.weather ?? "none"
-        }`,
-      );
       const left = seededUnit(
         orderSeed,
         SHOWCASE_KIND_ORDER[a.definition.kind],
@@ -287,7 +298,6 @@ function chooseWeightedDefinition(
   );
   if (totalWeight <= 0) return null;
 
-  const bucket = Math.floor(args.nowMs / BUDDY_SHOWCASE_IDLE_COOLDOWN_MS);
   const pulseKey = args.pulse
     ? `${args.pulse.memory.total}:${args.pulse.memory.orphan}:${args.pulse.memory.stale_conflicts}:${args.pulse.providers.broken_refs}:${args.pulse.providers.quota_warnings}:${args.pulse.providers.defaults_ok}`
     : "no-pulse";
@@ -326,11 +336,6 @@ export function chooseBuddyShowcase(
   }
 
   if (args.strongRuntimeTrigger) return null;
-
-  if (hasProviderPulseIssue(args.pulse)) {
-    const definition = BUDDY_SHOWCASE_DEFINITIONS.stargazing_constellation;
-    if (findTarget(args.targets, definition)) return definition;
-  }
 
   return chooseWeightedDefinition(args);
 }

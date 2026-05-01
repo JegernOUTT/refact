@@ -41,6 +41,10 @@ function clamp01(value: number): number {
   return clamp(value, 0, 1);
 }
 
+function clampAlpha(value: number): number {
+  return clamp01(value);
+}
+
 function lerp(from: number, to: number, progress: number): number {
   return from + (to - from) * progress;
 }
@@ -115,7 +119,7 @@ function fillPixelRect(
   alpha = 1,
 ): void {
   ctx.save();
-  ctx.globalAlpha = alpha;
+  ctx.globalAlpha = clampAlpha(alpha);
   ctx.fillStyle = color;
   ctx.fillRect(
     Math.round(x),
@@ -135,7 +139,7 @@ function fillCircle(
   alpha = 1,
 ): void {
   ctx.save();
-  ctx.globalAlpha = alpha;
+  ctx.globalAlpha = clampAlpha(alpha);
   ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(x, y, radius, 0, TAU);
@@ -152,7 +156,7 @@ function strokeLine(
   alpha = 1,
 ): void {
   ctx.save();
-  ctx.globalAlpha = alpha;
+  ctx.globalAlpha = clampAlpha(alpha);
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.lineCap = "round";
@@ -412,7 +416,7 @@ function drawBeam(
 ): void {
   const spread = width;
   ctx.save();
-  ctx.globalAlpha = alpha;
+  ctx.globalAlpha = clampAlpha(alpha);
   ctx.fillStyle = "rgba(191, 219, 254, 0.18)";
   ctx.beginPath();
   ctx.moveTo(base.x + 22, base.y - 18);

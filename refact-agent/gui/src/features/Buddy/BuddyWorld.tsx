@@ -759,6 +759,17 @@ function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+function resolveBuddyWorldSpeechOverride(args: {
+  activeSpeechText: string | null;
+  showcasePose: BuddyScenePose | null;
+  showcaseSpeech: string | null;
+  reaction: string | null;
+}): string | null {
+  if (args.activeSpeechText !== null) return args.activeSpeechText;
+  if (args.showcasePose !== null) return args.showcaseSpeech;
+  return args.reaction;
+}
+
 function drawScene(
   ctx: CanvasRenderingContext2D,
   world: BuddyWorldState,
@@ -867,16 +878,30 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       return;
     }
 
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)") as {
+      matches: boolean;
+      addEventListener?: (type: "change", listener: () => void) => void;
+      removeEventListener?: (type: "change", listener: () => void) => void;
+      addListener?: (listener: () => void) => void;
+      removeListener?: (listener: () => void) => void;
+    };
     const updateReducedMotion = () => setReducedMotion(media.matches);
     updateReducedMotion();
     if (typeof media.addEventListener === "function") {
       media.addEventListener("change", updateReducedMotion);
-      return () => media.removeEventListener("change", updateReducedMotion);
+      return () => {
+        if (typeof media.removeEventListener === "function") {
+          media.removeEventListener("change", updateReducedMotion);
+        }
+      };
     }
     if (typeof media.addListener === "function") {
       media.addListener(updateReducedMotion);
-      return () => media.removeListener(updateReducedMotion);
+      return () => {
+        if (typeof media.removeListener === "function") {
+          media.removeListener(updateReducedMotion);
+        }
+      };
     }
   }, []);
 
@@ -1160,9 +1185,19 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       ? showcaseRun.pose
       : null;
   const characterPose: BuddyScenePose = showcasePose ?? randomPose;
-  const speechOverride = activeSpeech
-    ? activeSpeech.text
-    : reaction ?? (showcasePose ? showcaseRun?.speech : null);
+  const speechOverride = resolveBuddyWorldSpeechOverride({
+    activeSpeechText: activeSpeech?.text ?? null,
+    showcasePose,
+    showcaseSpeech: showcaseRun?.speech ?? null,
+    reaction,
+  });
+  const speechSource = activeSpeech
+    ? "active"
+    : showcasePose
+      ? "showcase"
+      : reaction
+        ? "reaction"
+        : "none";
 
   return (
     <section
@@ -1172,6 +1207,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       data-vitality={world.vitality}
       data-showcase={showcaseRun?.kind ?? "none"}
       data-showcase-phase={showcaseRun?.phase ?? "idle"}
+      data-speech-source={speechSource}
       data-testid="buddy-world"
       aria-label={`Buddy virtual scene: ${world.phaseLabel}. ${world.vitalityLabel}.`}
     >

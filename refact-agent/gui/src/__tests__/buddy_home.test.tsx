@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "../utils/test-utils";
+import { fireEvent, render, screen, waitFor } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
@@ -36,6 +36,34 @@ import type {
   BuddySnapshot,
 } from "../features/Buddy/types";
 import type React from "react";
+
+vi.mock("../features/Buddy/BuddyCharacter", async () => {
+  const ReactModule = await vi.importActual<typeof import("react")>("react");
+
+  return {
+    BuddyCharacter: ({
+      scenePose = "idle",
+      sceneXPercent,
+      speechText,
+    }: {
+      scenePose?: string;
+      sceneXPercent?: number;
+      speechText?: string | null;
+    }) =>
+      ReactModule.createElement(
+        "div",
+        {
+          "data-pose": scenePose,
+          "data-testid": "buddy-world-character",
+          style:
+            typeof sceneXPercent === "number"
+              ? { left: `${sceneXPercent}%` }
+              : undefined,
+        },
+        speechText,
+      ),
+  };
+});
 
 const CONFIG_STATE = {
   config: {
@@ -429,6 +457,53 @@ describe("BuddyWorld_dynamic_environment", () => {
     }
   });
 
+  it("cleans up partial reduced-motion addEventListener mocks safely", () => {
+    const originalMatchMedia = window.matchMedia;
+    const addEventListener = vi.fn();
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        addEventListener,
+      })),
+    });
+
+    try {
+      const view = render(
+        <BuddyWorld
+          palette={PALETTES[0]}
+          stage={STAGES[2]}
+          state={makeSemanticState()}
+          pulse={makePulse()}
+          pet={makeSnapshot().state.pet}
+          nowPlaying={null}
+          activeQuest={null}
+          activeSpeech={null}
+          setupNeeded={false}
+          now={new Date("2024-01-01T14:00:00")}
+          onCanvasEvent={vi.fn()}
+          onCare={vi.fn()}
+          onOpenPage={vi.fn()}
+          onRunMode={vi.fn()}
+          onDismissSetup={vi.fn()}
+          onSpeechControl={vi.fn()}
+        />,
+        { preloadedState: CONFIG_STATE },
+      );
+
+      expect(addEventListener).toHaveBeenCalledWith(
+        "change",
+        expect.any(Function),
+      );
+      expect(() => view.unmount()).not.toThrow();
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
   it("builds time-dependent sun and moon phases", () => {
     const morning = buildBuddyWorldState({
       now: new Date("2024-01-01T08:00:00"),
@@ -607,6 +682,68 @@ describe("BuddyWorld_dynamic_environment", () => {
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-showcase",
         "memory_firefly_night",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps showcase speech ahead of local hotspot reactions", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T00:00:40Z"));
+    try {
+      render(
+        <BuddyWorld
+          palette={PALETTES[0]}
+          stage={STAGES[2]}
+          state={makeSemanticState()}
+          pulse={{
+            ...makePulse(),
+            diagnostics: { last_hour: 0, top_error_types: [] },
+            git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+            mcp: { total: 4, failing: 0, auth_expiring: 0 },
+            memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+          }}
+          pet={makeSnapshot().state.pet}
+          nowPlaying={{
+            id: "runtime-showcase-speech",
+            signal_type: "memory_extract",
+            title: "Memory extracted",
+            source: "test",
+            status: "completed",
+            priority: "normal",
+            created_at: "2024-01-01T00:00:00Z",
+          }}
+          activeQuest={null}
+          activeSpeech={null}
+          setupNeeded={false}
+          now={new Date("2024-01-01T14:00:00")}
+          onCanvasEvent={vi.fn()}
+          onCare={vi.fn()}
+          onOpenPage={vi.fn()}
+          onRunMode={vi.fn()}
+          onDismissSetup={vi.fn()}
+          onSpeechControl={vi.fn()}
+        />,
+        { preloadedState: CONFIG_STATE },
+      );
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-showcase",
+        "memory_firefly_night",
+      );
+
+      await vi.advanceTimersByTimeAsync(3817);
+      expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+        "data-pose",
+        "meditate",
+      );
+      fireEvent.click(screen.getByRole("button", { name: /play in sun/i }));
+
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-speech-source",
+        "showcase",
       );
     } finally {
       vi.useRealTimers();
