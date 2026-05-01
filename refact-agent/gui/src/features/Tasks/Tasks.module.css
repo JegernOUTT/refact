@@ -65,12 +65,6 @@
   display: none;
 }
 
-.taskHeader {
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--gray-5);
-  flex-shrink: 0;
-}
-
 .boardSection {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   flex: 0 0 auto;

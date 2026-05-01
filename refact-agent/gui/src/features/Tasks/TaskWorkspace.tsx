@@ -11,7 +11,6 @@ import {
   Checkbox,
 } from "@radix-ui/themes";
 import {
-  ArrowLeftIcon,
   PlusIcon,
   PersonIcon,
   Cross2Icon,
@@ -1183,46 +1182,12 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           board.cards.find((c) => c.id === activeChat.cardId)?.title ?? "",
         );
 
-  const branchDisplay =
-    activeChat?.type === "agent"
-      ? board.cards.find((c) => c.id === activeChat.cardId)?.agent_branch ??
-        task.base_branch ??
-        "(unknown)"
-      : task.base_branch ?? "(unknown)";
-
   return (
     <Box
       className={`${styles.taskWorkspace} ${
         chatExpanded ? styles.expanded : ""
       }`}
     >
-      <Flex className={styles.taskHeader} justify="between" align="center">
-        <Flex align="center" gap="3">
-          <Button variant="ghost" size="1" onClick={handleBack}>
-            <ArrowLeftIcon />
-          </Button>
-          <Heading size="4">{task.name}</Heading>
-          <Badge
-            color={
-              task.status === "active"
-                ? "blue"
-                : task.status === "completed"
-                  ? "green"
-                  : "gray"
-            }
-          >
-            {task.status}
-          </Badge>
-          <Badge color="gray">
-            <CodeIcon /> {branchDisplay}
-          </Badge>
-        </Flex>
-        <Text size="1" color="gray">
-          {task.cards_done}/{task.cards_total} done
-          {task.cards_failed > 0 && ` • ${task.cards_failed} failed`}
-        </Text>
-      </Flex>
-
       {!chatExpanded && (
         <>
           <Box className={styles.boardSection}>
