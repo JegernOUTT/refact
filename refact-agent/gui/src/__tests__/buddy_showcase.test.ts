@@ -7,6 +7,7 @@ import {
   BUDDY_SHOWCASE_PHASE_DURATIONS_MS,
   chooseBuddyShowcase,
   createBuddyShowcaseRun,
+  hasBuddyShowcaseRuntimeTrigger,
   type BuddyShowcaseTargetCandidate,
 } from "../features/Buddy/buddyShowcase";
 import { drawShowcaseEvent } from "../features/Buddy/buddyShowcaseDraw";
@@ -568,6 +569,95 @@ describe("buddy showcase director", () => {
     });
   });
 
+  it("ignores dismissed memory runtime signals", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "knowledge_update",
+        dismissed: true,
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 11_000,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying)).toBe(false);
+    expect(chooseBuddyShowcase(args)).toBeNull();
+    expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
+  it("ignores expired non-persistent runtime signals", () => {
+    const nowMs = new Date("2024-01-01T00:02:00Z").getTime();
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "knowledge_update",
+        created_at: "2024-01-01T00:00:00Z",
+        ttl_ms: 30_000,
+        persistent: false,
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying, nowMs)).toBe(false);
+    expect(chooseBuddyShowcase(args)).toBeNull();
+    expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
+  it("keeps persistent expired-looking runtime signals eligible", () => {
+    const nowMs = new Date("2024-01-01T00:02:00Z").getTime();
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "knowledge_update",
+        created_at: "2024-01-01T00:00:00Z",
+        ttl_ms: 30_000,
+        persistent: true,
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying, nowMs)).toBe(true);
+    expect(chooseBuddyShowcase(args)?.kind).toBe("memory_firefly_night");
+  });
+
+  it("treats invalid runtime timestamps as not expired", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "knowledge_update",
+        created_at: "not-a-date",
+        ttl_ms: 30_000,
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 14_000,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying)).toBe(true);
+    expect(chooseBuddyShowcase(args)?.kind).toBe("memory_firefly_night");
+  });
+
   it("chooses and creates stargazing constellation for generation and provider signals", () => {
     const generatingArgs = {
       targets: [OBSERVATORY_TARGET],
@@ -601,6 +691,41 @@ describe("buddy showcase director", () => {
     expect(chooseBuddyShowcase(providerArgs)?.kind).toBe(
       "stargazing_constellation",
     );
+  });
+
+  it("ignores dismissed provider and generation runtime signals", () => {
+    const baseArgs = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 20_500,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "evening" as const, weather: "busy" as const },
+    };
+    const streamingEvent = makeRuntimeEvent({
+      signal_type: "streaming",
+      title: "Streaming answer",
+      status: "streaming",
+      dismissed: true,
+    });
+    const providerEvent = makeRuntimeEvent({
+      signal_type: "error",
+      title: "Provider quota warning",
+      description: "The default model quota is low.",
+      status: "failed",
+      dismissed: true,
+    });
+
+    expect(hasBuddyShowcaseRuntimeTrigger(streamingEvent)).toBe(false);
+    expect(hasBuddyShowcaseRuntimeTrigger(providerEvent)).toBe(false);
+    expect(
+      chooseBuddyShowcase({ ...baseArgs, nowPlaying: streamingEvent }),
+    ).toBeNull();
+    expect(
+      chooseBuddyShowcase({ ...baseArgs, nowPlaying: providerEvent }),
+    ).toBeNull();
   });
 
   it("ignores completed active-work runtime signals", () => {
@@ -856,6 +981,69 @@ describe("buddy showcase director", () => {
 
     expect(chooseBuddyShowcase(args)).toBeNull();
     expect(createBuddyShowcaseRun(args)).toBeNull();
+  });
+
+  it("ignores benign successful default model and provider sync notifications", () => {
+    const baseArgs = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 27_500,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "evening" as const, weather: "clear" as const },
+    };
+    const defaultModelsEvent = makeRuntimeEvent({
+      signal_type: "default_models_sync",
+      title: "Default models synced",
+      description: "Provider defaults refreshed successfully with no warnings.",
+      source: "providers/default_models",
+      status: "completed",
+      priority: "critical",
+    });
+    const providerSyncEvent = makeRuntimeEvent({
+      signal_type: "provider_sync",
+      title: "Provider catalog refreshed",
+      description: "All provider sources synced successfully.",
+      source: "providers",
+      status: "completed",
+      priority: "normal",
+    });
+
+    expect(hasBuddyShowcaseRuntimeTrigger(defaultModelsEvent)).toBe(false);
+    expect(hasBuddyShowcaseRuntimeTrigger(providerSyncEvent)).toBe(false);
+    expect(
+      chooseBuddyShowcase({ ...baseArgs, nowPlaying: defaultModelsEvent }),
+    ).toBeNull();
+    expect(
+      chooseBuddyShowcase({ ...baseArgs, nowPlaying: providerSyncEvent }),
+    ).toBeNull();
+  });
+
+  it("keeps real failed provider problem notifications eligible", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "provider_sync",
+        title: "Provider model not found",
+        description: "The default chat model reference is missing.",
+        source: "providers/default_models",
+        status: "failed",
+        priority: "normal",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 27_800,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "evening" as const, weather: "clear" as const },
+    };
+
+    expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying)).toBe(true);
+    expect(chooseBuddyShowcase(args)?.kind).toBe("stargazing_constellation");
+    expect(createBuddyShowcaseRun(args)?.target.id).toBe("providers");
   });
 
   it("provider pulse issues prefer and create stargazing constellation", () => {

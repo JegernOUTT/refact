@@ -34,27 +34,28 @@ const STARGAZING_RUNTIME_SIGNALS = new Set([
   "tool_used",
 ]);
 const ACTIVE_RUNTIME_STATUSES = new Set(["started", "progress", "streaming"]);
-const PROVIDER_SIGNAL_PATTERNS = [
+const PROVIDER_TOPIC_PATTERNS = [
   /\bproviders?\b/,
   /\bquotas?\b/,
   /\bdefault[-_\s]?models?\b/,
   /\bprovider[-_\s]?sources?\b/,
-  /\bbroken[-_\s]?refs?\b/,
+  /\bbroken[-_\s]?(?:refs?|model[-_\s]?references?)\b/,
   /\bmodel[-_\s]?not[-_\s]?found\b/,
 ] as const;
 const PROVIDER_PROBLEM_CUE_PATTERNS = [
   /\bquotas?\b/,
-  /\bdefault[-_\s]?models?\b/,
-  /\bprovider[-_\s]?sources?\b/,
-  /\bbroken[-_\s]?refs?\b/,
+  /\bquota[-_\s]?warnings?\b/,
+  /\bbroken[-_\s]?(?:refs?|model[-_\s]?references?)\b/,
   /\bmodel[-_\s]?not[-_\s]?found\b/,
   /\bfail(?:ed|ing|ure)?\b/,
   /\berrors?\b/,
   /\bproblems?\b/,
-  /\bwarnings?\b/,
   /\bmissing\b/,
   /\binvalid\b/,
   /\brejected\b/,
+  /\bunset\b/,
+  /\bunconfigured\b/,
+  /\bnot[-_\s]?configured\b/,
 ] as const;
 const IDLE_SHOWCASE_BASE_WEIGHT = 18;
 const IDLE_SHOWCASE_REPEAT_WEIGHT = 0.34;
@@ -127,8 +128,27 @@ export interface AdvanceBuddyShowcasePhaseArgs {
   nowMs: number;
 }
 
-function hasProviderSignal(event: BuddyRuntimeEvent | null): boolean {
+function isRuntimeEventExpired(
+  event: BuddyRuntimeEvent,
+  nowMs: number,
+): boolean {
+  if (event.persistent === true) return false;
+  if (event.ttl_ms == null || !Number.isFinite(event.ttl_ms)) return false;
+  const createdAtMs = Date.parse(event.created_at);
+  if (!Number.isFinite(createdAtMs) || !Number.isFinite(nowMs)) return false;
+  return nowMs > createdAtMs + event.ttl_ms;
+}
+
+function canUseRuntimeEvent(
+  event: BuddyRuntimeEvent | null,
+  nowMs: number,
+): event is BuddyRuntimeEvent {
   if (!event) return false;
+  if (event.dismissed === true) return false;
+  return !isRuntimeEventExpired(event, nowMs);
+}
+
+function hasProviderTopic(event: BuddyRuntimeEvent): boolean {
   const haystack = [
     event.signal_type,
     event.title,
@@ -137,17 +157,24 @@ function hasProviderSignal(event: BuddyRuntimeEvent | null): boolean {
   ]
     .join(" ")
     .toLowerCase();
-  if (!PROVIDER_SIGNAL_PATTERNS.some((pattern) => pattern.test(haystack))) {
-    return false;
-  }
-  const problemHaystack = [event.title, event.description ?? "", event.source]
+  return PROVIDER_TOPIC_PATTERNS.some((pattern) => pattern.test(haystack));
+}
+
+function hasProviderProblemCue(event: BuddyRuntimeEvent): boolean {
+  const haystack = [event.title, event.description ?? ""]
     .join(" ")
     .toLowerCase();
-  const hasProblemCue = PROVIDER_PROBLEM_CUE_PATTERNS.some((pattern) =>
-    pattern.test(problemHaystack),
+  return PROVIDER_PROBLEM_CUE_PATTERNS.some((pattern) =>
+    pattern.test(haystack),
   );
+}
+
+function hasProviderSignal(event: BuddyRuntimeEvent | null): boolean {
+  if (!event || !hasProviderTopic(event)) return false;
+  const hasProblemCue = hasProviderProblemCue(event);
   if (event.status === "failed") return true;
-  if (event.priority === "critical") return true;
+  if (event.priority === "critical") return hasProblemCue;
+  if (event.priority === "high") return hasProblemCue;
   return hasProblemCue;
 }
 
@@ -181,8 +208,9 @@ function providerPulseScore(pulse: BuddyPulse | null | undefined): number {
 
 function kindForRuntime(
   event: BuddyRuntimeEvent | null,
+  nowMs: number,
 ): BuddyShowcaseKind | null {
-  if (!event) return null;
+  if (!canUseRuntimeEvent(event, nowMs)) return null;
   if (MEMORY_RUNTIME_SIGNALS.has(event.signal_type)) {
     return MEMORY_RUNTIME_STATUSES.has(event.status)
       ? "memory_firefly_night"
@@ -201,8 +229,9 @@ function kindForRuntime(
 
 export function hasBuddyShowcaseRuntimeTrigger(
   event: BuddyRuntimeEvent | null,
+  nowMs = Date.now(),
 ): boolean {
-  return kindForRuntime(event) !== null;
+  return kindForRuntime(event, nowMs) !== null;
 }
 
 function findTarget(
@@ -351,7 +380,7 @@ export function chooseBuddyShowcase(
   if (!canChooseShowcase(args)) return null;
 
   const runtimeKind = args.strongRuntimeTrigger
-    ? kindForRuntime(args.nowPlaying)
+    ? kindForRuntime(args.nowPlaying, args.nowMs)
     : null;
   if (runtimeKind) {
     if (
