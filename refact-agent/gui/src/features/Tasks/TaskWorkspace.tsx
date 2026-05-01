@@ -15,6 +15,7 @@ import {
   Cross2Icon,
   ChevronDownIcon,
   FileTextIcon,
+  MagnifyingGlassIcon,
 } from "@radix-ui/react-icons";
 import { AgentStatusDot } from "./AgentStatusDot";
 import { ScrollArea } from "../../components/ScrollArea";
@@ -257,14 +258,19 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
   onRemovePlanner,
 }) => {
   return (
-    <Box className={styles.panel}>
+    <Box className={styles.panelList}>
       <Flex className={styles.panelHeader}>
-        <Text size="2" weight="medium">
+        <Text size="1" color="gray" className={styles.panelLabel}>
           Planners
         </Text>
-        <Button size="1" variant="ghost" onClick={onNewPlanner}>
+        <button
+          type="button"
+          className={styles.panelActionButton}
+          onClick={onNewPlanner}
+          aria-label="New planner"
+        >
           <PlusIcon />
-        </Button>
+        </button>
       </Flex>
       <Box className={styles.panelContent}>
         {plannerChats.length === 0 ? (
@@ -358,9 +364,9 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
   };
 
   return (
-    <Box className={styles.panel}>
+    <Box className={styles.panelList}>
       <Flex className={styles.panelHeader}>
-        <Text size="2" weight="medium">
+        <Text size="1" color="gray" className={styles.panelLabel}>
           Agents
         </Text>
         {total > 0 && (
@@ -389,7 +395,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
         )}
       </Box>
       {onModelChange && (
-        <Flex p="2" style={{ borderTop: "1px solid var(--gray-4)" }}>
+        <Flex className={styles.modelPickerRow}>
           <ModelPickerPopover
             value={defaultAgentModel ?? ""}
             onValueChange={onModelChange}
@@ -1218,6 +1224,15 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           </Box>
 
           <Box className={styles.panelsWrapper}>
+            <Flex className={styles.panelsSearchRow}>
+              <Box className={styles.panelsSearchBox}>
+                <MagnifyingGlassIcon width={12} height={12} />
+                <Text size="1" color="gray">
+                  Planners and agents
+                </Text>
+              </Box>
+            </Flex>
+
             <Flex
               className={styles.panelsHeader}
               align="center"

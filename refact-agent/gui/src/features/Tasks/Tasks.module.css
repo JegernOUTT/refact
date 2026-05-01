@@ -83,34 +83,57 @@
   max-height: 30%;
   min-height: 80px;
   overflow: auto;
-  border-bottom: 1px solid var(--gray-5);
+  border-bottom: 1px solid var(--gray-a4);
 }
 
 .panelsWrapper {
-  border-bottom: 1px solid var(--gray-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--gray-a4);
 }
 
 .panelsHeader {
   flex-shrink: 0;
-  background: var(--gray-2);
+  justify-content: space-between;
+  background: transparent;
   user-select: none;
-  min-height: 28px;
+  min-height: 22px;
+  padding: 0;
+}
+
+.panelsSearchRow {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.panelsSearchBox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 160px;
+  min-width: 0;
+  height: 20px;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-2);
+  color: var(--gray-10);
+  background: transparent;
 }
 
 .panelsSection {
   display: flex;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  min-height: 180px;
-  max-height: 280px;
+  gap: var(--space-4);
+  padding-top: var(--space-1);
+  min-height: 120px;
+  max-height: 240px;
   overflow: hidden;
 }
 
-.panel {
+.panelList {
   flex: 1;
-  background: var(--gray-2);
-  border-radius: var(--radius-3);
-  padding: var(--space-2);
+  min-width: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -120,9 +143,41 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-bottom: var(--space-2);
-  border-bottom: 1px solid var(--gray-4);
-  margin-bottom: var(--space-2);
+  gap: var(--space-2);
+  padding: 0 0 var(--space-1);
+  border-bottom: 1px solid var(--gray-a4);
+  margin-bottom: var(--space-1);
+  min-height: 20px;
+}
+
+.panelLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.panelActionButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: var(--gray-11);
+  cursor: pointer;
+}
+
+.panelActionButton:hover,
+.panelActionButton:focus-visible {
+  background: var(--gray-a3);
+  border-color: var(--gray-a7);
+}
+
+.panelActionButton:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: 1px;
 }
 
 .panelContent {
@@ -130,6 +185,11 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+.modelPickerRow {
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--gray-a4);
 }
 
 .chatSection {
@@ -142,7 +202,7 @@
 
 .chatHeader {
   flex-shrink: 0;
-  border-bottom: 1px solid var(--gray-4);
+  border-bottom: 1px solid var(--gray-a4);
   background: var(--gray-2);
   user-select: none;
   min-height: 28px;
@@ -161,8 +221,9 @@
 
 .chatExpandButton,
 .panelsExpandButton {
-  min-width: 22px;
-  height: 22px;
+  min-width: 18px;
+  height: 18px;
+  margin-left: calc(-1 * var(--space-1));
 }
 
 .chatHeaderLabel,
@@ -182,7 +243,7 @@
 }
 
 .panelItem {
-  padding: var(--space-1) var(--space-2);
+  padding: 2px 0;
   border-radius: var(--radius-2);
   cursor: pointer;
   display: flex;
@@ -191,15 +252,15 @@
 }
 
 .panelItem:hover {
-  background: var(--gray-4);
+  background: var(--gray-a3);
 }
 
 .panelItemSelected {
-  background: var(--accent-4);
+  background: var(--accent-a3);
 }
 
 .panelItemSelected:hover {
-  background: var(--accent-5);
+  background: var(--accent-a4);
 }
 
 .panelItemLead {
