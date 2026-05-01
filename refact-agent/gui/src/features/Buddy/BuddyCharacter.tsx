@@ -3,6 +3,7 @@ import { BuddyCanvas } from "./BuddyCanvas";
 import type {
   BuddyControl,
   BuddyEvent,
+  BuddyScenePose,
   BuddySemanticState,
   BubblePosition,
   Palette,
@@ -19,7 +20,7 @@ interface BuddyCharacterProps {
   bubblePosition?: BubblePosition;
   randomizeBubblePosition?: boolean;
   sceneXPercent?: number;
-  scenePose?: "idle" | "spin" | "bounce" | "look";
+  scenePose?: BuddyScenePose;
   speechText?: string | null;
   speechControls?: BuddyControl[];
   onCanvasEvent: (event: BuddyEvent) => void;

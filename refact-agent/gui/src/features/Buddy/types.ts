@@ -397,6 +397,51 @@ export type BuddyEvent =
 
 export type BubblePosition = "top" | "left" | "right";
 
+export type BuddyScenePose =
+  | "idle"
+  | "spin"
+  | "bounce"
+  | "look"
+  | "stargaze"
+  | "meditate"
+  | "pounce"
+  | "dance"
+  | "shield"
+  | "cheer"
+  | "carry"
+  | "dig"
+  | "sleepy";
+
+export type BuddyShowcaseKind =
+  | "memory_firefly_night"
+  | "stargazing_constellation";
+
+export type BuddyShowcasePhase =
+  | "travel"
+  | "anticipate"
+  | "showcase"
+  | "react"
+  | "cooldown";
+
+export interface BuddyShowcaseTarget {
+  id: string;
+  x: number;
+  y: number;
+  label: string;
+}
+
+export interface BuddyShowcaseRun {
+  id: string;
+  kind: BuddyShowcaseKind;
+  phase: BuddyShowcasePhase;
+  target: BuddyShowcaseTarget;
+  pose: BuddyScenePose;
+  speech: string;
+  seed: number;
+  startedAtMs: number;
+  phaseStartedAtMs: number;
+}
+
 export interface BuddyCanvasProps {
   state: BuddySemanticState;
   onEvent?: (event: BuddyEvent) => void;

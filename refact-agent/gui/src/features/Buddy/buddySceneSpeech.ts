@@ -99,7 +99,8 @@ function defaultRuntimeControls(event: BuddyRuntimeEvent): BuddyControl[] {
 function runtimeEventToSpeech(
   event: BuddyRuntimeEvent | null | undefined,
 ): BuddySceneSpeech | null {
-  if (!event || event.dismissed || isRuntimeEventExpired(event)) return null;
+  if (event === null || event === undefined) return null;
+  if (event.dismissed === true || isRuntimeEventExpired(event)) return null;
   const text = runtimeEventText(event).trim();
   if (!text) return null;
   const controls = event.controls?.length

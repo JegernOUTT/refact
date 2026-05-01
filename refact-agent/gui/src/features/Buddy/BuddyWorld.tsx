@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import classNames from "classnames";
 import { BuddyCharacter } from "./BuddyCharacter";
 import type {
@@ -10,7 +16,10 @@ import type {
   BuddyPulse,
   BuddyQuest,
   BuddyRuntimeEvent,
+  BuddyScenePose,
   BuddySemanticState,
+  BuddyShowcaseKind,
+  BuddyShowcaseRun,
   Palette,
   Stage,
 } from "./types";
@@ -20,6 +29,14 @@ import {
   type BuddyWorldState,
   type BuddyWorldTone,
 } from "./buddyWorldModel";
+import {
+  advanceBuddyShowcasePhase,
+  BUDDY_SHOWCASE_IDLE_COOLDOWN_MS,
+  BUDDY_SHOWCASE_PHASE_DURATIONS_MS,
+  BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS,
+  createBuddyShowcaseRun,
+  type BuddyShowcaseTargetCandidate,
+} from "./buddyShowcase";
 import styles from "./BuddyWorld.module.css";
 
 interface BuddyWorldProps {
@@ -73,7 +90,12 @@ const RANDOM_IDLE_REACTIONS = [
   "Buddy pauses to inspect a sparkle.",
 ] as const;
 
-const RANDOM_POSES = ["idle", "spin", "bounce", "look"] as const;
+const RANDOM_POSES = [
+  "idle",
+  "spin",
+  "bounce",
+  "look",
+] as const satisfies readonly BuddyScenePose[];
 
 type BuddyRandomPose = (typeof RANDOM_POSES)[number];
 
@@ -654,6 +676,18 @@ function clampBuddySceneX(x: number): number {
   return Math.max(BUDDY_MIN_X, Math.min(BUDDY_MAX_X, x));
 }
 
+function buildBuddyShowcaseTargets(
+  world: BuddyWorldState,
+): BuddyShowcaseTargetCandidate[] {
+  return world.objects.map((item) => ({
+    id: item.id,
+    x: item.x,
+    y: item.y,
+    label: item.label,
+    sprite: item.sprite,
+  }));
+}
+
 function buildBuddyWaypoints(world: BuddyWorldState): BuddyWaypoint[] {
   return [
     {
@@ -805,6 +839,10 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   const [activeWaypointIndex, setActiveWaypointIndex] = useState(0);
   const [lastWaypoint, setLastWaypoint] = useState<BuddyWaypoint | null>(null);
   const [randomPose, setRandomPose] = useState<BuddyRandomPose>("idle");
+  const [showcaseRun, setShowcaseRun] = useState<BuddyShowcaseRun | null>(null);
+  const [lastShowcaseKind, setLastShowcaseKind] =
+    useState<BuddyShowcaseKind | null>(null);
+  const [nextShowcaseAtMs, setNextShowcaseAtMs] = useState(0);
 
   useEffect(() => {
     if (now) {
@@ -839,20 +877,66 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     [activeQuest, currentTime, nowPlaying, pet, pulse],
   );
   const waypoints = useMemo(() => buildBuddyWaypoints(world), [world]);
+  const showcaseTargets = useMemo(
+    () => buildBuddyShowcaseTargets(world),
+    [world],
+  );
   const activeWaypoint = waypoints[activeWaypointIndex % waypoints.length];
-  const characterSceneX = clampBuddySceneX(activeWaypoint.x);
+  const characterSceneX = clampBuddySceneX(
+    showcaseRun ? showcaseRun.target.x : activeWaypoint.x,
+  );
 
   useEffect(() => {
     setActiveWaypointIndex(0);
     setLastWaypoint(null);
+    setShowcaseRun(null);
   }, [world.headline]);
 
+  const startShowcase = useCallback(
+    (strongRuntimeTrigger: boolean) => {
+      if (showcaseRun) return false;
+      const nowMs = Date.now();
+      const run = createBuddyShowcaseRun({
+        targets: showcaseTargets,
+        nowPlaying,
+        activeSpeechVisible: Boolean(activeSpeech),
+        pet,
+        nowMs,
+        cooldownUntilMs: nextShowcaseAtMs,
+        lastShowcaseKind,
+        strongRuntimeTrigger,
+      });
+      if (!run) return false;
+      setShowcaseRun(run);
+      setLastWaypoint(null);
+      setLastShowcaseKind(run.kind);
+      setNextShowcaseAtMs(
+        nowMs +
+          (strongRuntimeTrigger
+            ? BUDDY_SHOWCASE_TRIGGER_COOLDOWN_MS
+            : BUDDY_SHOWCASE_IDLE_COOLDOWN_MS),
+      );
+      return true;
+    },
+    [
+      activeSpeech,
+      lastShowcaseKind,
+      nextShowcaseAtMs,
+      nowPlaying,
+      pet,
+      showcaseRun,
+      showcaseTargets,
+    ],
+  );
+
   useEffect(() => {
-    if (activeSpeech ?? reaction) return;
+    if (activeSpeech ?? reaction ?? showcaseRun) return;
     const delay = 4200 + Math.random() * 7200;
     const timer = window.setTimeout(() => {
       const roll = Math.random();
-      if (roll < 0.22) {
+      if (roll < 0.18 && startShowcase(false)) return;
+
+      if (roll < 0.34) {
         setRandomPose(
           RANDOM_POSES[Math.floor(Math.random() * RANDOM_POSES.length)],
         );
@@ -860,7 +944,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         return;
       }
 
-      if (roll < 0.36) {
+      if (roll < 0.46) {
         setLastWaypoint(null);
         return;
       }
@@ -871,10 +955,10 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       );
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [activeSpeech, reaction, waypoints]);
+  }, [activeSpeech, reaction, showcaseRun, startShowcase, waypoints]);
 
   useEffect(() => {
-    if (activeSpeech ?? reaction) return;
+    if (activeSpeech ?? reaction ?? showcaseRun) return;
     if (lastWaypoint?.id === activeWaypoint.id) return;
     const timer = window.setTimeout(() => {
       setLastWaypoint(activeWaypoint);
@@ -883,7 +967,39 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       }
     }, 2200);
     return () => window.clearTimeout(timer);
-  }, [activeSpeech, activeWaypoint, lastWaypoint, reaction]);
+  }, [activeSpeech, activeWaypoint, lastWaypoint, reaction, showcaseRun]);
+
+  useEffect(() => {
+    if (activeSpeech !== null || showcaseRun !== null || nowPlaying === null) {
+      return;
+    }
+    startShowcase(true);
+  }, [activeSpeech, nowPlaying, showcaseRun, startShowcase]);
+
+  useEffect(() => {
+    if (!showcaseRun) return;
+    const nowMs = Date.now();
+    const elapsedMs = nowMs - showcaseRun.phaseStartedAtMs;
+    const remainingMs = Math.max(
+      0,
+      BUDDY_SHOWCASE_PHASE_DURATIONS_MS[showcaseRun.phase] - elapsedMs,
+    );
+    const timer = window.setTimeout(() => {
+      setShowcaseRun((currentRun) => {
+        if (!currentRun) return null;
+        const currentNowMs = Date.now();
+        const advanced = advanceBuddyShowcasePhase({
+          run: currentRun,
+          nowMs: currentNowMs,
+        });
+        if (!advanced) {
+          setNextShowcaseAtMs(currentNowMs + BUDDY_SHOWCASE_IDLE_COOLDOWN_MS);
+        }
+        return advanced;
+      });
+    }, remainingMs + 16);
+    return () => window.clearTimeout(timer);
+  }, [showcaseRun]);
 
   useEffect(() => {
     let frame = 0;
@@ -972,7 +1088,16 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     setReaction("Buddy opens the front door.");
   };
 
-  const speechOverride = activeSpeech ? activeSpeech.text : reaction;
+  const showcasePose =
+    showcaseRun !== null &&
+    showcaseRun.phase !== "travel" &&
+    showcaseRun.phase !== "cooldown"
+      ? showcaseRun.pose
+      : null;
+  const characterPose: BuddyScenePose = showcasePose ?? randomPose;
+  const speechOverride = activeSpeech
+    ? activeSpeech.text
+    : reaction ?? (showcasePose ? showcaseRun?.speech : null);
 
   return (
     <section
@@ -980,6 +1105,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       data-phase={world.phase}
       data-weather={world.weather}
       data-vitality={world.vitality}
+      data-showcase={showcaseRun?.kind ?? "none"}
+      data-showcase-phase={showcaseRun?.phase ?? "idle"}
       data-testid="buddy-world"
       aria-label={`Buddy virtual scene: ${world.phaseLabel}. ${world.vitalityLabel}.`}
     >
@@ -1058,7 +1185,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         palette={palette}
         displaySize={compact ? 230 : 282}
         sceneXPercent={characterSceneX}
-        scenePose={randomPose}
+        scenePose={characterPose}
         speechText={speechOverride}
         speechControls={activeSpeech ? activeSpeech.controls : undefined}
         randomizeBubblePosition
