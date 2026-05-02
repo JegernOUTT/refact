@@ -152,16 +152,38 @@ const ACTIVE_RUNTIME_STATUSES = new Set<BuddyRuntimeEvent["status"]>([
 
 const MEMORY_RUNTIME_SIGNALS = new Set(["memory_extract", "knowledge_update"]);
 
-const PROVIDER_RUNTIME_SIGNALS = new Set([
+const GENERATION_RUNTIME_SIGNALS = new Set([
   "streaming",
   "generating",
-  "tool_used",
-  "tool_failed",
-  "tool_confirmation",
-  "browser_action",
   "title_generating",
-  "commit_msg",
 ]);
+
+const PROVIDER_MODEL_TOPIC_TERMS = [
+  "provider",
+  "model",
+  "default_model",
+  "default model",
+  "default_model_missing",
+  "broken_ref",
+  "broken ref",
+  "broken_model_reference",
+  "model_not_found",
+  "quota",
+  "llm",
+  "openai",
+  "anthropic",
+  "claude",
+  "gemini",
+  "groq",
+  "ollama",
+  "openrouter",
+  "vllm",
+  "xai",
+  "context window",
+  "rate limit",
+  "api key",
+  "apikey",
+] as const;
 
 const AFFECTION_SIGNALS = new Set([
   "care_pet",
@@ -185,6 +207,11 @@ function clamp01(value: number): number {
   return clampRange(value, 0, 1, 0);
 }
 
+function safeCount(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.max(0, value);
+}
+
 function addLayer(layers: BuddyWorldLayer[], layer: BuddyWorldLayer): void {
   if (!layers.includes(layer)) layers.push(layer);
 }
@@ -206,6 +233,19 @@ function runtimeText(event: BuddyRuntimeEvent): string {
   }`.toLowerCase();
 }
 
+function hasProviderModelTopicText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return PROVIDER_MODEL_TOPIC_TERMS.some((term) => normalized.includes(term));
+}
+
+function hasProviderModelRuntimeTopic(event: BuddyRuntimeEvent): boolean {
+  return hasProviderModelTopicText(runtimeText(event));
+}
+
+function isGenerationRuntime(event: BuddyRuntimeEvent): boolean {
+  return GENERATION_RUNTIME_SIGNALS.has(event.signal_type);
+}
+
 function isMemoryRuntimeActive(event: BuddyRuntimeEvent | null): boolean {
   return (
     event !== null &&
@@ -216,49 +256,66 @@ function isMemoryRuntimeActive(event: BuddyRuntimeEvent | null): boolean {
 
 function isProviderRuntimeActive(event: BuddyRuntimeEvent | null): boolean {
   if (event === null || !isActiveRuntime(event)) return false;
-  if (PROVIDER_RUNTIME_SIGNALS.has(event.signal_type)) return true;
-  const text = runtimeText(event);
-  return (
-    text.includes("provider") ||
-    text.includes("model") ||
-    text.includes("default")
-  );
+  return isGenerationRuntime(event) || hasProviderModelRuntimeTopic(event);
 }
 
-function isSeriousRuntimeProblem(event: BuddyRuntimeEvent | null): boolean {
+function isProviderModelRuntimeProblem(
+  event: BuddyRuntimeEvent | null,
+): boolean {
   if (event === null || event.status !== "failed") return false;
-  const priority = event.priority.toLowerCase();
-  const text = runtimeText(event);
-  return (
-    priority === "critical" ||
-    priority === "high" ||
-    event.signal_type === "error" ||
-    event.signal_type === "chat_error" ||
-    event.signal_type === "tool_failed" ||
-    text.includes("provider") ||
-    text.includes("model") ||
-    text.includes("default") ||
-    text.includes("quota")
-  );
+  return isGenerationRuntime(event) || hasProviderModelRuntimeTopic(event);
 }
 
 function providerWarningCount(pulse: BuddyPulse | null | undefined): number {
   if (!pulse) return 0;
-  return pulse.providers.quota_warnings + (pulse.providers.defaults_ok ? 0 : 1);
+  return (
+    safeCount(pulse.providers.quota_warnings) +
+    (pulse.providers.defaults_ok === true ? 0 : 1)
+  );
 }
 
 function providerCriticalCount(pulse: BuddyPulse | null | undefined): number {
-  return pulse?.providers.broken_refs ?? 0;
+  return safeCount(pulse?.providers.broken_refs);
+}
+
+function diagnosticPressure(pulse: BuddyPulse | null | undefined): number {
+  return safeCount(pulse?.diagnostics.last_hour);
+}
+
+function diagnosticsTopicText(pulse: BuddyPulse): string {
+  return pulse.diagnostics.top_error_types.join(" ");
+}
+
+function hasGenericDiagnosticPressure(
+  pulse: BuddyPulse | null | undefined,
+): boolean {
+  return diagnosticPressure(pulse) >= 6;
 }
 
 function memoryPressure(pulse: BuddyPulse | null | undefined): number {
   if (!pulse) return 0;
-  return pulse.memory.orphan + pulse.memory.stale_conflicts * 2;
+  return (
+    safeCount(pulse.memory.orphan) + safeCount(pulse.memory.stale_conflicts) * 2
+  );
 }
 
-function hasSeriousPulseProblem(pulse: BuddyPulse | null | undefined): boolean {
+function memoryIssueCount(pulse: BuddyPulse | null | undefined): number {
+  if (!pulse) return 0;
+  return (
+    safeCount(pulse.memory.orphan) + safeCount(pulse.memory.stale_conflicts)
+  );
+}
+
+function hasProviderModelPulseProblem(
+  pulse: BuddyPulse | null | undefined,
+): boolean {
   if (!pulse) return false;
-  return pulse.providers.broken_refs > 0 || pulse.diagnostics.last_hour >= 6;
+  return (
+    providerCriticalCount(pulse) > 0 ||
+    (diagnosticPressure(pulse) >= 6 &&
+      !pulse.providers.defaults_ok &&
+      hasProviderModelTopicText(diagnosticsTopicText(pulse)))
+  );
 }
 
 function phaseFromHour(hour: number): BuddyWorldPhase {
@@ -365,7 +422,7 @@ function buildObjects(
   const runtimeActive = isActiveRuntime(visibleRuntime);
   const memoryRuntimeActive = isMemoryRuntimeActive(visibleRuntime);
   const providerRuntimeActive = isProviderRuntimeActive(visibleRuntime);
-  const runtimeSerious = isSeriousRuntimeProblem(visibleRuntime);
+  const runtimeProviderProblem = isProviderModelRuntimeProblem(visibleRuntime);
 
   if (!pulse) {
     return [
@@ -396,18 +453,26 @@ function buildObjects(
   }
 
   const providerWarnings = providerWarningCount(pulse);
-  const providerCritical = providerCriticalCount(pulse) > 0 || runtimeSerious;
-  const providerIssues =
-    pulse.providers.broken_refs +
-    pulse.providers.quota_warnings +
-    (pulse.providers.defaults_ok ? 0 : 1);
-  const memoryIssues = pulse.memory.orphan + pulse.memory.stale_conflicts;
+  const providerCritical =
+    providerCriticalCount(pulse) > 0 || runtimeProviderProblem;
+  const providerIssues = providerCriticalCount(pulse) + providerWarnings;
+  const memoryIssues = memoryIssueCount(pulse);
   const memoryLoad = memoryPressure(pulse);
-  const memoryCritical = pulse.memory.stale_conflicts >= 6 || memoryLoad >= 8;
-  const taskPressure = pulse.tasks.stuck + pulse.tasks.abandoned;
-  const mcpPressure = pulse.mcp.failing + pulse.mcp.auth_expiring;
-  const gitPressure =
-    pulse.git.uncommitted_files + (pulse.git.diff_lines_4h > 0 ? 1 : 0);
+  const memoryCritical =
+    safeCount(pulse.memory.stale_conflicts) >= 6 || memoryLoad >= 8;
+  const taskTotal = safeCount(pulse.tasks.total);
+  const taskStuck = safeCount(pulse.tasks.stuck);
+  const taskPressure = taskStuck + safeCount(pulse.tasks.abandoned);
+  const memoryTotal = safeCount(pulse.memory.total);
+  const mcpFailing = safeCount(pulse.mcp.failing);
+  const mcpAuthExpiring = safeCount(pulse.mcp.auth_expiring);
+  const mcpPressure = mcpFailing + mcpAuthExpiring;
+  const gitUncommittedFiles = safeCount(pulse.git.uncommitted_files);
+  const gitDiffLines = safeCount(pulse.git.diff_lines_4h);
+  const gitPressure = gitUncommittedFiles + (gitDiffLines > 0 ? 1 : 0);
+  const customizationTools =
+    safeCount(pulse.customization.skills) +
+    safeCount(pulse.customization.commands);
 
   const memoryState: BuddyWorldObjectState = memoryRuntimeActive
     ? "active"
@@ -430,10 +495,10 @@ function buildObjects(
         id: "tasks",
         sprite: "task_grove",
         label: "Task grove",
-        value: `${pulse.tasks.total} open`,
+        value: `${taskTotal} open`,
         description:
-          pulse.tasks.stuck > 0
-            ? `${pulse.tasks.stuck} stuck branches need Buddy's nudge.`
+          taskStuck > 0
+            ? `${taskStuck} stuck branches need Buddy's nudge.`
             : "Branches are clear enough to grow.",
         page: { type: "tasks_list" },
         tone: toneFromCount(taskPressure, 1, 3),
@@ -456,7 +521,7 @@ function buildObjects(
         id: "memory",
         sprite: "memory_fireflies",
         label: "Memory fireflies",
-        value: `${pulse.memory.total} docs`,
+        value: `${memoryTotal} docs`,
         description:
           memoryIssues > 0
             ? `${memoryIssues} memory sparks want pruning.`
@@ -533,10 +598,10 @@ function buildObjects(
         id: "mcp",
         sprite: "satellite",
         label: "MCP satellites",
-        value: `${pulse.mcp.total} linked`,
+        value: `${safeCount(pulse.mcp.total)} linked`,
         description:
-          pulse.mcp.failing > 0 || pulse.mcp.auth_expiring > 0
-            ? `${pulse.mcp.failing} failing · ${pulse.mcp.auth_expiring} auth expiring.`
+          mcpFailing > 0 || mcpAuthExpiring > 0
+            ? `${mcpFailing} failing · ${mcpAuthExpiring} auth expiring.`
             : "Satellites are holding orbit.",
         page: { type: "integrations" },
         tone: toneFromCount(mcpPressure, 1, 3),
@@ -565,21 +630,20 @@ function buildObjects(
         id: "git",
         sprite: "git_vane",
         label: "Git weather vane",
-        value: `${pulse.git.uncommitted_files} files`,
+        value: `${gitUncommittedFiles} files`,
         description:
-          pulse.git.diff_lines_4h > 0
-            ? `${pulse.git.diff_lines_4h} lines moved in the last 4h.`
+          gitDiffLines > 0
+            ? `${gitDiffLines} lines moved in the last 4h.`
             : "No diff winds right now.",
         page: { type: "stats" },
-        tone: toneFromCount(pulse.git.uncommitted_files, 8, 20),
+        tone: toneFromCount(gitUncommittedFiles, 8, 20),
         x: 29,
         y: 78,
         size: 12,
       },
       {
         state: gitPressure > 0 ? "attention" : "calm",
-        intensity:
-          gitPressure > 0 ? 0.3 + pulse.git.uncommitted_files / 40 : 0.18,
+        intensity: gitPressure > 0 ? 0.3 + gitUncommittedFiles / 40 : 0.18,
         animation: gitPressure > 0 ? "wobble" : "breathe",
         interactionX: 30,
         interactionY: 80,
@@ -592,10 +656,12 @@ function buildObjects(
         id: "market",
         sprite: "market_comet",
         label: "Upgrade comet",
-        value: `${
-          pulse.customization.skills + pulse.customization.commands
-        } tools`,
-        description: `${pulse.customization.modes} modes · ${pulse.customization.subagents} delegates · ${pulse.customization.hooks} hooks.`,
+        value: `${customizationTools} tools`,
+        description: `${safeCount(
+          pulse.customization.modes,
+        )} modes · ${safeCount(
+          pulse.customization.subagents,
+        )} delegates · ${safeCount(pulse.customization.hooks)} hooks.`,
         page: { type: "marketplace_hub" },
         tone: "neutral",
         x: 36,
@@ -634,7 +700,7 @@ function weatherFromState(
     };
   }
 
-  if (isSeriousRuntimeProblem(visibleRuntime)) {
+  if (isProviderModelRuntimeProblem(visibleRuntime)) {
     return {
       weather: "storm",
       weatherLabel: "Bug storm",
@@ -657,7 +723,7 @@ function weatherFromState(
   }
 
   if (pulse) {
-    if (hasSeriousPulseProblem(pulse)) {
+    if (hasProviderModelPulseProblem(pulse)) {
       return {
         weather: "storm",
         weatherLabel: "Bug storm",
@@ -667,7 +733,7 @@ function weatherFromState(
       };
     }
 
-    if (pulse.memory.orphan + pulse.memory.stale_conflicts >= 3) {
+    if (memoryIssueCount(pulse) >= 3) {
       return {
         weather: "rain",
         weatherLabel: "Memory rain",
@@ -677,7 +743,10 @@ function weatherFromState(
       };
     }
 
-    if (pulse.git.diff_lines_4h > 0 || pulse.git.uncommitted_files > 0) {
+    if (
+      safeCount(pulse.git.diff_lines_4h) > 0 ||
+      safeCount(pulse.git.uncommitted_files) > 0
+    ) {
       return {
         weather: "wind",
         weatherLabel: "Diff breeze",
@@ -715,13 +784,13 @@ function vitalityFromPulse(
   }
 
   const attention =
-    pulse.tasks.stuck * 10 +
-    pulse.tasks.abandoned * 8 +
-    pulse.diagnostics.last_hour * 4 +
-    pulse.providers.broken_refs * 12 +
-    pulse.mcp.failing * 8 +
-    pulse.memory.stale_conflicts * 6 +
-    Math.min(24, pulse.git.uncommitted_files);
+    safeCount(pulse.tasks.stuck) * 10 +
+    safeCount(pulse.tasks.abandoned) * 8 +
+    diagnosticPressure(pulse) * 4 +
+    providerCriticalCount(pulse) * 12 +
+    safeCount(pulse.mcp.failing) * 8 +
+    safeCount(pulse.memory.stale_conflicts) * 6 +
+    Math.min(24, safeCount(pulse.git.uncommitted_files));
 
   if (attention >= 60) return { vitality: "tangled", vitalityLabel: "Tangled" };
   if (attention >= 20) return { vitality: "growing", vitalityLabel: "Growing" };
@@ -784,8 +853,8 @@ function buildAtmosphere(args: {
   const memoryRuntimeActive = isMemoryRuntimeActive(args.visibleRuntime);
   const providerRuntimeActive = isProviderRuntimeActive(args.visibleRuntime);
   const serious =
-    hasSeriousPulseProblem(args.pulse) ||
-    isSeriousRuntimeProblem(args.visibleRuntime);
+    hasProviderModelPulseProblem(args.pulse) ||
+    isProviderModelRuntimeProblem(args.visibleRuntime);
   const sleeping = args.pet?.condition.sleeping === true;
   const hungry = args.pet?.condition.hungry === true;
   const bored = args.pet?.condition.bored === true;
@@ -796,9 +865,8 @@ function buildAtmosphere(args: {
   });
   const providerWarnings = providerWarningCount(args.pulse);
   const memoryLoad = memoryPressure(args.pulse);
-  const memoryIssues = args.pulse
-    ? args.pulse.memory.orphan + args.pulse.memory.stale_conflicts
-    : 0;
+  const memoryIssues = memoryIssueCount(args.pulse);
+  const genericDiagnosticPressure = hasGenericDiagnosticPressure(args.pulse);
 
   switch (args.phase) {
     case "morning":
@@ -820,11 +888,14 @@ function buildAtmosphere(args: {
     addLayer(layers, "dream_mist");
   if (hungry) addLayer(layers, "empty_food_nook");
   if (bored) addLayer(layers, "toy_glow");
-  if (runtimeActive || args.primaryWeather === "busy")
+  if (
+    runtimeActive ||
+    args.primaryWeather === "busy" ||
+    genericDiagnosticPressure
+  )
     addLayer(layers, "workshop_runes");
   if (providerWarnings > 0) addLayer(layers, "provider_flicker");
-  if (serious || args.primaryWeather === "storm")
-    addLayer(layers, "provider_storm");
+  if (serious) addLayer(layers, "provider_storm");
   if (memoryIssues > 0 || memoryRuntimeActive) addLayer(layers, "memory_orbs");
   if (providerRuntimeActive) addLayer(layers, "workshop_runes");
   if (args.primaryWeather === "aurora") addLayer(layers, "aurora");

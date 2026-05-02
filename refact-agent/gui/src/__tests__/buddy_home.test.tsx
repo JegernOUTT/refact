@@ -573,8 +573,11 @@ describe("BuddyWorld_dynamic_environment", () => {
     expect(night.celestialLabel).toBe("Moon");
   });
 
-  it("turns pulse problems into stormy weather and interactive objects", () => {
-    const pulse = makePulse();
+  it("turns serious provider pulse problems into stormy weather and interactive objects", () => {
+    const pulse = {
+      ...makePulse(),
+      providers: { defaults_ok: true, broken_refs: 1, quota_warnings: 0 },
+    };
     const world = buildBuddyWorldState({
       now: new Date("2024-01-01T14:00:00"),
       pulse,
@@ -643,6 +646,54 @@ describe("BuddyWorld_dynamic_environment", () => {
 
     await user.click(screen.getByRole("button", { name: /open task grove/i }));
     expect(onOpenPage).toHaveBeenCalledWith({ type: "tasks_list" });
+  });
+
+  it("passes semantic state into the world model", () => {
+    const state = makeSemanticState({
+      activity: {
+        mood: "happy",
+        animationType: "perk",
+        lastSignalTime: new Date("2024-01-01T13:58:00").getTime(),
+        lastSignalType: "care_pet",
+      },
+    });
+    const pet = makeSnapshot().state.pet;
+
+    render(
+      <BuddyWorld
+        palette={PALETTES[0]}
+        stage={STAGES[2]}
+        state={state}
+        pulse={{
+          ...makePulse(),
+          diagnostics: { last_hour: 0, top_error_types: [] },
+          git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+          mcp: { total: 4, failing: 0, auth_expiring: 0 },
+          memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+        }}
+        pet={{
+          ...pet,
+          needs: { ...pet.needs, affection: 35 },
+        }}
+        nowPlaying={null}
+        activeQuest={null}
+        activeSpeech={null}
+        setupNeeded={false}
+        now={new Date("2024-01-01T14:00:00")}
+        onCanvasEvent={vi.fn()}
+        onCare={vi.fn()}
+        onOpenPage={vi.fn()}
+        onRunMode={vi.fn()}
+        onDismissSetup={vi.fn()}
+        onSpeechControl={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+      "data-atmosphere-mood",
+      "affectionate",
+    );
   });
 
   it("keeps active showcase through ordinary headline changes", async () => {

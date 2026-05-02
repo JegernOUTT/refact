@@ -141,6 +141,14 @@ function buildWorld(args?: {
 }
 
 function expectWorldNumbersSafe(world: ReturnType<typeof buildWorld>): void {
+  const worldValues = [
+    world.celestialX,
+    world.celestialY,
+    world.weatherX,
+    world.weatherY,
+    world.atmosphere.intensity,
+  ];
+  expect(worldValues.every((value) => Number.isFinite(value))).toBe(true);
   expect(Number.isFinite(world.atmosphere.intensity)).toBe(true);
   expect(world.atmosphere.intensity).toBeGreaterThanOrEqual(0);
   expect(world.atmosphere.intensity).toBeLessThanOrEqual(1);
@@ -163,6 +171,12 @@ function expectWorldNumbersSafe(world: ReturnType<typeof buildWorld>): void {
     expect(item.interactionY).toBeLessThanOrEqual(84);
     expect(item.depthScale).toBeGreaterThan(0);
   }
+}
+
+function getProviderObject(world: ReturnType<typeof buildWorld>) {
+  const providers = world.objects.find((item) => item.id === "providers");
+  if (!providers) throw new Error("Provider object missing");
+  return providers;
 }
 
 describe("buddy world semantic model", () => {
@@ -247,7 +261,7 @@ describe("buddy world semantic model", () => {
 
   it("adds workshop runes and active observatory state for visible active runtime", () => {
     const world = buildWorld({ nowPlaying: makeRuntimeEvent() });
-    const providers = world.objects.find((item) => item.id === "providers");
+    const providers = getProviderObject(world);
 
     expect(world.weather).toBe("busy");
     expect(world.atmosphere.mood).toBe("busy");
@@ -255,6 +269,26 @@ describe("buddy world semantic model", () => {
     expect(providers).toMatchObject({
       state: "active",
       animation: "stream",
+    });
+  });
+
+  it("keeps generic active runtime in workshop work without activating observatory", () => {
+    const world = buildWorld({
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "tool_used",
+        status: "progress",
+        title: "Running browser checks",
+        description: "Clicking a page button",
+        source: "browser",
+      }),
+    });
+    const providers = getProviderObject(world);
+
+    expect(world.weather).toBe("busy");
+    expect(world.atmosphere.layers).toContain("workshop_runes");
+    expect(providers).toMatchObject({
+      state: "calm",
+      animation: "sparkle",
     });
   });
 
@@ -291,7 +325,7 @@ describe("buddy world semantic model", () => {
         providers: { defaults_ok: true, broken_refs: 0, quota_warnings: 1 },
       }),
     });
-    const providers = world.objects.find((item) => item.id === "providers");
+    const providers = getProviderObject(world);
 
     expect(providers).toMatchObject({
       state: "attention",
@@ -303,13 +337,104 @@ describe("buddy world semantic model", () => {
     expect(world.atmosphere.layers).not.toContain("provider_storm");
   });
 
+  it("keeps defaults warnings flickering without provider storms", () => {
+    const world = buildWorld({
+      pulse: makePulse({
+        providers: { defaults_ok: false, broken_refs: 0, quota_warnings: 0 },
+      }),
+    });
+    const providers = getProviderObject(world);
+
+    expect(providers).toMatchObject({
+      state: "attention",
+      animation: "flicker",
+    });
+    expect(world.weather).not.toBe("storm");
+    expect(world.atmosphere.serious).toBe(false);
+    expect(world.atmosphere.layers).toContain("provider_flicker");
+    expect(world.atmosphere.layers).not.toContain("provider_storm");
+  });
+
+  it("keeps high generic diagnostics out of provider storm semantics", () => {
+    const world = buildWorld({
+      pulse: makePulse({
+        diagnostics: {
+          last_hour: 8,
+          top_error_types: ["tool_failed", "browser_failure"],
+        },
+      }),
+    });
+    const providers = getProviderObject(world);
+
+    expect(world.weather).not.toBe("storm");
+    expect(world.atmosphere.serious).toBe(false);
+    expect(world.atmosphere.paletteHint).not.toBe("storm");
+    expect(world.atmosphere.layers).toContain("workshop_runes");
+    expect(world.atmosphere.layers).not.toContain("provider_storm");
+    expect(providers).not.toMatchObject({
+      state: "critical",
+      animation: "storm",
+    });
+  });
+
+  it("keeps high generic failed runtime events out of provider storms", () => {
+    const world = buildWorld({
+      pulse: makePulse({
+        git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+      }),
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "tool_failed",
+        status: "failed",
+        priority: "high",
+        title: "Browser action failed",
+        description: "The page button was not found",
+        source: "browser",
+      }),
+    });
+    const providers = getProviderObject(world);
+
+    expect(world.weather).not.toBe("storm");
+    expect(world.atmosphere.serious).toBe(false);
+    expect(world.atmosphere.layers).not.toContain("provider_storm");
+    expect(providers).not.toMatchObject({
+      state: "critical",
+      animation: "storm",
+    });
+  });
+
+  it("keeps failed provider runtime events critical and stormy", () => {
+    const world = buildWorld({
+      pulse: makePulse({
+        git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+      }),
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "tool_failed",
+        status: "failed",
+        priority: "high",
+        title: "Default model failed",
+        description: "model_not_found for the configured chat model",
+        source: "provider",
+      }),
+    });
+    const providers = getProviderObject(world);
+
+    expect(world.weather).toBe("storm");
+    expect(world.atmosphere.serious).toBe(true);
+    expect(world.atmosphere.paletteHint).toBe("storm");
+    expect(world.atmosphere.layers).toContain("provider_storm");
+    expect(providers).toMatchObject({
+      state: "critical",
+      animation: "storm",
+    });
+  });
+
   it("reserves storm semantics for serious provider issues", () => {
     const world = buildWorld({
       pulse: makePulse({
         providers: { defaults_ok: true, broken_refs: 1, quota_warnings: 0 },
       }),
     });
-    const providers = world.objects.find((item) => item.id === "providers");
+    const providers = getProviderObject(world);
 
     expect(world.weather).toBe("storm");
     expect(world.atmosphere.serious).toBe(true);
@@ -382,5 +507,50 @@ describe("buddy world semantic model", () => {
       "git",
       "market",
     ]);
+  });
+
+  it("keeps malformed pulse numbers finite and clamped", () => {
+    const malformedPulse = makePulse({
+      tasks: {
+        total: Number.NaN,
+        stuck: Number.POSITIVE_INFINITY,
+        abandoned: -4,
+        by_status: {},
+      },
+      memory: {
+        total: Number.POSITIVE_INFINITY,
+        orphan: Number.NaN,
+        stale_conflicts: Number.NEGATIVE_INFINITY,
+      },
+      providers: {
+        defaults_ok: true,
+        broken_refs: Number.NaN,
+        quota_warnings: Number.POSITIVE_INFINITY,
+      },
+      mcp: {
+        total: Number.NaN,
+        failing: Number.POSITIVE_INFINITY,
+        auth_expiring: -2,
+      },
+      customization: {
+        modes: Number.NaN,
+        skills: Number.POSITIVE_INFINITY,
+        commands: -1,
+        subagents: Number.NEGATIVE_INFINITY,
+        hooks: Number.NaN,
+      },
+      diagnostics: {
+        last_hour: Number.POSITIVE_INFINITY,
+        top_error_types: ["generic"],
+      },
+      git: {
+        uncommitted_files: Number.POSITIVE_INFINITY,
+        diff_lines_4h: Number.NaN,
+        branches: -1,
+      },
+    });
+
+    expect(() => buildWorld({ pulse: malformedPulse })).not.toThrow();
+    expectWorldNumbersSafe(buildWorld({ pulse: malformedPulse }));
   });
 });

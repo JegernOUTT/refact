@@ -937,8 +937,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         pet,
         nowPlaying,
         activeQuest,
+        semanticState: state,
       }),
-    [activeQuest, currentTime, nowPlaying, pet, pulse],
+    [activeQuest, currentTime, nowPlaying, pet, pulse, state],
   );
   const waypoints = useMemo(() => buildBuddyWaypoints(world), [world]);
   const showcaseTargets = useMemo(
@@ -1251,6 +1252,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       className={classNames(styles.scene, { [styles.compact]: compact })}
       data-phase={world.phase}
       data-weather={world.weather}
+      data-atmosphere-mood={world.atmosphere.mood}
       data-vitality={world.vitality}
       data-showcase={showcaseRun?.kind ?? "none"}
       data-showcase-phase={showcaseRun?.phase ?? "idle"}
