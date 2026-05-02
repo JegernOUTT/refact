@@ -22,13 +22,16 @@ impl BuddyJob for StatsWatcherJob {
     fn produces_suggestion(&self) -> bool {
         true
     }
+    fn runs_when_suggestions_blocked(&self) -> bool {
+        true
+    }
 
     async fn should_run(
         &self,
         _gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
-        _ctx: &BuddyJobContext,
+        ctx: &BuddyJobContext,
     ) -> bool {
-        true
+        stats_watcher_has_visible_output(ctx)
     }
 
     async fn execute(
@@ -114,14 +117,50 @@ impl BuddyJob for StatsWatcherJob {
     }
 }
 
+fn stats_watcher_has_visible_output(ctx: &BuddyJobContext) -> bool {
+    if ctx.total_workflow_runs == 0 {
+        return false;
+    }
+    let cutoff = chrono::Utc::now().timestamp() - RECENT_ERROR_WINDOW_SECS;
+    let recent_error_count = ctx
+        .recent_diagnostics
+        .iter()
+        .filter(|d| {
+            chrono::DateTime::parse_from_rfc3339(&d.collected_at)
+                .map(|t| t.timestamp() >= cutoff)
+                .unwrap_or(false)
+        })
+        .count();
+    if recent_error_count >= 5 {
+        return true;
+    }
+
+    let prev_runs: u64 = ctx
+        .job_state
+        .last_result
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    WORKFLOW_MILESTONES
+        .iter()
+        .any(|&m| prev_runs < m && ctx.total_workflow_runs >= m)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::buddy::diagnostics::{DiagnosticContext, DiagnosticSeverity};
     use crate::buddy::settings::BuddySettings;
-    use crate::buddy::types::{BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
+    use crate::buddy::scheduler::result_after_suggestion_policy;
+    use crate::buddy::types::{
+        BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse, BuddySuggestion,
+    };
 
-    fn test_context(runs: u64, diagnostics_count: usize) -> BuddyJobContext {
+    fn test_context_with_state(
+        runs: u64,
+        diagnostics_count: usize,
+        job_state: BuddyJobState,
+    ) -> BuddyJobContext {
         let collected_at = chrono::Utc::now().to_rfc3339();
         let recent_diagnostics = (0..diagnostics_count)
             .map(|idx| DiagnosticContext {
@@ -139,7 +178,7 @@ mod tests {
             onboarding: BuddyOnboarding::default(),
             recent_diagnostics,
             project_root: std::path::PathBuf::from("/tmp/project"),
-            job_state: BuddyJobState::default(),
+            job_state,
             total_workflow_runs: runs,
             suggestion_state: vec![],
             pet: BuddyPetState::default(),
@@ -147,6 +186,23 @@ mod tests {
             settings: BuddySettings::default(),
             pulse: BuddyPulse::default(),
             facts: vec![],
+        }
+    }
+
+    fn test_context(runs: u64, diagnostics_count: usize) -> BuddyJobContext {
+        test_context_with_state(runs, diagnostics_count, BuddyJobState::default())
+    }
+
+    fn active_suggestion(idx: usize) -> BuddySuggestion {
+        BuddySuggestion {
+            id: format!("suggestion-{idx}"),
+            suggestion_type: "test".to_string(),
+            title: format!("Suggestion {idx}"),
+            description: "Test".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            dismissed: false,
+            controls: vec![],
+            quest: None,
         }
     }
 
@@ -166,6 +222,94 @@ mod tests {
         let result = job.execute(gcx, ctx).await;
 
         assert!(result.suggestion.is_some());
+        assert_eq!(result.last_result.as_deref(), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn stats_watcher_should_run_only_for_visible_suggestion_policy() {
+        let job = StatsWatcherJob;
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let quiet_ctx = test_context(12, 0);
+        let milestone_ctx = test_context_with_state(
+            12,
+            0,
+            BuddyJobState {
+                last_result: Some("9".to_string()),
+                ..Default::default()
+            },
+        );
+        let updated_ctx = test_context_with_state(
+            12,
+            0,
+            BuddyJobState {
+                last_result: Some("12".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(job.should_run(gcx.clone(), &quiet_ctx).await);
+        assert!(job.should_run(gcx.clone(), &milestone_ctx).await);
+        assert!(!job.should_run(gcx.clone(), &updated_ctx).await);
+        assert!(!job.should_run(gcx.clone(), &test_context(0, 0)).await);
+
+        let result = job.execute(gcx, updated_ctx).await;
+        assert!(result.suggestion.is_none());
+        assert!(result.speech.is_none());
+        assert!(result.activity.is_none());
+        assert_eq!(result.last_result.as_deref(), Some("12"));
+    }
+
+    #[tokio::test]
+    async fn stats_watcher_suppresses_suggestion_when_proactive_is_disabled_but_keeps_milestones() {
+        let job = StatsWatcherJob;
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut error_ctx = test_context(1, 5);
+        error_ctx.settings.proactive_enabled = false;
+        let mut milestone_ctx = test_context_with_state(
+            10,
+            0,
+            BuddyJobState {
+                last_result: Some("9".to_string()),
+                ..Default::default()
+            },
+        );
+        milestone_ctx.settings.proactive_enabled = false;
+
+        assert!(job.should_run(gcx.clone(), &error_ctx).await);
+        assert!(job.should_run(gcx.clone(), &milestone_ctx).await);
+
+        let error_result = job.execute(gcx.clone(), error_ctx.clone()).await;
+        assert!(error_result.suggestion.is_some());
+        let error_result = result_after_suggestion_policy(
+            error_result,
+            &error_ctx.settings,
+            &error_ctx.suggestion_state,
+        );
+        assert!(error_result.suggestion.is_none());
+        assert_eq!(error_result.last_result.as_deref(), Some("1"));
+
+        let milestone_result = job.execute(gcx, milestone_ctx).await;
+        assert!(milestone_result.suggestion.is_none());
+        assert!(milestone_result.speech.is_some());
+        assert!(milestone_result.activity.is_some());
+        assert_eq!(milestone_result.last_result.as_deref(), Some("10"));
+    }
+
+    #[tokio::test]
+    async fn stats_watcher_suppresses_suggestion_when_unread_cap_is_full() {
+        let job = StatsWatcherJob;
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut ctx = test_context(1, 5);
+        ctx.suggestion_state = (0..crate::buddy::scheduler::MAX_UNREAD_SUGGESTIONS)
+            .map(active_suggestion)
+            .collect();
+
+        assert!(job.should_run(gcx.clone(), &ctx).await);
+        let result = job.execute(gcx, ctx.clone()).await;
+        assert!(result.suggestion.is_some());
+        let result = result_after_suggestion_policy(result, &ctx.settings, &ctx.suggestion_state);
+
+        assert!(result.suggestion.is_none());
         assert_eq!(result.last_result.as_deref(), Some("1"));
     }
 }

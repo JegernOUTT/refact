@@ -2,6 +2,7 @@ use std::path::Path;
 use tokio::fs;
 use tracing::warn;
 
+use super::autonomous_workflows::autonomous_workflow_meta;
 use super::types::BuddyConversationEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,66 +13,19 @@ pub struct BuddyWorkflowMapping {
 }
 
 pub fn workflow_id_to_mapping(id: &str) -> BuddyWorkflowMapping {
+    if let Some(meta) = autonomous_workflow_meta(id) {
+        return BuddyWorkflowMapping {
+            kind: meta.kind,
+            icon: meta.icon,
+            badge: Some(meta.badge),
+        };
+    }
+
     match id {
         "buddy_humor" => BuddyWorkflowMapping {
             kind: "system",
             icon: "🎭",
             badge: Some("Humor"),
-        },
-        "buddy_error_detective" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "🕵️",
-            badge: Some("Error Detective"),
-        },
-        "buddy_memory_gardener" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "🌿",
-            badge: Some("Memory"),
-        },
-        "buddy_knowledge_conflict_resolver" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "🧩",
-            badge: Some("Knowledge"),
-        },
-        "buddy_behavior_learner" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "🧭",
-            badge: Some("Preferences"),
-        },
-        "buddy_user_habit_coach" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "🏃",
-            badge: Some("Habits"),
-        },
-        "buddy_model_cost_optimizer" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "💸",
-            badge: Some("Model/Cost"),
-        },
-        "buddy_dependency_radar" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "📦",
-            badge: Some("Dependencies"),
-        },
-        "buddy_docs_gardener" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "📚",
-            badge: Some("Docs"),
-        },
-        "buddy_setup_coach" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "🧰",
-            badge: Some("Setup"),
-        },
-        "buddy_security_whisperer" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "🛡️",
-            badge: Some("Security"),
-        },
-        "buddy_architecture_drift_watcher" => BuddyWorkflowMapping {
-            kind: "system",
-            icon: "🏗️",
-            badge: Some("Architecture"),
         },
         "commit_message" => BuddyWorkflowMapping {
             kind: "workflow",
@@ -291,28 +245,17 @@ pub async fn list_all_buddy_conversations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buddy::autonomous_workflows::AUTONOMOUS_BUDDY_WORKFLOWS;
 
     #[test]
     fn autonomous_workflow_ids_have_system_mappings() {
-        let expected = [
-            ("buddy_error_detective", "🕵️", "Error Detective"),
-            ("buddy_memory_gardener", "🌿", "Memory"),
-            ("buddy_knowledge_conflict_resolver", "🧩", "Knowledge"),
-            ("buddy_behavior_learner", "🧭", "Preferences"),
-            ("buddy_user_habit_coach", "🏃", "Habits"),
-            ("buddy_model_cost_optimizer", "💸", "Model/Cost"),
-            ("buddy_dependency_radar", "📦", "Dependencies"),
-            ("buddy_docs_gardener", "📚", "Docs"),
-            ("buddy_setup_coach", "🧰", "Setup"),
-            ("buddy_security_whisperer", "🛡️", "Security"),
-            ("buddy_architecture_drift_watcher", "🏗️", "Architecture"),
-        ];
-
-        for (workflow_id, icon, badge) in expected {
-            let mapping = workflow_id_to_mapping(workflow_id);
+        for meta in AUTONOMOUS_BUDDY_WORKFLOWS {
+            let mapping = workflow_id_to_mapping(meta.id);
             assert_eq!(mapping.kind, "system");
-            assert_eq!(mapping.icon, icon);
-            assert_eq!(mapping.badge, Some(badge));
+            assert_eq!(mapping.icon, meta.icon);
+            assert_eq!(mapping.badge, Some(meta.badge));
+            assert_ne!(mapping.icon, "🔄");
+            assert!(mapping.badge.is_some());
         }
     }
 

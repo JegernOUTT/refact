@@ -12,6 +12,7 @@ use super::types::{
 use crate::global_context::GlobalContext;
 
 #[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone)]
 pub struct BuddyJobContext {
     pub identity_name: String,
     pub onboarding: BuddyOnboarding,
@@ -60,12 +61,29 @@ fn next_last_result(existing: Option<&str>, result: Option<&str>) -> Option<Stri
     result.or(existing).map(ToString::to_string)
 }
 
+pub(crate) fn result_after_suggestion_policy(
+    result: BuddyJobResult,
+    settings: &BuddySettings,
+    suggestion_state: &[BuddySuggestion],
+) -> BuddyJobResult {
+    if suggestions_allowed(settings, suggestion_state) {
+        return result;
+    }
+    BuddyJobResult {
+        suggestion: None,
+        ..result
+    }
+}
+
 #[async_trait::async_trait]
 pub trait BuddyJob: Send + Sync {
     fn id(&self) -> &str;
     fn cooldown_seconds(&self) -> u64;
     fn priority(&self) -> u32;
     fn produces_suggestion(&self) -> bool {
+        false
+    }
+    fn runs_when_suggestions_blocked(&self) -> bool {
         false
     }
     async fn should_run(
@@ -80,7 +98,18 @@ pub trait BuddyJob: Send + Sync {
     ) -> BuddyJobResult;
 }
 
-const MAX_UNREAD_SUGGESTIONS: usize = 3;
+pub(crate) const MAX_UNREAD_SUGGESTIONS: usize = 3;
+
+pub(crate) fn suggestions_allowed(
+    settings: &BuddySettings,
+    suggestion_state: &[BuddySuggestion],
+) -> bool {
+    let unread = suggestion_state
+        .iter()
+        .filter(|suggestion| !suggestion.dismissed)
+        .count();
+    settings.proactive_enabled && unread < MAX_UNREAD_SUGGESTIONS
+}
 
 pub struct BuddyScheduler {
     jobs: Vec<Box<dyn BuddyJob>>,
@@ -164,16 +193,10 @@ impl BuddyScheduler {
             Some(x) => x,
             None => return,
         };
-        let proactive_enabled = settings.proactive_enabled;
-
-        let unread = state
-            .suggestion_state
-            .iter()
-            .filter(|s| !s.dismissed)
-            .count();
-
         for job in &self.jobs {
-            if job.produces_suggestion() && (!proactive_enabled || unread >= MAX_UNREAD_SUGGESTIONS)
+            if job.produces_suggestion()
+                && !job.runs_when_suggestions_blocked()
+                && !suggestions_allowed(&settings, &state.suggestion_state)
             {
                 continue;
             }
@@ -218,6 +241,11 @@ impl BuddyScheduler {
                 continue;
             }
             let result = job.execute(gcx.clone(), ctx).await;
+            let result = if job.produces_suggestion() {
+                result_after_suggestion_policy(result, &settings, &state.suggestion_state)
+            } else {
+                result
+            };
             let has_visible_output = result.has_visible_output();
             let mut buddy = buddy_arc.lock().await;
             if let Some(svc) = buddy.as_mut() {
@@ -256,6 +284,7 @@ impl BuddyScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buddy::autonomous_workflows::AUTONOMOUS_BUDDY_WORKFLOWS;
 
     #[test]
     fn next_last_result_preserves_existing_when_job_returns_none() {
@@ -270,19 +299,91 @@ mod tests {
         assert_eq!(next_last_result(None, None), None);
     }
 
+    fn active_suggestion(idx: usize) -> BuddySuggestion {
+        BuddySuggestion {
+            id: format!("suggestion-{idx}"),
+            suggestion_type: "test".to_string(),
+            title: format!("Suggestion {idx}"),
+            description: "Test".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            dismissed: false,
+            controls: vec![],
+            quest: None,
+        }
+    }
+
     #[test]
-    fn scheduler_registers_autonomous_memory_behavior_habit_model_jobs() {
+    fn result_after_suggestion_policy_removes_only_suggestion_output() {
+        let mut settings = BuddySettings::default();
+        settings.proactive_enabled = false;
+        let result = BuddyJobResult {
+            suggestion: Some(active_suggestion(1)),
+            runtime_event: Some(BuddyRuntimeEvent {
+                id: "event".to_string(),
+                signal_type: "health".to_string(),
+                title: "Health".to_string(),
+                description: None,
+                source: "test".to_string(),
+                status: "failed".to_string(),
+                progress: None,
+                dedupe_key: None,
+                priority: "normal".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                ttl_ms: None,
+                speech_text: None,
+                scene: None,
+                duration_hint: None,
+                persistent: false,
+                controls: vec![],
+                chat_id: None,
+                dismissed: false,
+            }),
+            last_result: Some("unhealthy".to_string()),
+            ..Default::default()
+        };
+
+        let filtered = result_after_suggestion_policy(result, &settings, &[]);
+
+        assert!(filtered.suggestion.is_none());
+        assert!(filtered.runtime_event.is_some());
+        assert_eq!(filtered.last_result.as_deref(), Some("unhealthy"));
+    }
+
+    #[test]
+    fn suggestions_allowed_requires_proactive_and_unread_budget() {
+        let mut settings = BuddySettings::default();
+        assert!(suggestions_allowed(&settings, &[]));
+
+        settings.proactive_enabled = false;
+        assert!(!suggestions_allowed(&settings, &[]));
+
+        settings.proactive_enabled = true;
+        let mut suggestions = (0..MAX_UNREAD_SUGGESTIONS)
+            .map(active_suggestion)
+            .collect::<Vec<_>>();
+        assert!(!suggestions_allowed(&settings, &suggestions));
+        suggestions[0].dismissed = true;
+        assert!(suggestions_allowed(&settings, &suggestions));
+    }
+
+    #[test]
+    fn mixed_suggestion_watchers_run_when_suggestions_blocked() {
+        use crate::buddy::jobs::health_watcher::HealthWatcherJob;
+        use crate::buddy::jobs::stats_watcher::StatsWatcherJob;
+
+        assert!(StatsWatcherJob.produces_suggestion());
+        assert!(StatsWatcherJob.runs_when_suggestions_blocked());
+        assert!(HealthWatcherJob.produces_suggestion());
+        assert!(HealthWatcherJob.runs_when_suggestions_blocked());
+    }
+
+    #[test]
+    fn scheduler_registers_all_autonomous_registry_jobs() {
         let scheduler = BuddyScheduler::new();
         let ids = scheduler.job_ids();
 
-        for expected in [
-            "buddy_memory_gardener",
-            "buddy_knowledge_conflict_resolver",
-            "buddy_behavior_learner",
-            "buddy_user_habit_coach",
-            "buddy_model_cost_optimizer",
-        ] {
-            assert!(ids.iter().any(|id| id == expected), "missing {expected}");
+        for meta in AUTONOMOUS_BUDDY_WORKFLOWS {
+            assert!(ids.iter().any(|id| id == meta.id), "missing {}", meta.id);
         }
     }
 }

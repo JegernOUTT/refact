@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,7 @@ pub struct MemoryGardenObserver;
 
 const MAX_ORPHAN_IDS: usize = 50;
 const MAX_MEMORY_FILES: usize = 500;
+const MAX_KNOWLEDGE_SCAN_ENTRIES: usize = 5_000;
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 
 struct KnowledgeEntry {
@@ -34,6 +35,12 @@ struct KnowledgeEntry {
 struct KnowledgeCandidate {
     modified_key: u64,
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct KnowledgeScanStats {
+    visited_entries: usize,
+    matching_files_considered: usize,
 }
 
 async fn scan_knowledge_dirs(gcx: Arc<RwLock<GlobalContext>>) -> Vec<KnowledgeEntry> {
@@ -109,38 +116,51 @@ fn push_knowledge_candidate(
 }
 
 fn collect_knowledge_candidates_from_dir(
-    dir: &std::path::Path,
+    dir: &Path,
     heap: &mut BinaryHeap<Reverse<KnowledgeCandidate>>,
     max_candidates: usize,
+    max_visited_entries: usize,
+    stats: &mut KnowledgeScanStats,
 ) {
-    for entry in walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if !path.is_file() {
+    if max_visited_entries == 0 || stats.visited_entries >= max_visited_entries {
+        return;
+    }
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
-        }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext != "md" && ext != "mdx" {
-            continue;
-        }
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
         };
-        if metadata.len() > MAX_FILE_BYTES {
-            continue;
+        for entry in entries.flatten() {
+            if stats.visited_entries >= max_visited_entries {
+                return;
+            }
+            stats.visited_entries += 1;
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "md" && ext != "mdx" {
+                continue;
+            }
+            if metadata.len() > MAX_FILE_BYTES {
+                continue;
+            }
+            stats.matching_files_considered += 1;
+            let modified_key = metadata.modified().map(system_time_key).unwrap_or_default();
+            push_knowledge_candidate(
+                heap,
+                KnowledgeCandidate { modified_key, path },
+                max_candidates,
+            );
         }
-        let modified_key = metadata.modified().map(system_time_key).unwrap_or_default();
-        push_knowledge_candidate(
-            heap,
-            KnowledgeCandidate {
-                modified_key,
-                path: path.to_path_buf(),
-            },
-            max_candidates,
-        );
     }
 }
 
@@ -148,9 +168,32 @@ fn collect_knowledge_candidates_from_dirs(
     dirs: &[PathBuf],
     max_candidates: usize,
 ) -> Vec<KnowledgeCandidate> {
+    collect_knowledge_candidates_from_dirs_with_stats(
+        dirs,
+        max_candidates,
+        MAX_KNOWLEDGE_SCAN_ENTRIES,
+    )
+    .0
+}
+
+fn collect_knowledge_candidates_from_dirs_with_stats(
+    dirs: &[PathBuf],
+    max_candidates: usize,
+    max_visited_entries: usize,
+) -> (Vec<KnowledgeCandidate>, KnowledgeScanStats) {
     let mut heap = BinaryHeap::new();
+    let mut stats = KnowledgeScanStats::default();
     for dir in dirs {
-        collect_knowledge_candidates_from_dir(dir, &mut heap, max_candidates);
+        if stats.visited_entries >= max_visited_entries {
+            break;
+        }
+        collect_knowledge_candidates_from_dir(
+            dir,
+            &mut heap,
+            max_candidates,
+            max_visited_entries,
+            &mut stats,
+        );
     }
     let mut candidates = heap
         .into_iter()
@@ -161,7 +204,7 @@ fn collect_knowledge_candidates_from_dirs(
             .cmp(&a.modified_key)
             .then_with(|| a.path.cmp(&b.path))
     });
-    candidates
+    (candidates, stats)
 }
 
 #[cfg(test)]
@@ -535,5 +578,21 @@ mod tests {
 
         assert_eq!(candidates.len(), 3);
         assert_eq!(names, vec!["memory_4.md", "memory_3.md", "memory_2.md"]);
+    }
+
+    #[test]
+    fn knowledge_candidate_scan_stops_at_visit_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        for idx in 0..8 {
+            let path = dir.path().join(format!("memory_{idx}.md"));
+            std::fs::write(&path, format!("# Memory {idx}\n")).unwrap();
+        }
+
+        let (candidates, stats) =
+            collect_knowledge_candidates_from_dirs_with_stats(&[dir.path().to_path_buf()], 8, 4);
+
+        assert_eq!(stats.visited_entries, 4);
+        assert_eq!(stats.matching_files_considered, candidates.len());
+        assert!(stats.matching_files_considered < 8);
     }
 }

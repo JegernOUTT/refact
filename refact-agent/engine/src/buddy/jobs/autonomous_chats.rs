@@ -12,6 +12,13 @@ use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
 use crate::buddy::actor::{make_runtime_event, redact_sensitive, validate_workflow_id};
+use crate::buddy::autonomous_workflows::{
+    autonomous_workflow_meta, is_autonomous_workflow_id, AutonomousWorkflowMeta,
+    ARCHITECTURE_DRIFT_WORKFLOW_ID, BEHAVIOR_LEARNER_WORKFLOW_ID, DEPENDENCY_RADAR_WORKFLOW_ID,
+    DOCS_GARDENER_WORKFLOW_ID, ERROR_DETECTIVE_WORKFLOW_ID, KNOWLEDGE_CONFLICT_WORKFLOW_ID,
+    MEMORY_GARDENER_WORKFLOW_ID, MODEL_COST_OPTIMIZER_WORKFLOW_ID, SECURITY_WHISPERER_WORKFLOW_ID,
+    SETUP_COACH_WORKFLOW_ID, USER_HABIT_COACH_WORKFLOW_ID,
+};
 use crate::buddy::diagnostics::{DiagnosticContext, DiagnosticSeverity};
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use crate::buddy::types::{BuddyActivity, BuddyFact, BuddyFactKind, BuddyRuntimeEvent, BuddyThreadMeta};
@@ -41,30 +48,6 @@ const MAX_BEHAVIOR_TRAJECTORY_BYTES: u64 = 1_024 * 1_024;
 const MAX_BEHAVIOR_TRAJECTORY_META_BYTES: u64 = 32 * 1024;
 const MAX_BEHAVIOR_TRAJECTORY_SCAN_FILES: usize = 5_000;
 const MODEL_COST_RECENT_EVENT_LIMIT: usize = 500;
-const ERROR_DETECTIVE_WORKFLOW_ID: &str = "buddy_error_detective";
-const SECURITY_WHISPERER_WORKFLOW_ID: &str = "buddy_security_whisperer";
-const SETUP_COACH_WORKFLOW_ID: &str = "buddy_setup_coach";
-const DEPENDENCY_RADAR_WORKFLOW_ID: &str = "buddy_dependency_radar";
-const DOCS_GARDENER_WORKFLOW_ID: &str = "buddy_docs_gardener";
-const ARCHITECTURE_DRIFT_WORKFLOW_ID: &str = "buddy_architecture_drift_watcher";
-const MEMORY_GARDENER_WORKFLOW_ID: &str = "buddy_memory_gardener";
-const KNOWLEDGE_CONFLICT_WORKFLOW_ID: &str = "buddy_knowledge_conflict_resolver";
-const BEHAVIOR_LEARNER_WORKFLOW_ID: &str = "buddy_behavior_learner";
-const USER_HABIT_COACH_WORKFLOW_ID: &str = "buddy_user_habit_coach";
-const MODEL_COST_OPTIMIZER_WORKFLOW_ID: &str = "buddy_model_cost_optimizer";
-const AUTONOMOUS_BUDDY_WORKFLOW_IDS: &[&str] = &[
-    ERROR_DETECTIVE_WORKFLOW_ID,
-    SECURITY_WHISPERER_WORKFLOW_ID,
-    SETUP_COACH_WORKFLOW_ID,
-    DEPENDENCY_RADAR_WORKFLOW_ID,
-    DOCS_GARDENER_WORKFLOW_ID,
-    ARCHITECTURE_DRIFT_WORKFLOW_ID,
-    MEMORY_GARDENER_WORKFLOW_ID,
-    KNOWLEDGE_CONFLICT_WORKFLOW_ID,
-    BEHAVIOR_LEARNER_WORKFLOW_ID,
-    USER_HABIT_COACH_WORKFLOW_ID,
-    MODEL_COST_OPTIMIZER_WORKFLOW_ID,
-];
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,37 +390,20 @@ fn knowledge_conflict_evidence(ctx: &BuddyJobContext) -> Option<AutonomousEviden
     })
 }
 
-fn title_for_workflow(workflow_id: &str) -> &'static str {
-    match workflow_id {
-        MEMORY_GARDENER_WORKFLOW_ID => "Memory Gardener",
-        KNOWLEDGE_CONFLICT_WORKFLOW_ID => "Knowledge Conflict Resolver",
-        BEHAVIOR_LEARNER_WORKFLOW_ID => "Behavior Learner",
-        USER_HABIT_COACH_WORKFLOW_ID => "User Habit Coach",
-        MODEL_COST_OPTIMIZER_WORKFLOW_ID => "Model/Cost Optimizer",
-        _ => "Buddy Autonomous Report",
-    }
-}
-
-fn display_for_workflow(workflow_id: &str) -> (&'static str, &'static str, &'static str) {
-    match workflow_id {
-        MEMORY_GARDENER_WORKFLOW_ID => ("🌿", "Memory", "normal"),
-        KNOWLEDGE_CONFLICT_WORKFLOW_ID => ("🧩", "Knowledge", "normal"),
-        BEHAVIOR_LEARNER_WORKFLOW_ID => ("🧭", "Preferences", "normal"),
-        USER_HABIT_COACH_WORKFLOW_ID => ("🏃", "Habits", "normal"),
-        MODEL_COST_OPTIMIZER_WORKFLOW_ID => ("💸", "Model/Cost", "normal"),
-        _ => ("🤖", "Buddy", "normal"),
-    }
-}
-
 fn build_spec(workflow_id: &str, evidence: AutonomousEvidence) -> AutonomousBuddyChatSpec {
-    let (icon, badge, priority) = display_for_workflow(workflow_id);
+    let meta = autonomous_workflow_meta(workflow_id);
     AutonomousBuddyChatSpec::new(
         workflow_id,
-        title_for_workflow(workflow_id),
+        meta.map(|meta| meta.title)
+            .unwrap_or("Buddy Autonomous Report"),
         evidence.prompt,
         evidence.evidence,
     )
-    .with_display(icon, badge, priority)
+    .with_display(
+        meta.map(|meta| meta.icon).unwrap_or("🤖"),
+        meta.map(|meta| meta.badge).unwrap_or("Buddy"),
+        meta.map(|meta| meta.priority).unwrap_or("normal"),
+    )
 }
 
 fn autonomous_activity(spec: &AutonomousBuddyChatSpec, chat_id: &str) -> BuddyActivity {
@@ -1212,9 +1178,12 @@ fn bucket_duration_ms(value: u64) -> String {
 
 fn is_autonomous_buddy_workflow_identifier(identifier: &str) -> bool {
     let normalized = identifier.to_ascii_lowercase();
-    AUTONOMOUS_BUDDY_WORKFLOW_IDS.iter().any(|workflow_id| {
-        normalized == *workflow_id || normalized.starts_with(&format!("buddy-{}-", workflow_id))
-    })
+    is_autonomous_workflow_id(&normalized)
+        || normalized
+            .strip_prefix("buddy-")
+            .and_then(|rest| rest.split_once('-').map(|(workflow_id, _)| workflow_id))
+            .map(is_autonomous_workflow_id)
+            .unwrap_or(false)
 }
 
 fn is_buddy_autonomous_report_event(event: &LlmCallEvent) -> bool {
@@ -1772,11 +1741,7 @@ struct LocalGitEvidence {
 
 #[derive(Debug, Clone, Copy)]
 struct AutonomousJobDefinition {
-    workflow_id: &'static str,
-    title: &'static str,
-    icon: &'static str,
-    badge: &'static str,
-    priority: &'static str,
+    meta: &'static AutonomousWorkflowMeta,
     cooldown_seconds: u64,
     scheduler_priority: u32,
     prompt: &'static str,
@@ -1791,11 +1756,7 @@ pub struct ArchitectureDriftWatcherJob;
 
 fn error_detective_definition() -> AutonomousJobDefinition {
     AutonomousJobDefinition {
-        workflow_id: ERROR_DETECTIVE_WORKFLOW_ID,
-        title: "Error Detective",
-        icon: "🕵️",
-        badge: "Error Detective",
-        priority: "high",
+        meta: autonomous_workflow_meta(ERROR_DETECTIVE_WORKFLOW_ID).unwrap(),
         cooldown_seconds: 15 * 60,
         scheduler_priority: 5,
         prompt: "Analyze the diagnostic pattern using only the summaries below. Explain the likely failure cluster, risk, and the smallest safe next checks. Do not invent log details that are not in evidence.",
@@ -1804,11 +1765,7 @@ fn error_detective_definition() -> AutonomousJobDefinition {
 
 fn security_whisperer_definition() -> AutonomousJobDefinition {
     AutonomousJobDefinition {
-        workflow_id: SECURITY_WHISPERER_WORKFLOW_ID,
-        title: "Security Whisperer",
-        icon: "🛡️",
-        badge: "Security",
-        priority: "critical",
+        meta: autonomous_workflow_meta(SECURITY_WHISPERER_WORKFLOW_ID).unwrap(),
         cooldown_seconds: 30 * 60,
         scheduler_priority: 5,
         prompt: "Review the redacted local security findings. Highlight immediate leakage risk, containment steps, and safer follow-up. Never ask for or repeat raw secret values.",
@@ -1817,11 +1774,7 @@ fn security_whisperer_definition() -> AutonomousJobDefinition {
 
 fn setup_coach_definition() -> AutonomousJobDefinition {
     AutonomousJobDefinition {
-        workflow_id: SETUP_COACH_WORKFLOW_ID,
-        title: "Setup Coach",
-        icon: "🧰",
-        badge: "Setup",
-        priority: "normal",
+        meta: autonomous_workflow_meta(SETUP_COACH_WORKFLOW_ID).unwrap(),
         cooldown_seconds: 2 * 60 * 60,
         scheduler_priority: 5,
         prompt: "Review the local setup checklist and recommend the next onboarding step. Keep it practical and based only on the checklist.",
@@ -1830,11 +1783,7 @@ fn setup_coach_definition() -> AutonomousJobDefinition {
 
 fn dependency_radar_definition() -> AutonomousJobDefinition {
     AutonomousJobDefinition {
-        workflow_id: DEPENDENCY_RADAR_WORKFLOW_ID,
-        title: "Dependency Radar",
-        icon: "📦",
-        badge: "Dependencies",
-        priority: "normal",
+        meta: autonomous_workflow_meta(DEPENDENCY_RADAR_WORKFLOW_ID).unwrap(),
         cooldown_seconds: 2 * 60 * 60,
         scheduler_priority: 5,
         prompt: "Review local dependency manifest activity. Identify coordination risks and safe review steps without using package registry data.",
@@ -1843,11 +1792,7 @@ fn dependency_radar_definition() -> AutonomousJobDefinition {
 
 fn docs_gardener_definition() -> AutonomousJobDefinition {
     AutonomousJobDefinition {
-        workflow_id: DOCS_GARDENER_WORKFLOW_ID,
-        title: "Docs Gardener",
-        icon: "📚",
-        badge: "Docs",
-        priority: "normal",
+        meta: autonomous_workflow_meta(DOCS_GARDENER_WORKFLOW_ID).unwrap(),
         cooldown_seconds: 3 * 60 * 60,
         scheduler_priority: 5,
         prompt: "Review the documentation signal. Suggest whether README, AGENTS, or docs should be updated based only on changed path categories and docs presence.",
@@ -1856,11 +1801,7 @@ fn docs_gardener_definition() -> AutonomousJobDefinition {
 
 fn architecture_drift_definition() -> AutonomousJobDefinition {
     AutonomousJobDefinition {
-        workflow_id: ARCHITECTURE_DRIFT_WORKFLOW_ID,
-        title: "Architecture Drift Watcher",
-        icon: "🏗️",
-        badge: "Architecture",
-        priority: "normal",
+        meta: autonomous_workflow_meta(ARCHITECTURE_DRIFT_WORKFLOW_ID).unwrap(),
         cooldown_seconds: 4 * 60 * 60,
         scheduler_priority: 5,
         prompt: "Review the local architecture drift signal. Summarize subsystem concentration or cross-cutting risk, and propose lightweight guardrails. Use only path groups and diff stats.",
@@ -1872,12 +1813,16 @@ fn build_autonomous_job_spec(
     evidence: String,
 ) -> AutonomousBuddyChatSpec {
     AutonomousBuddyChatSpec::new(
-        definition.workflow_id,
-        definition.title,
+        definition.meta.id,
+        definition.meta.title,
         definition.prompt,
         evidence,
     )
-    .with_display(definition.icon, definition.badge, definition.priority)
+    .with_display(
+        definition.meta.icon,
+        definition.meta.badge,
+        definition.meta.priority,
+    )
 }
 
 async fn execute_autonomous_job(
@@ -1898,7 +1843,7 @@ async fn execute_autonomous_job(
         Err(err) => {
             tracing::debug!(
                 "buddy: autonomous job {} skipped after subchat failure: {}",
-                definition.workflow_id,
+                definition.meta.id,
                 err
             );
             return BuddyJobResult::default();
@@ -1906,23 +1851,26 @@ async fn execute_autonomous_job(
     };
 
     let activity = BuddyActivity {
-        icon: definition.icon.to_string(),
-        title: format!("{} opened a Buddy check-in", definition.title),
-        description: format!("Buddy created a {} system conversation.", definition.badge),
+        icon: definition.meta.icon.to_string(),
+        title: format!("{} opened a Buddy check-in", definition.meta.title),
+        description: format!(
+            "Buddy created a {} system conversation.",
+            definition.meta.badge
+        ),
         timestamp: Utc::now().to_rfc3339(),
-        activity_type: definition.workflow_id.to_string(),
+        activity_type: definition.meta.id.to_string(),
     };
     let mut runtime_event = make_runtime_event(
         "buddy_autonomous_chat",
-        definition.title,
-        definition.workflow_id,
-        &format!("{}:{}", definition.workflow_id, signal_hash),
+        definition.meta.title,
+        definition.meta.id,
+        &format!("{}:{}", definition.meta.id, signal_hash),
         "completed",
-        Some(definition.priority),
+        Some(definition.meta.priority),
     );
     runtime_event.description = Some(format!(
         "Buddy created a {} system conversation from local signals.",
-        definition.badge
+        definition.meta.badge
     ));
     runtime_event.chat_id = Some(chat_id.clone());
     BuddyJobResult {
@@ -2941,6 +2889,7 @@ impl BuddyJob for ArchitectureDriftWatcherJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buddy::autonomous_workflows::AUTONOMOUS_BUDDY_WORKFLOWS;
     use crate::buddy::scheduler::BuddyJobContext;
     use crate::buddy::settings::BuddySettings;
     use crate::buddy::types::{BuddyFact, BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
@@ -3613,14 +3562,12 @@ mod tests {
         let mut events = (0..5)
             .map(|i| test_llm_event(i, true, 1_000, 1_000, 0.01))
             .collect::<Vec<_>>();
-        let mut model_cost_report = test_llm_event(20, false, 60_000, 1_000_000, 10.0);
-        model_cost_report.mode = "buddy".to_string();
-        model_cost_report.chat_id = "buddy-buddy_model_cost_optimizer-report".to_string();
-        let mut error_report = test_llm_event(21, false, 60_000, 1_000_000, 10.0);
-        error_report.mode = "buddy".to_string();
-        error_report.chat_id = "buddy-buddy_error_detective-report".to_string();
-        events.push(model_cost_report);
-        events.push(error_report);
+        for (idx, meta) in AUTONOMOUS_BUDDY_WORKFLOWS.iter().enumerate() {
+            let mut report = test_llm_event(20 + idx as u64, false, 60_000, 1_000_000, 10.0);
+            report.mode = "buddy".to_string();
+            report.chat_id = format!("buddy-{}-report", meta.id);
+            events.push(report);
+        }
 
         assert!(model_cost_evidence_from_events(&events).is_none());
 
@@ -3629,6 +3576,12 @@ mod tests {
         assert!(input_events
             .iter()
             .all(|event| !is_buddy_autonomous_report_event(event)));
+        for meta in AUTONOMOUS_BUDDY_WORKFLOWS {
+            assert!(is_autonomous_buddy_workflow_identifier(&format!(
+                "buddy-{}-report",
+                meta.id
+            )));
+        }
     }
 
     #[test]
