@@ -8,6 +8,7 @@ pub mod facts;
 pub mod humor;
 pub mod issues;
 pub mod jobs;
+pub mod memory_lifecycle;
 pub mod observers;
 pub mod opportunities;
 pub mod policy;
