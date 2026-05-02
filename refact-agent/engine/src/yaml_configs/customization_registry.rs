@@ -340,12 +340,14 @@ pub fn resolve_mode_for_model(
         .mode_overrides
         .iter()
         .filter(|o| o.base.as_deref() == Some(mode_id))
-        .find(|o| {
+        .filter_map(|o| {
             o.match_models
                 .as_ref()
-                .map(|patterns| patterns.iter().any(|p| model_matches_pattern(model_id, p)))
-                .unwrap_or(false)
-        });
+                .and_then(|patterns| best_matching_pattern_specificity(model_id, patterns))
+                .map(|specificity| (specificity, o))
+        })
+        .fold(None, best_override_by_specificity)
+        .map(|(_, o)| o);
 
     match matching_override {
         Some(override_config) => {
@@ -375,12 +377,14 @@ pub fn resolve_subagent_for_model(
         .subagent_overrides
         .iter()
         .filter(|o| o.base.as_deref() == Some(subagent_id))
-        .find(|o| {
+        .filter_map(|o| {
             o.match_models
                 .as_ref()
-                .map(|patterns| patterns.iter().any(|p| model_matches_pattern(model_id, p)))
-                .unwrap_or(false)
-        });
+                .and_then(|patterns| best_matching_pattern_specificity(model_id, patterns))
+                .map(|specificity| (specificity, o))
+        })
+        .fold(None, best_override_by_specificity)
+        .map(|(_, o)| o);
 
     match matching_override {
         Some(override_config) => Some(base.apply_override(override_config)),
@@ -439,6 +443,55 @@ fn model_matches_pattern_single(model_id: &str, pattern: &str) -> bool {
     }
 
     false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModelPatternSpecificity {
+    exact: bool,
+    literal_chars: usize,
+}
+
+impl ModelPatternSpecificity {
+    fn for_pattern(pattern: &str) -> Self {
+        Self {
+            exact: !pattern.contains('*'),
+            literal_chars: pattern.chars().filter(|c| *c != '*').count(),
+        }
+    }
+
+    fn is_more_specific_than(self, other: Self) -> bool {
+        if self.exact && other.exact {
+            false
+        } else if self.exact != other.exact {
+            self.exact
+        } else {
+            self.literal_chars > other.literal_chars
+        }
+    }
+}
+
+fn best_matching_pattern_specificity(
+    model_id: &str,
+    patterns: &[String],
+) -> Option<ModelPatternSpecificity> {
+    patterns
+        .iter()
+        .filter(|pattern| model_matches_pattern(model_id, pattern))
+        .map(|pattern| ModelPatternSpecificity::for_pattern(pattern))
+        .fold(None, |best, specificity| match best {
+            Some(best) if !specificity.is_more_specific_than(best) => Some(best),
+            _ => Some(specificity),
+        })
+}
+
+fn best_override_by_specificity<'a, T>(
+    best: Option<(ModelPatternSpecificity, &'a T)>,
+    candidate: (ModelPatternSpecificity, &'a T),
+) -> Option<(ModelPatternSpecificity, &'a T)> {
+    match best {
+        Some(best) if !candidate.0.is_more_specific_than(best.0) => Some(best),
+        _ => Some(candidate),
+    }
 }
 
 pub fn match_tool_confirm_action(rules: &[ToolConfirmRule], tool_name: &str) -> Option<String> {
@@ -556,6 +609,7 @@ pub fn map_legacy_mode_to_id(mode_str: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn runtime_required_subagent_ids() -> Vec<&'static str> {
         vec![
@@ -593,6 +647,157 @@ mod tests {
     fn write_file(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+    }
+
+    fn base_agent_mode() -> ModeConfig {
+        ModeConfig {
+            schema_version: 1,
+            id: "agent".to_string(),
+            title: "Agent".to_string(),
+            description: String::new(),
+            specific: false,
+            prompt: "base".to_string(),
+            tools: vec!["tree".to_string(), "cat".to_string(), "shell".to_string()],
+            allow_integrations: true,
+            allow_mcp: true,
+            allow_subagents: true,
+            model_defaults: ModeModelDefaults::default(),
+            tool_confirm: ToolConfirmConfig {
+                rules: vec![
+                    ToolConfirmRule {
+                        match_pattern: "tree".to_string(),
+                        action: "auto".to_string(),
+                    },
+                    ToolConfirmRule {
+                        match_pattern: "shell".to_string(),
+                        action: "ask".to_string(),
+                    },
+                ],
+            },
+            thread_defaults: ModeThreadDefaults {
+                include_project_info: Some(true),
+                checkpoints_enabled: Some(true),
+                auto_approve_editing_tools: Some(true),
+                auto_approve_dangerous_commands: Some(false),
+            },
+            ui: ModeUi::default(),
+            base: None,
+            match_models: None,
+            override_config: None,
+        }
+    }
+
+    fn mode_override(id: &str, patterns: &[&str], prompt: &str) -> ModeConfig {
+        ModeConfig {
+            schema_version: 1,
+            id: id.to_string(),
+            title: String::new(),
+            description: String::new(),
+            specific: true,
+            prompt: String::new(),
+            tools: Vec::new(),
+            allow_integrations: false,
+            allow_mcp: false,
+            allow_subagents: false,
+            model_defaults: ModeModelDefaults::default(),
+            tool_confirm: ToolConfirmConfig::default(),
+            thread_defaults: ModeThreadDefaults::default(),
+            ui: ModeUi::default(),
+            base: Some("agent".to_string()),
+            match_models: Some(patterns.iter().map(|pattern| pattern.to_string()).collect()),
+            override_config: Some(ModeOverride {
+                prompt: Some(prompt.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn registry_with_mode_overrides(overrides: Vec<ModeConfig>) -> ProjectRegistry {
+        let mut modes = HashMap::new();
+        modes.insert("agent".to_string(), base_agent_mode());
+        ProjectRegistry {
+            modes,
+            mode_overrides: overrides,
+            ..Default::default()
+        }
+    }
+
+    fn base_subagent() -> SubagentConfig {
+        SubagentConfig {
+            schema_version: 1,
+            id: "coder".to_string(),
+            title: "Base".to_string(),
+            description: String::new(),
+            specific: false,
+            expose_as_tool: false,
+            has_code: false,
+            tool: None,
+            subchat: SubchatConfig::default(),
+            messages: SubagentMessages::default(),
+            prompts: SubagentPrompts::default(),
+            gather_files: GatherFilesConfig::default(),
+            tools: Vec::new(),
+            base: None,
+            match_models: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    fn subagent_override(id: &str, patterns: &[&str], title: &str) -> SubagentConfig {
+        SubagentConfig {
+            schema_version: 1,
+            id: id.to_string(),
+            title: title.to_string(),
+            description: String::new(),
+            specific: true,
+            expose_as_tool: false,
+            has_code: false,
+            tool: None,
+            subchat: SubchatConfig::default(),
+            messages: SubagentMessages::default(),
+            prompts: SubagentPrompts::default(),
+            gather_files: GatherFilesConfig::default(),
+            tools: Vec::new(),
+            base: Some("coder".to_string()),
+            match_models: Some(patterns.iter().map(|pattern| pattern.to_string()).collect()),
+            extra: HashMap::new(),
+        }
+    }
+
+    fn assert_mode_inherits_agent_surface(agent: &ModeConfig, resolved: &ModeConfig) {
+        assert_eq!(resolved.tools, agent.tools);
+        assert_eq!(resolved.allow_integrations, agent.allow_integrations);
+        assert_eq!(resolved.allow_mcp, agent.allow_mcp);
+        assert_eq!(resolved.allow_subagents, agent.allow_subagents);
+        assert_eq!(
+            resolved.tool_confirm.rules.len(),
+            agent.tool_confirm.rules.len()
+        );
+        for (resolved_rule, agent_rule) in resolved
+            .tool_confirm
+            .rules
+            .iter()
+            .zip(agent.tool_confirm.rules.iter())
+        {
+            assert_eq!(resolved_rule.match_pattern, agent_rule.match_pattern);
+            assert_eq!(resolved_rule.action, agent_rule.action);
+        }
+        assert_eq!(
+            resolved.thread_defaults.include_project_info,
+            agent.thread_defaults.include_project_info
+        );
+        assert_eq!(
+            resolved.thread_defaults.checkpoints_enabled,
+            agent.thread_defaults.checkpoints_enabled
+        );
+        assert_eq!(
+            resolved.thread_defaults.auto_approve_editing_tools,
+            agent.thread_defaults.auto_approve_editing_tools
+        );
+        assert_eq!(
+            resolved.thread_defaults.auto_approve_dangerous_commands,
+            agent.thread_defaults.auto_approve_dangerous_commands
+        );
     }
 
     #[tokio::test]
@@ -657,6 +862,165 @@ mod tests {
         assert!(model_matches_pattern("gpt-4o", "gpt-*"));
         assert!(model_matches_pattern("gpt-4-turbo", "gpt-*"));
         assert!(!model_matches_pattern("claude-3", "gpt-*"));
+    }
+
+    #[test]
+    fn test_mode_override_specificity_exact_beats_broad_wildcard() {
+        let registry = registry_with_mode_overrides(vec![
+            mode_override("openai_agent", &["gpt-5*"], "broad"),
+            mode_override("gpt55_agent", &["gpt-5.5"], "exact"),
+        ]);
+
+        let resolved = resolve_mode_for_model(&registry, "agent", Some("openai/gpt-5.5"))
+            .expect("agent mode should resolve");
+
+        assert_eq!(resolved.prompt, "exact");
+    }
+
+    #[test]
+    fn test_mode_override_specificity_qwen_provider_pattern_beats_broad() {
+        let registry = registry_with_mode_overrides(vec![
+            mode_override("oss_agent", &["qwen*"], "broad"),
+            mode_override(
+                "qwen36_agent",
+                &["qwen3.6-flash", "Qwen/Qwen3.6-*"],
+                "specific",
+            ),
+        ]);
+
+        let exact_resolved = resolve_mode_for_model(&registry, "agent", Some("qwen3.6-flash"))
+            .expect("agent mode should resolve");
+        let provider_resolved =
+            resolve_mode_for_model(&registry, "agent", Some("alibaba/Qwen/Qwen3.6-flash"))
+                .expect("agent mode should resolve");
+
+        assert!(model_matches_pattern("qwen3.6-flash", "qwen*"));
+        assert!(model_matches_pattern("qwen3.6-flash", "qwen3.6-flash"));
+        assert!(model_matches_pattern("alibaba/Qwen/Qwen3.6-flash", "qwen*"));
+        assert!(model_matches_pattern(
+            "alibaba/Qwen/Qwen3.6-flash",
+            "Qwen/Qwen3.6-*"
+        ));
+        assert_eq!(exact_resolved.prompt, "specific");
+        assert_eq!(provider_resolved.prompt, "specific");
+    }
+
+    #[test]
+    fn test_mode_override_specificity_preserves_stable_order_on_tie() {
+        let registry = registry_with_mode_overrides(vec![
+            mode_override("first", &["gpt-5*"], "first"),
+            mode_override("second", &["gpt-5*"], "second"),
+        ]);
+
+        let resolved = resolve_mode_for_model(&registry, "agent", Some("gpt-5.5"))
+            .expect("agent mode should resolve");
+
+        assert_eq!(resolved.prompt, "first");
+    }
+
+    #[test]
+    fn test_mode_override_specificity_preserves_local_precedence_on_tie() {
+        let global =
+            registry_with_mode_overrides(vec![mode_override("global", &["gpt-5*"], "global")]);
+        let local = ProjectRegistry {
+            mode_overrides: vec![mode_override("local", &["gpt-5*"], "local")],
+            ..Default::default()
+        };
+        let merged = merge_registries(global, local);
+
+        let resolved = resolve_mode_for_model(&merged, "agent", Some("gpt-5.5"))
+            .expect("agent mode should resolve");
+
+        assert_eq!(resolved.prompt, "local");
+    }
+
+    #[test]
+    fn test_subagent_override_specificity_uses_best_match() {
+        let mut subagents = HashMap::new();
+        subagents.insert("coder".to_string(), base_subagent());
+        let registry = ProjectRegistry {
+            subagents,
+            subagent_overrides: vec![
+                subagent_override("oss_coder", &["qwen*"], "Broad"),
+                subagent_override(
+                    "qwen36_coder",
+                    &["qwen3.6-flash", "Qwen/Qwen3.6-*"],
+                    "Specific",
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let exact_resolved = resolve_subagent_for_model(&registry, "coder", Some("qwen3.6-flash"))
+            .expect("subagent should resolve");
+        let provider_resolved =
+            resolve_subagent_for_model(&registry, "coder", Some("alibaba/Qwen/Qwen3.6-flash"))
+                .expect("subagent should resolve");
+
+        assert_eq!(exact_resolved.title, "Specific");
+        assert_eq!(provider_resolved.title, "Specific");
+    }
+
+    #[test]
+    fn test_prompt_and_model_defaults_only_mode_override_inherits_agent_surface() {
+        let mut overlay = mode_override("provider_agent", &["provider-model*"], "provider");
+        overlay
+            .override_config
+            .as_mut()
+            .expect("override config should exist")
+            .model_defaults = Some(ModeModelDefaults {
+            default: Some(ModelTypeConfig {
+                temperature: Some(0.2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let registry = registry_with_mode_overrides(vec![overlay]);
+        let agent = registry
+            .modes
+            .get("agent")
+            .expect("base agent should exist")
+            .clone();
+
+        let resolved = resolve_mode_for_model(&registry, "agent", Some("provider-model-pro"))
+            .expect("agent mode should resolve");
+
+        assert_eq!(resolved.prompt, "provider");
+        assert_eq!(
+            resolved
+                .model_defaults
+                .default
+                .as_ref()
+                .and_then(|defaults| defaults.temperature),
+            Some(0.2)
+        );
+        assert_mode_inherits_agent_surface(&agent, &resolved);
+    }
+
+    #[test]
+    fn test_default_oss_agent_overlay_inherits_agent_surface() {
+        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = global_configs_try_create_all(config_dir).await;
+            let registry = load_registry_from_dir(config_dir).await;
+            assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+            let agent = registry
+                .modes
+                .get("agent")
+                .expect("base agent should exist")
+                .clone();
+            let resolved = resolve_mode_for_model(&registry, "agent", Some("qwen3.6-flash"))
+                .expect("agent mode should resolve");
+
+            assert_ne!(resolved.prompt, agent.prompt);
+            assert_mode_inherits_agent_surface(&agent, &resolved);
+        });
     }
 
     #[test]
