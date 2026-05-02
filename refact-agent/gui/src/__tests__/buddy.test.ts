@@ -16,6 +16,7 @@ import {
   addBuddyActivity,
   addBuddySuggestion,
   dismissBuddySuggestion,
+  dismissRuntimeEvent,
   addBuddyDiagnostic,
   setBuddyConversations,
   selectBuddySnapshot,
@@ -77,6 +78,7 @@ import {
 } from "../features/Buddy/reportBuddyFrontendError";
 import { BuddyErrorBoundary } from "../features/Buddy/BuddyErrorBoundary";
 import { getOpportunityDismissAction } from "../features/Buddy/buddyOpportunityActions";
+import { buildBuddySceneSpeech } from "../features/Buddy/buddySceneSpeech";
 
 const reducer = buddySlice.reducer;
 
@@ -831,6 +833,27 @@ describe("runtime event new fields", () => {
     expect(state.runtimeQueue[0].status).toBe("completed");
     expect(state.runtimeQueue[0].persistent).toBe(false);
     expect(state.runtimeQueue[0].ttl_ms).toBe(4000);
+  });
+
+  test("scene speech runtime dismiss control carries the event id", () => {
+    const event = makeEvent({
+      id: "evt-failed",
+      title: "Generation failed",
+      status: "failed",
+      priority: "high",
+    });
+
+    const speech = buildBuddySceneSpeech({
+      activeSpeech: null,
+      nowPlaying: event,
+      runtimeQueue: [],
+    });
+
+    const dismiss = speech?.controls.find(
+      (control) => control.id === "dismiss-evt-failed",
+    );
+    expect(dismiss?.action).toBe("dismiss_runtime_event");
+    expect(dismiss?.action_param).toBe(event.id);
   });
 });
 
@@ -2060,6 +2083,75 @@ describe("executeBuddyNavigation dispatches for each BuddyPage variant", () => {
 });
 
 describe("executeBuddyAction setup controls", () => {
+  test("generic dismiss clears active speech", async () => {
+    const dispatch = vi.fn();
+    await executeBuddyAction(
+      {
+        id: "dismiss",
+        label: "Dismiss",
+        action: "dismiss",
+        style: "secondary",
+      },
+      dispatch as never,
+    );
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(
+      isActionWithType(dispatch.mock.calls[0][0], clearActiveSpeech.type),
+    ).toBe(true);
+  });
+
+  test("runtime dismiss is optimistic and ignores mutation failures", async () => {
+    const eventId = "runtime-dismiss-id";
+    const failingMutation = vi.fn((_action: unknown) => ({
+      unwrap: () => Promise.reject(new Error("offline")),
+    }));
+    const dispatch = vi.fn<TestDispatch>((action) => {
+      if (typeof action === "function") {
+        return failingMutation(action);
+      }
+      return action;
+    });
+
+    await expect(
+      executeBuddyAction(
+        {
+          id: "dismiss-runtime",
+          label: "Dismiss",
+          action: "dismiss_runtime_event",
+          action_param: eventId,
+          style: "secondary",
+        },
+        dispatch as never,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(dispatch.mock.calls[0][0]).toEqual(dismissRuntimeEvent(eventId));
+    expect(failingMutation).toHaveBeenCalledTimes(1);
+    expect(
+      isActionWithType(dispatch.mock.calls[2][0], clearActiveSpeech.type),
+    ).toBe(true);
+  });
+
+  test("runtime dismiss without event id no-ops", async () => {
+    for (const actionParam of [undefined, " "]) {
+      const dispatch = vi.fn();
+      await executeBuddyAction(
+        {
+          id: "dismiss-runtime",
+          label: "Dismiss",
+          action: "dismiss_runtime_event",
+          action_param: actionParam,
+          style: "secondary",
+        },
+        dispatch as never,
+      );
+
+      expect(dispatch).not.toHaveBeenCalled();
+    }
+  });
+
   test("legacy setup controls dispatch their setup modes", async () => {
     const cases: [string, string][] = [
       ["open_setup_mcp", "setup_mcp"],

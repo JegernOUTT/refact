@@ -3,6 +3,7 @@ import { push } from "../Pages/pagesSlice";
 import {
   clearActiveSpeech,
   dismissBuddySuggestion,
+  dismissRuntimeEvent,
   setBuddySnapshot,
 } from "./buddySlice";
 import {
@@ -58,6 +59,19 @@ export async function executeBuddyAction(
         buddyApi.endpoints.dismissBuddySuggestion.initiate(suggestionId),
       ).unwrap();
       dispatch(dismissBuddySuggestion(suggestionId));
+      break;
+    }
+
+    case "dismiss_runtime_event": {
+      const eventId = ctrl.action_param?.trim();
+      if (!eventId) break;
+      dispatch(dismissRuntimeEvent(eventId));
+      await dispatch(
+        buddyApi.endpoints.dismissBuddyRuntimeEvent.initiate(eventId),
+      )
+        .unwrap()
+        .catch(() => undefined);
+      dispatch(clearActiveSpeech());
       break;
     }
 

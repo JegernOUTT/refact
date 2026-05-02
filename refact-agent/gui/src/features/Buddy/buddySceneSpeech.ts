@@ -91,7 +91,8 @@ function defaultRuntimeControls(event: BuddyRuntimeEvent): BuddyControl[] {
     {
       id: `dismiss-${event.id}`,
       label: "Dismiss",
-      action: "dismiss",
+      action: "dismiss_runtime_event",
+      action_param: event.id,
       style: "secondary",
     },
   ];
