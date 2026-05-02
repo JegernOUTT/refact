@@ -315,7 +315,7 @@ async fn build_worktree_pulse(
 
 fn build_git_pulse(project_root: &std::path::Path) -> GitPulse {
     let mut pulse = GitPulse::default();
-    let repo = match git2::Repository::open(project_root) {
+    let repo = match git2::Repository::discover(project_root) {
         Ok(r) => r,
         Err(_) => return pulse,
     };
@@ -528,5 +528,30 @@ mod tests {
 
         assert_eq!(pulse.modes, 1);
         assert_eq!(pulse.competitor_import, CompetitorImportPulse::default());
+    }
+
+    #[test]
+    fn git_pulse_discovers_repo_from_subdirectory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        let readme = temp.path().join("README.md");
+        std::fs::write(&readme, "initial\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("README.md")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Buddy", "buddy@example.com").unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        drop(tree);
+        std::fs::write(&readme, "changed\n").unwrap();
+        let subdir = temp.path().join("workspace").join("nested");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let pulse = build_git_pulse(&subdir);
+
+        assert!(pulse.branches > 0);
+        assert!(pulse.uncommitted_files > 0);
     }
 }

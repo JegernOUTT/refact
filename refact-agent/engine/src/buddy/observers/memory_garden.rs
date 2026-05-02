@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,12 +21,14 @@ const MAX_ORPHAN_IDS: usize = 50;
 const MAX_MEMORY_FILES: usize = 500;
 const MAX_KNOWLEDGE_SCAN_ENTRIES: usize = 5_000;
 const MAX_FILE_BYTES: u64 = 256 * 1024;
+const MAX_FRONTMATTER_BYTES: usize = 32 * 1024;
 
 struct KnowledgeEntry {
     id: String,
     title: String,
     tags: Vec<String>,
     related_files: Vec<String>,
+    links: Vec<String>,
     file_path: PathBuf,
     created_at: Option<String>,
     status: Option<String>,
@@ -43,7 +46,13 @@ struct KnowledgeScanStats {
     matching_files_considered: usize,
 }
 
-async fn scan_knowledge_dirs(gcx: Arc<RwLock<GlobalContext>>) -> Vec<KnowledgeEntry> {
+#[derive(Debug, Clone, Default)]
+struct KnowledgeReferenceScan {
+    referenced: HashSet<String>,
+    stats: KnowledgeScanStats,
+}
+
+async fn knowledge_dirs(gcx: Arc<RwLock<GlobalContext>>) -> Vec<PathBuf> {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     let mut dirs: Vec<PathBuf> = project_dirs
         .iter()
@@ -54,7 +63,7 @@ async fn scan_knowledge_dirs(gcx: Arc<RwLock<GlobalContext>>) -> Vec<KnowledgeEn
     if global_dir.exists() {
         dirs.push(global_dir);
     }
-    scan_knowledge_dirs_from_paths(dirs).await
+    dirs
 }
 
 async fn scan_knowledge_dirs_from_paths(dirs: Vec<PathBuf>) -> Vec<KnowledgeEntry> {
@@ -79,6 +88,7 @@ async fn scan_knowledge_dirs_from_paths(dirs: Vec<PathBuf>) -> Vec<KnowledgeEntr
             title,
             tags: fm.tags.clone(),
             related_files: fm.related_files.clone(),
+            links: fm.links.clone(),
             file_path: candidate.path,
             created_at: fm.created_at.clone().or_else(|| fm.created.clone()),
             status: fm.status.clone(),
@@ -136,9 +146,12 @@ fn collect_knowledge_candidates_from_dir(
             }
             stats.visited_entries += 1;
             let path = entry.path();
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
             if metadata.is_dir() {
                 dirs.push(path);
                 continue;
@@ -205,6 +218,100 @@ fn collect_knowledge_candidates_from_dirs_with_stats(
             .then_with(|| a.path.cmp(&b.path))
     });
     (candidates, stats)
+}
+
+fn read_frontmatter_only(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut frontmatter = String::new();
+    let mut line = String::new();
+    let mut lines_read = 0usize;
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).ok()?;
+        if read == 0 {
+            return None;
+        }
+        if frontmatter.len().saturating_add(line.len()) > MAX_FRONTMATTER_BYTES {
+            return None;
+        }
+        lines_read += 1;
+        let trimmed = line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        if lines_read == 1 && trimmed != "---" {
+            return None;
+        }
+        frontmatter.push_str(&line);
+        if lines_read > 1 && trimmed == "---" {
+            return Some(frontmatter);
+        }
+    }
+}
+
+fn collect_knowledge_references_from_dir(
+    dir: &Path,
+    scan: &mut KnowledgeReferenceScan,
+    max_visited_entries: usize,
+) {
+    if max_visited_entries == 0 || scan.stats.visited_entries >= max_visited_entries {
+        return;
+    }
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if scan.stats.visited_entries >= max_visited_entries {
+                return;
+            }
+            scan.stats.visited_entries += 1;
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "md" && ext != "mdx" {
+                continue;
+            }
+            if metadata.len() > MAX_FILE_BYTES {
+                continue;
+            }
+            scan.stats.matching_files_considered += 1;
+            let Some(frontmatter) = read_frontmatter_only(&path) else {
+                continue;
+            };
+            let (fm, _) = KnowledgeFrontmatter::parse(&frontmatter);
+            if fm.is_archived() || fm.is_deprecated() {
+                continue;
+            }
+            scan.referenced.extend(fm.related_files);
+            scan.referenced.extend(fm.links);
+            if let Some(superseded_by) = fm.superseded_by {
+                scan.referenced.insert(superseded_by);
+            }
+        }
+    }
+}
+
+fn scan_knowledge_references_from_paths(dirs: &[PathBuf]) -> KnowledgeReferenceScan {
+    let mut scan = KnowledgeReferenceScan::default();
+    for dir in dirs {
+        if scan.stats.visited_entries >= MAX_KNOWLEDGE_SCAN_ENTRIES {
+            break;
+        }
+        collect_knowledge_references_from_dir(dir, &mut scan, MAX_KNOWLEDGE_SCAN_ENTRIES);
+    }
+    scan
 }
 
 #[cfg(test)]
@@ -288,16 +395,26 @@ fn has_negation_conflict(a_title: &str, b_title: &str) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn memory_garden_facts_from_entries(
     entries: &[KnowledgeEntry],
     now: DateTime<Utc>,
 ) -> Vec<BuddyFact> {
+    memory_garden_facts_from_entries_with_references(entries, &HashSet::new(), now)
+}
+
+fn memory_garden_facts_from_entries_with_references(
+    entries: &[KnowledgeEntry],
+    broader_references: &HashSet<String>,
+    now: DateTime<Utc>,
+) -> Vec<BuddyFact> {
     let mut facts = vec![];
 
-    let all_referenced: HashSet<String> = entries
+    let mut all_referenced: HashSet<String> = entries
         .iter()
-        .flat_map(|e| e.related_files.iter().cloned())
+        .flat_map(|e| e.related_files.iter().chain(e.links.iter()).cloned())
         .collect();
+    all_referenced.extend(broader_references.iter().cloned());
 
     let mut orphan_ids: Vec<String> = Vec::new();
     for entry in entries {
@@ -341,9 +458,11 @@ fn memory_garden_facts_from_entries(
             payload: serde_json::json!({
                 "memory_ids": orphan_ids,
                 "count": orphan_ids.len(),
+                "scope": "scanned_subset",
+                "partial": true,
             }),
             seen_at: now,
-            confidence: 0.7,
+            confidence: 0.55,
         });
     }
 
@@ -451,8 +570,10 @@ async fn detect_memory_garden(
     gcx: Arc<RwLock<GlobalContext>>,
     now: DateTime<Utc>,
 ) -> Vec<BuddyFact> {
-    let entries = scan_knowledge_dirs(gcx).await;
-    memory_garden_facts_from_entries(&entries, now)
+    let dirs = knowledge_dirs(gcx).await;
+    let entries = scan_knowledge_dirs_from_paths(dirs.clone()).await;
+    let references = scan_knowledge_references_from_paths(&dirs);
+    memory_garden_facts_from_entries_with_references(&entries, &references.referenced, now)
 }
 
 #[async_trait::async_trait]
@@ -490,10 +611,32 @@ mod tests {
             title: title.to_string(),
             tags: vec![],
             related_files: vec![id.to_string()],
+            links: vec![],
             file_path: PathBuf::from(format!("{id}.md")),
             created_at: Some("2026-01-01T00:00:00Z".to_string()),
             status: None,
         }
+    }
+
+    fn orphan_candidate(id: &str) -> KnowledgeEntry {
+        KnowledgeEntry {
+            id: id.to_string(),
+            title: id.to_string(),
+            tags: vec![],
+            related_files: vec![],
+            links: vec![],
+            file_path: PathBuf::from(format!("{id}.md")),
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            status: None,
+        }
+    }
+
+    fn write_memory(path: &Path, frontmatter: &str) {
+        std::fs::write(
+            path,
+            format!("---\n{frontmatter}\n---\nBody must not be needed\n"),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -594,5 +737,77 @@ mod tests {
         assert_eq!(stats.visited_entries, 4);
         assert_eq!(stats.matching_files_considered, candidates.len());
         assert!(stats.matching_files_considered < 8);
+    }
+
+    #[test]
+    fn orphan_fact_is_partial_when_based_on_bounded_subset() {
+        let entries = vec![orphan_candidate("old-memory")];
+        let facts = memory_garden_facts_from_entries(&entries, Utc::now());
+
+        let orphan = facts
+            .iter()
+            .find(|fact| fact.kind == BuddyFactKind::MemoryOrphan)
+            .expect("expected partial orphan fact");
+        assert_eq!(orphan.payload["scope"], serde_json::json!("scanned_subset"));
+        assert_eq!(orphan.payload["partial"], serde_json::json!(true));
+        assert!(orphan.confidence < 0.7);
+    }
+
+    #[test]
+    fn older_frontmatter_reference_prevents_recent_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let recent = dir.path().join("recent.md");
+        let older = dir.path().join("older.md");
+        write_memory(
+            &recent,
+            "id: recent\ntitle: Recent\ncreated_at: \"2026-01-01T00:00:00Z\"",
+        );
+        write_memory(
+            &older,
+            "id: older\ntitle: Older\nrelated_files: [\"recent\"]\ncreated_at: \"2025-01-01T00:00:00Z\"",
+        );
+        filetime::set_file_mtime(&recent, filetime::FileTime::from_unix_time(200, 0)).unwrap();
+        filetime::set_file_mtime(&older, filetime::FileTime::from_unix_time(100, 0)).unwrap();
+
+        let entries = collect_knowledge_candidates_from_dirs(&[dir.path().to_path_buf()], 1)
+            .into_iter()
+            .map(|candidate| KnowledgeEntry {
+                id: "recent".to_string(),
+                title: "Recent".to_string(),
+                tags: vec![],
+                related_files: vec![],
+                links: vec![],
+                file_path: candidate.path,
+                created_at: Some("2026-01-01T00:00:00Z".to_string()),
+                status: None,
+            })
+            .collect::<Vec<_>>();
+        let references = scan_knowledge_references_from_paths(&[dir.path().to_path_buf()]);
+        let facts = memory_garden_facts_from_entries_with_references(
+            &entries,
+            &references.referenced,
+            Utc::now(),
+        );
+
+        assert!(references.referenced.contains("recent"));
+        assert!(!facts
+            .iter()
+            .any(|fact| fact.kind == BuddyFactKind::MemoryOrphan));
+    }
+
+    #[test]
+    fn malformed_older_frontmatter_reference_pass_is_skipped_safely() {
+        let dir = tempfile::tempdir().unwrap();
+        let malformed = dir.path().join("malformed.md");
+        std::fs::write(
+            &malformed,
+            "---\nid: malformed\nrelated_files: [\"target\"\n---\nBody\n",
+        )
+        .unwrap();
+
+        let references = scan_knowledge_references_from_paths(&[dir.path().to_path_buf()]);
+
+        assert_eq!(references.stats.matching_files_considered, 1);
+        assert!(!references.referenced.contains("target"));
     }
 }
