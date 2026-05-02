@@ -812,6 +812,114 @@ mod tests {
         );
     }
 
+    struct ProviderAgentPromptCase {
+        filename: &'static str,
+        model_id: &'static str,
+        markers: &'static [&'static str],
+    }
+
+    fn provider_agent_prompt_cases() -> Vec<ProviderAgentPromptCase> {
+        vec![
+            ProviderAgentPromptCase {
+                filename: "gpt55_agent.yaml",
+                model_id: "gpt-5.5",
+                markers: &[
+                    "GPT-5.5",
+                    "outcome-first",
+                    "OpenAI reasoning/tool continuity",
+                ],
+            },
+            ProviderAgentPromptCase {
+                filename: "claude_opus47_agent.yaml",
+                model_id: "claude-opus-4-7",
+                markers: &[
+                    "Claude Opus 4.7",
+                    "adaptive thinking/effort",
+                    "thinking blocks/signatures byte-for-byte",
+                ],
+            },
+            ProviderAgentPromptCase {
+                filename: "gemini3_agent.yaml",
+                model_id: "gemini-3.1-pro-preview",
+                markers: &["Gemini 3", "functionCall.id", "thought summaries"],
+            },
+            ProviderAgentPromptCase {
+                filename: "kimi_k26_agent.yaml",
+                model_id: "kimi-k2.6",
+                markers: &["Kimi K2.6", "reasoning_content", "strict tool schemas"],
+            },
+            ProviderAgentPromptCase {
+                filename: "glm51_agent.yaml",
+                model_id: "glm-5.1",
+                markers: &[
+                    "GLM-5.1",
+                    "`reasoning_content`",
+                    "plan → execute → validate",
+                ],
+            },
+            ProviderAgentPromptCase {
+                filename: "minimax_m27_agent.yaml",
+                model_id: "MiniMax-M2.7",
+                markers: &[
+                    "MiniMax M2.7",
+                    "complete assistant content arrays",
+                    "Anthropic-style `tool_use`/`tool_result` continuity",
+                ],
+            },
+            ProviderAgentPromptCase {
+                filename: "qwen36_agent.yaml",
+                model_id: "qwen3.6-flash",
+                markers: &[
+                    "Qwen3.6 coding models",
+                    "exact JSON tool arguments",
+                    "ReAct stopword assumptions",
+                ],
+            },
+        ]
+    }
+
+    fn assert_provider_prompt_contains_base_agent_contract(prompt: &str) {
+        for marker in [
+            "[mode3] You are Refact Agent",
+            "## Core Philosophy: Orchestrate",
+            "subagent()",
+            "strategic_planning()",
+            "code_review()",
+            "## Memory & Past Conversations",
+            "knowledge(search_key)",
+            "create_knowledge(content)",
+            "## Workflow",
+            "Understand the Task",
+            "Implement without Delegation",
+            "Validate via Delegation",
+            "tasks_set",
+            "task_done()",
+            "ask_questions()",
+            "%CD_INSTRUCTIONS%",
+            "%SHELL_INSTRUCTIONS%",
+            "%COMPRESS_HANDOFF_INSTRUCTIONS%",
+            "%RICH_CONTENT_INSTRUCTIONS%",
+            "%SYSTEM_INFO%",
+            "%ENVIRONMENT_INFO%",
+            "%WORKSPACE_INFO%",
+            "%SKILLS_INSTRUCTIONS%",
+            "%PROJECT_CONFIGS%",
+            "%GIT_INFO%",
+            "%PROJECT_TREE%",
+        ] {
+            assert!(
+                prompt.contains(marker),
+                "provider prompt missing base Agent marker '{}': {}",
+                marker,
+                prompt
+            );
+        }
+    }
+
+    fn yaml_key(key: &str) -> serde_yaml::Value {
+        serde_yaml::Value::String(key.to_string())
+    }
+
     #[tokio::test]
     async fn imported_competitor_subagent_loads_through_registry() {
         use crate::ext::competitor_import::types::ImportStatus;
@@ -1010,6 +1118,81 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_agent_overlay_prompts_include_full_agent_contract() {
+        let registry = load_default_registry_for_tests();
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+        for case in provider_agent_prompt_cases() {
+            let resolved = resolve_mode_for_model(&registry, "agent", Some(case.model_id))
+                .expect("agent mode should resolve");
+
+            assert_provider_prompt_contains_base_agent_contract(&resolved.prompt);
+            for marker in case.markers {
+                assert!(
+                    resolved.prompt.contains(marker),
+                    "{} resolved prompt missing provider marker '{}': {}",
+                    case.model_id,
+                    marker,
+                    resolved.prompt
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_provider_agent_overlays_do_not_replace_tool_or_capability_surface() {
+        let forbidden_top_level = [
+            "tools",
+            "tool_confirm",
+            "allow_integrations",
+            "allow_mcp",
+            "allow_subagents",
+            "thread_defaults",
+        ];
+        let forbidden_override = [
+            "tools_replace",
+            "tools_add",
+            "tools_remove",
+            "tool_confirm",
+            "allow_integrations",
+            "allow_mcp",
+            "allow_subagents",
+            "thread_defaults",
+        ];
+
+        for case in provider_agent_prompt_cases() {
+            let content = read_default_mode_file(case.filename);
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&content)
+                .unwrap_or_else(|err| panic!("{} should parse as YAML: {}", case.filename, err));
+            let root = yaml
+                .as_mapping()
+                .unwrap_or_else(|| panic!("{} root should be a mapping", case.filename));
+
+            for key in forbidden_top_level {
+                assert!(
+                    !root.contains_key(&yaml_key(key)),
+                    "{} must not define top-level {}",
+                    case.filename,
+                    key
+                );
+            }
+
+            let override_mapping = root
+                .get(&yaml_key("override"))
+                .and_then(|value| value.as_mapping())
+                .unwrap_or_else(|| panic!("{} should define override mapping", case.filename));
+            for key in forbidden_override {
+                assert!(
+                    !override_mapping.contains_key(&yaml_key(key)),
+                    "{} must not define override {}",
+                    case.filename,
+                    key
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_default_oss_agent_overlay_inherits_agent_surface() {
         use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
 
@@ -1027,10 +1210,12 @@ mod tests {
                 .get("agent")
                 .expect("base agent should exist")
                 .clone();
-            let resolved = resolve_mode_for_model(&registry, "agent", Some("qwen3.6-flash"))
+            let resolved = resolve_mode_for_model(&registry, "agent", Some("qwen2.5-coder"))
                 .expect("agent mode should resolve");
 
             assert_ne!(resolved.prompt, agent.prompt);
+            assert!(resolved.prompt.contains("open-source or local model"));
+            assert!(!resolved.prompt.contains("Qwen3.6 coding models"));
             assert_mode_inherits_agent_surface(&agent, &resolved);
         });
     }
