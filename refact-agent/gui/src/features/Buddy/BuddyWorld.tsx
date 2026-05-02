@@ -1256,6 +1256,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       data-showcase-phase={showcaseRun?.phase ?? "idle"}
       data-speech-priority="backend-showcase-local"
       data-speech-source={speechSource}
+      data-speech-text={speechOverride ?? undefined}
       data-testid="buddy-world"
       aria-label={`Buddy virtual scene: ${world.phaseLabel}. ${world.vitalityLabel}.`}
     >

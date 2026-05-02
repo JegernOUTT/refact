@@ -1,3 +1,4 @@
+import { isBuddyRuntimeEventVisible } from "./buddyRuntimeEvents";
 import type {
   BuddyPage,
   BuddyPetState,
@@ -258,6 +259,7 @@ function weatherFromState(
   pulse: BuddyPulse | null | undefined,
   pet: BuddyPetState | undefined,
   nowPlaying: BuddyRuntimeEvent | null,
+  nowMs: number,
 ): Pick<
   BuddyWorldState,
   "weather" | "weatherLabel" | "weatherDescription" | "weatherX" | "weatherY"
@@ -272,7 +274,10 @@ function weatherFromState(
     };
   }
 
-  if (nowPlaying && ACTIVE_RUNTIME_STATUSES.has(nowPlaying.status)) {
+  if (
+    isBuddyRuntimeEventVisible(nowPlaying, nowMs) &&
+    ACTIVE_RUNTIME_STATUSES.has(nowPlaying.status)
+  ) {
     return {
       weather: "busy",
       weatherLabel: "Busy currents",
@@ -374,6 +379,7 @@ export function buildBuddyWorldState(args: {
     args.pulse,
     args.pet,
     args.nowPlaying,
+    args.now.getTime(),
   );
   const vitalityInfo = vitalityFromPulse(args.pulse);
   const objects = buildObjects(args.pulse);

@@ -957,6 +957,10 @@ describe("BuddyWorld_dynamic_environment", () => {
         "data-speech-priority",
         "backend-showcase-local",
       );
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-speech-text",
+        "Buddy gathers the memory fireflies into a soft night map.",
+      );
 
       await vi.advanceTimersByTimeAsync(3817);
       expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
@@ -970,6 +974,10 @@ describe("BuddyWorld_dynamic_environment", () => {
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-priority",
         "backend-showcase-local",
+      );
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-speech-text",
+        "Buddy gathers the memory fireflies into a soft night map.",
       );
     } finally {
       vi.useRealTimers();
@@ -991,6 +999,92 @@ describe("BuddyWorld_dynamic_environment", () => {
       pulse: makePulse(),
       pet: makeSnapshot().state.pet,
       nowPlaying: runtimeEvent,
+      activeQuest: null,
+    });
+
+    expect(world.weather).toBe("busy");
+    expect(world.weatherDescription).toBe("Running browser checks");
+  });
+
+  it("ignores dismissed active runtime work for busy weather", () => {
+    const world = buildBuddyWorldState({
+      now: new Date("2024-01-01T14:00:00Z"),
+      pulse: {
+        ...makePulse(),
+        diagnostics: { last_hour: 0, top_error_types: [] },
+        git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+        mcp: { total: 4, failing: 0, auth_expiring: 0 },
+        memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+      },
+      pet: makeSnapshot().state.pet,
+      nowPlaying: {
+        id: "rt-dismissed",
+        signal_type: "tool_used",
+        title: "Running browser checks",
+        source: "test",
+        status: "progress",
+        priority: "normal",
+        created_at: "2024-01-01T13:59:00Z",
+        dismissed: true,
+      },
+      activeQuest: null,
+    });
+
+    expect(world.weather).not.toBe("busy");
+    expect(world.headline).not.toContain("Running browser checks");
+  });
+
+  it("ignores expired non-persistent active runtime work for busy weather", () => {
+    const world = buildBuddyWorldState({
+      now: new Date("2024-01-01T14:00:00Z"),
+      pulse: {
+        ...makePulse(),
+        diagnostics: { last_hour: 0, top_error_types: [] },
+        git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+        mcp: { total: 4, failing: 0, auth_expiring: 0 },
+        memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+      },
+      pet: makeSnapshot().state.pet,
+      nowPlaying: {
+        id: "rt-expired",
+        signal_type: "tool_used",
+        title: "Running browser checks",
+        source: "test",
+        status: "progress",
+        priority: "normal",
+        created_at: "2024-01-01T13:58:00Z",
+        ttl_ms: 30_000,
+        persistent: false,
+      },
+      activeQuest: null,
+    });
+
+    expect(world.weather).not.toBe("busy");
+    expect(world.headline).not.toContain("Running browser checks");
+  });
+
+  it("keeps persistent active runtime work eligible for busy weather", () => {
+    const world = buildBuddyWorldState({
+      now: new Date("2024-01-01T14:00:00Z"),
+      pulse: {
+        ...makePulse(),
+        diagnostics: { last_hour: 0, top_error_types: [] },
+        git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+        mcp: { total: 4, failing: 0, auth_expiring: 0 },
+        memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+      },
+      pet: makeSnapshot().state.pet,
+      nowPlaying: {
+        id: "rt-persistent",
+        signal_type: "tool_used",
+        title: "Running browser checks",
+        source: "test",
+        status: "progress",
+        priority: "normal",
+        created_at: "2024-01-01T13:58:00Z",
+        ttl_ms: 30_000,
+        persistent: true,
+      },
       activeQuest: null,
     });
 

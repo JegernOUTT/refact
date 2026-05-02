@@ -9,6 +9,7 @@ import {
   opportunityActionControls,
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
+import { isBuddyRuntimeEventVisible } from "./buddyRuntimeEvents";
 
 export type BuddySceneSpeechSource =
   | "speech"
@@ -100,7 +101,7 @@ function runtimeEventToSpeech(
   event: BuddyRuntimeEvent | null | undefined,
 ): BuddySceneSpeech | null {
   if (event === null || event === undefined) return null;
-  if (event.dismissed === true || isRuntimeEventExpired(event)) return null;
+  if (!isBuddyRuntimeEventVisible(event)) return null;
   const text = runtimeEventText(event).trim();
   if (!text) return null;
   const controls = event.controls?.length
@@ -114,14 +115,6 @@ function runtimeEventToSpeech(
     source: "runtime",
     runtimeEventId: event.id,
   };
-}
-
-function isRuntimeEventExpired(event: BuddyRuntimeEvent): boolean {
-  if (event.persistent) return false;
-  if (event.ttl_ms == null) return false;
-  const createdAt = Date.parse(event.created_at);
-  if (!Number.isFinite(createdAt)) return false;
-  return Date.now() - createdAt > event.ttl_ms;
 }
 
 function isSpeechExpired(speech: BuddySpeechItem): boolean {
@@ -177,9 +170,7 @@ function runtimeCandidatesFromQueue(
 ): BuddyRuntimeEvent[] {
   const candidates = [nowPlaying, ...runtimeQueue].filter(
     (event): event is BuddyRuntimeEvent =>
-      event !== null &&
-      !event.dismissed &&
-      !isRuntimeEventExpired(event) &&
+      isBuddyRuntimeEventVisible(event) &&
       runtimeEventText(event).trim() !== "",
   );
 

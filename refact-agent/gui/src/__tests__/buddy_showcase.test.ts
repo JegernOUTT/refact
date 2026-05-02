@@ -693,6 +693,56 @@ describe("buddy showcase director", () => {
     );
   });
 
+  it("uses provider fallback for failed mapped generation runtime signals", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "generating",
+        title: "Default model missing",
+        description: "The provider default chat model is missing.",
+        source: "providers/default_models",
+        status: "failed",
+        priority: "normal",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 20_200,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "evening" as const, weather: "busy" as const },
+    };
+
+    expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying)).toBe(true);
+    expect(chooseBuddyShowcase(args)?.kind).toBe("stargazing_constellation");
+    expect(createBuddyShowcaseRun(args)?.target.id).toBe("providers");
+  });
+
+  it("uses provider fallback for failed mapped memory runtime signals", () => {
+    const args = {
+      targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+      nowPlaying: makeRuntimeEvent({
+        signal_type: "memory_extract",
+        title: "Provider model not found",
+        description: "The default model reference is missing.",
+        source: "providers/default_models",
+        status: "failed",
+        priority: "normal",
+      }),
+      activeSpeechVisible: false,
+      pet: makePet(),
+      nowMs: 20_300,
+      lastShowcaseKind: null,
+      strongRuntimeTrigger: true,
+      pulse: makePulse(),
+      world: { phase: "night" as const, weather: "rain" as const },
+    };
+
+    expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying)).toBe(true);
+    expect(chooseBuddyShowcase(args)?.kind).toBe("stargazing_constellation");
+    expect(createBuddyShowcaseRun(args)?.target.id).toBe("providers");
+  });
+
   it("ignores dismissed provider and generation runtime signals", () => {
     const baseArgs = {
       targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
@@ -1020,6 +1070,87 @@ describe("buddy showcase director", () => {
       chooseBuddyShowcase({ ...baseArgs, nowPlaying: providerSyncEvent }),
     ).toBeNull();
   });
+
+  it.each([
+    ["no errors", "Provider defaults refreshed with no errors."],
+    ["no problems", "Provider scan finished with no problems."],
+    ["no missing references", "Default models have no missing references."],
+    ["no warnings", "Provider sources synced with no warnings."],
+    [
+      "no errors or warnings",
+      "Default model sync found no errors or warnings.",
+    ],
+  ] as const)(
+    "ignores benign provider notifications with %s",
+    (_label, description) => {
+      const args = {
+        targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+        nowPlaying: makeRuntimeEvent({
+          signal_type: "provider_sync",
+          title: "Provider sync complete",
+          description,
+          source: "providers/default_models",
+          status: "completed",
+          priority: "critical",
+        }),
+        activeSpeechVisible: false,
+        pet: makePet(),
+        nowMs: 27_600,
+        lastShowcaseKind: null,
+        strongRuntimeTrigger: true,
+        pulse: makePulse(),
+        world: { phase: "evening" as const, weather: "clear" as const },
+      };
+
+      expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying)).toBe(false);
+      expect(chooseBuddyShowcase(args)).toBeNull();
+      expect(createBuddyShowcaseRun(args)).toBeNull();
+    },
+  );
+
+  it.each([
+    [
+      "model not found",
+      "Provider model not found",
+      "The configured model failed lookup.",
+    ],
+    [
+      "quota warning",
+      "Provider quota warning",
+      "The default model quota is low.",
+    ],
+    ["broken ref", "Provider broken ref", "A model reference is invalid."],
+    [
+      "missing default model",
+      "Missing default model",
+      "The provider default is unset.",
+    ],
+  ] as const)(
+    "keeps real provider problem notifications eligible for %s",
+    (_label, title, description) => {
+      const args = {
+        targets: [MEMORY_TARGET, OBSERVATORY_TARGET],
+        nowPlaying: makeRuntimeEvent({
+          signal_type: "provider_sync",
+          title,
+          description,
+          source: "providers/default_models",
+          status: "completed",
+          priority: "normal",
+        }),
+        activeSpeechVisible: false,
+        pet: makePet(),
+        nowMs: 27_700,
+        lastShowcaseKind: null,
+        strongRuntimeTrigger: true,
+        pulse: makePulse(),
+        world: { phase: "evening" as const, weather: "clear" as const },
+      };
+
+      expect(hasBuddyShowcaseRuntimeTrigger(args.nowPlaying)).toBe(true);
+      expect(chooseBuddyShowcase(args)?.kind).toBe("stargazing_constellation");
+    },
+  );
 
   it("keeps real failed provider problem notifications eligible", () => {
     const args = {

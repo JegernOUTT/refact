@@ -8,6 +8,7 @@ import type {
   BuddyShowcaseRun,
   BuddyShowcaseTarget,
 } from "./types";
+import { isBuddyRuntimeEventVisible } from "./buddyRuntimeEvents";
 import type { BuddyWorldPhase, BuddyWorldWeather } from "./buddyWorldModel";
 
 export const BUDDY_SHOWCASE_PHASE_DURATIONS_MS: Record<
@@ -128,26 +129,6 @@ export interface AdvanceBuddyShowcasePhaseArgs {
   nowMs: number;
 }
 
-function isRuntimeEventExpired(
-  event: BuddyRuntimeEvent,
-  nowMs: number,
-): boolean {
-  if (event.persistent === true) return false;
-  if (event.ttl_ms == null || !Number.isFinite(event.ttl_ms)) return false;
-  const createdAtMs = Date.parse(event.created_at);
-  if (!Number.isFinite(createdAtMs) || !Number.isFinite(nowMs)) return false;
-  return nowMs > createdAtMs + event.ttl_ms;
-}
-
-function canUseRuntimeEvent(
-  event: BuddyRuntimeEvent | null,
-  nowMs: number,
-): event is BuddyRuntimeEvent {
-  if (!event) return false;
-  if (event.dismissed === true) return false;
-  return !isRuntimeEventExpired(event, nowMs);
-}
-
 function hasProviderTopic(event: BuddyRuntimeEvent): boolean {
   const haystack = [
     event.signal_type,
@@ -163,7 +144,11 @@ function hasProviderTopic(event: BuddyRuntimeEvent): boolean {
 function hasProviderProblemCue(event: BuddyRuntimeEvent): boolean {
   const haystack = [event.title, event.description ?? ""]
     .join(" ")
-    .toLowerCase();
+    .toLowerCase()
+    .replace(
+      /\bno[-_\s]+(?:errors?[-_\s]+or[-_\s]+warnings?|errors?|problems?|warnings?|missing[-_\s]+references?)\b/g,
+      "",
+    );
   return PROVIDER_PROBLEM_CUE_PATTERNS.some((pattern) =>
     pattern.test(haystack),
   );
@@ -210,21 +195,22 @@ function kindForRuntime(
   event: BuddyRuntimeEvent | null,
   nowMs: number,
 ): BuddyShowcaseKind | null {
-  if (!canUseRuntimeEvent(event, nowMs)) return null;
+  if (!isBuddyRuntimeEventVisible(event, nowMs)) return null;
+  const providerKind = hasProviderSignal(event)
+    ? "stargazing_constellation"
+    : null;
+  if (providerKind && event.status === "failed") return providerKind;
   if (MEMORY_RUNTIME_SIGNALS.has(event.signal_type)) {
     return MEMORY_RUNTIME_STATUSES.has(event.status)
       ? "memory_firefly_night"
-      : null;
+      : providerKind;
   }
   if (STARGAZING_RUNTIME_SIGNALS.has(event.signal_type)) {
     return ACTIVE_RUNTIME_STATUSES.has(event.status)
       ? "stargazing_constellation"
-      : null;
+      : providerKind;
   }
-  if (hasProviderSignal(event)) {
-    return "stargazing_constellation";
-  }
-  return null;
+  return providerKind;
 }
 
 export function hasBuddyShowcaseRuntimeTrigger(
