@@ -556,8 +556,22 @@ fn insert_string(metadata: &mut JsonMap<String, JsonValue>, key: &str, value: &s
 
 fn direct_child_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
+    let mut entry_count = 0usize;
     for entry in fs::read_dir(root)? {
         let entry = entry?;
+        entry_count += 1;
+        if entry_count > MAX_SCAN_ENTRIES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("direct child scan capped after {MAX_SCAN_ENTRIES} filesystem entries"),
+            ));
+        }
+        if entry_count > MAX_SCAN_DIRECT_CHILD_DIRS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("direct child scan capped after {MAX_SCAN_DIRECT_CHILD_DIRS} entries"),
+            ));
+        }
         let path = entry.path();
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -565,14 +579,6 @@ fn direct_child_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
             Err(err) => return Err(err),
         };
         if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-            if dirs.len() >= MAX_SCAN_DIRECT_CHILD_DIRS {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "direct child directory scan capped after {MAX_SCAN_DIRECT_CHILD_DIRS} directories"
-                    ),
-                ));
-            }
             dirs.push(path);
         }
     }
@@ -751,6 +757,24 @@ mod tests {
 
         let staging_root = root.join(".refact/imports/staging/claude");
         assert_eq!(fs::read_dir(staging_root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn skill_root_scan_caps_total_direct_entries_without_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let skills_root = temp.path().join(".claude").join("skills");
+        fs::create_dir_all(&skills_root).unwrap();
+        for index in 0..=MAX_SCAN_DIRECT_CHILD_DIRS {
+            fs::write(skills_root.join(format!("note-{index}.txt")), "ignore").unwrap();
+        }
+
+        let (candidates, issues) = collect_project_candidates(temp.path());
+
+        assert!(candidates.is_empty());
+        assert!(issues.iter().any(|issue| {
+            issue.status == ImportStatus::Error
+                && issue.message.contains("direct child scan capped")
+        }));
     }
 
     #[tokio::test]

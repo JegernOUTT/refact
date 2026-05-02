@@ -53,7 +53,50 @@ fn read_text_file_limited(path: &Path, max_bytes: u64, label: &str) -> IoResult<
             ),
         ));
     }
-    fs::read_to_string(path)
+    read_text_file_with_expected_len(path, max_bytes, label, metadata.len())
+}
+
+fn read_text_file_with_expected_len(
+    path: &Path,
+    max_bytes: u64,
+    label: &str,
+    expected_len: u64,
+) -> IoResult<String> {
+    let capacity = usize::try_from(max_bytes).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} byte limit is too large: {max_bytes}"),
+        )
+    })?;
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0u8; COPY_BUFFER_BYTES];
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut total = 0u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("{label} size overflow")))?;
+        if total > max_bytes {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("{label} exceeds {max_bytes} byte limit while reading: {total} bytes"),
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    if total != expected_len {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "{label} changed while reading: expected {expected_len} bytes, read {total} bytes"
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|err| Error::new(ErrorKind::InvalidData, err.to_string()))
 }
 
 pub fn convert_command_markdown(
@@ -1097,6 +1140,30 @@ mod tests {
 
         assert!(err.message.contains("byte limit"));
         assert!(!staging.exists());
+    }
+
+    #[test]
+    fn text_file_limit_is_enforced_while_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("growing.md");
+        fs::write(&path, "x".repeat(32)).unwrap();
+
+        let err = read_text_file_with_expected_len(&path, 16, "markdown file", 32).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("while reading"));
+    }
+
+    #[test]
+    fn changed_text_file_is_rejected_after_bounded_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("changed.md");
+        fs::write(&path, "short").unwrap();
+
+        let err = read_text_file_with_expected_len(&path, 64, "markdown file", 32).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("changed while reading"));
     }
 
     #[test]
