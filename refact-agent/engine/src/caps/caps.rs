@@ -919,6 +919,16 @@ fn remove_legacy_refact_models_from_caps(caps: &mut CodeAssistantCaps) {
     }
 }
 
+async fn take_models_dev_startup_refresh_flag(gcx: Arc<ARwLock<GlobalContext>>) -> bool {
+    let mut gcx_locked = gcx.write().await;
+    if gcx_locked.models_dev_startup_refresh_attempted {
+        false
+    } else {
+        gcx_locked.models_dev_startup_refresh_attempted = true;
+        true
+    }
+}
+
 pub async fn load_caps(
     _cmdline: crate::global_context::CommandLine,
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -952,7 +962,11 @@ pub async fn load_caps(
         }
     }
 
-    let model_caps_map = get_model_caps(gcx.clone(), false).await.map_err(|e| {
+    let force_models_dev_refresh = take_models_dev_startup_refresh_flag(gcx.clone()).await;
+    if force_models_dev_refresh {
+        info!("Refreshing models.dev catalog on engine startup");
+    }
+    let model_caps_map = get_model_caps(gcx.clone(), force_models_dev_refresh).await.map_err(|e| {
         format!("Failed to load models.dev capabilities. Check the bundled snapshot or runtime cache: {e}")
     })?;
     caps.metadata.pricing = model_caps_pricing_metadata(&model_caps_map);
@@ -1375,6 +1389,15 @@ mod tests {
 
         let result = resolve_model(&models, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_models_dev_startup_refresh_flag_is_consumed_once() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        gcx.write().await.models_dev_startup_refresh_attempted = false;
+
+        assert!(take_models_dev_startup_refresh_flag(gcx.clone()).await);
+        assert!(!take_models_dev_startup_refresh_flag(gcx).await);
     }
 
     #[test]
