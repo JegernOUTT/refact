@@ -418,43 +418,54 @@ fn normalize_model_match_str(s: &str) -> String {
 }
 
 fn model_matches_pattern_single(model_id: &str, pattern: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-
     if !pattern.contains('*') {
         return model_id == pattern;
     }
 
-    if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len() - 1];
-        return model_id.starts_with(prefix);
+    let segments: Vec<_> = pattern
+        .split('*')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return true;
     }
 
-    if pattern.starts_with('*') {
-        let suffix = &pattern[1..];
-        return model_id.ends_with(suffix);
+    let mut remaining = model_id;
+    for (index, segment) in segments.iter().enumerate() {
+        if index == 0 && !pattern.starts_with('*') {
+            if !remaining.starts_with(segment) {
+                return false;
+            }
+            remaining = &remaining[segment.len()..];
+        } else if index == segments.len() - 1 && !pattern.ends_with('*') {
+            return remaining.ends_with(segment);
+        } else if let Some(segment_pos) = remaining.find(segment) {
+            remaining = &remaining[segment_pos + segment.len()..];
+        } else {
+            return false;
+        }
     }
 
-    if let Some(star_pos) = pattern.find('*') {
-        let prefix = &pattern[..star_pos];
-        let suffix = &pattern[star_pos + 1..];
-        return model_id.starts_with(prefix) && model_id.ends_with(suffix);
-    }
-
-    false
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ModelPatternSpecificity {
     exact: bool,
+    wildcard_rank: u8,
     literal_chars: usize,
 }
 
 impl ModelPatternSpecificity {
     fn for_pattern(pattern: &str) -> Self {
+        let exact = !pattern.contains('*');
         Self {
-            exact: !pattern.contains('*'),
+            exact,
+            wildcard_rank: if exact {
+                0
+            } else {
+                wildcard_specificity_rank(pattern)
+            },
             literal_chars: pattern.chars().filter(|c| *c != '*').count(),
         }
     }
@@ -464,10 +475,33 @@ impl ModelPatternSpecificity {
             false
         } else if self.exact != other.exact {
             self.exact
+        } else if self.wildcard_rank != other.wildcard_rank {
+            self.wildcard_rank > other.wildcard_rank
         } else {
             self.literal_chars > other.literal_chars
         }
     }
+}
+
+fn wildcard_specificity_rank(pattern: &str) -> u8 {
+    if is_specific_wildcard(pattern) {
+        3
+    } else if is_contains_wildcard(pattern) {
+        2
+    } else {
+        1
+    }
+}
+
+fn is_specific_wildcard(pattern: &str) -> bool {
+    let literal = pattern.replace('*', "");
+    literal
+        .chars()
+        .any(|c| c.is_ascii_digit() || c == '.' || c == '/' || c == '_')
+}
+
+fn is_contains_wildcard(pattern: &str) -> bool {
+    pattern.starts_with('*') && pattern.ends_with('*') && pattern.chars().any(|c| c != '*')
 }
 
 fn best_matching_pattern_specificity(
@@ -985,6 +1019,36 @@ mod tests {
     }
 
     #[test]
+    fn test_model_matches_pattern_contains_wildcard() {
+        assert!(model_matches_pattern("llama-7b", "*7b*"));
+        assert!(model_matches_pattern("qwen2.5-7b-instruct", "*7b*"));
+        assert!(model_matches_pattern("phi-mini", "*mini*"));
+        assert!(!model_matches_pattern("abc-def", "*def*abc*"));
+    }
+
+    #[test]
+    fn test_mode_override_specificity_contains_wildcard_beats_broad_family() {
+        let registry = registry_with_mode_overrides(vec![
+            mode_override("oss_agent", &["llama*", "qwen*", "phi*"], "generic"),
+            mode_override("oss_weak_agent", &["*7b*", "*mini*"], "weak"),
+        ]);
+
+        let llama = resolve_mode_for_model(&registry, "agent", Some("llama-7b"))
+            .expect("agent mode should resolve");
+        let qwen = resolve_mode_for_model(&registry, "agent", Some("qwen2.5-7b-instruct"))
+            .expect("agent mode should resolve");
+        let phi = resolve_mode_for_model(&registry, "agent", Some("phi-mini"))
+            .expect("agent mode should resolve");
+        let generic = resolve_mode_for_model(&registry, "agent", Some("qwen2.5-coder"))
+            .expect("agent mode should resolve");
+
+        assert_eq!(llama.prompt, "weak");
+        assert_eq!(qwen.prompt, "weak");
+        assert_eq!(phi.prompt, "weak");
+        assert_eq!(generic.prompt, "generic");
+    }
+
+    #[test]
     fn test_mode_override_specificity_exact_beats_broad_wildcard() {
         let registry = registry_with_mode_overrides(vec![
             mode_override("openai_agent", &["gpt-5*"], "broad"),
@@ -1215,9 +1279,47 @@ mod tests {
 
             assert_ne!(resolved.prompt, agent.prompt);
             assert!(resolved.prompt.contains("open-source or local model"));
+            assert!(!resolved
+                .prompt
+                .contains("weaker open-source or local model"));
             assert!(!resolved.prompt.contains("Qwen3.6 coding models"));
             assert_mode_inherits_agent_surface(&agent, &resolved);
         });
+    }
+
+    #[test]
+    fn test_default_oss_weak_agent_overlay_beats_broad_oss_overlay() {
+        let registry = load_default_registry_for_tests();
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+        let agent = registry
+            .modes
+            .get("agent")
+            .expect("base agent should exist")
+            .clone();
+
+        for model_id in ["llama-7b", "qwen2.5-7b-instruct", "phi-mini"] {
+            let resolved = resolve_mode_for_model(&registry, "agent", Some(model_id))
+                .expect("agent mode should resolve");
+
+            assert!(
+                resolved
+                    .prompt
+                    .contains("weaker open-source or local model"),
+                "{} should resolve to weak OSS prompt: {}",
+                model_id,
+                resolved.prompt
+            );
+            assert!(!resolved.prompt.contains("Qwen3.6 coding models"));
+            assert_mode_inherits_agent_surface(&agent, &resolved);
+        }
+
+        let generic = resolve_mode_for_model(&registry, "agent", Some("qwen2.5-coder"))
+            .expect("agent mode should resolve");
+
+        assert!(generic.prompt.contains("open-source or local model"));
+        assert!(!generic.prompt.contains("weaker open-source or local model"));
+        assert!(!generic.prompt.contains("Qwen3.6 coding models"));
+        assert_mode_inherits_agent_surface(&agent, &generic);
     }
 
     #[test]
