@@ -1699,7 +1699,22 @@ pub fn normalize_tags(tags: &[String]) -> Vec<String> {
 }
 
 pub fn parse_memory_lifecycle_status(status: &str) -> Option<String> {
-    let normalized = status.trim().to_lowercase().replace(['-', ' '], "_");
+    let mut normalized = String::new();
+    let mut last_separator = false;
+    for ch in status.trim().to_lowercase().chars() {
+        if ch == '-' || ch == '_' || ch.is_whitespace() {
+            if !normalized.is_empty() && !last_separator {
+                normalized.push('_');
+                last_separator = true;
+            }
+        } else {
+            normalized.push(ch);
+            last_separator = false;
+        }
+    }
+    if normalized.ends_with('_') {
+        normalized.pop();
+    }
     match normalized.as_str() {
         "proposed" | "active" | "pinned" | "archived" | "deprecated" => Some(normalized),
         "review" | "review_needed" | "needs_review" => Some("proposed".to_string()),
@@ -3830,7 +3845,10 @@ mod tests {
             ("deprecated", Some("deprecated")),
             ("review", Some("proposed")),
             ("review-needed", Some("proposed")),
+            ("review__needed", Some("proposed")),
             ("needs review", Some("proposed")),
+            ("needs   review", Some("proposed")),
+            ("needs\treview", Some("proposed")),
             ("needs_review", Some("proposed")),
             ("stale", Some("deprecated")),
             ("obsolete", Some("deprecated")),

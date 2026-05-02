@@ -164,6 +164,43 @@ async fn validate_knowledge_path(
     file_path: &Path,
     workspace_root: &Path,
 ) -> Result<PathBuf, ScratchError> {
+    let root_metadata = tokio::fs::symlink_metadata(workspace_root)
+        .await
+        .map_err(|_| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Cannot access workspace".to_string(),
+            )
+        })?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(ScratchError::new(
+            StatusCode::FORBIDDEN,
+            "Knowledge directory cannot be a symlink".to_string(),
+        ));
+    }
+    if !root_metadata.is_dir() {
+        return Err(ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Knowledge directory is not a directory".to_string(),
+        ));
+    }
+
+    let file_metadata = tokio::fs::symlink_metadata(file_path)
+        .await
+        .map_err(|_| ScratchError::new(StatusCode::NOT_FOUND, "File not found".to_string()))?;
+    if file_metadata.file_type().is_symlink() {
+        return Err(ScratchError::new(
+            StatusCode::FORBIDDEN,
+            "Memory file cannot be a symlink".to_string(),
+        ));
+    }
+    if !file_metadata.is_file() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Memory path must be a file".to_string(),
+        ));
+    }
+
     let canonical = tokio::fs::canonicalize(file_path)
         .await
         .map(|path| dunce::simplified(&path).to_path_buf())
@@ -331,6 +368,38 @@ mod tests {
         (frontmatter, text[content_start..].trim().to_string())
     }
 
+    fn create_file_symlink(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            return std::os::unix::fs::symlink(target, link).is_ok();
+        }
+        #[cfg(windows)]
+        {
+            return std::os::windows::fs::symlink_file(target, link).is_ok();
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            return std::os::unix::fs::symlink(target, link).is_ok();
+        }
+        #[cfg(windows)]
+        {
+            return std::os::windows::fs::symlink_dir(target, link).is_ok();
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
     async fn update_status(
         gcx: Arc<ARwLock<GlobalContext>>,
         path: &Path,
@@ -343,6 +412,24 @@ mod tests {
                     "file_path": path.to_string_lossy(),
                     "status": status,
                     "auto_link": false,
+                })
+                .to_string(),
+            ),
+        )
+        .await
+    }
+
+    async fn delete_memory(
+        gcx: Arc<ARwLock<GlobalContext>>,
+        path: &Path,
+        archive: bool,
+    ) -> Result<Response<Body>, ScratchError> {
+        handle_v1_knowledge_delete_memory(
+            Extension(gcx),
+            Bytes::from(
+                json!({
+                    "file_path": path.to_string_lossy(),
+                    "archive": archive,
                 })
                 .to_string(),
             ),
@@ -398,6 +485,106 @@ mod tests {
         let (frontmatter, body) = read_frontmatter_body(&path).await;
         assert_eq!(frontmatter.status.as_deref(), Some("active"));
         assert_eq!(body, "Invalid status body");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_rejects_symlinked_knowledge_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let real_knowledge = dir.path().join("real-knowledge");
+        tokio::fs::create_dir_all(workspace.join(".refact"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&real_knowledge).await.unwrap();
+        let real_path = real_knowledge.join("memory.md");
+        write_memory(&real_path, "memory", "Body").await;
+        if !create_dir_symlink(&real_knowledge, &workspace.join(KNOWLEDGE_FOLDER_NAME)) {
+            return;
+        }
+        let gcx = test_gcx_with_workspace(&workspace).await;
+        let symlink_path = workspace.join(KNOWLEDGE_FOLDER_NAME).join("memory.md");
+
+        let err = update_status(gcx, &symlink_path, "pinned")
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::FORBIDDEN);
+        assert!(err.message.contains("symlink"));
+        let (frontmatter, body) = read_frontmatter_body(&real_path).await;
+        assert_eq!(frontmatter.status.as_deref(), Some("active"));
+        assert_eq!(body, "Body");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_delete_rejects_symlinked_knowledge_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let real_knowledge = dir.path().join("real-knowledge");
+        tokio::fs::create_dir_all(workspace.join(".refact"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&real_knowledge).await.unwrap();
+        let real_path = real_knowledge.join("memory.md");
+        write_memory(&real_path, "memory", "Body").await;
+        if !create_dir_symlink(&real_knowledge, &workspace.join(KNOWLEDGE_FOLDER_NAME)) {
+            return;
+        }
+        let gcx = test_gcx_with_workspace(&workspace).await;
+        let symlink_path = workspace.join(KNOWLEDGE_FOLDER_NAME).join("memory.md");
+
+        let err = delete_memory(gcx, &symlink_path, true).await.unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::FORBIDDEN);
+        assert!(err.message.contains("symlink"));
+        let (frontmatter, body) = read_frontmatter_body(&real_path).await;
+        assert_eq!(frontmatter.status.as_deref(), Some("active"));
+        assert_eq!(body, "Body");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_rejects_symlink_file_inside_knowledge_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let outside_path = dir.path().join("outside.md");
+        write_memory(&outside_path, "outside", "Outside body").await;
+        let link = knowledge_dir.join("link.md");
+        if !create_file_symlink(&outside_path, &link) {
+            return;
+        }
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+
+        let err = update_status(gcx, &link, "pinned").await.unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::FORBIDDEN);
+        assert!(err.message.contains("symlink"));
+        let (frontmatter, body) = read_frontmatter_body(&outside_path).await;
+        assert_eq!(frontmatter.status.as_deref(), Some("active"));
+        assert_eq!(body, "Outside body");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hard_delete_rejects_symlink_file_inside_knowledge_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let outside_path = dir.path().join("outside.md");
+        write_memory(&outside_path, "outside", "Outside body").await;
+        let link = knowledge_dir.join("link.md");
+        if !create_file_symlink(&outside_path, &link) {
+            return;
+        }
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+
+        let err = delete_memory(gcx, &link, false).await.unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::FORBIDDEN);
+        assert!(err.message.contains("symlink"));
+        assert!(outside_path.exists());
+        assert!(link.exists());
+        let (frontmatter, body) = read_frontmatter_body(&outside_path).await;
+        assert_eq!(frontmatter.status.as_deref(), Some("active"));
+        assert_eq!(body, "Outside body");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -529,18 +716,7 @@ mod tests {
         write_memory(&path, "archive-delete", body).await;
         let gcx = test_gcx_with_workspace(dir.path()).await;
 
-        let response = handle_v1_knowledge_delete_memory(
-            Extension(gcx.clone()),
-            Bytes::from(
-                json!({
-                    "file_path": path.to_string_lossy(),
-                    "archive": true,
-                })
-                .to_string(),
-            ),
-        )
-        .await
-        .unwrap();
+        let response = delete_memory(gcx.clone(), &path, true).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(path.exists());
@@ -569,30 +745,10 @@ mod tests {
         write_memory(&hard_delete_path, "hard-delete", "Hard delete body").await;
         let gcx = test_gcx_with_workspace(dir.path()).await;
 
-        let archive_response = handle_v1_knowledge_delete_memory(
-            Extension(gcx.clone()),
-            Bytes::from(
-                json!({
-                    "file_path": archived_path.to_string_lossy(),
-                    "archive": true,
-                })
-                .to_string(),
-            ),
-        )
-        .await
-        .unwrap();
-        let hard_delete_response = handle_v1_knowledge_delete_memory(
-            Extension(gcx),
-            Bytes::from(
-                json!({
-                    "file_path": hard_delete_path.to_string_lossy(),
-                    "archive": false,
-                })
-                .to_string(),
-            ),
-        )
-        .await
-        .unwrap();
+        let archive_response = delete_memory(gcx.clone(), &archived_path, true)
+            .await
+            .unwrap();
+        let hard_delete_response = delete_memory(gcx, &hard_delete_path, false).await.unwrap();
 
         assert_eq!(archive_response.status(), StatusCode::OK);
         assert_eq!(hard_delete_response.status(), StatusCode::OK);

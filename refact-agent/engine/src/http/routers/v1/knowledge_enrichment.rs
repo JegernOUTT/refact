@@ -95,6 +95,8 @@ const KNOWLEDGE_SCORE_THRESHOLD: f32 = 0.75;
 const FORCED_KNOWLEDGE_SCORE_THRESHOLD: f32 = 0.50;
 const KNOWLEDGE_ENRICHMENT_MARKER: &str = "knowledge_enrichment";
 const MAX_QUERY_LENGTH: usize = 2000;
+const MAX_ENRICHMENT_PREVIEW_ITEMS: usize = 5;
+const MAX_ENRICHMENT_PREVIEW_CANDIDATES: usize = 64;
 
 pub async fn enrich_messages_with_knowledge(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -436,34 +438,67 @@ fn path_has_markdown_extension(path: &FilePath) -> bool {
         .unwrap_or(false)
 }
 
+fn workspace_root_for_allowed_knowledge_dir(root: &FilePath) -> Option<PathBuf> {
+    let knowledge_folder = FilePath::new(KNOWLEDGE_FOLDER_NAME);
+    let knowledge_name = knowledge_folder.file_name()?;
+    let refact_name = knowledge_folder.parent()?.file_name()?;
+    if root.file_name()? == knowledge_name && root.parent()?.file_name()? == refact_name {
+        root.parent()?.parent().map(|path| path.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn candidate_paths_for_enrichment_path(path: &FilePath, allowed_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    if path.is_absolute() {
+        return vec![path.to_path_buf()];
+    }
+
+    let mut candidates = Vec::new();
+    for root in allowed_dirs {
+        if path.starts_with(KNOWLEDGE_FOLDER_NAME) {
+            if let Some(workspace_root) = workspace_root_for_allowed_knowledge_dir(root) {
+                candidates.push(workspace_root.join(path));
+            }
+        } else {
+            candidates.push(root.join(path));
+        }
+    }
+    candidates
+}
+
 fn canonicalize_enrichment_candidate(raw_path: &str, allowed_dirs: &[PathBuf]) -> Option<PathBuf> {
     let path_str = strip_line_range_suffix(raw_path);
     let path_str = path_str.trim();
-    if path_str.is_empty() || path_str.contains('\0') {
+    if allowed_dirs.is_empty() || path_str.is_empty() || path_str.contains('\0') {
         return None;
     }
 
     let path = FilePath::new(path_str);
-    if !path.is_absolute() || path_has_unsafe_component(path) {
+    if path_has_unsafe_component(path) || !path_has_markdown_extension(path) {
         return None;
     }
 
-    let canonical = std::fs::canonicalize(path).ok()?;
-    let canonical = dunce::simplified(&canonical).to_path_buf();
-    if !std::fs::metadata(&canonical)
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    if !path_has_markdown_extension(&canonical) {
-        return None;
-    }
-    if !allowed_dirs.iter().any(|root| canonical.starts_with(root)) {
-        return None;
+    for candidate in candidate_paths_for_enrichment_path(path, allowed_dirs) {
+        let canonical = match std::fs::canonicalize(&candidate) {
+            Ok(canonical) => dunce::simplified(&canonical).to_path_buf(),
+            Err(_) => continue,
+        };
+        if !std::fs::metadata(&canonical)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if !path_has_markdown_extension(&canonical) {
+            continue;
+        }
+        if allowed_dirs.iter().any(|root| canonical.starts_with(root)) {
+            return Some(canonical);
+        }
     }
 
-    Some(canonical)
+    None
 }
 
 fn strip_line_range_suffix(path: &str) -> String {
@@ -511,12 +546,20 @@ fn kind_from_section_or_path(section: &str, path_str: &str) -> String {
 fn push_enrichment_item(
     items: &mut Vec<EnrichmentItem>,
     seen_paths: &mut HashSet<String>,
+    candidate_attempts: &mut usize,
     allowed_dirs: &[PathBuf],
     raw_path: &str,
     label: Option<String>,
     kind: String,
     content: String,
 ) {
+    if items.len() >= MAX_ENRICHMENT_PREVIEW_ITEMS
+        || *candidate_attempts >= MAX_ENRICHMENT_PREVIEW_CANDIDATES
+    {
+        return;
+    }
+    *candidate_attempts += 1;
+
     let path = match canonicalize_enrichment_candidate(raw_path, allowed_dirs) {
         Some(path) => path,
         None => {
@@ -571,8 +614,14 @@ fn extract_items_from_tool_results(
 
     let mut items: Vec<EnrichmentItem> = Vec::new();
     let mut seen_paths: HashSet<String> = HashSet::new();
+    let mut candidate_attempts = 0usize;
 
     for msg in messages {
+        if items.len() >= MAX_ENRICHMENT_PREVIEW_ITEMS
+            || candidate_attempts >= MAX_ENRICHMENT_PREVIEW_CANDIDATES
+        {
+            break;
+        }
         if msg.role != "tool" {
             continue;
         }
@@ -582,6 +631,11 @@ fn extract_items_from_tool_results(
         };
 
         for section in text.split("# Related memory").skip(1) {
+            if items.len() >= MAX_ENRICHMENT_PREVIEW_ITEMS
+                || candidate_attempts >= MAX_ENRICHMENT_PREVIEW_CANDIDATES
+            {
+                break;
+            }
             let path_str = match path_re
                 .captures(section)
                 .and_then(|c| c.get(1))
@@ -602,6 +656,7 @@ fn extract_items_from_tool_results(
             push_enrichment_item(
                 &mut items,
                 &mut seen_paths,
+                &mut candidate_attempts,
                 allowed_dirs,
                 &path_str,
                 label,
@@ -611,6 +666,11 @@ fn extract_items_from_tool_results(
         }
 
         for section in text.split("\n---\n") {
+            if items.len() >= MAX_ENRICHMENT_PREVIEW_ITEMS
+                || candidate_attempts >= MAX_ENRICHMENT_PREVIEW_CANDIDATES
+            {
+                break;
+            }
             let path_str = match tool_path_line_re()
                 .captures(section)
                 .and_then(|c| c.get(1))
@@ -625,6 +685,7 @@ fn extract_items_from_tool_results(
             push_enrichment_item(
                 &mut items,
                 &mut seen_paths,
+                &mut candidate_attempts,
                 allowed_dirs,
                 &path_str,
                 label,
@@ -634,6 +695,11 @@ fn extract_items_from_tool_results(
         }
 
         for caps in related_bullet_re().captures_iter(text) {
+            if items.len() >= MAX_ENRICHMENT_PREVIEW_ITEMS
+                || candidate_attempts >= MAX_ENRICHMENT_PREVIEW_CANDIDATES
+            {
+                break;
+            }
             let label = caps.get(1).map(|m| m.as_str().trim().to_string());
             let path_str = match caps.get(2).map(|m| m.as_str().trim().to_string()) {
                 Some(p) if !p.is_empty() => p,
@@ -654,6 +720,7 @@ fn extract_items_from_tool_results(
             push_enrichment_item(
                 &mut items,
                 &mut seen_paths,
+                &mut candidate_attempts,
                 allowed_dirs,
                 &path_str,
                 label,
@@ -676,14 +743,50 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
+    fn create_file_symlink(target: &FilePath, link: &FilePath) -> bool {
+        #[cfg(unix)]
+        {
+            return std::os::unix::fs::symlink(target, link).is_ok();
+        }
+        #[cfg(windows)]
+        {
+            return std::os::windows::fs::symlink_file(target, link).is_ok();
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    fn create_dir_symlink(target: &FilePath, link: &FilePath) -> bool {
+        #[cfg(unix)]
+        {
+            return std::os::unix::fs::symlink(target, link).is_ok();
+        }
+        #[cfg(windows)]
+        {
+            return std::os::windows::fs::symlink_dir(target, link).is_ok();
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
     fn canonical(path: &FilePath) -> PathBuf {
         dunce::simplified(&fs::canonicalize(path).unwrap()).to_path_buf()
     }
 
     fn extract_from_single_path(path: &FilePath, allowed_dirs: &[PathBuf]) -> Vec<EnrichmentItem> {
+        extract_from_path_str(&path.display().to_string(), allowed_dirs)
+    }
+
+    fn extract_from_path_str(path: &str, allowed_dirs: &[PathBuf]) -> Vec<EnrichmentItem> {
         let message = format!(
             "📄 {}:1-3\n📌 Memory Title\n📦 decision\nbody\n\n---\n",
-            path.display()
+            path
         );
         extract_items_from_tool_results(&[tool_message(&message)], allowed_dirs)
     }
@@ -769,8 +872,9 @@ mod tests {
             .await
             .unwrap();
         tokio::fs::create_dir_all(&outside).await.unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, workspace.join(KNOWLEDGE_FOLDER_NAME)).unwrap();
+        if !create_dir_symlink(&outside, &workspace.join(KNOWLEDGE_FOLDER_NAME)) {
+            return;
+        }
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
@@ -792,12 +896,12 @@ mod tests {
         let link = knowledge_dir.join("link.md");
         write_file(&knowledge_dir.join("memory.md"), "memory body");
         write_file(&outside, "outside body");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        if !create_file_symlink(&outside, &link) {
+            return;
+        }
 
         let items = extract_from_single_path(&link, &[canonical(&knowledge_dir)]);
 
-        #[cfg(unix)]
         assert!(items.is_empty());
     }
 
@@ -815,6 +919,121 @@ mod tests {
             items[0].context_file.file_name,
             canonical(&path).display().to_string()
         );
+    }
+
+    #[test]
+    fn extract_items_from_tool_results_accepts_relative_refact_knowledge_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let path = knowledge_dir.join("relative.md");
+        write_file(&path, "relative body");
+
+        let items = extract_from_path_str(
+            ".refact/knowledge/relative.md",
+            &[canonical(&knowledge_dir)],
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].context_file.file_name,
+            canonical(&path).display().to_string()
+        );
+    }
+
+    #[test]
+    fn extract_items_from_tool_results_accepts_relative_memory_doc_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let path = knowledge_dir.join("nested/relative.mdx");
+        write_file(&path, "relative body");
+
+        let items = extract_from_path_str("nested/relative.mdx", &[canonical(&knowledge_dir)]);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].context_file.file_name,
+            canonical(&path).display().to_string()
+        );
+    }
+
+    #[test]
+    fn extract_items_from_tool_results_rejects_relative_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        write_file(&knowledge_dir.join("allowed.md"), "allowed body");
+        write_file(&dir.path().join("outside.md"), "outside body");
+
+        let items = extract_from_path_str("../outside.md", &[canonical(&knowledge_dir)]);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn extract_items_from_tool_results_rejects_relative_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let outside = dir.path().join("outside.md");
+        let link = knowledge_dir.join("link.md");
+        write_file(&knowledge_dir.join("memory.md"), "memory body");
+        write_file(&outside, "outside body");
+        if !create_file_symlink(&outside, &link) {
+            return;
+        }
+
+        let items = extract_from_path_str("link.md", &[canonical(&knowledge_dir)]);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn extract_items_from_tool_results_is_bounded_and_dedupes() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        for i in 0..10 {
+            write_file(&knowledge_dir.join(format!("valid-{i}.md")), "valid body");
+        }
+        let mut message = String::new();
+        for i in 0..70 {
+            let path = if i < 60 {
+                format!("missing-{i}.md")
+            } else {
+                format!("valid-{}.md", i - 60)
+            };
+            message.push_str(&format!("📄 {path}:1-3\n📌 Title {i}\nbody\n\n---\n"));
+        }
+
+        let items = extract_items_from_tool_results(
+            &[tool_message(&message)],
+            &[canonical(&knowledge_dir)],
+        );
+
+        assert_eq!(items.len(), 4);
+        assert!(items
+            .iter()
+            .all(|item| item.context_file.file_name.contains("valid-")));
+
+        let mut duplicate_message = String::new();
+        for i in 0..10 {
+            duplicate_message.push_str(&format!(
+                "📄 valid-0.md:1-3\n📌 Duplicate {i}\nbody\n\n---\n"
+            ));
+        }
+        for i in 1..10 {
+            duplicate_message
+                .push_str(&format!("📄 valid-{i}.md:1-3\n📌 Valid {i}\nbody\n\n---\n"));
+        }
+
+        let deduped = extract_items_from_tool_results(
+            &[tool_message(&duplicate_message)],
+            &[canonical(&knowledge_dir)],
+        );
+
+        assert_eq!(deduped.len(), MAX_ENRICHMENT_PREVIEW_ITEMS);
+        let unique_paths = deduped
+            .iter()
+            .map(|item| item.context_file.file_name.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(unique_paths.len(), deduped.len());
     }
 }
 
@@ -949,9 +1168,7 @@ async fn model_gather_and_rewrite(
     let rewritten_text = parse_rewritten_text(&last_text);
 
     let allowed_dirs = get_allowed_enrichment_dirs(gcx.clone()).await;
-    let mut items = extract_items_from_tool_results(&result.messages, &allowed_dirs);
-
-    items.truncate(5);
+    let items = extract_items_from_tool_results(&result.messages, &allowed_dirs);
 
     Ok((rewritten_text, items))
 }
