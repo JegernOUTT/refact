@@ -170,7 +170,7 @@ export function worldWeather(
 export function worldPaletteHint(
   world: BuddyWorldState,
 ): BuddyWorldState["atmosphere"]["paletteHint"] {
-  switch (world.atmosphere?.paletteHint) {
+  switch (world.atmosphere.paletteHint) {
     case "dawn":
     case "day":
     case "dusk":
@@ -184,11 +184,11 @@ export function worldPaletteHint(
 }
 
 export function worldIntensity(world: BuddyWorldState): number {
-  return clamp01(world.atmosphere?.intensity ?? 0.38);
+  return clamp01(world.atmosphere.intensity);
 }
 
 export function worldLayers(world: BuddyWorldState): BuddyWorldLayer[] {
-  return Array.isArray(world.atmosphere?.layers) ? world.atmosphere.layers : [];
+  return world.atmosphere.layers;
 }
 
 export function hasWorldLayer(

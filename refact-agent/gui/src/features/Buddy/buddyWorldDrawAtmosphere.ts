@@ -80,7 +80,7 @@ export function drawSkyGradient(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
-  const stops = SKY_STOPS[worldPaletteHint(args.world)] ?? SKY_STOPS.day;
+  const stops = SKY_STOPS[worldPaletteHint(args.world)];
 
   for (const stop of stops) {
     gradient.addColorStop(clamp(stop.offset, 0, 1), stop.color);
@@ -93,7 +93,7 @@ function drawSkyStructures(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
-  const serious = args.world.atmosphere?.serious === true;
+  const serious = args.world.atmosphere.serious;
   const warning = hasWorldLayer(args.world, "provider_flicker") && !serious;
   const active = hasWorldLayer(args.world, "workshop_runes");
   const crystalX = width * 0.75;
@@ -475,7 +475,7 @@ function drawAurora(args: DrawBuddyWorldBaseArgs, alpha = 0.3): void {
   const { ctx } = args;
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
-  const y = pctY(height, args.world.weatherY ?? 24);
+  const y = pctY(height, args.world.weatherY);
   const frame = safeFrame(args.frame);
   const bands = countForMotion(3, args.compact, args.reducedMotion);
 

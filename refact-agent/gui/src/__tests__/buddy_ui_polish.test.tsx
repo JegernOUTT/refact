@@ -316,13 +316,14 @@ describe("buddy UI polish", () => {
 
   it("BuddyWorld_uses_deterministic_edge_aware_bubbles", async () => {
     const source = await readGuiSource("features/Buddy/BuddyWorld.tsx");
+    const utilSource = await readGuiSource("features/Buddy/buddyWorldUtils.ts");
 
-    expect(source).toContain("function bubblePositionForSceneX");
-    expect(source).toContain("LONG_COMPACT_SPEECH_LENGTH");
-    expect(source).toContain("compact && (speechText?.length ?? 0)");
-    expect(source).toContain('if (x < 42) return "right"');
-    expect(source).toContain('if (x > 58) return "left"');
-    expect(source).toContain('return "top"');
+    expect(utilSource).toContain("function bubblePositionForSceneX");
+    expect(utilSource).toContain("LONG_COMPACT_SPEECH_LENGTH");
+    expect(utilSource).toContain("compact && (speechText?.length ?? 0)");
+    expect(utilSource).toContain('if (x < 42) return "right"');
+    expect(utilSource).toContain('if (x > 58) return "left"');
+    expect(utilSource).toContain('return "top"');
     expect(source).toContain("bubblePosition={bubblePosition}");
     expect(source).toContain("randomizeBubblePosition={false}");
   });

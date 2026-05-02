@@ -20,7 +20,6 @@ import type {
   BuddySemanticState,
   BuddyShowcaseKind,
   BuddyShowcaseRun,
-  BubblePosition,
   Palette,
   Stage,
 } from "./types";
@@ -46,6 +45,7 @@ import {
   type BuddyWorldIntent,
   type BuddyWorldIntentKind,
 } from "./buddyWorldDirector";
+import { bubblePositionForSceneX } from "./buddyWorldUtils";
 import styles from "./BuddyWorld.module.css";
 
 interface BuddyWorldProps {
@@ -97,8 +97,6 @@ const DIRECTOR_CHARM_SPEECH_COOLDOWN_MS = 12_000;
 const DIRECTOR_ACTIONABLE_SPEECH_COOLDOWN_MS = 20_000;
 const DIRECTOR_REPEAT_KIND_COOLDOWN_MS = 30_000;
 const MAX_RECENT_DIRECTOR_INTENTS = 12;
-const LONG_COMPACT_SPEECH_LENGTH = 72;
-
 const RANDOM_IDLE_REACTIONS = [
   "Buddy does a tiny spin.",
   "Buddy watches the garden for a moment.",
@@ -131,19 +129,6 @@ interface RecentDirectorIntent {
 
 function clampBuddySceneX(x: number): number {
   return Math.max(BUDDY_MIN_X, Math.min(BUDDY_MAX_X, x));
-}
-
-export function bubblePositionForSceneX(
-  x: number,
-  compact = false,
-  speechText: string | null = null,
-): BubblePosition {
-  if (compact && (speechText?.length ?? 0) > LONG_COMPACT_SPEECH_LENGTH) {
-    return "top";
-  }
-  if (x < 42) return "right";
-  if (x > 58) return "left";
-  return "top";
 }
 
 function buildBuddyShowcaseTargets(
@@ -360,7 +345,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
   useEffect(() => {
     if (now) return;
-    const lastSignalTime = state.activity?.lastSignalTime;
+    const lastSignalTime = state.activity.lastSignalTime;
     if (
       typeof lastSignalTime !== "number" ||
       !Number.isFinite(lastSignalTime) ||
@@ -369,7 +354,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       return;
     }
     setCurrentTime(new Date());
-  }, [now, state.activity?.lastSignalTime]);
+  }, [now, state.activity.lastSignalTime]);
 
   useEffect(() => {
     if (!reaction) return;
@@ -402,7 +387,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   );
   const activeWaypoint = waypoints[activeWaypointIndex % waypoints.length];
   const effectiveDirectorIntent =
-    activeSpeech || showcaseRun ? null : directorIntent;
+    activeSpeech !== null || showcaseRun !== null ? null : directorIntent;
   const characterSceneX = clampBuddySceneX(
     showcaseRun
       ? showcaseRun.target.x
@@ -633,7 +618,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           : activeIntents;
       });
 
-      if (showcaseRun || activeSpeech) {
+      if (showcaseRun !== null || activeSpeech !== null) {
         setDirectorIntent(null);
         return;
       }
@@ -656,8 +641,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         world,
         previousIntent: directorIntent,
         nowMs,
-        activeSpeechVisible: activeSpeech !== null,
-        showcaseActive: showcaseRun !== null,
+        activeSpeechVisible: false,
+        showcaseActive: false,
         localReactionVisible: reaction !== null,
         reducedMotion,
         recentIntentKinds: activeRecentKinds,
@@ -720,7 +705,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           1,
           Math.round(rect.height || (compact ? 190 : 260)),
         );
-        const ratio = window.devicePixelRatio || 1;
+        const ratio = window.devicePixelRatio;
         const targetWidth = Math.round(cssWidth * ratio);
         const targetHeight = Math.round(cssHeight * ratio);
         if (canvas.width !== targetWidth || canvas.height !== targetHeight) {

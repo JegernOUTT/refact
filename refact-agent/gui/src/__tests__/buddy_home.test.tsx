@@ -20,10 +20,8 @@ import { BuddyWorkshop } from "../features/Buddy/BuddyWorkshop";
 import { BuddyDraftPreview } from "../features/Buddy/BuddyDraftPreview";
 import { BuddySettingsPanel } from "../features/Buddy/BuddySettingsPanel";
 import { BuddyPanel } from "../features/Buddy/BuddyPanel";
-import {
-  BuddyWorld,
-  bubblePositionForSceneX,
-} from "../features/Buddy/BuddyWorld";
+import { BuddyWorld } from "../features/Buddy/BuddyWorld";
+import { bubblePositionForSceneX } from "../features/Buddy/buddyWorldUtils";
 import { buildBuddyWorldState } from "../features/Buddy/buddyWorldModel";
 import { buildBuddySceneSpeech } from "../features/Buddy/buddySceneSpeech";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";

@@ -233,6 +233,24 @@ function safeStrings(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string");
 }
 
+function petConditionFlag(
+  pet: BuddyPetState | undefined,
+  key: keyof BuddyPetState["condition"],
+): boolean {
+  const condition: Partial<BuddyPetState["condition"]> | undefined =
+    pet?.condition;
+  return condition?.[key] === true;
+}
+
+function petNeedValue(
+  pet: BuddyPetState | undefined,
+  key: keyof BuddyPetState["needs"],
+): number | undefined {
+  const needs: Partial<BuddyPetState["needs"]> | undefined = pet?.needs;
+  const value = needs?.[key];
+  return typeof value === "number" ? value : undefined;
+}
+
 function normalizeBuddyPulse(
   pulse: BuddyPulse | null | undefined,
 ): BuddyPulse | null {
@@ -257,7 +275,7 @@ function normalizeBuddyPulse(
       stale_conflicts: safeCount(raw.memory?.stale_conflicts),
     },
     providers: {
-      defaults_ok: raw.providers?.defaults_ok === false ? false : true,
+      defaults_ok: raw.providers?.defaults_ok !== false,
       broken_refs: safeCount(raw.providers?.broken_refs),
       quota_warnings: safeCount(raw.providers?.quota_warnings),
     },
@@ -409,7 +427,7 @@ function providerWarningCount(pulse: BuddyPulse | null | undefined): number {
   if (!pulse) return 0;
   return (
     safeCount(pulse.providers.quota_warnings) +
-    (pulse.providers.defaults_ok === true ? 0 : 1)
+    (pulse.providers.defaults_ok ? 0 : 1)
   );
 }
 
@@ -844,7 +862,7 @@ function weatherFromState(
   }
 
   if (
-    pet?.condition?.sleeping &&
+    petConditionFlag(pet, "sleeping") &&
     pulse &&
     hasProviderModelPulseProblem(pulse)
   ) {
@@ -857,7 +875,7 @@ function weatherFromState(
     };
   }
 
-  if (pet?.condition?.sleeping) {
+  if (petConditionFlag(pet, "sleeping")) {
     return {
       weather: "dream",
       weatherLabel: "Dream mist",
@@ -972,7 +990,7 @@ function hasAffectionState(args: {
   semanticState: BuddySemanticState | undefined;
   nowMs: number;
 }): boolean {
-  const affection = args.pet?.needs?.affection;
+  const affection = petNeedValue(args.pet, "affection");
   if (
     typeof affection === "number" &&
     Number.isFinite(affection) &&
@@ -980,8 +998,8 @@ function hasAffectionState(args: {
   ) {
     return true;
   }
-  const lastSignalType = args.semanticState?.activity?.lastSignalType;
-  const lastSignalTime = args.semanticState?.activity?.lastSignalTime;
+  const lastSignalType = args.semanticState?.activity.lastSignalType;
+  const lastSignalTime = args.semanticState?.activity.lastSignalTime;
   if (
     lastSignalType == null ||
     !AFFECTION_SIGNALS.has(lastSignalType) ||
@@ -1013,9 +1031,9 @@ function buildAtmosphere(args: {
   const serious =
     hasProviderModelPulseProblem(args.pulse) ||
     isProviderModelRuntimeProblem(args.visibleRuntime);
-  const sleeping = args.pet?.condition?.sleeping === true;
-  const hungry = args.pet?.condition?.hungry === true;
-  const bored = args.pet?.condition?.bored === true;
+  const sleeping = petConditionFlag(args.pet, "sleeping");
+  const hungry = petConditionFlag(args.pet, "hungry");
+  const bored = petConditionFlag(args.pet, "bored");
   const affectionate = hasAffectionState({
     pet: args.pet,
     semanticState: args.semanticState,
