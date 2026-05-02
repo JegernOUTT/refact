@@ -158,32 +158,48 @@ const GENERATION_RUNTIME_SIGNALS = new Set([
   "title_generating",
 ]);
 
-const PROVIDER_MODEL_TOPIC_TERMS = [
-  "provider",
-  "model",
-  "default_model",
-  "default model",
-  "default_model_missing",
-  "broken_ref",
-  "broken ref",
-  "broken_model_reference",
-  "model_not_found",
-  "quota",
-  "llm",
-  "openai",
-  "anthropic",
-  "claude",
-  "gemini",
-  "groq",
-  "ollama",
-  "openrouter",
-  "vllm",
-  "xai",
-  "context window",
-  "rate limit",
-  "api key",
-  "apikey",
+const PROVIDER_MODEL_STRICT_TOPIC_PATTERNS = [
+  /\bproviders?\b/u,
+  /\bprovider[-_\s]?sources?\b/u,
+  /\bmodel[-_\s]?providers?\b/u,
+  /\bdefault[-_\s]?models?\b/u,
+  /\bdefault_model(?:_missing)?\b/u,
+  /\bmodel_not_found\b/u,
+  /\bbroken[-_\s]?model[-_\s]?references?\b/u,
+  /\bbroken_model_reference\b/u,
+  /\bbroken[-_\s]?refs?\b/u,
+  /\bbroken_refs?\b/u,
+  /\bllm\b/u,
+  /\bcontext[-_\s]?windows?\b/u,
+  /\bopenai\b/u,
+  /\banthropic\b/u,
+  /\bclaude\b/u,
+  /\bgemini\b/u,
+  /\bgroq\b/u,
+  /\bollama\b/u,
+  /\bopenrouter\b/u,
+  /\bvllm\b/u,
+  /\bxai\b/u,
 ] as const;
+
+const PROVIDER_MODEL_CONTEXT_PATTERNS = [
+  /\bproviders?\b/u,
+  /\bprovider[-_\s]?sources?\b/u,
+  /\bmodel[-_\s]?providers?\b/u,
+  /\bdefault[-_\s]?models?\b/u,
+  /\bdefault_model\b/u,
+] as const;
+
+const PROVIDER_MODEL_CONTEXTUAL_TOPIC_PATTERNS = [
+  /\bapi[-_\s]?keys?\b/u,
+  /\bapikeys?\b/u,
+  /\brate[-_\s]?limits?\b/u,
+  /\bquotas?\b/u,
+  /\bmodels?\b/u,
+] as const;
+
+const AFFECTION_SIGNAL_WINDOW_MS = 600_000;
+const AFFECTION_SIGNAL_FUTURE_TOLERANCE_MS = 5_000;
 
 const AFFECTION_SIGNALS = new Set([
   "care_pet",
@@ -212,6 +228,96 @@ function safeCount(value: number | null | undefined): number {
   return Math.max(0, value);
 }
 
+function safeStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function normalizeBuddyPulse(
+  pulse: BuddyPulse | null | undefined,
+): BuddyPulse | null {
+  if (!pulse) return null;
+  const raw: Partial<BuddyPulse> = pulse;
+  return {
+    generated_at: raw.generated_at ?? null,
+    tasks: {
+      total: safeCount(raw.tasks?.total),
+      stuck: safeCount(raw.tasks?.stuck),
+      abandoned: safeCount(raw.tasks?.abandoned),
+      by_status: raw.tasks?.by_status ?? {},
+    },
+    trajectories: {
+      total: safeCount(raw.trajectories?.total),
+      untitled: safeCount(raw.trajectories?.untitled),
+      oldest_age_days: safeCount(raw.trajectories?.oldest_age_days),
+    },
+    memory: {
+      total: safeCount(raw.memory?.total),
+      orphan: safeCount(raw.memory?.orphan),
+      stale_conflicts: safeCount(raw.memory?.stale_conflicts),
+    },
+    providers: {
+      defaults_ok: raw.providers?.defaults_ok === false ? false : true,
+      broken_refs: safeCount(raw.providers?.broken_refs),
+      quota_warnings: safeCount(raw.providers?.quota_warnings),
+    },
+    mcp: {
+      total: safeCount(raw.mcp?.total),
+      failing: safeCount(raw.mcp?.failing),
+      auth_expiring: safeCount(raw.mcp?.auth_expiring),
+    },
+    customization: {
+      modes: safeCount(raw.customization?.modes),
+      skills: safeCount(raw.customization?.skills),
+      commands: safeCount(raw.customization?.commands),
+      subagents: safeCount(raw.customization?.subagents),
+      hooks: safeCount(raw.customization?.hooks),
+    },
+    diagnostics: {
+      last_hour: safeCount(raw.diagnostics?.last_hour),
+      top_error_types: safeStrings(raw.diagnostics?.top_error_types),
+    },
+    git: {
+      uncommitted_files: safeCount(raw.git?.uncommitted_files),
+      diff_lines_4h: safeCount(raw.git?.diff_lines_4h),
+      branches: safeCount(raw.git?.branches),
+    },
+    worktrees: {
+      total_registered: safeCount(raw.worktrees?.total_registered),
+      total_discovered: safeCount(raw.worktrees?.total_discovered),
+      total: safeCount(raw.worktrees?.total),
+      clean: safeCount(raw.worktrees?.clean),
+      dirty: safeCount(raw.worktrees?.dirty),
+      unknown: safeCount(raw.worktrees?.unknown),
+      stale: safeCount(raw.worktrees?.stale),
+      conflicted: safeCount(raw.worktrees?.conflicted),
+      shared: safeCount(raw.worktrees?.shared),
+      abandoned_clean: safeCount(raw.worktrees?.abandoned_clean),
+      changed_files: safeCount(raw.worktrees?.changed_files),
+      additions: safeCount(raw.worktrees?.additions),
+      deletions: safeCount(raw.worktrees?.deletions),
+      missing_registry_paths: safeCount(raw.worktrees?.missing_registry_paths),
+      unregistered_cache_dirs: safeCount(
+        raw.worktrees?.unregistered_cache_dirs,
+      ),
+      merged_branches: safeCount(raw.worktrees?.merged_branches),
+      newest_age_hours:
+        raw.worktrees?.newest_age_hours == null
+          ? null
+          : safeCount(raw.worktrees.newest_age_hours),
+      oldest_age_hours:
+        raw.worktrees?.oldest_age_hours == null
+          ? null
+          : safeCount(raw.worktrees.oldest_age_hours),
+      disk_usage_bytes:
+        raw.worktrees?.disk_usage_bytes == null
+          ? null
+          : safeCount(raw.worktrees.disk_usage_bytes),
+    },
+    humor: raw.humor ?? null,
+  };
+}
+
 function addLayer(layers: BuddyWorldLayer[], layer: BuddyWorldLayer): void {
   if (!layers.includes(layer)) layers.push(layer);
 }
@@ -233,13 +339,46 @@ function runtimeText(event: BuddyRuntimeEvent): string {
   }`.toLowerCase();
 }
 
+function runtimeContextText(event: BuddyRuntimeEvent): string {
+  return `${event.signal_type} ${event.source}`.toLowerCase();
+}
+
 function hasProviderModelTopicText(text: string): boolean {
   const normalized = text.toLowerCase();
-  return PROVIDER_MODEL_TOPIC_TERMS.some((term) => normalized.includes(term));
+  if (
+    PROVIDER_MODEL_STRICT_TOPIC_PATTERNS.some((pattern) =>
+      pattern.test(normalized),
+    )
+  ) {
+    return true;
+  }
+
+  return (
+    PROVIDER_MODEL_CONTEXT_PATTERNS.some((pattern) =>
+      pattern.test(normalized),
+    ) &&
+    PROVIDER_MODEL_CONTEXTUAL_TOPIC_PATTERNS.some((pattern) =>
+      pattern.test(normalized),
+    )
+  );
 }
 
 function hasProviderModelRuntimeTopic(event: BuddyRuntimeEvent): boolean {
-  return hasProviderModelTopicText(runtimeText(event));
+  const text = runtimeText(event);
+  if (
+    PROVIDER_MODEL_STRICT_TOPIC_PATTERNS.some((pattern) => pattern.test(text))
+  ) {
+    return true;
+  }
+
+  return (
+    PROVIDER_MODEL_CONTEXT_PATTERNS.some((pattern) =>
+      pattern.test(runtimeContextText(event)),
+    ) &&
+    PROVIDER_MODEL_CONTEXTUAL_TOPIC_PATTERNS.some((pattern) =>
+      pattern.test(text),
+    )
+  );
 }
 
 function isGenerationRuntime(event: BuddyRuntimeEvent): boolean {
@@ -313,7 +452,6 @@ function hasProviderModelPulseProblem(
   return (
     providerCriticalCount(pulse) > 0 ||
     (diagnosticPressure(pulse) >= 6 &&
-      !pulse.providers.defaults_ok &&
       hasProviderModelTopicText(diagnosticsTopicText(pulse)))
   );
 }
@@ -453,9 +591,12 @@ function buildObjects(
   }
 
   const providerWarnings = providerWarningCount(pulse);
-  const providerCritical =
-    providerCriticalCount(pulse) > 0 || runtimeProviderProblem;
-  const providerIssues = providerCriticalCount(pulse) + providerWarnings;
+  const providerPulseProblem = hasProviderModelPulseProblem(pulse);
+  const providerCritical = providerPulseProblem || runtimeProviderProblem;
+  const providerIssues =
+    providerCriticalCount(pulse) +
+    providerWarnings +
+    (providerPulseProblem && providerCriticalCount(pulse) === 0 ? 1 : 0);
   const memoryIssues = memoryIssueCount(pulse);
   const memoryLoad = memoryPressure(pulse);
   const memoryCritical =
@@ -836,7 +977,10 @@ function hasAffectionState(args: {
   ) {
     return false;
   }
-  return args.nowMs >= lastSignalTime && args.nowMs - lastSignalTime <= 600_000;
+  return (
+    args.nowMs + AFFECTION_SIGNAL_FUTURE_TOLERANCE_MS >= lastSignalTime &&
+    args.nowMs - lastSignalTime <= AFFECTION_SIGNAL_WINDOW_MS
+  );
 }
 
 function buildAtmosphere(args: {
@@ -941,22 +1085,18 @@ export function buildBuddyWorldState(args: {
   activeQuest: BuddyQuest | null;
   semanticState?: BuddySemanticState;
 }): BuddyWorldState {
+  const pulse = normalizeBuddyPulse(args.pulse);
   const phase = phaseFromHour(args.now.getHours());
   const phaseInfo = phaseDetails(phase);
   const nowMs = args.now.getTime();
   const visibleRuntime = visibleRuntimeEvent(args.nowPlaying, nowMs);
-  const weatherInfo = weatherFromState(
-    phase,
-    args.pulse,
-    args.pet,
-    visibleRuntime,
-  );
-  const vitalityInfo = vitalityFromPulse(args.pulse);
-  const objects = buildObjects(args.pulse, visibleRuntime);
+  const weatherInfo = weatherFromState(phase, pulse, args.pet, visibleRuntime);
+  const vitalityInfo = vitalityFromPulse(pulse);
+  const objects = buildObjects(pulse, visibleRuntime);
   const atmosphere = buildAtmosphere({
     phase,
     primaryWeather: weatherInfo.weather,
-    pulse: args.pulse,
+    pulse,
     pet: args.pet,
     visibleRuntime,
     semanticState: args.semanticState,
