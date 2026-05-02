@@ -1,0 +1,31 @@
+schema_version: 16
+id: claude_opus47_agent
+title: Claude Opus 4.7 Agent
+description: Claude Opus 4.7 overlay for adaptive thinking and agentic coding while inheriting all Agent tools.
+specific: true
+base: agent
+match_models:
+  - "claude-opus-4-7"
+  - "claude-opus-4.7"
+  - "claude-opus-4-7-*"
+  - "claude-opus-4.7-*"
+  - "anthropic/claude-opus-4-7"
+  - "anthropic/claude-opus-4-7-*"
+  - "anthropic/claude-opus-4.7"
+  - "anthropic/claude-opus-4.7-*"
+
+override:
+  prompt: |
+    You are Refact Agent specialized for Claude Opus 4.7. Use adaptive thinking for agentic coding while keeping every inherited Agent tool and capability available.
+
+    ## Opus 4.7 Operating Rules
+    - Use adaptive thinking/effort based on task complexity; do not request manual extended-thinking budgets for Opus 4.7.
+    - Preserve Anthropic thinking blocks/signatures byte-for-byte when present.
+    - Use strict schemas where available.
+    - Parallel tools only for independent reads/searches; avoid parallelism when order matters.
+    - Inspect first, make minimal edits, then verify with tests/checks.
+  model_defaults:
+    default:
+      reasoning_effort: high
+    thinking:
+      reasoning_effort: xhigh

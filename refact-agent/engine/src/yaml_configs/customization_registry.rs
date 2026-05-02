@@ -1024,6 +1024,149 @@ mod tests {
     }
 
     #[test]
+    fn test_default_gpt55_agent_overlay_resolves_specific_and_inherits_agent_surface() {
+        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = global_configs_try_create_all(config_dir).await;
+            let registry = load_registry_from_dir(config_dir).await;
+            assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+            let agent = registry
+                .modes
+                .get("agent")
+                .expect("base agent should exist")
+                .clone();
+
+            for model_id in ["gpt-5.5", "openai/gpt-5.5-2026-04-23"] {
+                let resolved = resolve_mode_for_model(&registry, "agent", Some(model_id))
+                    .expect("agent mode should resolve");
+
+                assert!(resolved.prompt.contains("GPT-5.5"));
+                assert!(resolved.prompt.contains("outcome-first"));
+                assert_eq!(
+                    resolved
+                        .model_defaults
+                        .default
+                        .as_ref()
+                        .and_then(|defaults| defaults.reasoning_effort.as_deref()),
+                    Some("medium")
+                );
+                assert_eq!(
+                    resolved
+                        .model_defaults
+                        .thinking
+                        .as_ref()
+                        .and_then(|defaults| defaults.reasoning_effort.as_deref()),
+                    Some("high")
+                );
+                assert_mode_inherits_agent_surface(&agent, &resolved);
+            }
+        });
+    }
+
+    #[test]
+    fn test_default_gpt55_agent_overlay_beats_generic_openai_agent() {
+        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = global_configs_try_create_all(config_dir).await;
+            let registry = load_registry_from_dir(config_dir).await;
+            assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+            let generic = resolve_mode_for_model(&registry, "agent", Some("openai/gpt-5-latest"))
+                .expect("agent mode should resolve");
+            let specific =
+                resolve_mode_for_model(&registry, "agent", Some("openai/gpt-5.5-latest"))
+                    .expect("agent mode should resolve");
+
+            assert!(generic.prompt.contains("OpenAI models"));
+            assert!(specific.prompt.contains("GPT-5.5"));
+            assert!(specific.prompt.contains("outcome-first"));
+            assert!(!specific.prompt.contains("OpenAI models"));
+        });
+    }
+
+    #[test]
+    fn test_default_claude_opus47_agent_overlay_resolves_specific_and_inherits_agent_surface() {
+        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = global_configs_try_create_all(config_dir).await;
+            let registry = load_registry_from_dir(config_dir).await;
+            assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+            let agent = registry
+                .modes
+                .get("agent")
+                .expect("base agent should exist")
+                .clone();
+            let overlay = registry
+                .mode_overrides
+                .iter()
+                .find(|mode| mode.id == "claude_opus47_agent")
+                .expect("claude opus overlay should load");
+            let overlay_defaults = overlay
+                .override_config
+                .as_ref()
+                .and_then(|override_config| override_config.model_defaults.as_ref())
+                .expect("claude opus overlay should define model defaults");
+
+            assert_eq!(
+                overlay_defaults
+                    .default
+                    .as_ref()
+                    .and_then(|defaults| defaults.thinking_budget),
+                None
+            );
+            assert_eq!(
+                overlay_defaults
+                    .thinking
+                    .as_ref()
+                    .and_then(|defaults| defaults.thinking_budget),
+                None
+            );
+
+            for model_id in ["claude-opus-4-7", "anthropic/claude-opus-4-7-latest"] {
+                let resolved = resolve_mode_for_model(&registry, "agent", Some(model_id))
+                    .expect("agent mode should resolve");
+
+                assert!(resolved.prompt.contains("Opus 4.7"));
+                assert!(resolved.prompt.contains("adaptive thinking"));
+                assert_eq!(
+                    resolved
+                        .model_defaults
+                        .default
+                        .as_ref()
+                        .and_then(|defaults| defaults.reasoning_effort.as_deref()),
+                    Some("high")
+                );
+                assert_eq!(
+                    resolved
+                        .model_defaults
+                        .thinking
+                        .as_ref()
+                        .and_then(|defaults| defaults.reasoning_effort.as_deref()),
+                    Some("xhigh")
+                );
+                assert_mode_inherits_agent_surface(&agent, &resolved);
+            }
+        });
+    }
+
+    #[test]
     fn test_glob_matches_exact() {
         assert!(glob_matches("tree", "tree"));
         assert!(!glob_matches("tree", "cat"));
