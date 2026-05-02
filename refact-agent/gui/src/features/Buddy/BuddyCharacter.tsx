@@ -69,32 +69,36 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
   onSpeechControl,
 }) => (
   <div
-    className={styles.character}
-    data-pose={scenePose}
+    className={styles.characterAnchor}
     style={buildBuddyCharacterStyle({
       sceneXPercent,
       sceneYPercent,
       sceneDepthScale,
     })}
+    data-bubble-position={bubblePosition}
+    data-pose={scenePose}
+    data-randomize-bubble-position={String(randomizeBubblePosition)}
     data-testid="buddy-world-character"
   >
-    <BuddyCanvas
-      state={state}
-      onEvent={onCanvasEvent}
-      displaySize={displaySize}
-      speechOverride={speechText}
-      speechControls={speechControls}
-      onSpeechControlClick={onSpeechControl}
-      bubblePosition={bubblePosition}
-      randomizeBubblePosition={randomizeBubblePosition}
-    />
-    {showStageBadge && (
-      <div
-        className={styles.stageBadge}
-        style={{ borderColor: palette.body, color: palette.body }}
-      >
-        {stage.emoji} {stage.name}
-      </div>
-    )}
+    <div className={styles.characterBody} data-pose={scenePose}>
+      <BuddyCanvas
+        state={state}
+        onEvent={onCanvasEvent}
+        displaySize={displaySize}
+        speechOverride={speechText}
+        speechControls={speechControls}
+        onSpeechControlClick={onSpeechControl}
+        bubblePosition={bubblePosition}
+        randomizeBubblePosition={randomizeBubblePosition}
+      />
+      {showStageBadge && (
+        <div
+          className={styles.stageBadge}
+          style={{ borderColor: palette.body, color: palette.body }}
+        >
+          {stage.emoji} {stage.name}
+        </div>
+      )}
+    </div>
   </div>
 );

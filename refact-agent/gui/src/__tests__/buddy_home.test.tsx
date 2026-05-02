@@ -42,12 +42,16 @@ vi.mock("../features/Buddy/BuddyCharacter", async () => {
 
   return {
     BuddyCharacter: ({
+      bubblePosition,
+      randomizeBubblePosition,
       scenePose = "idle",
       sceneXPercent,
       sceneYPercent,
       sceneDepthScale,
       speechText,
     }: {
+      bubblePosition?: string;
+      randomizeBubblePosition?: boolean;
       scenePose?: string;
       sceneXPercent?: number;
       sceneYPercent?: number;
@@ -57,8 +61,10 @@ vi.mock("../features/Buddy/BuddyCharacter", async () => {
       ReactModule.createElement(
         "div",
         {
+          "data-bubble-position": bubblePosition,
           "data-depth-scale": sceneDepthScale,
           "data-pose": scenePose,
+          "data-randomize-bubble-position": String(randomizeBubblePosition),
           "data-testid": "buddy-world-character",
           style:
             typeof sceneXPercent === "number" ||
@@ -649,8 +655,19 @@ describe("BuddyWorld_dynamic_environment", () => {
       "data-showcase",
       "none",
     );
+    expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+      "data-world-mood",
+      "unstable",
+    );
+    expect(
+      screen.getByTestId("buddy-world").getAttribute("data-world-layers"),
+    ).toContain("provider_storm");
     expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+      "data-randomize-bubble-position",
+      "false",
+    );
 
     await user.click(screen.getByRole("button", { name: /play in sun/i }));
     expect(onCare).toHaveBeenCalledWith("play", "scroll");
@@ -660,6 +677,116 @@ describe("BuddyWorld_dynamic_environment", () => {
 
     await user.click(screen.getByRole("button", { name: /open task grove/i }));
     expect(onOpenPage).toHaveBeenCalledWith({ type: "tasks_list" });
+  });
+
+  it("keeps object tooltips, navigation, and care controls reachable", async () => {
+    const onCare = vi.fn();
+    const onOpenPage = vi.fn();
+
+    const { user } = render(
+      <BuddyWorld
+        palette={PALETTES[0]}
+        stage={STAGES[2]}
+        state={makeSemanticState()}
+        pulse={makePulse()}
+        pet={makeSnapshot().state.pet}
+        nowPlaying={null}
+        activeQuest={null}
+        activeSpeech={null}
+        setupNeeded={false}
+        now={new Date("2024-01-01T14:00:00")}
+        onCanvasEvent={vi.fn()}
+        onCare={onCare}
+        onOpenPage={onOpenPage}
+        onRunMode={vi.fn()}
+        onDismissSetup={vi.fn()}
+        onSpeechControl={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    const taskGrove = screen.getByRole("button", { name: /open task grove/i });
+    await user.hover(taskGrove);
+    expect(screen.getByText("Task grove")).toBeInTheDocument();
+
+    await user.tab();
+    expect(screen.getByRole("button", { name: /play in sun/i })).toHaveFocus();
+    await user.tab();
+    expect(
+      screen.getByRole("button", { name: /interact with/i }),
+    ).toHaveFocus();
+    await user.tab();
+    expect(
+      screen.getByRole("button", { name: /open buddy home/i }),
+    ).toHaveFocus();
+    await user.tab();
+    expect(taskGrove).toHaveFocus();
+    expect(screen.getByText("Task grove")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /open model observatory/i }),
+    );
+    expect(onOpenPage).toHaveBeenCalledWith({ type: "default_models" });
+
+    await user.click(
+      screen.getByRole("button", { name: /water buddy garden/i }),
+    );
+    expect(onCare).toHaveBeenCalledWith("feed");
+    await user.click(
+      screen.getByRole("button", { name: /hunt bugs with buddy/i }),
+    );
+    expect(onCare).toHaveBeenCalledWith("play", "bug");
+    await user.click(screen.getByRole("button", { name: /clean buddy/i }));
+    expect(onCare).toHaveBeenCalledWith("clean");
+    await user.click(screen.getByRole("button", { name: /let buddy rest/i }));
+    expect(onCare).toHaveBeenCalledWith("sleep");
+  });
+
+  it("compact mode keeps scene controls mounted", () => {
+    render(
+      <BuddyWorld
+        palette={PALETTES[0]}
+        stage={STAGES[2]}
+        state={makeSemanticState()}
+        pulse={makePulse()}
+        pet={makeSnapshot().state.pet}
+        nowPlaying={null}
+        activeQuest={null}
+        activeSpeech={null}
+        setupNeeded
+        compact
+        now={new Date("2024-01-01T14:00:00")}
+        onCanvasEvent={vi.fn()}
+        onCare={vi.fn()}
+        onOpenPage={vi.fn()}
+        onRunMode={vi.fn()}
+        onDismissSetup={vi.fn()}
+        onSpeechControl={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    expect(screen.getByTestId("buddy-world")).toHaveClass(/compact/u);
+    expect(
+      screen.getByRole("button", { name: /water buddy garden/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /hunt bugs with buddy/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /clean buddy/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /let buddy rest/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Warm up" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Link MCP" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Teach skills" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Later" })).toBeInTheDocument();
   });
 
   it("passes semantic state into the world model", () => {
@@ -1184,6 +1311,155 @@ describe("BuddyWorld_dynamic_environment", () => {
       expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
         "data-pose",
         "meditate",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses right bubble for left-side director targets", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T14:00:00Z"));
+    try {
+      const pet = makeSnapshot().state.pet;
+      render(
+        <BuddyWorld
+          palette={PALETTES[0]}
+          stage={STAGES[2]}
+          state={makeSemanticState()}
+          pulse={{
+            ...makePulse(),
+            providers: { defaults_ok: true, broken_refs: 0, quota_warnings: 0 },
+            diagnostics: { last_hour: 0, top_error_types: [] },
+            git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+            mcp: { total: 4, failing: 0, auth_expiring: 0 },
+            memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+          }}
+          pet={{
+            ...pet,
+            condition: { ...pet.condition, hungry: true },
+          }}
+          nowPlaying={null}
+          activeQuest={null}
+          activeSpeech={null}
+          setupNeeded={false}
+          now={new Date("2024-01-01T14:00:00")}
+          onCanvasEvent={vi.fn()}
+          onCare={vi.fn()}
+          onOpenPage={vi.fn()}
+          onRunMode={vi.fn()}
+          onDismissSetup={vi.fn()}
+          onSpeechControl={vi.fn()}
+        />,
+        { preloadedState: CONFIG_STATE },
+      );
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-buddy-intent",
+        "seek_food",
+      );
+      expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+        "data-bubble-position",
+        "right",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses left bubble for right-side director targets", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T14:00:00Z"));
+    try {
+      render(
+        <BuddyWorld
+          palette={PALETTES[0]}
+          stage={STAGES[2]}
+          state={makeSemanticState()}
+          pulse={{
+            ...makePulse(),
+            providers: { defaults_ok: true, broken_refs: 1, quota_warnings: 0 },
+            diagnostics: { last_hour: 0, top_error_types: [] },
+            git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+            mcp: { total: 4, failing: 0, auth_expiring: 0 },
+            memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+          }}
+          pet={makeSnapshot().state.pet}
+          nowPlaying={null}
+          activeQuest={null}
+          activeSpeech={null}
+          setupNeeded={false}
+          now={new Date("2024-01-01T14:00:00")}
+          onCanvasEvent={vi.fn()}
+          onCare={vi.fn()}
+          onOpenPage={vi.fn()}
+          onRunMode={vi.fn()}
+          onDismissSetup={vi.fn()}
+          onSpeechControl={vi.fn()}
+        />,
+        { preloadedState: CONFIG_STATE },
+      );
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-buddy-intent",
+        "stabilize_crystal",
+      );
+      expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+        "data-bubble-position",
+        "left",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses top bubble for center director targets", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T08:00:00Z"));
+    try {
+      const pet = makeSnapshot().state.pet;
+      render(
+        <BuddyWorld
+          palette={PALETTES[0]}
+          stage={STAGES[2]}
+          state={makeSemanticState()}
+          pulse={{
+            ...makePulse(),
+            providers: { defaults_ok: true, broken_refs: 0, quota_warnings: 0 },
+            diagnostics: { last_hour: 0, top_error_types: [] },
+            git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+            mcp: { total: 4, failing: 0, auth_expiring: 0 },
+            memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+          }}
+          pet={{
+            ...pet,
+            needs: { ...pet.needs, affection: 35 },
+          }}
+          nowPlaying={null}
+          activeQuest={null}
+          activeSpeech={null}
+          setupNeeded={false}
+          now={new Date("2024-01-01T08:00:00")}
+          onCanvasEvent={vi.fn()}
+          onCare={vi.fn()}
+          onOpenPage={vi.fn()}
+          onRunMode={vi.fn()}
+          onDismissSetup={vi.fn()}
+          onSpeechControl={vi.fn()}
+        />,
+        { preloadedState: CONFIG_STATE },
+      );
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-buddy-intent",
+        "morning_stretch",
+      );
+      expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+        "data-bubble-position",
+        "top",
       );
     } finally {
       vi.useRealTimers();

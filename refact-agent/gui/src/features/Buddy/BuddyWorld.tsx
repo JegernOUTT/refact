@@ -20,6 +20,7 @@ import type {
   BuddySemanticState,
   BuddyShowcaseKind,
   BuddyShowcaseRun,
+  BubblePosition,
   Palette,
   Stage,
 } from "./types";
@@ -129,6 +130,12 @@ interface RecentDirectorIntent {
 
 function clampBuddySceneX(x: number): number {
   return Math.max(BUDDY_MIN_X, Math.min(BUDDY_MAX_X, x));
+}
+
+function bubblePositionForSceneX(x: number): BubblePosition {
+  if (x < 42) return "right";
+  if (x > 58) return "left";
+  return "top";
 }
 
 function buildBuddyShowcaseTargets(
@@ -395,6 +402,13 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         ? effectiveDirectorIntent.targetX
         : activeWaypoint.x,
   );
+  const characterSceneY = showcaseRun
+    ? showcaseRun.target.y
+    : effectiveDirectorIntent?.targetY;
+  const characterDepthScale = showcaseRun
+    ? 1
+    : effectiveDirectorIntent?.depthScale;
+  const bubblePosition = bubblePositionForSceneX(characterSceneX);
 
   useEffect(() => {
     setActiveWaypointIndex(0);
@@ -818,6 +832,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       data-phase={world.phase}
       data-weather={world.weather}
       data-atmosphere-mood={world.atmosphere.mood}
+      data-world-mood={world.atmosphere.mood}
+      data-world-layers={world.atmosphere.layers.join(" ") || "none"}
       data-vitality={world.vitality}
       data-showcase={showcaseRun?.kind ?? "none"}
       data-showcase-phase={showcaseRun?.phase ?? "idle"}
@@ -906,15 +922,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         stage={stage}
         palette={palette}
         displaySize={compact ? 230 : 282}
+        bubblePosition={bubblePosition}
+        randomizeBubblePosition={false}
         sceneXPercent={characterSceneX}
-        sceneYPercent={
-          showcaseRun ? showcaseRun.target.y : effectiveDirectorIntent?.targetY
-        }
-        sceneDepthScale={effectiveDirectorIntent?.depthScale}
+        sceneYPercent={characterSceneY}
+        sceneDepthScale={characterDepthScale}
         scenePose={characterPose}
         speechText={speechOverride}
         speechControls={activeSpeech ? activeSpeech.controls : undefined}
-        randomizeBubblePosition
         onCanvasEvent={onCanvasEvent}
         onSpeechControl={activeSpeech ? onSpeechControl : undefined}
       />

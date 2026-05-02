@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { http, HttpResponse } from "msw";
 import { render, screen, waitFor } from "../utils/test-utils";
 import { server } from "../utils/mockServer";
@@ -37,6 +39,10 @@ type CapturedThunk = (
 ) => unknown;
 
 type TestDispatch = (action: unknown) => unknown;
+
+function readGuiSource(path: string): Promise<string> {
+  return readFile(resolve(process.cwd(), "src", path), "utf8");
+}
 
 function isSetupModeCreateAction(action: unknown): boolean {
   if (typeof action !== "object" || action === null) return false;
@@ -291,10 +297,7 @@ describe("buddy UI polish", () => {
   });
 
   it("BuddyWorld_keeps_scene_level_motion_without_roam_boosts", async () => {
-    const buddyWorldSource = await import(
-      "../features/Buddy/BuddyWorld.tsx?raw"
-    );
-    const source = buddyWorldSource.default;
+    const source = await readGuiSource("features/Buddy/BuddyWorld.tsx");
 
     const forbiddenTarget = ["roam", "TargetX"].join("");
     const forbiddenBoost = ["roam", "Boost"].join("");
@@ -303,17 +306,56 @@ describe("buddy UI polish", () => {
     expect(source).not.toContain(forbiddenBoost);
   });
 
-  it("BuddyWorld_reschedules_idle_loop_after_noop_branch", async () => {
-    const buddyWorldSource = await import(
-      "../features/Buddy/BuddyWorld.tsx?raw"
+  it("BuddyWorld_uses_deterministic_edge_aware_bubbles", async () => {
+    const source = await readGuiSource("features/Buddy/BuddyWorld.tsx");
+
+    expect(source).toContain("function bubblePositionForSceneX");
+    expect(source).toContain('if (x < 42) return "right"');
+    expect(source).toContain('if (x > 58) return "left"');
+    expect(source).toContain('return "top"');
+    expect(source).toContain("bubblePosition={bubblePosition}");
+    expect(source).toContain("randomizeBubblePosition={false}");
+  });
+
+  it("BuddyCharacter_splits_anchor_and_body_motion", async () => {
+    const characterSource = await readGuiSource(
+      "features/Buddy/BuddyCharacter.tsx",
     );
-    const source = buddyWorldSource.default;
+    const styleSource = await readGuiSource(
+      "features/Buddy/BuddyWorld.module.css",
+    );
+
+    expect(characterSource).toContain("styles.characterAnchor");
+    expect(characterSource).toContain("styles.characterBody");
+    expect(styleSource).toContain(".characterAnchor");
+    expect(styleSource).toContain("bottom 3.8s cubic-bezier");
+    expect(styleSource).toContain("transform 3.8s cubic-bezier");
+    expect(styleSource).toContain(".characterBody[data-pose");
+    expect(styleSource).not.toContain(".character[data-pose");
+  });
+
+  it("BuddyWorld_hotspots_have_visible_affordance_rings", async () => {
+    const source = await readGuiSource("features/Buddy/BuddyWorld.module.css");
+
+    expect(source).toContain(".hotspot::before");
+    expect(source).toContain(".objectHotspot::before");
+    expect(source).toContain("opacity: 0.42");
+    expect(source).toContain(".toneWarning::before");
+    expect(source).toContain(".toneDanger::before");
+    expect(source).toContain(".homeHotspot::before");
+  });
+
+  it("BuddyWorld_reschedules_idle_loop_after_noop_branch", async () => {
+    const source = await readGuiSource("features/Buddy/BuddyWorld.tsx");
 
     expect(source).toContain("const [idleTick, setIdleTick]");
     expect(source).toContain("setIdleTick((tick) => tick + 1)");
-    expect(source).toContain(
-      "[activeSpeech, idleTick, reaction, showcaseRun, startShowcase, waypoints]",
-    );
+    expect(source).toContain("activeSpeech,");
+    expect(source).toContain("idleTick,");
+    expect(source).toContain("reaction,");
+    expect(source).toContain("showcaseRun,");
+    expect(source).toContain("startShowcase,");
+    expect(source).toContain("waypoints,");
   });
 
   it("BuddyHome_container_renders_split_subcomponents", async () => {

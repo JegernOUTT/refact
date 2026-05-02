@@ -56,11 +56,28 @@
   border-radius: 9999px;
   background: transparent;
   color: rgba(255, 255, 255, 0.82);
-  opacity: 0;
+  transition:
+    transform 0.12s ease,
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.hotspot::before,
+.objectHotspot::before {
+  position: absolute;
+  inset: 16%;
+  pointer-events: none;
+  content: "";
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: inherit;
+  box-shadow:
+    0 0 12px rgba(255, 255, 255, 0.14),
+    inset 0 0 10px rgba(255, 255, 255, 0.06);
+  opacity: 0.42;
   transition:
     opacity 0.12s ease,
-    transform 0.12s ease,
-    background 0.12s ease;
+    box-shadow 0.12s ease,
+    transform 0.12s ease;
 }
 
 .hotspot {
@@ -81,8 +98,18 @@
 .objectHotspot:focus-visible {
   transform: translate(-50%, -52%) scale(1.04);
   background: rgba(255, 255, 255, 0.08);
-  opacity: 1;
   outline: none;
+}
+
+.hotspot:hover::before,
+.hotspot:focus-visible::before,
+.objectHotspot:hover::before,
+.objectHotspot:focus-visible::before {
+  opacity: 0.9;
+  transform: scale(1.08);
+  box-shadow:
+    0 0 16px rgba(255, 255, 255, 0.24),
+    inset 0 0 12px rgba(255, 255, 255, 0.12);
 }
 
 .hotspot:focus-visible,
@@ -90,17 +117,30 @@
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.48);
 }
 
-.celestialHotspot {
-  box-shadow: none;
+.celestialHotspot::before {
+  border-color: rgba(253, 224, 71, 0.36);
+  box-shadow:
+    0 0 14px rgba(253, 224, 71, 0.2),
+    inset 0 0 10px rgba(253, 224, 71, 0.08);
 }
 
-.weatherHotspot {
-  box-shadow: none;
+.weatherHotspot::before {
+  border-color: rgba(125, 211, 252, 0.34);
+  box-shadow:
+    0 0 14px rgba(125, 211, 252, 0.18),
+    inset 0 0 10px rgba(125, 211, 252, 0.08);
 }
 
 .homeHotspot {
   width: 78px;
   height: 64px;
+}
+
+.homeHotspot::before {
+  border-color: rgba(251, 191, 36, 0.32);
+  box-shadow:
+    0 0 14px rgba(251, 191, 36, 0.16),
+    inset 0 0 10px rgba(251, 191, 36, 0.08);
 }
 
 .objectTooltip {
@@ -152,75 +192,109 @@
   border-color: rgba(34, 197, 94, 0.42);
 }
 
+.toneGood::before {
+  border-color: rgba(34, 197, 94, 0.34);
+  box-shadow:
+    0 0 12px rgba(34, 197, 94, 0.16),
+    inset 0 0 10px rgba(34, 197, 94, 0.08);
+}
+
 .toneNeutral {
   border-color: rgba(96, 165, 250, 0.42);
+}
+
+.toneNeutral::before {
+  border-color: rgba(96, 165, 250, 0.34);
+  box-shadow:
+    0 0 12px rgba(96, 165, 250, 0.16),
+    inset 0 0 10px rgba(96, 165, 250, 0.08);
 }
 
 .toneWarning {
   border-color: rgba(245, 158, 11, 0.62);
 }
 
+.toneWarning::before {
+  border-color: rgba(245, 158, 11, 0.5);
+  box-shadow:
+    0 0 14px rgba(245, 158, 11, 0.22),
+    inset 0 0 10px rgba(245, 158, 11, 0.1);
+}
+
 .toneDanger {
   border-color: rgba(239, 68, 68, 0.68);
 }
 
-.character {
+.toneDanger::before {
+  border-color: rgba(239, 68, 68, 0.56);
+  box-shadow:
+    0 0 16px rgba(239, 68, 68, 0.28),
+    inset 0 0 10px rgba(239, 68, 68, 0.12);
+}
+
+.characterAnchor {
   position: absolute;
   z-index: 5;
   left: 50%;
   bottom: -32px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
   transform: translateX(-50%) scale(var(--buddy-scene-scale, 1));
+  transform-origin: 50% 100%;
   filter: drop-shadow(0 14px 18px rgba(0, 0, 0, 0.18));
   transition:
     left 3.8s cubic-bezier(0.4, 0, 0.2, 1),
+    bottom 3.8s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 3.8s cubic-bezier(0.4, 0, 0.2, 1),
     filter 0.18s ease;
 }
 
-.scene:hover .character {
+.characterBody {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.scene:hover .characterAnchor {
   filter: drop-shadow(0 16px 22px rgba(0, 0, 0, 0.26));
 }
 
-.scene[data-showcase-phase="cooldown"] .character {
+.scene[data-showcase-phase="cooldown"] .characterAnchor {
   filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.16));
 }
 
-.character[data-pose="spin"] {
+.characterBody[data-pose="spin"] {
   animation: buddySceneSpin 1.4s ease-in-out;
 }
 
-.character[data-pose="bounce"] {
+.characterBody[data-pose="bounce"] {
   animation: buddySceneBounce 1.8s ease-in-out;
 }
 
-.character[data-pose="look"] {
+.characterBody[data-pose="look"] {
   animation: buddySceneLook 2.2s ease-in-out;
 }
 
-.character[data-pose="stargaze"] {
+.characterBody[data-pose="stargaze"] {
   animation: buddySceneStargaze 5.2s ease-in-out infinite;
 }
 
-.character[data-pose="meditate"] {
+.characterBody[data-pose="meditate"] {
   animation: buddySceneMeditate 5.8s ease-in-out infinite;
 }
 
-.character[data-pose="cheer"] {
+.characterBody[data-pose="cheer"] {
   animation: buddySceneCheer 1.9s ease-in-out infinite;
 }
 
-.character[data-pose="pounce"],
-.character[data-pose="dance"],
-.character[data-pose="shield"],
-.character[data-pose="carry"],
-.character[data-pose="dig"],
-.character[data-pose="sleepy"] {
+.characterBody[data-pose="pounce"],
+.characterBody[data-pose="dance"],
+.characterBody[data-pose="shield"],
+.characterBody[data-pose="carry"],
+.characterBody[data-pose="dig"],
+.characterBody[data-pose="sleepy"] {
   animation: buddyScenePoseSoft 4.8s ease-in-out infinite;
 }
 
-.character[data-pose="sleepy"] {
+.characterBody[data-pose="sleepy"] {
   opacity: 0.94;
 }
 
@@ -316,7 +390,7 @@
   outline: none;
 }
 
-.compact .character {
+.compact .characterAnchor {
   bottom: -18px;
 }
 
@@ -345,91 +419,93 @@
 @keyframes buddySceneSpin {
   0%,
   100% {
-    transform: translateX(-50%) scale(var(--buddy-scene-scale, 1)) rotate(0deg);
+    transform: rotate(0deg) scale(1);
   }
 
   50% {
-    transform: translateX(-50%) scale(calc(var(--buddy-scene-scale, 1) * 1.03)) rotate(5deg);
+    transform: rotate(5deg) scale(1.03);
   }
 }
 
 @keyframes buddySceneBounce {
   0%,
   100% {
-    transform: translateX(-50%) translateY(0) scale(var(--buddy-scene-scale, 1));
+    transform: translateY(0);
   }
 
   40% {
-    transform: translateX(-50%) translateY(-8px) scale(var(--buddy-scene-scale, 1));
+    transform: translateY(-8px);
   }
 }
 
 @keyframes buddySceneLook {
   0%,
   100% {
-    transform: translateX(-50%) scale(var(--buddy-scene-scale, 1));
+    transform: translateX(0);
   }
 
   35% {
-    transform: translateX(-54%) scale(var(--buddy-scene-scale, 1));
+    transform: translateX(-4%);
   }
 
   70% {
-    transform: translateX(-46%) scale(var(--buddy-scene-scale, 1));
+    transform: translateX(4%);
   }
 }
 
 @keyframes buddySceneStargaze {
   0%,
   100% {
-    transform: translateX(-50%) translateY(0) scale(var(--buddy-scene-scale, 1)) rotate(0deg);
+    transform: translateY(0) rotate(0deg);
   }
 
   45% {
-    transform: translateX(-50%) translateY(-5px) scale(var(--buddy-scene-scale, 1)) rotate(-2deg);
+    transform: translateY(-5px) rotate(-2deg);
   }
 }
 
 @keyframes buddySceneMeditate {
   0%,
   100% {
-    transform: translateX(-50%) translateY(0) scale(var(--buddy-scene-scale, 1));
+    transform: translateY(0) scale(1);
   }
 
   50% {
-    transform: translateX(-50%) translateY(-7px) scale(calc(var(--buddy-scene-scale, 1) * 1.015));
+    transform: translateY(-7px) scale(1.015);
   }
 }
 
 @keyframes buddySceneCheer {
   0%,
   100% {
-    transform: translateX(-50%) translateY(0) scale(var(--buddy-scene-scale, 1)) rotate(0deg);
+    transform: translateY(0) rotate(0deg);
   }
 
   32% {
-    transform: translateX(-50%) translateY(-10px) scale(var(--buddy-scene-scale, 1)) rotate(-2deg);
+    transform: translateY(-10px) rotate(-2deg);
   }
 
   58% {
-    transform: translateX(-50%) translateY(-3px) scale(var(--buddy-scene-scale, 1)) rotate(2deg);
+    transform: translateY(-3px) rotate(2deg);
   }
 }
 
 @keyframes buddyScenePoseSoft {
   0%,
   100% {
-    transform: translateX(-50%) translateY(0) scale(var(--buddy-scene-scale, 1));
+    transform: translateY(0);
   }
 
   50% {
-    transform: translateX(-50%) translateY(-4px) scale(var(--buddy-scene-scale, 1));
+    transform: translateY(-4px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .hotspot,
+  .hotspot::before,
   .objectHotspot,
+  .objectHotspot::before,
   .objectTooltip,
   .setupDock,
   .careDock,
@@ -438,8 +514,8 @@
     transition-duration: 0.01ms;
   }
 
-  .character,
-  .character[data-pose] {
+  .characterAnchor,
+  .characterBody[data-pose] {
     animation-duration: 0.01ms;
     animation-iteration-count: 1;
     transition-duration: 0.01ms;
