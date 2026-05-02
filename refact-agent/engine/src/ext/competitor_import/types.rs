@@ -739,7 +739,7 @@ fn sanitize_report_path(path: &Path) -> String {
     sanitize_report_path_value(&path.to_string_lossy())
 }
 
-fn sanitize_report_path_value(path: &str) -> String {
+pub(crate) fn sanitize_report_path_value(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     if !is_absolute_path_value(path) {
         return normalized;
@@ -755,7 +755,7 @@ fn is_absolute_path_value(path: &str) -> bool {
     path.starts_with('/') || path.starts_with('\\') || path.as_bytes().get(1) == Some(&b':')
 }
 
-fn sanitize_report_message(message: &str) -> String {
+pub(crate) fn sanitize_report_message(message: &str) -> String {
     let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
     let sanitized = compact
         .split_whitespace()

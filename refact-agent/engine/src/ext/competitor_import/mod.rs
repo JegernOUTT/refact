@@ -515,21 +515,30 @@ fn log_import_summary(label: &str, summary: &ImportSummary) {
     }
     for issue in summary.errors.iter().take(5) {
         tracing::warn!(
-            "competitor import {label} error: {}{}",
-            issue
-                .path
-                .as_ref()
-                .map(|path| format!("{}: ", path.display()))
-                .unwrap_or_default(),
-            issue.message
+            "competitor import {label} error: {}",
+            format_log_issue(issue)
         );
     }
+}
+
+fn format_log_issue(issue: &ImportIssue) -> String {
+    let mut formatted = String::new();
+    if let Some(path) = &issue.path {
+        formatted.push_str(&sanitize_log_path(path));
+        formatted.push_str(": ");
+    }
+    formatted.push_str(&types::sanitize_report_message(&issue.message));
+    formatted
+}
+
+fn sanitize_log_path(path: &Path) -> String {
+    types::sanitize_report_path_value(&path.to_string_lossy())
 }
 
 fn scope_label(scope: &ImportScope) -> String {
     match scope {
         ImportScope::Global => "global".to_string(),
-        ImportScope::Project { root } => format!("project:{}", root.display()),
+        ImportScope::Project { .. } => "project:<redacted>".to_string(),
     }
 }
 
@@ -611,6 +620,60 @@ mod tests {
             },
             loaded_ts: 0,
         }))
+    }
+
+    #[test]
+    fn log_issue_format_redacts_absolute_paths() {
+        let issue = ImportIssue {
+            competitor: Some(Competitor::ClaudeCode),
+            kind: Some(ImportKind::Command),
+            scope: Some(ImportScope::Project {
+                root: PathBuf::from("/home/user/private-project"),
+            }),
+            path: Some(PathBuf::from(
+                "/home/user/private-project/.claude/commands/secret.md",
+            )),
+            status: ImportStatus::Error,
+            message:
+                "failed reading /home/user/private-project/.claude/commands/secret.md and C:\\Users\\me\\secret.md"
+                    .to_string(),
+        };
+
+        let formatted = format_log_issue(&issue);
+
+        assert!(formatted.contains("<redacted>/.../secret.md"));
+        assert!(formatted.contains("<redacted-path>"));
+        assert!(!formatted.contains("/home/user"));
+        assert!(!formatted.contains("private-project"));
+        assert!(!formatted.contains("C:\\Users"));
+    }
+
+    #[test]
+    fn log_issue_format_keeps_relative_generated_path_readable() {
+        let issue = ImportIssue {
+            competitor: Some(Competitor::ClaudeCode),
+            kind: Some(ImportKind::Command),
+            scope: Some(ImportScope::Global),
+            path: Some(PathBuf::from("commands/foo.md")),
+            status: ImportStatus::Conflict,
+            message: "destination exists without import manifest ownership".to_string(),
+        };
+
+        let formatted = format_log_issue(&issue);
+
+        assert!(formatted.starts_with("commands/foo.md: "));
+        assert!(formatted.contains("destination exists"));
+    }
+
+    #[test]
+    fn log_scope_label_redacts_project_root() {
+        let label = scope_label(&ImportScope::Project {
+            root: PathBuf::from("/home/user/private-project"),
+        });
+
+        assert_eq!(label, "project:<redacted>");
+        assert!(!label.contains("/home/user"));
+        assert!(!label.contains("private-project"));
     }
 
     async fn set_allow_all_privacy(gcx: Arc<ARwLock<GlobalContext>>) {
