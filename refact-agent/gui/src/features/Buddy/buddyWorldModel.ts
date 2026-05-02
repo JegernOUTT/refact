@@ -5,6 +5,7 @@ import type {
   BuddyPulse,
   BuddyQuest,
   BuddyRuntimeEvent,
+  BuddySemanticState,
 } from "./types";
 
 export type BuddyWorldPhase = "morning" | "day" | "evening" | "night";
@@ -17,6 +18,41 @@ export type BuddyWorldWeather =
   | "storm"
   | "dream";
 
+export type BuddyWorldMood =
+  | "serene"
+  | "curious"
+  | "busy"
+  | "sleepy"
+  | "hungry"
+  | "bored"
+  | "affectionate"
+  | "unstable";
+
+export type BuddyWorldLayer =
+  | "sun_motes"
+  | "moths"
+  | "fireflies"
+  | "stars"
+  | "aurora"
+  | "dream_mist"
+  | "workshop_runes"
+  | "provider_storm"
+  | "provider_flicker"
+  | "memory_orbs"
+  | "cozy_home_glow"
+  | "toy_glow"
+  | "empty_food_nook";
+
+export interface BuddyWorldAtmosphere {
+  phase: BuddyWorldPhase;
+  mood: BuddyWorldMood;
+  primaryWeather: BuddyWorldWeather;
+  layers: BuddyWorldLayer[];
+  intensity: number;
+  paletteHint: "dawn" | "day" | "dusk" | "night" | "dream" | "storm";
+  serious: boolean;
+}
+
 export type BuddyWorldTone = "good" | "neutral" | "warning" | "danger";
 export type BuddyWorldSprite =
   | "task_grove"
@@ -26,6 +62,24 @@ export type BuddyWorldSprite =
   | "git_vane"
   | "market_comet"
   | "seed";
+
+export type BuddyWorldObjectState =
+  | "calm"
+  | "active"
+  | "attention"
+  | "critical"
+  | "celebrating";
+
+export type BuddyWorldObjectAnimation =
+  | "none"
+  | "breathe"
+  | "sparkle"
+  | "flicker"
+  | "orbit"
+  | "wobble"
+  | "storm"
+  | "stream"
+  | "dim";
 
 export interface BuddyWorldObject {
   id: string;
@@ -38,6 +92,13 @@ export interface BuddyWorldObject {
   x: number;
   y: number;
   size: number;
+  state: BuddyWorldObjectState;
+  intensity: number;
+  animation: BuddyWorldObjectAnimation;
+  interactionX: number;
+  interactionY: number;
+  depthScale: number;
+  magicalLabel?: string;
 }
 
 export interface BuddyWorldState {
@@ -57,10 +118,148 @@ export interface BuddyWorldState {
   vitality: "lush" | "growing" | "tangled";
   vitalityLabel: string;
   objects: BuddyWorldObject[];
+  atmosphere: BuddyWorldAtmosphere;
   headline: string;
 }
 
-const ACTIVE_RUNTIME_STATUSES = new Set(["started", "progress", "streaming"]);
+type BuddyWorldObjectBase = Omit<
+  BuddyWorldObject,
+  | "state"
+  | "intensity"
+  | "animation"
+  | "interactionX"
+  | "interactionY"
+  | "depthScale"
+  | "magicalLabel"
+>;
+
+type BuddyWorldObjectSemanticFields = Pick<
+  BuddyWorldObject,
+  | "state"
+  | "intensity"
+  | "animation"
+  | "interactionX"
+  | "interactionY"
+  | "depthScale"
+  | "magicalLabel"
+>;
+
+const ACTIVE_RUNTIME_STATUSES = new Set<BuddyRuntimeEvent["status"]>([
+  "started",
+  "progress",
+  "streaming",
+]);
+
+const MEMORY_RUNTIME_SIGNALS = new Set(["memory_extract", "knowledge_update"]);
+
+const PROVIDER_RUNTIME_SIGNALS = new Set([
+  "streaming",
+  "generating",
+  "tool_used",
+  "tool_failed",
+  "tool_confirmation",
+  "browser_action",
+  "title_generating",
+  "commit_msg",
+]);
+
+const AFFECTION_SIGNALS = new Set([
+  "care_pet",
+  "care_play",
+  "care_feed",
+  "stage_up",
+  "skill_learned",
+]);
+
+function clampRange(
+  value: number,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  const finiteValue = Number.isFinite(value) ? value : fallback;
+  return Math.max(min, Math.min(max, finiteValue));
+}
+
+function clamp01(value: number): number {
+  return clampRange(value, 0, 1, 0);
+}
+
+function addLayer(layers: BuddyWorldLayer[], layer: BuddyWorldLayer): void {
+  if (!layers.includes(layer)) layers.push(layer);
+}
+
+function visibleRuntimeEvent(
+  event: BuddyRuntimeEvent | null,
+  nowMs: number,
+): BuddyRuntimeEvent | null {
+  return isBuddyRuntimeEventVisible(event, nowMs) ? event : null;
+}
+
+function isActiveRuntime(event: BuddyRuntimeEvent | null): boolean {
+  return event !== null && ACTIVE_RUNTIME_STATUSES.has(event.status);
+}
+
+function runtimeText(event: BuddyRuntimeEvent): string {
+  return `${event.signal_type} ${event.title} ${event.description ?? ""} ${
+    event.source
+  }`.toLowerCase();
+}
+
+function isMemoryRuntimeActive(event: BuddyRuntimeEvent | null): boolean {
+  return (
+    event !== null &&
+    isActiveRuntime(event) &&
+    MEMORY_RUNTIME_SIGNALS.has(event.signal_type)
+  );
+}
+
+function isProviderRuntimeActive(event: BuddyRuntimeEvent | null): boolean {
+  if (event === null || !isActiveRuntime(event)) return false;
+  if (PROVIDER_RUNTIME_SIGNALS.has(event.signal_type)) return true;
+  const text = runtimeText(event);
+  return (
+    text.includes("provider") ||
+    text.includes("model") ||
+    text.includes("default")
+  );
+}
+
+function isSeriousRuntimeProblem(event: BuddyRuntimeEvent | null): boolean {
+  if (event === null || event.status !== "failed") return false;
+  const priority = event.priority.toLowerCase();
+  const text = runtimeText(event);
+  return (
+    priority === "critical" ||
+    priority === "high" ||
+    event.signal_type === "error" ||
+    event.signal_type === "chat_error" ||
+    event.signal_type === "tool_failed" ||
+    text.includes("provider") ||
+    text.includes("model") ||
+    text.includes("default") ||
+    text.includes("quota")
+  );
+}
+
+function providerWarningCount(pulse: BuddyPulse | null | undefined): number {
+  if (!pulse) return 0;
+  return pulse.providers.quota_warnings + (pulse.providers.defaults_ok ? 0 : 1);
+}
+
+function providerCriticalCount(pulse: BuddyPulse | null | undefined): number {
+  return pulse?.providers.broken_refs ?? 0;
+}
+
+function memoryPressure(pulse: BuddyPulse | null | undefined): number {
+  if (!pulse) return 0;
+  return pulse.memory.orphan + pulse.memory.stale_conflicts * 2;
+}
+
+function hasSeriousPulseProblem(pulse: BuddyPulse | null | undefined): boolean {
+  if (!pulse) return false;
+  return pulse.providers.broken_refs > 0 || pulse.diagnostics.last_hour >= 6;
+}
 
 function phaseFromHour(hour: number): BuddyWorldPhase {
   if (hour >= 5 && hour < 11) return "morning";
@@ -135,122 +334,284 @@ function toneFromCount(
   return count > 0 ? "neutral" : "good";
 }
 
+function buildWorldObject(
+  base: BuddyWorldObjectBase,
+  semantic: Partial<BuddyWorldObjectSemanticFields>,
+): BuddyWorldObject {
+  const object = {
+    ...base,
+    state: semantic.state ?? "calm",
+    intensity: clamp01(semantic.intensity ?? 0.24),
+    animation: semantic.animation ?? "breathe",
+    interactionX: clampRange(semantic.interactionX ?? base.x, 0, 100, 50),
+    interactionY: clampRange(
+      semantic.interactionY ?? Math.max(base.y, 72),
+      58,
+      84,
+      76,
+    ),
+    depthScale: clampRange(semantic.depthScale ?? 1, 0.7, 1.2, 1),
+  } satisfies BuddyWorldObject;
+  if (semantic.magicalLabel) {
+    return { ...object, magicalLabel: semantic.magicalLabel };
+  }
+  return object;
+}
+
 function buildObjects(
   pulse: BuddyPulse | null | undefined,
+  visibleRuntime: BuddyRuntimeEvent | null,
 ): BuddyWorldObject[] {
+  const runtimeActive = isActiveRuntime(visibleRuntime);
+  const memoryRuntimeActive = isMemoryRuntimeActive(visibleRuntime);
+  const providerRuntimeActive = isProviderRuntimeActive(visibleRuntime);
+  const runtimeSerious = isSeriousRuntimeProblem(visibleRuntime);
+
   if (!pulse) {
     return [
-      {
-        id: "warming-up",
-        sprite: "seed",
-        label: "Project garden",
-        value: "Warming up",
-        description: "Buddy is waiting for a pulse snapshot.",
-        page: { type: "buddy" },
-        tone: "neutral",
-        x: 25,
-        y: 70,
-        size: 12,
-      },
+      buildWorldObject(
+        {
+          id: "warming-up",
+          sprite: "seed",
+          label: "Project garden",
+          value: "Warming up",
+          description: "Buddy is waiting for a pulse snapshot.",
+          page: { type: "buddy" },
+          tone: "neutral",
+          x: 25,
+          y: 70,
+          size: 12,
+        },
+        {
+          state: runtimeActive ? "active" : "calm",
+          intensity: runtimeActive ? 0.72 : 0.32,
+          animation: runtimeActive ? "stream" : "breathe",
+          interactionX: 32,
+          interactionY: 76,
+          depthScale: 0.92,
+          magicalLabel: "Sprouting hearth",
+        },
+      ),
     ];
   }
 
+  const providerWarnings = providerWarningCount(pulse);
+  const providerCritical = providerCriticalCount(pulse) > 0 || runtimeSerious;
   const providerIssues =
     pulse.providers.broken_refs +
     pulse.providers.quota_warnings +
     (pulse.providers.defaults_ok ? 0 : 1);
   const memoryIssues = pulse.memory.orphan + pulse.memory.stale_conflicts;
+  const memoryLoad = memoryPressure(pulse);
+  const memoryCritical = pulse.memory.stale_conflicts >= 6 || memoryLoad >= 8;
+  const taskPressure = pulse.tasks.stuck + pulse.tasks.abandoned;
+  const mcpPressure = pulse.mcp.failing + pulse.mcp.auth_expiring;
+  const gitPressure =
+    pulse.git.uncommitted_files + (pulse.git.diff_lines_4h > 0 ? 1 : 0);
+
+  const memoryState: BuddyWorldObjectState = memoryRuntimeActive
+    ? "active"
+    : memoryCritical
+      ? "critical"
+      : memoryIssues > 0
+        ? "attention"
+        : "calm";
+  const providerState: BuddyWorldObjectState = providerCritical
+    ? "critical"
+    : providerRuntimeActive
+      ? "active"
+      : providerWarnings > 0
+        ? "attention"
+        : "calm";
 
   return [
-    {
-      id: "tasks",
-      sprite: "task_grove",
-      label: "Task grove",
-      value: `${pulse.tasks.total} open`,
-      description:
-        pulse.tasks.stuck > 0
-          ? `${pulse.tasks.stuck} stuck branches need Buddy's nudge.`
-          : "Branches are clear enough to grow.",
-      page: { type: "tasks_list" },
-      tone: toneFromCount(pulse.tasks.stuck + pulse.tasks.abandoned, 1, 3),
-      x: 18,
-      y: 68,
-      size: 16,
-    },
-    {
-      id: "memory",
-      sprite: "memory_fireflies",
-      label: "Memory fireflies",
-      value: `${pulse.memory.total} docs`,
-      description:
-        memoryIssues > 0
-          ? `${memoryIssues} memory sparks want pruning.`
-          : "Knowledge fireflies are neatly orbiting.",
-      page: { type: "knowledge_graph" },
-      tone: toneFromCount(memoryIssues, 1, 6),
-      x: 33,
-      y: 52,
-      size: 14,
-    },
-    {
-      id: "providers",
-      sprite: "observatory",
-      label: "Model observatory",
-      value: pulse.providers.defaults_ok ? "Defaults ok" : "Defaults off",
-      description:
-        providerIssues > 0
-          ? `${providerIssues} provider signals are flickering.`
-          : "Model stars are aligned.",
-      page: { type: "default_models" },
-      tone: toneFromCount(providerIssues, 1, 3),
-      x: 72,
-      y: 67,
-      size: 18,
-    },
-    {
-      id: "mcp",
-      sprite: "satellite",
-      label: "MCP satellites",
-      value: `${pulse.mcp.total} linked`,
-      description:
-        pulse.mcp.failing > 0 || pulse.mcp.auth_expiring > 0
-          ? `${pulse.mcp.failing} failing · ${pulse.mcp.auth_expiring} auth expiring.`
-          : "Satellites are holding orbit.",
-      page: { type: "integrations" },
-      tone: toneFromCount(pulse.mcp.failing + pulse.mcp.auth_expiring, 1, 3),
-      x: 84,
-      y: 35,
-      size: 13,
-    },
-    {
-      id: "git",
-      sprite: "git_vane",
-      label: "Git weather vane",
-      value: `${pulse.git.uncommitted_files} files`,
-      description:
-        pulse.git.diff_lines_4h > 0
-          ? `${pulse.git.diff_lines_4h} lines moved in the last 4h.`
-          : "No diff winds right now.",
-      page: { type: "stats" },
-      tone: toneFromCount(pulse.git.uncommitted_files, 8, 20),
-      x: 29,
-      y: 78,
-      size: 12,
-    },
-    {
-      id: "market",
-      sprite: "market_comet",
-      label: "Upgrade comet",
-      value: `${
-        pulse.customization.skills + pulse.customization.commands
-      } tools`,
-      description: `${pulse.customization.modes} modes · ${pulse.customization.subagents} delegates · ${pulse.customization.hooks} hooks.`,
-      page: { type: "marketplace_hub" },
-      tone: "neutral",
-      x: 36,
-      y: 38,
-      size: 13,
-    },
+    buildWorldObject(
+      {
+        id: "tasks",
+        sprite: "task_grove",
+        label: "Task grove",
+        value: `${pulse.tasks.total} open`,
+        description:
+          pulse.tasks.stuck > 0
+            ? `${pulse.tasks.stuck} stuck branches need Buddy's nudge.`
+            : "Branches are clear enough to grow.",
+        page: { type: "tasks_list" },
+        tone: toneFromCount(taskPressure, 1, 3),
+        x: 18,
+        y: 68,
+        size: 16,
+      },
+      {
+        state: taskPressure > 0 ? "attention" : "calm",
+        intensity: taskPressure > 0 ? 0.32 + taskPressure / 8 : 0.22,
+        animation: taskPressure > 0 ? "wobble" : "breathe",
+        interactionX: 23,
+        interactionY: 76,
+        depthScale: 0.96,
+        magicalLabel: taskPressure > 0 ? "Restless grove" : "Task grove",
+      },
+    ),
+    buildWorldObject(
+      {
+        id: "memory",
+        sprite: "memory_fireflies",
+        label: "Memory fireflies",
+        value: `${pulse.memory.total} docs`,
+        description:
+          memoryIssues > 0
+            ? `${memoryIssues} memory sparks want pruning.`
+            : "Knowledge fireflies are neatly orbiting.",
+        page: { type: "knowledge_graph" },
+        tone: toneFromCount(memoryIssues, 1, 6),
+        x: 33,
+        y: 52,
+        size: 14,
+      },
+      {
+        state: memoryState,
+        intensity: memoryRuntimeActive
+          ? 0.84
+          : memoryIssues > 0
+            ? 0.36 + memoryLoad / 12
+            : 0.28,
+        animation: memoryRuntimeActive
+          ? "stream"
+          : memoryIssues > 0
+            ? "orbit"
+            : "sparkle",
+        interactionX: 36,
+        interactionY: 72,
+        depthScale: 0.9,
+        magicalLabel:
+          memoryIssues > 0 ? "Whispering fireflies" : "Memory fireflies",
+      },
+    ),
+    buildWorldObject(
+      {
+        id: "providers",
+        sprite: "observatory",
+        label: "Model observatory",
+        value: pulse.providers.defaults_ok ? "Defaults ok" : "Defaults off",
+        description:
+          providerIssues > 0
+            ? `${providerIssues} provider signals are flickering.`
+            : "Model stars are aligned.",
+        page: { type: "default_models" },
+        tone: toneFromCount(providerIssues, 1, 3),
+        x: 72,
+        y: 67,
+        size: 18,
+      },
+      {
+        state: providerState,
+        intensity: providerCritical
+          ? 1
+          : providerRuntimeActive
+            ? 0.82
+            : providerWarnings > 0
+              ? 0.56
+              : 0.28,
+        animation: providerCritical
+          ? "storm"
+          : providerRuntimeActive
+            ? "stream"
+            : providerWarnings > 0
+              ? "flicker"
+              : "sparkle",
+        interactionX: 67,
+        interactionY: 74,
+        depthScale: 1.02,
+        magicalLabel: providerCritical
+          ? "Crackling observatory"
+          : providerWarnings > 0
+            ? "Flickering observatory"
+            : "Model observatory",
+      },
+    ),
+    buildWorldObject(
+      {
+        id: "mcp",
+        sprite: "satellite",
+        label: "MCP satellites",
+        value: `${pulse.mcp.total} linked`,
+        description:
+          pulse.mcp.failing > 0 || pulse.mcp.auth_expiring > 0
+            ? `${pulse.mcp.failing} failing · ${pulse.mcp.auth_expiring} auth expiring.`
+            : "Satellites are holding orbit.",
+        page: { type: "integrations" },
+        tone: toneFromCount(mcpPressure, 1, 3),
+        x: 84,
+        y: 35,
+        size: 13,
+      },
+      {
+        state:
+          mcpPressure >= 3
+            ? "critical"
+            : mcpPressure > 0
+              ? "attention"
+              : "calm",
+        intensity: mcpPressure > 0 ? 0.32 + mcpPressure / 8 : 0.22,
+        animation: mcpPressure > 0 ? "flicker" : "orbit",
+        interactionX: 78,
+        interactionY: 72,
+        depthScale: 0.84,
+        magicalLabel:
+          mcpPressure > 0 ? "Wavering satellites" : "MCP satellites",
+      },
+    ),
+    buildWorldObject(
+      {
+        id: "git",
+        sprite: "git_vane",
+        label: "Git weather vane",
+        value: `${pulse.git.uncommitted_files} files`,
+        description:
+          pulse.git.diff_lines_4h > 0
+            ? `${pulse.git.diff_lines_4h} lines moved in the last 4h.`
+            : "No diff winds right now.",
+        page: { type: "stats" },
+        tone: toneFromCount(pulse.git.uncommitted_files, 8, 20),
+        x: 29,
+        y: 78,
+        size: 12,
+      },
+      {
+        state: gitPressure > 0 ? "attention" : "calm",
+        intensity:
+          gitPressure > 0 ? 0.3 + pulse.git.uncommitted_files / 40 : 0.18,
+        animation: gitPressure > 0 ? "wobble" : "breathe",
+        interactionX: 30,
+        interactionY: 80,
+        depthScale: 1.06,
+        magicalLabel: gitPressure > 0 ? "Rustling vane" : "Git weather vane",
+      },
+    ),
+    buildWorldObject(
+      {
+        id: "market",
+        sprite: "market_comet",
+        label: "Upgrade comet",
+        value: `${
+          pulse.customization.skills + pulse.customization.commands
+        } tools`,
+        description: `${pulse.customization.modes} modes · ${pulse.customization.subagents} delegates · ${pulse.customization.hooks} hooks.`,
+        page: { type: "marketplace_hub" },
+        tone: "neutral",
+        x: 36,
+        y: 38,
+        size: 13,
+      },
+      {
+        state: "calm",
+        intensity: 0.26,
+        animation: "sparkle",
+        interactionX: 43,
+        interactionY: 70,
+        depthScale: 0.82,
+        magicalLabel: "Upgrade comet",
+      },
+    ),
   ];
 }
 
@@ -258,8 +619,7 @@ function weatherFromState(
   phase: BuddyWorldPhase,
   pulse: BuddyPulse | null | undefined,
   pet: BuddyPetState | undefined,
-  nowPlaying: BuddyRuntimeEvent | null,
-  nowMs: number,
+  visibleRuntime: BuddyRuntimeEvent | null,
 ): Pick<
   BuddyWorldState,
   "weather" | "weatherLabel" | "weatherDescription" | "weatherX" | "weatherY"
@@ -274,27 +634,30 @@ function weatherFromState(
     };
   }
 
-  if (
-    isBuddyRuntimeEventVisible(nowPlaying, nowMs) &&
-    ACTIVE_RUNTIME_STATUSES.has(nowPlaying.status)
-  ) {
+  if (isSeriousRuntimeProblem(visibleRuntime)) {
+    return {
+      weather: "storm",
+      weatherLabel: "Bug storm",
+      weatherDescription:
+        visibleRuntime?.title ??
+        "Errors are crackling; Buddy can chase them down.",
+      weatherX: 57,
+      weatherY: 27,
+    };
+  }
+
+  if (visibleRuntime !== null && isActiveRuntime(visibleRuntime)) {
     return {
       weather: "busy",
       weatherLabel: "Busy currents",
-      weatherDescription: nowPlaying.title,
+      weatherDescription: visibleRuntime.title,
       weatherX: 50,
       weatherY: 61,
     };
   }
 
   if (pulse) {
-    const stormScore =
-      pulse.diagnostics.last_hour +
-      pulse.providers.broken_refs * 3 +
-      pulse.providers.quota_warnings * 2 +
-      pulse.mcp.failing * 2 +
-      (pulse.providers.defaults_ok ? 0 : 3);
-    if (stormScore >= 6) {
+    if (hasSeriousPulseProblem(pulse)) {
       return {
         weather: "storm",
         weatherLabel: "Bug storm",
@@ -365,24 +728,169 @@ function vitalityFromPulse(
   return { vitality: "lush", vitalityLabel: "Lush" };
 }
 
+function phasePaletteHint(
+  phase: BuddyWorldPhase,
+): BuddyWorldAtmosphere["paletteHint"] {
+  switch (phase) {
+    case "morning":
+      return "dawn";
+    case "day":
+      return "day";
+    case "evening":
+      return "dusk";
+    case "night":
+      return "night";
+  }
+}
+
+function hasAffectionState(args: {
+  pet: BuddyPetState | undefined;
+  semanticState: BuddySemanticState | undefined;
+  nowMs: number;
+}): boolean {
+  const affection = args.pet?.needs.affection;
+  if (
+    typeof affection === "number" &&
+    Number.isFinite(affection) &&
+    affection >= 70
+  ) {
+    return true;
+  }
+  const lastSignalType = args.semanticState?.activity.lastSignalType;
+  const lastSignalTime = args.semanticState?.activity.lastSignalTime;
+  if (
+    lastSignalType == null ||
+    !AFFECTION_SIGNALS.has(lastSignalType) ||
+    typeof lastSignalTime !== "number" ||
+    !Number.isFinite(lastSignalTime) ||
+    !Number.isFinite(args.nowMs)
+  ) {
+    return false;
+  }
+  return args.nowMs >= lastSignalTime && args.nowMs - lastSignalTime <= 600_000;
+}
+
+function buildAtmosphere(args: {
+  phase: BuddyWorldPhase;
+  primaryWeather: BuddyWorldWeather;
+  pulse: BuddyPulse | null | undefined;
+  pet: BuddyPetState | undefined;
+  visibleRuntime: BuddyRuntimeEvent | null;
+  semanticState: BuddySemanticState | undefined;
+  nowMs: number;
+}): BuddyWorldAtmosphere {
+  const layers: BuddyWorldLayer[] = [];
+  const runtimeActive = isActiveRuntime(args.visibleRuntime);
+  const memoryRuntimeActive = isMemoryRuntimeActive(args.visibleRuntime);
+  const providerRuntimeActive = isProviderRuntimeActive(args.visibleRuntime);
+  const serious =
+    hasSeriousPulseProblem(args.pulse) ||
+    isSeriousRuntimeProblem(args.visibleRuntime);
+  const sleeping = args.pet?.condition.sleeping === true;
+  const hungry = args.pet?.condition.hungry === true;
+  const bored = args.pet?.condition.bored === true;
+  const affectionate = hasAffectionState({
+    pet: args.pet,
+    semanticState: args.semanticState,
+    nowMs: args.nowMs,
+  });
+  const providerWarnings = providerWarningCount(args.pulse);
+  const memoryLoad = memoryPressure(args.pulse);
+  const memoryIssues = args.pulse
+    ? args.pulse.memory.orphan + args.pulse.memory.stale_conflicts
+    : 0;
+
+  switch (args.phase) {
+    case "morning":
+    case "day":
+      addLayer(layers, "sun_motes");
+      break;
+    case "evening":
+      addLayer(layers, "moths");
+      addLayer(layers, "cozy_home_glow");
+      break;
+    case "night":
+      addLayer(layers, "stars");
+      addLayer(layers, "fireflies");
+      break;
+  }
+
+  if (!args.pulse || affectionate) addLayer(layers, "cozy_home_glow");
+  if (sleeping || args.primaryWeather === "dream")
+    addLayer(layers, "dream_mist");
+  if (hungry) addLayer(layers, "empty_food_nook");
+  if (bored) addLayer(layers, "toy_glow");
+  if (runtimeActive || args.primaryWeather === "busy")
+    addLayer(layers, "workshop_runes");
+  if (providerWarnings > 0) addLayer(layers, "provider_flicker");
+  if (serious || args.primaryWeather === "storm")
+    addLayer(layers, "provider_storm");
+  if (memoryIssues > 0 || memoryRuntimeActive) addLayer(layers, "memory_orbs");
+  if (providerRuntimeActive) addLayer(layers, "workshop_runes");
+  if (args.primaryWeather === "aurora") addLayer(layers, "aurora");
+
+  let mood: BuddyWorldMood = args.phase === "night" ? "serene" : "curious";
+  if (affectionate) mood = "affectionate";
+  if (bored) mood = "bored";
+  if (hungry) mood = "hungry";
+  if (runtimeActive) mood = "busy";
+  if (sleeping) mood = "sleepy";
+  if (serious) mood = "unstable";
+
+  let intensity = args.phase === "night" ? 0.44 : 0.38;
+  if (!args.pulse) intensity = 0.3;
+  if (affectionate) intensity = Math.max(intensity, 0.42);
+  if (hungry || bored) intensity = Math.max(intensity, 0.46);
+  if (memoryIssues > 0) intensity = Math.max(intensity, 0.38 + memoryLoad / 20);
+  if (providerWarnings > 0) intensity = Math.max(intensity, 0.52);
+  if (runtimeActive) intensity = Math.max(intensity, 0.72);
+  if (serious) intensity = Math.max(intensity, 0.92);
+  if (sleeping && !serious) intensity = Math.min(intensity, 0.32);
+
+  return {
+    phase: args.phase,
+    mood,
+    primaryWeather: args.primaryWeather,
+    layers,
+    intensity: clamp01(intensity),
+    paletteHint: serious
+      ? "storm"
+      : sleeping
+        ? "dream"
+        : phasePaletteHint(args.phase),
+    serious,
+  };
+}
+
 export function buildBuddyWorldState(args: {
   now: Date;
   pulse: BuddyPulse | null | undefined;
   pet: BuddyPetState | undefined;
   nowPlaying: BuddyRuntimeEvent | null;
   activeQuest: BuddyQuest | null;
+  semanticState?: BuddySemanticState;
 }): BuddyWorldState {
   const phase = phaseFromHour(args.now.getHours());
   const phaseInfo = phaseDetails(phase);
+  const nowMs = args.now.getTime();
+  const visibleRuntime = visibleRuntimeEvent(args.nowPlaying, nowMs);
   const weatherInfo = weatherFromState(
     phase,
     args.pulse,
     args.pet,
-    args.nowPlaying,
-    args.now.getTime(),
+    visibleRuntime,
   );
   const vitalityInfo = vitalityFromPulse(args.pulse);
-  const objects = buildObjects(args.pulse);
+  const objects = buildObjects(args.pulse, visibleRuntime);
+  const atmosphere = buildAtmosphere({
+    phase,
+    primaryWeather: weatherInfo.weather,
+    pulse: args.pulse,
+    pet: args.pet,
+    visibleRuntime,
+    semanticState: args.semanticState,
+    nowMs,
+  });
   const questText = args.activeQuest
     ? ` Quest active: ${args.activeQuest.title}.`
     : "";
@@ -393,6 +901,7 @@ export function buildBuddyWorldState(args: {
     ...weatherInfo,
     ...vitalityInfo,
     objects,
+    atmosphere,
     headline:
       `${phaseInfo.phaseMessage} ${weatherInfo.weatherDescription}${questText}`.trim(),
   };
