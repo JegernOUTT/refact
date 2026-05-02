@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -217,7 +218,12 @@ impl MemoryLifecycleOp {
     }
 
     pub fn normalized(mut self) -> Self {
+        self.op_id = self.op_id.trim().to_string();
+        self.created_at = self.created_at.trim().to_string();
+        self.idempotency_key = self.idempotency_key.trim().to_string();
         self.target_paths = normalize_paths(&self.target_paths);
+        self.applied_at = normalize_optional_string(self.applied_at.as_deref());
+        self.error = normalize_optional_string(self.error.as_deref());
         if self.idempotency_key.trim().is_empty() {
             self.idempotency_key = compute_idempotency_key(&MemoryOpIdempotencyInput {
                 source: self.source,
@@ -233,6 +239,143 @@ impl MemoryLifecycleOp {
         }
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MemoryOpsRecord {
+    Op { op: MemoryLifecycleOp },
+}
+
+impl MemoryOpsRecord {
+    pub fn into_op(self) -> MemoryLifecycleOp {
+        match self {
+            Self::Op { op } => op,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryOpsState {
+    pub ops: Vec<MemoryLifecycleOp>,
+    pub total_records: u32,
+    pub malformed_lines: u32,
+    pub pending_count: u32,
+    pub approved_count: u32,
+    pub applied_count: u32,
+    pub rejected_count: u32,
+    pub failed_count: u32,
+    pub skipped_count: u32,
+}
+
+impl MemoryOpsState {
+    pub fn from_records(records: impl IntoIterator<Item = MemoryOpsRecord>) -> Self {
+        Self::from_records_with_malformed(records, 0)
+    }
+
+    pub fn from_records_with_malformed(
+        records: impl IntoIterator<Item = MemoryOpsRecord>,
+        malformed_lines: u32,
+    ) -> Self {
+        let mut ops: Vec<MemoryLifecycleOp> = Vec::new();
+        let mut op_id_index: HashMap<String, usize> = HashMap::new();
+        let mut idempotency_index: HashMap<String, usize> = HashMap::new();
+        let mut total_records = 0u32;
+
+        for record in records {
+            total_records = total_records.saturating_add(1);
+            let op = record.into_op().normalized();
+            let existing_index = nonempty_key(&op.idempotency_key)
+                .and_then(|key| idempotency_index.get(key).copied())
+                .or_else(|| nonempty_key(&op.op_id).and_then(|key| op_id_index.get(key).copied()));
+
+            match existing_index {
+                Some(index) => {
+                    if let Some(old) = ops.get(index).cloned() {
+                        remove_indexed_key(&mut op_id_index, &old.op_id, index);
+                        remove_indexed_key(&mut idempotency_index, &old.idempotency_key, index);
+                    }
+                    ops[index] = op.clone();
+                    insert_op_indexes(&op, index, &mut op_id_index, &mut idempotency_index);
+                }
+                None => {
+                    let index = ops.len();
+                    insert_op_indexes(&op, index, &mut op_id_index, &mut idempotency_index);
+                    ops.push(op);
+                }
+            }
+        }
+
+        let mut state = Self {
+            ops,
+            total_records,
+            malformed_lines,
+            ..Self::default()
+        };
+        state.recount();
+        state
+    }
+
+    pub fn canonical_records(&self) -> Vec<MemoryOpsRecord> {
+        self.ops
+            .iter()
+            .cloned()
+            .map(|op| MemoryOpsRecord::Op { op })
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    fn recount(&mut self) {
+        self.pending_count = 0;
+        self.approved_count = 0;
+        self.applied_count = 0;
+        self.rejected_count = 0;
+        self.failed_count = 0;
+        self.skipped_count = 0;
+
+        for op in &self.ops {
+            match op.status {
+                MemoryOpStatus::Pending => self.pending_count += 1,
+                MemoryOpStatus::Approved => self.approved_count += 1,
+                MemoryOpStatus::Applied => self.applied_count += 1,
+                MemoryOpStatus::Rejected => self.rejected_count += 1,
+                MemoryOpStatus::Failed => self.failed_count += 1,
+                MemoryOpStatus::Skipped => self.skipped_count += 1,
+            }
+        }
+    }
+}
+
+fn insert_op_indexes(
+    op: &MemoryLifecycleOp,
+    index: usize,
+    op_id_index: &mut HashMap<String, usize>,
+    idempotency_index: &mut HashMap<String, usize>,
+) {
+    if let Some(key) = nonempty_key(&op.op_id) {
+        op_id_index.insert(key.to_string(), index);
+    }
+    if let Some(key) = nonempty_key(&op.idempotency_key) {
+        idempotency_index.insert(key.to_string(), index);
+    }
+}
+
+fn remove_indexed_key(index: &mut HashMap<String, usize>, key: &str, expected_index: usize) {
+    let Some(key) = nonempty_key(key) else {
+        return;
+    };
+    if index.get(key) == Some(&expected_index) {
+        index.remove(key);
+    }
+}
+
+fn nonempty_key(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -585,6 +728,20 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
+    fn test_op(op_id: &str, evidence: &str, status: MemoryOpStatus) -> MemoryLifecycleOp {
+        let mut op = MemoryLifecycleOp::pending(
+            op_id,
+            MemorySource::MemoryGarden,
+            MemoryOpType::CreateMemory,
+            strings(&[".refact/knowledge/item.md"]),
+            evidence,
+            0.91,
+            "2026-05-02T00:00:00Z",
+        );
+        op.status = status;
+        op
+    }
+
     #[test]
     fn serde_roundtrip_every_source_op_and_status_variant() {
         let sources = [
@@ -774,5 +931,56 @@ mod tests {
             ),
             "2026-06-01"
         );
+    }
+
+    #[test]
+    fn memory_ops_state_preserves_first_seen_order() {
+        let first = test_op("op-1", "first", MemoryOpStatus::Pending);
+        let second = test_op("op-2", "second", MemoryOpStatus::Approved);
+        let state = MemoryOpsState::from_records(vec![
+            MemoryOpsRecord::Op { op: first.clone() },
+            MemoryOpsRecord::Op { op: second.clone() },
+        ]);
+
+        assert_eq!(state.ops, vec![first.normalized(), second.normalized()]);
+        assert_eq!(state.pending_count, 1);
+        assert_eq!(state.approved_count, 1);
+    }
+
+    #[test]
+    fn memory_ops_state_duplicate_idempotency_key_uses_latest_slot() {
+        let first = test_op("op-1", "same", MemoryOpStatus::Pending);
+        let mut second = test_op("op-2", "same", MemoryOpStatus::Applied);
+        second.idempotency_key = first.idempotency_key.clone();
+
+        let state = MemoryOpsState::from_records(vec![
+            MemoryOpsRecord::Op { op: first },
+            MemoryOpsRecord::Op { op: second.clone() },
+        ]);
+
+        assert_eq!(state.ops.len(), 1);
+        assert_eq!(state.ops[0].op_id, "op-2");
+        assert_eq!(state.ops[0].status, MemoryOpStatus::Applied);
+        assert_eq!(state.applied_count, 1);
+    }
+
+    #[test]
+    fn memory_ops_state_compaction_records_latest_per_op_and_key() {
+        let first = test_op("op-1", "first", MemoryOpStatus::Pending);
+        let mut second = first.clone();
+        second.status = MemoryOpStatus::Failed;
+        second.error = Some("write failed".to_string());
+        let third = test_op("op-2", "second", MemoryOpStatus::Applied);
+
+        let state = MemoryOpsState::from_records(vec![
+            MemoryOpsRecord::Op { op: first },
+            MemoryOpsRecord::Op { op: second.clone() },
+            MemoryOpsRecord::Op { op: third.clone() },
+        ]);
+        let compacted = MemoryOpsState::from_records(state.canonical_records());
+
+        assert_eq!(compacted.ops, vec![second.normalized(), third.normalized()]);
+        assert_eq!(compacted.failed_count, 1);
+        assert_eq!(compacted.applied_count, 1);
     }
 }

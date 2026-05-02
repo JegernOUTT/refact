@@ -15,6 +15,7 @@ use super::drafts::{
 use super::events::BuddyEvent;
 use super::facts::FactStore;
 use super::humor::{HumorPlan, HumorService};
+use super::memory_lifecycle::MemoryOpsState;
 use super::observers::{build_observer_registry, BuddyObserver, ObserverContext};
 use super::opportunities::{primary_fact_kind_for_opportunity, OpportunityDetector, OpportunityQueue};
 use super::policy::{evaluate, PolicyDecision};
@@ -186,6 +187,7 @@ pub struct BuddyService {
     pub project_root: std::path::PathBuf,
     pub last_suggestion_at: Option<Instant>,
     pub recent_diagnostics: Vec<super::diagnostics::DiagnosticContext>,
+    pub memory_ops: MemoryOpsState,
     pub last_issue_at: Option<Instant>,
     pub recent_issue_errors: Vec<(String, DateTime<Utc>)>,
     pub runtime_queue: RuntimeQueue,
@@ -237,6 +239,7 @@ impl BuddyService {
             events_tx,
             last_suggestion_at: None,
             recent_diagnostics,
+            memory_ops: MemoryOpsState::default(),
             last_issue_at: None,
             recent_issue_errors: Vec::new(),
             runtime_queue,
@@ -281,6 +284,8 @@ impl BuddyService {
         let opportunities = self.opportunity_queue.snapshot();
         let mut state = self.state.clone();
         state.opportunities = opportunities.clone();
+        let mut pulse = self.pulse.clone();
+        self.apply_memory_ops_to_pulse(&mut pulse);
         BuddySnapshot {
             state,
             settings: self.settings.clone(),
@@ -289,7 +294,7 @@ impl BuddyService {
             runtime_queue: self.runtime_queue.items.iter().cloned().collect(),
             now_playing: self.runtime_queue.now_playing.clone(),
             active_speech: self.active_speech.clone(),
-            pulse: self.pulse.clone(),
+            pulse,
             opportunities,
             active_drafts: self.draft_store.snapshot(),
         }
@@ -390,8 +395,16 @@ impl BuddyService {
     }
 
     pub fn set_pulse(&mut self, pulse: BuddyPulse) {
+        let mut pulse = pulse;
+        self.apply_memory_ops_to_pulse(&mut pulse);
         self.pulse = pulse.clone();
         let _ = self.events_tx.send(BuddyEvent::PulseUpdated { pulse });
+    }
+
+    fn apply_memory_ops_to_pulse(&self, pulse: &mut BuddyPulse) {
+        pulse.memory.pending_ops = self.memory_ops.pending_count + self.memory_ops.approved_count;
+        pulse.memory.applied_ops = self.memory_ops.applied_count;
+        pulse.memory.failed_ops = self.memory_ops.failed_count;
     }
 
     pub fn create_draft(
@@ -1319,6 +1332,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
     let state = super::state::load_state(&project_root).await;
     let settings = super::settings::load_settings(&project_root).await;
     let recent_diagnostics = load_diagnostics_for_service(&project_root).await;
+    let memory_ops = super::storage::load_memory_ops(&project_root).await;
     let runtime_queue = super::storage::load_runtime_queue(&project_root).await;
 
     let events_tx = gcx
@@ -1336,7 +1350,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
         run_runtime_queue_writer(writer_root, queue_rx).await;
     });
 
-    let service = BuddyService::new(
+    let mut service = BuddyService::new(
         project_root.clone(),
         state,
         settings,
@@ -1345,6 +1359,7 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
         events_tx,
         Some(queue_tx),
     );
+    service.memory_ops = memory_ops;
 
     let buddy_arc = gcx.read().await.buddy.clone();
     *buddy_arc.lock().await = Some(service);

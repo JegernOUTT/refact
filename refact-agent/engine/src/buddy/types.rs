@@ -632,6 +632,12 @@ pub struct MemoryPulse {
     pub total: u32,
     pub orphan: u32,
     pub stale_conflicts: u32,
+    #[serde(default)]
+    pub pending_ops: u32,
+    #[serde(default)]
+    pub applied_ops: u32,
+    #[serde(default)]
+    pub failed_ops: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

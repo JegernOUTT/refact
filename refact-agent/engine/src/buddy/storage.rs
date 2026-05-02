@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
 use super::diagnostics::DiagnosticContext;
+use super::memory_lifecycle::{MemoryLifecycleOp, MemoryOpsRecord, MemoryOpsState};
 use super::runtime_queue::RuntimeQueue;
 use super::state::default_buddy_state;
 use super::types::BuddyRuntimeEvent;
@@ -52,6 +53,10 @@ fn diagnostics_history_path(project_root: &Path) -> PathBuf {
 
 fn runtime_queue_path(project_root: &Path) -> PathBuf {
     project_root.join(".refact/buddy/runtime_queue.jsonl")
+}
+
+fn memory_ops_path(project_root: &Path) -> PathBuf {
+    project_root.join(".refact/buddy/memory_ops.jsonl")
 }
 
 /// Append-only persistence: every mutation writes one JSON record. The caller
@@ -205,6 +210,111 @@ pub async fn compact_runtime_queue(
         .map_err(|e| format!("Failed to rename {:?} to {:?}: {}", tmp, path, e))
 }
 
+#[allow(dead_code)]
+pub async fn enqueue_memory_op(
+    project_root: &Path,
+    op: MemoryLifecycleOp,
+) -> Result<MemoryOpsState, String> {
+    let path = memory_ops_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to create dir {:?}: {}", parent, e))?;
+    }
+    let record = MemoryOpsRecord::Op {
+        op: op.normalized(),
+    };
+    let line = format!(
+        "{}\n",
+        serde_json::to_string(&record)
+            .map_err(|e| format!("Failed to serialize memory op record: {}", e))?
+    );
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await
+        .map_err(|e| format!("Failed to open memory ops queue {:?}: {}", path, e))?;
+    file.write_all(line.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to append memory ops queue {:?}: {}", path, e))?;
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed to flush memory ops queue {:?}: {}", path, e))?;
+    Ok(load_memory_ops(project_root).await)
+}
+
+pub async fn load_memory_ops(project_root: &Path) -> MemoryOpsState {
+    let path = memory_ops_path(project_root);
+    let content = match fs::read_to_string(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == ErrorKind::NotFound => return MemoryOpsState::default(),
+        Err(err) => {
+            warn!(
+                "buddy: failed to read memory ops queue at {:?}: {}, starting empty",
+                path, err
+            );
+            return MemoryOpsState::default();
+        }
+    };
+
+    let mut records = Vec::new();
+    let mut malformed_lines = 0u32;
+    for (idx, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<MemoryOpsRecord>(line) {
+            Ok(record) => records.push(record),
+            Err(err) => {
+                malformed_lines = malformed_lines.saturating_add(1);
+                warn!(
+                    "buddy: failed to parse memory ops queue line {} in {:?}: {}",
+                    idx + 1,
+                    path,
+                    err
+                );
+            }
+        }
+    }
+    MemoryOpsState::from_records_with_malformed(records, malformed_lines)
+}
+
+#[allow(dead_code)]
+pub async fn compact_memory_ops(project_root: &Path) -> Result<MemoryOpsState, String> {
+    let state = load_memory_ops(project_root).await;
+    let path = memory_ops_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to create dir {:?}: {}", parent, e))?;
+    }
+
+    let mut buf = String::new();
+    for record in state.canonical_records() {
+        let line = serde_json::to_string(&record)
+            .map_err(|e| format!("Failed to serialize memory op record: {}", e))?;
+        buf.push_str(&line);
+        buf.push('\n');
+    }
+
+    let tmp = path.with_extension("jsonl.tmp");
+    fs::write(&tmp, &buf)
+        .await
+        .map_err(|e| format!("Failed to write {:?}: {}", tmp, e))?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(&path)
+            .await
+            .map_err(|e| format!("Failed to remove existing file: {}", e))?;
+    }
+    fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| format!("Failed to rename {:?} to {:?}: {}", tmp, path, e))?;
+    Ok(state)
+}
+
 pub async fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> Result<(), String> {
     let tmp_path = path.with_extension("json.tmp");
     let json = serde_json::to_string(data).map_err(|e| e.to_string())?;
@@ -342,4 +452,119 @@ pub async fn bootstrap_buddy_storage(project_root: &Path) -> Result<(), String> 
             .map_err(|e| format!("Failed to write main_prompt.md: {}", e))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buddy::memory_lifecycle::{
+        MemoryLifecycleOp, MemoryOpStatus, MemoryOpType, MemorySource,
+    };
+
+    fn test_op(op_id: &str, evidence: &str, status: MemoryOpStatus) -> MemoryLifecycleOp {
+        let mut op = MemoryLifecycleOp::pending(
+            op_id,
+            MemorySource::MemoryGarden,
+            MemoryOpType::CreateMemory,
+            vec![".refact/knowledge/item.md".to_string()],
+            evidence,
+            0.91,
+            "2026-05-02T00:00:00Z",
+        );
+        op.status = status;
+        op
+    }
+
+    #[tokio::test]
+    async fn memory_ops_enqueue_then_replay_preserves_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let first = test_op("op-1", "first", MemoryOpStatus::Pending);
+        let second = test_op("op-2", "second", MemoryOpStatus::Approved);
+
+        enqueue_memory_op(root, first.clone()).await.unwrap();
+        enqueue_memory_op(root, second.clone()).await.unwrap();
+        let state = load_memory_ops(root).await;
+
+        assert_eq!(state.ops, vec![first.normalized(), second.normalized()]);
+        assert_eq!(state.pending_count, 1);
+        assert_eq!(state.approved_count, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_ops_malformed_line_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = memory_ops_path(root);
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        let valid = MemoryOpsRecord::Op {
+            op: test_op("op-1", "first", MemoryOpStatus::Pending),
+        };
+        let content = format!(
+            "not json\n{}\n{{\"kind\":\"op\",\"op\":\n",
+            serde_json::to_string(&valid).unwrap()
+        );
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let state = load_memory_ops(root).await;
+
+        assert_eq!(state.ops.len(), 1);
+        assert_eq!(state.ops[0].op_id, "op-1");
+        assert_eq!(state.malformed_lines, 2);
+    }
+
+    #[tokio::test]
+    async fn memory_ops_duplicate_idempotency_key_is_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let first = test_op("op-1", "same", MemoryOpStatus::Pending);
+        let mut second = test_op("op-2", "same", MemoryOpStatus::Applied);
+        second.idempotency_key = first.idempotency_key.clone();
+        second.applied_at = Some("2026-05-02T00:01:00Z".to_string());
+
+        enqueue_memory_op(root, first).await.unwrap();
+        enqueue_memory_op(root, second.clone()).await.unwrap();
+        let state = load_memory_ops(root).await;
+
+        assert_eq!(state.ops.len(), 1);
+        assert_eq!(state.ops[0], second.normalized());
+        assert_eq!(state.applied_count, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_ops_compaction_leaves_latest_status_per_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let first = test_op("op-1", "same", MemoryOpStatus::Pending);
+        let mut second = test_op("op-2", "same", MemoryOpStatus::Failed);
+        second.idempotency_key = first.idempotency_key.clone();
+        second.error = Some("apply failed".to_string());
+        let third = test_op("op-3", "other", MemoryOpStatus::Applied);
+
+        enqueue_memory_op(root, first).await.unwrap();
+        enqueue_memory_op(root, second.clone()).await.unwrap();
+        enqueue_memory_op(root, third.clone()).await.unwrap();
+        let compacted = compact_memory_ops(root).await.unwrap();
+        let replayed = load_memory_ops(root).await;
+        let content = tokio::fs::read_to_string(memory_ops_path(root)).await.unwrap();
+
+        assert_eq!(compacted.ops, vec![second.normalized(), third.normalized()]);
+        assert_eq!(replayed.ops, compacted.ops);
+        assert_eq!(content.lines().count(), 2);
+        assert_eq!(replayed.failed_count, 1);
+        assert_eq!(replayed.applied_count, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_ops_missing_queue_is_empty_and_compactable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let loaded = load_memory_ops(root).await;
+        let compacted = compact_memory_ops(root).await.unwrap();
+
+        assert!(loaded.is_empty());
+        assert!(compacted.is_empty());
+        assert_eq!(tokio::fs::read_to_string(memory_ops_path(root)).await.unwrap(), "");
+    }
 }
