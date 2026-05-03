@@ -265,6 +265,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   now,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animationStartMsRef = useRef<number | null>(null);
   const [currentTime, setCurrentTime] = useState(() => now ?? new Date());
   const [reaction, setReaction] = useState<string | null>(null);
   const [activeWaypointIndex, setActiveWaypointIndex] = useState(0);
@@ -415,6 +416,23 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     compact,
     speechOverride,
   );
+  const renderStateRef = useRef({
+    compact,
+    palette,
+    reducedMotion,
+    showcaseRun,
+    world,
+  });
+
+  useEffect(() => {
+    renderStateRef.current = {
+      compact,
+      palette,
+      reducedMotion,
+      showcaseRun,
+      world,
+    };
+  }, [compact, palette, reducedMotion, showcaseRun, world]);
 
   useEffect(() => {
     setActiveWaypointIndex(0);
@@ -681,15 +699,17 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   ]);
 
   useEffect(() => {
-    let frame = 0;
     let raf = 0;
-    const render = () => {
+    const render = (timestampMs: number) => {
       if (document.hidden) {
         raf = window.requestAnimationFrame(render);
         return;
       }
 
-      frame += 1;
+      animationStartMsRef.current ??= timestampMs;
+      const frame = ((timestampMs - animationStartMsRef.current) / 1000) * 24;
+      const { compact, palette, reducedMotion, showcaseRun, world } =
+        renderStateRef.current;
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
       if (canvas && ctx) {
@@ -734,8 +754,11 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       raf = window.requestAnimationFrame(render);
     };
     raf = window.requestAnimationFrame(render);
-    return () => window.cancelAnimationFrame(raf);
-  }, [compact, palette, reducedMotion, showcaseRun, world]);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      animationStartMsRef.current = null;
+    };
+  }, []);
 
   const handleCelestialClick = () => {
     if (!showcaseRun) {

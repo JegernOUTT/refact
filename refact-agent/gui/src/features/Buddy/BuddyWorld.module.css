@@ -168,27 +168,39 @@
 }
 
 .characterBody[data-pose="spin"] {
-  animation: buddySceneSpin 1.4s ease-in-out;
+  animation: buddySceneSpin 2.8s ease-in-out;
 }
 
 .characterBody[data-pose="bounce"] {
-  animation: buddySceneBounce 1.8s ease-in-out;
+  animation: buddySceneBounce 3.6s ease-in-out;
 }
 
 .characterBody[data-pose="look"] {
-  animation: buddySceneLook 2.2s ease-in-out;
+  animation: buddySceneLook 4.4s ease-in-out;
+}
+
+.characterBody[data-pose="stargaze"],
+.characterBody[data-pose="meditate"],
+.characterBody[data-pose="cheer"],
+.characterBody[data-pose="pounce"],
+.characterBody[data-pose="dance"],
+.characterBody[data-pose="shield"],
+.characterBody[data-pose="carry"],
+.characterBody[data-pose="dig"],
+.characterBody[data-pose="sleepy"] {
+  transition: transform 1.2s ease;
 }
 
 .characterBody[data-pose="stargaze"] {
-  animation: buddySceneStargaze 5.2s ease-in-out infinite;
+  transform: translateY(-4px) rotate(-1.5deg);
 }
 
 .characterBody[data-pose="meditate"] {
-  animation: buddySceneMeditate 5.8s ease-in-out infinite;
+  transform: translateY(-5px) scale(1.012);
 }
 
 .characterBody[data-pose="cheer"] {
-  animation: buddySceneCheer 1.9s ease-in-out infinite;
+  transform: translateY(-5px) rotate(-1deg);
 }
 
 .characterBody[data-pose="pounce"],
@@ -197,7 +209,7 @@
 .characterBody[data-pose="carry"],
 .characterBody[data-pose="dig"],
 .characterBody[data-pose="sleepy"] {
-  animation: buddyScenePoseSoft 4.8s ease-in-out infinite;
+  transform: translateY(-3px);
 }
 
 .characterBody[data-pose="sleepy"] {

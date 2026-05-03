@@ -297,7 +297,7 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
     const offset = (x * 17) % 43;
     const clumpX = x + offset;
     const clumpY = baseY + 12 + ((x * 11) % 22);
-    const grassHeight = 4 + ((x + frame + offset) % 9);
+    const grassHeight = 8 + wave(frame, 64, x + offset, 4, args.reducedMotion);
     fillPixelRect(
       ctx,
       clumpX,
