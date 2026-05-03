@@ -4,11 +4,23 @@ strip = true
 opt-level = "z"
 lto = true
 
+[profile.ci-release]
+inherits = "release"
+strip = false
+lto = "thin"
+codegen-units = 16
+
 [package]
 name = "refact-lsp"
 version = "7.1.0"
 edition = "2021"
 build = "build.rs"
+
+[[bin]]
+name = "refact-lsp"
+path = "src/main.rs"
+test = false
+bench = false
 
 [features]
 default = ["voice"]
