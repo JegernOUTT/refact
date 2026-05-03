@@ -594,7 +594,7 @@ function buildObjects(
           sprite: "seed",
           label: "Project garden",
           value: "Warming up",
-          description: `${name} is waiting for a pulse snapshot.`
+          description: `${name} is waiting for a pulse snapshot.`,
           page: { type: "buddy" },
           tone: "neutral",
           x: 25,
