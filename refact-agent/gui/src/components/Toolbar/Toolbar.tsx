@@ -51,14 +51,15 @@ import {
   useAppDispatch,
   useAppSelector,
   useAppearance,
-  useConfig,
   useEventsBusForIDE,
+  useOpenUrl,
 } from "../../hooks";
 import { useGetChatModesQuery } from "../../services/refact/chatModes";
 
 import styles from "./Toolbar.module.css";
 import { ConnectionStatusIndicator } from "../ConnectionStatus";
 import { getModeColor } from "../../utils/modeColors";
+import { selectLspPort } from "../../features/Config/configSlice";
 
 export type DashboardTab = {
   type: "dashboard";
@@ -128,17 +129,18 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const dispatch = useAppDispatch();
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const activeTabRef = useRef<HTMLDivElement | null>(null);
-  const config = useConfig();
   const { isDarkMode, toggle: toggleDarkMode } = useAppearance();
+  const openUrl = useOpenUrl();
 
   const tabs = useAppSelector(selectTabsDisplayData);
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
+  const lspPort = useAppSelector(selectLspPort);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const { data: modesData } = useGetChatModesQuery(undefined);
   const { data: tasksList = [] } = useListTasksQuery(undefined);
 
-  const { openSettings, openHotKeys, openChatInNewTab } = useEventsBusForIDE();
+  const { openSettings, openHotKeys } = useEventsBusForIDE();
   const [createTask] = useCreateTaskMutation();
 
   const [renameState, setRenameState] = useState<{
@@ -215,20 +217,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   }, [createTask, dispatch]);
 
   const onOpenChatInBrowser = useCallback(() => {
-    if (config.host === "web") {
-      window.open(window.location.href, "_blank", "noopener,noreferrer");
-      return;
-    }
-
-    const currentThread = allThreads[currentChatId]?.thread;
-
-    if (currentThread) {
-      openChatInNewTab(currentThread);
-      return;
-    }
-
-    window.open(window.location.href, "_blank", "noopener,noreferrer");
-  }, [allThreads, config.host, currentChatId, openChatInNewTab]);
+    openUrl(`http://127.0.0.1:${lspPort}`);
+  }, [lspPort, openUrl]);
 
   const goToTab = useCallback(
     (tab: Tab) => {
