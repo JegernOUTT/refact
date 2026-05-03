@@ -3499,10 +3499,11 @@ mod tests {
         )
         .with_display("🌱", "Memory", "normal");
 
-        let activity = autonomous_activity(&spec, "buddy-chat-1");
+        let activity = autonomous_activity(&spec, "buddy-chat-1", "Buddy");
 
         assert_eq!(activity.activity_type, MEMORY_GARDENER_WORKFLOW_ID);
         assert_eq!(activity.chat_id.as_deref(), Some("buddy-chat-1"));
+        assert!(activity.description.contains("Buddy saved"));
     }
 
     #[test]
