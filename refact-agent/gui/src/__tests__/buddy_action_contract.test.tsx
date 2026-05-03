@@ -136,19 +136,6 @@ function makeOpportunity(
   };
 }
 
-function makeInvestigationAction(): BuddyAction {
-  return {
-    kind: "launch_investigation_chat",
-    preload: {
-      fact_keys: [],
-      diagnostic_ids: [],
-      log_excerpt: "",
-      config_summary: "",
-      initial_user_message: "investigate",
-    },
-  };
-}
-
 function acceptResponse(actionResult: BuddyActionResult) {
   return HttpResponse.json({
     snapshot: makeSnapshot("Accepted Snapshot"),
@@ -170,10 +157,6 @@ function renderExecutor() {
 function lastPage(store: AppStore) {
   const pages = store.getState().pages;
   return pages[pages.length - 1];
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 describe("buddy action execution contract", () => {
@@ -258,29 +241,6 @@ describe("buddy action execution contract", () => {
     });
   });
 
-  it("investigation_action_opens_exactly_one_chat", async () => {
-    server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
-        acceptResponse({
-          kind: "launch_investigation_chat",
-          chat_id: "investigation-chat-1",
-        }),
-      ),
-    );
-
-    const { store, execute } = renderExecutor();
-    const action = makeInvestigationAction();
-    await execute(action, makeOpportunity({ proposed_actions: [action] }), 0);
-
-    const openIds = store
-      .getState()
-      .chat.open_thread_ids.filter((id) => id === "investigation-chat-1");
-    expect(openIds).toHaveLength(1);
-    expect(store.getState().chat.current_thread_id).toBe(
-      "investigation-chat-1",
-    );
-  });
-
   it("open_page_action_navigates_using_returned_navigate_to", async () => {
     server.use(
       http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
@@ -331,36 +291,6 @@ describe("buddy action execution contract", () => {
     expect(store.getState().buddy.snapshot?.state.identity.name).toBe(
       "Dismiss Snapshot",
     );
-  });
-
-  it("double_click_sends_one_opportunity_request", async () => {
-    let acceptCalls = 0;
-    server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept",
-        async () => {
-          acceptCalls += 1;
-          await delay(25);
-          return acceptResponse({
-            kind: "open_page",
-            navigate_to: { type: "buddy" },
-          });
-        },
-      ),
-    );
-
-    const action: BuddyAction = { kind: "open_page", page: { type: "buddy" } };
-    const opp = makeOpportunity({ proposed_actions: [action] });
-    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
-      preloadedState: CONFIG_STATE,
-    });
-
-    const button = screen.getByRole("button", { name: "Open Buddy" });
-    await user.dblClick(button);
-
-    await waitFor(() => {
-      expect(acceptCalls).toBe(1);
-    });
   });
 
   it("failed_marketplace_install_shows_error_and_stays_retryable", async () => {

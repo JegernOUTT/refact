@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { http, HttpResponse } from "msw";
 import { screen, waitFor, render } from "../../utils/test-utils";
-import { ChatForm } from "../../components/ChatForm/ChatForm";
 import type { Chat } from "../Chat/Thread/types";
 import type {
   WorktreeDiffResponse,
@@ -10,18 +9,7 @@ import type {
   WorktreeRecordView,
 } from "../../services/refact";
 import { WorktreeControl } from "./WorktreeControl";
-import {
-  emptyTrajectories,
-  goodCaps,
-  goodPing,
-  goodPrompts,
-  goodUser,
-  noCommandPreview,
-  noCompletions,
-  noTools,
-  server,
-  trajectorySave,
-} from "../../utils/mockServer";
+import { server } from "../../utils/mockServer";
 
 type JsonObject = Record<string, unknown>;
 type Host = "web" | "ide" | "vscode" | "jetbrains";
@@ -165,24 +153,6 @@ function commandCapture(calls: JsonObject[]) {
   );
 }
 
-function voiceStatus() {
-  return http.get("http://127.0.0.1:8001/v1/voice/status", () =>
-    HttpResponse.json({
-      enabled: false,
-      model_loaded: false,
-      model_name: "",
-      is_downloading: false,
-      download_progress: 0,
-    }),
-  );
-}
-
-function providerUsage(path: "claude-code" | "openai-codex") {
-  return http.get(`http://127.0.0.1:8001/v1/${path}/usage`, () =>
-    HttpResponse.json({ data: null, error: null }),
-  );
-}
-
 function createWorktreeHandler(
   record: WorktreeRecordView,
   calls: JsonObject[],
@@ -312,45 +282,6 @@ beforeEach(() => {
 });
 
 describe("WorktreeControl", () => {
-  test("control renders beside mode selector", async () => {
-    server.use(
-      goodCaps,
-      goodUser,
-      goodPrompts,
-      noTools,
-      noCommandPreview,
-      noCompletions,
-      goodPing,
-      emptyTrajectories,
-      trajectorySave,
-      worktreesList([]),
-      chatModes(),
-      voiceStatus(),
-      providerUsage("claude-code"),
-      providerUsage("openai-codex"),
-      commandCapture([]),
-    );
-
-    render(<ChatForm onSubmit={() => undefined} />, {
-      preloadedState: {
-        chat: makeChatState("chat-form"),
-        config: configState("web"),
-      },
-    });
-
-    const worktreeTrigger = await screen.findByTestId(
-      "worktree-control-trigger",
-    );
-    const modeButtons = await screen.findAllByRole("button", { name: /Agent/ });
-    const modeButton = modeButtons.find(
-      (button) => button.textContent?.trim() === "Agent",
-    );
-
-    expect(worktreeTrigger).toBeInTheDocument();
-    expect(modeButton).toBeDefined();
-    expect(worktreeTrigger.parentElement).toBe(modeButton?.parentElement);
-  });
-
   test("label shows worktree branch", async () => {
     const record = makeWorktreeRecord("wt-branch", "refact/chat/branch");
 

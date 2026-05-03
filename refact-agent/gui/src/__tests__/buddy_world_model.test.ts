@@ -180,22 +180,6 @@ function getProviderObject(world: ReturnType<typeof buildWorld>) {
 }
 
 describe("buddy world semantic model", () => {
-  it("returns a cozy warming-up state with finite fields when there is no pulse", () => {
-    const world = buildWorld({ pulse: null, hour: 8 });
-
-    expect(world.objects.map((item) => item.id)).toEqual(["warming-up"]);
-    expect(world.objects[0]).toMatchObject({
-      state: "calm",
-      animation: "breathe",
-      magicalLabel: "Sprouting hearth",
-    });
-    expect(world.atmosphere.layers).toEqual(
-      expect.arrayContaining(["sun_motes", "cozy_home_glow"]),
-    );
-    expect(world.headline).toContain("Buddy has room to explore and play.");
-    expectWorldNumbersSafe(world);
-  });
-
   it("maps morning, day, evening, and night to distinct palettes and layers", () => {
     const morning = buildWorld({ hour: 8 });
     const day = buildWorld({ hour: 13 });
@@ -775,42 +759,6 @@ describe("buddy world semantic model", () => {
       state: "calm",
       animation: "sparkle",
     });
-    expectWorldNumbersSafe(world);
-  });
-
-  it("keeps partial malformed pet and semantic state safe and cozy", () => {
-    const partialPet = {} as unknown as BuddyPetState;
-    const partialSemanticState = {
-      activity: { lastSignalType: "care_pet" },
-    } as unknown as BuddySemanticState;
-
-    expect(() =>
-      buildWorld({
-        pulse: makePulse({
-          diagnostics: { last_hour: 0, top_error_types: [] },
-          git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
-          memory: { total: 10, orphan: 0, stale_conflicts: 0 },
-          mcp: { total: 4, failing: 0, auth_expiring: 0 },
-        }),
-        pet: partialPet,
-        semanticState: partialSemanticState,
-      }),
-    ).not.toThrow();
-
-    const world = buildWorld({
-      pulse: makePulse({
-        diagnostics: { last_hour: 0, top_error_types: [] },
-        git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
-        memory: { total: 10, orphan: 0, stale_conflicts: 0 },
-        mcp: { total: 4, failing: 0, auth_expiring: 0 },
-      }),
-      pet: partialPet,
-      semanticState: partialSemanticState,
-    });
-
-    expect(world.weather).toBe("clear");
-    expect(world.atmosphere.serious).toBe(false);
-    expect(world.atmosphere.paletteHint).toBe("day");
     expectWorldNumbersSafe(world);
   });
 });

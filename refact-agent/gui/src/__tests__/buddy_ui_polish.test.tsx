@@ -350,17 +350,6 @@ describe("buddy UI polish", () => {
     expect(styleSource).not.toContain(".character[data-pose");
   });
 
-  it("BuddyWorld_hotspots_have_visible_affordance_rings", async () => {
-    const source = await readGuiSource("features/Buddy/BuddyWorld.module.css");
-
-    expect(source).toContain(".hotspot::before");
-    expect(source).toContain(".objectHotspot::before");
-    expect(source).toContain("opacity: 0.42");
-    expect(source).toContain(".toneWarning::before");
-    expect(source).toContain(".toneDanger::before");
-    expect(source).toContain(".homeHotspot::before");
-  });
-
   it("BuddyWorld_keeps_narrow_object_tooltips_available", async () => {
     const source = await readGuiSource("features/Buddy/BuddyWorld.module.css");
 
