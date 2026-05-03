@@ -57,6 +57,13 @@ fn internal_error<E: Display>(err: E) -> Error {
     }
 }
 
+async fn notify_workspace_changed(gcx: &Arc<ARwLock<GlobalContext>>) {
+    let tx = gcx.read().await.workspace_changed_tx.clone();
+    if let Some(tx) = tx {
+        let _ = tx.send(());
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Choice {
     pub index: u32,
@@ -243,8 +250,10 @@ impl LanguageServer for LspBackend {
         }
 
         let gcx_clone = self.gcx.clone();
+        notify_workspace_changed(&gcx_clone).await;
         tokio::spawn(async move {
-            files_in_workspace::on_workspaces_init(gcx_clone).await;
+            files_in_workspace::on_workspaces_init(gcx_clone.clone()).await;
+            notify_workspace_changed(&gcx_clone).await;
         });
 
         let completion_options: CompletionOptions;
@@ -409,6 +418,7 @@ impl LanguageServer for LspBackend {
                     .to_string(),
             );
             files_in_workspace::add_folder(self.gcx.clone(), &path).await;
+            notify_workspace_changed(&self.gcx).await;
         }
         for folder in params.event.removed {
             info!("did_change_workspace_folders/delete {}", folder.name);
@@ -421,6 +431,7 @@ impl LanguageServer for LspBackend {
                     .to_string(),
             );
             files_in_workspace::remove_folder(self.gcx.clone(), &path).await;
+            notify_workspace_changed(&self.gcx).await;
         }
     }
 
