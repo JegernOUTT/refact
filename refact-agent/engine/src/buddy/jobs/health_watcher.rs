@@ -107,6 +107,7 @@ impl BuddyJob for HealthWatcherJob {
                 description: format!("Health check passed — {}", title),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 activity_type: "health".to_string(),
+                chat_id: None,
             })
         } else {
             None

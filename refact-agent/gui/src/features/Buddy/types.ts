@@ -547,6 +547,7 @@ export interface BuddyActivityEntry {
   description: string;
   timestamp: string;
   activity_type: string;
+  chat_id?: string | null;
 }
 
 export interface BuddySuggestion {

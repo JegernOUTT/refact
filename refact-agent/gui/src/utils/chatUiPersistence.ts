@@ -182,7 +182,7 @@ function normalizeChatTab(
 
 export function loadPersistedChatTabs(): PersistedChatTabsState {
   const record = readRecord(CHAT_TABS_STORAGE_KEY);
-  const openThreadIds = dedupeStrings(
+  const rawOpenThreadIds = dedupeStrings(
     stringArrayOrEmpty(record?.openThreadIds).slice(-MAX_OPEN_CHAT_TABS),
   );
   const rawTabs = Array.isArray(record?.tabs) ? record.tabs : [];
@@ -190,9 +190,10 @@ export function loadPersistedChatTabs(): PersistedChatTabsState {
 
   for (const rawTab of rawTabs) {
     const tab = normalizeChatTab(rawTab);
-    if (tab) tabsById.set(tab.id, tab);
+    if (tab && !tab.is_buddy_chat) tabsById.set(tab.id, tab);
   }
 
+  const openThreadIds = rawOpenThreadIds.filter((id) => tabsById.has(id));
   const tabs = openThreadIds.map(
     (id) => tabsById.get(id) ?? ({ id } satisfies PersistedChatTab),
   );
@@ -206,15 +207,17 @@ export function loadPersistedChatTabs(): PersistedChatTabsState {
 
 export function savePersistedChatTabs(input: PersistedChatTabsState): void {
   const existing = loadPersistedChatTabs();
-  const openThreadIds = dedupeStrings(
-    input.openThreadIds.slice(-MAX_OPEN_CHAT_TABS),
-  );
   const tabsById = new Map<string, PersistedChatTab>();
 
   for (const tab of input.tabs) {
-    tabsById.set(tab.id, tab);
+    if (!tab.is_buddy_chat) tabsById.set(tab.id, tab);
   }
 
+  const openThreadIds = dedupeStrings(
+    input.openThreadIds
+      .filter((id) => tabsById.has(id))
+      .slice(-MAX_OPEN_CHAT_TABS),
+  );
   const currentThreadId = openThreadIds.includes(input.currentThreadId)
     ? input.currentThreadId
     : openThreadIds.includes(existing.currentThreadId)

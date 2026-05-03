@@ -100,6 +100,7 @@ impl BuddyJob for StatsWatcherJob {
                     description: format!("{} workflows have finished successfully.", m),
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     activity_type: "milestone".to_string(),
+                    chat_id: None,
                 };
                 return BuddyJobResult {
                     speech: Some(speech),

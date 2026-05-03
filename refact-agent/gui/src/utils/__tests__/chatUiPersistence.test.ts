@@ -64,6 +64,43 @@ describe("chatUiPersistence", () => {
     });
   });
 
+  it("excludes Buddy chats from normal persisted chat tabs", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "buddy-a"],
+      currentThreadId: "buddy-a",
+      tabs: [
+        {
+          id: "chat-a",
+          title: "Research",
+          mode: "agent",
+          tool_use: "agent",
+        },
+        {
+          id: "buddy-a",
+          title: "Buddy report",
+          mode: "buddy",
+          tool_use: "agent",
+          is_buddy_chat: true,
+        },
+      ],
+    });
+
+    expect(loadPersistedChatTabs()).toEqual({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [
+        {
+          id: "chat-a",
+          title: "Research",
+          mode: "agent",
+          tool_use: "agent",
+          session_state: undefined,
+          is_buddy_chat: undefined,
+        },
+      ],
+    });
+  });
+
   it("persists the active toolbar tab", () => {
     savePersistedActiveTab({ type: "task", taskId: "task-1" });
     expect(loadPersistedActiveTab()).toEqual({

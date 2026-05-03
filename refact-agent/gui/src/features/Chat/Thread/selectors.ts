@@ -114,19 +114,22 @@ export const selectTabsDisplayData = createSelector(
     (state: RootState) => state.history.chats,
   ],
   (openIds, threads, historyChats): TabDisplayData[] =>
-    openIds.map((id) => {
+    openIds.flatMap((id) => {
       const runtime = threads[id];
+      if (runtime?.thread.buddy_meta?.is_buddy_chat) return [];
       const historyItem = historyChats[id] as
         | (typeof historyChats)[string]
         | undefined;
       const liveSessionState = deriveSessionStateFromRuntime(runtime);
-      return {
-        id,
-        title: runtime?.thread.title ?? historyItem?.title ?? "New Chat",
-        session_state: liveSessionState ?? historyItem?.session_state,
-        mode: runtime?.thread.mode ?? historyItem?.mode,
-        is_buddy_chat: !!runtime?.thread.buddy_meta?.is_buddy_chat,
-      };
+      return [
+        {
+          id,
+          title: runtime?.thread.title ?? historyItem?.title ?? "New Chat",
+          session_state: liveSessionState ?? historyItem?.session_state,
+          mode: runtime?.thread.mode ?? historyItem?.mode,
+          is_buddy_chat: false,
+        },
+      ];
     }),
 );
 

@@ -14,10 +14,12 @@ function formatTime(ts: string): string {
 
 interface BuddyActivityPanelProps {
   activities: BuddyActivityEntry[];
+  onOpenChat?: (chatId: string, title: string) => void;
 }
 
 export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
   activities,
+  onOpenChat,
 }) => (
   <div
     className={classNames(styles.panel, styles.panelScroll)}
@@ -36,6 +38,7 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
       )}
       {activities.map((a, i) => {
         const tooltip = a.description || a.title;
+        const canOpen = Boolean(a.chat_id && onOpenChat);
         return (
           <Tooltip
             key={`${a.activity_type}-${a.timestamp}-${i}`}
@@ -44,9 +47,19 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
           >
             <div
               className={styles.listRow}
+              data-clickable={canOpen ? "true" : undefined}
               tabIndex={0}
-              role="listitem"
-              aria-label={tooltip}
+              role={canOpen ? "button" : "listitem"}
+              aria-label={canOpen ? `${tooltip}. Open Buddy chat` : tooltip}
+              onClick={() => {
+                if (a.chat_id) onOpenChat?.(a.chat_id, a.title);
+              }}
+              onKeyDown={(event) => {
+                if (!a.chat_id || !onOpenChat) return;
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                onOpenChat(a.chat_id, a.title);
+              }}
             >
               <span className={styles.listIcon}>{a.icon}</span>
               <div className={styles.listContent}>

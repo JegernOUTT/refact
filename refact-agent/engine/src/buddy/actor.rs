@@ -709,6 +709,7 @@ impl BuddyService {
             description: format!("Buddy wrapped up '{title}' and earned a growth boost."),
             timestamp: Utc::now().to_rfc3339(),
             activity_type: "quest_completed".to_string(),
+            chat_id: None,
         });
         self.update_speech(BuddySpeechItem {
             id: format!("quest-complete-{}", quest.id),
@@ -1079,6 +1080,7 @@ impl BuddyService {
             description: redacted,
             timestamp: Utc::now().to_rfc3339(),
             activity_type: "error".to_string(),
+            chat_id: chat_id.map(|s| s.to_string()),
         });
         self.dirty = true;
     }

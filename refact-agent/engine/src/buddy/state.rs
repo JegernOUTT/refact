@@ -749,6 +749,7 @@ pub fn apply_care_action(
             description: message.clone(),
             timestamp: Utc::now().to_rfc3339(),
             activity_type: activity_type.to_string(),
+            chat_id: None,
         },
     );
 

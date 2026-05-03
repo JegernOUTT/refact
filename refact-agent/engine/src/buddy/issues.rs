@@ -482,6 +482,7 @@ pub async fn create_issue_via_mcp(
         description: format!("Auto-created issue: {}", text),
         timestamp: chrono::Utc::now().to_rfc3339(),
         activity_type: "issue_created".to_string(),
+        chat_id: None,
     };
     record_issue_success(gcx, prepared.dedupe_text, activity).await;
 
@@ -800,6 +801,7 @@ pub async fn create_issue(
         description: format!("Auto-created issue: {}", url),
         timestamp: chrono::Utc::now().to_rfc3339(),
         activity_type: "issue_created".to_string(),
+        chat_id: None,
     };
     record_issue_success(gcx, prepared.dedupe_text, activity.clone()).await;
     Ok((url, activity))

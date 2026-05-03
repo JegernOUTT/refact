@@ -103,6 +103,7 @@ where
             description: String::new(),
             timestamp: Utc::now().to_rfc3339(),
             activity_type: "workflow".to_string(),
+            chat_id: None,
         };
 
         let mut buddy = buddy_arc.lock().await;

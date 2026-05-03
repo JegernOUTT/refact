@@ -208,6 +208,7 @@ const createInitialState = (): Chat => {
   const threads: Chat["threads"] = {};
 
   for (const tab of persistedTabs.tabs) {
+    if (tab.is_buddy_chat) continue;
     threads[tab.id] = createPersistedThreadRuntime(tab, "agent");
   }
 
@@ -588,9 +589,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const { chat_id, title } = action.payload;
     const existingRt = getRuntime(state, chat_id);
     if (existingRt) {
-      if (!state.open_thread_ids.includes(chat_id)) {
-        state.open_thread_ids.push(chat_id);
-      }
       state.current_thread_id = chat_id;
       return;
     }
@@ -603,7 +601,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
     };
     if (title) newRuntime.thread.title = title;
     state.threads[chat_id] = newRuntime;
-    state.open_thread_ids.push(chat_id);
     state.current_thread_id = chat_id;
   });
 
@@ -611,9 +608,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const { chat_id } = action.payload;
     const existingRt = getRuntime(state, chat_id);
     if (existingRt) {
-      if (!state.open_thread_ids.includes(chat_id)) {
-        state.open_thread_ids.push(chat_id);
-      }
       state.current_thread_id = chat_id;
       return;
     }
@@ -625,7 +619,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       workflow_id: null,
     };
     state.threads[chat_id] = newRuntime;
-    state.open_thread_ids.push(chat_id);
     state.current_thread_id = chat_id;
   });
 

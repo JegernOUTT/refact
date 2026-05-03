@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import React from "react";
+import { fireEvent, render, screen } from "../utils/test-utils";
 import {
   executeBuddyAction,
   executeBuddyNavigation,
@@ -35,6 +37,7 @@ import {
   defaultBuddyPulse,
 } from "../features/Buddy/buddySlice";
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
+import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
 import {
   getSignalDef,
   PALETTES,
@@ -447,6 +450,30 @@ describe("recent chats", () => {
     const state = reducer(undefined, setBuddyConversations([]));
     expect(state.conversations).toEqual([]);
     expect(state.conversations).toHaveLength(0);
+  });
+});
+
+describe("BuddyActivityPanel", () => {
+  test("opens linked Buddy chat activity", () => {
+    const onOpenChat = vi.fn();
+    render(
+      React.createElement(BuddyActivityPanel, {
+        activities: [
+          makeActivity({
+            title: "Memory report saved",
+            chat_id: "buddy-chat-1",
+          }),
+        ],
+        onOpenChat,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /open buddy chat/i }));
+
+    expect(onOpenChat).toHaveBeenCalledWith(
+      "buddy-chat-1",
+      "Memory report saved",
+    );
   });
 });
 

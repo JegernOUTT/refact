@@ -426,6 +426,7 @@ fn autonomous_activity(spec: &AutonomousBuddyChatSpec, chat_id: &str) -> BuddyAc
         ),
         timestamp: Utc::now().to_rfc3339(),
         activity_type: spec.workflow_id.clone(),
+        chat_id: Some(chat_id.to_string()),
     }
 }
 
@@ -2032,6 +2033,7 @@ async fn execute_built_autonomous_job(
         ),
         timestamp: Utc::now().to_rfc3339(),
         activity_type: definition.meta.id.to_string(),
+        chat_id: Some(chat_id.clone()),
     };
     let mut runtime_event = make_runtime_event(
         "buddy_autonomous_chat",
@@ -3473,6 +3475,22 @@ mod tests {
         assert_eq!(dynamic.signal_hash, "hash-b");
         assert_eq!(dynamic.chat_id, "chat-b");
         assert!(!dynamic.completed_at.is_empty());
+    }
+
+    #[test]
+    fn autonomous_activity_links_to_generated_buddy_chat() {
+        let spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Memory Gardener",
+            "Review memory signals",
+            "memory evidence",
+        )
+        .with_display("🌱", "Memory", "normal");
+
+        let activity = autonomous_activity(&spec, "buddy-chat-1");
+
+        assert_eq!(activity.activity_type, MEMORY_GARDENER_WORKFLOW_ID);
+        assert_eq!(activity.chat_id.as_deref(), Some("buddy-chat-1"));
     }
 
     #[test]

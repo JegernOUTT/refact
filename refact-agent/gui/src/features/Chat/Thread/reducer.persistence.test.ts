@@ -8,7 +8,7 @@ describe("chatReducer persisted startup", () => {
     vi.resetModules();
   });
 
-  it("hydrates lightweight runtimes for persisted open tabs", async () => {
+  it("hydrates lightweight runtimes for persisted non-Buddy open tabs", async () => {
     vi.resetModules();
     vi.doMock(persistenceModulePath, async () => {
       const actual = await vi.importActual<
@@ -44,14 +44,12 @@ describe("chatReducer persisted startup", () => {
     const { chatReducer } = await import("./reducer");
     const state = chatReducer(undefined, { type: "@@INIT" });
 
-    expect(state.open_thread_ids).toEqual(["chat-a", "chat-b"]);
-    expect(state.current_thread_id).toBe("chat-b");
+    expect(state.open_thread_ids).toEqual(["chat-a"]);
+    expect(state.current_thread_id).toBe("chat-a");
     expect(state.threads["chat-a"]?.thread.title).toBe("Explore tab");
     expect(state.threads["chat-a"]?.thread.mode).toBe("explore");
     expect(state.threads["chat-a"]?.thread.tool_use).toBe("explore");
     expect(state.threads["chat-a"]?.session_state).toBe("completed");
-    expect(state.threads["chat-b"]?.thread.buddy_meta?.is_buddy_chat).toBe(
-      true,
-    );
+    expect(state.threads["chat-b"]).toBeUndefined();
   });
 });

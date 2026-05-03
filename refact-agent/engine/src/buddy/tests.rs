@@ -756,6 +756,7 @@ async fn issue_success_side_effects_are_centralized() {
                 description: format!("created {dedupe}"),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 activity_type: "issue_created".to_string(),
+                chat_id: None,
             },
         )
         .await;
@@ -5838,6 +5839,7 @@ async fn humor_attach_does_not_hold_buddy_lock() {
                 description: "test".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 activity_type: "test".to_string(),
+                chat_id: None,
             });
         }
     }

@@ -220,6 +220,8 @@ pub struct BuddyActivity {
     pub description: String,
     pub timestamp: String,
     pub activity_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
 }
 
 fn default_quest_status() -> String {

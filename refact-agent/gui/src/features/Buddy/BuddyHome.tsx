@@ -38,6 +38,7 @@ import {
   clearExpiredBuddyNotificationSnooze,
 } from "./buddySlice";
 import {
+  openBuddyChat,
   openChatInModeAndStart,
   startBuddyInvestigation,
 } from "../Chat/Thread";
@@ -100,6 +101,9 @@ const DRAFT_KIND_LABELS: Record<DraftKind, string> = {
 };
 
 const REVIEWABLE_DRAFT_KINDS: DraftKind[] = ["agents_md", "pulse_report"];
+
+const RECENT_ERROR_WINDOW_MS = 6 * 60 * 60 * 1000;
+const RECENT_ERROR_REFRESH_MS = 60 * 1000;
 
 function draftKindLabel(draft: BuddyDraft): string {
   return DRAFT_KIND_LABELS[draft.kind];
@@ -215,6 +219,7 @@ export const BuddyHome: React.FC = () => {
   const [setupDismissed, setSetupDismissed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [speechIndex, setSpeechIndex] = useState(0);
+  const [recentErrorNow, setRecentErrorNow] = useState(() => Date.now());
   const [updateSettings, { isLoading: isSavingSettings }] =
     useUpdateBuddySettingsMutation();
 
@@ -354,6 +359,13 @@ export const BuddyHome: React.FC = () => {
     return () => window.clearTimeout(timer);
   }, [dispatch, homeSnoozedUntil]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setRecentErrorNow(Date.now());
+    }, RECENT_ERROR_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const homeNotificationsSnoozed =
     homeSnoozedUntil != null && homeSnoozedUntil > Date.now();
   const heroSpeechCandidates = useMemo(() => {
@@ -473,6 +485,14 @@ export const BuddyHome: React.FC = () => {
     [activeQuest?.title, dispatch],
   );
 
+  const handleOpenActivityChat = useCallback(
+    (chatId: string, title: string) => {
+      dispatch(openBuddyChat({ chat_id: chatId, title }));
+      dispatch(push({ name: "chat" }));
+    },
+    [dispatch],
+  );
+
   const unlockedSkills = skills?.unlocked ?? state.skills;
 
   const recentErrors = useMemo<RecentBuddyError[]>(() => {
@@ -500,7 +520,7 @@ export const BuddyHome: React.FC = () => {
       return tb - ta;
     });
 
-    const cutoff = Date.now() - 60 * 60 * 1000;
+    const cutoff = recentErrorNow - RECENT_ERROR_WINDOW_MS;
     const sigMap = new Map<string, RecentBuddyError>();
     for (const e of collected) {
       const createdAt = Date.parse(e.created_at);
@@ -534,7 +554,7 @@ export const BuddyHome: React.FC = () => {
       }
     }
     return Array.from(sigMap.values()).slice(0, 25);
-  }, [nowPlaying, runtimeQueue]);
+  }, [nowPlaying, recentErrorNow, runtimeQueue]);
 
   const handleInvestigateError = useCallback(
     (event: BuddyRuntimeEvent) => {
@@ -710,7 +730,10 @@ export const BuddyHome: React.FC = () => {
           styles.rowFlexBottom,
         )}
       >
-        <BuddyActivityPanel activities={activities} />
+        <BuddyActivityPanel
+          activities={activities}
+          onOpenChat={handleOpenActivityChat}
+        />
         <BuddyRecentErrorsPanel
           recentErrors={recentErrors}
           onInvestigate={handleInvestigateError}
