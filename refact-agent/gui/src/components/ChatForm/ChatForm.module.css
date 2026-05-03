@@ -168,7 +168,7 @@
 .bottomModelControl,
 .bottomModeControl,
 .bottomWorkspaceControl {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
 }
 
 @container (max-width: 520px) {
