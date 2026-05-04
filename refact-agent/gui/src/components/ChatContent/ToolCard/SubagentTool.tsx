@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import { PersonIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
-import { StreamingToolCard } from "./StreamingToolCard";
+import { ReportToolCard, type ReportData } from "./ReportToolCard";
 
 interface SubagentArgs {
   task?: string;
@@ -12,6 +12,23 @@ interface SubagentArgs {
 
 interface SubagentToolProps {
   toolCall: ToolCall;
+}
+
+function extractSubagentReport(content: string): ReportData | null {
+  const responseMarker = "## Response";
+  const responseIndex = content.indexOf(responseMarker);
+  if (!content.startsWith("# Subagent Result") || responseIndex === -1) {
+    return null;
+  }
+
+  const taskMatch = content.match(/\*\*Task:\*\*\s*([^\n]+)/);
+  const responseStart = responseIndex + responseMarker.length;
+  const response = content.slice(responseStart).trim();
+
+  return {
+    summary: taskMatch ? `Subagent: ${taskMatch[1].trim()}` : "Subagent report",
+    markdown: response || content,
+  };
 }
 
 export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
@@ -34,11 +51,12 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
       .join(" · ") || null;
 
   return (
-    <StreamingToolCard
+    <ReportToolCard
       toolCall={toolCall}
       icon={<PersonIcon />}
-      summary={summary}
+      defaultSummary={summary}
       meta={meta}
+      extractReport={extractSubagentReport}
     />
   );
 };
