@@ -41,8 +41,6 @@
 
 .contentWrapper {
   overflow: hidden;
-  /* Force GPU layer for JCEF compatibility */
-  transform: translateZ(0);
   /* CSS-based collapse animation using grid */
   display: grid;
   grid-template-rows: 0fr;

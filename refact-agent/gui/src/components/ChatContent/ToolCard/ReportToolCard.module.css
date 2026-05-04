@@ -147,11 +147,15 @@
   margin-top: var(--space-1);
 }
 
+.entertainmentText {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Content wrapper (collapsible animation) */
 .contentWrapper {
   overflow: hidden;
-  /* Force GPU layer for JCEF compatibility */
-  transform: translateZ(0);
   /* CSS-based collapse animation using grid */
   display: grid;
   grid-template-rows: 0fr;

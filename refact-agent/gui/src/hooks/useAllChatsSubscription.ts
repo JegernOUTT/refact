@@ -148,10 +148,12 @@ export function useAllChatsSubscription() {
   const FLUSH_TIER_FAST_BYTES = 8_192;
   const FLUSH_TIER_MEDIUM_BYTES = 200_000;
   // Flush intervals per tier (ms)
-  const FLUSH_MS_FAST = 0;
-  const FLUSH_MS_MEDIUM = 150;
-  const FLUSH_MS_SLOW = 500;
-  const FLUSH_MS_BACKGROUND = 500;
+  const FLUSH_MS_FAST = 50;
+  const FLUSH_MS_MEDIUM = 250;
+  const FLUSH_MS_SLOW = 750;
+  const FLUSH_MS_BACKGROUND = 750;
+  const SUBCHAT_FLUSH_MS_ACTIVE = 150;
+  const SUBCHAT_FLUSH_MS_BACKGROUND = 750;
   // Hard cap: force flush if buffered char-count (UTF-16 units) exceeds this
   const MAX_BUFFERED_BYTES = 2_000_000;
 
@@ -259,19 +261,17 @@ export function useAllChatsSubscription() {
         subchatFlushRef.current.delete(chatId);
         flushPendingSubchatUpdateForChat(chatId);
       };
-
-      const frameHandle = requestNextFrame(flush);
-      if (frameHandle) {
-        subchatFlushRef.current.set(chatId, frameHandle);
-        return;
-      }
+      const delayMs =
+        chatId === activeChatId
+          ? SUBCHAT_FLUSH_MS_ACTIVE
+          : SUBCHAT_FLUSH_MS_BACKGROUND;
 
       subchatFlushRef.current.set(chatId, {
         type: "timeout",
-        id: setTimeout(flush, 16),
+        id: setTimeout(flush, delayMs),
       });
     },
-    [flushPendingSubchatUpdateForChat],
+    [activeChatId, flushPendingSubchatUpdateForChat],
   );
 
   const enqueueStreamDelta = useCallback(

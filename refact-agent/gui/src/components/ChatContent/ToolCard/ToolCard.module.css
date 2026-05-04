@@ -49,9 +49,6 @@
 
 .contentWrapper {
   overflow: hidden;
-  /* Force GPU layer for JCEF compatibility */
-  transform: translateZ(0);
-  will-change: grid-template-rows, opacity;
   /* CSS-based collapse animation using grid */
   display: grid;
   grid-template-rows: 0fr;
@@ -64,10 +61,6 @@
 .contentWrapperOpen {
   grid-template-rows: 1fr;
   opacity: 1;
-}
-
-.contentWrapper:not(.contentWrapperOpen) {
-  will-change: auto;
 }
 
 .noTransition {

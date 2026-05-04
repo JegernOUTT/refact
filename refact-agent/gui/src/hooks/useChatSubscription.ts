@@ -122,9 +122,10 @@ export function useChatSubscription(
   // Adaptive flush thresholds (JS string length units, i.e. UTF-16 code units)
   const FLUSH_TIER_FAST_BYTES = 8_192;
   const FLUSH_TIER_MEDIUM_BYTES = 200_000;
-  const FLUSH_MS_FAST = 0;
-  const FLUSH_MS_MEDIUM = 150;
-  const FLUSH_MS_SLOW = 500;
+  const FLUSH_MS_FAST = 50;
+  const FLUSH_MS_MEDIUM = 250;
+  const FLUSH_MS_SLOW = 750;
+  const SUBCHAT_FLUSH_MS = 150;
   // Hard cap: force flush if buffered char-count (UTF-16 units) exceeds this
   const MAX_BUFFERED_BYTES = 2_000_000;
 
@@ -201,15 +202,9 @@ export function useChatSubscription(
       flushPendingSubchatUpdate();
     };
 
-    const frameHandle = requestNextFrame(flush);
-    if (frameHandle) {
-      subchatFlushRef.current = frameHandle;
-      return;
-    }
-
     subchatFlushRef.current = {
       type: "timeout",
-      id: setTimeout(flush, 16),
+      id: setTimeout(flush, SUBCHAT_FLUSH_MS),
     };
   }, [flushPendingSubchatUpdate]);
 

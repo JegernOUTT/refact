@@ -16,6 +16,7 @@ import {
 import styles from "./StreamingToolCard.module.css";
 
 const MAX_MD_RENDER_CHARS = 50_000;
+const MAX_STREAMING_PROGRESS_CHARS = 500;
 
 function looksLikeMarkdown(text: string): boolean {
   if (text.includes("```")) return true;
@@ -81,9 +82,12 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     const last = log[log.length - 1];
     const stepMatch = last.match(/^(\d+\/\d+):\s*([\s\S]+)$/);
     if (stepMatch) {
-      return { step: stepMatch[1], text: stepMatch[2].trim() };
+      return {
+        step: stepMatch[1],
+        text: stepMatch[2].trim().slice(-MAX_STREAMING_PROGRESS_CHARS),
+      };
     }
-    return { step: null, text: last };
+    return { step: null, text: last.slice(-MAX_STREAMING_PROGRESS_CHARS) };
   }, [status, toolCall.subchat_log]);
 
   const entertainmentText = entertainmentMessage?.step
@@ -93,7 +97,10 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     entertainmentText,
     status === "running",
   );
-  const deferredContent = useStreamingMarkdown(content, status === "running");
+  const deferredContent = useStreamingMarkdown(
+    isOpen ? content : null,
+    status === "running",
+  );
 
   const entertainmentRef = useRef<HTMLDivElement | null>(null);
   const userScrolledRef = useRef(false);
@@ -172,11 +179,9 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
           ref={entertainmentRef}
           onScroll={handleEntertainmentScroll}
         >
-          <div className={styles.entertainmentMarkdown}>
-            <Markdown canHaveInteractiveElements={false} isStreaming={true}>
-              {deferredEntertainmentText}
-            </Markdown>
-          </div>
+          <Text size="1" color="gray" className={styles.entertainmentText}>
+            {deferredEntertainmentText}
+          </Text>
         </div>
       )}
 

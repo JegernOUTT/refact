@@ -32,6 +32,7 @@ import {
 import styles from "./ReportToolCard.module.css";
 
 const MAX_MD_RENDER_CHARS = 50_000;
+const MAX_STREAMING_PROGRESS_CHARS = 500;
 
 function looksLikeMarkdown(text: string): boolean {
   if (text.includes("```")) return true;
@@ -112,11 +113,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     handleToggle();
   }, [handleToggle]);
 
-  const summary = reportData?.summary
-    ? variant === "taskDone"
-      ? reportData.summary
-      : reportData.summary
-    : defaultSummary;
+  const summary = reportData?.summary ?? defaultSummary;
 
   const handleCopy = useCallback(
     (e: React.MouseEvent) => {
@@ -152,14 +149,14 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     if (status !== "running") return null;
     const log = toolCall.subchat_log;
     if (!log || log.length === 0) return null;
-    return log.join("\n\n");
+    return log[log.length - 1].slice(-MAX_STREAMING_PROGRESS_CHARS);
   }, [status, toolCall.subchat_log]);
   const deferredEntertainmentText = useStreamingMarkdown(
     entertainmentText,
     status === "running",
   );
   const deferredReportMarkdown = useStreamingMarkdown(
-    reportData?.markdown ?? null,
+    isOpen ? reportData?.markdown ?? null : null,
     status === "running",
   );
 
@@ -331,11 +328,9 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           ref={entertainmentRef}
           onScroll={handleEntertainmentScroll}
         >
-          <div className={styles.entertainmentMarkdown}>
-            <Markdown canHaveInteractiveElements={false} isStreaming={true}>
-              {deferredEntertainmentText}
-            </Markdown>
-          </div>
+          <Text size="1" color="gray" className={styles.entertainmentText}>
+            {deferredEntertainmentText}
+          </Text>
         </div>
       )}
 

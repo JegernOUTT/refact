@@ -1,14 +1,6 @@
-import { useDeferredValue, useEffect, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 
-function scheduleDeferred(cb: () => void): () => void {
-  if (typeof globalThis.requestAnimationFrame === "function") {
-    const id = globalThis.requestAnimationFrame(() => cb());
-    return () => globalThis.cancelAnimationFrame(id);
-  }
-
-  const id = setTimeout(cb, 16);
-  return () => clearTimeout(id);
-}
+const STREAMING_MARKDOWN_UPDATE_MS = 150;
 
 export function useStreamingMarkdown(
   text: string | null,
@@ -18,25 +10,39 @@ export function useStreamingMarkdown(
   const [mountedText, setMountedText] = useState<string | null>(
     isStreaming ? deferredText : text,
   );
+  const latestTextRef = useRef<string | null>(
+    isStreaming ? deferredText : text,
+  );
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    latestTextRef.current = isStreaming ? deferredText : text;
+
     if (!isStreaming) {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
       setMountedText(text);
       return;
     }
 
-    let cancelled = false;
-    const dispose = scheduleDeferred(() => {
-      if (!cancelled) {
-        setMountedText(deferredText);
-      }
-    });
+    if (timerRef.current !== null) return;
 
-    return () => {
-      cancelled = true;
-      dispose();
-    };
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      setMountedText(latestTextRef.current);
+    }, STREAMING_MARKDOWN_UPDATE_MS);
   }, [deferredText, isStreaming, text]);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, []);
 
   return isStreaming ? mountedText : text;
 }

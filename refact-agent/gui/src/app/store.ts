@@ -146,6 +146,8 @@ const rootPersistConfig = {
   stateReconciler: mergeInitialState,
 };
 
+const APPLY_CHAT_EVENT_ACTION = "chatThread/applyChatEvent";
+
 const persistedReducer = persistReducer<ReturnType<typeof rootReducer>>(
   rootPersistConfig,
   rootReducer,
@@ -182,7 +184,12 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
                 PERSIST,
                 PURGE,
                 REGISTER,
+                APPLY_CHAT_EVENT_ACTION,
               ],
+              ignoredPaths: ["chat.threads"],
+            },
+            immutableCheck: {
+              ignoredPaths: ["chat.threads"],
             },
           });
 
