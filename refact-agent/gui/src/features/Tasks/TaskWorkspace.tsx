@@ -721,8 +721,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     if (!savedPlanners || !currentTaskUI) return;
 
     for (const traj of savedPlanners) {
-      if (currentTaskUI.plannerChats.some((p) => p.id === traj.id)) continue;
-
       dispatch(
         createChatWithId({
           id: traj.id,
@@ -732,6 +730,9 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           taskMeta: { task_id: taskId, role: "planner" },
         }),
       );
+
+      if (currentTaskUI.plannerChats.some((p) => p.id === traj.id)) continue;
+
       dispatch(
         addPlannerChat({
           taskId,
@@ -760,6 +761,16 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   }, [dispatch, taskId, savedPlanners, currentTaskUI, activeChat]);
 
   useEffect(() => {
+    if (!activeChat && activePlannerId) {
+      dispatch(
+        setTaskActiveChat({
+          taskId,
+          activeChat: { type: "planner", chatId: activePlannerId },
+        }),
+      );
+      return;
+    }
+
     if (
       activeChat?.type === "planner" &&
       !plannerChats.some((p) => p.id === activeChat.chatId)
@@ -779,8 +790,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
   useEffect(() => {
     if (activeChat?.type === "agent" && board) {
-      const cardExists = board.cards.some((c) => c.id === activeChat.cardId);
-      if (!cardExists) {
+      const card = board.cards.find((c) => c.id === activeChat.cardId);
+      if (!card || card.agent_chat_id !== activeChat.chatId) {
         if (activePlannerId) {
           dispatch(
             setTaskActiveChat({

@@ -1,10 +1,5 @@
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { skipToken } from "@reduxjs/toolkit/query";
 import { Flex, Popover, Text } from "@radix-ui/themes";
 import {
   DEFAULT_MODE,
@@ -102,7 +97,6 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   const [pendingCreatedWorktreeId, setPendingCreatedWorktreeId] = useState<
     string | null
   >(null);
-  const pendingCreatedWorktreeIdRef = useRef<string | null>(null);
   const copyToClipboard = useCopyToClipboard();
   const { openFolderInNewWindow } = useEventsBusForIDE();
   const { data, isLoading } = useListWorktreesQuery(undefined, {
@@ -121,21 +115,19 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   );
   const isPendingCreatedWorktree =
     currentWorktree?.id !== undefined &&
-    (pendingCreatedWorktreeId === currentWorktree.id ||
-      pendingCreatedWorktreeIdRef.current === currentWorktree.id);
-  const { data: currentDiff } = useGetWorktreeDiffQuery(
-    {
-      id: currentWorktree?.id ?? "",
-      source_workspace_root: currentWorktree?.source_workspace_root,
-      max_patch_bytes: 1,
-    },
-    {
-      skip: !currentWorktree?.id || !currentRecord,
-      pollingInterval: 5000,
-      refetchOnFocus: true,
-      refetchOnReconnect: true,
-    },
-  );
+    pendingCreatedWorktreeId === currentWorktree.id;
+  const currentDiffQuery = currentRecord
+    ? {
+        id: currentRecord.meta.id,
+        source_workspace_root: currentRecord.meta.source_workspace_root,
+        max_patch_bytes: 1,
+      }
+    : skipToken;
+  const { data: currentDiff } = useGetWorktreeDiffQuery(currentDiffQuery, {
+    pollingInterval: 5000,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+  });
   const mainWorkspacePath = data?.source_workspace_root;
   const copyPath = currentWorktree?.root ?? mainWorkspacePath ?? null;
   const sourceBranch = data?.source_current_branch?.trim();
@@ -228,7 +220,6 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
 
   useEffect(() => {
     if (currentRecord?.meta.id === pendingCreatedWorktreeId) {
-      pendingCreatedWorktreeIdRef.current = null;
       setPendingCreatedWorktreeId(null);
     }
   }, [currentRecord?.meta.id, pendingCreatedWorktreeId]);
@@ -259,7 +250,6 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       };
       try {
         const response = await createWorktree(request).unwrap();
-        pendingCreatedWorktreeIdRef.current = response.worktree.meta.id;
         setPendingCreatedWorktreeId(response.worktree.meta.id);
         const attached = await attachWorktree(response.worktree.meta, {
           optimistic: false,
@@ -268,7 +258,6 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
           setCreateOpen(false);
           setMenuOpen(false);
         } else {
-          pendingCreatedWorktreeIdRef.current = null;
           setPendingCreatedWorktreeId(null);
           await deleteWorktree({
             id: response.worktree.meta.id,
@@ -279,7 +268,6 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
           );
         }
       } catch (error) {
-        pendingCreatedWorktreeIdRef.current = null;
         setPendingCreatedWorktreeId(null);
         setCreateError(worktreeErrorText(error));
       }

@@ -87,13 +87,18 @@ export const tasksSlice = createSlice({
       action: PayloadAction<{ taskId: string; planner: PlannerInfo }>,
     ) => {
       const task = state.openTasks.find((t) => t.id === action.payload.taskId);
-      if (
-        task &&
-        !task.plannerChats.some((p) => p.id === action.payload.planner.id)
-      ) {
+      if (!task) return;
+
+      if (!task.plannerChats.some((p) => p.id === action.payload.planner.id)) {
         task.plannerChats.push(action.payload.planner);
-        persistTasksUIState(state);
       }
+      if (!task.activeChat) {
+        task.activeChat = {
+          type: "planner",
+          chatId: action.payload.planner.id,
+        };
+      }
+      persistTasksUIState(state);
     },
     updatePlannerChat: (
       state,
