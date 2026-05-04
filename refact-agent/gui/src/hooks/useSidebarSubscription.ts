@@ -21,7 +21,13 @@ import {
   closeThread,
   updateChatRuntimeFromSessionState,
 } from "../features/Chat/Thread";
-import { setCurrentProjectInfo } from "../features/Chat/currentProject";
+import {
+  markProjectBuddySnapshotReceived,
+  markProjectHistorySnapshotReceived,
+  markProjectServerSnapshotReceived,
+  markProjectTasksSnapshotReceived,
+  setCurrentProjectInfo,
+} from "../features/Chat/currentProject";
 import { tasksApi } from "../services/refact/tasks";
 import {
   setBuddySnapshot,
@@ -349,21 +355,22 @@ export function useSidebarSubscription() {
     [dispatch],
   );
 
-  const processSnapshot = useCallback(
-    (event: SidebarEventEnvelope & { category: "snapshot" }) => {
-      if (event.workspace_roots !== undefined) {
-        const workspaceRoots = event.workspace_roots;
-        dispatch(
-          setCurrentProjectInfo({
-            name: getWorkspaceDisplayName(workspaceRoots[0] ?? ""),
-            workspaceRoots,
-            serverSnapshotReceived: true,
-          }),
-        );
-      } else {
-        dispatch(setCurrentProjectInfo({ serverSnapshotReceived: true }));
-      }
+  const processWorkspaceSnapshot = useCallback(
+    (event: SidebarEventEnvelope & { workspace_roots: string[] }) => {
+      const workspaceRoots = event.workspace_roots;
+      dispatch(
+        setCurrentProjectInfo({
+          name: getWorkspaceDisplayName(workspaceRoots[0] ?? ""),
+          workspaceRoots,
+        }),
+      );
+      dispatch(markProjectServerSnapshotReceived());
+    },
+    [dispatch],
+  );
 
+  const processTrajectoriesSnapshot = useCallback(
+    (event: SidebarEventEnvelope & { trajectories: TrajectoryMeta[] }) => {
       const trajectoryItems = event.trajectories.map((t: TrajectoryMeta) => ({
         id: t.id,
         title: t.title,
@@ -387,25 +394,68 @@ export function useSidebarSubscription() {
       dispatch(replaceSnapshotHistory(trajectoryItems));
       dispatch(setHistoryLoadError(null));
       dispatch(setHistoryLoading(false));
+      dispatch(markProjectHistorySnapshotReceived());
+    },
+    [dispatch],
+  );
 
-      dispatch(
-        tasksApi.util.updateQueryData(
-          "listTasks",
-          undefined,
-          () => event.tasks,
-        ),
+  const processTasksSnapshot = useCallback(
+    (event: SidebarEventEnvelope & { category: "tasks_snapshot" }) => {
+      void dispatch(
+        tasksApi.util.upsertQueryData("listTasks", undefined, event.tasks),
       );
+      dispatch(markProjectTasksSnapshotReceived());
+    },
+    [dispatch],
+  );
 
+  const processBuddySnapshot = useCallback(
+    (event: SidebarEventEnvelope & { category: "buddy_snapshot" }) => {
       if (event.buddy) {
         if ("state" in event.buddy) {
           dispatch(setBuddySnapshot(event.buddy));
         } else {
-          // Backend reports buddy as disabled or not yet initialised
           dispatch(setBuddyUnavailable());
         }
       }
+      dispatch(markProjectBuddySnapshotReceived());
     },
     [dispatch],
+  );
+
+  const processSnapshot = useCallback(
+    (event: SidebarEventEnvelope & { category: "snapshot" }) => {
+      if (event.workspace_roots !== undefined) {
+        processWorkspaceSnapshot({
+          ...event,
+          workspace_roots: event.workspace_roots,
+        });
+      } else {
+        dispatch(markProjectServerSnapshotReceived());
+      }
+
+      processTrajectoriesSnapshot({
+        ...event,
+        trajectories: event.trajectories,
+      });
+      processTasksSnapshot({
+        ...event,
+        category: "tasks_snapshot",
+        tasks: event.tasks,
+      });
+      processBuddySnapshot({
+        ...event,
+        category: "buddy_snapshot",
+        buddy: event.buddy ?? null,
+      });
+    },
+    [
+      dispatch,
+      processBuddySnapshot,
+      processTasksSnapshot,
+      processTrajectoriesSnapshot,
+      processWorkspaceSnapshot,
+    ],
   );
 
   const processBuddyEvent = useCallback(
@@ -532,7 +582,6 @@ export function useSidebarSubscription() {
       const message =
         err instanceof Error ? err.message : "Failed to load history";
       dispatch(setHistoryLoadError(message));
-      dispatch(setHistoryLoading(false));
     }
   }, [dispatch, migrateFromLocalStorage]);
 
@@ -564,9 +613,27 @@ export function useSidebarSubscription() {
 
     const onEvent = (envelope: SidebarEventEnvelope) => {
       if (envelope.category === "snapshot") {
-        processSnapshot(
-          envelope as SidebarEventEnvelope & { category: "snapshot" },
-        );
+        processSnapshot(envelope);
+      } else if (envelope.category === "workspace_snapshot") {
+        processWorkspaceSnapshot(envelope);
+      } else if (envelope.category === "trajectories_snapshot") {
+        processTrajectoriesSnapshot(envelope);
+      } else if (envelope.category === "tasks_snapshot") {
+        processTasksSnapshot(envelope);
+      } else if (envelope.category === "buddy_snapshot") {
+        processBuddySnapshot(envelope);
+      } else if (envelope.category === "loading_phase") {
+        if (envelope.status === "ready") {
+          if (envelope.section === "workspace") {
+            dispatch(markProjectServerSnapshotReceived());
+          } else if (envelope.section === "trajectories") {
+            dispatch(markProjectHistorySnapshotReceived());
+          } else if (envelope.section === "tasks") {
+            dispatch(markProjectTasksSnapshotReceived());
+          } else {
+            dispatch(markProjectBuddySnapshotReceived());
+          }
+        }
       } else if (envelope.category === "trajectory") {
         processTrajectoryEvent(
           envelope as SidebarEventEnvelope & { category: "trajectory" },
@@ -603,6 +670,10 @@ export function useSidebarSubscription() {
     config.lspPort,
     config.apiKey,
     processSnapshot,
+    processWorkspaceSnapshot,
+    processTrajectoriesSnapshot,
+    processTasksSnapshot,
+    processBuddySnapshot,
     processTrajectoryEvent,
     processTaskEvent,
     processBuddyEvent,

@@ -203,6 +203,7 @@ export const sidebarSubscribe: HttpHandler = http.get(
       start(controller) {
         // Send initial snapshot with empty data
         const snapshot = JSON.stringify({
+          seq: 0,
           category: "snapshot",
           trajectories: [],
           tasks: [],

@@ -12,7 +12,10 @@ import styles from "./Dashboard.module.css";
 import { ChatLoading } from "../../components/ChatContent/ChatLoading";
 import { useAppSelector } from "../../hooks";
 import { selectBackendStatus } from "../Connection";
-import { selectHasProjectSnapshot } from "../Chat/currentProject";
+import {
+  selectHasHistorySnapshot,
+  selectHasTasksSnapshot,
+} from "../Chat/currentProject";
 
 const OfflineState: React.FC = () => {
   const backendStatus = useAppSelector(selectBackendStatus);
@@ -44,7 +47,8 @@ export const Dashboard: React.FC = () => {
   const splitRef = useRef<HTMLDivElement>(null);
   const breakpoint = useDashboardLayout(containerRef);
   const backendStatus = useAppSelector(selectBackendStatus);
-  const hasProjectSnapshot = useAppSelector(selectHasProjectSnapshot);
+  const hasHistorySnapshot = useAppSelector(selectHasHistorySnapshot);
+  const hasTasksSnapshot = useAppSelector(selectHasTasksSnapshot);
 
   const { collapsed, toggle } = useDashboardCollapseState();
   const {
@@ -55,7 +59,8 @@ export const Dashboard: React.FC = () => {
 
   const showResizeDivider = !collapsed.chats && !collapsed.tasks;
   const isOffline = backendStatus !== "online";
-  const projectLoading = !hasProjectSnapshot;
+  const chatsLoading = !hasHistorySnapshot;
+  const tasksLoading = !hasTasksSnapshot;
 
   const chatsFlexStyle = collapsed.chats
     ? undefined
@@ -86,7 +91,7 @@ export const Dashboard: React.FC = () => {
               <ChatsSection
                 breakpoint={breakpoint}
                 collapsed={collapsed.chats}
-                projectLoading={projectLoading}
+                projectLoading={chatsLoading}
                 onToggleCollapsed={() => toggle("chats")}
               />
             </div>
@@ -104,7 +109,7 @@ export const Dashboard: React.FC = () => {
               <TasksSection
                 breakpoint={breakpoint}
                 collapsed={collapsed.tasks}
-                projectLoading={projectLoading}
+                projectLoading={tasksLoading}
                 onToggleCollapsed={() => toggle("tasks")}
               />
             </div>

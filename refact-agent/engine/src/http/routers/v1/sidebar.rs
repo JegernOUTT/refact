@@ -5,6 +5,7 @@ use axum::response::Response;
 use hyper::{Body, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock as ARwLock};
+use tokio::task::JoinSet;
 
 use crate::buddy::events::BuddyEvent;
 use crate::chat::{TrajectoryEvent, TrajectoryMeta, list_all_trajectories_meta};
@@ -42,12 +43,49 @@ pub struct NotificationQuestion {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarLoadingSection {
+    Workspace,
+    Trajectories,
+    Tasks,
+    Buddy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarLoadingStatus {
+    Loading,
+    Ready,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "category", rename_all = "snake_case")]
 pub enum SidebarEvent {
+    LoadingPhase {
+        section: SidebarLoadingSection,
+        status: SidebarLoadingStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u128>,
+    },
     Snapshot {
         trajectories: Vec<TrajectoryMeta>,
         tasks: Vec<TaskMeta>,
         workspace_roots: Vec<String>,
+        buddy: serde_json::Value,
+    },
+    WorkspaceSnapshot {
+        workspace_roots: Vec<String>,
+    },
+    TrajectoriesSnapshot {
+        trajectories: Vec<TrajectoryMeta>,
+    },
+    TasksSnapshot {
+        tasks: Vec<TaskMeta>,
+    },
+    BuddySnapshot {
         buddy: serde_json::Value,
     },
     Trajectory(TrajectoryEvent),
@@ -65,21 +103,35 @@ pub struct SidebarEventEnvelope {
     pub event: SidebarEvent,
 }
 
+async fn fetch_workspace_roots(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<String> {
+    let gcx_locked = gcx.read().await;
+    let folders = gcx_locked.documents_state.workspace_folders.lock().unwrap();
+    folders
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
+}
+
+async fn fetch_trajectories_snapshot(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> Result<Vec<TrajectoryMeta>, String> {
+    list_all_trajectories_meta(gcx).await
+}
+
+async fn fetch_tasks_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Vec<TaskMeta>, String> {
+    list_tasks_with_session_state(gcx)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn fetch_snapshot(
     gcx: Arc<ARwLock<GlobalContext>>,
 ) -> Result<(Vec<TrajectoryMeta>, Vec<TaskMeta>, Vec<String>), String> {
-    let trajectories = list_all_trajectories_meta(gcx.clone()).await?;
-    let tasks = list_tasks_with_session_state(gcx.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    let workspace_roots = {
-        let gcx_locked = gcx.read().await;
-        let folders = gcx_locked.documents_state.workspace_folders.lock().unwrap();
-        folders
-            .iter()
-            .map(|path| path.to_string_lossy().to_string())
-            .collect()
-    };
+    let (trajectories, tasks, workspace_roots) = tokio::try_join!(
+        fetch_trajectories_snapshot(gcx.clone()),
+        fetch_tasks_snapshot(gcx.clone()),
+        async { Ok::<_, String>(fetch_workspace_roots(gcx.clone()).await) },
+    )?;
     Ok((trajectories, tasks, workspace_roots))
 }
 
@@ -91,6 +143,54 @@ async fn fetch_buddy_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> serde_json::V
             serde_json::to_value(&svc.snapshot()).unwrap_or(serde_json::json!({"enabled": false}))
         }
         None => serde_json::json!({"enabled": false}),
+    }
+}
+
+#[derive(Debug)]
+enum SidebarInitialPart {
+    Workspace(Vec<String>),
+    Trajectories(Result<Vec<TrajectoryMeta>, String>),
+    Tasks(Result<Vec<TaskMeta>, String>),
+    Buddy(serde_json::Value),
+}
+
+fn next_envelope(seq_counter: &AtomicU64, event: SidebarEvent) -> SidebarEventEnvelope {
+    SidebarEventEnvelope {
+        seq: seq_counter.fetch_add(1, Ordering::SeqCst),
+        event,
+    }
+}
+
+fn serialize_envelope(envelope: &SidebarEventEnvelope) -> Option<String> {
+    serde_json::to_string(envelope)
+        .ok()
+        .map(|json| format!("data: {}\n\n", json))
+}
+
+fn loading_event(section: SidebarLoadingSection) -> SidebarEvent {
+    SidebarEvent::LoadingPhase {
+        section,
+        status: SidebarLoadingStatus::Loading,
+        message: None,
+        elapsed_ms: None,
+    }
+}
+
+fn ready_event(section: SidebarLoadingSection, elapsed_ms: u128) -> SidebarEvent {
+    SidebarEvent::LoadingPhase {
+        section,
+        status: SidebarLoadingStatus::Ready,
+        message: None,
+        elapsed_ms: Some(elapsed_ms),
+    }
+}
+
+fn error_event(section: SidebarLoadingSection, message: String, elapsed_ms: u128) -> SidebarEvent {
+    SidebarEvent::LoadingPhase {
+        section,
+        status: SidebarLoadingStatus::Error,
+        message: Some(message),
+        elapsed_ms: Some(elapsed_ms),
     }
 }
 
@@ -137,26 +237,157 @@ pub async fn handle_sidebar_subscribe(
         )
     };
 
-    let (trajectories, tasks, workspace_roots) = fetch_snapshot(gcx.clone())
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let buddy_snap = fetch_buddy_snapshot(gcx.clone()).await;
-
     let gcx_for_stream = gcx.clone();
     let stream = async_stream::stream! {
-        let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-        let envelope = SidebarEventEnvelope {
-            seq,
-            event: SidebarEvent::Snapshot {
-                trajectories,
-                tasks,
-                workspace_roots,
-                buddy: buddy_snap,
+        let initial_started_at = std::time::Instant::now();
+        for section in [
+            SidebarLoadingSection::Workspace,
+            SidebarLoadingSection::Buddy,
+            SidebarLoadingSection::Tasks,
+            SidebarLoadingSection::Trajectories,
+        ] {
+            let envelope = next_envelope(&seq_counter, loading_event(section));
+            if let Some(serialized) = serialize_envelope(&envelope) {
+                yield Ok::<_, std::convert::Infallible>(serialized);
+            }
+        }
+
+        let mut trajectories: Option<Vec<TrajectoryMeta>> = None;
+        let mut tasks: Option<Vec<TaskMeta>> = None;
+        let mut workspace_roots: Option<Vec<String>> = None;
+        let mut buddy_snap: Option<serde_json::Value> = None;
+        let mut initial_parts = JoinSet::new();
+
+        initial_parts.spawn({
+            let gcx = gcx.clone();
+            async move { SidebarInitialPart::Workspace(fetch_workspace_roots(gcx).await) }
+        });
+        initial_parts.spawn({
+            let gcx = gcx.clone();
+            async move { SidebarInitialPart::Trajectories(fetch_trajectories_snapshot(gcx).await) }
+        });
+        initial_parts.spawn({
+            let gcx = gcx.clone();
+            async move { SidebarInitialPart::Tasks(fetch_tasks_snapshot(gcx).await) }
+        });
+        initial_parts.spawn({
+            let gcx = gcx.clone();
+            async move { SidebarInitialPart::Buddy(fetch_buddy_snapshot(gcx).await) }
+        });
+
+        while let Some(part) = initial_parts.join_next().await {
+            match part {
+                Ok(SidebarInitialPart::Workspace(roots)) => {
+                    tracing::info!(
+                        "sidebar snapshot: workspace roots ready in {:.3}s",
+                        initial_started_at.elapsed().as_secs_f32(),
+                    );
+                    workspace_roots = Some(roots.clone());
+                    let elapsed_ms = initial_started_at.elapsed().as_millis();
+                    let events = vec![
+                        SidebarEvent::WorkspaceSnapshot { workspace_roots: roots },
+                        ready_event(SidebarLoadingSection::Workspace, elapsed_ms),
+                    ];
+                    for event in events {
+                        let envelope = next_envelope(&seq_counter, event);
+                        if let Some(serialized) = serialize_envelope(&envelope) {
+                            yield Ok::<_, std::convert::Infallible>(serialized);
+                        }
+                    }
+                }
+                Ok(SidebarInitialPart::Trajectories(Ok(items))) => {
+                    tracing::info!(
+                        "sidebar snapshot: {} trajectories ready in {:.3}s",
+                        items.len(),
+                        initial_started_at.elapsed().as_secs_f32(),
+                    );
+                    trajectories = Some(items.clone());
+                    let elapsed_ms = initial_started_at.elapsed().as_millis();
+                    let events = vec![
+                        SidebarEvent::TrajectoriesSnapshot { trajectories: items },
+                        ready_event(SidebarLoadingSection::Trajectories, elapsed_ms),
+                    ];
+                    for event in events {
+                        let envelope = next_envelope(&seq_counter, event);
+                        if let Some(serialized) = serialize_envelope(&envelope) {
+                            yield Ok::<_, std::convert::Infallible>(serialized);
+                        }
+                    }
+                }
+                Ok(SidebarInitialPart::Trajectories(Err(err))) => {
+                    let elapsed_ms = initial_started_at.elapsed().as_millis();
+                    let envelope = next_envelope(
+                        &seq_counter,
+                        error_event(SidebarLoadingSection::Trajectories, err, elapsed_ms),
+                    );
+                    if let Some(serialized) = serialize_envelope(&envelope) {
+                        yield Ok::<_, std::convert::Infallible>(serialized);
+                    }
+                }
+                Ok(SidebarInitialPart::Tasks(Ok(items))) => {
+                    tracing::info!(
+                        "sidebar snapshot: {} tasks ready in {:.3}s",
+                        items.len(),
+                        initial_started_at.elapsed().as_secs_f32(),
+                    );
+                    tasks = Some(items.clone());
+                    let elapsed_ms = initial_started_at.elapsed().as_millis();
+                    let events = vec![
+                        SidebarEvent::TasksSnapshot { tasks: items },
+                        ready_event(SidebarLoadingSection::Tasks, elapsed_ms),
+                    ];
+                    for event in events {
+                        let envelope = next_envelope(&seq_counter, event);
+                        if let Some(serialized) = serialize_envelope(&envelope) {
+                            yield Ok::<_, std::convert::Infallible>(serialized);
+                        }
+                    }
+                }
+                Ok(SidebarInitialPart::Tasks(Err(err))) => {
+                    let elapsed_ms = initial_started_at.elapsed().as_millis();
+                    let envelope = next_envelope(
+                        &seq_counter,
+                        error_event(SidebarLoadingSection::Tasks, err, elapsed_ms),
+                    );
+                    if let Some(serialized) = serialize_envelope(&envelope) {
+                        yield Ok::<_, std::convert::Infallible>(serialized);
+                    }
+                }
+                Ok(SidebarInitialPart::Buddy(buddy)) => {
+                    tracing::info!(
+                        "sidebar snapshot: buddy ready in {:.3}s",
+                        initial_started_at.elapsed().as_secs_f32(),
+                    );
+                    buddy_snap = Some(buddy.clone());
+                    let elapsed_ms = initial_started_at.elapsed().as_millis();
+                    let events = vec![
+                        SidebarEvent::BuddySnapshot { buddy },
+                        ready_event(SidebarLoadingSection::Buddy, elapsed_ms),
+                    ];
+                    for event in events {
+                        let envelope = next_envelope(&seq_counter, event);
+                        if let Some(serialized) = serialize_envelope(&envelope) {
+                            yield Ok::<_, std::convert::Infallible>(serialized);
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("sidebar snapshot: initial loader task failed: {}", err);
+                }
+            }
+        }
+
+        let envelope = next_envelope(
+            &seq_counter,
+            SidebarEvent::Snapshot {
+                trajectories: trajectories.unwrap_or_default(),
+                tasks: tasks.unwrap_or_default(),
+                workspace_roots: workspace_roots.unwrap_or_default(),
+                buddy: buddy_snap.unwrap_or_else(|| serde_json::json!({"enabled": false})),
             },
-        };
-        if let Ok(json) = serde_json::to_string(&envelope) {
-            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+        );
+        if let Some(serialized) = serialize_envelope(&envelope) {
+            yield Ok::<_, std::convert::Infallible>(serialized);
         }
 
         let mut trajectory_rx = trajectory_rx;
@@ -177,13 +408,12 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
-                            let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                            let envelope = SidebarEventEnvelope {
-                                seq,
-                                event: SidebarEvent::Trajectory(event),
-                            };
-                            if let Ok(json) = serde_json::to_string(&envelope) {
-                                yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                            let envelope = next_envelope(
+                                &seq_counter,
+                                SidebarEvent::Trajectory(event),
+                            );
+                            if let Some(serialized) = serialize_envelope(&envelope) {
+                                yield Ok::<_, std::convert::Infallible>(serialized);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -191,18 +421,17 @@ pub async fn handle_sidebar_subscribe(
                                 fetch_snapshot(gcx_for_stream.clone()).await
                             {
                                 let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                                let envelope = SidebarEventEnvelope {
-                                    seq,
-                                    event: SidebarEvent::Snapshot {
+                                let envelope = next_envelope(
+                                    &seq_counter,
+                                    SidebarEvent::Snapshot {
                                         trajectories,
                                         tasks,
                                         workspace_roots,
                                         buddy,
                                     },
-                                };
-                                if let Ok(json) = serde_json::to_string(&envelope) {
-                                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                                );
+                                if let Some(serialized) = serialize_envelope(&envelope) {
+                                    yield Ok::<_, std::convert::Infallible>(serialized);
                                 }
                             } else {
                                 break;
@@ -229,18 +458,17 @@ pub async fn handle_sidebar_subscribe(
                                 fetch_snapshot(gcx_for_stream.clone()).await
                             {
                                 let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                                let envelope = SidebarEventEnvelope {
-                                    seq,
-                                    event: SidebarEvent::Snapshot {
+                                let envelope = next_envelope(
+                                    &seq_counter,
+                                    SidebarEvent::Snapshot {
                                         trajectories,
                                         tasks,
                                         workspace_roots,
                                         buddy,
                                     },
-                                };
-                                if let Ok(json) = serde_json::to_string(&envelope) {
-                                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                                );
+                                if let Some(serialized) = serialize_envelope(&envelope) {
+                                    yield Ok::<_, std::convert::Infallible>(serialized);
                                 }
                             }
                         }
@@ -258,13 +486,12 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(task_envelope) => {
-                            let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                            let envelope = SidebarEventEnvelope {
-                                seq,
-                                event: SidebarEvent::Task(task_envelope.event),
-                            };
-                            if let Ok(json) = serde_json::to_string(&envelope) {
-                                yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                            let envelope = next_envelope(
+                                &seq_counter,
+                                SidebarEvent::Task(task_envelope.event),
+                            );
+                            if let Some(serialized) = serialize_envelope(&envelope) {
+                                yield Ok::<_, std::convert::Infallible>(serialized);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -272,18 +499,17 @@ pub async fn handle_sidebar_subscribe(
                                 fetch_snapshot(gcx_for_stream.clone()).await
                             {
                                 let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                                let envelope = SidebarEventEnvelope {
-                                    seq,
-                                    event: SidebarEvent::Snapshot {
+                                let envelope = next_envelope(
+                                    &seq_counter,
+                                    SidebarEvent::Snapshot {
                                         trajectories,
                                         tasks,
                                         workspace_roots,
                                         buddy,
                                     },
-                                };
-                                if let Ok(json) = serde_json::to_string(&envelope) {
-                                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                                );
+                                if let Some(serialized) = serialize_envelope(&envelope) {
+                                    yield Ok::<_, std::convert::Infallible>(serialized);
                                 }
                             } else {
                                 break;
@@ -306,13 +532,12 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
-                            let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                            let envelope = SidebarEventEnvelope {
-                                seq,
-                                event: SidebarEvent::Notification(event),
-                            };
-                            if let Ok(json) = serde_json::to_string(&envelope) {
-                                yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                            let envelope = next_envelope(
+                                &seq_counter,
+                                SidebarEvent::Notification(event),
+                            );
+                            if let Some(serialized) = serialize_envelope(&envelope) {
+                                yield Ok::<_, std::convert::Infallible>(serialized);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -334,13 +559,12 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
-                            let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                            let envelope = SidebarEventEnvelope {
-                                seq,
-                                event: SidebarEvent::Buddy { buddy_event: event },
-                            };
-                            if let Ok(json) = serde_json::to_string(&envelope) {
-                                yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                            let envelope = next_envelope(
+                                &seq_counter,
+                                SidebarEvent::Buddy { buddy_event: event },
+                            );
+                            if let Some(serialized) = serialize_envelope(&envelope) {
+                                yield Ok::<_, std::convert::Infallible>(serialized);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {

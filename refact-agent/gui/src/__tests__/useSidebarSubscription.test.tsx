@@ -100,6 +100,9 @@ describe("useSidebarSubscription", () => {
       name: "local-refact",
       workspaceRoots: ["/local/refact"],
       serverSnapshotReceived: true,
+      historySnapshotReceived: true,
+      tasksSnapshotReceived: true,
+      buddySnapshotReceived: true,
     });
   });
 
@@ -122,6 +125,9 @@ describe("useSidebarSubscription", () => {
         name: "",
         workspaceRoots: [],
         serverSnapshotReceived: true,
+        historySnapshotReceived: true,
+        tasksSnapshotReceived: true,
+        buddySnapshotReceived: true,
       });
     });
   });

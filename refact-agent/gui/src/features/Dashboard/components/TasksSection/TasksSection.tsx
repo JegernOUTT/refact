@@ -114,7 +114,6 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
     isFetching,
     isError,
   } = useListTasksQuery(undefined, {
-    skip: projectLoading,
     refetchOnMountOrArgChange: true,
     refetchOnFocus: true,
     refetchOnReconnect: true,

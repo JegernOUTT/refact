@@ -4,42 +4,62 @@ import { RootState } from "../../app/store";
 export type CurrentProjectInfo = {
   name: string;
   workspaceRoots?: string[];
-  serverSnapshotReceived: boolean;
+  serverSnapshotReceived?: boolean;
+  historySnapshotReceived?: boolean;
+  tasksSnapshotReceived?: boolean;
+  buddySnapshotReceived?: boolean;
 };
-
-export type CurrentProjectInfoUpdate = Partial<CurrentProjectInfo>;
-
-type WorkspaceIdentity = Pick<CurrentProjectInfo, "name" | "workspaceRoots">;
 
 const initialState: CurrentProjectInfo = {
   name: "",
   serverSnapshotReceived: false,
+  historySnapshotReceived: false,
+  tasksSnapshotReceived: false,
+  buddySnapshotReceived: false,
 };
 
-export const setCurrentProjectInfo = createAction<CurrentProjectInfoUpdate>(
+export const setCurrentProjectInfo = createAction<CurrentProjectInfo>(
   "currentProjectInfo/setCurrentProjectInfo",
+);
+
+export const markProjectServerSnapshotReceived = createAction(
+  "currentProjectInfo/markProjectServerSnapshotReceived",
+);
+
+export const markProjectHistorySnapshotReceived = createAction(
+  "currentProjectInfo/markProjectHistorySnapshotReceived",
+);
+
+export const markProjectTasksSnapshotReceived = createAction(
+  "currentProjectInfo/markProjectTasksSnapshotReceived",
+);
+
+export const markProjectBuddySnapshotReceived = createAction(
+  "currentProjectInfo/markProjectBuddySnapshotReceived",
 );
 
 export const resetProjectServerSnapshot = createAction(
   "currentProjectInfo/resetProjectServerSnapshot",
 );
 
-function workspaceRootsEqual(a?: string[], b?: string[]): boolean {
-  if (a === b) return true;
-  if (a === undefined || b === undefined) return a === b;
-  if (a.length !== b.length) return false;
-  return a.every((root, index) => root === b[index]);
+function sameWorkspaceRoots(left?: string[], right?: string[]): boolean {
+  if (left === undefined || right === undefined) return false;
+  if (left.length !== right.length) return false;
+  return left.every((root, index) => root === right[index]);
 }
 
-function hasWorkspaceIdentityChanged(
-  state: WorkspaceIdentity,
-  update: CurrentProjectInfoUpdate,
+function isSameProjectIdentity(
+  current: CurrentProjectInfo,
+  next: CurrentProjectInfo,
 ): boolean {
-  const nameChanged = update.name !== undefined && update.name !== state.name;
-  const rootsChanged =
-    update.workspaceRoots !== undefined &&
-    !workspaceRootsEqual(update.workspaceRoots, state.workspaceRoots);
-  return nameChanged || rootsChanged;
+  if (sameWorkspaceRoots(current.workspaceRoots, next.workspaceRoots)) {
+    return true;
+  }
+  if (next.workspaceRoots !== undefined) return false;
+
+  return Boolean(
+    current.name.trim() && current.name.trim() === next.name.trim(),
+  );
 }
 
 export const currentProjectInfoReducer = createReducer(
@@ -47,22 +67,46 @@ export const currentProjectInfoReducer = createReducer(
   (builder) => {
     builder
       .addCase(setCurrentProjectInfo, (state, action) => {
-        const identityChanged = hasWorkspaceIdentityChanged(
-          state,
-          action.payload,
-        );
-        const nextServerSnapshotReceived =
-          action.payload.serverSnapshotReceived ??
-          (identityChanged ? false : state.serverSnapshotReceived);
+        const explicitSnapshot = action.payload.serverSnapshotReceived;
+        const shouldPreserveSnapshot =
+          explicitSnapshot === undefined &&
+          isSameProjectIdentity(state, action.payload);
+
+        const preserve = shouldPreserveSnapshot;
 
         return {
-          ...state,
           ...action.payload,
-          serverSnapshotReceived: nextServerSnapshotReceived,
+          serverSnapshotReceived:
+            explicitSnapshot ??
+            (preserve ? Boolean(state.serverSnapshotReceived) : false),
+          historySnapshotReceived:
+            action.payload.historySnapshotReceived ??
+            (preserve ? Boolean(state.historySnapshotReceived) : false),
+          tasksSnapshotReceived:
+            action.payload.tasksSnapshotReceived ??
+            (preserve ? Boolean(state.tasksSnapshotReceived) : false),
+          buddySnapshotReceived:
+            action.payload.buddySnapshotReceived ??
+            (preserve ? Boolean(state.buddySnapshotReceived) : false),
         };
+      })
+      .addCase(markProjectServerSnapshotReceived, (state) => {
+        state.serverSnapshotReceived = true;
+      })
+      .addCase(markProjectHistorySnapshotReceived, (state) => {
+        state.historySnapshotReceived = true;
+      })
+      .addCase(markProjectTasksSnapshotReceived, (state) => {
+        state.tasksSnapshotReceived = true;
+      })
+      .addCase(markProjectBuddySnapshotReceived, (state) => {
+        state.buddySnapshotReceived = true;
       })
       .addCase(resetProjectServerSnapshot, (state) => {
         state.serverSnapshotReceived = false;
+        state.historySnapshotReceived = false;
+        state.tasksSnapshotReceived = false;
+        state.buddySnapshotReceived = false;
       });
   },
 );
@@ -82,14 +126,24 @@ export const selectThreadProjectOrCurrentProject = (state: RootState) => {
 
 export const selectHasActiveProject = (state: RootState): boolean => {
   const workspaceRoots = state.current_project.workspaceRoots;
-  const hasWorkspaceRoot =
-    workspaceRoots !== undefined && workspaceRoots.length > 0;
+  if (workspaceRoots !== undefined) {
+    return workspaceRoots.length > 0;
+  }
+
   return Boolean(
-    hasWorkspaceRoot ||
-      state.current_project.name.trim() ||
+    state.current_project.name.trim() ||
       state.config.currentWorkspaceName?.trim(),
   );
 };
 
 export const selectHasProjectSnapshot = (state: RootState): boolean =>
-  state.current_project.serverSnapshotReceived;
+  Boolean(state.current_project.serverSnapshotReceived);
+
+export const selectHasHistorySnapshot = (state: RootState): boolean =>
+  Boolean(state.current_project.historySnapshotReceived);
+
+export const selectHasTasksSnapshot = (state: RootState): boolean =>
+  Boolean(state.current_project.tasksSnapshotReceived);
+
+export const selectHasBuddySnapshot = (state: RootState): boolean =>
+  Boolean(state.current_project.buddySnapshotReceived);

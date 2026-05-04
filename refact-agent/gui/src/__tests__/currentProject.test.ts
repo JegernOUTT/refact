@@ -1,107 +1,101 @@
 import { describe, expect, it } from "vitest";
-
+import { setUpStore, type RootState } from "../app/store";
 import {
   currentProjectInfoReducer,
+  markProjectBuddySnapshotReceived,
+  markProjectHistorySnapshotReceived,
+  markProjectServerSnapshotReceived,
+  markProjectTasksSnapshotReceived,
   resetProjectServerSnapshot,
-  selectHasActiveProject,
+  selectHasBuddySnapshot,
+  selectHasHistorySnapshot,
   selectHasProjectSnapshot,
+  selectHasTasksSnapshot,
   setCurrentProjectInfo,
 } from "../features/Chat/currentProject";
-import type { RootState } from "../app/store";
 
-function rootStateWithCurrentProject(
-  currentProject: RootState["current_project"],
-): RootState {
-  return {
-    current_project: currentProject,
-    config: {},
-    chat: {
-      current_thread_id: "",
-      threads: {},
-    },
-  } as RootState;
+function makeState(current_project: RootState["current_project"]): RootState {
+  return setUpStore({ current_project }).getState();
 }
 
-describe("current project state", () => {
-  it("preserves server snapshot readiness when a local project update keeps the same workspace", () => {
-    const serverSnapshotState = currentProjectInfoReducer(
-      undefined,
-      setCurrentProjectInfo({
-        name: "refact",
-        workspaceRoots: ["/workspace/refact"],
-        serverSnapshotReceived: true,
-      }),
-    );
+describe("current project server snapshot readiness", () => {
+  it("starts without a received server snapshot", () => {
+    const state = setUpStore().getState();
 
-    const localUpdateState = currentProjectInfoReducer(
-      serverSnapshotState,
-      setCurrentProjectInfo({
-        name: "refact",
-      }),
-    );
-
-    expect(localUpdateState).toEqual({
-      name: "refact",
-      workspaceRoots: ["/workspace/refact"],
-      serverSnapshotReceived: true,
-    });
+    expect(selectHasProjectSnapshot(state)).toBe(false);
   });
 
-  it("resets server snapshot readiness when local workspace identity changes", () => {
-    const serverSnapshotState = currentProjectInfoReducer(
-      undefined,
-      setCurrentProjectInfo({
-        name: "refact",
-        workspaceRoots: ["/workspace/refact"],
-        serverSnapshotReceived: true,
-      }),
+  it("marks and resets server snapshot readiness", () => {
+    const ready = currentProjectInfoReducer(
+      {
+        name: "repo",
+        workspaceRoots: ["/tmp/repo"],
+        serverSnapshotReceived: false,
+      },
+      markProjectServerSnapshotReceived(),
     );
 
-    const localUpdateState = currentProjectInfoReducer(
-      serverSnapshotState,
-      setCurrentProjectInfo({
-        name: "other-project",
-        workspaceRoots: ["/workspace/other-project"],
-      }),
-    );
+    expect(selectHasProjectSnapshot(makeState(ready))).toBe(true);
 
-    expect(localUpdateState).toEqual({
-      name: "other-project",
-      workspaceRoots: ["/workspace/other-project"],
-      serverSnapshotReceived: false,
-    });
-  });
+    const withSections = [
+      markProjectHistorySnapshotReceived(),
+      markProjectTasksSnapshotReceived(),
+      markProjectBuddySnapshotReceived(),
+    ].reduce(currentProjectInfoReducer, ready);
+    const sectionState = makeState(withSections);
 
-  it("resets server snapshot readiness explicitly", () => {
-    const serverSnapshotState = currentProjectInfoReducer(
-      undefined,
-      setCurrentProjectInfo({
-        name: "refact",
-        workspaceRoots: ["/workspace/refact"],
-        serverSnapshotReceived: true,
-      }),
-    );
+    expect(selectHasHistorySnapshot(sectionState)).toBe(true);
+    expect(selectHasTasksSnapshot(sectionState)).toBe(true);
+    expect(selectHasBuddySnapshot(sectionState)).toBe(true);
 
-    const resetState = currentProjectInfoReducer(
-      serverSnapshotState,
+    const reset = currentProjectInfoReducer(
+      withSections,
       resetProjectServerSnapshot(),
     );
+    const resetState = makeState(reset);
 
-    expect(resetState.serverSnapshotReceived).toBe(false);
+    expect(selectHasProjectSnapshot(resetState)).toBe(false);
+    expect(selectHasHistorySnapshot(resetState)).toBe(false);
+    expect(selectHasTasksSnapshot(resetState)).toBe(false);
+    expect(selectHasBuddySnapshot(resetState)).toBe(false);
   });
 
-  it("treats an explicit empty server workspace as a received snapshot", () => {
-    const state = currentProjectInfoReducer(
-      undefined,
+  it("preserves readiness across same-project IDE updates", () => {
+    const ready = currentProjectInfoReducer(
+      {
+        name: "repo",
+        workspaceRoots: ["/tmp/repo"],
+        serverSnapshotReceived: true,
+      },
+      setCurrentProjectInfo({ name: "repo" }),
+    );
+
+    expect(ready.serverSnapshotReceived).toBe(true);
+  });
+
+  it("resets readiness when project identity changes", () => {
+    const changed = currentProjectInfoReducer(
+      {
+        name: "repo",
+        workspaceRoots: ["/tmp/repo"],
+        serverSnapshotReceived: true,
+      },
+      setCurrentProjectInfo({ name: "other", workspaceRoots: ["/tmp/other"] }),
+    );
+
+    expect(changed.serverSnapshotReceived).toBe(false);
+  });
+
+  it("accepts explicit snapshot readiness from server updates", () => {
+    const ready = currentProjectInfoReducer(
+      { name: "", serverSnapshotReceived: false },
       setCurrentProjectInfo({
-        name: "",
-        workspaceRoots: [],
+        name: "repo",
+        workspaceRoots: ["/tmp/repo"],
         serverSnapshotReceived: true,
       }),
     );
-    const rootState = rootStateWithCurrentProject(state);
 
-    expect(selectHasProjectSnapshot(rootState)).toBe(true);
-    expect(selectHasActiveProject(rootState)).toBe(false);
+    expect(ready.serverSnapshotReceived).toBe(true);
   });
 });
