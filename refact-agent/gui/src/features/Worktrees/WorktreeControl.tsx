@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { skipToken } from "@reduxjs/toolkit/query";
 import { Flex, Popover, Text } from "@radix-ui/themes";
 import {
@@ -94,9 +100,14 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   const [createOpen, setCreateOpen] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [pendingCreatedWorktreeId, setPendingCreatedWorktreeId] = useState<
+  const pendingCreatedWorktreeIdRef = useRef<string | null>(null);
+  const [pendingCreatedWorktreeId, setPendingCreatedWorktreeIdState] = useState<
     string | null
   >(null);
+  const setPendingCreatedWorktreeId = useCallback((id: string | null) => {
+    pendingCreatedWorktreeIdRef.current = id;
+    setPendingCreatedWorktreeIdState(id);
+  }, []);
   const copyToClipboard = useCopyToClipboard();
   const { openFolderInNewWindow } = useEventsBusForIDE();
   const { data, isLoading } = useListWorktreesQuery(undefined, {
@@ -115,7 +126,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   );
   const isPendingCreatedWorktree =
     currentWorktree?.id !== undefined &&
-    pendingCreatedWorktreeId === currentWorktree.id;
+    pendingCreatedWorktreeIdRef.current === currentWorktree.id;
   const currentDiffQuery = currentRecord
     ? {
         id: currentRecord.meta.id,
@@ -272,7 +283,13 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
         setCreateError(worktreeErrorText(error));
       }
     },
-    [attachWorktree, chatId, createWorktree, deleteWorktree],
+    [
+      attachWorktree,
+      chatId,
+      createWorktree,
+      deleteWorktree,
+      setPendingCreatedWorktreeId,
+    ],
   );
 
   const handleCopyPath = useCallback(() => {
