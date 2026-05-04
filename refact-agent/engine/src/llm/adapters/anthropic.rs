@@ -111,7 +111,6 @@ impl LlmWireAdapter for AnthropicAdapter {
                     if is_cc {
                         claude_code_compat::apply_cc_tool_names(&mut converted_tools);
                         claude_code_compat::strip_tool_descriptions(&mut converted_tools);
-                        claude_code_compat::inject_cc_tool_stubs(&mut converted_tools);
                     }
                     // Add Anthropic's server-side web_search tool if enabled
                     if settings.supports_web_search {

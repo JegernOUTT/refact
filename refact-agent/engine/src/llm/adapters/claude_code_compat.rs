@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 
 // ─── Version / Identity ──────────────────────────────────────────────────────
 
-pub const CC_VERSION: &str = "2.1.97";
-pub const USER_AGENT: &str = "claude-cli/2.1.97 (external, cli)";
+pub const CC_VERSION: &str = "2.1.126";
+pub const USER_AGENT: &str = "claude-cli/2.1.126 (external, cli)";
 pub const SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 /// Prefix applied to Refact tool names in CC OAuth mode.
 /// NOTE: "mcp_" is explicitly blacklisted by Anthropic's billing detection —
@@ -58,62 +58,6 @@ lazy_static! {
     static ref SESSION_ID: String = uuid::Uuid::new_v4().to_string();
 }
 
-// ─── CC Tool Stubs ───────────────────────────────────────────────────────────
-
-/// Native CC tool stubs injected into every CC request.
-/// Makes the tool-set fingerprint look like a real Claude Code session.
-/// These use CC PascalCase naming and are NOT prefixed with `mcp_`.
-pub fn cc_tool_stubs() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "Glob",
-            "description": "Find files by pattern",
-            "input_schema": {
-                "type": "object",
-                "properties": {"pattern": {"type": "string", "description": "Glob pattern"}},
-                "required": ["pattern"]
-            }
-        }),
-        json!({
-            "name": "Grep",
-            "description": "Search file contents",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Regex pattern"},
-                    "path": {"type": "string", "description": "Search path"}
-                },
-                "required": ["pattern"]
-            }
-        }),
-        json!({
-            "name": "Agent",
-            "description": "Launch a subagent for complex tasks",
-            "input_schema": {
-                "type": "object",
-                "properties": {"prompt": {"type": "string", "description": "Task description"}},
-                "required": ["prompt"]
-            }
-        }),
-        json!({
-            "name": "NotebookEdit",
-            "description": "Edit notebook cells",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "notebook_path": {"type": "string"},
-                    "cell_index": {"type": "integer"}
-                },
-                "required": ["notebook_path"]
-            }
-        }),
-        json!({
-            "name": "TodoRead",
-            "description": "Read current task list",
-            "input_schema": {"type": "object", "properties": {}}
-        }),
-    ]
-}
 
 // ─── Auth Detection ──────────────────────────────────────────────────────────
 
@@ -292,8 +236,6 @@ const CC_SYSTEM_REPLACEMENTS: &[(&str, &str)] = &[
     ("You are Refact Agent", "You are Claude Code"),
     // Remaining brand mentions — specific patterns only; no bare "Refact" catch-all
     // because it would corrupt unrelated words like "Refactor" → "or".
-    ("refact-lsp", "ai-coding-assistant"),
-    (".refact/", ".ai-assistant/"),
     ("Refact Agent Engine", "AI Coding Assistant Engine"),
     ("Refact Agent", "AI coding assistant"),
     ("Refact Quick Agent", "AI coding assistant"),
@@ -662,19 +604,6 @@ pub fn strip_tool_descriptions(tools: &mut Value) {
     }
 }
 
-/// Prepend CC-native tool stubs to `tools` so the toolset fingerprint resembles
-/// a real Claude Code session. Called only when `tools` is a non-empty array.
-pub fn inject_cc_tool_stubs(tools: &mut Value) {
-    if let Some(arr) = tools.as_array_mut() {
-        if arr.is_empty() {
-            return;
-        }
-        let mut stubs = cc_tool_stubs();
-        // Prepend stubs; existing tools follow
-        stubs.append(arr);
-        *arr = stubs;
-    }
-}
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -1003,56 +932,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_inject_cc_tool_stubs_prepends() {
-        let mut tools = json!([{"name": "t_search", "input_schema": {"type": "object"}}]);
-        inject_cc_tool_stubs(&mut tools);
-        let arr = tools.as_array().unwrap();
-        // 5 stubs + 1 original
-        assert_eq!(arr.len(), 6);
-        assert_eq!(arr[0]["name"], "Glob");
-        assert_eq!(arr[5]["name"], "t_search");
-    }
-
-    #[test]
-    fn test_correct_cc_tool_order_stubs_keep_descriptions() {
-        // 1. strip_tool_descriptions  → t_* tools lose descriptions
-        // 2. inject_cc_tool_stubs     → CC stubs are added WITH descriptions
-        // Result: CC stubs look like native CC tools, t_* look like unnamed tool-server tools.
-        let mut tools = json!([{
-            "name": "t_cat",
-            "description": "Like cat in console, but better",
-            "input_schema": {"type": "object", "properties": {
-                "paths": {"type": "string", "description": "files to read"}
-            }}
-        }]);
-        strip_tool_descriptions(&mut tools);
-        inject_cc_tool_stubs(&mut tools);
-        let arr = tools.as_array().unwrap();
-        // CC stubs at positions 0-4 have descriptions
-        assert!(
-            arr[0].get("description").is_some(),
-            "Glob stub should have description"
-        );
-        assert_eq!(arr[0]["name"], "Glob");
-        // Original t_ tool at position 5 has no description
-        assert!(
-            arr[5].get("description").is_none(),
-            "t_cat should not have description"
-        );
-        assert!(arr[5]["input_schema"]["properties"]["paths"]
-            .get("description")
-            .is_none());
-    }
-
-    #[test]
-    fn test_inject_cc_tool_stubs_skips_empty() {
-        let mut tools = json!([]);
-        inject_cc_tool_stubs(&mut tools);
-        assert_eq!(tools.as_array().unwrap().len(), 0);
-    }
-
-    #[test]
     fn test_cc_oauth_betas_contains_required() {
         assert!(CC_OAUTH_BETAS.contains(&"oauth-2025-04-20"));
         assert!(CC_OAUTH_BETAS.contains(&"claude-code-20250219"));
