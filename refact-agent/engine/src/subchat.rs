@@ -20,7 +20,7 @@ use crate::llm::params::CacheControl;
 use crate::chat::stream_core::{
     run_llm_stream, StreamRunParams, ChoiceFinal, StreamCollector, normalize_tool_call,
 };
-use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
+use crate::chat::tools::{execute_tools, resolve_tool_call_aliases, ExecuteToolsOptions};
 use crate::chat::types::{TaskMeta, ThreadParams};
 use crate::worktrees::types::WorktreeMeta;
 use crate::chat::trajectories::save_trajectory_as;
@@ -1257,6 +1257,8 @@ async fn execute_pending_tool_calls(
         Some(tc) if !tc.is_empty() => tc.clone(),
         _ => return Ok(messages),
     };
+    let tool_calls =
+        resolve_tool_call_aliases(gcx.clone(), tool_calls, mode_id, Some(model_id)).await;
 
     let mut allowed: Vec<ChatToolCall> = vec![];
     let mut denied_msgs: Vec<ChatMessage> = vec![];

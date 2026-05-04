@@ -84,6 +84,73 @@ fn is_server_executed_tool(tool_call_id: &str) -> bool {
     tool_call_id.starts_with("srvtoolu_")
 }
 
+fn glob_pattern_to_regex(pattern: &str) -> String {
+    let mut out = String::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                out.push_str(".*");
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push('.'),
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn rewrite_cc_native_stub_tool_call(tc: &mut ChatToolCall) {
+    let name = tc.function.name.as_str();
+    if name != "Grep" && name != "Glob" {
+        return;
+    }
+
+    let args = tc.function.parse_args().unwrap_or_default();
+    let mut mapped = serde_json::Map::new();
+    match name {
+        "Grep" => {
+            let pattern = args
+                .get("pattern")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::String(String::new()));
+            let scope = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("workspace");
+            mapped.insert("pattern".to_string(), pattern);
+            mapped.insert(
+                "scope".to_string(),
+                serde_json::Value::String(scope.to_string()),
+            );
+        }
+        "Glob" => {
+            let pattern = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            mapped.insert(
+                "pattern".to_string(),
+                serde_json::Value::String(glob_pattern_to_regex(pattern)),
+            );
+            mapped.insert(
+                "scope".to_string(),
+                serde_json::Value::String("workspace".to_string()),
+            );
+        }
+        _ => return,
+    }
+
+    tc.function.name = "search_pattern".to_string();
+    tc.function.arguments = serde_json::Value::Object(mapped).to_string();
+}
+
 pub async fn resolve_tool_call_aliases(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_calls: Vec<ChatToolCall>,
@@ -102,7 +169,10 @@ pub async fn resolve_tool_call_aliases(
             .name
             .starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX)
     });
-    if !registry.needs_aliasing() && !needs_cc {
+    let needs_cc_native = tool_calls
+        .iter()
+        .any(|tc| matches!(tc.function.name.as_str(), "Grep" | "Glob"));
+    if !registry.needs_aliasing() && !needs_cc && !needs_cc_native {
         return tool_calls;
     }
     tool_calls
@@ -141,6 +211,7 @@ pub async fn resolve_tool_call_aliases(
             } else if let Some(internal_name) = registry.resolve_alias(&tc.function.name) {
                 tc.function.name = internal_name.to_string();
             }
+            rewrite_cc_native_stub_tool_call(&mut tc);
             tc
         })
         .collect()
@@ -359,6 +430,54 @@ mod tests {
         assert!(!is_server_executed_tool(""));
         assert!(!is_server_executed_tool("srvtoolu"));
         assert!(!is_server_executed_tool("SRVTOOLU_abc"));
+    }
+
+    #[test]
+    fn test_rewrite_cc_native_grep_tool_call() {
+        let mut tc = ChatToolCall {
+            id: "call-1".to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                name: "Grep".to_string(),
+                arguments: r#"{"pattern":"needle","path":"src"}"#.to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        };
+
+        rewrite_cc_native_stub_tool_call(&mut tc);
+
+        assert_eq!(tc.function.name, "search_pattern");
+        let args = tc.function.parse_args().unwrap();
+        assert_eq!(args.get("pattern").and_then(|v| v.as_str()), Some("needle"));
+        assert_eq!(args.get("scope").and_then(|v| v.as_str()), Some("src"));
+    }
+
+    #[test]
+    fn test_rewrite_cc_native_glob_tool_call() {
+        let mut tc = ChatToolCall {
+            id: "call-1".to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                name: "Glob".to_string(),
+                arguments: r#"{"pattern":"src/**/*.rs"}"#.to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        };
+
+        rewrite_cc_native_stub_tool_call(&mut tc);
+
+        assert_eq!(tc.function.name, "search_pattern");
+        let args = tc.function.parse_args().unwrap();
+        assert_eq!(
+            args.get("pattern").and_then(|v| v.as_str()),
+            Some("src/.*/[^/]*\\.rs")
+        );
+        assert_eq!(
+            args.get("scope").and_then(|v| v.as_str()),
+            Some("workspace")
+        );
     }
 
     #[test]

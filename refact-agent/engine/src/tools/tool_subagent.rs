@@ -68,6 +68,27 @@ fn task_agent_scope_guard_error(
     }
 }
 
+fn normalize_subagent_tool_name(name: &str) -> String {
+    match name {
+        "Grep" | "Glob" => "search_pattern".to_string(),
+        name if name.starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX) => {
+            crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(name)
+        }
+        _ => name.to_string(),
+    }
+}
+
+fn normalize_subagent_tools(tools: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for tool in tools {
+        let name = normalize_subagent_tool_name(&tool);
+        if !name.is_empty() && !normalized.contains(&name) {
+            normalized.push(name);
+        }
+    }
+    normalized
+}
+
 #[derive(Clone)]
 pub struct ToolSubagent {
     pub config_path: String,
@@ -146,14 +167,14 @@ impl Tool for ToolSubagent {
             None => return Err("Missing argument `expected_result`".to_string()),
         };
 
-        let tools: Vec<String> = match args.get("tools") {
+        let tools: Vec<String> = normalize_subagent_tools(match args.get("tools") {
             Some(Value::String(s)) if !s.trim().is_empty() => s
                 .split(',')
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .collect(),
             _ => vec![],
-        };
+        });
 
         let max_steps: usize = match args.get("max_steps") {
             Some(Value::String(s)) => s.parse().unwrap_or(10),
@@ -451,6 +472,28 @@ mod tests {
             agent_id: Some("agent-1".to_string()),
             enforce: true,
         })
+    }
+
+    #[test]
+    fn normalize_subagent_tools_accepts_claude_code_tool_names() {
+        let tools = normalize_subagent_tools(vec![
+            "t_cat".to_string(),
+            "t_tree".to_string(),
+            "t_plan".to_string(),
+            "Grep".to_string(),
+            "Glob".to_string(),
+            "cat".to_string(),
+        ]);
+
+        assert_eq!(
+            tools,
+            vec![
+                "cat".to_string(),
+                "tree".to_string(),
+                "strategic_planning".to_string(),
+                "search_pattern".to_string(),
+            ]
+        );
     }
 
     #[test]
