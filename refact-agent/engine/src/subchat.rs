@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock, mpsc};
 use serde_json::{json, Value};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::caps::{resolve_chat_model, resolve_model};
@@ -25,7 +25,9 @@ use crate::chat::types::{TaskMeta, ThreadParams};
 use crate::worktrees::types::WorktreeMeta;
 use crate::chat::trajectories::save_trajectory_as;
 use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
-use crate::stats::event::{LlmCallEvent, canonicalize_mode_for_stats, split_model_provider};
+use crate::stats::event::{canonicalize_mode_for_stats, split_model_provider, LlmCallEvent};
+use crate::worktrees::service::WorktreeService;
+use crate::worktrees::types::WorktreeReference;
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     use std::collections::HashSet;
@@ -609,6 +611,87 @@ pub async fn resolve_subchat_config(
     .await
 }
 
+async fn parent_thread_worktree(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    parent_id: &str,
+) -> Option<WorktreeMeta> {
+    let sessions = { gcx.read().await.chat_sessions.clone() };
+    let session_arc = {
+        let sessions_read = sessions.read().await;
+        sessions_read.get(parent_id).cloned()
+    };
+    if let Some(session_arc) = session_arc {
+        return session_arc.lock().await.thread.worktree.clone();
+    }
+
+    crate::chat::trajectories::validate_trajectory_id(parent_id).ok()?;
+    crate::chat::trajectories::load_trajectory_for_chat(gcx, parent_id)
+        .await
+        .and_then(|loaded| loaded.thread.worktree)
+}
+
+async fn resolve_subchat_worktree(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    parent_id: Option<&str>,
+    worktree: Option<WorktreeMeta>,
+) -> Option<WorktreeMeta> {
+    match worktree {
+        Some(worktree) => Some(worktree),
+        None => match parent_id {
+            Some(parent_id) => parent_thread_worktree(gcx, parent_id).await,
+            None => None,
+        },
+    }
+}
+
+fn worktree_reference_for_thread(
+    chat_id: &str,
+    thread: &ThreadParams,
+) -> Option<WorktreeReference> {
+    let worktree = thread.worktree.as_ref()?;
+    let task_meta = thread.task_meta.as_ref();
+    Some(WorktreeReference {
+        kind: worktree.kind.clone(),
+        chat_id: Some(chat_id.to_string()),
+        task_id: task_meta.map(|meta| meta.task_id.clone()),
+        card_id: task_meta.and_then(|meta| meta.card_id.clone()),
+        agent_id: task_meta.and_then(|meta| meta.agent_id.clone()),
+    })
+}
+
+async fn register_stateful_subchat_worktree(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    chat_id: &str,
+    thread: &mut ThreadParams,
+) {
+    let Some(worktree) = thread.worktree.clone() else {
+        return;
+    };
+    let Some(reference) = worktree_reference_for_thread(chat_id, thread) else {
+        return;
+    };
+
+    let cache_dir = { gcx.read().await.cache_dir.clone() };
+    let service = match WorktreeService::new(cache_dir, worktree.source_workspace_root.clone()) {
+        Ok(service) => service,
+        Err(e) => {
+            warn!(
+                "Failed to resolve worktree service while registering subchat '{}': {}",
+                chat_id, e
+            );
+            return;
+        }
+    };
+
+    match service.add_reference(&worktree.id, reference).await {
+        Ok(view) => thread.worktree = Some(view.meta),
+        Err(e) => warn!(
+            "Failed to add worktree reference '{}' for subchat '{}': {}",
+            worktree.id, chat_id, e
+        ),
+    }
+}
+
 pub async fn resolve_subchat_config_with_parent(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_name: &str,
@@ -655,6 +738,8 @@ pub async fn resolve_subchat_config_with_parent(
             params.subchat_n_ctx, model, model_rec.base.n_ctx
         ));
     }
+
+    let worktree = resolve_subchat_worktree(gcx.clone(), parent_id.as_deref(), worktree).await;
 
     Ok(SubchatConfig {
         tool_name: tool_name.to_string(),
@@ -802,7 +887,8 @@ pub async fn run_subchat(
     }
 
     if config.stateful {
-        let thread = stateful_thread_from_config(&chat_id, &config);
+        let mut thread = stateful_thread_from_config(&chat_id, &config);
+        register_stateful_subchat_worktree(gcx.clone(), &chat_id, &mut thread).await;
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
     }
 
@@ -1652,16 +1738,20 @@ async fn subchat_single_internal(
 #[cfg(test)]
 mod subchat_tests {
     use super::{
-        resolve_subchat_model, resolve_subchat_params, stateful_thread_from_config, SubchatConfig,
-        ToolsPolicy,
+        parent_thread_worktree, register_stateful_subchat_worktree, resolve_subchat_model,
+        resolve_subchat_params, resolve_subchat_worktree, stateful_thread_from_config,
+        SubchatConfig, ToolsPolicy,
     };
-    use crate::call_validation::{ChatModelType, ReasoningEffort, SubchatParameters};
-    use crate::chat::types::TaskMeta;
+    use crate::chat::trajectories::save_trajectory_as;
+    use crate::call_validation::{ChatMessage, ChatModelType, ReasoningEffort, SubchatParameters};
+    use crate::chat::types::{TaskMeta, ThreadParams};
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
     use crate::worktrees::types::WorktreeMeta;
     use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
     use std::fs;
+    use std::path::Path;
+    use std::process::Command;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1677,6 +1767,31 @@ mod subchat_tests {
             max_output_tokens: Some(128_000),
             ..Default::default()
         })
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_repo(root: &Path) {
+        run_git(root, &["init"]);
+        run_git(root, &["checkout", "-b", "main"]);
+        run_git(root, &["config", "core.autocrlf", "false"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test User"]);
+        fs::write(root.join("file.txt"), "hello\n").unwrap();
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-m", "initial"]);
     }
 
     fn sample_worktree() -> (tempfile::TempDir, WorktreeMeta) {
@@ -1854,6 +1969,209 @@ mod subchat_tests {
 
         assert_eq!(config.task_meta, Some(task_meta));
         assert_eq!(config.worktree, Some(worktree));
+    }
+
+    #[tokio::test]
+    async fn subchat_worktree_config_inherits_scope_from_parent_session() {
+        let gcx = make_test_gcx().await;
+        let (_temp, worktree) = sample_worktree();
+        let parent_chat_id = "parent-session-chat".to_string();
+        let sessions = gcx.read().await.chat_sessions.clone();
+        {
+            let mut sessions_write = sessions.write().await;
+            let mut parent_session = crate::chat::types::ChatSession::new(parent_chat_id.clone());
+            parent_session.thread.worktree = Some(worktree.clone());
+            sessions_write.insert(
+                parent_chat_id.clone(),
+                Arc::new(tokio::sync::Mutex::new(parent_session)),
+            );
+        }
+
+        let resolved = resolve_subchat_worktree(gcx, Some(&parent_chat_id), None).await;
+
+        assert_eq!(resolved, Some(worktree));
+    }
+
+    #[tokio::test]
+    async fn subchat_worktree_config_prefers_explicit_scope_over_parent_session() {
+        let gcx = make_test_gcx().await;
+        let (_parent_temp, parent_worktree) = sample_worktree();
+        let (_explicit_temp, mut explicit_worktree) = sample_worktree();
+        explicit_worktree.id = "wt-explicit-subchat".to_string();
+        let parent_chat_id = "parent-explicit-chat".to_string();
+        let sessions = gcx.read().await.chat_sessions.clone();
+        {
+            let mut sessions_write = sessions.write().await;
+            let mut parent_session = crate::chat::types::ChatSession::new(parent_chat_id.clone());
+            parent_session.thread.worktree = Some(parent_worktree);
+            sessions_write.insert(
+                parent_chat_id.clone(),
+                Arc::new(tokio::sync::Mutex::new(parent_session)),
+            );
+        }
+
+        let resolved =
+            resolve_subchat_worktree(gcx, Some(&parent_chat_id), Some(explicit_worktree.clone()))
+                .await;
+
+        assert_eq!(resolved, Some(explicit_worktree));
+    }
+
+    #[tokio::test]
+    async fn subchat_worktree_lookup_falls_back_to_parent_trajectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("repo");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = make_test_gcx().await;
+        {
+            let gcx_lock = gcx.read().await;
+            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            drop(gcx_lock);
+            gcx.write().await.cache_dir = cache.clone();
+        }
+        let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                branch: Some("refact/chat/subchat-parent".to_string()),
+                chat_id: Some("parent-trajectory-chat".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let worktree = created.worktree.meta.clone();
+        let parent_chat_id = "parent-trajectory-chat".to_string();
+        let thread = ThreadParams {
+            id: parent_chat_id.clone(),
+            title: "Parent".to_string(),
+            model: "model".to_string(),
+            worktree: Some(worktree.clone()),
+            ..Default::default()
+        };
+        let messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
+        save_trajectory_as(gcx.clone(), &thread, &messages).await;
+
+        assert_eq!(
+            parent_thread_worktree(gcx, &parent_chat_id).await,
+            Some(worktree)
+        );
+    }
+
+    #[tokio::test]
+    async fn subchat_worktree_active_detached_session_does_not_restore_stale_trajectory_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("repo");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = make_test_gcx().await;
+        {
+            let gcx_lock = gcx.read().await;
+            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            drop(gcx_lock);
+            gcx.write().await.cache_dir = cache.clone();
+        }
+        let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                branch: Some("refact/chat/subchat-detached-parent".to_string()),
+                chat_id: Some("parent-detached-chat".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let parent_chat_id = "parent-detached-chat".to_string();
+        let persisted_thread = ThreadParams {
+            id: parent_chat_id.clone(),
+            title: "Parent".to_string(),
+            model: "model".to_string(),
+            worktree: Some(created.worktree.meta.clone()),
+            ..Default::default()
+        };
+        let messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
+        save_trajectory_as(gcx.clone(), &persisted_thread, &messages).await;
+        let sessions = gcx.read().await.chat_sessions.clone();
+        {
+            let mut sessions_write = sessions.write().await;
+            sessions_write.insert(
+                parent_chat_id.clone(),
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::chat::types::ChatSession::new(parent_chat_id.clone()),
+                )),
+            );
+        }
+
+        assert_eq!(parent_thread_worktree(gcx, &parent_chat_id).await, None);
+    }
+
+    #[tokio::test]
+    async fn subchat_worktree_registers_stateful_child_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("repo");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = make_test_gcx().await;
+        {
+            gcx.write().await.cache_dir = cache.clone();
+        }
+        let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                branch: Some("refact/chat/subchat-child-reference".to_string()),
+                chat_id: Some("parent-ref-chat".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let config = SubchatConfig {
+            tool_name: "subagent".to_string(),
+            stateful: true,
+            chat_id: Some("child-ref-chat".to_string()),
+            title: Some("Subchat".to_string()),
+            parent_id: Some("parent-ref-chat".to_string()),
+            link_type: Some("subagent".to_string()),
+            root_chat_id: Some("parent-ref-chat".to_string()),
+            tools: ToolsPolicy::Only(vec!["cat".to_string()]),
+            max_steps: 1,
+            prepend_system_prompt: false,
+            wrap_up: None,
+            task_meta: None,
+            worktree: Some(created.worktree.meta.clone()),
+            model: "model".to_string(),
+            mode: "agent".to_string(),
+            n_ctx: 4096,
+            max_new_tokens: 512,
+            temperature: None,
+            reasoning_effort: None,
+            parent_tool_call_id: None,
+            parent_subchat_tx: None,
+            abort_flag: None,
+            subchat_depth: 1,
+            buddy_meta: None,
+        };
+        let mut thread = stateful_thread_from_config("child-ref-chat", &config);
+
+        register_stateful_subchat_worktree(gcx, "child-ref-chat", &mut thread).await;
+        assert_eq!(thread.worktree, Some(created.worktree.meta.clone()));
+
+        let view = service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .unwrap();
+        assert_eq!(view.reference_count, 2);
+        assert!(view
+            .references
+            .iter()
+            .any(|reference| reference.chat_id.as_deref() == Some("parent-ref-chat")));
+        assert!(view
+            .references
+            .iter()
+            .any(|reference| reference.chat_id.as_deref() == Some("child-ref-chat")));
     }
 
     #[tokio::test]

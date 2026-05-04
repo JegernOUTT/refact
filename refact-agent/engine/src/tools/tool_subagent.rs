@@ -18,13 +18,17 @@ use crate::knowledge_index::format_related_memories_section;
 use regex::Regex;
 
 const FILE_EDITING_TOOLS: &[&str] = &[
+    "patch",
+    "text_edit",
     "create_textdoc",
     "update_textdoc",
+    "replace_textdoc",
     "update_textdoc_anchored",
     "update_textdoc_by_lines",
     "update_textdoc_regex",
     "apply_patch",
     "undo_textdoc",
+    "mv",
     "rm",
 ];
 
@@ -205,7 +209,7 @@ impl Tool for ToolSubagent {
             return Err(error);
         }
 
-        let has_editing_tools = tools_contain_file_editing(&tools);
+        let has_editing_tools = tools.is_empty() || tools_contain_file_editing(&tools);
         let config_name = if has_editing_tools {
             "subagent_with_editing"
         } else {
@@ -468,5 +472,19 @@ mod tests {
         )
         .is_none());
         assert!(task_agent_scope_guard_error(&task_meta("agents"), &None, &Vec::new()).is_some());
+    }
+
+    #[test]
+    fn subchat_worktree_tool_subagent_requires_scope_for_editing_aliases() {
+        assert!(tools_allow_editing_or_shell(&Vec::new()));
+        for tool in ["patch", "text_edit", "replace_textdoc", "mv", "rm"] {
+            let tools = vec![tool.to_string()];
+            let error = task_agent_scope_guard_error(&task_meta("agents"), &None, &tools);
+            assert!(error.is_some(), "{tool} should require a worktree scope");
+            assert!(
+                tools_contain_file_editing(&tools),
+                "{tool} should select editing subagent config"
+            );
+        }
     }
 }
