@@ -39,11 +39,11 @@ jobs:
             target: aarch64-pc-windows-msvc
             code-target: win32-arm64
             ext: .exe
-          - os: ubuntu-20.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             code-target: linux-x64
             cross: true
-          - os: ubuntu-20.04
+          - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             code-target: linux-arm64
             cross: true
