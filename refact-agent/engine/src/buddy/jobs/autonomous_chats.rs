@@ -2038,7 +2038,10 @@ async fn execute_built_autonomous_job(
 
     let activity = BuddyActivity {
         icon: definition.meta.icon.to_string(),
-        title: format!("{} opened {}'s check-in", definition.meta.title, ctx.identity_name),
+        title: format!(
+            "{} opened {}'s check-in",
+            definition.meta.title, ctx.identity_name
+        ),
         description: format!(
             "{} created a {} system conversation.",
             ctx.identity_name, definition.meta.badge

@@ -4,7 +4,6 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-
 pub const CC_VERSION: &str = "2.1.126";
 pub const USER_AGENT: &str = "claude-cli/2.1.126 (external, cli)";
 pub const SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -25,7 +24,6 @@ pub const CC_OAUTH_BETAS: &[&str] = &[
 const BILLING_HASH_SALT: &str = "59cf53e54c78";
 const BILLING_HASH_INDICES: [usize; 3] = [4, 7, 20];
 
-
 lazy_static! {
     /// Stable per-process device identifier (hex-encoded 32 random bytes).
     /// Matches CC's persistent device_id format.
@@ -40,7 +38,6 @@ lazy_static! {
     /// Stable per-process session identifier (UUID v4).
     static ref SESSION_ID: String = uuid::Uuid::new_v4().to_string();
 }
-
 
 pub fn is_claude_code_oauth(auth_token: &str) -> bool {
     !auth_token.is_empty()
@@ -524,7 +521,6 @@ pub fn inject_metadata(body: &mut Value) {
     .unwrap_or_default();
     body["metadata"] = json!({"user_id": meta_value});
 }
-
 
 #[cfg(test)]
 mod tests {

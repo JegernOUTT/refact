@@ -502,29 +502,21 @@ pub async fn handle_sidebar_subscribe(
     let gcx_for_stream = gcx.clone();
     let subscription_id = Uuid::new_v4().to_string();
     let stream = async_stream::stream! {
-                        Some(part) => {
-                            let section = part.section();
-                            let status = part.status();
-                            let elapsed_ms = initial_started_at.elapsed().as_millis();
-                            let event = part.into_event(elapsed_ms);
-                            match section {
-                                SidebarSection::Workspace => workspace_ready = status == SidebarSectionStatus::Ready,
-                                SidebarSection::Chats => chats_ready = status == SidebarSectionStatus::Ready,
-                                SidebarSection::Tasks => tasks_ready = status == SidebarSectionStatus::Ready,
-                                SidebarSection::Buddy => buddy_ready = status == SidebarSectionStatus::Ready,
-                            }
-                            tracing::info!("sidebar initial {:?} finished with {:?} in {}ms", section, status, elapsed_ms);
-                            if let Some(event) = make_event(&seq_counter, &subscription_id, event) {
-                                yield Ok::<_, std::convert::Infallible>(event);
-                            }
-                            if status == SidebarSectionStatus::Error {
-                                spawn_sidebar_section_retry(
-                                    gcx_for_stream.clone(),
-                                    section,
-                                    retry_tx.clone(),
-                                );
-                            }
-                        }
+        let mut trajectory_rx = trajectory_rx;
+        let mut workspace_changed_rx = workspace_changed_rx;
+        let mut task_rx = task_rx;
+        let mut notification_rx = notification_rx;
+        let mut buddy_rx = buddy_rx;
+        let mut initial_rx = Some(spawn_initial_sidebar_loads(gcx_for_stream.clone()));
+        let (retry_tx, mut retry_rx) = mpsc::unbounded_channel::<InitialSidebarPart>();
+        let mut workspace_ready = false;
+        let mut chats_ready = false;
+        let mut tasks_ready = false;
+        let mut buddy_ready = false;
+        let mut bootstrap_complete = false;
+        let mut buffered_live_events = VecDeque::new();
+        let initial_started_at = Instant::now();
+        let shutdown_flag = gcx_for_stream.read().await.shutdown_flag.clone();
 
         let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -540,17 +532,27 @@ pub async fn handle_sidebar_subscribe(
                     match part {
                         Some(part) => {
                             let section = part.section();
+                            let status = part.status();
                             let elapsed_ms = initial_started_at.elapsed().as_millis();
                             let event = part.into_event(elapsed_ms);
-                            match section {
-                                SidebarSection::Workspace => workspace_ready = true,
-                                SidebarSection::Chats => chats_ready = true,
-                                SidebarSection::Tasks => tasks_ready = true,
-                                SidebarSection::Buddy => buddy_ready = true,
+                            if status == SidebarSectionStatus::Ready {
+                                match section {
+                                    SidebarSection::Workspace => workspace_ready = true,
+                                    SidebarSection::Chats => chats_ready = true,
+                                    SidebarSection::Tasks => tasks_ready = true,
+                                    SidebarSection::Buddy => buddy_ready = true,
+                                }
                             }
-                            tracing::info!("sidebar initial {:?} finished in {}ms", section, elapsed_ms);
+                            tracing::info!("sidebar initial {:?} finished with {:?} in {}ms", section, status, elapsed_ms);
                             if let Some(event) = make_event(&seq_counter, &subscription_id, event) {
                                 yield Ok::<_, std::convert::Infallible>(event);
+                            }
+                            if status == SidebarSectionStatus::Error {
+                                spawn_sidebar_section_retry(
+                                    gcx_for_stream.clone(),
+                                    section,
+                                    retry_tx.clone(),
+                                );
                             }
                         }
                         None => {
