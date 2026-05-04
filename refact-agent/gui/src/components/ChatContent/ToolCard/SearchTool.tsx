@@ -35,6 +35,10 @@ interface SearchToolProps {
   contextFiles?: ChatContextFile[];
 }
 
+function isSimpleWhitespace(char: string): boolean {
+  return char === " " || char === "\t" || char === "\r" || char === "\n";
+}
+
 function countMatches(content: string): number | null {
   let count = 0;
   let hasContent = false;
@@ -43,7 +47,7 @@ function countMatches(content: string): number | null {
     if (char === "\n") {
       if (hasContent) count++;
       hasContent = false;
-    } else if (!/\s/.test(char)) {
+    } else if (!isSimpleWhitespace(char)) {
       hasContent = true;
     }
   }

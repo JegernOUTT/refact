@@ -1,8 +1,12 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
+import { fireEvent } from "@testing-library/react";
 import { applyDeltaOps, DeltaOp } from "../services/refact/chatSubscription";
 import type { ChatMessage } from "../services/refact/types";
+import type { ToolCall } from "../services/refact/types";
 import {
+  selectManualPreviewItems,
+  selectManualPreviewItemsById,
   selectManyToolResultsByIds,
   selectToolResultById,
 } from "../features/Chat/Thread/selectors";
@@ -10,6 +14,7 @@ import type { RootState } from "../app/store";
 import type { Config } from "../features/Config/configSlice";
 import { render, waitFor, createDefaultChatState } from "../utils/test-utils";
 import { ChatContent } from "../components/ChatContent";
+import { ToolCallTooltip } from "../components/ChatContent/ToolCard/ToolCallTooltip";
 import { Chat } from "../components/Chat";
 import { InnerApp } from "../features/App";
 import { MARKDOWN_ISSUE } from "../__fixtures__";
@@ -31,6 +36,19 @@ const createHighlighterSpy = vi.fn(() =>
     codeToHtml: codeToHtmlSpy,
   }),
 );
+
+function renderTooltip(toolCall: ToolCall) {
+  const tooltip = ToolCallTooltip as React.FC<{
+    toolCall: ToolCall;
+    children?: React.ReactNode;
+  }>;
+
+  return React.createElement(
+    tooltip,
+    { toolCall },
+    React.createElement("button", { type: "button" }, "show tool"),
+  );
+}
 
 vi.mock("shiki", () => ({
   createHighlighter: createHighlighterSpy,
@@ -169,6 +187,86 @@ describe("applyDeltaOps", () => {
 });
 
 describe("selectToolResultById optimization", () => {
+  it("treats tools with both result and diff as resolved once per id", async () => {
+    const messages: ChatMessages = [
+      {
+        role: "assistant",
+        message_id: "msg-both",
+        content: "I'll edit the file.",
+        tool_calls: [
+          {
+            id: "tool-both",
+            type: "function",
+            index: 0,
+            function: {
+              name: "update_textdoc",
+              arguments:
+                '{"path":"src/both.ts","old_str":"old","replacement":"new"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "tool-both",
+        content: "done",
+      },
+      {
+        role: "diff",
+        tool_call_id: "tool-both",
+        content: [
+          {
+            file_name: "src/both.ts",
+            file_action: "edit",
+            line1: 1,
+            line2: 1,
+            lines_remove: "old\n",
+            lines_add: "new\n",
+          },
+        ],
+      },
+    ];
+    const state = createThreadState(messages);
+    state.chat.threads[MARKDOWN_ISSUE.id].streaming = true;
+    state.chat.threads[MARKDOWN_ISSUE.id].waiting_for_response = true;
+
+    const { container } = render(
+      React.createElement(ChatContent, {
+        onRetry: () => undefined,
+        onStopStreaming: () => undefined,
+      }),
+      {
+        preloadedState: state,
+      },
+    );
+
+    await waitFor(() => {
+      expect(container.textContent).toContain("Edit both.ts");
+      expect(container.textContent).toContain("+1");
+      expect(container.textContent).toContain("−1");
+    });
+  });
+
+  it("uses stable empty manual preview fallbacks", () => {
+    const state = {
+      chat: {
+        current_thread_id: "test",
+        threads: {
+          test: {},
+        },
+      },
+    } as unknown as RootState;
+
+    const first = selectManualPreviewItems(state);
+    const second = selectManualPreviewItems(state);
+    const byIdFirst = selectManualPreviewItemsById(state, "test");
+    const byIdSecond = selectManualPreviewItemsById(state, "missing");
+
+    expect(first).toBe(second);
+    expect(byIdFirst).toBe(first);
+    expect(byIdSecond).toBe(first);
+  });
+
   it("finds tool result from end without array copy", () => {
     const mockState = {
       chat: {
@@ -252,6 +350,47 @@ describe("selectToolResultById optimization", () => {
 
     expect(second).toBe(first);
     expect(second[0]).toBe(toolMessage);
+  });
+});
+
+describe("ToolCallTooltip", () => {
+  it("parses lazily and truncates oversized arguments when visible", async () => {
+    vi.useFakeTimers();
+    const parseSpy = vi.spyOn(JSON, "parse");
+    const largeValue = "x".repeat(700);
+    const args = Object.fromEntries(
+      Array.from({ length: 14 }, (_, index) => [`arg${index}`, largeValue]),
+    );
+    const toolCall: ToolCall = {
+      id: "tool-tooltip",
+      type: "function",
+      index: 0,
+      function: {
+        name: "update_textdoc",
+        arguments: JSON.stringify(args),
+      },
+    };
+
+    const { getByText, unmount } = render(renderTooltip(toolCall));
+
+    expect(parseSpy).not.toHaveBeenCalled();
+
+    try {
+      fireEvent.mouseEnter(getByText("show tool"));
+      vi.advanceTimersByTime(10_000);
+      vi.useRealTimers();
+
+      await waitFor(() => {
+        expect(getByText("update_textdoc")).toBeTruthy();
+        expect(getByText(/truncated \(700 chars\)/)).toBeTruthy();
+        expect(getByText("more arguments hidden")).toBeTruthy();
+      });
+      expect(parseSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      parseSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -427,11 +566,6 @@ describe("chat rendering regressions", () => {
           },
         ],
       },
-      {
-        role: "diff",
-        tool_call_id: "tool-edit",
-        content: [largeDiff],
-      },
     ];
     const streamingState = createThreadState(messages);
     streamingState.chat.threads[MARKDOWN_ISSUE.id].streaming = false;
@@ -447,6 +581,20 @@ describe("chat rendering regressions", () => {
       },
     );
 
+    store.dispatch(
+      applyChatEvent({
+        chat_id: MARKDOWN_ISSUE.id,
+        seq: "1",
+        type: "message_added",
+        index: 1,
+        message: {
+          role: "diff",
+          tool_call_id: "tool-edit",
+          content: [largeDiff],
+        },
+      }),
+    );
+
     await waitFor(() => {
       expect(container.textContent).toContain("Edit generated.ts");
       expect(container.textContent).not.toContain("+2000");
@@ -456,7 +604,7 @@ describe("chat rendering regressions", () => {
     store.dispatch(
       applyChatEvent({
         chat_id: MARKDOWN_ISSUE.id,
-        seq: "1",
+        seq: "2",
         type: "runtime_updated",
         state: "waiting_user_input",
       }),
@@ -465,6 +613,103 @@ describe("chat rendering regressions", () => {
     await waitFor(() => {
       expect(container.textContent).toContain("+2000");
       expect(container.textContent).toContain("−2000");
+    });
+  });
+
+  it("keeps completed diff-only tools stable while a later assistant streams", async () => {
+    const completedDiff: DiffChunk = {
+      file_name: "src/completed.ts",
+      file_action: "edit",
+      line1: 1,
+      line2: 1,
+      lines_remove: "old line\n".repeat(3),
+      lines_add: "new line\n".repeat(3),
+    };
+    const activeDiff: DiffChunk = {
+      file_name: "src/active.ts",
+      file_action: "edit",
+      line1: 1,
+      line2: 1,
+      lines_remove: "active old\n".repeat(2000),
+      lines_add: "active new\n".repeat(2000),
+    };
+    const messages: ChatMessages = [
+      {
+        role: "assistant",
+        message_id: "msg-tools",
+        content: "I'll edit two files.",
+        tool_calls: [
+          {
+            id: "tool-completed",
+            type: "function",
+            index: 0,
+            function: {
+              name: "update_textdoc",
+              arguments:
+                '{"path":"src/completed.ts","old_str":"old","replacement":"new"}',
+            },
+          },
+          {
+            id: "tool-active",
+            type: "function",
+            index: 1,
+            function: {
+              name: "update_textdoc",
+              arguments:
+                '{"path":"src/active.ts","old_str":"old","replacement":"new"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "diff",
+        tool_call_id: "tool-completed",
+        content: [completedDiff],
+      },
+      {
+        role: "assistant",
+        message_id: "msg-active",
+        content: "Now I'll edit another file.",
+        tool_calls: [
+          {
+            id: "tool-active",
+            type: "function",
+            index: 0,
+            function: {
+              name: "update_textdoc",
+              arguments:
+                '{"path":"src/active.ts","old_str":"old","replacement":"new"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "diff",
+        tool_call_id: "tool-active",
+        content: [activeDiff],
+      },
+    ];
+    const streamingState = createThreadState(messages);
+    streamingState.chat.threads[MARKDOWN_ISSUE.id].streaming = true;
+    streamingState.chat.threads[MARKDOWN_ISSUE.id].waiting_for_response = true;
+
+    const { container } = render(
+      React.createElement(ChatContent, {
+        onRetry: () => undefined,
+        onStopStreaming: () => undefined,
+      }),
+      {
+        preloadedState: streamingState,
+      },
+    );
+
+    await waitFor(() => {
+      expect(container.textContent).toContain("Edit completed.ts");
+      expect(container.textContent).toContain("+3");
+      expect(container.textContent).toContain("−3");
+      expect(container.textContent).toContain("Edit active.ts");
+      expect(container.textContent).not.toContain("+2000");
+      expect(container.textContent).not.toContain("−2000");
     });
   });
 

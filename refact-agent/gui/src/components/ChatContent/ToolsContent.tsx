@@ -286,8 +286,15 @@ export const SingleModelToolContent: React.FC<{
   const results = useAppSelector(selectResults);
   const diffs = useAppSelector(selectDiffs);
   const allResolved = useMemo(() => {
-    return results.length + diffs.length === toolCallsId.length;
-  }, [diffs.length, results.length, toolCallsId.length]);
+    const resolvedToolIds = new Set<string>();
+    for (const result of results) {
+      resolvedToolIds.add(result.tool_call_id);
+    }
+    for (const diff of diffs) {
+      resolvedToolIds.add(diff.tool_call_id);
+    }
+    return toolCallsId.every((id) => resolvedToolIds.has(id));
+  }, [diffs, results, toolCallsId]);
 
   const busy = useMemo(() => {
     if (allResolved) return false;
@@ -375,12 +382,14 @@ export type ToolContentProps = {
   toolCalls: ToolCall[];
   contextFilesByToolId?: Record<string, ChatContextFile[]>;
   diffsByToolId?: Record<string, DiffChunk[]>;
+  isActiveAssistant?: boolean;
 };
 
 export const ToolContent: React.FC<ToolContentProps> = ({
   toolCalls,
   contextFilesByToolId,
   diffsByToolId,
+  isActiveAssistant = false,
 }) => {
   const features = useAppSelector(selectFeatures);
   const ids = useMemo(() => {
@@ -399,6 +408,7 @@ export const ToolContent: React.FC<ToolContentProps> = ({
     [idsKey],
   );
   const allToolResults = useAppSelector(selectResults);
+  const activeToolCallId = isActiveAssistant ? ids[ids.length - 1] : undefined;
 
   return processToolCalls(
     toolCalls,
@@ -407,6 +417,7 @@ export const ToolContent: React.FC<ToolContentProps> = ({
     [],
     contextFilesByToolId,
     diffsByToolId,
+    activeToolCallId,
   );
 };
 
@@ -417,6 +428,7 @@ function processToolCalls(
   processed: React.ReactNode[] = [],
   contextFilesByToolId: Record<string, ChatContextFile[]> = {},
   diffsByToolId: Record<string, DiffChunk[]> = {},
+  activeToolCallId?: string,
 ) {
   if (toolCalls.length === 0) return processed;
   const [head, ...tail] = toolCalls;
@@ -428,6 +440,7 @@ function processToolCalls(
   const result = toolResults.find((result) => result.tool_call_id === head.id);
   const contextFiles = head.id ? contextFilesByToolId[head.id] : undefined;
   const diffs = head.id ? diffsByToolId[head.id] : undefined;
+  const isActiveTool = head.id === activeToolCallId;
 
   if (headName === "cat") {
     const elem = (
@@ -444,6 +457,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -462,6 +476,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -481,6 +496,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -500,6 +516,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -519,6 +536,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -533,6 +551,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -550,6 +569,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -567,6 +587,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -584,6 +605,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -601,6 +623,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -618,6 +641,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -637,6 +661,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -656,6 +681,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -675,6 +701,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -694,6 +721,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -705,6 +733,7 @@ function processToolCalls(
       processed,
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -724,6 +753,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -743,6 +773,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -752,6 +783,7 @@ function processToolCalls(
         key={`edit-tool-${head.function.name}-${processed.length}`}
         toolCall={normalizedHead}
         diffs={diffs}
+        isActiveTool={isActiveTool}
       />
     );
     return processToolCalls(
@@ -761,6 +793,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -770,6 +803,7 @@ function processToolCalls(
         key={`mv-tool-${processed.length}`}
         toolCall={head}
         toolType="mv"
+        isActiveTool={isActiveTool}
       />
     );
     return processToolCalls(
@@ -779,6 +813,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -789,6 +824,7 @@ function processToolCalls(
         toolCall={head}
         toolType="rm"
         diffs={diffs}
+        isActiveTool={isActiveTool}
       />
     );
     return processToolCalls(
@@ -798,6 +834,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -807,6 +844,7 @@ function processToolCalls(
         key={`add-workspace-tool-${processed.length}`}
         toolCall={head}
         toolType="add_workspace_folder"
+        isActiveTool={isActiveTool}
       />
     );
     return processToolCalls(
@@ -816,6 +854,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -833,6 +872,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -850,6 +890,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -867,6 +908,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -970,6 +1012,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -991,6 +1034,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -1005,6 +1049,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -1037,6 +1082,7 @@ function processToolCalls(
       [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
+      activeToolCallId,
     );
   }
 
@@ -1054,6 +1100,7 @@ function processToolCalls(
     [...processed, elem],
     contextFilesByToolId,
     diffsByToolId,
+    activeToolCallId,
   );
 }
 

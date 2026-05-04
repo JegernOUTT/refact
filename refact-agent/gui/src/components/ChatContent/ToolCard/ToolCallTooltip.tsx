@@ -11,19 +11,42 @@ import styles from "./ToolCallTooltip.module.css";
 
 const DELAY_MS = 10000;
 
+const MAX_TOOLTIP_ENTRIES = 12;
+const MAX_TOOLTIP_VALUE_LENGTH = 500;
+const HIDDEN_ARGS_LABEL = "more arguments hidden";
+
+function truncateTooltipValue(value: string): string {
+  if (value.length <= MAX_TOOLTIP_VALUE_LENGTH) return value;
+  return `${value.slice(0, MAX_TOOLTIP_VALUE_LENGTH)}… truncated (${
+    value.length
+  } chars)`;
+}
+
+function formatTooltipValue(value: unknown): string {
+  const formatted =
+    typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return truncateTooltipValue(formatted);
+}
+
 function parseArgs(toolCall: ToolCall): [string, string][] {
   try {
     const parsed = JSON.parse(toolCall.function.arguments) as Record<
       string,
       unknown
     >;
-    return Object.entries(parsed).map(([k, v]) => [
-      k,
-      typeof v === "string" ? v : JSON.stringify(v, null, 2),
-    ]);
+    const parsedEntries = Object.entries(parsed);
+    const entries = parsedEntries
+      .slice(0, MAX_TOOLTIP_ENTRIES)
+      .map(([k, v]) => [k, formatTooltipValue(v)] satisfies [string, string]);
+
+    if (parsedEntries.length > MAX_TOOLTIP_ENTRIES) {
+      entries.push(["…", HIDDEN_ARGS_LABEL]);
+    }
+
+    return entries;
   } catch {
     if (toolCall.function.arguments) {
-      return [["(raw)", toolCall.function.arguments]];
+      return [["(raw)", truncateTooltipValue(toolCall.function.arguments)]];
     }
     return [];
   }

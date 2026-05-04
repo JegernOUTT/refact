@@ -30,6 +30,8 @@ const EMPTY_TOOL_RESULTS: ToolResult[] = [];
 const EMPTY_TOOL_RESULTS_BY_ID: ReadonlyMap<string, ToolResult> = new Map();
 const EMPTY_DIFF_MESSAGES_BY_ID: ReadonlyMap<string, DiffMessage[]> = new Map();
 const EMPTY_DIFF_MESSAGES: DiffMessage[] = [];
+const EMPTY_MANUAL_PREVIEW_ITEMS: ChatThreadRuntime["manual_preview_items"] =
+  [];
 const EMPTY_TASKS: TodoItem[] = [];
 const DEFAULT_NEW_CHAT_SUGGESTED = { wasSuggested: false } as const;
 const DEFAULT_CONFIRMATION: ThreadConfirmation = {
@@ -307,8 +309,7 @@ export const toolResultsByIdSelector = (() => {
     }
 
     const nextMap = new Map<string, ToolResult>();
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
+    for (const msg of messages) {
       nextMap.set(msg.tool_call_id, msg as unknown as ToolResult);
     }
 
@@ -366,8 +367,7 @@ export const diffMessagesByIdSelector = (() => {
     }
 
     const nextMap = new Map<string, DiffMessage[]>();
-    for (let i = 0; i < diffs.length; i++) {
-      const diff = diffs[i];
+    for (const diff of diffs) {
       const existing = nextMap.get(diff.tool_call_id);
       if (existing) {
         existing.push(diff);
@@ -753,12 +753,15 @@ export const selectMemoryEnrichmentUserTouched = (state: RootState) =>
     ?.memory_enrichment_user_touched ?? false;
 
 export const selectManualPreviewItems = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.manual_preview_items ?? [];
+  state.chat.threads[state.chat.current_thread_id]?.manual_preview_items ??
+  EMPTY_MANUAL_PREVIEW_ITEMS;
 
 export const selectManualPreviewItemsById = (
   state: RootState,
   chatId: string,
-) => state.chat.threads[chatId]?.manual_preview_items ?? [];
+) =>
+  state.chat.threads[chatId]?.manual_preview_items ??
+  EMPTY_MANUAL_PREVIEW_ITEMS;
 
 export const selectManualPreviewRan = (state: RootState) =>
   state.chat.threads[state.chat.current_thread_id]?.manual_preview_ran ?? false;

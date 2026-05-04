@@ -26,6 +26,7 @@ import styles from "./EditTool.module.css";
 interface EditToolProps {
   toolCall: ToolCall;
   diffs?: DiffChunk[];
+  isActiveTool?: boolean;
 }
 
 function countNonEmptyLines(text: string): number {
@@ -36,7 +37,7 @@ function countNonEmptyLines(text: string): number {
     if (char === "\n") {
       if (hasContent) count++;
       hasContent = false;
-    } else {
+    } else if (char !== "\r" && char !== " " && char !== "\t") {
       hasContent = true;
     }
   }
@@ -190,7 +191,11 @@ const FileEditItem: React.FC<FileEditItemProps> = ({
   );
 };
 
-export const EditTool: React.FC<EditToolProps> = ({ toolCall, diffs = [] }) => {
+export const EditTool: React.FC<EditToolProps> = ({
+  toolCall,
+  diffs = [],
+  isActiveTool = true,
+}) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const { queryPathThenOpenFile, diffPasteBack, sendToolCallToIde } =
@@ -217,7 +222,7 @@ export const EditTool: React.FC<EditToolProps> = ({ toolCall, diffs = [] }) => {
 
   const hasResult = maybeResult !== undefined;
   const hasDiffs = diffs.length > 0 || toolDiffs.length > 0;
-  const isToolBusy = !hasResult && (isStreaming || isWaiting);
+  const isToolBusy = isActiveTool && !hasResult && (isStreaming || isWaiting);
   const shouldRenderDiffs = hasDiffs && !isToolBusy;
 
   const allDiffs = useMemo(() => {

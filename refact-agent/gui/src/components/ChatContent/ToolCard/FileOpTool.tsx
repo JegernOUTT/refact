@@ -35,6 +35,7 @@ interface FileOpToolProps {
   toolCall: ToolCall;
   toolType: FileOpType;
   diffs?: DiffChunk[];
+  isActiveTool?: boolean;
 }
 
 function countNonEmptyLines(text: string): number {
@@ -45,7 +46,7 @@ function countNonEmptyLines(text: string): number {
     if (char === "\n") {
       if (hasContent) count++;
       hasContent = false;
-    } else {
+    } else if (char !== "\r" && char !== " " && char !== "\t") {
       hasContent = true;
     }
   }
@@ -57,6 +58,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   toolCall,
   toolType,
   diffs = [],
+  isActiveTool = true,
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
@@ -80,7 +82,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
 
   const hasResult = maybeResult !== undefined;
   const hasDiffs = diffs.length > 0 || toolDiffs.length > 0;
-  const isToolBusy = !hasResult && (isStreaming || isWaiting);
+  const isToolBusy = isActiveTool && !hasResult && (isStreaming || isWaiting);
   const shouldReadDiffs = hasDiffs && !isToolBusy;
 
   const allDiffs = useMemo((): DiffChunk[] => {

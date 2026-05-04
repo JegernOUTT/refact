@@ -190,6 +190,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
           toolCalls={serverExecutedTools}
           contextFilesByToolId={contextFilesByToolId}
           diffsByToolId={diffsByToolId}
+          isActiveAssistant={isStreaming}
         />
       )}
 
@@ -198,6 +199,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
           toolCalls={toolCalls}
           contextFilesByToolId={contextFilesByToolId}
           diffsByToolId={diffsByToolId}
+          isActiveAssistant={isStreaming}
         />
       )}
       <MessageFooter
