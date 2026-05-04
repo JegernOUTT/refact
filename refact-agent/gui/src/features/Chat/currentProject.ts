@@ -68,6 +68,13 @@ function hasWorkspaceIdentityChanged(
   next: CurrentProjectInfo,
 ): boolean {
   if (next.workspaceRoots !== undefined) {
+    if (current.workspaceRoots === undefined) {
+      return Boolean(
+        current.name.trim() &&
+          next.name.trim() &&
+          current.name.trim() !== next.name.trim(),
+      );
+    }
     return !sameStringArray(current.workspaceRoots, next.workspaceRoots);
   }
 

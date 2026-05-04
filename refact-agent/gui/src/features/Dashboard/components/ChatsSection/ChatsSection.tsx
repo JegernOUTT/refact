@@ -94,6 +94,7 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const isInitialLoading = useAppSelector((state) => state.history.isLoading);
+  const loadError = useAppSelector((state) => state.history.loadError);
   const history = useAppSelector((state) => state.history.chats, {
     devModeChecks: { stabilityCheck: "never" },
   });
@@ -122,8 +123,10 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
     () => buildFlatList(filteredTree, expandedIds),
     [filteredTree, expandedIds],
   );
+  const showLoadError = Boolean(loadError) && filteredTree.length === 0;
   const showLoading =
-    projectLoading || (isInitialLoading && filteredTree.length === 0);
+    !showLoadError &&
+    (projectLoading || (isInitialLoading && filteredTree.length === 0));
 
   const handleToggleExpand = useCallback((id: string) => {
     setExpandedIds((prev) => {
@@ -229,7 +232,16 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
         </div>
 
         <div className={styles.list}>
-          {showLoading ? (
+          {showLoadError ? (
+            <Flex direction="column" align="center" gap="2" p="4">
+              <Text size="2" color="red">
+                Failed to load chats
+              </Text>
+              <Text size="1" color="gray" align="center">
+                {loadError ?? "Refact could not load chat history."}
+              </Text>
+            </Flex>
+          ) : showLoading ? (
             <Flex direction="column" gap="1" p="1">
               {Array.from({ length: 8 }, (_, i) => (
                 <Flex key={i} align="center" gap="2" py="1" px="2">
@@ -309,7 +321,7 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
               }}
             />
           )}
-          {!showLoading && filteredTree.length === 0 && (
+          {!showLoadError && !showLoading && filteredTree.length === 0 && (
             <Text
               size="2"
               color="gray"

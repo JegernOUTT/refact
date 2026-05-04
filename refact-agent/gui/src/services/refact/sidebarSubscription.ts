@@ -126,8 +126,29 @@ function isValidNotificationEvent(obj: Record<string, unknown>): boolean {
 }
 
 function isValidLoadingPhase(obj: Record<string, unknown>): boolean {
-  if (typeof obj.section !== "string") return false;
-  if (typeof obj.status !== "string") return false;
+  const validSections = new Set<SidebarLoadingSection>([
+    "workspace",
+    "trajectories",
+    "tasks",
+    "buddy",
+  ]);
+  const validStatuses = new Set<SidebarLoadingStatus>([
+    "started",
+    "ready",
+    "error",
+  ]);
+  if (
+    typeof obj.section !== "string" ||
+    !validSections.has(obj.section as SidebarLoadingSection)
+  ) {
+    return false;
+  }
+  if (
+    typeof obj.status !== "string" ||
+    !validStatuses.has(obj.status as SidebarLoadingStatus)
+  ) {
+    return false;
+  }
   if (obj.elapsed_ms !== undefined && typeof obj.elapsed_ms !== "number") {
     return false;
   }

@@ -157,6 +157,14 @@ export function useSidebarSubscription() {
     null,
   );
   const trajectoriesSnapshotDoneRef = useRef(false);
+  const tasksSnapshotDoneRef = useRef(false);
+  const tasksSnapshotRef = useRef<TaskMeta[] | null>(null);
+  const progressiveSnapshotsRef = useRef({
+    workspace: false,
+    trajectories: false,
+    tasks: false,
+    buddy: false,
+  });
   // eslint-disable-next-line @typescript-eslint/no-empty-function
   const connectRef = useRef<() => void>(() => {});
 
@@ -186,7 +194,11 @@ export function useSidebarSubscription() {
         event.total_lines_removed !== undefined ||
         event.tasks_total !== undefined ||
         event.tasks_done !== undefined ||
-        event.tasks_failed !== undefined;
+        event.tasks_failed !== undefined ||
+        event.task_id !== undefined ||
+        event.task_role !== undefined ||
+        event.agent_id !== undefined ||
+        event.card_id !== undefined;
 
       if (existsInHistory && hasMetaUpdate) {
         const metaPatch: Record<string, unknown> = { id: event.id };
@@ -218,6 +230,11 @@ export function useSidebarSubscription() {
           metaPatch.tasks_done = event.tasks_done;
         if (event.tasks_failed !== undefined)
           metaPatch.tasks_failed = event.tasks_failed;
+        if (event.task_id !== undefined) metaPatch.task_id = event.task_id;
+        if (event.task_role !== undefined)
+          metaPatch.task_role = event.task_role;
+        if (event.agent_id !== undefined) metaPatch.agent_id = event.agent_id;
+        if (event.card_id !== undefined) metaPatch.card_id = event.card_id;
         dispatch(
           updateChatMetaById(
             metaPatch as Parameters<typeof updateChatMetaById>[0],
@@ -277,6 +294,10 @@ export function useSidebarSubscription() {
               tasks_total: 0,
               tasks_done: 0,
               tasks_failed: 0,
+              task_id: event.task_id,
+              task_role: event.task_role,
+              agent_id: event.agent_id,
+              card_id: event.card_id,
             },
           ]),
         );
@@ -308,6 +329,24 @@ export function useSidebarSubscription() {
     [dispatch],
   );
 
+  const updateListTasksCache = useCallback(
+    (updater: (draft: TaskMeta[]) => void) => {
+      if (tasksSnapshotRef.current) {
+        const next = [...tasksSnapshotRef.current];
+        updater(next);
+        tasksSnapshotRef.current = next;
+        void dispatch(
+          tasksApi.util.upsertQueryData("listTasks", undefined, next),
+        );
+        return;
+      }
+      void dispatch(
+        tasksApi.util.updateQueryData("listTasks", undefined, updater),
+      );
+    },
+    [dispatch],
+  );
+
   const processTaskEvent = useCallback(
     (event: SidebarEventEnvelope & { category: "task" }) => {
       switch (event.type) {
@@ -319,32 +358,30 @@ export function useSidebarSubscription() {
           break;
 
         case "task_created":
-          dispatch(
-            tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {
-              const exists = draft.some((t) => t.id === event.task_id);
-              if (!exists) {
-                draft.unshift(event.meta);
-              }
-            }),
-          );
+          updateListTasksCache((draft) => {
+            const exists = draft.some((t) => t.id === event.task_id);
+            if (!exists) {
+              draft.unshift(event.meta);
+            }
+          });
           break;
 
         case "task_updated":
-          dispatch(
-            tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {
-              const index = draft.findIndex((t) => t.id === event.task_id);
-              if (index >= 0) {
-                const existing = draft[index];
-                draft[index] = {
-                  ...event.meta,
-                  planner_session_state:
-                    event.meta.planner_session_state ??
-                    existing.planner_session_state,
-                };
-              }
-              draft.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-            }),
-          );
+          updateListTasksCache((draft) => {
+            const index = draft.findIndex((t) => t.id === event.task_id);
+            if (index >= 0) {
+              const existing = draft[index];
+              draft[index] = {
+                ...event.meta,
+                planner_session_state:
+                  event.meta.planner_session_state ??
+                  existing.planner_session_state,
+              };
+            } else {
+              draft.unshift(event.meta);
+            }
+            draft.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+          });
           dispatch(
             tasksApi.util.updateQueryData(
               "getTask",
@@ -360,14 +397,12 @@ export function useSidebarSubscription() {
           break;
 
         case "task_deleted":
-          dispatch(
-            tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {
-              const index = draft.findIndex((t) => t.id === event.task_id);
-              if (index >= 0) {
-                draft.splice(index, 1);
-              }
-            }),
-          );
+          updateListTasksCache((draft) => {
+            const index = draft.findIndex((t) => t.id === event.task_id);
+            if (index >= 0) {
+              draft.splice(index, 1);
+            }
+          });
           break;
 
         case "board_changed":
@@ -381,11 +416,12 @@ export function useSidebarSubscription() {
           break;
       }
     },
-    [dispatch],
+    [dispatch, updateListTasksCache],
   );
 
   const processWorkspaceSnapshot = useCallback(
     (workspaceRoots: string[]) => {
+      progressiveSnapshotsRef.current.workspace = true;
       dispatch(
         setCurrentProjectInfo({
           name: getWorkspaceDisplayName(workspaceRoots[0] ?? ""),
@@ -400,6 +436,7 @@ export function useSidebarSubscription() {
 
   const processTrajectoriesSnapshot = useCallback(
     (trajectories: TrajectoryMeta[]) => {
+      progressiveSnapshotsRef.current.trajectories = true;
       dispatch(replaceSnapshotHistory(trajectoryItemsFromMeta(trajectories)));
       dispatch(setHistoryLoadError(null));
       dispatch(setHistoryLoading(false));
@@ -411,9 +448,12 @@ export function useSidebarSubscription() {
 
   const processTasksSnapshot = useCallback(
     (tasks: TaskMeta[]) => {
+      progressiveSnapshotsRef.current.tasks = true;
+      tasksSnapshotRef.current = tasks;
       void dispatch(
         tasksApi.util.upsertQueryData("listTasks", undefined, tasks),
       );
+      tasksSnapshotDoneRef.current = true;
       dispatch(markTasksSnapshotReceived());
     },
     [dispatch],
@@ -421,6 +461,7 @@ export function useSidebarSubscription() {
 
   const processBuddySnapshot = useCallback(
     (buddy: BuddySnapshotPayload | undefined) => {
+      progressiveSnapshotsRef.current.buddy = true;
       if (!buddy || !("state" in buddy)) {
         dispatch(setBuddyUnavailable());
       } else {
@@ -431,16 +472,38 @@ export function useSidebarSubscription() {
     [dispatch],
   );
 
+  const processLoadingPhase = useCallback(
+    (event: SidebarEventEnvelope & { category: "loading_phase" }) => {
+      if (event.status !== "error") return;
+      const message = event.error ?? `Failed to load ${event.section}`;
+      if (event.section === "trajectories") {
+        trajectoriesSnapshotDoneRef.current = false;
+        dispatch(setHistoryLoadError(message));
+      } else if (event.section === "tasks") {
+        tasksSnapshotDoneRef.current = false;
+        dispatch(markTasksSnapshotReceived());
+      }
+    },
+    [dispatch],
+  );
+
   const processSnapshot = useCallback(
     (event: SidebarEventEnvelope & { category: "snapshot" }) => {
-      if (event.workspace_roots !== undefined) {
+      const progressive = progressiveSnapshotsRef.current;
+      if (event.workspace_roots !== undefined && !progressive.workspace) {
         processWorkspaceSnapshot(event.workspace_roots);
-      } else {
+      } else if (!progressive.workspace) {
         dispatch(markWorkspaceSnapshotReceived());
       }
-      processTrajectoriesSnapshot(event.trajectories);
-      processTasksSnapshot(event.tasks);
-      processBuddySnapshot(event.buddy);
+      if (!progressive.trajectories) {
+        processTrajectoriesSnapshot(event.trajectories);
+      }
+      if (!progressive.tasks) {
+        processTasksSnapshot(event.tasks);
+      }
+      if (!progressive.buddy) {
+        processBuddySnapshot(event.buddy);
+      }
     },
     [
       dispatch,
@@ -617,6 +680,10 @@ export function useSidebarSubscription() {
         processSnapshot(
           envelope as SidebarEventEnvelope & { category: "snapshot" },
         );
+      } else if (envelope.category === "loading_phase") {
+        processLoadingPhase(
+          envelope as SidebarEventEnvelope & { category: "loading_phase" },
+        );
       } else if (envelope.category === "workspace_snapshot") {
         processWorkspaceSnapshot(envelope.workspace_roots);
       } else if (envelope.category === "trajectories_snapshot") {
@@ -637,7 +704,7 @@ export function useSidebarSubscription() {
         processNotification(
           envelope as SidebarEventEnvelope & { category: "notification" },
         );
-      } else if (envelope.category === "buddy") {
+      } else {
         processBuddyEvent(
           envelope as SidebarEventEnvelope & { category: "buddy" },
         );
@@ -665,6 +732,7 @@ export function useSidebarSubscription() {
     config.lspPort,
     config.apiKey,
     processSnapshot,
+    processLoadingPhase,
     processWorkspaceSnapshot,
     processTrajectoriesSnapshot,
     processTasksSnapshot,
@@ -680,6 +748,14 @@ export function useSidebarSubscription() {
 
   useEffect(() => {
     trajectoriesSnapshotDoneRef.current = false;
+    tasksSnapshotDoneRef.current = false;
+    tasksSnapshotRef.current = null;
+    progressiveSnapshotsRef.current = {
+      workspace: false,
+      trajectories: false,
+      tasks: false,
+      buddy: false,
+    };
     dispatch(resetSidebarReadiness());
     dispatch(setHistoryLoading(true));
     void prepareInitialHistory();

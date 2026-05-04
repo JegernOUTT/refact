@@ -518,6 +518,10 @@ export const historySlice = createSlice({
         tasks_total?: number;
         tasks_done?: number;
         tasks_failed?: number;
+        task_id?: string;
+        task_role?: string;
+        agent_id?: string;
+        card_id?: string;
       }>,
     ) => {
       if (!(action.payload.id in state.chats)) return;
@@ -569,6 +573,18 @@ export const historySlice = createSlice({
       }
       if (action.payload.tasks_failed !== undefined) {
         chat.tasks_failed = action.payload.tasks_failed;
+      }
+      if (action.payload.task_id !== undefined) {
+        chat.task_id = action.payload.task_id;
+      }
+      if (action.payload.task_role !== undefined) {
+        chat.task_role = action.payload.task_role;
+      }
+      if (action.payload.agent_id !== undefined) {
+        chat.agent_id = action.payload.agent_id;
+      }
+      if (action.payload.card_id !== undefined) {
+        chat.card_id = action.payload.card_id;
       }
     },
 

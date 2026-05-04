@@ -171,6 +171,30 @@ fn loading_event(
     }
 }
 
+async fn emit_full_snapshot(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    seq_counter: &AtomicU64,
+) -> Option<String> {
+    match fetch_snapshot(gcx.clone()).await {
+        Ok((trajectories, tasks, workspace_roots)) => {
+            let buddy = fetch_buddy_snapshot(gcx).await;
+            make_event(
+                seq_counter,
+                SidebarEvent::Snapshot {
+                    trajectories,
+                    tasks,
+                    workspace_roots,
+                    buddy,
+                },
+            )
+        }
+        Err(error) => {
+            tracing::warn!("sidebar full snapshot recovery failed: {error}");
+            None
+        }
+    }
+}
+
 fn spawn_initial_sidebar_loads(
     gcx: Arc<ARwLock<GlobalContext>>,
 ) -> mpsc::UnboundedReceiver<InitialSidebarPart> {
@@ -280,11 +304,13 @@ pub async fn handle_sidebar_subscribe(
         let mut notification_rx = notification_rx;
         let mut buddy_rx = buddy_rx;
         let mut initial_rx = Some(spawn_initial_sidebar_loads(gcx_for_stream.clone()));
-        let mut workspace_roots: Option<Vec<String>> = None;
-        let mut trajectories: Option<Vec<TrajectoryMeta>> = None;
-        let mut tasks: Option<Vec<TaskMeta>> = None;
-        let mut buddy_snap: Option<serde_json::Value> = None;
+        let mut workspace_ready = false;
+        let mut trajectories_ready = false;
+        let mut tasks_ready = false;
+        let mut buddy_ready = false;
+        let mut live_events_started = false;
         let initial_started_at = Instant::now();
+        let shutdown_flag = gcx_for_stream.read().await.shutdown_flag.clone();
 
         for section in [
             SidebarLoadingSection::Workspace,
@@ -316,7 +342,7 @@ pub async fn handle_sidebar_subscribe(
                             match result {
                                 Ok(roots) => {
                                     tracing::info!("sidebar initial workspace ready in {}ms", initial_started_at.elapsed().as_millis());
-                                    workspace_roots = Some(roots.clone());
+                                    workspace_ready = true;
                                     if let Some(event) = make_event(&seq_counter, SidebarEvent::WorkspaceSnapshot { workspace_roots: roots }) {
                                         yield Ok::<_, std::convert::Infallible>(event);
                                     }
@@ -326,7 +352,7 @@ pub async fn handle_sidebar_subscribe(
                                 }
                                 Err(error) => {
                                     tracing::warn!("sidebar initial workspace failed: {error}");
-                                    workspace_roots = Some(Vec::new());
+                                    workspace_ready = true;
                                     if let Some(event) = make_event(&seq_counter, SidebarEvent::WorkspaceSnapshot { workspace_roots: Vec::new() }) {
                                         yield Ok::<_, std::convert::Infallible>(event);
                                     }
@@ -340,7 +366,7 @@ pub async fn handle_sidebar_subscribe(
                             match result {
                                 Ok(items) => {
                                     tracing::info!("sidebar initial trajectories ready in {}ms", initial_started_at.elapsed().as_millis());
-                                    trajectories = Some(items.clone());
+                                    trajectories_ready = true;
                                     if let Some(event) = make_event(&seq_counter, SidebarEvent::TrajectoriesSnapshot { trajectories: items }) {
                                         yield Ok::<_, std::convert::Infallible>(event);
                                     }
@@ -350,7 +376,7 @@ pub async fn handle_sidebar_subscribe(
                                 }
                                 Err(error) => {
                                     tracing::warn!("sidebar initial trajectories failed: {error}");
-                                    trajectories = Some(Vec::new());
+                                    trajectories_ready = true;
                                     if let Some(event) = make_event(&seq_counter, SidebarEvent::TrajectoriesSnapshot { trajectories: Vec::new() }) {
                                         yield Ok::<_, std::convert::Infallible>(event);
                                     }
@@ -364,7 +390,7 @@ pub async fn handle_sidebar_subscribe(
                             match result {
                                 Ok(items) => {
                                     tracing::info!("sidebar initial tasks ready in {}ms", initial_started_at.elapsed().as_millis());
-                                    tasks = Some(items.clone());
+                                    tasks_ready = true;
                                     if let Some(event) = make_event(&seq_counter, SidebarEvent::TasksSnapshot { tasks: items }) {
                                         yield Ok::<_, std::convert::Infallible>(event);
                                     }
@@ -374,7 +400,7 @@ pub async fn handle_sidebar_subscribe(
                                 }
                                 Err(error) => {
                                     tracing::warn!("sidebar initial tasks failed: {error}");
-                                    tasks = Some(Vec::new());
+                                    tasks_ready = true;
                                     if let Some(event) = make_event(&seq_counter, SidebarEvent::TasksSnapshot { tasks: Vec::new() }) {
                                         yield Ok::<_, std::convert::Infallible>(event);
                                     }
@@ -386,7 +412,7 @@ pub async fn handle_sidebar_subscribe(
                         }
                         Some(InitialSidebarPart::Buddy(snapshot)) => {
                             tracing::info!("sidebar initial buddy ready in {}ms", initial_started_at.elapsed().as_millis());
-                            buddy_snap = Some(snapshot.clone());
+                            buddy_ready = true;
                             if let Some(event) = make_event(&seq_counter, SidebarEvent::BuddySnapshot { buddy: snapshot }) {
                                 yield Ok::<_, std::convert::Infallible>(event);
                             }
@@ -399,17 +425,11 @@ pub async fn handle_sidebar_subscribe(
                         }
                     }
 
-                    if let (Some(trajectories), Some(tasks), Some(workspace_roots), Some(buddy)) = (
-                        trajectories.clone(),
-                        tasks.clone(),
-                        workspace_roots.clone(),
-                        buddy_snap.clone(),
-                    ) {
-                        if let Some(event) = make_event(
-                            &seq_counter,
-                            SidebarEvent::Snapshot { trajectories, tasks, workspace_roots, buddy },
-                        ) {
-                            yield Ok::<_, std::convert::Infallible>(event);
+                    if workspace_ready && trajectories_ready && tasks_ready && buddy_ready {
+                        if !live_events_started {
+                            if let Some(event) = emit_full_snapshot(gcx_for_stream.clone(), &seq_counter).await {
+                                yield Ok::<_, std::convert::Infallible>(event);
+                            }
                         }
                         initial_rx = None;
                     }
@@ -423,16 +443,14 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
+                            live_events_started = true;
                             if let Some(event) = make_event(&seq_counter, SidebarEvent::Trajectory(event)) {
                                 yield Ok::<_, std::convert::Infallible>(event);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if let Ok((trajectories, tasks, workspace_roots)) = fetch_snapshot(gcx_for_stream.clone()).await {
-                                let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                if let Some(event) = make_event(&seq_counter, SidebarEvent::Snapshot { trajectories, tasks, workspace_roots, buddy }) {
-                                    yield Ok::<_, std::convert::Infallible>(event);
-                                }
+                            if let Some(event) = emit_full_snapshot(gcx_for_stream.clone(), &seq_counter).await {
+                                yield Ok::<_, std::convert::Infallible>(event);
                             } else {
                                 break;
                             }
@@ -454,12 +472,12 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if let Ok((trajectories, tasks, workspace_roots)) = fetch_snapshot(gcx_for_stream.clone()).await {
-                                let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                if let Some(event) = make_event(&seq_counter, SidebarEvent::WorkspaceSnapshot { workspace_roots: workspace_roots.clone() }) {
+                            live_events_started = true;
+                            if let Ok((_trajectories, _tasks, workspace_roots)) = fetch_snapshot(gcx_for_stream.clone()).await {
+                                if let Some(event) = make_event(&seq_counter, SidebarEvent::WorkspaceSnapshot { workspace_roots }) {
                                     yield Ok::<_, std::convert::Infallible>(event);
                                 }
-                                if let Some(event) = make_event(&seq_counter, SidebarEvent::Snapshot { trajectories, tasks, workspace_roots, buddy }) {
+                                if let Some(event) = emit_full_snapshot(gcx_for_stream.clone(), &seq_counter).await {
                                     yield Ok::<_, std::convert::Infallible>(event);
                                 }
                             } else {
@@ -483,16 +501,14 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(task_envelope) => {
+                            live_events_started = true;
                             if let Some(event) = make_event(&seq_counter, SidebarEvent::Task(task_envelope.event)) {
                                 yield Ok::<_, std::convert::Infallible>(event);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if let Ok((trajectories, tasks, workspace_roots)) = fetch_snapshot(gcx_for_stream.clone()).await {
-                                let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                if let Some(event) = make_event(&seq_counter, SidebarEvent::Snapshot { trajectories, tasks, workspace_roots, buddy }) {
-                                    yield Ok::<_, std::convert::Infallible>(event);
-                                }
+                            if let Some(event) = emit_full_snapshot(gcx_for_stream.clone(), &seq_counter).await {
+                                yield Ok::<_, std::convert::Infallible>(event);
                             } else {
                                 break;
                             }
@@ -514,11 +530,14 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
+                            live_events_started = true;
                             if let Some(event) = make_event(&seq_counter, SidebarEvent::Notification(event)) {
                                 yield Ok::<_, std::convert::Infallible>(event);
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            tracing::warn!("sidebar notification event receiver lagged; dropping unrecoverable notification events");
+                        }
                         Err(broadcast::error::RecvError::Closed) => {
                             notification_rx = None;
                             if all_receivers_closed(&trajectory_rx, &workspace_changed_rx, &task_rx, &notification_rx, &buddy_rx) {
@@ -536,11 +555,17 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
+                            live_events_started = true;
                             if let Some(event) = make_event(&seq_counter, SidebarEvent::Buddy { buddy_event: event }) {
                                 yield Ok::<_, std::convert::Infallible>(event);
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
+                            if let Some(event) = make_event(&seq_counter, SidebarEvent::BuddySnapshot { buddy }) {
+                                yield Ok::<_, std::convert::Infallible>(event);
+                            }
+                        }
                         Err(broadcast::error::RecvError::Closed) => {
                             buddy_rx = None;
                             if all_receivers_closed(&trajectory_rx, &workspace_changed_rx, &task_rx, &notification_rx, &buddy_rx) {
@@ -555,7 +580,6 @@ pub async fn handle_sidebar_subscribe(
                 }
 
                 _ = async {
-                    let shutdown_flag = gcx_for_stream.read().await.shutdown_flag.clone();
                     while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }

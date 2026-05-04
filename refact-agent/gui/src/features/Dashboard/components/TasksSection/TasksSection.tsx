@@ -178,9 +178,10 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
     (t) => t.status === "active" || t.status === "planning",
   ).length;
   const tasksLoaded = Boolean(tasks);
+  const showTaskError = isError && !tasksLoaded;
   const tasksLoading =
-    projectLoading || isLoading || (isFetching && !tasksLoaded);
-  const showTaskError = isError && !projectLoading && !tasksLoaded;
+    !showTaskError &&
+    (projectLoading || isLoading || (isFetching && !tasksLoaded));
 
   const renderHeader = (children?: React.ReactNode) => (
     <div className={styles.header}>

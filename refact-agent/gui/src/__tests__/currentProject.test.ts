@@ -83,6 +83,32 @@ describe("currentProjectInfoReducer", () => {
     expect(state.buddySnapshotReceived).toBe(false);
   });
 
+  it("does not reset other sections when workspace roots are learned late", () => {
+    let state = currentProjectInfoReducer(
+      undefined,
+      setCurrentProjectInfo({ name: "refact" }),
+    );
+    state = currentProjectInfoReducer(
+      state,
+      markTrajectoriesSnapshotReceived(),
+    );
+    state = currentProjectInfoReducer(state, markTasksSnapshotReceived());
+
+    state = currentProjectInfoReducer(
+      state,
+      setCurrentProjectInfo({
+        name: "refact",
+        workspaceRoots: ["/tmp/a/refact"],
+        workspaceSnapshotReceived: true,
+      }),
+    );
+
+    expect(state.workspaceRoots).toEqual(["/tmp/a/refact"]);
+    expect(state.workspaceSnapshotReceived).toBe(true);
+    expect(state.trajectoriesSnapshotReceived).toBe(true);
+    expect(state.tasksSnapshotReceived).toBe(true);
+  });
+
   it("resets all sidebar readiness when workspace identity changes", () => {
     const state = currentProjectInfoReducer(
       {

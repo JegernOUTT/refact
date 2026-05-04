@@ -78,6 +78,10 @@ export type TrajectoryEvent = {
   parent_id?: string;
   link_type?: string;
   root_chat_id?: string;
+  task_id?: string;
+  task_role?: string;
+  agent_id?: string;
+  card_id?: string;
   worktree?: WorktreeMeta | null;
   model?: string;
   mode?: string;

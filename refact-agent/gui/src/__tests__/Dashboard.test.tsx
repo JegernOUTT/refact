@@ -105,4 +105,53 @@ describe("Dashboard progressive sidebar readiness", () => {
     });
     expect(screen.queryByText(/No tasks yet/i)).not.toBeInTheDocument();
   });
+
+  it("shows task load errors even before sidebar task readiness arrives", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks", () =>
+        HttpResponse.json({ detail: "boom" }, { status: 500 }),
+      ),
+    );
+
+    render(<Dashboard />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        current_project: {
+          name: "refact-test",
+          workspaceRoots: ["/tmp/refact-test"],
+          tasksSnapshotReceived: false,
+          trajectoriesSnapshotReceived: true,
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Failed to load tasks")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/No tasks yet/i)).not.toBeInTheDocument();
+  });
+
+  it("shows chat load errors instead of a false empty state", () => {
+    render(<Dashboard />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        history: {
+          chats: {},
+          isLoading: false,
+          loadError: "trajectory boom",
+          pagination: { cursor: null, hasMore: false },
+        },
+        current_project: {
+          name: "refact-test",
+          workspaceRoots: ["/tmp/refact-test"],
+          tasksSnapshotReceived: true,
+          trajectoriesSnapshotReceived: true,
+        },
+      },
+    });
+
+    expect(screen.getByText("Failed to load chats")).toBeInTheDocument();
+    expect(screen.getByText("trajectory boom")).toBeInTheDocument();
+    expect(screen.queryByText(/No chats yet/i)).not.toBeInTheDocument();
+  });
 });
