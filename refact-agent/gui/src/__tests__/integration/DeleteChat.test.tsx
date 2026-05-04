@@ -80,6 +80,7 @@ describe("Delete a Chat form history", () => {
                   trajectories: [trajectory],
                   tasks: [],
                   workspace_roots: ["/tmp/refact-test"],
+                  buddy: { enabled: false },
                 })}\n\n`,
               ),
             );

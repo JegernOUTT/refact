@@ -1,107 +1,108 @@
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
-import { render, screen } from "../utils/test-utils";
+import { beforeEach, describe, expect, it } from "vitest";
+import { render, screen, waitFor } from "../utils/test-utils";
+import { emptyTasks, server } from "../utils/mockServer";
 import { Dashboard } from "../features/Dashboard/Dashboard";
-import { setUpStore, type RootState } from "../app/store";
-import { setHistoryLoading } from "../features/History/historySlice";
-import { tasksApi } from "../services/refact/tasks";
-import {
-  markProjectHistorySnapshotReceived,
-  markProjectTasksSnapshotReceived,
-  setCurrentProjectInfo,
-} from "../features/Chat/currentProject";
-import { server } from "../utils/mockServer";
+import type { TaskMeta } from "../services/refact/tasks";
 
-const CONFIG_STATE: Partial<RootState> = {
+const CONFIG_STATE = {
   config: {
     apiKey: "test",
     lspPort: 8001,
     themeProps: {},
-    host: "vscode",
-    currentWorkspaceName: "refact-test",
+    host: "web" as const,
   },
   connection: {
     browserOnline: true,
-    backendStatus: "online",
+    backendStatus: "online" as const,
     backendLastOkAt: Date.now(),
     backendError: null,
     sseConnections: {},
   },
+  current_project: {
+    name: "refact-test",
+    workspaceRoots: ["/tmp/refact-test"],
+  },
 };
 
-function mockSetupStatus() {
-  server.use(
-    http.get("http://127.0.0.1:8001/v1/setup/status", () =>
-      HttpResponse.json({ configured: true }),
-    ),
-  );
-}
+const task: TaskMeta = {
+  id: "task-1",
+  name: "Progressive task",
+  status: "active",
+  created_at: "2024-01-01T00:00:00Z",
+  updated_at: "2024-01-01T00:00:00Z",
+  cards_total: 2,
+  cards_done: 1,
+  cards_failed: 0,
+  agents_active: 0,
+};
 
-function mockEmptyTasks() {
-  server.use(
-    http.get("http://127.0.0.1:8001/v1/tasks", () => HttpResponse.json([])),
-  );
-}
+describe("Dashboard progressive sidebar readiness", () => {
+  beforeEach(() => {
+    server.use(
+      emptyTasks,
+      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        HttpResponse.json({ configured: true }),
+      ),
+    );
+  });
 
-describe("Dashboard startup loading", () => {
-  it("keeps chats and tasks loading until the sidebar snapshot is processed", () => {
-    mockSetupStatus();
-    mockEmptyTasks();
+  it("does not show empty states before section snapshots arrive", () => {
+    render(<Dashboard />, {
+      preloadedState: CONFIG_STATE,
+    });
 
-    render(<Dashboard />, { preloadedState: CONFIG_STATE });
-
-    expect(screen.getAllByText("Loading").length).toBeGreaterThanOrEqual(2);
-    expect(screen.queryByText("No chats yet — start a new one!")).toBeNull();
-    expect(screen.queryByText("No tasks yet — start a new one!")).toBeNull();
-    expect(screen.queryByText("0 total")).toBeNull();
+    expect(screen.getAllByText("Loading").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/No chats yet/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No tasks yet/i)).not.toBeInTheDocument();
   });
 
   it("lets tasks become ready while chats are still loading", async () => {
-    mockEmptyTasks();
-    mockSetupStatus();
-
-    const store = setUpStore({ ...CONFIG_STATE });
-    void store.dispatch(
-      tasksApi.util.upsertQueryData("listTasks", undefined, []),
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks", () =>
+        HttpResponse.json([task]),
+      ),
     );
-    store.dispatch(markProjectTasksSnapshotReceived());
 
-    render(<Dashboard />, { store });
+    render(<Dashboard />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        current_project: {
+          name: "refact-test",
+          workspaceRoots: ["/tmp/refact-test"],
+          tasksSnapshotReceived: true,
+          trajectoriesSnapshotReceived: false,
+        },
+      },
+    });
 
-    expect(screen.getByText("TASKS")).toBeInTheDocument();
-    expect(
-      await screen.findByText("No tasks yet — start a new one!"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Progressive task")).toBeInTheDocument();
     expect(screen.getByText("CHATS")).toBeInTheDocument();
-    expect(screen.queryByText("No chats yet — start a new one!")).toBeNull();
+    expect(screen.queryByText(/No chats yet/i)).not.toBeInTheDocument();
   });
 
-  it("shows real empty states only after the sidebar snapshot is processed", async () => {
-    mockEmptyTasks();
-    mockSetupStatus();
-
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(
-      setCurrentProjectInfo({
-        name: "refact-test",
-        workspaceRoots: ["/tmp/refact-test"],
-      }),
+  it("shows task load errors instead of a loading skeleton forever", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks", () =>
+        HttpResponse.json({ detail: "boom" }, { status: 500 }),
+      ),
     );
-    store.dispatch(setHistoryLoading(false));
-    store.dispatch(markProjectHistorySnapshotReceived());
-    void store.dispatch(
-      tasksApi.util.upsertQueryData("listTasks", undefined, []),
-    );
-    store.dispatch(markProjectTasksSnapshotReceived());
 
-    render(<Dashboard />, { store });
+    render(<Dashboard />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        current_project: {
+          name: "refact-test",
+          workspaceRoots: ["/tmp/refact-test"],
+          tasksSnapshotReceived: true,
+          trajectoriesSnapshotReceived: true,
+        },
+      },
+    });
 
-    expect(
-      await screen.findByText("No chats yet — start a new one!"),
-    ).toBeInTheDocument();
-    expect(
-      await screen.findByText("No tasks yet — start a new one!"),
-    ).toBeInTheDocument();
-    expect(screen.getAllByText("0 total").length).toBeGreaterThanOrEqual(2);
+    await waitFor(() => {
+      expect(screen.getByText("Failed to load tasks")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/No tasks yet/i)).not.toBeInTheDocument();
   });
 });

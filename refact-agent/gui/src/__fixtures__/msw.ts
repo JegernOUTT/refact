@@ -207,6 +207,8 @@ export const sidebarSubscribe: HttpHandler = http.get(
           category: "snapshot",
           trajectories: [],
           tasks: [],
+          workspace_roots: ["/tmp/refact-test"],
+          buddy: { enabled: false },
         });
         controller.enqueue(encoder.encode(`data: ${snapshot}\n\n`));
       },

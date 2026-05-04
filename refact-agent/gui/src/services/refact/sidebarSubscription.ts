@@ -4,13 +4,6 @@ import type { BuddySnapshot, BuddySSEEvent } from "../../features/Buddy/types";
 
 export type { TrajectoryMeta, TrajectoryEvent };
 
-export type SidebarLoadingSection =
-  | "workspace"
-  | "trajectories"
-  | "tasks"
-  | "buddy";
-export type SidebarLoadingStatus = "loading" | "ready" | "error";
-
 export type TaskEvent =
   | { type: "snapshot"; tasks: TaskMeta[] }
   | { type: "task_created"; task_id: string; meta: TaskMeta }
@@ -38,27 +31,46 @@ export type NotificationEvent =
       }[];
     };
 
+export type SidebarLoadingSection =
+  | "workspace"
+  | "trajectories"
+  | "tasks"
+  | "buddy";
+
+export type SidebarLoadingStatus = "started" | "ready" | "error";
+
+export type BuddySnapshotPayload = BuddySnapshot | { enabled: false } | null;
+
 export type SidebarEvent =
-  | {
-      category: "loading_phase";
-      section: SidebarLoadingSection;
-      status: SidebarLoadingStatus;
-      message?: string;
-      elapsed_ms?: number;
-    }
   | {
       category: "snapshot";
       trajectories: TrajectoryMeta[];
       tasks: TaskMeta[];
       workspace_roots?: string[];
-      buddy?: BuddySnapshot | { enabled: false } | null;
+      buddy?: BuddySnapshotPayload;
     }
-  | { category: "workspace_snapshot"; workspace_roots: string[] }
-  | { category: "trajectories_snapshot"; trajectories: TrajectoryMeta[] }
-  | { category: "tasks_snapshot"; tasks: TaskMeta[] }
+  | {
+      category: "loading_phase";
+      section: SidebarLoadingSection;
+      status: SidebarLoadingStatus;
+      elapsed_ms?: number;
+      error?: string;
+    }
+  | {
+      category: "workspace_snapshot";
+      workspace_roots: string[];
+    }
+  | {
+      category: "trajectories_snapshot";
+      trajectories: TrajectoryMeta[];
+    }
+  | {
+      category: "tasks_snapshot";
+      tasks: TaskMeta[];
+    }
   | {
       category: "buddy_snapshot";
-      buddy: BuddySnapshot | { enabled: false } | null;
+      buddy: BuddySnapshotPayload;
     }
   | ({ category: "trajectory" } & TrajectoryEvent)
   | ({ category: "task" } & TaskEvent)
@@ -75,10 +87,6 @@ export type SidebarSubscriptionCallbacks = {
   onConnected?: () => void;
   onDisconnected?: () => void;
 };
-
-function isValidLoadingPhase(obj: Record<string, unknown>): boolean {
-  return typeof obj.section === "string" && typeof obj.status === "string";
-}
 
 function isValidSnapshot(obj: Record<string, unknown>): boolean {
   return (
@@ -117,6 +125,16 @@ function isValidNotificationEvent(obj: Record<string, unknown>): boolean {
   return false;
 }
 
+function isValidLoadingPhase(obj: Record<string, unknown>): boolean {
+  if (typeof obj.section !== "string") return false;
+  if (typeof obj.status !== "string") return false;
+  if (obj.elapsed_ms !== undefined && typeof obj.elapsed_ms !== "number") {
+    return false;
+  }
+  if (obj.error !== undefined && typeof obj.error !== "string") return false;
+  return true;
+}
+
 function isValidSidebarEventEnvelope(
   data: unknown,
 ): data is SidebarEventEnvelope {
@@ -126,10 +144,10 @@ function isValidSidebarEventEnvelope(
   if (typeof obj.category !== "string") return false;
 
   switch (obj.category) {
-    case "loading_phase":
-      return isValidLoadingPhase(obj);
     case "snapshot":
       return isValidSnapshot(obj);
+    case "loading_phase":
+      return isValidLoadingPhase(obj);
     case "workspace_snapshot":
       return Array.isArray(obj.workspace_roots);
     case "trajectories_snapshot":
@@ -137,7 +155,7 @@ function isValidSidebarEventEnvelope(
     case "tasks_snapshot":
       return Array.isArray(obj.tasks);
     case "buddy_snapshot":
-      return obj.buddy === null || typeof obj.buddy === "object";
+      return "buddy" in obj;
     case "trajectory":
       return isValidTrajectoryEvent(obj);
     case "task":

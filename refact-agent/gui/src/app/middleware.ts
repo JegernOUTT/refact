@@ -64,7 +64,7 @@ import {
 } from "../features/Errors/errorsSlice";
 import { reportBuddyFrontendError } from "../features/Buddy/reportBuddyFrontendError";
 import { setThemeMode, updateConfig } from "../features/Config/configSlice";
-import { resetProjectServerSnapshot } from "../features/Chat/currentProject";
+import { resetSidebarReadiness } from "../features/Chat/currentProject";
 import { nextTip } from "../features/TipOfTheDay";
 import { tasksApi } from "../services/refact/tasks";
 import {
@@ -431,10 +431,10 @@ startListening({
     if (action.payload.lspPort !== undefined) {
       listenerApi.dispatch(providersApi.util.resetApiState());
       listenerApi.dispatch(modelsApi.util.resetApiState());
-      listenerApi.dispatch(resetProjectServerSnapshot());
+      listenerApi.dispatch(resetSidebarReadiness());
     }
     if (action.payload.currentWorkspaceName !== undefined) {
-      listenerApi.dispatch(resetProjectServerSnapshot());
+      listenerApi.dispatch(resetSidebarReadiness());
     }
   },
 });

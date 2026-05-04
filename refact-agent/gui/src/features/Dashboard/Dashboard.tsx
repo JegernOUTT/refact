@@ -13,8 +13,9 @@ import { ChatLoading } from "../../components/ChatContent/ChatLoading";
 import { useAppSelector } from "../../hooks";
 import { selectBackendStatus } from "../Connection";
 import {
-  selectHasHistorySnapshot,
-  selectHasTasksSnapshot,
+  selectHasActiveProject,
+  selectTasksSnapshotReceived,
+  selectTrajectoriesSnapshotReceived,
 } from "../Chat/currentProject";
 
 const OfflineState: React.FC = () => {
@@ -47,8 +48,9 @@ export const Dashboard: React.FC = () => {
   const splitRef = useRef<HTMLDivElement>(null);
   const breakpoint = useDashboardLayout(containerRef);
   const backendStatus = useAppSelector(selectBackendStatus);
-  const hasHistorySnapshot = useAppSelector(selectHasHistorySnapshot);
-  const hasTasksSnapshot = useAppSelector(selectHasTasksSnapshot);
+  const hasActiveProject = useAppSelector(selectHasActiveProject);
+  const trajectoriesReady = useAppSelector(selectTrajectoriesSnapshotReceived);
+  const tasksReady = useAppSelector(selectTasksSnapshotReceived);
 
   const { collapsed, toggle } = useDashboardCollapseState();
   const {
@@ -59,8 +61,9 @@ export const Dashboard: React.FC = () => {
 
   const showResizeDivider = !collapsed.chats && !collapsed.tasks;
   const isOffline = backendStatus !== "online";
-  const chatsLoading = !hasHistorySnapshot;
-  const tasksLoading = !hasTasksSnapshot;
+  const projectLoading = !hasActiveProject;
+  const chatsLoading = projectLoading || !trajectoriesReady;
+  const tasksLoading = projectLoading || !tasksReady;
 
   const chatsFlexStyle = collapsed.chats
     ? undefined

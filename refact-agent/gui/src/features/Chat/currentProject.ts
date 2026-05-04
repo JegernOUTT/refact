@@ -4,16 +4,16 @@ import { RootState } from "../../app/store";
 export type CurrentProjectInfo = {
   name: string;
   workspaceRoots?: string[];
-  serverSnapshotReceived?: boolean;
-  historySnapshotReceived?: boolean;
+  workspaceSnapshotReceived?: boolean;
+  trajectoriesSnapshotReceived?: boolean;
   tasksSnapshotReceived?: boolean;
   buddySnapshotReceived?: boolean;
 };
 
 const initialState: CurrentProjectInfo = {
   name: "",
-  serverSnapshotReceived: false,
-  historySnapshotReceived: false,
+  workspaceSnapshotReceived: false,
+  trajectoriesSnapshotReceived: false,
   tasksSnapshotReceived: false,
   buddySnapshotReceived: false,
 };
@@ -22,44 +22,42 @@ export const setCurrentProjectInfo = createAction<CurrentProjectInfo>(
   "currentProjectInfo/setCurrentProjectInfo",
 );
 
-export const markProjectServerSnapshotReceived = createAction(
-  "currentProjectInfo/markProjectServerSnapshotReceived",
+export const markWorkspaceSnapshotReceived = createAction(
+  "currentProjectInfo/markWorkspaceSnapshotReceived",
 );
 
-export const markProjectHistorySnapshotReceived = createAction(
-  "currentProjectInfo/markProjectHistorySnapshotReceived",
+export const markTrajectoriesSnapshotReceived = createAction(
+  "currentProjectInfo/markTrajectoriesSnapshotReceived",
 );
 
-export const markProjectTasksSnapshotReceived = createAction(
-  "currentProjectInfo/markProjectTasksSnapshotReceived",
+export const markTasksSnapshotReceived = createAction(
+  "currentProjectInfo/markTasksSnapshotReceived",
 );
 
-export const markProjectBuddySnapshotReceived = createAction(
-  "currentProjectInfo/markProjectBuddySnapshotReceived",
+export const markBuddySnapshotReceived = createAction(
+  "currentProjectInfo/markBuddySnapshotReceived",
 );
 
-export const resetProjectServerSnapshot = createAction(
-  "currentProjectInfo/resetProjectServerSnapshot",
+export const resetSidebarReadiness = createAction(
+  "currentProjectInfo/resetSidebarReadiness",
 );
 
-function sameWorkspaceRoots(left?: string[], right?: string[]): boolean {
-  if (left === undefined || right === undefined) return false;
+function sameStringArray(left?: string[], right?: string[]): boolean {
+  if (!left || !right) return false;
   if (left.length !== right.length) return false;
-  return left.every((root, index) => root === right[index]);
+  return left.every((item, index) => item === right[index]);
 }
 
-function isSameProjectIdentity(
-  current: CurrentProjectInfo,
+function shouldPreserveWorkspaceRoots(
+  state: CurrentProjectInfo,
   next: CurrentProjectInfo,
 ): boolean {
-  if (sameWorkspaceRoots(current.workspaceRoots, next.workspaceRoots)) {
-    return true;
-  }
-  if (next.workspaceRoots !== undefined) return false;
+  if (!state.workspaceRoots || next.workspaceRoots !== undefined) return false;
 
-  return Boolean(
-    current.name.trim() && current.name.trim() === next.name.trim(),
-  );
+  const nextName = next.name.trim();
+  if (!nextName) return false;
+
+  return nextName === state.name;
 }
 
 export const currentProjectInfoReducer = createReducer(
@@ -67,44 +65,62 @@ export const currentProjectInfoReducer = createReducer(
   (builder) => {
     builder
       .addCase(setCurrentProjectInfo, (state, action) => {
-        const explicitSnapshot = action.payload.serverSnapshotReceived;
-        const shouldPreserveSnapshot =
-          explicitSnapshot === undefined &&
-          isSameProjectIdentity(state, action.payload);
+        const next = action.payload;
+        const nextRoots =
+          next.workspaceRoots ??
+          (shouldPreserveWorkspaceRoots(state, next)
+            ? state.workspaceRoots
+            : undefined);
 
-        const preserve = shouldPreserveSnapshot;
+        const workspaceIdentityKnown =
+          state.workspaceRoots !== undefined &&
+          next.workspaceRoots !== undefined;
+        const sameWorkspace = workspaceIdentityKnown
+          ? sameStringArray(state.workspaceRoots, next.workspaceRoots)
+          : state.name === next.name;
 
-        return {
-          ...action.payload,
-          serverSnapshotReceived:
-            explicitSnapshot ??
-            (preserve ? Boolean(state.serverSnapshotReceived) : false),
-          historySnapshotReceived:
-            action.payload.historySnapshotReceived ??
-            (preserve ? Boolean(state.historySnapshotReceived) : false),
-          tasksSnapshotReceived:
-            action.payload.tasksSnapshotReceived ??
-            (preserve ? Boolean(state.tasksSnapshotReceived) : false),
-          buddySnapshotReceived:
-            action.payload.buddySnapshotReceived ??
-            (preserve ? Boolean(state.buddySnapshotReceived) : false),
-        };
+        state.name = next.name;
+        if (nextRoots !== undefined) {
+          state.workspaceRoots = nextRoots;
+        } else {
+          delete state.workspaceRoots;
+        }
+
+        if (!sameWorkspace) {
+          state.trajectoriesSnapshotReceived = false;
+          state.tasksSnapshotReceived = false;
+          state.buddySnapshotReceived = false;
+        }
+
+        if (next.workspaceSnapshotReceived !== undefined) {
+          state.workspaceSnapshotReceived = next.workspaceSnapshotReceived;
+        }
+        if (next.trajectoriesSnapshotReceived !== undefined) {
+          state.trajectoriesSnapshotReceived =
+            next.trajectoriesSnapshotReceived;
+        }
+        if (next.tasksSnapshotReceived !== undefined) {
+          state.tasksSnapshotReceived = next.tasksSnapshotReceived;
+        }
+        if (next.buddySnapshotReceived !== undefined) {
+          state.buddySnapshotReceived = next.buddySnapshotReceived;
+        }
       })
-      .addCase(markProjectServerSnapshotReceived, (state) => {
-        state.serverSnapshotReceived = true;
+      .addCase(markWorkspaceSnapshotReceived, (state) => {
+        state.workspaceSnapshotReceived = true;
       })
-      .addCase(markProjectHistorySnapshotReceived, (state) => {
-        state.historySnapshotReceived = true;
+      .addCase(markTrajectoriesSnapshotReceived, (state) => {
+        state.trajectoriesSnapshotReceived = true;
       })
-      .addCase(markProjectTasksSnapshotReceived, (state) => {
+      .addCase(markTasksSnapshotReceived, (state) => {
         state.tasksSnapshotReceived = true;
       })
-      .addCase(markProjectBuddySnapshotReceived, (state) => {
+      .addCase(markBuddySnapshotReceived, (state) => {
         state.buddySnapshotReceived = true;
       })
-      .addCase(resetProjectServerSnapshot, (state) => {
-        state.serverSnapshotReceived = false;
-        state.historySnapshotReceived = false;
+      .addCase(resetSidebarReadiness, (state) => {
+        state.workspaceSnapshotReceived = false;
+        state.trajectoriesSnapshotReceived = false;
         state.tasksSnapshotReceived = false;
         state.buddySnapshotReceived = false;
       });
@@ -136,14 +152,14 @@ export const selectHasActiveProject = (state: RootState): boolean => {
   );
 };
 
-export const selectHasProjectSnapshot = (state: RootState): boolean =>
-  Boolean(state.current_project.serverSnapshotReceived);
+export const selectWorkspaceSnapshotReceived = (state: RootState): boolean =>
+  state.current_project.workspaceSnapshotReceived === true;
 
-export const selectHasHistorySnapshot = (state: RootState): boolean =>
-  Boolean(state.current_project.historySnapshotReceived);
+export const selectTrajectoriesSnapshotReceived = (state: RootState): boolean =>
+  state.current_project.trajectoriesSnapshotReceived === true;
 
-export const selectHasTasksSnapshot = (state: RootState): boolean =>
-  Boolean(state.current_project.tasksSnapshotReceived);
+export const selectTasksSnapshotReceived = (state: RootState): boolean =>
+  state.current_project.tasksSnapshotReceived === true;
 
-export const selectHasBuddySnapshot = (state: RootState): boolean =>
-  Boolean(state.current_project.buddySnapshotReceived);
+export const selectBuddySnapshotReceived = (state: RootState): boolean =>
+  state.current_project.buddySnapshotReceived === true;

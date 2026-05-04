@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use axum::Extension;
 use axum::response::Response;
 use hyper::{Body, StatusCode};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, RwLock as ARwLock};
+use tokio::sync::{RwLock as ARwLock, broadcast, mpsc};
 use tokio::task::JoinSet;
 
 use crate::buddy::events::BuddyEvent;
@@ -42,7 +43,7 @@ pub struct NotificationQuestion {
     pub options: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SidebarLoadingSection {
     Workspace,
@@ -52,29 +53,21 @@ pub enum SidebarLoadingSection {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SidebarLoadingStatus {
-    Loading,
-    Ready,
-    Error,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "category", rename_all = "snake_case")]
 pub enum SidebarEvent {
-    LoadingPhase {
-        section: SidebarLoadingSection,
-        status: SidebarLoadingStatus,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        message: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        elapsed_ms: Option<u128>,
-    },
     Snapshot {
         trajectories: Vec<TrajectoryMeta>,
         tasks: Vec<TaskMeta>,
         workspace_roots: Vec<String>,
         buddy: serde_json::Value,
+    },
+    LoadingPhase {
+        section: SidebarLoadingSection,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u128>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     WorkspaceSnapshot {
         workspace_roots: Vec<String>,
@@ -103,6 +96,28 @@ pub struct SidebarEventEnvelope {
     pub event: SidebarEvent,
 }
 
+#[derive(Debug)]
+enum InitialSidebarPart {
+    Workspace(Result<Vec<String>, String>),
+    Trajectories(Result<Vec<TrajectoryMeta>, String>),
+    Tasks(Result<Vec<TaskMeta>, String>),
+    Buddy(serde_json::Value),
+}
+
+fn all_receivers_closed(
+    trajectory_rx: &Option<broadcast::Receiver<TrajectoryEvent>>,
+    workspace_changed_rx: &Option<broadcast::Receiver<()>>,
+    task_rx: &Option<broadcast::Receiver<crate::tasks::events::TaskEventEnvelope>>,
+    notification_rx: &Option<broadcast::Receiver<NotificationEvent>>,
+    buddy_rx: &Option<broadcast::Receiver<BuddyEvent>>,
+) -> bool {
+    trajectory_rx.is_none()
+        && workspace_changed_rx.is_none()
+        && task_rx.is_none()
+        && notification_rx.is_none()
+        && buddy_rx.is_none()
+}
+
 async fn fetch_workspace_roots(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<String> {
     let gcx_locked = gcx.read().await;
     let folders = gcx_locked.documents_state.workspace_folders.lock().unwrap();
@@ -112,26 +127,14 @@ async fn fetch_workspace_roots(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<String> 
         .collect()
 }
 
-async fn fetch_trajectories_snapshot(
-    gcx: Arc<ARwLock<GlobalContext>>,
-) -> Result<Vec<TrajectoryMeta>, String> {
-    list_all_trajectories_meta(gcx).await
-}
-
-async fn fetch_tasks_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Vec<TaskMeta>, String> {
-    list_tasks_with_session_state(gcx)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 async fn fetch_snapshot(
     gcx: Arc<ARwLock<GlobalContext>>,
 ) -> Result<(Vec<TrajectoryMeta>, Vec<TaskMeta>, Vec<String>), String> {
-    let (trajectories, tasks, workspace_roots) = tokio::try_join!(
-        fetch_trajectories_snapshot(gcx.clone()),
-        fetch_tasks_snapshot(gcx.clone()),
-        async { Ok::<_, String>(fetch_workspace_roots(gcx.clone()).await) },
-    )?;
+    let trajectories = list_all_trajectories_meta(gcx.clone()).await?;
+    let tasks = list_tasks_with_session_state(gcx.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let workspace_roots = fetch_workspace_roots(gcx).await;
     Ok((trajectories, tasks, workspace_roots))
 }
 
@@ -146,52 +149,79 @@ async fn fetch_buddy_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> serde_json::V
     }
 }
 
-#[derive(Debug)]
-enum SidebarInitialPart {
-    Workspace(Vec<String>),
-    Trajectories(Result<Vec<TrajectoryMeta>, String>),
-    Tasks(Result<Vec<TaskMeta>, String>),
-    Buddy(serde_json::Value),
-}
-
-fn next_envelope(seq_counter: &AtomicU64, event: SidebarEvent) -> SidebarEventEnvelope {
-    SidebarEventEnvelope {
-        seq: seq_counter.fetch_add(1, Ordering::SeqCst),
-        event,
-    }
-}
-
-fn serialize_envelope(envelope: &SidebarEventEnvelope) -> Option<String> {
-    serde_json::to_string(envelope)
+fn make_event(seq_counter: &AtomicU64, event: SidebarEvent) -> Option<String> {
+    let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
+    let envelope = SidebarEventEnvelope { seq, event };
+    serde_json::to_string(&envelope)
         .ok()
         .map(|json| format!("data: {}\n\n", json))
 }
 
-fn loading_event(section: SidebarLoadingSection) -> SidebarEvent {
+fn loading_event(
+    section: SidebarLoadingSection,
+    status: &str,
+    elapsed_ms: Option<u128>,
+    error: Option<String>,
+) -> SidebarEvent {
     SidebarEvent::LoadingPhase {
         section,
-        status: SidebarLoadingStatus::Loading,
-        message: None,
-        elapsed_ms: None,
+        status: status.to_string(),
+        elapsed_ms,
+        error,
     }
 }
 
-fn ready_event(section: SidebarLoadingSection, elapsed_ms: u128) -> SidebarEvent {
-    SidebarEvent::LoadingPhase {
-        section,
-        status: SidebarLoadingStatus::Ready,
-        message: None,
-        elapsed_ms: Some(elapsed_ms),
-    }
-}
+fn spawn_initial_sidebar_loads(
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> mpsc::UnboundedReceiver<InitialSidebarPart> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut jobs = JoinSet::new();
 
-fn error_event(section: SidebarLoadingSection, message: String, elapsed_ms: u128) -> SidebarEvent {
-    SidebarEvent::LoadingPhase {
-        section,
-        status: SidebarLoadingStatus::Error,
-        message: Some(message),
-        elapsed_ms: Some(elapsed_ms),
-    }
+        jobs.spawn({
+            let gcx = gcx.clone();
+            async move {
+                let roots = fetch_workspace_roots(gcx).await;
+                InitialSidebarPart::Workspace(Ok(roots))
+            }
+        });
+
+        jobs.spawn({
+            let gcx = gcx.clone();
+            async move { InitialSidebarPart::Trajectories(list_all_trajectories_meta(gcx).await) }
+        });
+
+        jobs.spawn({
+            let gcx = gcx.clone();
+            async move {
+                InitialSidebarPart::Tasks(
+                    list_tasks_with_session_state(gcx)
+                        .await
+                        .map_err(|e| e.to_string()),
+                )
+            }
+        });
+
+        jobs.spawn({
+            let gcx = gcx.clone();
+            async move { InitialSidebarPart::Buddy(fetch_buddy_snapshot(gcx).await) }
+        });
+
+        while let Some(result) = jobs.join_next().await {
+            match result {
+                Ok(part) => {
+                    if tx.send(part).is_err() {
+                        jobs.abort_all();
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("sidebar initial load task failed: {e}");
+                }
+            }
+        }
+    });
+    rx
 }
 
 pub async fn handle_sidebar_subscribe(
@@ -219,7 +249,12 @@ pub async fn handle_sidebar_subscribe(
 
         let buddy_rx = gcx_locked.buddy_events_tx.as_ref().map(|tx| tx.subscribe());
 
-        if trajectory_rx.is_none() && task_rx.is_none() && notification_rx.is_none() {
+        if trajectory_rx.is_none()
+            && workspace_changed_rx.is_none()
+            && task_rx.is_none()
+            && notification_rx.is_none()
+            && buddy_rx.is_none()
+        {
             return Err(ScratchError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Sidebar events not available".to_string(),
@@ -239,167 +274,147 @@ pub async fn handle_sidebar_subscribe(
 
     let gcx_for_stream = gcx.clone();
     let stream = async_stream::stream! {
-        let initial_started_at = std::time::Instant::now();
-        for section in [
-            SidebarLoadingSection::Workspace,
-            SidebarLoadingSection::Buddy,
-            SidebarLoadingSection::Tasks,
-            SidebarLoadingSection::Trajectories,
-        ] {
-            let envelope = next_envelope(&seq_counter, loading_event(section));
-            if let Some(serialized) = serialize_envelope(&envelope) {
-                yield Ok::<_, std::convert::Infallible>(serialized);
-            }
-        }
-
-        let mut trajectories: Option<Vec<TrajectoryMeta>> = None;
-        let mut tasks: Option<Vec<TaskMeta>> = None;
-        let mut workspace_roots: Option<Vec<String>> = None;
-        let mut buddy_snap: Option<serde_json::Value> = None;
-        let mut initial_parts = JoinSet::new();
-
-        initial_parts.spawn({
-            let gcx = gcx.clone();
-            async move { SidebarInitialPart::Workspace(fetch_workspace_roots(gcx).await) }
-        });
-        initial_parts.spawn({
-            let gcx = gcx.clone();
-            async move { SidebarInitialPart::Trajectories(fetch_trajectories_snapshot(gcx).await) }
-        });
-        initial_parts.spawn({
-            let gcx = gcx.clone();
-            async move { SidebarInitialPart::Tasks(fetch_tasks_snapshot(gcx).await) }
-        });
-        initial_parts.spawn({
-            let gcx = gcx.clone();
-            async move { SidebarInitialPart::Buddy(fetch_buddy_snapshot(gcx).await) }
-        });
-
-        while let Some(part) = initial_parts.join_next().await {
-            match part {
-                Ok(SidebarInitialPart::Workspace(roots)) => {
-                    tracing::info!(
-                        "sidebar snapshot: workspace roots ready in {:.3}s",
-                        initial_started_at.elapsed().as_secs_f32(),
-                    );
-                    workspace_roots = Some(roots.clone());
-                    let elapsed_ms = initial_started_at.elapsed().as_millis();
-                    let events = vec![
-                        SidebarEvent::WorkspaceSnapshot { workspace_roots: roots },
-                        ready_event(SidebarLoadingSection::Workspace, elapsed_ms),
-                    ];
-                    for event in events {
-                        let envelope = next_envelope(&seq_counter, event);
-                        if let Some(serialized) = serialize_envelope(&envelope) {
-                            yield Ok::<_, std::convert::Infallible>(serialized);
-                        }
-                    }
-                }
-                Ok(SidebarInitialPart::Trajectories(Ok(items))) => {
-                    tracing::info!(
-                        "sidebar snapshot: {} trajectories ready in {:.3}s",
-                        items.len(),
-                        initial_started_at.elapsed().as_secs_f32(),
-                    );
-                    trajectories = Some(items.clone());
-                    let elapsed_ms = initial_started_at.elapsed().as_millis();
-                    let events = vec![
-                        SidebarEvent::TrajectoriesSnapshot { trajectories: items },
-                        ready_event(SidebarLoadingSection::Trajectories, elapsed_ms),
-                    ];
-                    for event in events {
-                        let envelope = next_envelope(&seq_counter, event);
-                        if let Some(serialized) = serialize_envelope(&envelope) {
-                            yield Ok::<_, std::convert::Infallible>(serialized);
-                        }
-                    }
-                }
-                Ok(SidebarInitialPart::Trajectories(Err(err))) => {
-                    let elapsed_ms = initial_started_at.elapsed().as_millis();
-                    let envelope = next_envelope(
-                        &seq_counter,
-                        error_event(SidebarLoadingSection::Trajectories, err, elapsed_ms),
-                    );
-                    if let Some(serialized) = serialize_envelope(&envelope) {
-                        yield Ok::<_, std::convert::Infallible>(serialized);
-                    }
-                }
-                Ok(SidebarInitialPart::Tasks(Ok(items))) => {
-                    tracing::info!(
-                        "sidebar snapshot: {} tasks ready in {:.3}s",
-                        items.len(),
-                        initial_started_at.elapsed().as_secs_f32(),
-                    );
-                    tasks = Some(items.clone());
-                    let elapsed_ms = initial_started_at.elapsed().as_millis();
-                    let events = vec![
-                        SidebarEvent::TasksSnapshot { tasks: items },
-                        ready_event(SidebarLoadingSection::Tasks, elapsed_ms),
-                    ];
-                    for event in events {
-                        let envelope = next_envelope(&seq_counter, event);
-                        if let Some(serialized) = serialize_envelope(&envelope) {
-                            yield Ok::<_, std::convert::Infallible>(serialized);
-                        }
-                    }
-                }
-                Ok(SidebarInitialPart::Tasks(Err(err))) => {
-                    let elapsed_ms = initial_started_at.elapsed().as_millis();
-                    let envelope = next_envelope(
-                        &seq_counter,
-                        error_event(SidebarLoadingSection::Tasks, err, elapsed_ms),
-                    );
-                    if let Some(serialized) = serialize_envelope(&envelope) {
-                        yield Ok::<_, std::convert::Infallible>(serialized);
-                    }
-                }
-                Ok(SidebarInitialPart::Buddy(buddy)) => {
-                    tracing::info!(
-                        "sidebar snapshot: buddy ready in {:.3}s",
-                        initial_started_at.elapsed().as_secs_f32(),
-                    );
-                    buddy_snap = Some(buddy.clone());
-                    let elapsed_ms = initial_started_at.elapsed().as_millis();
-                    let events = vec![
-                        SidebarEvent::BuddySnapshot { buddy },
-                        ready_event(SidebarLoadingSection::Buddy, elapsed_ms),
-                    ];
-                    for event in events {
-                        let envelope = next_envelope(&seq_counter, event);
-                        if let Some(serialized) = serialize_envelope(&envelope) {
-                            yield Ok::<_, std::convert::Infallible>(serialized);
-                        }
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!("sidebar snapshot: initial loader task failed: {}", err);
-                }
-            }
-        }
-
-        let envelope = next_envelope(
-            &seq_counter,
-            SidebarEvent::Snapshot {
-                trajectories: trajectories.unwrap_or_default(),
-                tasks: tasks.unwrap_or_default(),
-                workspace_roots: workspace_roots.unwrap_or_default(),
-                buddy: buddy_snap.unwrap_or_else(|| serde_json::json!({"enabled": false})),
-            },
-        );
-        if let Some(serialized) = serialize_envelope(&envelope) {
-            yield Ok::<_, std::convert::Infallible>(serialized);
-        }
-
         let mut trajectory_rx = trajectory_rx;
         let mut workspace_changed_rx = workspace_changed_rx;
         let mut task_rx = task_rx;
         let mut notification_rx = notification_rx;
         let mut buddy_rx = buddy_rx;
+        let mut initial_rx = Some(spawn_initial_sidebar_loads(gcx_for_stream.clone()));
+        let mut workspace_roots: Option<Vec<String>> = None;
+        let mut trajectories: Option<Vec<TrajectoryMeta>> = None;
+        let mut tasks: Option<Vec<TaskMeta>> = None;
+        let mut buddy_snap: Option<serde_json::Value> = None;
+        let initial_started_at = Instant::now();
+
+        for section in [
+            SidebarLoadingSection::Workspace,
+            SidebarLoadingSection::Trajectories,
+            SidebarLoadingSection::Tasks,
+            SidebarLoadingSection::Buddy,
+        ] {
+            if let Some(event) = make_event(
+                &seq_counter,
+                loading_event(section, "started", Some(initial_started_at.elapsed().as_millis()), None),
+            ) {
+                yield Ok::<_, std::convert::Infallible>(event);
+            }
+        }
+
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
+                part = async {
+                    match &mut initial_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match part {
+                        Some(InitialSidebarPart::Workspace(result)) => {
+                            match result {
+                                Ok(roots) => {
+                                    tracing::info!("sidebar initial workspace ready in {}ms", initial_started_at.elapsed().as_millis());
+                                    workspace_roots = Some(roots.clone());
+                                    if let Some(event) = make_event(&seq_counter, SidebarEvent::WorkspaceSnapshot { workspace_roots: roots }) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                    if let Some(event) = make_event(&seq_counter, loading_event(SidebarLoadingSection::Workspace, "ready", Some(initial_started_at.elapsed().as_millis()), None)) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!("sidebar initial workspace failed: {error}");
+                                    workspace_roots = Some(Vec::new());
+                                    if let Some(event) = make_event(&seq_counter, SidebarEvent::WorkspaceSnapshot { workspace_roots: Vec::new() }) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                    if let Some(event) = make_event(&seq_counter, loading_event(SidebarLoadingSection::Workspace, "error", Some(initial_started_at.elapsed().as_millis()), Some(error))) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                }
+                            }
+                        }
+                        Some(InitialSidebarPart::Trajectories(result)) => {
+                            match result {
+                                Ok(items) => {
+                                    tracing::info!("sidebar initial trajectories ready in {}ms", initial_started_at.elapsed().as_millis());
+                                    trajectories = Some(items.clone());
+                                    if let Some(event) = make_event(&seq_counter, SidebarEvent::TrajectoriesSnapshot { trajectories: items }) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                    if let Some(event) = make_event(&seq_counter, loading_event(SidebarLoadingSection::Trajectories, "ready", Some(initial_started_at.elapsed().as_millis()), None)) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!("sidebar initial trajectories failed: {error}");
+                                    trajectories = Some(Vec::new());
+                                    if let Some(event) = make_event(&seq_counter, SidebarEvent::TrajectoriesSnapshot { trajectories: Vec::new() }) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                    if let Some(event) = make_event(&seq_counter, loading_event(SidebarLoadingSection::Trajectories, "error", Some(initial_started_at.elapsed().as_millis()), Some(error))) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                }
+                            }
+                        }
+                        Some(InitialSidebarPart::Tasks(result)) => {
+                            match result {
+                                Ok(items) => {
+                                    tracing::info!("sidebar initial tasks ready in {}ms", initial_started_at.elapsed().as_millis());
+                                    tasks = Some(items.clone());
+                                    if let Some(event) = make_event(&seq_counter, SidebarEvent::TasksSnapshot { tasks: items }) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                    if let Some(event) = make_event(&seq_counter, loading_event(SidebarLoadingSection::Tasks, "ready", Some(initial_started_at.elapsed().as_millis()), None)) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!("sidebar initial tasks failed: {error}");
+                                    tasks = Some(Vec::new());
+                                    if let Some(event) = make_event(&seq_counter, SidebarEvent::TasksSnapshot { tasks: Vec::new() }) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                    if let Some(event) = make_event(&seq_counter, loading_event(SidebarLoadingSection::Tasks, "error", Some(initial_started_at.elapsed().as_millis()), Some(error))) {
+                                        yield Ok::<_, std::convert::Infallible>(event);
+                                    }
+                                }
+                            }
+                        }
+                        Some(InitialSidebarPart::Buddy(snapshot)) => {
+                            tracing::info!("sidebar initial buddy ready in {}ms", initial_started_at.elapsed().as_millis());
+                            buddy_snap = Some(snapshot.clone());
+                            if let Some(event) = make_event(&seq_counter, SidebarEvent::BuddySnapshot { buddy: snapshot }) {
+                                yield Ok::<_, std::convert::Infallible>(event);
+                            }
+                            if let Some(event) = make_event(&seq_counter, loading_event(SidebarLoadingSection::Buddy, "ready", Some(initial_started_at.elapsed().as_millis()), None)) {
+                                yield Ok::<_, std::convert::Infallible>(event);
+                            }
+                        }
+                        None => {
+                            initial_rx = None;
+                        }
+                    }
+
+                    if let (Some(trajectories), Some(tasks), Some(workspace_roots), Some(buddy)) = (
+                        trajectories.clone(),
+                        tasks.clone(),
+                        workspace_roots.clone(),
+                        buddy_snap.clone(),
+                    ) {
+                        if let Some(event) = make_event(
+                            &seq_counter,
+                            SidebarEvent::Snapshot { trajectories, tasks, workspace_roots, buddy },
+                        ) {
+                            yield Ok::<_, std::convert::Infallible>(event);
+                        }
+                        initial_rx = None;
+                    }
+                }
+
                 result = async {
                     match &mut trajectory_rx {
                         Some(rx) => rx.recv().await,
@@ -408,30 +423,15 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
-                            let envelope = next_envelope(
-                                &seq_counter,
-                                SidebarEvent::Trajectory(event),
-                            );
-                            if let Some(serialized) = serialize_envelope(&envelope) {
-                                yield Ok::<_, std::convert::Infallible>(serialized);
+                            if let Some(event) = make_event(&seq_counter, SidebarEvent::Trajectory(event)) {
+                                yield Ok::<_, std::convert::Infallible>(event);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if let Ok((trajectories, tasks, workspace_roots)) =
-                                fetch_snapshot(gcx_for_stream.clone()).await
-                            {
+                            if let Ok((trajectories, tasks, workspace_roots)) = fetch_snapshot(gcx_for_stream.clone()).await {
                                 let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                let envelope = next_envelope(
-                                    &seq_counter,
-                                    SidebarEvent::Snapshot {
-                                        trajectories,
-                                        tasks,
-                                        workspace_roots,
-                                        buddy,
-                                    },
-                                );
-                                if let Some(serialized) = serialize_envelope(&envelope) {
-                                    yield Ok::<_, std::convert::Infallible>(serialized);
+                                if let Some(event) = make_event(&seq_counter, SidebarEvent::Snapshot { trajectories, tasks, workspace_roots, buddy }) {
+                                    yield Ok::<_, std::convert::Infallible>(event);
                                 }
                             } else {
                                 break;
@@ -439,7 +439,7 @@ pub async fn handle_sidebar_subscribe(
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             trajectory_rx = None;
-                            if task_rx.is_none() && notification_rx.is_none() {
+                            if all_receivers_closed(&trajectory_rx, &workspace_changed_rx, &task_rx, &notification_rx, &buddy_rx) {
                                 break;
                             }
                         }
@@ -454,26 +454,23 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if let Ok((trajectories, tasks, workspace_roots)) =
-                                fetch_snapshot(gcx_for_stream.clone()).await
-                            {
+                            if let Ok((trajectories, tasks, workspace_roots)) = fetch_snapshot(gcx_for_stream.clone()).await {
                                 let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                let envelope = next_envelope(
-                                    &seq_counter,
-                                    SidebarEvent::Snapshot {
-                                        trajectories,
-                                        tasks,
-                                        workspace_roots,
-                                        buddy,
-                                    },
-                                );
-                                if let Some(serialized) = serialize_envelope(&envelope) {
-                                    yield Ok::<_, std::convert::Infallible>(serialized);
+                                if let Some(event) = make_event(&seq_counter, SidebarEvent::WorkspaceSnapshot { workspace_roots: workspace_roots.clone() }) {
+                                    yield Ok::<_, std::convert::Infallible>(event);
                                 }
+                                if let Some(event) = make_event(&seq_counter, SidebarEvent::Snapshot { trajectories, tasks, workspace_roots, buddy }) {
+                                    yield Ok::<_, std::convert::Infallible>(event);
+                                }
+                            } else {
+                                break;
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             workspace_changed_rx = None;
+                            if all_receivers_closed(&trajectory_rx, &workspace_changed_rx, &task_rx, &notification_rx, &buddy_rx) {
+                                break;
+                            }
                         }
                     }
                 }
@@ -486,30 +483,15 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(task_envelope) => {
-                            let envelope = next_envelope(
-                                &seq_counter,
-                                SidebarEvent::Task(task_envelope.event),
-                            );
-                            if let Some(serialized) = serialize_envelope(&envelope) {
-                                yield Ok::<_, std::convert::Infallible>(serialized);
+                            if let Some(event) = make_event(&seq_counter, SidebarEvent::Task(task_envelope.event)) {
+                                yield Ok::<_, std::convert::Infallible>(event);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if let Ok((trajectories, tasks, workspace_roots)) =
-                                fetch_snapshot(gcx_for_stream.clone()).await
-                            {
+                            if let Ok((trajectories, tasks, workspace_roots)) = fetch_snapshot(gcx_for_stream.clone()).await {
                                 let buddy = fetch_buddy_snapshot(gcx_for_stream.clone()).await;
-                                let envelope = next_envelope(
-                                    &seq_counter,
-                                    SidebarEvent::Snapshot {
-                                        trajectories,
-                                        tasks,
-                                        workspace_roots,
-                                        buddy,
-                                    },
-                                );
-                                if let Some(serialized) = serialize_envelope(&envelope) {
-                                    yield Ok::<_, std::convert::Infallible>(serialized);
+                                if let Some(event) = make_event(&seq_counter, SidebarEvent::Snapshot { trajectories, tasks, workspace_roots, buddy }) {
+                                    yield Ok::<_, std::convert::Infallible>(event);
                                 }
                             } else {
                                 break;
@@ -517,7 +499,7 @@ pub async fn handle_sidebar_subscribe(
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             task_rx = None;
-                            if trajectory_rx.is_none() && notification_rx.is_none() {
+                            if all_receivers_closed(&trajectory_rx, &workspace_changed_rx, &task_rx, &notification_rx, &buddy_rx) {
                                 break;
                             }
                         }
@@ -532,19 +514,14 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
-                            let envelope = next_envelope(
-                                &seq_counter,
-                                SidebarEvent::Notification(event),
-                            );
-                            if let Some(serialized) = serialize_envelope(&envelope) {
-                                yield Ok::<_, std::convert::Infallible>(serialized);
+                            if let Some(event) = make_event(&seq_counter, SidebarEvent::Notification(event)) {
+                                yield Ok::<_, std::convert::Infallible>(event);
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => {
                             notification_rx = None;
-                            if trajectory_rx.is_none() && task_rx.is_none() {
+                            if all_receivers_closed(&trajectory_rx, &workspace_changed_rx, &task_rx, &notification_rx, &buddy_rx) {
                                 break;
                             }
                         }
@@ -559,18 +536,16 @@ pub async fn handle_sidebar_subscribe(
                 } => {
                     match result {
                         Ok(event) => {
-                            let envelope = next_envelope(
-                                &seq_counter,
-                                SidebarEvent::Buddy { buddy_event: event },
-                            );
-                            if let Some(serialized) = serialize_envelope(&envelope) {
-                                yield Ok::<_, std::convert::Infallible>(serialized);
+                            if let Some(event) = make_event(&seq_counter, SidebarEvent::Buddy { buddy_event: event }) {
+                                yield Ok::<_, std::convert::Infallible>(event);
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => {
                             buddy_rx = None;
+                            if all_receivers_closed(&trajectory_rx, &workspace_changed_rx, &task_rx, &notification_rx, &buddy_rx) {
+                                break;
+                            }
                         }
                     }
                 }

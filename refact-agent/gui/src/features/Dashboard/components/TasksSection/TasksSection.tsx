@@ -177,8 +177,10 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
   const activeCount = filteredTasks.filter(
     (t) => t.status === "active" || t.status === "planning",
   ).length;
+  const tasksLoaded = Boolean(tasks);
   const tasksLoading =
-    projectLoading || isLoading || isFetching || tasks === undefined;
+    projectLoading || isLoading || (isFetching && !tasksLoaded);
+  const showTaskError = isError && !projectLoading && !tasksLoaded;
 
   const renderHeader = (children?: React.ReactNode) => (
     <div className={styles.header}>
@@ -197,8 +199,12 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
               {activeCount} active
             </Text>
           )}
-          <Text size="1" color="gray">
-            {tasksLoading ? "Loading" : `${filteredTasks.length} total`}
+          <Text size="1" color={showTaskError ? "red" : "gray"}>
+            {tasksLoading
+              ? "Loading"
+              : showTaskError
+                ? "Error"
+                : `${filteredTasks.length} total`}
           </Text>
           {collapsed ? (
             <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
@@ -210,6 +216,25 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
       {children}
     </div>
   );
+
+  if (showTaskError) {
+    return (
+      <div className={styles.section} data-collapsed={collapsed || undefined}>
+        {renderHeader()}
+        <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
+          <Flex direction="column" align="center" gap="2" p="4">
+            <Text size="2" color="red">
+              Failed to load tasks
+            </Text>
+            <Text size="1" color="gray" align="center">
+              Refact could not load the task list. Check the engine logs or try
+              reconnecting.
+            </Text>
+          </Flex>
+        </CollapsePanel>
+      </div>
+    );
+  }
 
   if (tasksLoading) {
     return (
