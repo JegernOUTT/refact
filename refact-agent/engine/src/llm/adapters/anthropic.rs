@@ -888,6 +888,7 @@ fn parse_anthropic_usage(usage: &Value) -> Option<ChatUsage> {
 mod tests {
     use super::*;
     use crate::call_validation::ChatMessage;
+    use crate::llm::params::CacheControl;
 
     fn settings() -> AdapterSettings {
         AdapterSettings {
