@@ -7,6 +7,7 @@ import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
 import {
   selectToolResultById,
   selectManyDiffMessageByIds,
+  selectIsWaiting,
 } from "../../../features/Chat/Thread/selectors";
 import { ToolCall, DiffChunk } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
@@ -35,6 +36,22 @@ interface FileOpToolProps {
   diffs?: DiffChunk[];
 }
 
+function countNonEmptyLines(text: string): number {
+  let count = 0;
+  let hasContent = false;
+
+  for (const char of text) {
+    if (char === "\n") {
+      if (hasContent) count++;
+      hasContent = false;
+    } else {
+      hasContent = true;
+    }
+  }
+
+  return hasContent ? count + 1 : count;
+}
+
 export const FileOpTool: React.FC<FileOpToolProps> = ({
   toolCall,
   toolType,
@@ -43,6 +60,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const { queryPathThenOpenFile } = useEventsBusForIDE();
+  const isWaiting = useAppSelector(selectIsWaiting);
 
   const maybeResult = useAppSelector((state) =>
     selectToolResultById(state, toolCall.id),
@@ -57,12 +75,12 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
     [diffIds],
   );
   const toolDiffs = useAppSelector(selectDiffs);
-
   const allDiffs = useMemo((): DiffChunk[] => {
+    if (isWaiting) return [];
     const fromProps = diffs;
     const fromStore = toolDiffs.flatMap((d) => d.content);
     return fromProps.length > 0 ? fromProps : fromStore;
-  }, [diffs, toolDiffs]);
+  }, [diffs, isWaiting, toolDiffs]);
 
   const args = useMemo((): MvArgs | RmArgs | AddWorkspaceArgs => {
     try {
@@ -87,12 +105,11 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
       return "success";
     }
     // rm tool returns diff message (not tool message) when deleting files with content
-    if (toolDiffs.length > 0) {
+    if (!isWaiting && toolDiffs.length > 0) {
       return "success";
     }
     return "running";
-  }, [maybeResult, toolDiffs]);
-
+  }, [isWaiting, maybeResult, toolDiffs.length]);
   const handleFileClick = useCallback(
     (e: React.MouseEvent, filePath: string) => {
       e.stopPropagation();
@@ -152,11 +169,10 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
     const rmArgs = args as RmArgs;
     const path = rmArgs.path ?? "";
     const isDir = rmArgs.recursive;
-    const linesRemoved = allDiffs.reduce((acc, d) => {
-      return (
-        acc + d.lines_remove.split("\n").filter((l) => l.length > 0).length
-      );
-    }, 0);
+    const linesRemoved = allDiffs.reduce(
+      (acc, d) => acc + countNonEmptyLines(d.lines_remove),
+      0,
+    );
     return {
       icon: <TrashIcon />,
       summary: (

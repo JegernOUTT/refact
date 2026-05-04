@@ -36,9 +36,20 @@ interface SearchToolProps {
 }
 
 function countMatches(content: string): number | null {
-  const lines = content.split("\n").filter((l) => l.trim());
-  if (lines.length === 0) return null;
-  return lines.length;
+  let count = 0;
+  let hasContent = false;
+
+  for (const char of content) {
+    if (char === "\n") {
+      if (hasContent) count++;
+      hasContent = false;
+    } else if (!/\s/.test(char)) {
+      hasContent = true;
+    }
+  }
+
+  if (hasContent) count++;
+  return count > 0 ? count : null;
 }
 
 export const SearchTool: React.FC<SearchToolProps> = ({
@@ -85,8 +96,10 @@ export const SearchTool: React.FC<SearchToolProps> = ({
       : null;
 
   // Don't show match count on error - error messages also have content
-  const matchCount =
-    content && status !== "error" ? countMatches(content) : null;
+  const matchCount = useMemo(
+    () => (content && status !== "error" ? countMatches(content) : null),
+    [content, status],
+  );
 
   const summary = useMemo(() => {
     switch (toolType) {

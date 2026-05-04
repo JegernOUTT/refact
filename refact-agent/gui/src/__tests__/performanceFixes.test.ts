@@ -2,7 +2,10 @@ import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { applyDeltaOps, DeltaOp } from "../services/refact/chatSubscription";
 import type { ChatMessage } from "../services/refact/types";
-import { selectToolResultById } from "../features/Chat/Thread/selectors";
+import {
+  selectManyToolResultsByIds,
+  selectToolResultById,
+} from "../features/Chat/Thread/selectors";
 import type { RootState } from "../app/store";
 import type { Config } from "../features/Config/configSlice";
 import { render, waitFor, createDefaultChatState } from "../utils/test-utils";
@@ -206,6 +209,49 @@ describe("selectToolResultById optimization", () => {
 
     const result = selectToolResultById(mockState, "nonexistent");
     expect(result).toBeUndefined();
+  });
+
+  it("keeps many-result selector output stable across unrelated streaming updates", () => {
+    const selectResults = selectManyToolResultsByIds(["id1"]);
+    const toolMessage = { role: "tool", tool_call_id: "id1", content: "first" };
+    const baseState = {
+      chat: {
+        current_thread_id: "test",
+        threads: {
+          test: {
+            thread: {
+              messages: [
+                { role: "assistant", content: "before" },
+                toolMessage,
+                { role: "assistant", message_id: "stream", content: "tick 1" },
+              ],
+            },
+          },
+        },
+      },
+    } as unknown as RootState;
+    const nextState = {
+      chat: {
+        current_thread_id: "test",
+        threads: {
+          test: {
+            thread: {
+              messages: [
+                { role: "assistant", content: "before" },
+                toolMessage,
+                { role: "assistant", message_id: "stream", content: "tick 2" },
+              ],
+            },
+          },
+        },
+      },
+    } as unknown as RootState;
+
+    const first = selectResults(baseState);
+    const second = selectResults(nextState);
+
+    expect(second).toBe(first);
+    expect(second[0]).toBe(toolMessage);
   });
 });
 

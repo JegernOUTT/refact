@@ -27,6 +27,8 @@ const EMPTY_QUEUED: QueuedItem[] = [];
 const EMPTY_PAUSE_REASONS: ThreadConfirmation["pause_reasons"] = [];
 const EMPTY_IMAGES: ImageFile[] = [];
 const EMPTY_TOOL_RESULTS: ToolResult[] = [];
+const EMPTY_TOOL_RESULTS_BY_ID: ReadonlyMap<string, ToolResult> = new Map();
+const EMPTY_DIFF_MESSAGES_BY_ID: ReadonlyMap<string, DiffMessage[]> = new Map();
 const EMPTY_DIFF_MESSAGES: DiffMessage[] = [];
 const EMPTY_TASKS: TodoItem[] = [];
 const DEFAULT_NEW_CHAT_SUGGESTED = { wasSuggested: false } as const;
@@ -289,33 +291,50 @@ export const toolMessagesSelector = createSelector(selectMessages, (messages) =>
   messages.filter(isToolMessage),
 );
 
-export const selectToolResultById = createSelector(
-  [toolMessagesSelector, (_, id?: string) => id],
-  (messages, id) => {
-    if (!id) return undefined;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.tool_call_id === id) {
-        return m as unknown as ToolResult;
-      }
+export const toolResultsByIdSelector = (() => {
+  let prevMessages: ToolMessage[] = [];
+  let prevMap: ReadonlyMap<string, ToolResult> = EMPTY_TOOL_RESULTS_BY_ID;
+
+  return createSelector(toolMessagesSelector, (messages) => {
+    if (messages.length === 0) {
+      prevMessages = [];
+      prevMap = EMPTY_TOOL_RESULTS_BY_ID;
+      return prevMap;
     }
-    return undefined;
-  },
+
+    if (sameRefArray(prevMessages, messages)) {
+      return prevMap;
+    }
+
+    const nextMap = new Map<string, ToolResult>();
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      nextMap.set(msg.tool_call_id, msg as unknown as ToolResult);
+    }
+
+    prevMessages = messages;
+    prevMap = nextMap;
+    return nextMap;
+  });
+})();
+
+export const selectToolResultById = createSelector(
+  [toolResultsByIdSelector, (_, id?: string) => id],
+  (messagesById, id) => (id ? messagesById.get(id) : undefined),
 );
 export const selectManyToolResultsByIds = (ids: string[]) => {
   let prev = EMPTY_TOOL_RESULTS;
 
-  return createSelector(toolMessagesSelector, (messages) => {
-    if (ids.length === 0 || messages.length === 0) {
+  return createSelector(toolResultsByIdSelector, (messagesById) => {
+    if (ids.length === 0 || messagesById.size === 0) {
       prev = EMPTY_TOOL_RESULTS;
       return prev;
     }
 
-    const wanted = new Set(ids);
     const next: ToolResult[] = [];
-    for (const msg of messages) {
-      if (!wanted.has(msg.tool_call_id)) continue;
-      next.push(msg as unknown as ToolResult);
+    for (const id of ids) {
+      const msg = messagesById.get(id);
+      if (msg) next.push(msg);
     }
 
     if (sameRefArray(prev, next)) {
@@ -331,22 +350,61 @@ const selectDiffMessages = createSelector(selectMessages, (messages) =>
   messages.filter(isDiffMessage),
 );
 
-export const selectDiffMessageById = createSelector(
-  [selectDiffMessages, (_, id?: string) => id],
-  (messages, id) => messages.find((message) => message.tool_call_id === id),
-);
+export const diffMessagesByIdSelector = (() => {
+  let prevDiffs: DiffMessage[] = [];
+  let prevMap: ReadonlyMap<string, DiffMessage[]> = EMPTY_DIFF_MESSAGES_BY_ID;
 
+  return createSelector(selectDiffMessages, (diffs) => {
+    if (diffs.length === 0) {
+      prevDiffs = [];
+      prevMap = EMPTY_DIFF_MESSAGES_BY_ID;
+      return prevMap;
+    }
+
+    if (sameRefArray(prevDiffs, diffs)) {
+      return prevMap;
+    }
+
+    const nextMap = new Map<string, DiffMessage[]>();
+    for (let i = 0; i < diffs.length; i++) {
+      const diff = diffs[i];
+      const existing = nextMap.get(diff.tool_call_id);
+      if (existing) {
+        existing.push(diff);
+      } else {
+        nextMap.set(diff.tool_call_id, [diff]);
+      }
+    }
+
+    prevDiffs = diffs;
+    prevMap = nextMap;
+    return nextMap;
+  });
+})();
+
+export const selectDiffMessageById = createSelector(
+  [diffMessagesByIdSelector, (_, id?: string) => id],
+  (messagesById, id) => {
+    if (!id) return undefined;
+    const messages = messagesById.get(id);
+    return messages ? messages[messages.length - 1] : undefined;
+  },
+);
 export const selectManyDiffMessageByIds = (ids: string[]) => {
   let prev = EMPTY_DIFF_MESSAGES;
 
-  return createSelector(selectDiffMessages, (diffs) => {
-    if (ids.length === 0 || diffs.length === 0) {
+  return createSelector(diffMessagesByIdSelector, (diffsById) => {
+    if (ids.length === 0 || diffsById.size === 0) {
       prev = EMPTY_DIFF_MESSAGES;
       return prev;
     }
 
-    const wanted = new Set(ids);
-    const next = diffs.filter((message) => wanted.has(message.tool_call_id));
+    const next: DiffMessage[] = [];
+    for (const id of ids) {
+      const messages = diffsById.get(id);
+      if (messages) next.push(...messages);
+    }
+
     if (sameRefArray(prev, next)) {
       return prev;
     }

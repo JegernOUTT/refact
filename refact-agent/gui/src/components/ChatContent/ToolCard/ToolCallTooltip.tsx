@@ -45,7 +45,10 @@ export const ToolCallTooltip: React.FC<ToolCallTooltipProps> = ({
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   const toolName = toolCall.function.name ?? "unknown";
-  const entries = useMemo(() => parseArgs(toolCall), [toolCall]);
+  const entries = useMemo(
+    () => (visible ? parseArgs(toolCall) : []),
+    [visible, toolCall],
+  );
 
   const clearOpenTimer = useCallback(() => {
     if (openTimerRef.current) {
