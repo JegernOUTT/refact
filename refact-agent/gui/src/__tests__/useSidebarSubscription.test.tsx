@@ -85,7 +85,9 @@ describe("useSidebarSubscription", () => {
     );
 
     await waitFor(() => {
-      expect(store.getState().current_project.serverSnapshotReceived).toBe(true);
+      expect(store.getState().current_project.serverSnapshotReceived).toBe(
+        true,
+      );
     });
 
     expect(store.getState().current_project).toEqual({
@@ -154,7 +156,9 @@ describe("useSidebarSubscription", () => {
     store.dispatch(setBackendStatus({ status: "online" }));
 
     await waitFor(() => {
-      expect(store.getState().current_project.serverSnapshotReceived).toBe(true);
+      expect(store.getState().current_project.serverSnapshotReceived).toBe(
+        true,
+      );
     });
 
     store.dispatch(

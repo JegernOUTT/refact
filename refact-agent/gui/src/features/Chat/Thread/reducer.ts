@@ -316,7 +316,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const openThreadIds = persistedTabs.openThreadIds.filter(
       (id) => threads[id] !== undefined,
     );
-    const currentThreadId = openThreadIds.includes(persistedTabs.currentThreadId)
+    const currentThreadId = openThreadIds.includes(
+      persistedTabs.currentThreadId,
+    )
       ? persistedTabs.currentThreadId
       : openThreadIds[openThreadIds.length - 1] ?? "";
 
