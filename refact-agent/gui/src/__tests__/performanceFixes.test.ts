@@ -354,6 +354,74 @@ describe("chat rendering regressions", () => {
     });
   });
 
+  it("keeps streaming edit tool diffs inert until the tool finishes", async () => {
+    const largeDiff: DiffChunk = {
+      file_name: "src/generated.ts",
+      file_action: "edit",
+      line1: 1,
+      line2: 1,
+      lines_remove: "old line\n".repeat(2000),
+      lines_add: "new line\n".repeat(2000),
+    };
+    const messages: ChatMessages = [
+      {
+        role: "assistant",
+        message_id: "msg-edit",
+        content: "I'll edit the file.",
+        tool_calls: [
+          {
+            id: "tool-edit",
+            type: "function",
+            index: 0,
+            function: {
+              name: "update_textdoc",
+              arguments:
+                '{"path":"src/generated.ts","old_str":"old","replacement":"new"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "diff",
+        tool_call_id: "tool-edit",
+        content: [largeDiff],
+      },
+    ];
+    const streamingState = createThreadState(messages);
+    streamingState.chat.threads[MARKDOWN_ISSUE.id].streaming = false;
+    streamingState.chat.threads[MARKDOWN_ISSUE.id].waiting_for_response = true;
+
+    const { container, store } = render(
+      React.createElement(ChatContent, {
+        onRetry: () => undefined,
+        onStopStreaming: () => undefined,
+      }),
+      {
+        preloadedState: streamingState,
+      },
+    );
+
+    await waitFor(() => {
+      expect(container.textContent).toContain("Edit generated.ts");
+      expect(container.textContent).not.toContain("+2000");
+      expect(container.textContent).not.toContain("−2000");
+    });
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: MARKDOWN_ISSUE.id,
+        seq: "1",
+        type: "runtime_updated",
+        state: "waiting_user_input",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(container.textContent).toContain("+2000");
+      expect(container.textContent).toContain("−2000");
+    });
+  });
+
   it("keeps appended context files grouped with the preceding read tool", async () => {
     const baseMessages: ChatMessages = [
       {

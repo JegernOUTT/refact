@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 import { Text, Container, Box, Flex, Link } from "@radix-ui/themes";
 import { DiffMessage, type DiffChunk } from "../../services/refact";
 import { ScrollArea } from "../ScrollArea";
@@ -48,12 +48,25 @@ const DiffLine: React.FC<{
   );
 };
 
+function splitDiffLines(text: string): string[] {
+  const lines: string[] = [];
+  let start = 0;
+
+  for (let i = 0; i <= text.length; i++) {
+    if (i !== text.length && text[i] !== "\n") continue;
+    lines.push(text.slice(start, i));
+    start = i + 1;
+  }
+
+  return lines;
+}
+
 const DiffHighlight: React.FC<{
   startLine?: number;
   sign: string;
   text: string;
 }> = ({ startLine, sign, text }) => {
-  const lines = text.split("\n");
+  const lines = useMemo(() => splitDiffLines(text), [text]);
   return (
     <Flex
       direction="column"
@@ -112,9 +125,19 @@ export type DiffChunkWithTypeAndApply = DiffChunk & {
   apply: boolean;
 };
 
-export const DiffTitle: React.FC<{
-  diffs: Record<string, DiffChunk[]>;
-}> = ({ diffs }): React.ReactNode[] => {
+function countDiffLines(text: string): number {
+  if (!text) return 0;
+
+  let count = 1;
+  for (const char of text) {
+    if (char === "\n") count++;
+  }
+  return count;
+}
+
+function buildDiffTitleNodes(
+  diffs: Record<string, DiffChunk[]>,
+): React.ReactNode[] {
   const entries = Object.entries(diffs);
   const nodes: React.ReactNode[] = [];
 
@@ -128,9 +151,8 @@ export const DiffTitle: React.FC<{
     let addCount = 0;
     let removeCount = 0;
     for (const diff of diffForFile) {
-      if (diff.lines_add) addCount += diff.lines_add.split("\n").length;
-      if (diff.lines_remove)
-        removeCount += diff.lines_remove.split("\n").length;
+      addCount += countDiffLines(diff.lines_add);
+      removeCount += countDiffLines(diff.lines_remove);
     }
 
     if (nodes.length > 0) {
@@ -165,6 +187,13 @@ export const DiffTitle: React.FC<{
   }
 
   return nodes;
+}
+
+export const DiffTitle: React.FC<{
+  diffs: Record<string, DiffChunk[]>;
+}> = ({ diffs }) => {
+  const nodes = useMemo(() => buildDiffTitleNodes(diffs), [diffs]);
+  return <>{nodes}</>;
 };
 
 export const DiffContent: React.FC<{
@@ -301,12 +330,14 @@ const _GroupedDiffs: React.FC<GroupedDiffsProps> = ({
   open,
   onOpenChange,
 }) => {
-  const chunks: DiffMessage["content"] = [];
-  for (const diff of diffs) {
-    chunks.push(...diff.content);
-  }
+  const groupedByFileName = useMemo(() => {
+    const chunks: DiffMessage["content"] = [];
+    for (const diff of diffs) {
+      chunks.push(...diff.content);
+    }
 
-  const groupedByFileName = groupBy(chunks, (chunk) => chunk.file_name);
+    return groupBy(chunks, (chunk) => chunk.file_name);
+  }, [diffs]);
 
   return (
     <Container>

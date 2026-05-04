@@ -28,12 +28,28 @@ interface EditToolProps {
   diffs?: DiffChunk[];
 }
 
+function countNonEmptyLines(text: string): number {
+  let count = 0;
+  let hasContent = false;
+
+  for (const char of text) {
+    if (char === "\n") {
+      if (hasContent) count++;
+      hasContent = false;
+    } else {
+      hasContent = true;
+    }
+  }
+
+  return hasContent ? count + 1 : count;
+}
+
 function getDiffStats(diffs: DiffChunk[]): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
   for (const diff of diffs) {
-    added += diff.lines_add.split("\n").filter((l) => l.length > 0).length;
-    removed += diff.lines_remove.split("\n").filter((l) => l.length > 0).length;
+    added += countNonEmptyLines(diff.lines_add);
+    removed += countNonEmptyLines(diff.lines_remove);
   }
   return { added, removed };
 }
@@ -68,9 +84,31 @@ const DiffLine: React.FC<{
   );
 };
 
+function splitNonEmptyLines(text: string): string[] {
+  const lines: string[] = [];
+  let start = 0;
+
+  for (let i = 0; i <= text.length; i++) {
+    if (i !== text.length && text[i] !== "\n") continue;
+
+    if (i > start) {
+      lines.push(text.slice(start, i));
+    }
+    start = i + 1;
+  }
+
+  return lines;
+}
+
 const DiffBlock: React.FC<{ diff: DiffChunk }> = ({ diff }) => {
-  const removeLines = diff.lines_remove.split("\n").filter((l) => l.length > 0);
-  const addLines = diff.lines_add.split("\n").filter((l) => l.length > 0);
+  const removeLines = useMemo(
+    () => splitNonEmptyLines(diff.lines_remove),
+    [diff.lines_remove],
+  );
+  const addLines = useMemo(
+    () => splitNonEmptyLines(diff.lines_add),
+    [diff.lines_add],
+  );
 
   return (
     <Box className={styles.diffBlock}>
@@ -177,14 +215,18 @@ export const EditTool: React.FC<EditToolProps> = ({ toolCall, diffs = [] }) => {
   );
   const toolDiffs = useAppSelector(selectDiffs);
 
+  const hasResult = maybeResult !== undefined;
+  const hasDiffs = diffs.length > 0 || toolDiffs.length > 0;
+  const isToolBusy = !hasResult && (isStreaming || isWaiting);
+  const shouldRenderDiffs = hasDiffs && !isToolBusy;
+
   const allDiffs = useMemo(() => {
+    if (!shouldRenderDiffs) return [];
+
     const fromProps = diffs;
     const fromStore = toolDiffs.flatMap((d) => d.content);
     return fromProps.length > 0 ? fromProps : fromStore;
-  }, [diffs, toolDiffs]);
-
-  const hasDiffs = allDiffs.length > 0;
-  const hasResult = maybeResult !== undefined;
+  }, [diffs, shouldRenderDiffs, toolDiffs]);
 
   const parsedToolCall = useMemo(() => {
     if (!isRawTextDocToolCall(toolCall)) return null;
@@ -266,14 +308,13 @@ export const EditTool: React.FC<EditToolProps> = ({ toolCall, diffs = [] }) => {
     ) {
       return "error";
     }
-    // Still running if no diffs AND no result AND streaming/waiting
-    if (!hasDiffs && !hasResult && (isStreaming || isWaiting)) return "running";
+    if (isToolBusy) return "running";
     // Has result but no diffs - could be an error message
     if (hasResult && !hasDiffs) {
       return "error";
     }
     return "success";
-  }, [hasDiffs, hasResult, isStreaming, isWaiting, maybeResult]);
+  }, [hasDiffs, hasResult, isToolBusy, maybeResult]);
 
   const summary = useMemo(() => {
     const statsEl =
@@ -345,7 +386,7 @@ export const EditTool: React.FC<EditToolProps> = ({ toolCall, diffs = [] }) => {
             </Text>
           </Box>
         )}
-      {hasDiffs && (
+      {shouldRenderDiffs && (
         <>
           <Flex gap="2" className={styles.actionBar}>
             <Button
