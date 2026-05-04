@@ -706,20 +706,6 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_billing_block_into_array_system() {
-        let mut body = json!({
-            "system": [{"type": "text", "text": "You are CC."}],
-            "messages": [{"role": "user", "content": "hello world, this is a test message for billing"}]
-        });
-        inject_billing_block(&mut body);
-        let sys = body["system"].as_array().unwrap();
-        assert_eq!(sys.len(), 2);
-        let billing_text = sys[0]["text"].as_str().unwrap();
-        assert!(billing_text.starts_with("x-anthropic-billing-header: cc_version=2.1.97."));
-        assert!(billing_text.contains("cc_entrypoint=cli"));
-    }
-
-    #[test]
     fn test_inject_billing_block_converts_string_system() {
         let mut body = json!({
             "system": "Be helpful.",

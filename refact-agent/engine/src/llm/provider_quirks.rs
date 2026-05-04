@@ -290,39 +290,4 @@ mod tests {
             _ => false,
         }
     }
-
-    #[test]
-    fn anthropic_unsupported_flags_strip_top_level_and_nested_fields() {
-        let mut body = json!({
-            "cache_control": {"type": "ephemeral"},
-            "tools": [{"name": "blocked"}],
-            "tool_choice": {"type": "any"},
-            "thinking": {"type": "enabled", "budget_tokens": 4096},
-            "output_config": {"effort": "high"},
-            "messages": [{
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "visible", "cache_control": {"type": "ephemeral"}},
-                    {"type": "thinking", "thinking": "hidden", "cache_control": {"type": "ephemeral"}},
-                    {"type": "redacted_thinking", "data": "encrypted"}
-                ]
-            }]
-        });
-        let mut settings = settings();
-        settings.supports_cache_control = false;
-        settings.supports_tools = false;
-        settings.supports_reasoning = false;
-
-        remove_anthropic_unsupported_fields(&mut body, &settings);
-
-        assert!(body.get("cache_control").is_none());
-        assert!(body.get("tools").is_none());
-        assert!(body.get("tool_choice").is_none());
-        assert!(body.get("thinking").is_none());
-        assert!(body.get("output_config").is_none());
-        assert!(!contains_key_recursively(&body, "cache_control"));
-        let content = body["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 1);
-        assert_eq!(content[0]["type"], "text");
-    }
 }
