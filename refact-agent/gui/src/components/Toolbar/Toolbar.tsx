@@ -51,6 +51,7 @@ import {
   useAppDispatch,
   useAppSelector,
   useAppearance,
+  useConfig,
   useEventsBusForIDE,
   useOpenUrl,
 } from "../../hooks";
@@ -130,6 +131,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const activeTabRef = useRef<HTMLDivElement | null>(null);
   const { isDarkMode, toggle: toggleDarkMode } = useAppearance();
+  const { host } = useConfig();
   const openUrl = useOpenUrl();
 
   const tabs = useAppSelector(selectTabsDisplayData);
@@ -550,9 +552,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           <ExternalLinkIcon />
         </ToolbarIconButton>
 
-        <ToolbarIconButton label="Toggle Dark Mode" onClick={toggleDarkMode}>
-          {isDarkMode ? <MoonIcon /> : <SunIcon />}
-        </ToolbarIconButton>
+        {host === "web" && (
+          <ToolbarIconButton label="Toggle Dark Mode" onClick={toggleDarkMode}>
+            {isDarkMode ? <MoonIcon /> : <SunIcon />}
+          </ToolbarIconButton>
+        )}
 
         <Dropdown handleNavigation={handleNavigation} useGhostTrigger />
       </div>
