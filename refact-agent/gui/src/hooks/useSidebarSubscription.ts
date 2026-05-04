@@ -63,6 +63,7 @@ import {
   resetSidebarState,
   sidebarSectionSnapshotReceived,
   sidebarSubscriptionStarted,
+  sidebarWorkspaceChanged,
 } from "../features/Sidebar/sidebarSlice";
 
 const RECONNECT_DELAY_MS = 500;
@@ -509,30 +510,24 @@ export function useSidebarSubscription() {
         section === "workspace" &&
         hasSnapshotKey(snapshot, "workspace_roots")
       ) {
+        const workspaceRoots = snapshot.workspace_roots;
         const workspaceChanged =
+          status === "ready" &&
           serverWorkspaceRootsRef.current !== undefined &&
-          !workspaceRootsEqual(
-            serverWorkspaceRootsRef.current,
-            snapshot.workspace_roots,
-          );
+          !workspaceRootsEqual(serverWorkspaceRootsRef.current, workspaceRoots);
         if (workspaceChanged) {
-          dispatch(resetSidebarState({ lspPort: config.lspPort }));
-          dispatch(
-            sidebarSubscriptionStarted({
-              subscriptionId,
-              lspPort: config.lspPort,
-            }),
-          );
+          dispatch(sidebarWorkspaceChanged({ subscriptionId }));
           tasksSnapshotRef.current = null;
           dispatch(replaceSnapshotHistory([]));
           void dispatch(
             tasksApi.util.upsertQueryData("listTasks", undefined, []),
           );
           dispatch(setHistoryLoading(true));
-          dispatch(setHistoryLoadError(null));
         }
-        processWorkspaceSnapshot(snapshot.workspace_roots);
-        serverWorkspaceRootsRef.current = snapshot.workspace_roots;
+        if (status === "ready") {
+          processWorkspaceSnapshot(workspaceRoots);
+          serverWorkspaceRootsRef.current = workspaceRoots;
+        }
       } else if (
         section === "chats" &&
         hasSnapshotKey(snapshot, "trajectories")
@@ -556,7 +551,6 @@ export function useSidebarSubscription() {
       );
     },
     [
-      config.lspPort,
       dispatch,
       processBuddySnapshot,
       processTasksSnapshot,
@@ -700,16 +694,24 @@ export function useSidebarSubscription() {
     markMigrationDone();
   }, [dispatch]);
 
-  const prepareInitialHistory = useCallback(async () => {
-    dispatch(setHistoryLoading(true));
-    try {
-      await migrateFromLocalStorage();
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to migrate local history";
-      dispatch(setHistoryLoadError(message));
-    }
-  }, [dispatch, migrateFromLocalStorage]);
+  const prepareInitialHistory = useCallback(
+    async (generation: number) => {
+      if (generation !== generationRef.current) return;
+      dispatch(setHistoryLoading(true));
+      try {
+        await migrateFromLocalStorage();
+        if (generation !== generationRef.current) return;
+      } catch (err) {
+        if (generation !== generationRef.current) return;
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Failed to migrate local history";
+        dispatch(setHistoryLoadError(message));
+      }
+    },
+    [dispatch, migrateFromLocalStorage],
+  );
 
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) return;
@@ -741,7 +743,7 @@ export function useSidebarSubscription() {
     dispatch(resetSidebarState({ lspPort: port }));
     serverWorkspaceRootsRef.current = undefined;
     tasksSnapshotRef.current = null;
-    void prepareInitialHistory();
+    void prepareInitialHistory(generation);
 
     const onEvent = (envelope: SidebarEventEnvelope) => {
       if (generation !== generationRef.current) return;

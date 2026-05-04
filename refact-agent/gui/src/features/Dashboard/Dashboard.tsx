@@ -15,7 +15,6 @@ import { selectBackendStatus } from "../Connection";
 import {
   selectChatsSection,
   selectTasksSection,
-  selectWorkspaceSection,
 } from "../Sidebar/sidebarSlice";
 
 const OfflineState: React.FC = () => {
@@ -48,7 +47,6 @@ export const Dashboard: React.FC = () => {
   const splitRef = useRef<HTMLDivElement>(null);
   const breakpoint = useDashboardLayout(containerRef);
   const backendStatus = useAppSelector(selectBackendStatus);
-  const workspaceSection = useAppSelector(selectWorkspaceSection);
   const chatsSection = useAppSelector(selectChatsSection);
   const tasksSection = useAppSelector(selectTasksSection);
 
@@ -61,10 +59,8 @@ export const Dashboard: React.FC = () => {
 
   const showResizeDivider = !collapsed.chats && !collapsed.tasks;
   const isOffline = backendStatus !== "online";
-  const chatsLoading =
-    workspaceSection.status === "loading" || chatsSection.status === "loading";
-  const tasksLoading =
-    workspaceSection.status === "loading" || tasksSection.status === "loading";
+  const chatsLoading = chatsSection.status === "loading";
+  const tasksLoading = tasksSection.status === "loading";
 
   const chatsFlexStyle = collapsed.chats
     ? undefined

@@ -8,13 +8,18 @@ import { setUpStore } from "../app/store";
 import { useSidebarSubscription } from "../hooks/useSidebarSubscription";
 import { server } from "../utils/mockServer";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
+import { updateConfig } from "../features/Config/configSlice";
 import { tasksApi } from "../services/refact/tasks";
 
-function envelope(seq: number, event: Record<string, unknown>) {
+function envelope(
+  seq: number,
+  event: Record<string, unknown>,
+  subscriptionId = "test-sidebar",
+) {
   return {
     protocol_version: 2,
     seq,
-    subscription_id: "test-sidebar",
+    subscription_id: subscriptionId,
     event,
   };
 }
@@ -25,14 +30,19 @@ function sectionSnapshot(
   snapshot: Record<string, unknown>,
   status: "ready" | "error" = "ready",
   error?: string,
+  subscriptionId?: string,
 ) {
-  return envelope(seq, {
-    type: "section_snapshot",
-    section,
-    status,
-    snapshot,
-    ...(error ? { error } : {}),
-  });
+  return envelope(
+    seq,
+    {
+      type: "section_snapshot",
+      section,
+      status,
+      snapshot,
+      ...(error ? { error } : {}),
+    },
+    subscriptionId,
+  );
 }
 
 function sidebarSnapshotHandler(...events: Record<string, unknown>[]) {
@@ -164,6 +174,43 @@ describe("useSidebarSubscription", () => {
     });
   });
 
+  it("keeps sidebar readiness for workspace-name-only config updates", async () => {
+    server.use(
+      sidebarSnapshotHandler(
+        sectionSnapshot(0, "workspace", {
+          workspace_roots: ["/workspace/refact"],
+        }),
+        sectionSnapshot(1, "chats", { trajectories: [] }),
+        sectionSnapshot(2, "tasks", { tasks: [] }),
+        sectionSnapshot(3, "buddy", { buddy: null }),
+      ),
+    );
+
+    const store = renderSidebarSubscription({
+      config: {
+        apiKey: "test",
+        lspPort: 8001,
+        themeProps: {},
+        host: "vscode",
+        currentWorkspaceName: "refact",
+      },
+    });
+
+    await waitFor(() => {
+      expect(store.getState().sidebar.sections.chats.status).toBe("ready");
+      expect(store.getState().sidebar.sections.tasks.status).toBe("ready");
+    });
+
+    store.dispatch(updateConfig({ currentWorkspaceName: "renamed-refact" }));
+
+    expect(store.getState().sidebar.sections).toMatchObject({
+      workspace: { status: "ready" },
+      chats: { status: "ready" },
+      tasks: { status: "ready" },
+      buddy: { status: "ready" },
+    });
+  });
+
   it("resets section readiness and cached tasks when the same subscription switches workspace", async () => {
     server.use(
       sidebarSnapshotHandler(
@@ -196,6 +243,82 @@ describe("useSidebarSubscription", () => {
     expect(
       tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
     ).toEqual([]);
+  });
+
+  it("settles after a same-subscription workspace switch receives replacement section snapshots", async () => {
+    server.use(
+      sidebarSnapshotHandler(
+        sectionSnapshot(0, "workspace", {
+          workspace_roots: ["/workspace/old"],
+        }),
+        sectionSnapshot(1, "chats", { trajectories: [] }),
+        sectionSnapshot(2, "tasks", { tasks: [taskMeta("old", "Old task")] }),
+        sectionSnapshot(3, "buddy", { buddy: null }),
+        sectionSnapshot(4, "workspace", {
+          workspace_roots: ["/workspace/new"],
+        }),
+        sectionSnapshot(5, "chats", { trajectories: [] }),
+        sectionSnapshot(6, "tasks", { tasks: [taskMeta("new", "New task")] }),
+        sectionSnapshot(7, "buddy", { buddy: null }),
+      ),
+    );
+
+    const store = renderSidebarSubscription();
+
+    await waitFor(() => {
+      expect(store.getState().current_project).toEqual({
+        name: "new",
+        workspaceRoots: ["/workspace/new"],
+      });
+      expect(store.getState().sidebar.subscriptionId).toBe("test-sidebar");
+      expect(store.getState().sidebar.sections).toMatchObject({
+        workspace: { status: "ready" },
+        chats: { status: "ready" },
+        tasks: { status: "ready" },
+        buddy: { status: "ready" },
+      });
+      expect(
+        tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
+      ).toEqual([taskMeta("new", "New task")]);
+      expect(store.getState().history.isLoading).toBe(false);
+    });
+  });
+
+  it("does not poison canonical roots with workspace error snapshots", async () => {
+    server.use(
+      sidebarSnapshotHandler(
+        sectionSnapshot(0, "workspace", {
+          workspace_roots: ["/workspace/refact"],
+        }),
+        sectionSnapshot(1, "chats", { trajectories: [] }),
+        sectionSnapshot(2, "tasks", { tasks: [] }),
+        sectionSnapshot(3, "buddy", { buddy: null }),
+        sectionSnapshot(
+          4,
+          "workspace",
+          { workspace_roots: [] },
+          "error",
+          "workspace timeout",
+        ),
+        sectionSnapshot(5, "workspace", {
+          workspace_roots: ["/workspace/refact"],
+        }),
+      ),
+    );
+
+    const store = renderSidebarSubscription();
+
+    await waitFor(() => {
+      expect(store.getState().sidebar.sections.workspace.status).toBe("ready");
+      expect(store.getState().sidebar.sections.workspace.error).toBeNull();
+      expect(store.getState().sidebar.sections.chats.status).toBe("ready");
+      expect(store.getState().sidebar.sections.tasks.status).toBe("ready");
+      expect(store.getState().sidebar.sections.buddy.status).toBe("ready");
+      expect(store.getState().current_project).toEqual({
+        name: "refact",
+        workspaceRoots: ["/workspace/refact"],
+      });
+    });
   });
 
   it("does not reset readiness for normalized-equivalent workspace snapshots", async () => {

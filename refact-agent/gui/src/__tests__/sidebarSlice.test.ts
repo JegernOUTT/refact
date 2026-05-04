@@ -4,6 +4,7 @@ import {
   sidebarReducer,
   sidebarSectionSnapshotReceived,
   sidebarSubscriptionStarted,
+  sidebarWorkspaceChanged,
 } from "../features/Sidebar/sidebarSlice";
 
 describe("sidebarReducer", () => {
@@ -29,6 +30,26 @@ describe("sidebarReducer", () => {
     expect(state.sections.workspace.status).toBe("loading");
     expect(state.sections.tasks.status).toBe("ready");
     expect(state.sections.chats).toEqual({ status: "error", error: "boom" });
+  });
+
+  it("resets section readiness for workspace changes without clearing subscription identity", () => {
+    let state = sidebarReducer(
+      undefined,
+      sidebarSubscriptionStarted({ subscriptionId: "sub", lspPort: 8001 }),
+    );
+    state = sidebarReducer(
+      state,
+      sidebarSectionSnapshotReceived({ section: "tasks", status: "ready" }),
+    );
+
+    state = sidebarReducer(
+      state,
+      sidebarWorkspaceChanged({ subscriptionId: "sub" }),
+    );
+
+    expect(state.subscriptionId).toBe("sub");
+    expect(state.lspPort).toBe(8001);
+    expect(state.sections.tasks.status).toBe("loading");
   });
 
   it("resets all sections only when explicitly reset", () => {

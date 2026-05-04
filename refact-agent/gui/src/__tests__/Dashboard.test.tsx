@@ -134,6 +134,62 @@ describe("Dashboard progressive sidebar readiness", () => {
     expect(screen.getByText(/No tasks yet/i)).toBeInTheDocument();
   });
 
+  it("does not mask ready empty chats and tasks while workspace is loading", async () => {
+    render(<Dashboard />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        history: {
+          chats: {},
+          isLoading: false,
+          loadError: null,
+          pagination: { cursor: null, hasMore: false },
+        },
+        sidebar: {
+          subscriptionId: "test-sidebar",
+          lspPort: 8001,
+          sections: {
+            workspace: { status: "loading", error: null },
+            chats: { status: "ready", error: null },
+            tasks: { status: "ready", error: null },
+            buddy: { status: "ready", error: null },
+          },
+        },
+      },
+    });
+
+    expect(screen.getByText(/No chats yet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/No tasks yet/i)).toBeInTheDocument();
+    expect(screen.queryByText("Loading")).not.toBeInTheDocument();
+  });
+
+  it("does not mask ready empty chats and tasks while workspace is error", async () => {
+    render(<Dashboard />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        history: {
+          chats: {},
+          isLoading: false,
+          loadError: null,
+          pagination: { cursor: null, hasMore: false },
+        },
+        sidebar: {
+          subscriptionId: "test-sidebar",
+          lspPort: 8001,
+          sections: {
+            workspace: { status: "error", error: "workspace boom" },
+            chats: { status: "ready", error: null },
+            tasks: { status: "ready", error: null },
+            buddy: { status: "ready", error: null },
+          },
+        },
+      },
+    });
+
+    expect(screen.getByText(/No chats yet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/No tasks yet/i)).toBeInTheDocument();
+    expect(screen.queryByText("Loading")).not.toBeInTheDocument();
+  });
+
   it("lets tasks become ready while chats are still loading", async () => {
     render(<Dashboard />, {
       preloadedState: {

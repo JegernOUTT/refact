@@ -46,6 +46,10 @@ export const resetSidebarState = createAction<{ lspPort?: number | null }>(
   "sidebar/reset",
 );
 
+export const sidebarWorkspaceChanged = createAction<{
+  subscriptionId: string | null;
+}>("sidebar/workspaceChanged");
+
 export const sidebarReducer = createReducer(initialState, (builder) => {
   builder
     .addCase(sidebarSubscriptionStarted, (state, action) => {
@@ -61,6 +65,13 @@ export const sidebarReducer = createReducer(initialState, (builder) => {
         status: action.payload.status,
         error: action.payload.error ?? null,
       };
+    })
+    .addCase(sidebarWorkspaceChanged, (state, action) => {
+      state.subscriptionId = action.payload.subscriptionId;
+      state.sections.workspace = loadingSection();
+      state.sections.chats = loadingSection();
+      state.sections.tasks = loadingSection();
+      state.sections.buddy = loadingSection();
     })
     .addCase(resetSidebarState, (state, action) => {
       state.subscriptionId = null;

@@ -97,6 +97,24 @@ const taskB: TaskMeta = {
   updated_at: "2024-01-02T00:00:00Z",
 };
 
+function trajectoryMeta(index: number) {
+  const padded = index.toString().padStart(4, "0");
+  return {
+    id: `chat-${padded}`,
+    title: `Chat ${padded}`,
+    created_at: `2024-01-01T00:00:00Z`,
+    updated_at: `2024-01-01T00:00:00Z`,
+    model: "gpt-4",
+    mode: "agent",
+    message_count: index,
+    total_lines_added: 0,
+    total_lines_removed: 0,
+    tasks_total: 0,
+    tasks_done: 0,
+    tasks_failed: 0,
+  };
+}
+
 describe("useSidebarSubscription", () => {
   it("handles v2 section snapshots and null buddy snapshots", async () => {
     server.use(
@@ -313,6 +331,41 @@ describe("useSidebarSubscription", () => {
         "recovered-chat",
       ]);
       expect(store.getState().sidebar.sections.chats.status).toBe("ready");
+    });
+  });
+
+  it("replaces large trajectory snapshots deterministically", async () => {
+    const firstSnapshot = Array.from({ length: 250 }, (_, index) =>
+      trajectoryMeta(index),
+    );
+    const secondSnapshot = Array.from({ length: 250 }, (_, index) =>
+      trajectoryMeta(index + 250),
+    );
+    server.use(
+      http.get(
+        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        () =>
+          new HttpResponse(
+            sseStream([
+              sectionSnapshot(0, "chats", { trajectories: firstSnapshot }),
+              sectionSnapshot(1, "chats", { trajectories: secondSnapshot }),
+            ]),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+
+    const { store } = render(<TestHarness />, { preloadedState: CONFIG_STATE });
+
+    await waitFor(() => {
+      expect(Object.keys(store.getState().history.chats)).toHaveLength(250);
+      expect(store.getState().history.chats["chat-0249"]).toBeUndefined();
+      expect(store.getState().history.chats["chat-0250"].title).toBe(
+        "Chat 0250",
+      );
+      expect(store.getState().history.chats["chat-0499"].title).toBe(
+        "Chat 0499",
+      );
     });
   });
 
