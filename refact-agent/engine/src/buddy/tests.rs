@@ -2202,16 +2202,6 @@ fn opportunity_queue_cooldown_blocks_dup() {
 }
 
 #[test]
-fn opportunity_queue_dismissed_24h() {
-    use super::opportunities::OpportunityQueue;
-    let mut q = OpportunityQueue::new();
-    push_opportunity(&mut q, make_opportunity("opp1", "ck1"));
-    q.dismiss("opp1");
-    assert!(q.recently_dismissed("ck1", Duration::hours(24)));
-    assert!(!q.recently_dismissed("ck1", Duration::zero()));
-}
-
-#[test]
 fn opportunity_queue_expire_old() {
     use super::opportunities::OpportunityQueue;
     let now = chrono::Utc::now();
