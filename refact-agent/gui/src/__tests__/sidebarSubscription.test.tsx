@@ -6,6 +6,8 @@ import { useSidebarSubscription } from "../hooks/useSidebarSubscription";
 import { setBuddySnapshot } from "../features/Buddy/buddySlice";
 import type { BuddySnapshot } from "../features/Buddy/types";
 import type { TaskMeta } from "../services/refact/tasks";
+import { setBackendStatus } from "../features/Connection";
+
 
 const CONFIG_STATE = {
   config: {
@@ -243,6 +245,45 @@ describe("useSidebarSubscription", () => {
         store.getState().current_project.trajectoriesSnapshotReceived,
       ).toBe(true);
       expect(store.getState().current_project.tasksSnapshotReceived).toBe(true);
+    });
+  });
+
+  it("keeps received sidebar sections ready across transient backend status changes", async () => {
+    server.use(
+      http.get(
+        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        () =>
+          new HttpResponse(
+            sseStream([
+              {
+                seq: 0,
+                category: "workspace_snapshot",
+                workspace_roots: ["/tmp/refact-test"],
+              },
+              { seq: 1, category: "tasks_snapshot", tasks: [] },
+              { seq: 2, category: "buddy_snapshot", buddy: null },
+            ]),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+
+    const { store } = render(<TestHarness />, { preloadedState: CONFIG_STATE });
+
+    await waitFor(() => {
+      expect(store.getState().current_project.workspaceSnapshotReceived).toBe(
+        true,
+      );
+      expect(store.getState().current_project.tasksSnapshotReceived).toBe(true);
+      expect(store.getState().current_project.buddySnapshotReceived).toBe(true);
+    });
+
+    store.dispatch(setBackendStatus({ status: "offline" }));
+
+    expect(store.getState().current_project).toMatchObject({
+      workspaceSnapshotReceived: true,
+      tasksSnapshotReceived: true,
+      buddySnapshotReceived: true,
     });
   });
 
