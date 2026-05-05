@@ -80,17 +80,20 @@ function normalizeWorkspaceRoot(root: string): string {
   return root.trim().replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
+function canonicalWorkspaceRoots(roots: string[]): string[] {
+  return Array.from(new Set(roots.map(normalizeWorkspaceRoot))).sort();
+}
+
 function workspaceRootsEqual(
   current: string[] | undefined,
   next: string[],
 ): boolean {
   if (!current) return false;
-  if (current.length !== next.length) return false;
+  const currentCanonical = canonicalWorkspaceRoots(current);
+  const nextCanonical = canonicalWorkspaceRoots(next);
+  if (currentCanonical.length !== nextCanonical.length) return false;
 
-  return current.every(
-    (root, index) =>
-      normalizeWorkspaceRoot(root) === normalizeWorkspaceRoot(next[index]),
-  );
+  return currentCanonical.every((root, index) => root === nextCanonical[index]);
 }
 
 function getLegacyHistory(): ChatHistoryItem[] {
@@ -190,6 +193,42 @@ function isTaskUpdate(update: SidebarSectionUpdate): update is TaskEvent {
 function isBuddyUpdate(update: SidebarSectionUpdate): update is BuddySSEEvent {
   return "event_type" in update;
 }
+
+type SidebarSnapshotEvent = Extract<
+  SidebarEventEnvelope["event"],
+  { type: "section_snapshot" }
+>;
+type SidebarSectionSnapshotStatus = SidebarSnapshotEvent["status"];
+type SidebarRuntimeSectionStatus = SidebarSectionSnapshotStatus | "loading";
+type NonWorkspaceSidebarSection = Exclude<SidebarSection, "workspace">;
+type BufferedSectionSnapshots = Partial<
+  Record<NonWorkspaceSidebarSection, SidebarSnapshotEvent>
+>;
+
+function initialSectionStatuses(): Record<
+  SidebarSection,
+  SidebarRuntimeSectionStatus
+> {
+  return {
+    workspace: "loading",
+    chats: "loading",
+    tasks: "loading",
+    buddy: "loading",
+  };
+}
+
+function sectionStatusesSettled(
+  statuses: Record<SidebarSection, SidebarRuntimeSectionStatus>,
+): boolean {
+  return Object.values(statuses).every((status) => status !== "loading");
+}
+
+function isNonWorkspaceSection(
+  section: SidebarSection,
+): section is NonWorkspaceSidebarSection {
+  return section !== "workspace";
+}
+
 export function useSidebarSubscription() {
   const dispatch = useAppDispatch();
   const config = useConfig();
@@ -204,6 +243,8 @@ export function useSidebarSubscription() {
   );
   const tasksSnapshotRef = useRef<TaskMeta[] | null>(null);
   const generationRef = useRef(0);
+  const sectionStatusesRef = useRef(initialSectionStatuses());
+  const postSettledSnapshotsRef = useRef<BufferedSectionSnapshots>({});
   // eslint-disable-next-line @typescript-eslint/no-empty-function
   const connectRef = useRef<() => void>(() => {});
 
@@ -496,6 +537,83 @@ export function useSidebarSubscription() {
     [dispatch],
   );
 
+  const processSectionSnapshotData = useCallback(
+    (
+      section: SidebarSection,
+      snapshot: SidebarSectionSnapshot,
+      status: SidebarSnapshotEvent["status"],
+      error?: string,
+    ) => {
+      if (
+        section === "workspace" &&
+        status === "ready" &&
+        hasSnapshotKey(snapshot, "workspace_roots")
+      ) {
+        const workspaceRoots = canonicalWorkspaceRoots(
+          snapshot.workspace_roots,
+        );
+        processWorkspaceSnapshot(workspaceRoots);
+        serverWorkspaceRootsRef.current = workspaceRoots;
+      } else if (
+        section === "chats" &&
+        hasSnapshotKey(snapshot, "trajectories")
+      ) {
+        processTrajectoriesSnapshot(
+          snapshot.trajectories,
+          status === "error" ? error ?? "Failed to load chats" : undefined,
+        );
+      } else if (
+        section === "tasks" &&
+        status === "ready" &&
+        hasSnapshotKey(snapshot, "tasks")
+      ) {
+        processTasksSnapshot(snapshot.tasks);
+      } else if (section === "buddy" && hasSnapshotKey(snapshot, "buddy")) {
+        processBuddySnapshot(snapshot.buddy);
+      }
+    },
+    [
+      processBuddySnapshot,
+      processTasksSnapshot,
+      processTrajectoriesSnapshot,
+      processWorkspaceSnapshot,
+    ],
+  );
+
+  const markSectionSnapshotReceived = useCallback(
+    (event: SidebarSnapshotEvent) => {
+      dispatch(
+        sidebarSectionSnapshotReceived({
+          section: event.section,
+          status: event.status,
+          error: event.status === "error" ? event.error : null,
+        }),
+      );
+      sectionStatusesRef.current = {
+        ...sectionStatusesRef.current,
+        [event.section]: event.status,
+      };
+    },
+    [dispatch],
+  );
+
+  const replayBufferedSnapshots = useCallback(
+    (snapshots: BufferedSectionSnapshots) => {
+      for (const section of ["chats", "tasks", "buddy"] as const) {
+        const event = snapshots[section];
+        if (!event) continue;
+        processSectionSnapshotData(
+          event.section,
+          event.snapshot,
+          event.status,
+          event.error,
+        );
+        markSectionSnapshotReceived(event);
+      }
+    },
+    [markSectionSnapshotReceived, processSectionSnapshotData],
+  );
+
   const processSectionSnapshot = useCallback(
     (
       event: Extract<
@@ -507,16 +625,35 @@ export function useSidebarSubscription() {
       const { section, snapshot, status, error } = event;
 
       if (
+        isNonWorkspaceSection(section) &&
+        sectionStatusesSettled(sectionStatusesRef.current)
+      ) {
+        postSettledSnapshotsRef.current = {
+          ...postSettledSnapshotsRef.current,
+          [section]: event,
+        };
+      }
+
+      if (
         section === "workspace" &&
         hasSnapshotKey(snapshot, "workspace_roots")
       ) {
-        const workspaceRoots = snapshot.workspace_roots;
+        const workspaceRoots = canonicalWorkspaceRoots(
+          snapshot.workspace_roots,
+        );
         const workspaceChanged =
           status === "ready" &&
           serverWorkspaceRootsRef.current !== undefined &&
           !workspaceRootsEqual(serverWorkspaceRootsRef.current, workspaceRoots);
+        const snapshotsToReplay = workspaceChanged
+          ? postSettledSnapshotsRef.current
+          : undefined;
+        if (status === "ready") {
+          postSettledSnapshotsRef.current = {};
+        }
         if (workspaceChanged) {
           dispatch(sidebarWorkspaceChanged({ subscriptionId }));
+          sectionStatusesRef.current = initialSectionStatuses();
           tasksSnapshotRef.current = null;
           dispatch(replaceSnapshotHistory([]));
           void dispatch(
@@ -528,34 +665,22 @@ export function useSidebarSubscription() {
           processWorkspaceSnapshot(workspaceRoots);
           serverWorkspaceRootsRef.current = workspaceRoots;
         }
-      } else if (
-        section === "chats" &&
-        hasSnapshotKey(snapshot, "trajectories")
-      ) {
-        processTrajectoriesSnapshot(
-          snapshot.trajectories,
-          status === "error" ? error ?? "Failed to load chats" : undefined,
-        );
-      } else if (section === "tasks" && hasSnapshotKey(snapshot, "tasks")) {
-        processTasksSnapshot(snapshot.tasks);
-      } else if (section === "buddy" && hasSnapshotKey(snapshot, "buddy")) {
-        processBuddySnapshot(snapshot.buddy);
+        markSectionSnapshotReceived(event);
+        if (workspaceChanged && snapshotsToReplay) {
+          replayBufferedSnapshots(snapshotsToReplay);
+        }
+        return;
       }
 
-      dispatch(
-        sidebarSectionSnapshotReceived({
-          section,
-          status,
-          error: status === "error" ? error : null,
-        }),
-      );
+      processSectionSnapshotData(section, snapshot, status, error);
+      markSectionSnapshotReceived(event);
     },
     [
       dispatch,
-      processBuddySnapshot,
-      processTasksSnapshot,
-      processTrajectoriesSnapshot,
+      markSectionSnapshotReceived,
+      processSectionSnapshotData,
       processWorkspaceSnapshot,
+      replayBufferedSnapshots,
     ],
   );
 
@@ -743,6 +868,8 @@ export function useSidebarSubscription() {
     dispatch(resetSidebarState({ lspPort: port }));
     serverWorkspaceRootsRef.current = undefined;
     tasksSnapshotRef.current = null;
+    sectionStatusesRef.current = initialSectionStatuses();
+    postSettledSnapshotsRef.current = {};
     void prepareInitialHistory(generation);
 
     const onEvent = (envelope: SidebarEventEnvelope) => {

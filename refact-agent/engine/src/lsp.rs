@@ -64,23 +64,15 @@ async fn notify_workspace_changed(gcx: &Arc<ARwLock<GlobalContext>>) {
     }
 }
 
-fn unique_workspace_roots(folders: &[PathBuf]) -> Vec<PathBuf> {
-    let mut unique = Vec::new();
-    for folder in folders {
-        if !unique.iter().any(|existing| existing == folder) {
-            unique.push(folder.clone());
-        }
-    }
-    unique
+pub(crate) fn canonical_workspace_roots(folders: &[PathBuf]) -> Vec<PathBuf> {
+    let mut canonical = folders.to_vec();
+    canonical.sort();
+    canonical.dedup();
+    canonical
 }
 
-fn workspace_roots_changed(current: &[PathBuf], next: &[PathBuf]) -> bool {
-    let current = unique_workspace_roots(current);
-    let next = unique_workspace_roots(next);
-    current.len() != next.len()
-        || current
-            .iter()
-            .any(|folder| !next.iter().any(|next_folder| next_folder == folder))
+pub(crate) fn workspace_roots_changed(current: &[PathBuf], next: &[PathBuf]) -> bool {
+    canonical_workspace_roots(current) != canonical_workspace_roots(next)
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -262,7 +254,7 @@ impl LanguageServer for LspBackend {
                 }
             }
         }
-        let folders = unique_workspace_roots(&folders);
+        let folders = canonical_workspace_roots(&folders);
         let changed = {
             let gcx_locked = self.gcx.write().await;
             let mut workspace_folders =
@@ -535,6 +527,17 @@ mod tests {
             std::slice::from_ref(&first),
             &[first.clone(), second]
         ));
+    }
+
+    #[test]
+    fn sidebar_canonical_workspace_roots_are_sorted_and_deduplicated() {
+        let first = PathBuf::from("/workspace/first");
+        let second = PathBuf::from("/workspace/second");
+
+        assert_eq!(
+            canonical_workspace_roots(&[second.clone(), first.clone(), second]),
+            vec![first, PathBuf::from("/workspace/second")]
+        );
     }
 }
 

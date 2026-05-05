@@ -68,6 +68,44 @@ function sidebarSnapshotHandler(...events: Record<string, unknown>[]) {
   });
 }
 
+function sidebarDelayedSnapshotHandler(
+  delayMs: number,
+  ...events: Record<string, unknown>[]
+) {
+  return http.get("http://127.0.0.1:8001/v1/sidebar/subscribe", () => {
+    const encoder = new TextEncoder();
+    let cancelled = false;
+    const stream = new ReadableStream({
+      start(controller) {
+        void (async () => {
+          for (const event of events) {
+            if (cancelled) break;
+            try {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+              );
+            } catch {
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+        })();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    return new HttpResponse(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  });
+}
+
 function taskMeta(
   id: string,
   name: string,
@@ -343,6 +381,159 @@ describe("useSidebarSubscription", () => {
       expect(store.getState().sidebar.sections.chats.status).toBe("ready");
       expect(store.getState().sidebar.sections.tasks.status).toBe("ready");
       expect(store.getState().sidebar.sections.buddy.status).toBe("ready");
+    });
+  });
+
+  it("does not reset readiness for reordered duplicate equivalent roots", async () => {
+    server.use(
+      sidebarSnapshotHandler(
+        sectionSnapshot(0, "workspace", {
+          workspace_roots: ["/workspace/first", "/workspace/second"],
+        }),
+        sectionSnapshot(1, "chats", { trajectories: [] }),
+        sectionSnapshot(2, "tasks", { tasks: [taskMeta("old", "Old task")] }),
+        sectionSnapshot(3, "buddy", { buddy: null }),
+        sectionSnapshot(4, "workspace", {
+          workspace_roots: [
+            "/workspace/second/",
+            "/workspace/first",
+            "/workspace/second",
+          ],
+        }),
+      ),
+    );
+
+    const store = renderSidebarSubscription();
+
+    await waitFor(() => {
+      expect(store.getState().sidebar.sections).toMatchObject({
+        workspace: { status: "ready" },
+        chats: { status: "ready" },
+        tasks: { status: "ready" },
+        buddy: { status: "ready" },
+      });
+      expect(
+        tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
+      ).toEqual([taskMeta("old", "Old task")]);
+    });
+  });
+
+  it("preserves task cache on task errors and replaces it on ready retry", async () => {
+    server.use(
+      sidebarDelayedSnapshotHandler(
+        250,
+        sectionSnapshot(0, "workspace", {
+          workspace_roots: ["/workspace/refact"],
+        }),
+        sectionSnapshot(1, "chats", { trajectories: [] }),
+        sectionSnapshot(2, "tasks", { tasks: [taskMeta("old", "Old task")] }),
+        sectionSnapshot(3, "buddy", { buddy: null }),
+        sectionSnapshot(4, "tasks", { tasks: [] }, "error", "task timeout"),
+        sectionSnapshot(5, "tasks", { tasks: [taskMeta("new", "New task")] }),
+      ),
+    );
+
+    const store = renderSidebarSubscription();
+
+    await waitFor(
+      () => {
+        expect(store.getState().sidebar.sections.tasks).toEqual({
+          status: "error",
+          error: "task timeout",
+        });
+        expect(
+          tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
+        ).toEqual([taskMeta("old", "Old task")]);
+      },
+      { timeout: 2_000, interval: 20 },
+    );
+
+    await waitFor(
+      () => {
+        expect(store.getState().sidebar.sections.tasks).toEqual({
+          status: "ready",
+          error: null,
+        });
+        expect(
+          tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
+        ).toEqual([taskMeta("new", "New task")]);
+      },
+      { timeout: 2_000, interval: 20 },
+    );
+  });
+
+  it("does not reset roots after workspace error recovers with equivalent roots", async () => {
+    server.use(
+      sidebarSnapshotHandler(
+        sectionSnapshot(0, "workspace", {
+          workspace_roots: ["/workspace/first", "/workspace/second"],
+        }),
+        sectionSnapshot(1, "chats", { trajectories: [] }),
+        sectionSnapshot(2, "tasks", { tasks: [taskMeta("old", "Old task")] }),
+        sectionSnapshot(3, "buddy", { buddy: null }),
+        sectionSnapshot(
+          4,
+          "workspace",
+          { workspace_roots: ["/workspace/other"] },
+          "error",
+          "workspace timeout",
+        ),
+        sectionSnapshot(5, "workspace", {
+          workspace_roots: ["/workspace/second/", "/workspace/first"],
+        }),
+      ),
+    );
+
+    const store = renderSidebarSubscription();
+
+    await waitFor(() => {
+      expect(store.getState().sidebar.sections).toMatchObject({
+        workspace: { status: "ready", error: null },
+        chats: { status: "ready" },
+        tasks: { status: "ready" },
+        buddy: { status: "ready" },
+      });
+      expect(
+        tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
+      ).toEqual([taskMeta("old", "Old task")]);
+    });
+  });
+
+  it("keeps out-of-order new section snapshots after a same-port workspace switch", async () => {
+    server.use(
+      sidebarSnapshotHandler(
+        sectionSnapshot(0, "workspace", {
+          workspace_roots: ["/workspace/old"],
+        }),
+        sectionSnapshot(1, "chats", { trajectories: [] }),
+        sectionSnapshot(2, "tasks", { tasks: [taskMeta("old", "Old task")] }),
+        sectionSnapshot(3, "buddy", { buddy: null }),
+        sectionSnapshot(4, "chats", { trajectories: [] }),
+        sectionSnapshot(5, "tasks", { tasks: [taskMeta("new", "New task")] }),
+        sectionSnapshot(6, "buddy", { buddy: null }),
+        sectionSnapshot(7, "workspace", {
+          workspace_roots: ["/workspace/new"],
+        }),
+      ),
+    );
+
+    const store = renderSidebarSubscription();
+
+    await waitFor(() => {
+      expect(store.getState().current_project).toEqual({
+        name: "new",
+        workspaceRoots: ["/workspace/new"],
+      });
+      expect(store.getState().sidebar.sections).toMatchObject({
+        workspace: { status: "ready" },
+        chats: { status: "ready" },
+        tasks: { status: "ready" },
+        buddy: { status: "ready" },
+      });
+      expect(
+        tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
+      ).toEqual([taskMeta("new", "New task")]);
+      expect(store.getState().history.isLoading).toBe(false);
     });
   });
 
