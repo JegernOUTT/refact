@@ -64,10 +64,16 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             startProcessCalls.incrementAndGet()
             startProcessEntered.countDown()
             releaseStartProcess.await(2, TimeUnit.SECONDS)
+            val processField = LSPProcessHolder::class.java.getDeclaredField("process")
+            processField.isAccessible = true
+            val mockProcess = mock(Process::class.java)
+            `when`(mockProcess.isAlive).thenReturn(true)
+            processField.set(this, mockProcess)
+
             isWorking = true
-            val field = LSPProcessHolder::class.java.getDeclaredField("lastConfig")
-            field.isAccessible = true
-            field.set(this, LSPConfig(port = 1))
+            val configField = LSPProcessHolder::class.java.getDeclaredField("lastConfig")
+            configField.isAccessible = true
+            configField.set(this, LSPConfig(port = 1))
         }
 
         fun waitUntilStartProcessEntered(): Boolean = startProcessEntered.await(2, TimeUnit.SECONDS)
