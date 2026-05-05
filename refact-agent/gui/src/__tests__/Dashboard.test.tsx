@@ -1,9 +1,10 @@
 import { http, HttpResponse } from "msw";
 import { QueryStatus } from "@reduxjs/toolkit/query";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "../utils/test-utils";
 import { emptyTasks, server } from "../utils/mockServer";
 import { Dashboard } from "../features/Dashboard/Dashboard";
+import { useSidebarSubscription } from "../hooks/useSidebarSubscription";
 import { updateConfig } from "../features/Config/configSlice";
 import { tasksApi, type TaskMeta } from "../services/refact/tasks";
 
@@ -50,6 +51,67 @@ const task: TaskMeta = {
   agents_active: 0,
 };
 
+const predefinedTask: TaskMeta = {
+  ...task,
+  id: "task-predefined",
+  name: "Predefined workspace task",
+};
+
+const predefinedChat = {
+  id: "chat-predefined",
+  title: "Predefined workspace chat",
+  created_at: "2024-01-01T00:00:00Z",
+  updated_at: "2024-01-01T00:00:00Z",
+  model: "gpt-4",
+  mode: "agent",
+  message_count: 1,
+  total_lines_added: 0,
+  total_lines_removed: 0,
+  tasks_total: 0,
+  tasks_done: 0,
+  tasks_failed: 0,
+};
+
+function envelope(seq: number, event: Record<string, unknown>) {
+  return {
+    protocol_version: 2,
+    seq,
+    subscription_id: "test-sidebar",
+    event,
+  };
+}
+
+function sectionSnapshot(
+  seq: number,
+  section: "workspace" | "chats" | "tasks" | "buddy",
+  snapshot: Record<string, unknown>,
+) {
+  return envelope(seq, {
+    type: "section_snapshot",
+    section,
+    status: "ready",
+    snapshot,
+  });
+}
+
+function sidebarSseStream(events: unknown[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      for (const event of events) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+        );
+      }
+    },
+  });
+}
+
+function DashboardWithSidebarSubscription() {
+  useSidebarSubscription();
+  return <Dashboard />;
+}
+
 describe("Dashboard progressive sidebar readiness", () => {
   beforeEach(() => {
     server.use(
@@ -58,6 +120,10 @@ describe("Dashboard progressive sidebar readiness", () => {
         HttpResponse.json({ configured: true }),
       ),
     );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("does not show empty states before section snapshots arrive", () => {
@@ -102,6 +168,63 @@ describe("Dashboard progressive sidebar readiness", () => {
 
     expect(screen.getByText(/No chats yet/i)).toBeInTheDocument();
     expect(await screen.findByText(/No tasks yet/i)).toBeInTheDocument();
+  });
+
+  it("settles from predefined backend workspace snapshots", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation((key) =>
+      key === "refact-trajectories-migrated" ? "true" : null,
+    );
+    server.use(
+      http.get(
+        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        () =>
+          new HttpResponse(
+            sidebarSseStream([
+              sectionSnapshot(0, "workspace", {
+                workspace_roots: ["/workspace/predefined-refact"],
+              }),
+              sectionSnapshot(1, "chats", {
+                trajectories: [predefinedChat],
+              }),
+              sectionSnapshot(2, "tasks", { tasks: [predefinedTask] }),
+              sectionSnapshot(3, "buddy", { buddy: null }),
+            ]),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+
+    const { store } = render(<DashboardWithSidebarSubscription />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        history: {
+          chats: {},
+          isLoading: true,
+          loadError: null,
+          pagination: { cursor: null, hasMore: false },
+        },
+      },
+    });
+
+    await screen.findByText("Predefined workspace task");
+
+    expect(store.getState().current_project).toEqual({
+      name: "predefined-refact",
+      workspaceRoots: ["/workspace/predefined-refact"],
+    });
+    expect(store.getState().sidebar.sections).toMatchObject({
+      workspace: { status: "ready" },
+      chats: { status: "ready" },
+      tasks: { status: "ready" },
+      buddy: { status: "ready" },
+    });
+    expect(store.getState().history.chats["chat-predefined"].title).toBe(
+      "Predefined workspace chat",
+    );
+    expect(
+      tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
+    ).toEqual([predefinedTask]);
+    expect(screen.queryByText("Loading")).not.toBeInTheDocument();
   });
 
   it("keeps sidebar readiness after duplicate config with unchanged lsp port", async () => {

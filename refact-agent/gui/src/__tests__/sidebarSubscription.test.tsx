@@ -97,6 +97,13 @@ const taskB: TaskMeta = {
   updated_at: "2024-01-02T00:00:00Z",
 };
 
+const taskC: TaskMeta = {
+  ...taskA,
+  id: "task-c",
+  name: "Task C",
+  updated_at: "2024-01-03T00:00:00Z",
+};
+
 function trajectoryMeta(index: number) {
   const padded = index.toString().padStart(4, "0");
   return {
@@ -114,6 +121,24 @@ function trajectoryMeta(index: number) {
     tasks_failed: 0,
   };
 }
+
+const chatA = {
+  ...trajectoryMeta(1),
+  id: "chat-a",
+  title: "Chat A",
+};
+
+const chatB = {
+  ...trajectoryMeta(2),
+  id: "chat-b",
+  title: "Chat B",
+};
+
+const chatC = {
+  ...trajectoryMeta(3),
+  id: "chat-c",
+  title: "Chat C",
+};
 
 describe("useSidebarSubscription", () => {
   it("handles v2 section snapshots and null buddy snapshots", async () => {
@@ -254,6 +279,41 @@ describe("useSidebarSubscription", () => {
     });
   });
 
+  it("resync snapshots replace chats and tasks without reconnecting", async () => {
+    server.use(
+      http.get(
+        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        () =>
+          new HttpResponse(
+            sseStream([
+              sectionSnapshot(0, "workspace", {
+                workspace_roots: ["/tmp/refact-test"],
+              }),
+              sectionSnapshot(1, "chats", { trajectories: [chatA] }),
+              sectionSnapshot(2, "tasks", { tasks: [taskA] }),
+              sectionSnapshot(3, "buddy", { buddy: null }),
+              sectionSnapshot(4, "chats", { trajectories: [chatB] }),
+              sectionSnapshot(5, "tasks", { tasks: [taskB] }),
+            ]),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+
+    const { store } = render(<TestHarness />, { preloadedState: CONFIG_STATE });
+
+    await waitFor(() => {
+      expect(store.getState().sidebar.subscriptionId).toBe("test-sidebar");
+      expect(Object.keys(store.getState().history.chats)).toEqual(["chat-b"]);
+      expect(tasksFromStore(store.getState()).map((t) => t.id)).toEqual([
+        "task-b",
+      ]);
+      expect(store.getState().current_project.workspaceRoots).toEqual([
+        "/tmp/refact-test",
+      ]);
+    });
+  });
+
   it("keeps section readiness when workspace snapshot arrives after other sections", async () => {
     server.use(
       http.get(
@@ -261,9 +321,10 @@ describe("useSidebarSubscription", () => {
         () =>
           new HttpResponse(
             sseStream([
-              sectionSnapshot(0, "tasks", { tasks: [] }),
-              sectionSnapshot(1, "chats", { trajectories: [] }),
-              sectionSnapshot(2, "workspace", {
+              sectionSnapshot(0, "buddy", { buddy: null }),
+              sectionSnapshot(1, "tasks", { tasks: [] }),
+              sectionSnapshot(2, "chats", { trajectories: [] }),
+              sectionSnapshot(3, "workspace", {
                 workspace_roots: ["/tmp/refact-test"],
               }),
             ]),
@@ -278,6 +339,55 @@ describe("useSidebarSubscription", () => {
       expect(store.getState().sidebar.sections.workspace.status).toBe("ready");
       expect(store.getState().sidebar.sections.chats.status).toBe("ready");
       expect(store.getState().sidebar.sections.tasks.status).toBe("ready");
+      expect(store.getState().sidebar.sections.buddy.status).toBe("ready");
+    });
+  });
+
+  it("processes other sections while one section errors and recovers on retry", async () => {
+    server.use(
+      http.get(
+        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        () =>
+          new HttpResponse(
+            sseStream([
+              sectionSnapshot(0, "workspace", {
+                workspace_roots: ["/tmp/refact-test"],
+              }),
+              sectionSnapshot(
+                1,
+                "chats",
+                { trajectories: [] },
+                "error",
+                "temporary trajectory error",
+              ),
+              sectionSnapshot(2, "tasks", { tasks: [taskA] }),
+              sectionSnapshot(3, "buddy", { buddy: null }),
+              sectionUpdate(4, "tasks", {
+                type: "task_created",
+                task_id: "task-c",
+                meta: taskC,
+              }),
+              sectionSnapshot(5, "chats", { trajectories: [chatC] }),
+            ]),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+
+    const { store } = render(<TestHarness />, { preloadedState: CONFIG_STATE });
+
+    await waitFor(() => {
+      expect(store.getState().sidebar.sections.chats).toEqual({
+        status: "ready",
+        error: null,
+      });
+      expect(Object.keys(store.getState().history.chats)).toEqual(["chat-c"]);
+      expect(tasksFromStore(store.getState()).map((t) => t.id)).toEqual([
+        "task-c",
+        "task-a",
+      ]);
+      expect(store.getState().sidebar.sections.tasks.status).toBe("ready");
+      expect(store.getState().sidebar.sections.buddy.status).toBe("ready");
     });
   });
 
@@ -335,11 +445,11 @@ describe("useSidebarSubscription", () => {
   });
 
   it("replaces large trajectory snapshots deterministically", async () => {
-    const firstSnapshot = Array.from({ length: 250 }, (_, index) =>
+    const firstSnapshot = Array.from({ length: 1_000 }, (_, index) =>
       trajectoryMeta(index),
     );
-    const secondSnapshot = Array.from({ length: 250 }, (_, index) =>
-      trajectoryMeta(index + 250),
+    const secondSnapshot = Array.from({ length: 1_000 }, (_, index) =>
+      trajectoryMeta(index + 1_000),
     );
     server.use(
       http.get(
@@ -358,13 +468,13 @@ describe("useSidebarSubscription", () => {
     const { store } = render(<TestHarness />, { preloadedState: CONFIG_STATE });
 
     await waitFor(() => {
-      expect(Object.keys(store.getState().history.chats)).toHaveLength(250);
-      expect(store.getState().history.chats["chat-0249"]).toBeUndefined();
-      expect(store.getState().history.chats["chat-0250"].title).toBe(
-        "Chat 0250",
+      expect(Object.keys(store.getState().history.chats)).toHaveLength(1_000);
+      expect(store.getState().history.chats["chat-0999"]).toBeUndefined();
+      expect(store.getState().history.chats["chat-1000"].title).toBe(
+        "Chat 1000",
       );
-      expect(store.getState().history.chats["chat-0499"].title).toBe(
-        "Chat 0499",
+      expect(store.getState().history.chats["chat-1999"].title).toBe(
+        "Chat 1999",
       );
     });
   });
