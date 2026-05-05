@@ -10,7 +10,10 @@ use url::Url;
 use crate::custom_error::ScratchError;
 use crate::global_context::SharedGlobalContext;
 use crate::files_in_workspace;
-use crate::lsp::{canonical_workspace_roots, workspace_roots_changed};
+use crate::lsp::{
+    add_workspace_root_to_set, canonical_workspace_roots, remove_workspace_root_from_set,
+    workspace_roots_changed,
+};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LspLikeInit {
@@ -149,12 +152,12 @@ pub async fn handle_v1_lsp_add_folder(
     })?;
     let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     let changed = {
-        let gcx = global_context.read().await;
-        let folders = gcx.documents_state.workspace_folders.lock().unwrap();
-        !folders.iter().any(|folder| folder == &cpath)
+        let gcx = global_context.write().await;
+        let mut folders = gcx.documents_state.workspace_folders.lock().unwrap();
+        add_workspace_root_to_set(&mut folders, cpath)
     };
-    files_in_workspace::add_folder(global_context.clone(), &cpath).await;
     if changed {
+        files_in_workspace::on_workspaces_init(global_context.clone()).await;
         if let Some(tx) = global_context.read().await.workspace_changed_tx.as_ref() {
             let _ = tx.send(());
         }
@@ -179,12 +182,12 @@ pub async fn handle_v1_lsp_remove_folder(
     })?;
     let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     let changed = {
-        let gcx = global_context.read().await;
-        let folders = gcx.documents_state.workspace_folders.lock().unwrap();
-        folders.iter().any(|folder| folder == &cpath)
+        let gcx = global_context.write().await;
+        let mut folders = gcx.documents_state.workspace_folders.lock().unwrap();
+        remove_workspace_root_from_set(&mut folders, &cpath)
     };
-    files_in_workspace::remove_folder(global_context.clone(), &cpath).await;
     if changed {
+        files_in_workspace::on_workspaces_init(global_context.clone()).await;
         if let Some(tx) = global_context.read().await.workspace_changed_tx.as_ref() {
             let _ = tx.send(());
         }

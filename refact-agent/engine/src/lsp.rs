@@ -75,6 +75,59 @@ pub(crate) fn workspace_roots_changed(current: &[PathBuf], next: &[PathBuf]) -> 
     canonical_workspace_roots(current) != canonical_workspace_roots(next)
 }
 
+pub(crate) fn canonical_path_from_file_uri(uri: &Url) -> Option<PathBuf> {
+    uri.to_file_path()
+        .ok()
+        .map(|path| crate::files_correction::canonical_path(path.to_string_lossy().into_owned()))
+}
+
+pub(crate) fn add_workspace_root_to_set(folders: &mut Vec<PathBuf>, path: PathBuf) -> bool {
+    let before = canonical_workspace_roots(folders);
+    let canonical_path =
+        crate::files_correction::canonical_path(path.to_string_lossy().into_owned());
+    let mut next = before.clone();
+    next.push(canonical_path);
+    let next = canonical_workspace_roots(&next);
+    *folders = next.clone();
+    before != next
+}
+
+pub(crate) fn remove_workspace_root_from_set(folders: &mut Vec<PathBuf>, path: &PathBuf) -> bool {
+    let before = canonical_workspace_roots(folders);
+    let canonical_path =
+        crate::files_correction::canonical_path(path.to_string_lossy().into_owned());
+    let next = before
+        .iter()
+        .filter(|folder| *folder != &canonical_path)
+        .cloned()
+        .collect::<Vec<_>>();
+    *folders = next.clone();
+    before != next
+}
+
+pub(crate) fn apply_workspace_root_changes(
+    folders: &mut Vec<PathBuf>,
+    added: &[PathBuf],
+    removed: &[PathBuf],
+) -> bool {
+    let before = canonical_workspace_roots(folders);
+    let mut next = before.clone();
+    next.extend(
+        added.iter().map(|path| {
+            crate::files_correction::canonical_path(path.to_string_lossy().into_owned())
+        }),
+    );
+    next = canonical_workspace_roots(&next);
+    for path in removed {
+        let canonical_path =
+            crate::files_correction::canonical_path(path.to_string_lossy().into_owned());
+        next.retain(|folder| folder != &canonical_path);
+    }
+    next = canonical_workspace_roots(&next);
+    *folders = next.clone();
+    before != next
+}
+
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Choice {
     pub index: u32,
@@ -228,24 +281,14 @@ impl LanguageServer for LspBackend {
         if let Some(workspace_folders) = &params.workspace_folders {
             folders = workspace_folders
                 .iter()
-                .map(|x| {
-                    crate::files_correction::canonical_path(
-                        x.uri
-                            .to_file_path()
-                            .unwrap_or_default()
-                            .display()
-                            .to_string(),
-                    )
-                })
+                .filter_map(|x| canonical_path_from_file_uri(&x.uri))
                 .collect();
         }
 
         if folders.is_empty() {
             if let Some(root_uri) = &params.root_uri {
-                if let Ok(root_path) = root_uri.to_file_path() {
-                    folders.push(crate::files_correction::canonical_path(
-                        root_path.display().to_string(),
-                    ));
+                if let Some(root_path) = canonical_path_from_file_uri(root_uri) {
+                    folders.push(root_path);
                 }
             } else {
                 #[allow(deprecated)]
@@ -427,47 +470,39 @@ impl LanguageServer for LspBackend {
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
         for folder in params.event.added {
             info!("did_change_workspace_folders/add {}", folder.name);
-            let path = crate::files_correction::canonical_path(
-                &folder
-                    .uri
-                    .to_file_path()
-                    .unwrap_or_default()
-                    .display()
-                    .to_string(),
-            );
-            let changed = {
-                let gcx_locked = self.gcx.read().await;
-                let workspace_folders =
-                    gcx_locked.documents_state.workspace_folders.lock().unwrap();
-                !workspace_folders.iter().any(|folder| folder == &path)
+            let Some(path) = canonical_path_from_file_uri(&folder.uri) else {
+                info!(
+                    "did_change_workspace_folders/add ignored non-file URI {}",
+                    folder.uri
+                );
+                continue;
             };
-            files_in_workspace::add_folder(self.gcx.clone(), &path).await;
-            if changed {
-                notify_workspace_changed(&self.gcx).await;
-            }
+            added.push(path);
         }
         for folder in params.event.removed {
             info!("did_change_workspace_folders/delete {}", folder.name);
-            let path = crate::files_correction::canonical_path(
-                &folder
-                    .uri
-                    .to_file_path()
-                    .unwrap_or_default()
-                    .display()
-                    .to_string(),
-            );
-            let changed = {
-                let gcx_locked = self.gcx.read().await;
-                let workspace_folders =
-                    gcx_locked.documents_state.workspace_folders.lock().unwrap();
-                workspace_folders.iter().any(|folder| folder == &path)
+            let Some(path) = canonical_path_from_file_uri(&folder.uri) else {
+                info!(
+                    "did_change_workspace_folders/delete ignored non-file URI {}",
+                    folder.uri
+                );
+                continue;
             };
-            files_in_workspace::remove_folder(self.gcx.clone(), &path).await;
-            if changed {
-                notify_workspace_changed(&self.gcx).await;
-            }
+            removed.push(path);
+        }
+        let changed = {
+            let gcx_locked = self.gcx.write().await;
+            let mut workspace_folders =
+                gcx_locked.documents_state.workspace_folders.lock().unwrap();
+            apply_workspace_root_changes(&mut workspace_folders, &added, &removed)
+        };
+        if changed {
+            files_in_workspace::on_workspaces_init(self.gcx.clone()).await;
+            notify_workspace_changed(&self.gcx).await;
         }
     }
 
@@ -538,6 +573,105 @@ mod tests {
             canonical_workspace_roots(&[second.clone(), first.clone(), second]),
             vec![first, PathBuf::from("/workspace/second")]
         );
+    }
+
+    #[test]
+    fn sidebar_canonical_path_from_file_uri_ignores_non_file_uris() {
+        let workspace_root = std::env::temp_dir().join("refact-sidebar-uri-root");
+        let file_uri = Url::from_directory_path(&workspace_root).unwrap();
+
+        assert_eq!(
+            canonical_path_from_file_uri(&file_uri),
+            Some(crate::files_correction::canonical_path(
+                workspace_root.to_string_lossy().into_owned()
+            ))
+        );
+        assert!(
+            canonical_path_from_file_uri(&Url::parse("untitled:Untitled-1").unwrap()).is_none()
+        );
+        assert!(canonical_path_from_file_uri(
+            &Url::parse("vscode-remote://ssh-remote%2Bhost/home/user/project").unwrap()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sidebar_workspace_root_set_helpers_compare_canonical_sets() {
+        let first_raw = std::env::temp_dir().join("refact-sidebar-first");
+        let first =
+            crate::files_correction::canonical_path(first_raw.to_string_lossy().into_owned());
+        let first_duplicate = first_raw.join(".");
+        let second_raw = std::env::temp_dir().join("refact-sidebar-second");
+        let second =
+            crate::files_correction::canonical_path(second_raw.to_string_lossy().into_owned());
+        let missing = std::env::temp_dir().join("refact-sidebar-missing");
+        let mut folders = vec![first.clone()];
+
+        assert!(!add_workspace_root_to_set(
+            &mut folders,
+            first_duplicate.clone()
+        ));
+        assert_eq!(folders, vec![first.clone()]);
+
+        assert!(add_workspace_root_to_set(&mut folders, second_raw));
+        assert_eq!(
+            folders,
+            canonical_workspace_roots(&[first.clone(), second.clone()])
+        );
+
+        assert!(!remove_workspace_root_from_set(&mut folders, &missing));
+        assert_eq!(
+            folders,
+            canonical_workspace_roots(&[first.clone(), second.clone()])
+        );
+
+        assert!(remove_workspace_root_from_set(
+            &mut folders,
+            &first_duplicate
+        ));
+        assert_eq!(folders, vec![second]);
+
+        assert!(!remove_workspace_root_from_set(&mut folders, &first_raw));
+    }
+
+    #[test]
+    fn sidebar_workspace_root_changes_are_compared_after_full_mutation() {
+        let first_raw = std::env::temp_dir().join("refact-sidebar-batch-first");
+        let first =
+            crate::files_correction::canonical_path(first_raw.to_string_lossy().into_owned());
+        let second_raw = std::env::temp_dir().join("refact-sidebar-batch-second");
+        let second =
+            crate::files_correction::canonical_path(second_raw.to_string_lossy().into_owned());
+        let missing = std::env::temp_dir().join("refact-sidebar-batch-missing");
+        let mut folders = vec![first.clone()];
+
+        assert!(!apply_workspace_root_changes(
+            &mut folders,
+            std::slice::from_ref(&first_raw),
+            &[]
+        ));
+        assert_eq!(folders, vec![first.clone()]);
+
+        assert!(!apply_workspace_root_changes(
+            &mut folders,
+            &[],
+            std::slice::from_ref(&missing)
+        ));
+        assert_eq!(folders, vec![first.clone()]);
+
+        assert!(!apply_workspace_root_changes(
+            &mut folders,
+            std::slice::from_ref(&second_raw),
+            std::slice::from_ref(&second_raw)
+        ));
+        assert_eq!(folders, vec![first.clone()]);
+
+        assert!(apply_workspace_root_changes(
+            &mut folders,
+            std::slice::from_ref(&second_raw),
+            std::slice::from_ref(&first_raw)
+        ));
+        assert_eq!(folders, vec![second]);
     }
 }
 
