@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock as ARwLock;
 use tokio::task::JoinHandle;
-use tower_lsp::{ClientSocket, LanguageServer, LspService};
-use tower_lsp::jsonrpc::{Error, Result};
+use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
 use tower_lsp::lsp_types::*;
+use tower_lsp::{ClientSocket, LanguageServer, LspService};
 use tracing::{error, info};
 
 use crate::call_validation::{
@@ -51,7 +51,16 @@ fn internal_error<E: Display>(err: E) -> Error {
     let err_msg = err.to_string();
     error!(err_msg);
     Error {
-        code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+        code: ErrorCode::InternalError,
+        message: err_msg.into(),
+        data: None,
+    }
+}
+
+fn invalid_params<E: Display>(err: E) -> Error {
+    let err_msg = err.to_string();
+    Error {
+        code: ErrorCode::InvalidParams,
         message: err_msg.into(),
         data: None,
     }
@@ -79,6 +88,19 @@ pub(crate) fn canonical_path_from_file_uri(uri: &Url) -> Option<PathBuf> {
     uri.to_file_path()
         .ok()
         .map(|path| crate::files_correction::canonical_path(path.to_string_lossy().into_owned()))
+}
+
+fn canonical_path_from_file_uri_required(uri: &Url, field: &str) -> Result<PathBuf> {
+    canonical_path_from_file_uri(uri)
+        .ok_or_else(|| invalid_params(format!("{field} must be a file URI: {uri}")))
+}
+
+fn canonical_path_from_file_uri_for_notification(handler: &str, uri: &Url) -> Option<PathBuf> {
+    let path = canonical_path_from_file_uri(uri);
+    if path.is_none() {
+        info!("{handler} ignored non-file URI {uri}");
+    }
+    path
 }
 
 pub(crate) fn add_workspace_root_to_set(folders: &mut Vec<PathBuf>, path: PathBuf) -> bool {
@@ -153,41 +175,25 @@ impl LspBackend {
         &self,
         params: &CompletionParams1,
     ) -> Result<CodeCompletionPost> {
-        let path = crate::files_correction::canonical_path(
-            &params
-                .text_document_position
-                .text_document
-                .uri
-                .to_file_path()
-                .unwrap_or_default()
-                .display()
-                .to_string(),
-        );
-        let txt = match self
-            .gcx
-            .read()
+        let path = canonical_path_from_file_uri_required(
+            &params.text_document_position.text_document.uri,
+            "text_document.uri",
+        )?;
+        let doc = {
+            let gcx_locked = self.gcx.read().await;
+            gcx_locked
+                .documents_state
+                .memory_document_map
+                .get(&path)
+                .cloned()
+        }
+        .ok_or_else(|| internal_error("document not found"))?;
+        let mut doc_snapshot = doc.read().await.clone();
+        let txt = doc_snapshot
+            .get_text_or_read_from_disk(self.gcx.clone())
             .await
-            .documents_state
-            .memory_document_map
-            .get(&path)
-        {
-            Some(doc) => doc
-                .read()
-                .await
-                .clone()
-                .get_text_or_read_from_disk(self.gcx.clone())
-                .await
-                .unwrap_or_default(),
-            None => return Err(internal_error("document not found")),
-        };
-        let path_string = params
-            .text_document_position
-            .text_document
-            .uri
-            .to_file_path()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+            .map_err(internal_error)?;
+        let path_string = path.to_string_lossy().to_string();
         Ok(CodeCompletionPost {
             inputs: CodeCompletionInputs {
                 sources: HashMap::from([(path_string.clone(), (&txt).to_string())]),
@@ -231,14 +237,7 @@ impl LspBackend {
     }
 
     pub async fn set_active_document(&self, params: ChangeActiveFile) -> Result<SuccessRes> {
-        let path = crate::files_correction::canonical_path(
-            &params
-                .uri
-                .to_file_path()
-                .unwrap_or_default()
-                .display()
-                .to_string(),
-        );
+        let path = canonical_path_from_file_uri_required(&params.uri, "uri")?;
         info!(
             "ACTIVE_DOC {:?}",
             crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
@@ -380,15 +379,11 @@ impl LanguageServer for LspBackend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let cpath = crate::files_correction::canonical_path(
-            &params
-                .text_document
-                .uri
-                .to_file_path()
-                .unwrap_or_default()
-                .display()
-                .to_string(),
-        );
+        let Some(cpath) =
+            canonical_path_from_file_uri_for_notification("did_open", &params.text_document.uri)
+        else {
+            return;
+        };
         if cpath.to_string_lossy().contains("keybindings.json") {
             return;
         }
@@ -405,28 +400,20 @@ impl LanguageServer for LspBackend {
         self.client
             .log_message(MessageType::INFO, "{refact-lsp} file closed")
             .await;
-        let cpath = crate::files_correction::canonical_path(
-            &params
-                .text_document
-                .uri
-                .to_file_path()
-                .unwrap_or_default()
-                .display()
-                .to_string(),
-        );
+        let Some(cpath) =
+            canonical_path_from_file_uri_for_notification("did_close", &params.text_document.uri)
+        else {
+            return;
+        };
         files_in_workspace::on_did_close(self.gcx.clone(), &cpath).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let path = crate::files_correction::canonical_path(
-            &params
-                .text_document
-                .uri
-                .to_file_path()
-                .unwrap_or_default()
-                .display()
-                .to_string(),
-        );
+        let Some(path) =
+            canonical_path_from_file_uri_for_notification("did_change", &params.text_document.uri)
+        else {
+            return;
+        };
         on_did_change(
             self.gcx.clone(),
             &path,
@@ -436,15 +423,11 @@ impl LanguageServer for LspBackend {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let path = crate::files_correction::canonical_path(
-            &params
-                .text_document
-                .uri
-                .to_file_path()
-                .unwrap_or_default()
-                .display()
-                .to_string(),
-        );
+        let Some(path) =
+            canonical_path_from_file_uri_for_notification("did_save", &params.text_document.uri)
+        else {
+            return;
+        };
         self.client
             .log_message(MessageType::INFO, "{refact-lsp} file saved")
             .await;
@@ -509,28 +492,24 @@ impl LanguageServer for LspBackend {
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         for event in params.changes {
             if event.typ == FileChangeType::DELETED {
-                let cpath = crate::files_correction::canonical_path(
-                    &event
-                        .uri
-                        .to_file_path()
-                        .unwrap_or_default()
-                        .display()
-                        .to_string(),
-                );
+                let Some(cpath) = canonical_path_from_file_uri_for_notification(
+                    "did_change_watched_files/delete",
+                    &event.uri,
+                ) else {
+                    continue;
+                };
                 info!(
                     "UNCLEAR LSP EVENT: did_change_watched_files/delete {}",
                     cpath.display()
                 );
                 on_did_delete(self.gcx.clone(), &cpath).await;
             } else if event.typ == FileChangeType::CREATED {
-                let cpath = crate::files_correction::canonical_path(
-                    &event
-                        .uri
-                        .to_file_path()
-                        .unwrap_or_default()
-                        .display()
-                        .to_string(),
-                );
+                let Some(cpath) = canonical_path_from_file_uri_for_notification(
+                    "did_change_watched_files/change",
+                    &event.uri,
+                ) else {
+                    continue;
+                };
                 info!(
                     "UNCLEAR LSP EVENT: did_change_watched_files/change {}",
                     cpath.display()
@@ -591,6 +570,27 @@ mod tests {
         );
         assert!(canonical_path_from_file_uri(
             &Url::parse("vscode-remote://ssh-remote%2Bhost/home/user/project").unwrap()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn lsp_file_uri_required_reports_invalid_params_for_non_file_uris() {
+        let err = canonical_path_from_file_uri_required(
+            &Url::parse("untitled:Untitled-1").unwrap(),
+            "text_document.uri",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("text_document.uri"));
+    }
+
+    #[test]
+    fn lsp_notification_file_uri_filter_ignores_non_file_uris() {
+        assert!(canonical_path_from_file_uri_for_notification(
+            "did_open",
+            &Url::parse("vscode-remote://ssh-remote%2Bhost/home/user/project/src/main.rs").unwrap()
         )
         .is_none());
     }
