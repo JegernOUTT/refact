@@ -442,7 +442,9 @@ startListening({
   actionCreator: updateConfig,
   effect: (action, listenerApi) => {
     listenerApi.dispatch(pingApi.util.resetApiState());
-    const namespaceChanged = syncProjectStorageNamespace(listenerApi.getState());
+    const namespaceChanged = syncProjectStorageNamespace(
+      listenerApi.getState(),
+    );
     if (namespaceChanged) {
       listenerApi.dispatch(hydratePersistedChatTabs());
     }
@@ -462,13 +464,14 @@ startListening({
 startListening({
   actionCreator: setCurrentProjectInfo,
   effect: (_action, listenerApi) => {
-    const namespaceChanged = syncProjectStorageNamespace(listenerApi.getState());
+    const namespaceChanged = syncProjectStorageNamespace(
+      listenerApi.getState(),
+    );
     if (namespaceChanged) {
       listenerApi.dispatch(hydratePersistedChatTabs());
     }
   },
 });
-
 
 startListening({
   matcher: isAnyOf(restoreChat, newChatAction, updateConfig),

@@ -141,7 +141,7 @@ export function setProjectStorageNamespace(value: string | undefined): void {
   writeSessionProjectStorageNamespace(projectStorageNamespace);
 }
 
-function firstNonEmpty(values: Array<string | undefined>): string | undefined {
+function firstNonEmpty(values: (string | undefined)[]): string | undefined {
   return values.map((value) => value?.trim()).find(Boolean);
 }
 
