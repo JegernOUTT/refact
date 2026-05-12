@@ -37,10 +37,6 @@ jobs:
       version: ${{ steps.setupvars.outputs.plugin_version }}
       changelog: ${{ steps.properties.outputs.changelog }}
 
-    defaults:
-      run:
-        working-directory: plugins/intellij
-
     steps:
       - name: Maximize build space
         run: |
@@ -62,6 +58,7 @@ jobs:
       - name: Set release channel and check tag version
         shell: bash
         id: setupvars
+        working-directory: plugins/intellij
         run: |
           if [[ "${{ github.event_name }}" == "push" || "${{ inputs.stable_release }}" == "true" ]]; then
             echo "PUBLISH_CHANNEL=default" >> "$GITHUB_ENV"
@@ -91,6 +88,7 @@ jobs:
 
       - name: Prepare GUI package
         shell: bash
+        working-directory: plugins/intellij
         run: |
           mkdir -p ./chat_package_fixed
           find ./chat_package -name "*.tgz" -type f -exec tar -xzf {} -C ./chat_package_fixed/ \;
@@ -106,17 +104,20 @@ jobs:
 
       - name: Make engine artifacts executable
         shell: bash
+        working-directory: plugins/intellij
         run: chmod +x ./src/main/resources/bin/dist-*/refact-lsp || true
 
       - name: Export properties
         id: properties
         shell: bash
+        working-directory: plugins/intellij
         run: |
           echo "pluginVerifierHomeDir=~/.pluginVerifier" >> $GITHUB_OUTPUT
           ./gradlew properties --console=plain -q
           ./gradlew printProductsReleases
 
       - name: Run tests
+        working-directory: plugins/intellij
         run: ./gradlew check
 
       - name: Collect test results
@@ -133,6 +134,7 @@ jobs:
           key: plugin-verifier-${{ hashFiles('plugins/intellij/build/listProductsReleases.txt') }}
 
       - name: Run plugin verification tasks
+        working-directory: plugins/intellij
         run: ./gradlew verifyPlugin -Dplugin.verifier.home.dir=${{ steps.properties.outputs.pluginVerifierHomeDir }}
 
       - name: Collect plugin verifier result
@@ -145,6 +147,7 @@ jobs:
       - name: Prepare plugin artifact
         id: artifact
         shell: bash
+        working-directory: plugins/intellij
         run: |
           cd build/distributions
           FILENAME=$(ls *.zip)
@@ -158,6 +161,7 @@ jobs:
           path: plugins/intellij/build/distributions/content/*/*
 
       - name: Publish JetBrains plugin
+        working-directory: plugins/intellij
         env:
           PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           PUBLISH_CHANNEL: ${{ env.PUBLISH_CHANNEL }}
