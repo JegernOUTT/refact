@@ -14,8 +14,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: agent-gui-build-${{ github.event_name == 'workflow_call' && github.run_id || (github.head_ref || github.ref_name) }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
+  group: agent-gui-build-${{ github.run_id }}
+  cancel-in-progress: false
 
 defaults:
   run:

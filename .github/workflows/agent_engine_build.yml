@@ -21,8 +21,8 @@ on:
 #      - completed
 
 concurrency:
-  group: agent-engine-build-${{ github.event_name == 'workflow_call' && github.run_id || (github.head_ref || github.ref_name) }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
+  group: agent-engine-build-${{ github.run_id }}
+  cancel-in-progress: false
 
 defaults:
   run:
