@@ -7,6 +7,7 @@ on:
     paths: 
       - "refact-agent/engine/**"
       - ".github/workflows/agent_engine_*"
+  workflow_call:
   # Trigger the workflow on any pull request
   pull_request:
     paths:
@@ -63,7 +64,7 @@ jobs:
 #          - os: ubuntu-22.04
 #            target: arm-unknown-linux-gnueabihf
 #            code-target: linux-armhf
-          - os: macos-15-intel
+          - os: macos-15-large
             target: x86_64-apple-darwin
             code-target: darwin-x64
           - os: macos-14
@@ -75,7 +76,6 @@ jobs:
 
     name: dist (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container }}
 
     steps:
       - name: Checkout repository

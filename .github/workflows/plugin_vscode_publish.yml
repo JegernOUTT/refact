@@ -1,0 +1,194 @@
+name: Refact VS Code Plugin Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      stable_release:
+        description: "Publish stable release version"
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "release/v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  engine:
+    uses: ./.github/workflows/agent_engine_build.yml
+
+  gui:
+    uses: ./.github/workflows/agent_gui_build.yml
+
+  publish:
+    needs: [engine, gui]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            code-target: win32-x64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            code-target: win32-arm64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            code-target: linux-x64
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            code-target: linux-arm64
+          - os: macos-15
+            target: x86_64-apple-darwin
+            code-target: darwin-x64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            code-target: darwin-arm64
+
+    name: publish (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: plugins/vscode
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download engine artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: plugins/vscode/assets
+
+      - name: Download GUI package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lts-refact-chat-js-*.tgz
+          path: plugins/vscode/chat_package
+          merge-multiple: true
+
+      - name: Prepare GUI package
+        shell: bash
+        run: |
+          mkdir -p ./chat_package_fixed
+          find ./chat_package -name "*.tgz" -type f -exec cp {} ./chat_package_fixed/ \;
+          ls -la ./chat_package_fixed
+
+      - name: Install dependencies and VSCE
+        shell: bash
+        run: |
+          npm ci
+          npm install ./chat_package_fixed/*.tgz --no-save
+          npm install -g @vscode/vsce
+          rm -rf ./chat_package ./chat_package_fixed
+
+      - name: Check release tag version
+        if: startsWith(github.ref, 'refs/tags/release/v')
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#release/v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$TAG_VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "release tag version $TAG_VERSION does not match VS Code package version $PACKAGE_VERSION"
+            exit 1
+          fi
+
+      - name: Package VS Code extension
+        shell: bash
+        run: |
+          chmod +x ./assets/refact-lsp*
+          if [[ "${{ github.event_name }}" != "push" && "${{ inputs.stable_release }}" != "true" ]]; then
+            export PRERELEASE=--pre-release
+          fi
+          echo "PRERELEASE=${PRERELEASE}"
+          vsce package --target ${{ matrix.code-target }} ${PRERELEASE}
+
+      - name: Publish VS Code extension
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" != "push" && "${{ inputs.stable_release }}" != "true" ]]; then
+            export PRERELEASE=--pre-release
+          fi
+          echo "PRERELEASE=${PRERELEASE}"
+          vsce publish --skip-duplicate --pat ${{ secrets.VSCE_PAT }} ${PRERELEASE} --packagePath *.vsix
+
+      - name: Upload VS Code package
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-plugin-${{ matrix.target }}
+          path: plugins/vscode/*.vsix
+
+      - name: Upload VS Code package to release
+        if: startsWith(github.ref, 'refs/tags/release/v')
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ github.token }}
+          file: plugins/vscode/*.vsix
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
+
+  notify:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup vars
+        shell: bash
+        id: setupvars
+        run: |
+          if [[ "${{ github.event_name }}" == "push" || "${{ inputs.stable_release }}" == "true" ]]; then
+            echo "slack_notification_channel=stable" >> "$GITHUB_OUTPUT"
+          else
+            echo "slack_notification_channel=prerelease" >> "$GITHUB_OUTPUT"
+          fi
+          echo "plugin_version=$(jq -r '.version' plugins/vscode/package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Post to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "VS Code plugin ${{ steps.setupvars.outputs.plugin_version }} is released in ${{ steps.setupvars.outputs.slack_notification_channel }} channel",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "by ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

@@ -8,9 +8,8 @@ AI coding assistant: Rust engine (LSP/HTTP server) + React chat UI + IDE plugins
 |---|---|---|---|
 | Agent Engine | `refact-agent/engine/` | Rust 2021, async/tokio | ✅ `refact-agent/engine/AGENTS.md` |
 | Agent GUI | `refact-agent/gui/` | TypeScript/React 18 | ✅ `refact-agent/gui/AGENTS.md` |
-| VSCode Extension | `extra/refact-vscode/` | TypeScript | — |
-| JetBrains Plugin | `extra/refact-intellij/` | Kotlin, Gradle | — |
-| Cloud Backend | `extra/web_v1_backend/` | Python 3.10, FastAPI | — |
+| VSCode Extension | `plugins/vscode/` | TypeScript | — |
+| JetBrains Plugin | `plugins/intellij/` | Kotlin, Gradle | — |
 | Documentation | `docs/` | Astro (static site) | — |
 
 Sub-project `AGENTS.md` files contain detailed architecture, patterns, and checklists. Read them before working in those directories.
@@ -70,6 +69,8 @@ If you changed **both**: run both sets.
 | `agent_gui_build` | `refact-agent/gui/**` | `npm test` → `format:check` → `types` → `lint` → `build` (Node LTS + latest) |
 | `server_build` | `refact-server/**` | Docker multi-arch build |
 | `docs_build` | `docs/**` | Docker build + push |
+| `plugin_vscode_build` | `plugins/vscode/**`, engine, GUI | VS Code extension packaging against same-commit engine/GUI artifacts |
+| `plugin_intellij_build` | `plugins/intellij/**`, engine, GUI | JetBrains plugin build against same-commit engine/GUI artifacts |
 
 ## Architecture Overview
 

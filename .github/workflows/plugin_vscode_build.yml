@@ -1,0 +1,115 @@
+name: Refact VS Code Plugin CI build
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "plugins/vscode/**"
+      - "refact-agent/gui/**"
+      - "refact-agent/engine/**"
+      - ".github/workflows/plugin_vscode_*"
+      - ".github/workflows/agent_gui_*"
+      - ".github/workflows/agent_engine_*"
+  pull_request:
+    paths:
+      - "plugins/vscode/**"
+      - "refact-agent/gui/**"
+      - "refact-agent/engine/**"
+      - ".github/workflows/plugin_vscode_*"
+      - ".github/workflows/agent_gui_*"
+      - ".github/workflows/agent_engine_*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    uses: ./.github/workflows/agent_engine_build.yml
+
+  gui:
+    uses: ./.github/workflows/agent_gui_build.yml
+
+  package:
+    needs: [engine, gui]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            code-target: win32-x64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            code-target: win32-arm64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            code-target: linux-x64
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            code-target: linux-arm64
+          - os: macos-15
+            target: x86_64-apple-darwin
+            code-target: darwin-x64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            code-target: darwin-arm64
+
+    name: package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: plugins/vscode
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download engine artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: plugins/vscode/assets
+
+      - name: Download GUI package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lts-refact-chat-js-*.tgz
+          path: plugins/vscode/chat_package
+          merge-multiple: true
+
+      - name: Prepare GUI package
+        shell: bash
+        run: |
+          mkdir -p ./chat_package_fixed
+          find ./chat_package -name "*.tgz" -type f -exec cp {} ./chat_package_fixed/ \;
+          ls -la ./chat_package_fixed
+
+      - name: Install dependencies and VSCE
+        shell: bash
+        run: |
+          npm ci
+          npm install ./chat_package_fixed/*.tgz --no-save
+          npm install -g @vscode/vsce
+          rm -rf ./chat_package ./chat_package_fixed
+
+      - name: Package VS Code extension
+        shell: bash
+        run: |
+          chmod +x ./assets/refact-lsp*
+          vsce package --target ${{ matrix.code-target }}
+
+      - name: Upload VS Code package
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-plugin-${{ matrix.target }}
+          path: plugins/vscode/*.vsix

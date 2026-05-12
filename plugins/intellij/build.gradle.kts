@@ -135,24 +135,42 @@ tasks {
     }
 }
 
+fun runCommandOrNull(cmd: String): String? {
+    return try {
+        providers.exec {
+            isIgnoreExitValue = true
+            commandLine(cmd.split(" "))
+        }.standardOutput.asText.get().trim().takeIf { it.isNotEmpty() }
+    } catch (_: Exception) {
+        null
+    }
+}
+
 fun runCommand(cmd: String): String {
-    return providers.exec {
-        commandLine(cmd.split(" "))
-    }.standardOutput.asText.get().trim()
+    return runCommandOrNull(cmd) ?: ""
 }
 
 fun getVersionString(baseVersion: String): String {
-    val tag = runCommand("git tag -l --points-at HEAD")
+    val releaseTagVersion = runCommand("git tag -l --points-at HEAD")
+        .lines()
+        .mapNotNull { Regex("^release/v(\\d+\\.\\d+\\.\\d+)$").matchEntire(it)?.groupValues?.get(1) }
+        .singleOrNull()
 
-    if (System.getenv("PUBLISH_EAP") != "1" &&
-        tag.isNotEmpty() && tag.contains(baseVersion)) return baseVersion
+    if (System.getenv("PUBLISH_EAP") != "1" && releaseTagVersion == baseVersion) return baseVersion
 
-    val branch = runCommand("git rev-parse --abbrev-ref HEAD").replace("/", "-")
+    val branch = runCommand("git rev-parse --abbrev-ref HEAD")
+        .ifEmpty { "unknown" }
+        .replace("/", "-")
     val numberOfCommits = if (branch == "main") {
-        val lastTag = runCommand("git describe --tags --abbrev=0 @^")
-        runCommand("git rev-list ${lastTag}..HEAD --count")
+        val lastTag = runCommandOrNull("git describe --tags --abbrev=0 @^")
+        if (lastTag != null) {
+            runCommand("git rev-list ${lastTag}..HEAD --count")
+        } else {
+            runCommand("git rev-list --count HEAD")
+        }
     } else {
-        runCommand("git rev-list --count HEAD ^origin/main")
+        runCommandOrNull("git rev-list --count HEAD ^origin/main")
+            ?: runCommand("git rev-list --count HEAD")
     }
     val commitId = runCommand("git rev-parse --short=8 HEAD")
     return if (System.getenv("PUBLISH_EAP") == "1") {

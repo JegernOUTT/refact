@@ -297,3 +297,20 @@ dist
 
 .refact_knowledge*/
 .refact*/
+.refact-tmp/
+
+# Plugin build outputs after monorepo migration
+plugins/vscode/out/
+plugins/vscode/node_modules/
+plugins/vscode/chat_package*/
+plugins/vscode/*.vsix
+plugins/vscode/assets/refact-lsp*
+plugins/intellij/build/
+plugins/intellij/out/
+plugins/intellij/.gradle/
+plugins/intellij/.kotlin/
+plugins/intellij/.intellijPlatform/
+plugins/intellij/.refact/
+plugins/intellij/chat_package*/
+plugins/intellij/src/main/resources/bin/
+plugins/intellij/src/main/resources/webview/dist/

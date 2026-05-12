@@ -115,7 +115,7 @@ class RefactAIToolboxPaneFactory : ToolWindowFactory {
                 addActionListener {
                     try {
                         Desktop.getDesktop().browse(
-                            URI("https://github.com/smallcloudai/refact-intellij/issues/new")
+                            URI("https://github.com/smallcloudai/refact/issues/new?labels=bug%2Cplugin%3Aintellij")
                         )
                     } catch (ex: Exception) {
                         logger.warn("Failed to open browser", ex)

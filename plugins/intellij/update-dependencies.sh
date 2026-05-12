@@ -2,12 +2,23 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REFACT_AGENT_DIR="$HOME/projects/smc/refact/refact-agent"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REFACT_AGENT_DIR="$REPO_ROOT/refact-agent"
 GUI_DIR="$REFACT_AGENT_DIR/gui"
 LSP_BINARY="$REFACT_AGENT_DIR/engine/target/debug/refact-lsp"
 
 WEBVIEW_DIST_DIR="$SCRIPT_DIR/src/main/resources/webview/dist"
 BIN_DIR="$SCRIPT_DIR/src/main/resources/bin"
+
+if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
+  echo "This script currently supports only Linux x86_64 local development."
+  exit 1
+fi
+
+if [[ ! -f "$LSP_BINARY" ]]; then
+  echo "=== Building debug LSP binary for local Linux x86_64 development ==="
+  (cd "$REFACT_AGENT_DIR/engine" && cargo build)
+fi
 
 echo "=== Building GUI ==="
 cd "$GUI_DIR"
@@ -19,7 +30,7 @@ rm -rf "$WEBVIEW_DIST_DIR"
 mkdir -p "$WEBVIEW_DIST_DIR"
 cp -r "$GUI_DIR/dist/"* "$WEBVIEW_DIST_DIR/"
 
-echo "=== Copying LSP binary ==="
+echo "=== Copying local Linux x86_64 LSP binary ==="
 mkdir -p "$BIN_DIR/dist-x86_64-unknown-linux-gnu"
 cp "$LSP_BINARY" "$BIN_DIR/dist-x86_64-unknown-linux-gnu/refact-lsp"
 chmod +x "$BIN_DIR/dist-x86_64-unknown-linux-gnu/refact-lsp"

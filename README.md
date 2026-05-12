@@ -110,8 +110,8 @@ Model availability, pricing, quotas, and data policies are controlled by the pro
 | --- | --- | --- |
 | Agent Engine | `refact-agent/engine/` | Rust `refact-lsp` HTTP/LSP engine, providers, tools, indexes, integrations |
 | Agent GUI | `refact-agent/gui/` | React/Vite chat UI package used by IDE webviews and standalone development |
-| VS Code extension | `extra/refact-vscode/` | VS Code host integration |
-| JetBrains plugin | `extra/refact-intellij/` | JetBrains host integration |
+| VS Code extension | `plugins/vscode/` | VS Code host integration |
+| JetBrains plugin | `plugins/intellij/` | JetBrains host integration |
 | Docs site | `docs/` | Astro/Starlight documentation site |
 
 ## Developer Commands
@@ -122,6 +122,12 @@ Model availability, pricing, quotas, and data policies are controlled by the pro
 
 # GUI
 (cd refact-agent/gui && npm ci && npm run types && npm run lint && npm run test)
+
+# VS Code plugin (after building/packing refact-agent/gui)
+(cd plugins/vscode && npm ci && npm install ../../refact-agent/gui/refact-chat-js-*.tgz --no-save && npm run compile && npm run lint)
+
+# JetBrains plugin
+(cd plugins/intellij && ./gradlew check)
 
 # Docs
 (cd docs && npm ci && npm run build)

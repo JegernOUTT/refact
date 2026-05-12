@@ -13,7 +13,7 @@ export async function show_message_from_server(kind_of_message: string, msg: str
     }
     let context = context_ as vscode.ExtensionContext;
     let already_seen = context.globalState.get<string>(`refactai.servermsg${kind_of_message}`);
-    
+
     if (already_seen === undefined) {
         already_seen = "";
     }
@@ -25,7 +25,7 @@ export async function show_message_from_server(kind_of_message: string, msg: str
     }
 
     const message_match_link = msg.match(HTML_TAG_A_REGULAR_EXPRESSION);
-    
+
     let message_text = msg;
     let link_label: string | undefined;
     let link_href: string | undefined;
@@ -45,6 +45,10 @@ export async function show_message_from_server(kind_of_message: string, msg: str
             if (selection === button_label && link_href) {
                 try {
                     const uri = vscode.Uri.parse(link_href, true);
+                    if (!["http", "https"].includes(uri.scheme)) {
+                        vscode.window.showErrorMessage("Unsupported link type");
+                        return;
+                    }
                     vscode.env.openExternal(uri)
                         .then(
                             success => {

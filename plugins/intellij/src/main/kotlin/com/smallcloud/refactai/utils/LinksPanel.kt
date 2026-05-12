@@ -11,7 +11,7 @@ fun makeLinksPanel(): JPanel {
         add(LinkLabel<String>("Bug report", AllIcons.Ide.External_link_arrow).apply {
 
             setListener({ _, _ ->
-                BrowserUtil.browse("https://github.com/smallcloudai/refact-intellij/issues")
+                BrowserUtil.browse("https://github.com/smallcloudai/refact/issues/new?labels=bug%2Cplugin%3Aintellij")
             }, null)
         })
     }

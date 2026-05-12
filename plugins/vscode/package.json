@@ -12,10 +12,11 @@
 	"author": "Small Magellanic Cloud AI <info@smallcloud.tech> (https://refact.ai)",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/smallcloudai/refact-vscode"
+		"url": "https://github.com/smallcloudai/refact",
+		"directory": "plugins/vscode"
 	},
 	"bugs": {
-		"url": "https://github.com/smallcloudai/refact-vscode/issues",
+		"url": "https://github.com/smallcloudai/refact/issues",
 		"email": "support@smallcloud.tech"
 	},
 	"version": "8.0.2",
@@ -27,7 +28,6 @@
 		"fetch-h2": "^3.0.2",
 		"json5": "^2.2.3",
 		"marked": "^4.0.8",
-		"refact-chat-js": "^8.0.0",
 		"uuid": "^9.0.1",
 		"vscode-languageclient": "^7.0.0"
 	},
