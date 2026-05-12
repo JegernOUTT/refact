@@ -1189,6 +1189,9 @@ fn compute_final_action(
     if matches!(mode_action, Some("deny")) {
         return "deny";
     }
+    if tool_name == "handoff_to_mode" {
+        return "auto";
+    }
     if ALWAYS_ASK_TOOLS.iter().any(|name| *name == tool_name) {
         return "ask";
     }

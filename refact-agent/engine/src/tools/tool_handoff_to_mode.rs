@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
-use crate::agentic::mode_transition::{analyze_mode_transition, assemble_new_chat, ParsedDecisions};
+use crate::agentic::mode_transition::{assemble_new_chat, ParsedDecisions};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::get_or_create_session_with_trajectory;
@@ -221,10 +221,19 @@ impl Tool for ToolHandoffToMode {
             format!("{} — {}", mode_title, mode_config.description)
         };
 
-        let mut decisions =
-            analyze_mode_transition(gcx.clone(), &messages, &canonical_mode, &mode_description)
-                .await
-                .map_err(|e| format!("mode transition analysis failed: {}", e))?;
+        let mut decisions = ParsedDecisions {
+            summary: if reason.is_empty() {
+                format!("Continue the conversation in {}.", mode_description)
+            } else {
+                reason.clone()
+            },
+            handoff_message: if reason.is_empty() {
+                format!("Continue in {}.", mode_description)
+            } else {
+                reason.clone()
+            },
+            ..Default::default()
+        };
 
         apply_overrides(&mut decisions, args);
 
