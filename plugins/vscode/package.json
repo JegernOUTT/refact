@@ -1,0 +1,409 @@
+{
+	"name": "codify",
+	"displayName": "Refact – Open-Source AI Agent, Code Generator & Chat for JavaScript, Python, TypeScript, Java, PHP, Go, and more.",
+	"description": "Refact.ai is the #1 free open-source AI Agent on the SWE-bench verified leaderboard. It autonomously handles software engineering tasks end to end. It understands large and complex codebases, adapts to your workflow, and connects with the tools developers actually use (including MCP). It tracks your cursor to provide instant help and transparently shows every step the Agent takes. As your AI copilot, it handles code generation, testing, review, refactoring, and more.",
+	"publisher": "smallcloud",
+	"icon": "logo-small.png",
+	"galleryBanner": {
+		"color": "#000000",
+		"theme": "dark"
+	},
+	"homepage": "https://refact.ai",
+	"author": "Small Magellanic Cloud AI <info@smallcloud.tech> (https://refact.ai)",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/smallcloudai/refact-vscode"
+	},
+	"bugs": {
+		"url": "https://github.com/smallcloudai/refact-vscode/issues",
+		"email": "support@smallcloud.tech"
+	},
+	"version": "8.0.2",
+	"dependencies": {
+		"@types/marked": "^4.0.8",
+		"@types/vscode": "^1.69.0",
+		"diff": "^7.0.0",
+		"difflib": "^0.2.4",
+		"fetch-h2": "^3.0.2",
+		"json5": "^2.2.3",
+		"marked": "^4.0.8",
+		"refact-chat-js": "^8.0.0",
+		"uuid": "^9.0.1",
+		"vscode-languageclient": "^7.0.0"
+	},
+	"devDependencies": {
+		"@types/diff": "^5.2.2",
+		"@types/glob": "^7.2.0",
+		"@types/mocha": "^9.1.1",
+		"@types/node": "^20.4.2",
+		"@types/uuid": "^9.0.4",
+		"@types/vscode": "^1.69.0",
+		"@typescript-eslint/eslint-plugin": "^5.30.0",
+		"@typescript-eslint/parser": "^5.30.0",
+		"@vscode/test-electron": "^2.1.5",
+		"esbuild": "^0.16.3",
+		"eslint": "^8.18.0",
+		"glob": "^8.0.3",
+		"mocha": "^10.0.0",
+		"patch-package": "^8.0.0",
+		"typescript": "^5.0.0"
+	},
+	"engines": {
+		"vscode": "^1.69.0"
+	},
+	"categories": [
+		"Programming Languages",
+		"Snippets",
+		"Other",
+		"Machine Learning",
+		"Education",
+		"Testing",
+		"Data Science",
+		"AI",
+		"Chat"
+	],
+	"keywords": [
+		"refact",
+		"refact.ai",
+		"refactoring",
+		"copilot",
+		"tabnine",
+		"javascript",
+		"python",
+		"typescript",
+		"php",
+		"autocomplete",
+		"ruby",
+		"java",
+		"go",
+		"golang",
+		"bash",
+		"kotlin",
+		"html",
+		"scss",
+		"vue",
+		"react",
+		"css",
+		"ocaml",
+		"perl",
+		"rust",
+		"julia",
+		"lua",
+		"haskell",
+		"c",
+		"cpp",
+		"c++",
+		"csharp",
+		"c#",
+		"react",
+		"swift",
+		"objective-c",
+		"ai",
+		"method completion",
+		"intellicode",
+		"intellisense",
+		"snippets",
+		"kite",
+		"node",
+		"node.js",
+		"jupyter",
+		"chat",
+		"chatgpt",
+		"code completion",
+		"documentation",
+		"refactor",
+		"llm",
+		"test",
+		"security",
+		"coding",
+		"copilot",
+		"cursor"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"configuration": {
+			"type": "object",
+			"title": "Refact Assistant",
+			"properties": {
+				"refactai.insecureSSL": {
+					"type": "boolean",
+					"description": "Allow insecure server connections when using SSL, ignore certificate verification errors. Allows you to use self-signed certificates.",
+					"default": false,
+					"order": 2
+				},
+				"refactai.submitChatWithShiftEnter": {
+					"type": "boolean",
+					"description": "Send chat messages with Shift+Enter instead of Enter.",
+					"default": false,
+					"order": 3
+				},
+				"refactai.completionMaxTokens": {
+					"type": "number",
+					"markdownDescription": "Maximum number of tokens to generate for code completion. Leave 0 if not sure.",
+					"default": 0,
+					"order": 3
+				},
+				"refactai.codeCompletionModel": {
+					"type": "string",
+					"description": "Which model to use, for example \"starcoder2/3b\". Leave blank if not sure.",
+					"default": "",
+					"order": 4
+				},
+				"refactai.codeLens": {
+					"type": "boolean",
+					"description": "Enable inline annotations that provide chat actions directly within the code editor.",
+					"default": true,
+					"order": 5
+				},
+				"refactai.codeLensDebug": {
+					"type": "boolean",
+					"description": "See what the parser sees, useful for debugging the parser.",
+					"deprecationMessage": "debug only",
+					"default": false,
+					"order": 6
+				},
+				"refactai.pauseCompletion": {
+					"type": "boolean",
+					"description": "Pause automatic code suggestions. Manual activation still works.",
+					"default": false,
+					"order": 7
+				},
+				"refactai.ast": {
+					"type": "boolean",
+					"markdownDescription": "Enable context-aware code completion and chat. This adds definition() and references() functions for chat models, plus @definition and @references commands for adding context manually.",
+					"default": true,
+					"order": 8
+				},
+				"refactai.astFileLimit": {
+					"type": "number",
+					"description": "Limit the number of files for AST to process, to avoid memory issues. Increase if you have a large project and sufficient memory.",
+					"default": 35000,
+					"order": 9
+				},
+				"refactai.vecdb": {
+					"type": "boolean",
+					"markdownDescription": "Enable vector database. This adds semantic search over your codebase and the @workspace command for adding context manually.",
+					"default": true,
+					"order": 11
+				},
+				"refactai.vecdbFileLimit": {
+					"type": "number",
+					"description": "Limit the number of files for VecDB to process. Increase if you have a lot of files.",
+					"default": 15000,
+					"order": 12
+				},
+				"refactai.xDebug": {
+					"type": "number|undefined",
+					"description": "Set this to debug the Rust binary in console. If set, the plugin will not attempt to start its own, it will connect HTTP on the port 8001, LSP on the port 8002 instead.",
+					"order": 13
+				},
+				"refactai.xperimental": {
+					"type": "boolean",
+					"description": "Enable experimental features.",
+					"default": false,
+					"order": 14
+				}
+			}
+		},
+		"properties": [],
+		"commands": [
+			{
+				"command": "refactaicmd.sendChatToSidebar",
+				"title": "Open in Sidebar",
+				"enablement": "refactaicmd.openSidebarButtonEnabled"
+			},
+			{
+				"command": "refactaicmd.closeInlineChat",
+				"title": "Close"
+			},
+			{
+				"command": "refactaicmd.activateToolbox",
+				"title": "Activate (opens chat)",
+				"category": "Refact.ai"
+			},
+			{
+				"command": "refactaicmd.completionManual",
+				"title": "Manual Completion Trigger",
+				"category": "Refact.ai"
+			},
+			{
+				"command": "refactaicmd.callChat",
+				"title": "Chat",
+				"key": "F1",
+				"category": "Refact.ai"
+			},
+			{
+				"command": "refactaicmd.openSettings",
+				"title": "Settings Page",
+				"category": "Refact.ai"
+			},
+			{
+				"command": "refactaicmd.openPromptCustomizationPage",
+				"title": "Open Prompt Customization Page",
+				"category": "Refact.ai"
+			},
+			{
+				"command": "refactaicmd.attachFile",
+				"title": "Attach to chat",
+				"category": "Refact.ai"
+			}
+		],
+		"menus": {
+			"editor/context": [
+				{
+					"group": "z_commands",
+					"command": "refactaicmd.callChat"
+				},
+				{
+					"group": "9_cutcopypaste",
+					"command": "refactaicmd.attachFile",
+					"when": "refactai.chat_page == 'chat'"
+				}
+			],
+			"explorer/context": [
+				{
+					"group": "5_cutcopypaste",
+					"command": "refactaicmd.attachFile"
+				}
+			]
+		},
+		"keybindings": [
+			{
+				"command": "refactaicmd.completionManual",
+				"key": "alt+space"
+			},
+			{
+				"command": "refactaicmd.esc",
+				"key": "escape",
+				"when": "refactcx.runEsc"
+			},
+			{
+				"command": "refactaicmd.tab",
+				"key": "tab",
+				"when": "refactcx.runTab"
+			},
+			{
+				"command": "refactaicmd.callChat",
+				"key": "F1"
+			}
+		],
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "refact-toolbox-pane",
+					"title": "Refact",
+					"icon": "$(codify-logo)"
+				}
+			]
+		},
+		"views": {
+			"refact-toolbox-pane": [
+				{
+					"type": "webview",
+					"id": "refactai-toolbox",
+					"name": ""
+				}
+			]
+		},
+		"icons": {
+			"codify-logo": {
+				"description": "codify logo",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e899"
+				}
+			},
+			"codify-bookmark-unchecked": {
+				"description": "codify bookmark unchecked",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e801"
+				}
+			},
+			"codify-bookmark-checked": {
+				"description": "codify bookmark checked",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e800"
+				}
+			},
+			"codify-like": {
+				"description": "codify like",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e808"
+				}
+			},
+			"codify-life-checked": {
+				"description": "codify like checked",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e807"
+				}
+			},
+			"codify-chat": {
+				"description": "codify chat",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e804"
+				}
+			},
+			"codify-reload": {
+				"description": "codify reload",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e809"
+				}
+			},
+			"codify-settings": {
+				"description": "codify settings",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e806"
+				}
+			},
+			"codify-link": {
+				"description": "codify link",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e80A"
+				}
+			},
+			"codify-send": {
+				"description": "codify send",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e803"
+				}
+			},
+			"codify-logout": {
+				"description": "codify logout",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e812"
+				}
+			},
+			"refact-icon-privacy": {
+				"description": "refacticon privacy",
+				"default": {
+					"fontPath": "./assets/codify.woff",
+					"fontCharacter": "\\e811"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./",
+		"pretest": "npm run compile && npm run lint",
+		"lint": "eslint src --ext ts",
+		"test": "node ./out/test/runTest.js",
+		"esbuild-base": "esbuild ./src/extension.ts --bundle --outfile=out/main.js --external:vscode --format=cjs --platform=node",
+		"esbuild": "npm run esbuild-base -- --sourcemap",
+		"esbuild-watch": "npm run esbuild-base -- --sourcemap --watch"
+	}
+}
