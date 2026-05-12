@@ -6,6 +6,8 @@ const TASKS_UI_STORAGE_KEY = "refact:chat-ui:tasks-ui:v1";
 const ASK_QUESTIONS_STORAGE_KEY = "refact:chat-ui:ask-questions:v1";
 const TASK_WORKSPACE_LAYOUT_STORAGE_KEY =
   "refact:chat-ui:task-workspace-layouts:v1";
+const PROJECT_STORAGE_NAMESPACE_SESSION_KEY =
+  "refact:chat-ui:project-storage-namespace:v1";
 
 let projectStorageNamespace: string | null = null;
 
@@ -82,22 +84,79 @@ function getStorage(): Storage | null {
   }
 }
 
+function getSessionStorage(): Storage | null {
+  try {
+    if (typeof sessionStorage === "undefined") return null;
+    return sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeProjectStorageNamespace(value: string | undefined): string {
   return value?.trim() ?? "";
 }
 
+function readSessionProjectStorageNamespace(): string | null {
+  const storage = getSessionStorage();
+  if (!storage) return null;
+
+  try {
+    return normalizeProjectStorageNamespace(
+      storage.getItem(PROJECT_STORAGE_NAMESPACE_SESSION_KEY) ?? undefined,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionProjectStorageNamespace(value: string | null): void {
+  const storage = getSessionStorage();
+  if (!storage) return;
+
+  try {
+    if (value) {
+      storage.setItem(PROJECT_STORAGE_NAMESPACE_SESSION_KEY, value);
+    } else {
+      storage.removeItem(PROJECT_STORAGE_NAMESPACE_SESSION_KEY);
+    }
+  } catch {
+    return;
+  }
+}
+
 function projectScopedStorageKey(baseKey: string): string {
-  const namespace = projectStorageNamespace;
+  const namespace =
+    projectStorageNamespace ?? readSessionProjectStorageNamespace();
   return namespace ? `refact:project:${namespace}:${baseKey}` : baseKey;
 }
 
 export function getProjectStorageNamespace(): string | null {
-  return projectStorageNamespace;
+  return projectStorageNamespace ?? readSessionProjectStorageNamespace();
 }
 
 export function setProjectStorageNamespace(value: string | undefined): void {
   const next = normalizeProjectStorageNamespace(value);
   projectStorageNamespace = next ? next : null;
+  writeSessionProjectStorageNamespace(projectStorageNamespace);
+}
+
+function firstNonEmpty(values: Array<string | undefined>): string | undefined {
+  return values.map((value) => value?.trim()).find(Boolean);
+}
+
+export function setProjectStorageNamespaceFromProjectInfo(input: {
+  workspaceRoots?: string[];
+  projectName?: string;
+  workspaceName?: string;
+}): void {
+  setProjectStorageNamespace(
+    firstNonEmpty([
+      ...(input.workspaceRoots ?? []),
+      input.projectName,
+      input.workspaceName,
+    ]),
+  );
 }
 
 function isRecord(value: unknown): value is JsonRecord {

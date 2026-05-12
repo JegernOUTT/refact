@@ -47,9 +47,14 @@ import {
   buildThreadParamsPatch,
   buildThreadScopePatch,
   selectCurrentThreadId,
+  hydratePersistedChatTabs,
 } from "../features/Chat/Thread";
 import { saveLastThreadParams } from "../utils/threadStorage";
-import { savePersistedChatTabs } from "../utils/chatUiPersistence";
+import {
+  getProjectStorageNamespace,
+  savePersistedChatTabs,
+  setProjectStorageNamespaceFromProjectInfo,
+} from "../utils/chatUiPersistence";
 import { integrationsApi } from "../services/refact/integrations";
 import { capsApi, isCapsErrorResponse } from "../services/refact/caps";
 import { promptsApi } from "../services/refact/prompts";
@@ -64,6 +69,7 @@ import {
 } from "../features/Errors/errorsSlice";
 import { reportBuddyFrontendError } from "../features/Buddy/reportBuddyFrontendError";
 import { setThemeMode, updateConfig } from "../features/Config/configSlice";
+import { setCurrentProjectInfo } from "../features/Chat/currentProject";
 import { resetSidebarState } from "../features/Sidebar/sidebarSlice";
 import { nextTip } from "../features/TipOfTheDay";
 import { tasksApi } from "../services/refact/tasks";
@@ -94,7 +100,18 @@ const startListening = listenerMiddleware.startListening.withTypes<
   AppDispatch
 >();
 
+function syncProjectStorageNamespace(state: RootState): boolean {
+  const previous = getProjectStorageNamespace();
+  setProjectStorageNamespaceFromProjectInfo({
+    workspaceRoots: state.current_project.workspaceRoots,
+    projectName: state.current_project.name,
+    workspaceName: state.config.currentWorkspaceName,
+  });
+  return getProjectStorageNamespace() !== previous;
+}
+
 function persistOpenChatTabs(state: RootState): void {
+  syncProjectStorageNamespace(state);
   savePersistedChatTabs({
     openThreadIds: state.chat.open_thread_ids,
     currentThreadId: state.chat.current_thread_id,
@@ -425,6 +442,10 @@ startListening({
   actionCreator: updateConfig,
   effect: (action, listenerApi) => {
     listenerApi.dispatch(pingApi.util.resetApiState());
+    const namespaceChanged = syncProjectStorageNamespace(listenerApi.getState());
+    if (namespaceChanged) {
+      listenerApi.dispatch(hydratePersistedChatTabs());
+    }
     const previousConfig = listenerApi.getOriginalState().config;
     const nextPort = action.payload.lspPort;
     const portChanged =
@@ -437,6 +458,17 @@ startListening({
     }
   },
 });
+
+startListening({
+  actionCreator: setCurrentProjectInfo,
+  effect: (_action, listenerApi) => {
+    const namespaceChanged = syncProjectStorageNamespace(listenerApi.getState());
+    if (namespaceChanged) {
+      listenerApi.dispatch(hydratePersistedChatTabs());
+    }
+  },
+});
+
 
 startListening({
   matcher: isAnyOf(restoreChat, newChatAction, updateConfig),

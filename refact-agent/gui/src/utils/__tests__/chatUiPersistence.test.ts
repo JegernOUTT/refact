@@ -12,11 +12,16 @@ import {
   savePersistedTasksUIState,
   saveTaskWorkspaceLayout,
 } from "../chatUiPersistence";
-import { setProjectStorageNamespace } from "../chatUiPersistence";
+import {
+  getProjectStorageNamespace,
+  setProjectStorageNamespace,
+  setProjectStorageNamespaceFromProjectInfo,
+} from "../chatUiPersistence";
 
 describe("chatUiPersistence", () => {
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     setProjectStorageNamespace(undefined);
   });
 
@@ -45,6 +50,39 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedActiveTab()).toEqual({ type: "chat", id: "chat-a" });
 
     setProjectStorageNamespace(undefined);
+  });
+
+  it("keeps the project namespace in session storage for refresh hydration", () => {
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/workspace/project-a"],
+      projectName: "project-a",
+      workspaceName: "fallback-a",
+    });
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a", title: "Project A" }],
+    });
+
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/workspace/project-b"],
+      projectName: "project-b",
+      workspaceName: "fallback-b",
+    });
+    savePersistedChatTabs({
+      openThreadIds: ["chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-b", title: "Project B" }],
+    });
+
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(
+      "refact:chat-ui:project-storage-namespace:v1",
+      "/workspace/project-a",
+    );
+
+    expect(getProjectStorageNamespace()).toBe("/workspace/project-a");
+    expect(loadPersistedChatTabs().openThreadIds).toEqual(["chat-a"]);
   });
 
   it("persists opened chat tabs and the latest active chat", () => {
