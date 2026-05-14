@@ -221,6 +221,7 @@ async fn force_refresh_openai_codex_for_retry(
 #[derive(Default, Clone)]
 pub struct ChoiceFinal {
     pub content: String,
+    pub raw_content: String,
     pub reasoning: String,
     pub thinking_blocks: Vec<serde_json::Value>,
     pub tool_calls_raw: Vec<serde_json::Value>,
@@ -280,6 +281,102 @@ impl StreamCollector for ReplayCollector {
         self.events
             .push(CollectorReplayEvent::Finish(choice_idx, finish_reason));
     }
+}
+
+const FUNCTION_CALLS_OPEN_TAG: &str = "<function_calls>";
+const FUNCTION_CALLS_CLOSE_TAG: &str = "</function_calls>";
+
+fn find_function_calls_close_tag(text: &str) -> Option<usize> {
+    text.find(FUNCTION_CALLS_CLOSE_TAG)
+}
+
+fn split_with_partial_literal_suffix<'a>(text: &'a str, tag: &str) -> (&'a str, &'a str) {
+    let max_len = tag.len().saturating_sub(1).min(text.len());
+    for len in (1..=max_len).rev() {
+        let suffix_start = text.len() - len;
+        let suffix = &text[suffix_start..];
+        if tag.starts_with(suffix) {
+            return (&text[..suffix_start], suffix);
+        }
+    }
+    (text, "")
+}
+
+fn route_append_content_without_function_calls(
+    acc: &mut ChoiceAccumulator,
+    ops: &mut Vec<DeltaOp>,
+    incoming_text: String,
+    block_index: Option<u64>,
+) {
+    if !acc.inside_function_calls_tag
+        && acc.pending_function_calls_parse.is_empty()
+        && !incoming_text.contains('<')
+    {
+        handle_append_content_delta(acc, ops, incoming_text, block_index);
+        return;
+    }
+
+    acc.pending_function_calls_parse.push_str(&incoming_text);
+
+    loop {
+        if acc.inside_function_calls_tag {
+            if let Some(close_idx) =
+                find_function_calls_close_tag(&acc.pending_function_calls_parse)
+            {
+                let drain_until = close_idx + FUNCTION_CALLS_CLOSE_TAG.len();
+                acc.function_calls_xml_raw
+                    .push_str(&acc.pending_function_calls_parse[..drain_until]);
+                acc.pending_function_calls_parse.drain(..drain_until);
+                acc.inside_function_calls_tag = false;
+                continue;
+            }
+            let (_, keep) = split_with_partial_literal_suffix(
+                &acc.pending_function_calls_parse,
+                FUNCTION_CALLS_CLOSE_TAG,
+            );
+            let consumed_len = acc.pending_function_calls_parse.len() - keep.len();
+            acc.function_calls_xml_raw
+                .push_str(&acc.pending_function_calls_parse[..consumed_len]);
+            acc.pending_function_calls_parse = keep.to_string();
+            break;
+        }
+
+        if let Some(open_idx) = acc
+            .pending_function_calls_parse
+            .find(FUNCTION_CALLS_OPEN_TAG)
+        {
+            let content_text = acc.pending_function_calls_parse[..open_idx].to_string();
+            handle_append_content_delta(acc, ops, content_text, block_index);
+            let drain_until = open_idx + FUNCTION_CALLS_OPEN_TAG.len();
+            acc.function_calls_xml_raw
+                .push_str(&acc.pending_function_calls_parse[open_idx..drain_until]);
+            acc.pending_function_calls_parse.drain(..drain_until);
+            acc.inside_function_calls_tag = true;
+            continue;
+        }
+
+        let (emit, keep) = split_with_partial_literal_suffix(
+            &acc.pending_function_calls_parse,
+            FUNCTION_CALLS_OPEN_TAG,
+        );
+        let content_text = emit.to_string();
+        acc.pending_function_calls_parse = keep.to_string();
+        handle_append_content_delta(acc, ops, content_text, block_index);
+        break;
+    }
+}
+
+fn flush_pending_function_calls_parse(acc: &mut ChoiceAccumulator, ops: &mut Vec<DeltaOp>) {
+    if acc.pending_function_calls_parse.is_empty() {
+        return;
+    }
+
+    let pending = std::mem::take(&mut acc.pending_function_calls_parse);
+    if acc.inside_function_calls_tag {
+        acc.function_calls_xml_raw.push_str(&pending);
+        return;
+    }
+    handle_append_content_delta(acc, ops, pending, None);
 }
 
 const THINK_OPEN_TAG: &str = "<think>";
@@ -466,7 +563,7 @@ fn process_stream_event_data<C: StreamCollector>(
     for delta in deltas {
         match delta {
             LlmStreamDelta::AppendContent { text, block_index } => {
-                handle_append_content_delta(acc, &mut ops, text, block_index);
+                route_append_content_without_function_calls(acc, &mut ops, text, block_index);
             }
             LlmStreamDelta::AppendReasoning { text, block_index } => {
                 flush_pending_think_parse(acc, &mut ops);
@@ -559,6 +656,10 @@ fn process_stream_event_data<C: StreamCollector>(
                 break;
             }
         }
+    }
+
+    if stream_done {
+        flush_pending_function_calls_parse(acc, &mut ops);
     }
 
     if !ops.is_empty() {
@@ -670,6 +771,7 @@ fn finalize_accumulators<C: StreamCollector>(
 ) -> Vec<ChoiceFinal> {
     for (idx, acc) in accumulators.iter_mut().enumerate() {
         let mut tail_ops = Vec::new();
+        flush_pending_function_calls_parse(acc, &mut tail_ops);
         flush_pending_think_parse(acc, &mut tail_ops);
         if !tail_ops.is_empty() {
             collector.on_delta_ops(idx, tail_ops);
@@ -717,8 +819,14 @@ fn finalize_accumulators<C: StreamCollector>(
                 acc.thinking_blocks
             };
 
+            let raw_content = format!(
+                "{}{}{}",
+                acc.content, acc.function_calls_xml_raw, acc.pending_function_calls_parse
+            );
+
             ChoiceFinal {
                 content: acc.content,
+                raw_content: raw_content,
                 reasoning: acc.reasoning,
                 thinking_blocks,
                 tool_calls_raw: acc.tool_calls.finalize(),
@@ -1299,6 +1407,9 @@ struct ChoiceAccumulator {
     usage: Option<ChatUsage>,
     pending_think_parse: String,
     inside_think_tag: bool,
+    pending_function_calls_parse: String,
+    inside_function_calls_tag: bool,
+    function_calls_xml_raw: String,
 }
 
 fn strip_mcp_prefix_from_tool_call(tc: &mut serde_json::Value) {
@@ -1447,6 +1558,61 @@ mod tests {
             reqwest::StatusCode::UNAUTHORIZED,
             r#"{"error":{"message":"invalid api key"}}"#,
         ));
+    }
+
+    #[test]
+    fn function_calls_xml_is_not_emitted_as_content() {
+        let mut acc = ChoiceAccumulator::default();
+        let mut ops = Vec::new();
+
+        route_append_content_without_function_calls(
+            &mut acc,
+            &mut ops,
+            "Before <function_calls><invoke name=\"mcp_tool_search\"><parameter name=\"query\">x"
+                .to_string(),
+            None,
+        );
+        route_append_content_without_function_calls(
+            &mut acc,
+            &mut ops,
+            "</parameter></invoke></function_calls> after".to_string(),
+            None,
+        );
+        flush_pending_function_calls_parse(&mut acc, &mut ops);
+
+        assert_eq!(acc.content, "Before  after");
+        assert!(ops.iter().all(|op| match op {
+            DeltaOp::AppendContent { text } =>
+                !text.contains("<function_calls>")
+                    && !text.contains("<invoke")
+                    && !text.contains("<parameter"),
+            _ => true,
+        }));
+    }
+
+    #[test]
+    fn partial_function_calls_open_tag_is_buffered() {
+        let mut acc = ChoiceAccumulator::default();
+        let mut ops = Vec::new();
+
+        route_append_content_without_function_calls(
+            &mut acc,
+            &mut ops,
+            "Before <function".to_string(),
+            None,
+        );
+        assert_eq!(acc.content, "Before ");
+        assert_eq!(acc.pending_function_calls_parse, "<function");
+
+        route_append_content_without_function_calls(
+            &mut acc,
+            &mut ops,
+            "_calls>hidden</function_calls> after".to_string(),
+            None,
+        );
+        flush_pending_function_calls_parse(&mut acc, &mut ops);
+
+        assert_eq!(acc.content, "Before  after");
     }
 
     #[test]
@@ -1793,6 +1959,7 @@ mod tests {
 
         ChoiceFinal {
             content: acc.content,
+            raw_content: String::new(),
             reasoning: acc.reasoning,
             thinking_blocks,
             tool_calls_raw: acc.tool_calls.finalize(),

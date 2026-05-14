@@ -158,6 +158,9 @@ fn recover_xml_tool(
     allowed: &HashSet<String>,
 ) -> Option<(String, Vec<Value>, &'static str)> {
     let tag_start = content.find("<tool")?;
+    if content[tag_start..].starts_with("<tool_call") {
+        return None;
+    }
     let tag_end = content[tag_start..].find('>')? + tag_start;
     let header = &content[tag_start..=tag_end];
     let name_key = "name=\"";
@@ -179,6 +182,120 @@ fn recover_xml_tool(
     Some((clean, vec![build_tool_call(name, body)], "xml_recovery"))
 }
 
+fn recover_function_calls_xml(
+    content: &str,
+    allowed: &HashSet<String>,
+) -> Option<(String, Vec<Value>, &'static str)> {
+    let mut calls = Vec::new();
+    let mut clean = String::new();
+    let mut content_cursor = 0;
+
+    while let Some(tag_rel) = content[content_cursor..].find("<function_calls>") {
+        let tag_start = content_cursor + tag_rel;
+        let block_body_start = tag_start + "<function_calls>".len();
+        let Some(tag_end_rel) = content[block_body_start..].find("</function_calls>") else {
+            break;
+        };
+        let tag_end = block_body_start + tag_end_rel;
+        let block_body = &content[block_body_start..tag_end];
+
+        clean.push_str(&content[content_cursor..tag_start]);
+        content_cursor = tag_end + "</function_calls>".len();
+
+        let mut block_cursor = 0;
+        while let Some(invoke_rel) = block_body[block_cursor..].find("<invoke") {
+            let invoke_start = block_cursor + invoke_rel;
+            let Some(invoke_header_end_rel) = block_body[invoke_start..].find('>') else {
+                break;
+            };
+            let invoke_header_end = invoke_start + invoke_header_end_rel;
+            let header = &block_body[invoke_start..=invoke_header_end];
+            let Some(name) = extract_xml_attribute(header, "name") else {
+                block_cursor = invoke_header_end + 1;
+                continue;
+            };
+
+            let Some(invoke_close_rel) = block_body[invoke_header_end + 1..].find("</invoke>")
+            else {
+                break;
+            };
+            let invoke_close = invoke_header_end + 1 + invoke_close_rel;
+            block_cursor = invoke_close + "</invoke>".len();
+
+            if !allowed.contains(&name) {
+                continue;
+            }
+
+            let invoke_body = &block_body[invoke_header_end + 1..invoke_close];
+            let arguments = extract_function_call_parameters(invoke_body);
+            let Ok(arguments_str) = serde_json::to_string(&arguments) else {
+                continue;
+            };
+            calls.push(build_tool_call(&name, &arguments_str));
+        }
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
+
+    clean.push_str(&content[content_cursor..]);
+
+    Some((
+        clean.trim().to_string(),
+        calls,
+        "function_calls_xml_recovery",
+    ))
+}
+
+fn extract_xml_attribute(tag: &str, name: &str) -> Option<String> {
+    let key = format!("{}=\"", name);
+    let value_start = tag.find(&key)? + key.len();
+    let value_end = tag[value_start..].find('"')? + value_start;
+    Some(unescape_xml_text(&tag[value_start..value_end]))
+}
+
+fn extract_function_call_parameters(invoke_body: &str) -> serde_json::Map<String, Value> {
+    let mut parameters = serde_json::Map::new();
+    let mut cursor = 0;
+
+    while let Some(parameter_rel) = invoke_body[cursor..].find("<parameter") {
+        let parameter_start = cursor + parameter_rel;
+        let Some(header_end_rel) = invoke_body[parameter_start..].find('>') else {
+            break;
+        };
+        let header_end = parameter_start + header_end_rel;
+        let header = &invoke_body[parameter_start..=header_end];
+        let Some(name) = extract_xml_attribute(header, "name") else {
+            cursor = header_end + 1;
+            continue;
+        };
+        let Some(close_rel) = invoke_body[header_end + 1..].find("</parameter>") else {
+            break;
+        };
+        let value_start = header_end + 1;
+        let value_end = value_start + close_rel;
+        cursor = value_end + "</parameter>".len();
+
+        parameters.insert(
+            name,
+            Value::String(unescape_xml_text(
+                invoke_body[value_start..value_end].trim(),
+            )),
+        );
+    }
+
+    parameters
+}
+
+fn unescape_xml_text(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 pub fn recover_tool_calls_from_oss_text(
     content: &str,
     allowed: &HashSet<String>,
@@ -187,7 +304,8 @@ pub fn recover_tool_calls_from_oss_text(
         return None;
     }
 
-    let result = recover_function_style(content, allowed)
+    let result = recover_function_calls_xml(content, allowed)
+        .or_else(|| recover_function_style(content, allowed))
         .or_else(|| recover_fenced_json(content, allowed))
         .or_else(|| recover_xml_tool(content, allowed));
 
@@ -247,6 +365,60 @@ mod tests {
         let (_, calls, source) = recover_tool_calls_from_oss_text(content, &allowed).unwrap();
         assert_eq!(source, "xml_recovery");
         assert_eq!(calls[0]["function"]["name"], "search_pattern");
+    }
+
+    #[test]
+    fn test_recover_function_calls_xml() {
+        let allowed = make_allowed(&["buddy_launch_investigation", "mcp_tool_search"]);
+        let content = concat!(
+            "I'll investigate this now.\n",
+            "<function_calls>\n",
+            "<invoke name=\"buddy_launch_investigation\">\n",
+            "<parameter name=\"topic\">Parse errors in trajectory JSON</parameter>\n",
+            "</invoke>\n",
+            "</function_calls>\n",
+            "While that starts, I will search upstream.\n",
+            "<function_calls>\n",
+            "<invoke name=\"mcp_tool_search\">\n",
+            "<parameter name=\"query\">GitHub MCP search code in repository</parameter>\n",
+            "</invoke>\n",
+            "</function_calls>"
+        );
+
+        let (clean, calls, source) = recover_tool_calls_from_oss_text(content, &allowed).unwrap();
+
+        assert_eq!(source, "function_calls_xml_recovery");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["function"]["name"], "buddy_launch_investigation");
+        assert_eq!(calls[1]["function"]["name"], "mcp_tool_search");
+        let args: Value =
+            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["topic"], "Parse errors in trajectory JSON");
+        let search_args: Value =
+            serde_json::from_str(calls[1]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(search_args["query"], "GitHub MCP search code in repository");
+        assert!(clean.contains("I'll investigate this now."));
+        assert!(clean.contains("While that starts"));
+        assert!(!clean.contains("<function_calls>"));
+        assert!(!clean.contains("<invoke"));
+        assert!(!clean.contains("<parameter"));
+    }
+
+    #[test]
+    fn test_recover_function_calls_xml_unescapes_parameters() {
+        let allowed = make_allowed(&["mcp_tool_search"]);
+        let content = concat!(
+            "<function_calls>",
+            "<invoke name=\"mcp_tool_search\">",
+            "<parameter name=\"query\">A &amp; B &lt; C &quot;quoted&quot;</parameter>",
+            "</invoke>",
+            "</function_calls>"
+        );
+
+        let (_, calls, _) = recover_tool_calls_from_oss_text(content, &allowed).unwrap();
+        let args: Value =
+            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["query"], "A & B < C \"quoted\"");
     }
 
     #[test]

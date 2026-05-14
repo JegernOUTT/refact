@@ -1513,7 +1513,7 @@ async fn run_streaming_generation(
         if result.tool_calls_raw.is_empty() && !allowed_tools.is_empty() {
             if let Some((cleaned_content, recovered_calls)) =
                 tool_call_recovery::recover_tool_calls_from_chatml_content(
-                    &result.content,
+                    &result.raw_content,
                     &allowed_tools,
                 )
             {
@@ -1529,7 +1529,7 @@ async fn run_streaming_generation(
         if result.tool_calls_raw.is_empty() && !allowed_tools.is_empty() {
             if let Some((cleaned_content, recovered_calls, source)) =
                 tool_call_recovery_oss::recover_tool_calls_from_oss_text(
-                    &result.content,
+                    &result.raw_content,
                     &allowed_tools,
                 )
             {
