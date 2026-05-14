@@ -12,7 +12,7 @@ codegen-units = 16
 
 [package]
 name = "refact-lsp"
-version = "8.0.3"
+version = "8.0.4"
 edition = "2021"
 build = "build.rs"
 
