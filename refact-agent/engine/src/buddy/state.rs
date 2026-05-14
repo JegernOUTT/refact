@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
 use rand::Rng;
@@ -83,6 +84,7 @@ const DIRTY_THRESHOLD: u8 = 40;
 const BORED_THRESHOLD: u8 = 60;
 const LONELY_THRESHOLD: u8 = 40;
 const PET_TICK_SECONDS: u64 = 15;
+static PERSONA_CACHE_VERSION: AtomicU64 = AtomicU64::new(0);
 
 struct PersonalitySeed {
     id: &'static str,
@@ -257,6 +259,25 @@ pub fn random_personality(rng: &mut impl Rng) -> BuddyPersonalityProfile {
             resilience: roll_trait(rng, seed.resilience),
         },
     }
+}
+
+pub fn persona_cache_version() -> u64 {
+    PERSONA_CACHE_VERSION.load(Ordering::SeqCst)
+}
+
+pub fn mark_persona_cache_dirty() {
+    PERSONA_CACHE_VERSION.fetch_add(1, Ordering::SeqCst);
+}
+
+pub fn render_persona_block(state: &BuddyState) -> String {
+    format!(
+        "You are {}, a {} ({}).\n{}\n\nPersonality voice: {}",
+        state.identity.name,
+        state.personality.archetype_label,
+        state.personality.vibe,
+        state.personality.summary,
+        state.personality.prompt
+    )
 }
 
 fn stage_name(stage: u32) -> &'static str {
@@ -460,6 +481,7 @@ pub fn reroll_personality(state: &mut BuddyState) {
     let mut rng = rand::thread_rng();
     state.personality = random_personality(&mut rng);
     sync_state(state);
+    mark_persona_cache_dirty();
 }
 
 fn maybe_advance_stage(state: &mut BuddyState) -> bool {
@@ -757,4 +779,34 @@ pub fn apply_care_action(
         serde_json::to_string(state).unwrap_or_default() != before,
         message,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_persona_block_formats_buddy_identity() {
+        let mut state = default_buddy_state();
+        state.identity.name = "Pixel".to_string();
+        state.personality.archetype_label = "Helper Sprite".to_string();
+        state.personality.vibe = "Playful, quirky, helpful".to_string();
+        state.personality.summary = "An energetic helper.".to_string();
+        state.personality.prompt = "Use warm humor.".to_string();
+
+        assert_eq!(
+            render_persona_block(&state),
+            "You are Pixel, a Helper Sprite (Playful, quirky, helpful).\nAn energetic helper.\n\nPersonality voice: Use warm humor."
+        );
+    }
+
+    #[test]
+    fn personality_cache_invalidates_on_reroll() {
+        let mut state = default_buddy_state();
+        let before = persona_cache_version();
+
+        reroll_personality(&mut state);
+
+        assert!(persona_cache_version() > before);
+    }
 }

@@ -62,6 +62,7 @@ pub async fn mix_setup_messages(
             .collect(),
         chat_meta,
         &None,
+        "setup",
     )
     .await;
 

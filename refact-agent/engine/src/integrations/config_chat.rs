@@ -212,6 +212,7 @@ pub async fn mix_config_messages(
                     .collect(),
                 chat_meta,
                 &None,
+                "configurator",
             )
             .await,
         ),

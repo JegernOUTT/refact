@@ -1175,6 +1175,12 @@ pub async fn buddy_enqueue_event(gcx: Arc<ARwLock<GlobalContext>>, event: BuddyR
     }
 }
 
+pub async fn buddy_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> Option<BuddySnapshot> {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    lock.as_ref().map(|svc| svc.snapshot())
+}
+
 pub async fn report_error_persisted(
     gcx: Arc<ARwLock<GlobalContext>>,
     error_type: &str,

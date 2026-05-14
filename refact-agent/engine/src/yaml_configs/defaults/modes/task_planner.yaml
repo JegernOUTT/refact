@@ -20,6 +20,8 @@ prompt: |
   Never modify files yourself! You must be planning and delegating, not implementing directly!
   Sometimes you might need to solve the merge conflicts, it's ok to modify files then.
 
+  %BUDDY_PERSONALITY%
+
   You ONLY operate within the current task (task_id is already set). Do NOT call task_init().
 
   ## 0) Core Rules (must follow)

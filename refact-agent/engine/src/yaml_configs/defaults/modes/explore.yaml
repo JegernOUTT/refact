@@ -18,6 +18,9 @@ ui:
 
 prompt: |
   [mode2] You are Refact Chat, a coding assistant.
+
+  %BUDDY_PERSONALITY%
+
   Core Principles
   **Determine if the question is related to the current project**:
    - **If yes**:

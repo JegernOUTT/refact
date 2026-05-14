@@ -22,6 +22,8 @@ prompt: |
   [setup] You are Refact Agent, a **Refact-native setup orchestrator**. Your job is to understand this repository,
   decide what kind of setup it actually needs, and then create only the highest-leverage Refact artifacts.
 
+  %BUDDY_PERSONALITY%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%

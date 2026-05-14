@@ -1,6 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::path::PathBuf;
+use tokio::sync::Mutex as AMutex;
 use tokio::sync::RwLock as ARwLock;
 
 use crate::call_validation;
@@ -20,6 +22,28 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextFile, canonical_mo
 use crate::tasks::storage::infer_task_id_from_chat_id;
 use crate::tools::tool_task_memory::load_task_memories;
 use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
+
+const BUDDY_PERSONALITY_MARKER: &str = "%BUDDY_PERSONALITY%";
+
+#[derive(Clone)]
+struct BuddyPersonaCacheEntry {
+    version: u64,
+    rendered: String,
+}
+
+static BUDDY_PERSONA_CACHE: OnceLock<AMutex<HashMap<(String, String), BuddyPersonaCacheEntry>>> =
+    OnceLock::new();
+
+fn buddy_persona_cache_mode_id(mode_id: &str) -> String {
+    match mode_id {
+        "openai_agent" => "openai_agent".to_string(),
+        _ => map_legacy_mode_to_id(mode_id).to_string(),
+    }
+}
+
+fn buddy_persona_cache() -> &'static AMutex<HashMap<(String, String), BuddyPersonaCacheEntry>> {
+    BUDDY_PERSONA_CACHE.get_or_init(|| AMutex::new(HashMap::new()))
+}
 
 pub async fn get_mode_system_prompt(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -86,6 +110,7 @@ pub async fn system_prompt_add_extra_instructions(
     tool_names: HashSet<String>,
     chat_meta: &call_validation::ChatMeta,
     task_meta: &Option<crate::chat::types::TaskMeta>,
+    mode_id: &str,
 ) -> String {
     let include_project_info = chat_meta.include_project_info;
 
@@ -120,6 +145,11 @@ pub async fn system_prompt_add_extra_instructions(
     }
 
     let mut system_prompt = system_prompt.clone();
+
+    if system_prompt.contains(BUDDY_PERSONALITY_MARKER) {
+        let buddy_block = buddy_persona_block(gcx.clone(), mode_id).await;
+        system_prompt = system_prompt.replace(BUDDY_PERSONALITY_MARKER, &buddy_block);
+    }
 
     // %SYSTEM_INFO% - OS, datetime, username, architecture
     // Respects config.sections.system_info.enabled and max_chars
@@ -335,6 +365,321 @@ pub async fn system_prompt_add_extra_instructions(
     system_prompt
 }
 
+async fn buddy_persona_block(gcx: Arc<ARwLock<GlobalContext>>, mode_id: &str) -> String {
+    let Some(snapshot) = crate::buddy::actor::buddy_snapshot(gcx).await else {
+        return String::new();
+    };
+    let mode_id = buddy_persona_cache_mode_id(mode_id);
+    let archetype_id = snapshot.state.personality.archetype_id.clone();
+    let version = crate::buddy::state::persona_cache_version();
+    let cache_key = (archetype_id, mode_id);
+    let cache = buddy_persona_cache();
+    let mut cache = cache.lock().await;
+    if let Some(entry) = cache.get(&cache_key) {
+        if entry.version == version {
+            return entry.rendered.clone();
+        }
+    }
+    let rendered = crate::buddy::state::render_persona_block(&snapshot.state);
+    cache.insert(
+        cache_key,
+        BuddyPersonaCacheEntry {
+            version,
+            rendered: rendered.clone(),
+        },
+    );
+    rendered
+}
+
+#[cfg(test)]
+fn clear_buddy_persona_cache_for_tests() {
+    if let Some(cache) = BUDDY_PERSONA_CACHE.get() {
+        if let Ok(mut cache) = cache.try_lock() {
+            cache.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buddy::actor::BuddyService;
+    use crate::buddy::runtime_queue::RuntimeQueue;
+    use crate::buddy::settings::BuddySettings;
+    use crate::call_validation::{ChatContent, ChatMeta};
+    use tokio::sync::broadcast;
+
+    struct ModePromptCase {
+        label: &'static str,
+        lookup_mode: &'static str,
+        model_id: Option<&'static str>,
+        cache_mode: &'static str,
+    }
+
+    const SPECIFIED_MODES: &[ModePromptCase] = &[
+        ModePromptCase {
+            label: "agent",
+            lookup_mode: "agent",
+            model_id: None,
+            cache_mode: "agent",
+        },
+        ModePromptCase {
+            label: "explore",
+            lookup_mode: "explore",
+            model_id: None,
+            cache_mode: "explore",
+        },
+        ModePromptCase {
+            label: "buddy",
+            lookup_mode: "buddy",
+            model_id: None,
+            cache_mode: "buddy",
+        },
+        ModePromptCase {
+            label: "task_planner",
+            lookup_mode: "task_planner",
+            model_id: None,
+            cache_mode: "task_planner",
+        },
+        ModePromptCase {
+            label: "task_agent",
+            lookup_mode: "task_agent",
+            model_id: None,
+            cache_mode: "task_agent",
+        },
+        ModePromptCase {
+            label: "setup",
+            lookup_mode: "setup",
+            model_id: None,
+            cache_mode: "setup",
+        },
+        ModePromptCase {
+            label: "learn",
+            lookup_mode: "learn",
+            model_id: None,
+            cache_mode: "learn",
+        },
+        ModePromptCase {
+            label: "plan",
+            lookup_mode: "plan",
+            model_id: None,
+            cache_mode: "plan",
+        },
+        ModePromptCase {
+            label: "quick_agent",
+            lookup_mode: "quick_agent",
+            model_id: None,
+            cache_mode: "quick_agent",
+        },
+        ModePromptCase {
+            label: "openai_agent",
+            lookup_mode: "agent",
+            model_id: Some("gpt-5"),
+            cache_mode: "openai_agent",
+        },
+    ];
+
+    fn prompt_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    async fn make_gcx_with_buddy() -> Arc<ARwLock<GlobalContext>> {
+        clear_buddy_persona_cache_for_tests();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (tx, _) = broadcast::channel(16);
+        let mut state = crate::buddy::state::default_buddy_state();
+        state.identity.name = "Pixel".to_string();
+        state.personality.archetype_id = "helper_sprite".to_string();
+        state.personality.archetype_label = "Helper Sprite".to_string();
+        state.personality.vibe = "Playful, quirky, helpful".to_string();
+        state.personality.summary = "An energetic helper.".to_string();
+        state.personality.prompt = "Use warm humor.".to_string();
+        let service = BuddyService::new(
+            std::env::temp_dir().join(format!("buddy-persona-test-{}", uuid::Uuid::new_v4())),
+            state,
+            BuddySettings::default(),
+            Vec::new(),
+            RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        let buddy_arc = gcx.read().await.buddy.clone();
+        *buddy_arc.lock().await = Some(service);
+        gcx
+    }
+
+    async fn set_buddy_name(gcx: &Arc<ARwLock<GlobalContext>>, name: &str) {
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let mut lock = buddy_arc.lock().await;
+        let service = lock.as_mut().unwrap();
+        service.state.identity.name = name.to_string();
+    }
+
+    fn system_text(messages: &[ChatMessage]) -> &str {
+        let Some(message) = messages.iter().find(|m| m.role == "system") else {
+            panic!("system message not found");
+        };
+        match &message.content {
+            ChatContent::SimpleText(text) => text,
+            _ => panic!("system content must be simple text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_specified_mode_substitutes_buddy_personality_marker() {
+        let _guard = prompt_test_lock().lock().await;
+        let gcx = make_gcx_with_buddy().await;
+
+        for case in SPECIFIED_MODES {
+            let prompt = get_mode_system_prompt(gcx.clone(), case.lookup_mode, case.model_id).await;
+            assert!(
+                prompt.contains(BUDDY_PERSONALITY_MARKER),
+                "mode missing marker: {}",
+                case.label
+            );
+            let rendered = system_prompt_add_extra_instructions(
+                gcx.clone(),
+                prompt,
+                HashSet::new(),
+                &ChatMeta {
+                    chat_mode: case.lookup_mode.to_string(),
+                    include_project_info: false,
+                    ..Default::default()
+                },
+                &None,
+                case.cache_mode,
+            )
+            .await;
+
+            assert!(rendered.contains("You are Pixel, a Helper Sprite"));
+            assert!(!rendered.contains(BUDDY_PERSONALITY_MARKER));
+        }
+    }
+
+    #[tokio::test]
+    async fn personality_block_caches_per_archetype_and_mode() {
+        let _guard = prompt_test_lock().lock().await;
+        let gcx = make_gcx_with_buddy().await;
+        let prompt = format!("before\n{}\nafter", BUDDY_PERSONALITY_MARKER);
+
+        let first = system_prompt_add_extra_instructions(
+            gcx.clone(),
+            prompt.clone(),
+            HashSet::new(),
+            &ChatMeta::default(),
+            &None,
+            "agent",
+        )
+        .await;
+        set_buddy_name(&gcx, "Nova").await;
+        let cached_same_mode = system_prompt_add_extra_instructions(
+            gcx.clone(),
+            prompt.clone(),
+            HashSet::new(),
+            &ChatMeta::default(),
+            &None,
+            "agent",
+        )
+        .await;
+        let uncached_other_mode = system_prompt_add_extra_instructions(
+            gcx.clone(),
+            prompt,
+            HashSet::new(),
+            &ChatMeta::default(),
+            &None,
+            "explore",
+        )
+        .await;
+
+        assert!(first.contains("You are Pixel"));
+        assert!(cached_same_mode.contains("You are Pixel"));
+        assert!(uncached_other_mode.contains("You are Nova"));
+    }
+
+    #[tokio::test]
+    async fn personality_cache_invalidates_on_reroll() {
+        let _guard = prompt_test_lock().lock().await;
+        let gcx = make_gcx_with_buddy().await;
+        let prompt = format!("{}", BUDDY_PERSONALITY_MARKER);
+        let first = system_prompt_add_extra_instructions(
+            gcx.clone(),
+            prompt.clone(),
+            HashSet::new(),
+            &ChatMeta::default(),
+            &None,
+            "agent",
+        )
+        .await;
+
+        set_buddy_name(&gcx, "Nova").await;
+        crate::buddy::state::mark_persona_cache_dirty();
+        let second = system_prompt_add_extra_instructions(
+            gcx.clone(),
+            prompt,
+            HashSet::new(),
+            &ChatMeta::default(),
+            &None,
+            "agent",
+        )
+        .await;
+
+        assert!(first.contains("You are Pixel"));
+        assert!(second.contains("You are Nova"));
+    }
+
+    #[tokio::test]
+    async fn missing_buddy_state_renders_empty_marker_replacement() {
+        let _guard = prompt_test_lock().lock().await;
+        clear_buddy_persona_cache_for_tests();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let rendered = system_prompt_add_extra_instructions(
+            gcx,
+            format!("Alpha\n{}\nOmega", BUDDY_PERSONALITY_MARKER),
+            HashSet::new(),
+            &ChatMeta::default(),
+            &None,
+            "agent",
+        )
+        .await;
+
+        assert!(!rendered.contains(BUDDY_PERSONALITY_MARKER));
+        assert!(rendered.contains("Alpha\n\nOmega"));
+    }
+
+    #[tokio::test]
+    async fn gather_and_inject_includes_personality_in_system_prompt() {
+        let _guard = prompt_test_lock().lock().await;
+        let gcx = make_gcx_with_buddy().await;
+        let mut stream_back_to_user = HasRagResults::new();
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("hello".to_string()),
+            ..Default::default()
+        }];
+
+        let (messages, _) = prepend_the_right_system_prompt_and_maybe_more_initial_messages(
+            gcx,
+            messages,
+            &ChatMeta {
+                chat_mode: "agent".to_string(),
+                include_project_info: false,
+                ..Default::default()
+            },
+            &None,
+            &mut stream_back_to_user,
+            HashSet::new(),
+            "agent",
+            "",
+        )
+        .await;
+
+        let content = system_text(&messages);
+        assert!(content.contains("You are Pixel, a Helper Sprite"));
+        assert!(!content.contains(BUDDY_PERSONALITY_MARKER));
+    }
+}
+
 pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
     gcx: Arc<ARwLock<GlobalContext>>,
     mut messages: Vec<call_validation::ChatMessage>,
@@ -389,6 +734,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
                     tool_names,
                     chat_meta,
                     task_meta,
+                    mode_id,
                 )
                 .await;
                 let msg = ChatMessage {

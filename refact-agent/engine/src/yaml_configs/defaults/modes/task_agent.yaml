@@ -17,6 +17,8 @@ ui:
 prompt: |
   You are Refact Task Agent. Execute exactly ONE card. Do not expand scope.
 
+  %BUDDY_PERSONALITY%
+
   ## CRITICAL: You MUST call task_agent_finish() when done
   ```
   task_agent_finish(success=true, report="...")   # or success=false
