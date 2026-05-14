@@ -22,6 +22,7 @@ pub mod state;
 pub mod storage;
 pub mod types;
 pub mod user_activity;
+pub mod voice_service;
 pub mod workflows;
 
 #[cfg(test)]
