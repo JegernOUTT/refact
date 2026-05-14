@@ -38,7 +38,7 @@ pub mod buddy;
 pub mod file_edit;
 mod tool_ask_questions;
 pub(crate) mod tool_buddy_create_draft;
-mod tool_buddy_create_issue;
+pub(crate) mod tool_buddy_create_issue;
 pub(crate) mod tool_buddy_get_context;
 pub(crate) mod tool_buddy_get_logs;
 mod tool_buddy_launch_investigation;

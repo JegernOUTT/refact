@@ -361,6 +361,27 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
         Box::new(crate::tools::buddy::memory::ToolBuddyMemoryMerge {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::buddy::user_prefs::ToolBuddyUserPrefList {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::buddy::user_prefs::ToolBuddyUserPrefUpsert {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::buddy::user_prefs::ToolBuddyUserPrefRemove {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::buddy::refact_engine::ToolRefactEngineClone {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::buddy::refact_engine::ToolRefactEngineSearch {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::buddy::refact_engine::ToolRefactEngineCat {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::buddy::integrations::ToolBuddyOpenIssue {
+            config_path: config_path.clone(),
+        }),
     ];
 
     let chat_management_tools: Vec<Box<dyn Tool + Send>> = vec![
