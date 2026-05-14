@@ -1,0 +1,48 @@
+schema_version: 2
+id: buddy_model_cost_optimizer
+title: Model/Cost Optimizer
+description: Review recent model usage signals and suggest cost-aware defaults.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 4
+  model_type: buddy
+  n_ctx: 24000
+  max_new_tokens: 800
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You review model usage evidence for obvious cost or latency improvements.
+    Keep suggestions practical and avoid changing behavior without clear benefit.
+    Speak only when there is a simple user-facing nudge.
+
+    Steps:
+    1. Read the model usage and cost evidence.
+    2. Identify one concise optimization or decide the current setup is fine.
+    3. Speak when a friendly recommendation would help the user.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - cat
+  - buddy_log_activity
+  - buddy_speak

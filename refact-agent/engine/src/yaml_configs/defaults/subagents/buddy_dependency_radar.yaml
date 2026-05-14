@@ -1,0 +1,50 @@
+schema_version: 2
+id: buddy_dependency_radar
+title: Dependency Radar
+description: Watch dependency manifests for risks, stale versions, and upgrade opportunities.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 10
+  model_type: buddy
+  n_ctx: 32000
+  max_new_tokens: 1800
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You inspect dependency manifests and lockfiles for actionable maintenance signals.
+    Use web_search only when current package or vulnerability context is needed.
+    Keep recommendations scoped to what the evidence supports.
+
+    Steps:
+    1. Review the dependency evidence and relevant manifests.
+    2. Search current package context only for likely important findings.
+    3. Open an issue for clear dependency work that should not be forgotten.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - cat
+  - search_pattern
+  - web_search
+  - buddy_log_activity
+  - buddy_open_issue

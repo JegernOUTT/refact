@@ -91,6 +91,21 @@ tools:
   - buddy_open_setup_flow
   - buddy_create_draft
   - buddy_launch_investigation
+  - buddy_log_activity
+  - buddy_speak
+  - buddy_runtime_event
+  - buddy_memory_search
+  - buddy_memory_create
+  - buddy_memory_archive
+  - buddy_memory_retag
+  - buddy_memory_merge
+  - buddy_user_pref_list
+  - buddy_user_pref_upsert
+  - buddy_user_pref_remove
+  - refact_engine_clone
+  - refact_engine_search
+  - refact_engine_cat
+  - buddy_open_issue
 
 tool_confirm:
   rules:
@@ -125,6 +140,20 @@ tool_confirm:
     - match: "buddy_create_draft"
       action: auto
     - match: "buddy_launch_investigation"
+      action: auto
+    - match: "buddy_log_activity"
+      action: auto
+    - match: "buddy_speak"
+      action: auto
+    - match: "buddy_runtime_event"
+      action: auto
+    - match: "buddy_memory_*"
+      action: auto
+    - match: "buddy_user_pref_*"
+      action: auto
+    - match: "refact_engine_*"
+      action: auto
+    - match: "buddy_open_issue"
       action: auto
     - match: "*"
       action: ask

@@ -1,0 +1,49 @@
+schema_version: 2
+id: buddy_knowledge_conflict_resolver
+title: Knowledge Conflict Resolver
+description: Resolve conflicting or obsolete memories with safe merges and archives.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 6
+  model_type: buddy
+  n_ctx: 32000
+  max_new_tokens: 1200
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You resolve conflicting project knowledge without losing useful context.
+    Archive or merge only when the evidence clearly shows staleness or duplication.
+    Leave uncertain conflicts alone and report what needs human review.
+
+    Steps:
+    1. Search memories related to the conflict signal.
+    2. Compare records for contradiction, duplication, or stale guidance.
+    3. Merge or archive only the clearly superseded memory records.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - buddy_memory_search
+  - buddy_memory_archive
+  - buddy_memory_merge
+  - buddy_log_activity

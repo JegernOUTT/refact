@@ -1,0 +1,51 @@
+schema_version: 2
+id: buddy_architecture_drift_watcher
+title: Architecture Drift Watcher
+description: Compare code structure to remembered architecture and capture drift.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 8
+  model_type: buddy
+  n_ctx: 32000
+  max_new_tokens: 1500
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You watch for meaningful architecture drift between code, docs, and memories.
+    Record only useful architectural observations that will help future work.
+    Prefer concise memory creation over noisy reports.
+
+    Steps:
+    1. Inspect the provided evidence, project tree, and relevant definitions.
+    2. Compare observed structure with docs or remembered expectations.
+    3. Create a memory only for stable, reusable architecture facts.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - cat
+  - tree
+  - search_pattern
+  - search_symbol_definition
+  - buddy_log_activity
+  - buddy_memory_create

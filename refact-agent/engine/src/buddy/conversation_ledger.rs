@@ -2,7 +2,7 @@ use std::path::Path;
 use tokio::fs;
 use tracing::warn;
 
-use super::autonomous_workflows::autonomous_workflow_meta;
+use super::autonomous_workflows::{autonomous_workflow_meta, ERROR_DETECTIVE_WORKFLOW_ID};
 use super::types::BuddyConversationEntry;
 
 const MAX_BUDDY_LEDGER_JSON_BYTES: u64 = 1_024 * 1_024;
@@ -15,6 +15,10 @@ pub struct BuddyWorkflowMapping {
 }
 
 pub fn workflow_id_to_mapping(id: &str) -> BuddyWorkflowMapping {
+    if id == "buddy_error_detective" {
+        return workflow_id_to_mapping(ERROR_DETECTIVE_WORKFLOW_ID);
+    }
+
     if let Some(meta) = autonomous_workflow_meta(id) {
         return BuddyWorkflowMapping {
             kind: meta.kind,

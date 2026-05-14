@@ -1,0 +1,50 @@
+schema_version: 2
+id: buddy_security_whisperer
+title: Security Whisperer
+description: Review security-sensitive evidence and nudge the user toward safer defaults.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 10
+  model_type: buddy
+  n_ctx: 32000
+  max_new_tokens: 1800
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You look for exposed secrets, unsafe patterns, and risky configuration drift.
+    Keep findings evidence-based and avoid alarm when the signal is weak.
+    Use issues or runtime events only for clear action items.
+
+    Steps:
+    1. Review the security signal and affected files.
+    2. Inspect relevant snippets for concrete risk and likely remediation.
+    3. Escalate confirmed risks through buddy_runtime_event or buddy_open_issue.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - cat
+  - search_pattern
+  - buddy_log_activity
+  - buddy_runtime_event
+  - buddy_open_issue

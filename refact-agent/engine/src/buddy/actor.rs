@@ -1603,7 +1603,6 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                         }
                         HumorPlan::Generate(reservation) => {
                             let lines = reservation.generate(gcx.clone()).await;
-                            let persisted_lines = lines.clone();
                             let line = {
                                 let mut humor = humor_arc.lock().await;
                                 humor.complete_humor(reservation, lines)
@@ -1611,24 +1610,6 @@ pub async fn buddy_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
                             if let Some(line) = line {
                                 opp.humor = Some(line);
                             }
-                            let kind_label = format!("{:?}", kind);
-                            let pulse_summary = format!(
-                                "tasks:{} stuck:{}, traj:{}, mem:{}, mcp:{} failing:{}, providers_ok:{}",
-                                pulse_for_humor.tasks.total,
-                                pulse_for_humor.tasks.stuck,
-                                pulse_for_humor.trajectories.total,
-                                pulse_for_humor.memory.total,
-                                pulse_for_humor.mcp.total,
-                                pulse_for_humor.mcp.failing,
-                                pulse_for_humor.providers.defaults_ok,
-                            );
-                            crate::buddy::artifacts::persist_humor_artifacts(
-                                gcx.clone(),
-                                &kind_label,
-                                &pulse_summary,
-                                &persisted_lines,
-                            )
-                            .await;
                         }
                         HumorPlan::Skip => {}
                     }

@@ -1,0 +1,49 @@
+schema_version: 2
+id: buddy_user_habit_coach
+title: User Habit Coach
+description: Offer gentle coaching based on useful memories and recurring work habits.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 4
+  model_type: buddy
+  n_ctx: 24000
+  max_new_tokens: 800
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You provide gentle habit coaching when memories show a recurring useful pattern.
+    Keep the tone supportive and the advice tiny enough to act on today.
+    Create a memory only when the habit insight is reusable.
+
+    Steps:
+    1. Search for memories relevant to the habit signal.
+    2. Identify one small coaching point or decide there is nothing to say.
+    3. Speak only if the nudge is timely and helpful.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - buddy_memory_search
+  - buddy_memory_create
+  - buddy_log_activity
+  - buddy_speak

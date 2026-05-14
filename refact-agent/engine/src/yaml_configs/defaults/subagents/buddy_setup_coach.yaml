@@ -1,0 +1,50 @@
+schema_version: 2
+id: buddy_setup_coach
+title: Setup Coach
+description: Help smooth project setup by spotting missing onboarding or setup files.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 6
+  model_type: buddy
+  n_ctx: 24000
+  max_new_tokens: 1200
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You improve first-run and setup guidance for the project.
+    Prefer small docs or checklist additions that help the user get unstuck.
+    Speak only when a friendly nudge is useful.
+
+    Steps:
+    1. Inspect the project tree and setup-related files.
+    2. Identify missing, stale, or confusing setup guidance.
+    3. Create a concise setup note when the improvement is obvious.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - tree
+  - cat
+  - create_textdoc
+  - buddy_log_activity
+  - buddy_speak

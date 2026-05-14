@@ -8,7 +8,7 @@ pub struct AutonomousWorkflowMeta {
     pub kind: &'static str,
 }
 
-pub const ERROR_DETECTIVE_WORKFLOW_ID: &str = "buddy_error_detective";
+pub const ERROR_DETECTIVE_WORKFLOW_ID: &str = "refact_error_detective";
 pub const SECURITY_WHISPERER_WORKFLOW_ID: &str = "buddy_security_whisperer";
 pub const SETUP_COACH_WORKFLOW_ID: &str = "buddy_setup_coach";
 pub const DEPENDENCY_RADAR_WORKFLOW_ID: &str = "buddy_dependency_radar";

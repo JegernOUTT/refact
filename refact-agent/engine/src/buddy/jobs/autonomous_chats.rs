@@ -11,7 +11,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
-use crate::buddy::actor::{make_runtime_event, redact_sensitive, validate_workflow_id};
+use crate::buddy::actor::{
+    buddy_apply, make_runtime_event, redact_sensitive, validate_workflow_id, BuddyMutation,
+};
 use crate::buddy::autonomous_workflows::{
     autonomous_workflow_meta, is_autonomous_workflow_id, AutonomousWorkflowMeta,
     ARCHITECTURE_DRIFT_WORKFLOW_ID, BEHAVIOR_LEARNER_WORKFLOW_ID, DEPENDENCY_RADAR_WORKFLOW_ID,
@@ -28,8 +30,6 @@ use crate::call_validation::ChatMessage;
 use crate::global_context::GlobalContext;
 use crate::stats::event::LlmCallEvent;
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub const AUTONOMOUS_BUDDY_CHAT_SUBAGENT: &str = "buddy_autonomous_chat";
 #[cfg_attr(not(test), allow(dead_code))]
 pub const AUTONOMOUS_PROMPT_CAP_CHARS: usize = 8_000;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -454,6 +454,45 @@ fn autonomous_runtime_event(
     ));
     event.chat_id = Some(chat_id.to_string());
     event
+}
+
+fn called_buddy_log_activity(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| {
+        message.tool_calls.as_ref().is_some_and(|tool_calls| {
+            tool_calls
+                .iter()
+                .any(|tool_call| tool_call.function.name == "buddy_log_activity")
+        })
+    })
+}
+
+fn last_assistant_text(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .map(|message| message.content.content_text_only())
+        .unwrap_or_default()
+}
+
+fn default_autonomous_activity(
+    spec: &AutonomousBuddyChatSpec,
+    chat_id: &str,
+    report_text: &str,
+) -> BuddyActivity {
+    let description = crate::llm::safe_truncate(report_text.trim(), 80).to_string();
+    BuddyActivity {
+        icon: spec.icon.clone(),
+        title: format!("Buddy ran {}", spec.workflow_id),
+        description: if description.is_empty() {
+            "Autonomous Buddy workflow completed without a final assistant summary.".to_string()
+        } else {
+            description
+        },
+        timestamp: Utc::now().to_rfc3339(),
+        activity_type: spec.workflow_id.clone(),
+        chat_id: Some(chat_id.to_string()),
+    }
 }
 
 async fn execute_autonomous_spec(
@@ -1767,18 +1806,18 @@ pub async fn run_autonomous_buddy_chat(
         return Err("autonomous chats disabled".to_string());
     }
 
-    let (messages, max_steps) = build_autonomous_messages(gcx.clone(), &spec).await?;
+    let (messages, max_steps, tools) = build_autonomous_messages(gcx.clone(), &spec).await?;
 
     let mut config = crate::subchat::resolve_subchat_config(
         gcx.clone(),
-        AUTONOMOUS_BUDDY_CHAT_SUBAGENT,
+        &spec.workflow_id,
         true,
         Some(format!("buddy-{}-{}", spec.workflow_id, Uuid::new_v4())),
         Some(spec.title.clone()),
         None,
         None,
         None,
-        Some(vec![]),
+        Some(tools),
         max_steps,
         false,
         None,
@@ -1799,29 +1838,16 @@ pub async fn run_autonomous_buddy_chat(
         .chat_id
         .clone()
         .ok_or_else(|| "autonomous buddy chat did not return a chat_id".to_string())?;
-    let report_text = result
-        .messages
-        .iter()
-        .rev()
-        .find(|msg| msg.role == "assistant")
-        .map(|msg| msg.content.content_text_only())
-        .unwrap_or_default();
-    let persisted = crate::buddy::artifacts::persist_autonomous_report_artifacts(
-        gcx,
-        &spec.workflow_id,
-        &spec.title,
-        &spec.signal_hash,
-        &chat_id,
-        &report_text,
-    )
-    .await;
-    if persisted > 0 {
-        tracing::debug!(
-            "buddy: persisted {} artifact(s) for autonomous workflow {} chat {}",
-            persisted,
-            spec.workflow_id,
-            chat_id
-        );
+    if !called_buddy_log_activity(&result.messages) {
+        let report_text = last_assistant_text(&result.messages);
+        buddy_apply(
+            gcx,
+            BuddyMutation {
+                activity: Some(default_autonomous_activity(&spec, &chat_id, &report_text)),
+                ..Default::default()
+            },
+        )
+        .await;
     }
     Ok(chat_id)
 }
@@ -1830,45 +1856,35 @@ pub async fn run_autonomous_buddy_chat(
 async fn build_autonomous_messages(
     gcx: Arc<ARwLock<GlobalContext>>,
     spec: &AutonomousBuddyChatSpec,
-) -> Result<(Vec<ChatMessage>, usize), String> {
+) -> Result<(Vec<ChatMessage>, usize, Vec<String>), String> {
     let subagent_config = crate::yaml_configs::customization_registry::get_subagent_config(
         gcx,
-        AUTONOMOUS_BUDDY_CHAT_SUBAGENT,
+        &spec.workflow_id,
         None,
     )
     .await
-    .ok_or_else(|| {
-        format!(
-            "subagent config '{}' not found",
-            AUTONOMOUS_BUDDY_CHAT_SUBAGENT
-        )
-    })?;
+    .ok_or_else(|| format!("subagent config '{}' not found", spec.workflow_id))?;
 
     let system_prompt = subagent_config.messages.system_prompt.ok_or_else(|| {
         format!(
             "messages.system_prompt not defined for subagent '{}'",
-            AUTONOMOUS_BUDDY_CHAT_SUBAGENT
+            spec.workflow_id
         )
     })?;
     let user_template = subagent_config.messages.user_template.ok_or_else(|| {
         format!(
             "messages.user_template not defined for subagent '{}'",
-            AUTONOMOUS_BUDDY_CHAT_SUBAGENT
+            spec.workflow_id
         )
     })?;
 
-    let max_steps = subagent_config
-        .subchat
-        .max_steps
-        .unwrap_or(1)
-        .max(1)
-        .min(10);
+    let max_steps = subagent_config.subchat.max_steps.unwrap_or(1).max(1);
     let user_prompt = render_autonomous_template(&user_template, spec);
     let messages = vec![
         ChatMessage::new("system".to_string(), system_prompt),
         ChatMessage::new("user".to_string(), user_prompt),
     ];
-    Ok((messages, max_steps))
+    Ok((messages, max_steps, subagent_config.tools))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2092,7 +2108,7 @@ async fn execute_built_autonomous_job(
         chat_id: Some(chat_id.clone()),
     };
     let mut runtime_event = make_runtime_event(
-        "buddy_autonomous_chat",
+        definition.meta.id,
         definition.meta.title,
         definition.meta.id,
         &format!("{}:{}", definition.meta.id, signal_hash),
@@ -3265,6 +3281,13 @@ async fn execute_dependency_radar_with_evidence(
 
 #[cfg(test)]
 mod tests {
+    mod workflow_migration {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/buddy/tests/workflow_migration.rs"
+        ));
+    }
+
     use super::*;
     use crate::buddy::autonomous_workflows::AUTONOMOUS_BUDDY_WORKFLOWS;
     use crate::buddy::scheduler::BuddyJobContext;
@@ -3272,7 +3295,6 @@ mod tests {
     use crate::buddy::types::{BuddyFact, BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
     use crate::call_validation::ChatContent;
     use crate::stats::event::LlmCallEvent;
-    use crate::yaml_configs::customization_types::SubagentConfig;
 
     fn init_temp_git_repo() -> (tempfile::TempDir, git2::Repository) {
         let dir = tempfile::tempdir().unwrap();
@@ -3450,9 +3472,9 @@ mod tests {
 
     #[test]
     fn signal_hash_is_stable_and_changes_with_signal() {
-        let first = signal_hash(["buddy_error_detective", "a", "b"]);
-        let second = signal_hash(["buddy_error_detective", "a", "b"]);
-        let changed = signal_hash(["buddy_error_detective", "a", "c"]);
+        let first = signal_hash(["refact_error_detective", "a", "b"]);
+        let second = signal_hash(["refact_error_detective", "a", "b"]);
+        let changed = signal_hash(["refact_error_detective", "a", "c"]);
         let boundary_a = signal_hash(["ab", "c"]);
         let boundary_b = signal_hash(["a", "bc"]);
 
@@ -4086,12 +4108,12 @@ mod tests {
         buddy_event.chat_id = "user-buddy-conversation".to_string();
         let mut report_event = test_llm_event(2, true, 1_000, 1_000, 0.01);
         report_event.mode = "buddy".to_string();
-        report_event.chat_id = "buddy-buddy_error_detective-report".to_string();
+        report_event.chat_id = "buddy-refact_error_detective-report".to_string();
 
         let input_events = model_cost_input_events(&[buddy_event.clone(), report_event]);
 
         assert!(is_autonomous_buddy_workflow_identifier(
-            "buddy-buddy_error_detective-550e8400-e29b-41d4-a716-446655440000"
+            "buddy-refact_error_detective-550e8400-e29b-41d4-a716-446655440000"
         ));
         assert!(!is_autonomous_buddy_workflow_identifier(
             "user-buddy-conversation"
@@ -4240,24 +4262,6 @@ mod tests {
             assert!(!rendered.contains(raw), "raw secret leaked: {rendered}");
         }
         assert!(rendered.contains("[REDACTED"));
-    }
-
-    #[test]
-    fn autonomous_yaml_defaults_to_stateless_no_tools_report_sections() {
-        let config: SubagentConfig = serde_yaml::from_str(include_str!(
-            "../../yaml_configs/defaults/subagents/buddy_autonomous_chat.yaml"
-        ))
-        .unwrap();
-        let system_prompt = config.messages.system_prompt.as_deref().unwrap_or_default();
-
-        assert!(!config.subchat.stateful);
-        assert!(config.tools.is_empty());
-        assert!(system_prompt.contains("Summary"));
-        assert!(system_prompt.contains("Evidence"));
-        assert!(system_prompt.contains("Risk or opportunity"));
-        assert!(system_prompt.contains("Suggested next steps"));
-        assert!(system_prompt.contains("Artifacts"));
-        assert!(system_prompt.contains("memories_to_add"));
     }
 
     #[test]
@@ -4680,9 +4684,10 @@ mod tests {
             "Check token=promptsecret",
             "Found password=evidencesecret",
         );
-        let (messages, max_steps) = build_autonomous_messages(gcx, &spec).await.unwrap();
+        let (messages, max_steps, tools) = build_autonomous_messages(gcx, &spec).await.unwrap();
 
-        assert_eq!(max_steps, 1);
+        assert_eq!(max_steps, 10);
+        assert!(tools.contains(&"buddy_log_activity".to_string()));
         assert_eq!(messages.len(), 2);
         let ChatContent::SimpleText(user_prompt) = &messages[1].content else {
             panic!("expected simple text user prompt");

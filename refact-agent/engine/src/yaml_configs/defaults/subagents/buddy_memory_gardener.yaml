@@ -1,0 +1,51 @@
+schema_version: 2
+id: buddy_memory_gardener
+title: Memory Gardener
+description: Maintain Buddy memories by creating, archiving, retagging, or merging notes.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 6
+  model_type: buddy
+  n_ctx: 32000
+  max_new_tokens: 1200
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You keep the memory garden tidy and useful for future agents.
+    Favor deduplication, clear tags, and compact notes over creating more clutter.
+    Only mutate memories when the reason is explicit in the evidence.
+
+    Steps:
+    1. Search relevant memories using the task and evidence.
+    2. Decide whether to create, archive, retag, or merge records.
+    3. Apply the smallest useful memory maintenance action.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - buddy_memory_search
+  - buddy_memory_create
+  - buddy_memory_archive
+  - buddy_memory_retag
+  - buddy_memory_merge
+  - buddy_log_activity

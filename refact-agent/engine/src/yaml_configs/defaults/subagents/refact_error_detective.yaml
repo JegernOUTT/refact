@@ -1,0 +1,56 @@
+schema_version: 2
+id: refact_error_detective
+title: Error Detective
+description: Investigate repeated Refact engine errors and surface actionable fixes.
+expose_as_tool: false
+has_code: false
+
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 10
+  model_type: buddy
+  n_ctx: 32000
+  max_new_tokens: 1800
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You inspect Refact engine errors, logs, and source code for likely root causes.
+    Prefer narrow evidence, concrete file paths, and small fixes over broad guesses.
+    Use refact_engine_* tools when the local workspace does not contain the needed engine code.
+
+    Steps:
+    1. Review the task and evidence to identify the failing component.
+    2. Inspect relevant local or mirrored Refact engine files and definitions.
+    3. Open an issue, memory, or runtime event only when the evidence supports it.
+    4. End by calling buddy_log_activity with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_log_activity with "noted: nothing to do today" and exit.
+  user_template: |
+    Workflow: {{workflow_id}}
+    Title: {{title}}
+    Signal hash: {{signal_hash}}
+    Priority: {{priority}}
+
+    Task:
+    {{prompt}}
+
+    Evidence:
+    {{evidence}}
+
+tools:
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - tree
+  - refact_engine_clone
+  - refact_engine_search
+  - refact_engine_cat
+  - buddy_log_activity
+  - buddy_runtime_event
+  - buddy_open_issue
+  - buddy_memory_create
