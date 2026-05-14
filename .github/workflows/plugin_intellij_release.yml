@@ -178,7 +178,19 @@ jobs:
           CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
-        run: ./gradlew publishPlugin
+        run: |
+          set +e
+          ./gradlew publishPlugin 2>&1 | tee publishPlugin.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$status" -eq 0 ]]; then
+            exit 0
+          fi
+          if grep -q "plugin already contains version" publishPlugin.log; then
+            echo "JetBrains Marketplace already contains version ${{ steps.setupvars.outputs.plugin_version }}; treating publish as successful for an idempotent release rerun."
+            exit 0
+          fi
+          exit "$status"
 
       - name: Upload JetBrains plugin to release
         if: startsWith(github.ref, 'refs/tags/release/v')
