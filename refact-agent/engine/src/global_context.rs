@@ -257,6 +257,7 @@ pub struct GlobalContext {
     pub ext_cache_generation: Arc<std::sync::atomic::AtomicU64>,
     pub buddy: Arc<AMutex<Option<crate::buddy::actor::BuddyService>>>,
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
+    pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
 }
 
 pub type SharedGlobalContext = Arc<ARwLock<GlobalContext>>; // TODO: remove this type alias, confusing
@@ -508,6 +509,13 @@ pub async fn create_global_context(
         let path = crate::files_correction::canonical_path(&cmdline.workspace_folder);
         workspace_dirs = vec![path];
     }
+    let user_activity_project_root = workspace_dirs
+        .first()
+        .cloned()
+        .unwrap_or_else(|| cache_dir.clone());
+    let user_activity =
+        crate::buddy::user_activity::UserActivityRing::load(user_activity_project_root.as_path())
+            .await;
     let cx = GlobalContext {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         cmdline: cmdline.clone(),
@@ -558,6 +566,7 @@ pub async fn create_global_context(
         ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         buddy: Arc::new(AMutex::new(None)),
         buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
+        user_activity: Arc::new(AMutex::new(user_activity)),
     };
     let gcx = Arc::new(ARwLock::new(cx));
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
@@ -577,6 +586,7 @@ pub mod tests {
         let config_dir = std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&cache_dir);
         let _ = std::fs::create_dir_all(&config_dir);
+        let user_activity = crate::buddy::user_activity::UserActivityRing::load(&cache_dir).await;
 
         let cmdline = CommandLine {
             ping_message: "pong".to_string(),
@@ -659,6 +669,7 @@ pub mod tests {
             ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             buddy: Arc::new(AMutex::new(None)),
             buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
+            user_activity: Arc::new(AMutex::new(user_activity)),
         };
         Arc::new(ARwLock::new(cx))
     }

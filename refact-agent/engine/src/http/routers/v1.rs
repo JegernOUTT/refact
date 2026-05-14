@@ -737,6 +737,14 @@ pub fn make_v1_router() -> Router {
         .route("/mcp/oauth/status", get(handle_v1_mcp_oauth_status))
         .route("/mcp/oauth/cancel", post(handle_v1_mcp_oauth_cancel))
         .route("/buddy", get(buddy::handle_v1_buddy_snapshot))
+        .route(
+            "/buddy/user_action",
+            post(buddy::handle_v1_buddy_user_action),
+        )
+        .route(
+            "/buddy/user_activity",
+            get(buddy::handle_v1_buddy_user_activity),
+        )
         .route("/buddy/settings", get(buddy::handle_v1_buddy_settings_get))
         .route(
             "/buddy/settings",

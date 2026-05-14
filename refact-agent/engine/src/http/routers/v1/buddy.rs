@@ -1,5 +1,6 @@
 use axum::Extension;
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::response::Result;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use crate::buddy::diagnostics::DiagnosticContext;
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::settings::MAX_PALETTE_INDEX;
 use crate::buddy::types::{BuddyActivity, BuddyCareAction, BuddyConversationEntry, BuddySuggestion};
+use crate::buddy::user_activity::{time_of_day_pattern, UserAction};
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 
@@ -25,6 +27,38 @@ pub struct BuddyConversationMeta {
 #[derive(Debug, Deserialize)]
 pub struct BuddyConversationCreateRequest {
     pub title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserActivityQuery {
+    pub hours: Option<u32>,
+}
+
+pub async fn handle_v1_buddy_user_action(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    axum::Json(action): axum::Json<UserAction>,
+) -> Result<StatusCode, ScratchError> {
+    let user_activity = gcx.read().await.user_activity.clone();
+    let mut ring = user_activity.lock().await;
+    ring.push(action);
+    if let Err(e) = ring.persist().await {
+        tracing::warn!("buddy: failed to persist user activity: {}", e);
+    }
+    Ok(StatusCode::OK)
+}
+
+pub async fn handle_v1_buddy_user_activity(
+    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    Query(query): Query<UserActivityQuery>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let user_activity = gcx.read().await.user_activity.clone();
+    let ring = user_activity.lock().await;
+    let actions = ring.last_hours(query.hours.unwrap_or(24));
+    let pattern = time_of_day_pattern(&actions);
+    Ok(axum::Json(serde_json::json!({
+        "actions": actions,
+        "time_of_day_pattern": pattern,
+    })))
 }
 
 pub async fn handle_v1_buddy_snapshot(
