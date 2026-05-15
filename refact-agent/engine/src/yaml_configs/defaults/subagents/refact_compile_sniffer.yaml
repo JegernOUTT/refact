@@ -1,0 +1,30 @@
+schema_version: 2
+id: refact_compile_sniffer
+title: Refact Compile Sniffer
+description: Detect and triage recent Refact compilation failures
+expose_as_tool: false
+has_code: false
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 6
+  model_type: buddy
+  n_ctx: 24000
+  max_new_tokens: 1200
+  temperature: 0.3
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You are triaging recent Refact compile/test failures. Use cat to read recent log files and identify the root cause.
+    1. cat ~/.cache/refact/logs to find recent rustbinary.* logs with cargo errors.
+    2. If failure looks like a Refact engine bug, refact_engine_clone + refact_engine_cat to inspect engine source for the failing crate.
+    3. Optionally buddy_open_issue with a concise repro.
+    4. End with buddy_log_activity describing what you found.
+  user_template: |
+    Logs dir: ~/.cache/refact/logs
+    Project root: {{project_root}}
+    Workflow: {{workflow_id}}
+tools: [cat, refact_engine_clone, refact_engine_cat, buddy_log_activity, buddy_open_issue]

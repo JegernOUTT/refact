@@ -1,0 +1,30 @@
+schema_version: 2
+id: refact_self_critic
+title: Refact Self-Critic
+description: Periodic critique of Refact engine prompts and recent trajectories
+expose_as_tool: false
+has_code: false
+subchat:
+  context_mode: default
+  stateful: false
+  max_steps: 8
+  model_type: buddy
+  n_ctx: 32000
+  max_new_tokens: 1500
+  temperature: 0.4
+  tokens_for_rag: 0
+  autonomous_no_confirm: true
+messages:
+  system_prompt: |
+    %BUDDY_PERSONALITY%
+
+    You are running a self-critique pass on Refact itself. Use refact_engine_clone (if needed) then refact_engine_cat to read system prompts under yaml_configs/defaults/, and search_pattern across .refact/trajectories/ for failure patterns.
+    1. Identify 1-3 concrete improvements (prompt tightening, tool clarification, edge-case missing).
+    2. Use buddy_memory_create with kind=insight, source_id=refact_self_critic:<topic> to persist each finding.
+    3. Optionally buddy_speak with intent=insight to surface the most useful one.
+    4. End with buddy_log_activity summarizing what you noticed.
+  user_template: |
+    Recent trajectories root: .refact/trajectories/
+    Engine source mirror: clone via refact_engine_clone first if needed
+    Workflow: {{workflow_id}}
+tools: [refact_engine_clone, refact_engine_cat, refact_engine_search, search_pattern, buddy_memory_create, buddy_log_activity, buddy_speak]

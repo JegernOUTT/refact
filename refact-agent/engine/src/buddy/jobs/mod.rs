@@ -5,6 +5,8 @@ pub mod greeting;
 pub mod health_watcher;
 pub mod proactive_suggestions;
 pub mod quest_prompt;
+pub mod refact_compile_sniffer;
+pub mod refact_self_critic;
 pub mod speaker_insight;
 pub mod speaker_memory_pulse_commentary;
 pub mod speaker_win;

@@ -62,6 +62,7 @@ pub struct AutonomousBuddyChatSpec {
     pub title: String,
     pub prompt: String,
     pub evidence: String,
+    pub project_root: String,
     pub signal_hash: String,
     pub icon: String,
     pub badge: String,
@@ -86,11 +87,17 @@ impl AutonomousBuddyChatSpec {
             title,
             prompt,
             evidence,
+            project_root: String::new(),
             signal_hash,
             icon: String::new(),
             badge: String::new(),
             priority: "normal".to_string(),
         }
+    }
+
+    pub fn with_project_root(mut self, project_root: impl Into<String>) -> Self {
+        self.project_root = project_root.into();
+        self
     }
 
     pub fn with_display(
@@ -536,7 +543,7 @@ fn default_autonomous_activity(
     }
 }
 
-async fn execute_autonomous_spec(
+pub(crate) async fn execute_autonomous_spec(
     gcx: Arc<ARwLock<GlobalContext>>,
     ctx: &BuddyJobContext,
     spec: AutonomousBuddyChatSpec,
@@ -1937,6 +1944,7 @@ fn render_autonomous_template(template: &str, spec: &AutonomousBuddyChatSpec) ->
         ("{{icon}}", spec.icon.as_str()),
         ("{{badge}}", spec.badge.as_str()),
         ("{{priority}}", spec.priority.as_str()),
+        ("{{project_root}}", spec.project_root.as_str()),
         ("{{prompt}}", prompt.as_str()),
         ("{{evidence}}", evidence.as_str()),
     ];

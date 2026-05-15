@@ -161,6 +161,12 @@ impl BuddyScheduler {
         s.jobs
             .push(Box::new(super::jobs::autonomous_chats::ErrorDetectiveJob));
         s.jobs.push(Box::new(
+            super::jobs::refact_compile_sniffer::RefactCompileSnifferJob,
+        ));
+        s.jobs.push(Box::new(
+            super::jobs::refact_self_critic::RefactSelfCriticJob,
+        ));
+        s.jobs.push(Box::new(
             super::jobs::autonomous_chats::SecurityWhispererJob,
         ));
         s.jobs

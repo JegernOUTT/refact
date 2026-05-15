@@ -9,6 +9,8 @@ pub struct AutonomousWorkflowMeta {
 }
 
 pub const ERROR_DETECTIVE_WORKFLOW_ID: &str = "refact_error_detective";
+pub const REFACT_SELF_CRITIC_WORKFLOW_ID: &str = "refact_self_critic";
+pub const REFACT_COMPILE_SNIFFER_WORKFLOW_ID: &str = "refact_compile_sniffer";
 pub const SECURITY_WHISPERER_WORKFLOW_ID: &str = "buddy_security_whisperer";
 pub const SETUP_COACH_WORKFLOW_ID: &str = "buddy_setup_coach";
 pub const DEPENDENCY_RADAR_WORKFLOW_ID: &str = "buddy_dependency_radar";
@@ -26,6 +28,22 @@ pub const AUTONOMOUS_BUDDY_WORKFLOWS: &[AutonomousWorkflowMeta] = &[
         title: "Error Detective",
         icon: "🕵️",
         badge: "Error Detective",
+        priority: "high",
+        kind: "system",
+    },
+    AutonomousWorkflowMeta {
+        id: REFACT_SELF_CRITIC_WORKFLOW_ID,
+        title: "Refact Self-Critic",
+        icon: "🪞",
+        badge: "Self-Critic",
+        priority: "normal",
+        kind: "system",
+    },
+    AutonomousWorkflowMeta {
+        id: REFACT_COMPILE_SNIFFER_WORKFLOW_ID,
+        title: "Refact Compile Sniffer",
+        icon: "🧯",
+        badge: "Compile Sniffer",
         priority: "high",
         kind: "system",
     },
