@@ -371,7 +371,7 @@ async fn vectorize_thread(
             doc_path: cpath.clone().into(),
             doc_text: None,
         };
-        if let Err(_) = doc.update_text_from_disk(gcx.clone()).await {
+        if let Err(_) = crate::files_in_workspace::update_document_text_from_disk(&mut doc, gcx.clone()).await {
             info!("{} cannot read, deleting from index", last_30_chars); // don't care what the error is, trivial (or privacy)
             match vecdb_handler_arc
                 .lock()

@@ -48,11 +48,7 @@ use crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first;
 //   ~/.config/refact/indexing.yaml
 //   ~/path/to/your/project/.refact/indexing.yaml
 
-#[derive(Debug, Eq, Hash, PartialEq, Clone)]
-pub struct Document {
-    pub doc_path: PathBuf,
-    pub doc_text: Option<Rope>,
-}
+pub use refact_ast::Document;
 
 pub async fn get_file_text_from_memory_or_disk(
     global_context: Arc<ARwLock<GlobalContext>>,
@@ -111,74 +107,29 @@ pub async fn filter_privacy_allowed_files(
         .collect()
 }
 
-impl Document {
-    pub fn new(doc_path: &PathBuf) -> Self {
-        Self {
-            doc_path: doc_path.clone(),
-            doc_text: None,
+pub async fn update_document_text_from_disk(
+    doc: &mut Document,
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> Result<(), String> {
+    match read_file_from_disk(load_privacy_if_needed(gcx.clone()).await, &doc.doc_path).await {
+        Ok(res) => {
+            doc.doc_text = Some(res);
+            return Ok(());
         }
+        Err(e) => return Err(e),
     }
+}
 
-    pub async fn update_text_from_disk(
-        &mut self,
-        gcx: Arc<ARwLock<GlobalContext>>,
-    ) -> Result<(), String> {
-        match read_file_from_disk(load_privacy_if_needed(gcx.clone()).await, &self.doc_path).await {
-            Ok(res) => {
-                self.doc_text = Some(res);
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
+pub async fn get_document_text_or_read_from_disk(
+    doc: &mut Document,
+    gcx: Arc<ARwLock<GlobalContext>>,
+) -> Result<String, String> {
+    if doc.doc_text.is_some() {
+        return Ok(doc.doc_text.as_ref().unwrap().to_string());
     }
-
-    pub async fn get_text_or_read_from_disk(
-        &mut self,
-        gcx: Arc<ARwLock<GlobalContext>>,
-    ) -> Result<String, String> {
-        if self.doc_text.is_some() {
-            return Ok(self.doc_text.as_ref().unwrap().to_string());
-        }
-        read_file_from_disk(load_privacy_if_needed(gcx.clone()).await, &self.doc_path)
-            .await
-            .map(|x| x.to_string())
-    }
-
-    pub fn update_text(&mut self, text: &String) {
-        self.doc_text = Some(Rope::from_str(text));
-    }
-
-    pub fn text_as_string(&self) -> Result<String, String> {
-        if let Some(r) = &self.doc_text {
-            return Ok(r.to_string());
-        }
-        return Err(format!("no text loaded in {}", self.doc_path.display()));
-    }
-
-    pub fn does_text_look_good(&self) -> Result<(), String> {
-        // Some simple tests to find if the text is suitable to parse (not generated or compressed code)
-        assert!(self.doc_text.is_some());
-        let r = self.doc_text.as_ref().unwrap();
-
-        let total_chars = r.chars().count();
-        let total_lines = r.lines().count();
-        let avg_line_length = total_chars / total_lines;
-        if avg_line_length > 150 {
-            return Err("generated, avg line length > 150".to_string());
-        }
-
-        // example: hl.min.js
-        let total_spaces = r.chars().filter(|x| x.is_whitespace()).count();
-        let spaces_percentage = total_spaces as f32 / total_chars as f32;
-        if total_lines >= 5 && spaces_percentage <= 0.05 {
-            return Err(format!(
-                "generated or compressed, {:.1}% spaces < 5%",
-                100.0 * spaces_percentage
-            ));
-        }
-
-        Ok(())
-    }
+    read_file_from_disk(load_privacy_if_needed(gcx.clone()).await, &doc.doc_path)
+        .await
+        .map(|x| x.to_string())
 }
 
 pub struct CacheCorrection {

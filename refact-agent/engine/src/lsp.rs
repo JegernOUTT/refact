@@ -189,8 +189,7 @@ impl LspBackend {
         }
         .ok_or_else(|| internal_error("document not found"))?;
         let mut doc_snapshot = doc.read().await.clone();
-        let txt = doc_snapshot
-            .get_text_or_read_from_disk(self.gcx.clone())
+        let txt = crate::files_in_workspace::get_document_text_or_read_from_disk(&mut doc_snapshot, self.gcx.clone())
             .await
             .map_err(internal_error)?;
         let path_string = path.to_string_lossy().to_string();

@@ -29,9 +29,7 @@ impl FileSplitter {
         global_context: Arc<ARwLock<GlobalContext>>,
     ) -> Result<Vec<SplitResult>, String> {
         let path = doc.doc_path.clone();
-        let text = match doc
-            .clone()
-            .get_text_or_read_from_disk(global_context.clone())
+        let text = match crate::files_in_workspace::get_document_text_or_read_from_disk(&mut doc.clone(), global_context.clone())
             .await
         {
             Ok(s) => s,

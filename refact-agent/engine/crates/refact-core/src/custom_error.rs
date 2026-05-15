@@ -58,7 +58,7 @@ impl From<(&str, &serde_yaml::Error)> for YamlError {
     }
 }
 
-fn last_n_chars(msg: &str, n: usize) -> String {
+pub fn last_n_chars(msg: &str, n: usize) -> String {
     let mut result: String = msg.chars().rev().take(n).collect::<String>().chars().rev().collect();
     if result.len() == n {
         result.insert_str(0, "...");
