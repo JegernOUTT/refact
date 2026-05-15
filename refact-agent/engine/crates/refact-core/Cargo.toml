@@ -1,0 +1,12 @@
+[package]
+name = "refact-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+axum = { version = "0.6.20", features = ["default", "http2"] }
+hyper = { version = "0.14", features = ["server", "stream"] }
+serde_yaml = "0.9.31"

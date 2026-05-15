@@ -20,10 +20,11 @@ use rusqlite::ffi::sqlite3_auto_extension;
 
 // mods roughly sorted by dependency ↓
 
+pub use refact_core::custom_error;
+
 pub mod background_tasks;
 pub mod buddy;
 pub mod caps;
-pub mod custom_error;
 pub mod global_context;
 pub mod indexing_utils;
 pub mod json_utils;

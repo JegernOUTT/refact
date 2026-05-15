@@ -1,3 +1,13 @@
+[workspace]
+members = [".", "crates/refact-core"]
+resolver = "2"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["rc", "derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "signal", "process"] }
+tracing = "0.1"
+
 [profile.release]
 #debug = true
 strip = true
@@ -47,6 +57,8 @@ shadow-rs = "1.1.0"
 winreg = "0.55.0"
 
 [dependencies]
+
+refact-core = { path = "crates/refact-core" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }
