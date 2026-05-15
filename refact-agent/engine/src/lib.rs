@@ -1,103 +1,245 @@
-#[cfg(test)]
-mod background_tasks;
-#[cfg(test)]
-mod buddy;
-#[cfg(test)]
-mod caps;
-#[cfg(test)]
-mod custom_error;
-#[cfg(test)]
-mod global_context;
-#[cfg(test)]
-mod indexing_utils;
-#[cfg(test)]
-mod json_utils;
-#[cfg(test)]
-mod nicer_logs;
-#[cfg(test)]
-mod version;
-#[cfg(test)]
-mod yaml_configs;
+use std::io::Write;
+use std::env;
+use std::panic;
 
-#[cfg(test)]
-mod ast;
-#[cfg(test)]
-mod at_commands;
-#[cfg(test)]
-mod completion_cache;
-#[cfg(test)]
-mod file_filter;
-#[cfg(test)]
-mod files_blocklist;
-#[cfg(test)]
-mod files_correction;
-#[cfg(test)]
-mod files_in_jsonl;
-#[cfg(test)]
-mod files_in_workspace;
-#[cfg(test)]
-mod fuzzy_search;
-#[cfg(test)]
-mod postprocessing;
-#[cfg(test)]
-mod scratchpad_abstract;
-#[cfg(test)]
-mod scratchpads;
-#[cfg(test)]
-mod subchat;
-#[cfg(test)]
-mod tokens;
-#[cfg(test)]
-mod tools;
-#[cfg(test)]
-mod vecdb;
+use files_correction::canonical_path;
+use integrations::running_integrations;
+use tokio::task::JoinHandle;
+use tracing::{info, Level};
+use tracing_appender;
+use backtrace;
+use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
-#[cfg(test)]
-mod fetch_embedding;
-#[cfg(test)]
-mod forward_to_openai_endpoint;
-#[cfg(test)]
-mod llm;
-#[cfg(test)]
-mod providers;
-#[cfg(test)]
-mod restream;
+use crate::background_tasks::start_background_tasks;
+use crate::lsp::spawn_lsp_task;
+use crate::yaml_configs::create_configs::yaml_configs_try_create_all;
+use crate::yaml_configs::customization_registry::get_project_registry;
+use sqlite_vec::sqlite3_vec_init;
+use rusqlite::ffi::sqlite3_auto_extension;
+
+// mods roughly sorted by dependency ↓
+
+pub mod background_tasks;
+pub mod buddy;
+pub mod caps;
+pub mod custom_error;
+pub mod global_context;
+pub mod indexing_utils;
+pub mod json_utils;
+pub mod nicer_logs;
+pub mod version;
+pub mod yaml_configs;
+
+pub mod ast;
+pub mod at_commands;
+pub mod completion_cache;
+pub mod file_filter;
+pub mod files_blocklist;
+pub mod files_correction;
+pub mod files_in_jsonl;
+pub mod files_in_workspace;
+pub mod fuzzy_search;
+pub mod postprocessing;
+pub mod scratchpad_abstract;
+pub mod scratchpads;
+pub mod subchat;
+pub mod tokens;
+pub mod tools;
+pub mod vecdb;
+
+pub mod fetch_embedding;
+pub mod forward_to_openai_endpoint;
+pub mod llm;
+pub mod providers;
+pub mod restream;
 pub mod worktrees;
 
-#[cfg(test)]
-mod call_validation;
-#[cfg(test)]
-mod chat;
-#[cfg(test)]
-mod http;
-#[cfg(test)]
-mod lsp;
+pub mod call_validation;
+pub mod chat;
+pub mod http;
+pub mod lsp;
 
-#[cfg(test)]
-mod agentic;
-#[cfg(test)]
+pub mod agentic;
 pub mod constants;
-#[cfg(test)]
-mod ext;
-#[cfg(test)]
-mod files_correction_cache;
-#[cfg(test)]
-mod git;
-#[cfg(test)]
-mod integrations;
-#[cfg(test)]
-mod knowledge_graph;
-#[cfg(test)]
-mod knowledge_index;
-#[cfg(test)]
-mod memories;
-#[cfg(test)]
-mod privacy;
-#[cfg(test)]
-mod stats;
-#[cfg(test)]
-mod tasks;
-#[cfg(test)]
-mod trajectory_memos;
-#[cfg(test)]
-mod voice;
+pub mod ext;
+pub mod files_correction_cache;
+pub mod git;
+pub mod integrations;
+pub mod knowledge_graph;
+pub mod knowledge_index;
+pub mod memories;
+pub mod privacy;
+pub mod stats;
+pub mod tasks;
+pub mod trajectory_memos;
+pub mod voice;
+
+pub async fn run() {
+    unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+
+        // Disabling owner validation in Git can theoretically allow code execution, but libgit2 doesn't run
+        // executables, so the original risk doesn't apply. Repos in locations like CARGO_HOME would otherwise
+        // be blocked, plus several more common cases in Windows. IDEs like VSCode and JetBrains already
+        // prompt for trust when adding folders, so we disable the check.
+        let _ = git2::opts::set_verify_owner_validation(false);
+    }
+
+    let cpu_num = std::thread::available_parallelism().unwrap().get();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(std::cmp::max(1, cpu_num / 2))
+        .build_global()
+        .unwrap();
+    let home_dir = canonical_path(
+        home::home_dir()
+            .ok_or(())
+            .expect("failed to find home dir")
+            .to_string_lossy()
+            .to_string(),
+    );
+    let cache_dir = home_dir.join(".cache").join("refact");
+    let config_dir = home_dir.join(".config").join("refact");
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .expect("failed to create cache dir");
+    tokio::fs::create_dir_all(&config_dir)
+        .await
+        .expect("failed to create cache dir");
+    let (gcx, ask_shutdown_receiver, cmdline) =
+        global_context::create_global_context(cache_dir.clone(), config_dir.clone()).await;
+    let mut writer_is_stderr = false;
+    let (logs_writer, _guard) = if cmdline.logs_stderr {
+        writer_is_stderr = true;
+        tracing_appender::non_blocking(std::io::stderr())
+    } else if !cmdline.logs_to_file.is_empty() {
+        tracing_appender::non_blocking(tracing_appender::rolling::RollingFileAppender::new(
+            tracing_appender::rolling::Rotation::NEVER,
+            std::path::Path::new(&cmdline.logs_to_file)
+                .parent()
+                .unwrap(),
+            std::path::Path::new(&cmdline.logs_to_file)
+                .file_name()
+                .unwrap(),
+        ))
+    } else {
+        let _ = write!(std::io::stderr(), "This rust binary keeps logs as files, rotated daily. Try\ntail -f {}/logs/\nor use --logs-stderr for debugging. Any errors will duplicate here in stderr.\n\n", cache_dir.display());
+        tracing_appender::non_blocking(
+            tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix("rustbinary")
+                .max_log_files(30)
+                .build(cache_dir.join("logs"))
+                .unwrap(),
+        )
+    };
+    let my_layer = nicer_logs::CustomLayer::new(
+        logs_writer.clone(),
+        writer_is_stderr,
+        if cmdline.verbose {
+            Level::DEBUG
+        } else {
+            Level::INFO
+        },
+        Level::ERROR,
+        cmdline.lsp_stdin_stdout == 0,
+    );
+    let _tracing = tracing_subscriber::registry().with(my_layer).init();
+
+    panic::set_hook(Box::new(|panic_info| {
+        let backtrace = backtrace::Backtrace::new();
+        tracing::error!("Panic occurred: {:?}\n{:?}", panic_info, backtrace);
+    }));
+
+    match global_context::migrate_to_config_folder(&config_dir, &cache_dir).await {
+        Ok(_) => {}
+        Err(err) => {
+            tracing::error!(
+                "failed to migrate config files from .cache to .config, exiting: {:?}",
+                err
+            );
+        }
+    }
+
+    {
+        let build_info = crate::http::routers::info::get_build_info();
+        for (k, v) in build_info {
+            info!("{:>20} {}", k, v);
+        }
+        info!("cache dir: {}", cache_dir.display());
+        for (arg_n, arg_v) in env::args().enumerate() {
+            info!("cmdline[{}]: {:?}", arg_n, arg_v.as_str());
+        }
+    }
+
+    let byok_config_path = yaml_configs_try_create_all(gcx.clone()).await;
+    if cmdline.only_create_yaml_configs {
+        println!("{}", byok_config_path);
+        std::process::exit(0);
+    }
+
+    let _ = crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+
+    if cmdline.print_customization {
+        if let Some(registry) = get_project_registry(gcx.clone()).await {
+            for e in registry.errors.iter() {
+                eprintln!("{}: {}", e.file_path, e.error);
+            }
+            println!("{}", serde_json::to_string_pretty(&registry).unwrap());
+        } else {
+            eprintln!("Failed to load project registry");
+        }
+        std::process::exit(0);
+    }
+
+    // Buddy starts in background tasks below, so startup import runtime events are best-effort.
+    // The persisted last_report is picked up by Buddy pulse after initialization.
+    let _ = ext::competitor_import::run_global_import(gcx.clone()).await;
+
+    if cmdline.ast {
+        let tmp = Some(
+            crate::ast::ast_indexer_thread::ast_service_init(
+                cmdline.ast_permanent.clone(),
+                cmdline.ast_max_files,
+            )
+            .await,
+        );
+        let mut gcx_locked = gcx.write().await;
+        gcx_locked.ast_service = tmp;
+    }
+
+    // Start or connect to mcp servers
+    let _ = running_integrations::load_integrations(gcx.clone(), &["**/*".to_string()]).await;
+
+    // not really needed, but it's nice to have an error message sooner if there's one
+    let _caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await;
+
+    let mut background_tasks = start_background_tasks(gcx.clone(), &config_dir).await;
+    // vector db will spontaneously start if the downloaded caps and command line parameters are right
+
+    let should_start_http = cmdline.http_port != 0;
+    let should_start_lsp = (cmdline.lsp_port == 0 && cmdline.lsp_stdin_stdout == 1)
+        || (cmdline.lsp_port != 0 && cmdline.lsp_stdin_stdout == 0);
+
+    let mut main_handle: Option<JoinHandle<()>> = None;
+    if should_start_http {
+        main_handle = http::start_server(gcx.clone(), ask_shutdown_receiver).await;
+    }
+    if should_start_lsp {
+        if main_handle.is_none() {
+            // FIXME: this ignores crate::global_context::block_until_signal , important because now we have a database to corrupt
+            main_handle = spawn_lsp_task(gcx.clone(), cmdline.clone()).await;
+        } else {
+            background_tasks.push_back(spawn_lsp_task(gcx.clone(), cmdline.clone()).await.unwrap())
+        }
+    }
+    if main_handle.is_some() {
+        let _ = main_handle.unwrap().await;
+    }
+
+    chat::close_all_chat_sessions(gcx.clone()).await;
+    background_tasks.abort().await;
+    git::checkpoints::abort_init_shadow_repos(gcx.clone()).await;
+    integrations::sessions::stop_sessions(gcx.clone()).await;
+    info!("bb\n");
+}

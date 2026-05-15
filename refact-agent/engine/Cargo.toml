@@ -25,6 +25,10 @@ version = "8.0.4"
 edition = "2021"
 build = "build.rs"
 
+[lib]
+name = "refact_lsp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "refact-lsp"
 path = "src/main.rs"
