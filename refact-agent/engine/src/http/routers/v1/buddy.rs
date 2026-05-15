@@ -248,14 +248,17 @@ pub async fn handle_v1_buddy_settings_update(
             }
             if req.clear_personality_prompt.unwrap_or(false) {
                 service.settings.personality_prompt = None;
+                crate::buddy::state::mark_persona_cache_dirty();
             } else if let Some(prompt) = &req.personality_prompt {
                 service.settings.personality_prompt = Some(prompt.clone());
+                crate::buddy::state::mark_persona_cache_dirty();
             }
             if let Some(v) = req.proactive_enabled {
                 service.settings.proactive_enabled = v;
             }
             if let Some(pi) = req.palette_index {
                 service.state.identity.palette_index = pi;
+                crate::buddy::state::mark_persona_cache_dirty();
                 crate::buddy::state::sync_state(&mut service.state);
                 service.dirty = true;
                 let _ = service.events_tx.send(BuddyEvent::StateUpdated {
