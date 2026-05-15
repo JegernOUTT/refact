@@ -10,6 +10,15 @@ strip = false
 lto = "thin"
 codegen-units = 16
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev.build-override]
+debug = false
+
 [package]
 name = "refact-lsp"
 version = "8.0.4"
