@@ -283,7 +283,7 @@ impl SubagentConfig {
         if ovr.tool.is_some() {
             result.tool = ovr.tool.clone();
         }
-        if ovr.subchat.context_mode != "bare" {
+        if !ovr.subchat.context_mode.is_empty() {
             result.subchat.context_mode = ovr.subchat.context_mode.clone();
         }
         if ovr.subchat.stateful {
@@ -312,6 +312,9 @@ impl SubagentConfig {
         }
         if ovr.subchat.tokens_for_rag.is_some() {
             result.subchat.tokens_for_rag = ovr.subchat.tokens_for_rag;
+        }
+        if ovr.subchat.autonomous_no_confirm.is_some() {
+            result.subchat.autonomous_no_confirm = ovr.subchat.autonomous_no_confirm;
         }
         if ovr.messages.system_prompt.is_some() {
             result.messages.system_prompt = ovr.messages.system_prompt.clone();
@@ -777,6 +780,56 @@ another_extra: 123
         assert!(result.expose_as_tool);
         assert!(result.extra.contains_key("base_extra"));
         assert!(result.extra.contains_key("override_extra"));
+    }
+
+    #[test]
+    fn test_subagent_apply_override_merges_autonomous_no_confirm() {
+        let base: SubagentConfig = serde_yaml::from_str(
+            r#"
+schema_version: 1
+id: base
+subchat:
+  autonomous_no_confirm: false
+"#,
+        )
+        .unwrap();
+        let override_cfg: SubagentConfig = serde_yaml::from_str(
+            r#"
+schema_version: 1
+id: override
+subchat:
+  autonomous_no_confirm: true
+"#,
+        )
+        .unwrap();
+
+        let result = base.apply_override(&override_cfg);
+        assert_eq!(result.subchat.autonomous_no_confirm, Some(true));
+    }
+
+    #[test]
+    fn test_subagent_apply_override_context_mode_back_to_bare() {
+        let base: SubagentConfig = serde_yaml::from_str(
+            r#"
+schema_version: 1
+id: base
+subchat:
+  context_mode: default
+"#,
+        )
+        .unwrap();
+        let override_cfg: SubagentConfig = serde_yaml::from_str(
+            r#"
+schema_version: 1
+id: override
+subchat:
+  context_mode: bare
+"#,
+        )
+        .unwrap();
+
+        let result = base.apply_override(&override_cfg);
+        assert_eq!(result.subchat.context_mode, "bare");
     }
 
     #[test]
