@@ -29,6 +29,7 @@ export * from "./useResizeObserver";
 export * from "./useAutoFocusOnce";
 export * from "./useHideScroll";
 export * from "./useEventBusForApp";
+export * from "./usePostUserAction";
 export {
   useTotalTokenMeteringForChat,
   useTotalUsdForChat,

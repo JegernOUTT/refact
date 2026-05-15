@@ -6,6 +6,8 @@ export type Snippet = {
   code: string;
   path: string;
   basename: string;
+  start_line?: number;
+  end_line?: number;
 };
 
 const initialState: Snippet = {

@@ -18,6 +18,7 @@ import {
 import { ideToolCallResponse, ideSwitchToThread } from "./useEventBusForIDE";
 import { createAction } from "@reduxjs/toolkit";
 import { switchToThread } from "../features/Chat/Thread/actions";
+import { usePostUserAction } from "./usePostUserAction";
 
 export const ideAttachFileToChat = createAction<string>("ide/attachFileToChat");
 
@@ -25,6 +26,7 @@ export function useEventBusForApp() {
   const config = useConfig();
   const dispatch = useAppDispatch();
   const pages = useAppSelector(selectPages);
+  const { postFileOpened, postSnippetSelected } = usePostUserAction();
   const pagesRef = useRef(pages);
   pagesRef.current = pages;
 
@@ -36,10 +38,15 @@ export function useEventBusForApp() {
 
       if (setFileInfo.match(event.data)) {
         dispatch(setFileInfo(event.data.payload));
+        postFileOpened(event.data.payload.path);
       }
 
       if (setSelectedSnippet.match(event.data)) {
         dispatch(setSelectedSnippet(event.data.payload));
+        const snippet = event.data.payload;
+        const line1 = snippet.start_line ?? 1;
+        const line2 = snippet.end_line ?? snippet.code.split("\n").length;
+        postSnippetSelected(snippet.path, line1, line2);
       }
 
       if (newChatAction.match(event.data)) {
@@ -86,5 +93,5 @@ export function useEventBusForApp() {
     return () => {
       window.removeEventListener("message", listener);
     };
-  }, [config.host, dispatch]);
+  }, [config.host, dispatch, postFileOpened, postSnippetSelected]);
 }

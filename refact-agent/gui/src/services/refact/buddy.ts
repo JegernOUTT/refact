@@ -60,6 +60,43 @@ export interface FrontendErrorReport {
   chat_id?: string;
 }
 
+export type UserActionPayload =
+  | { type: "file_opened"; path: string; ts: string }
+  | {
+      type: "snippet_selected";
+      path: string;
+      lines: [number, number];
+      ts: string;
+    }
+  | { type: "tool_approved"; tool_name: string; chat_id: string; ts: string }
+  | { type: "tool_rejected"; tool_name: string; chat_id: string; ts: string }
+  | {
+      type: "command_run";
+      command_preview: string;
+      chat_id: string;
+      ts: string;
+    }
+  | {
+      type: "workspace_changed";
+      folders_added: string[];
+      folders_removed: string[];
+      ts: string;
+    }
+  | {
+      type: "commit_made";
+      sha: string;
+      message_first_line: string;
+      files: number;
+      ts: string;
+    }
+  | { type: "task_failed"; task_id: string; reason_short: string; ts: string }
+  | {
+      type: "chat_started";
+      chat_id: string;
+      first_user_text_preview: string;
+      ts: string;
+    };
+
 export interface BuddyOpportunityDismissResponse {
   snapshot: BuddySnapshot;
 }
@@ -629,6 +666,19 @@ export const buddyApi = createApi({
         }
       },
     }),
+    postUserAction: builder.mutation<undefined, UserActionPayload>({
+      queryFn: async (action, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: `http://127.0.0.1:${port}/v1/buddy/user_action`,
+          method: "POST",
+          body: action,
+        });
+        if (result.error) return { error: result.error };
+        return { data: undefined };
+      },
+    }),
     reportFrontendError: builder.mutation<undefined, FrontendErrorReport>({
       queryFn: async (body, api) => {
         const state = api.getState() as BuddyApiState;
@@ -696,5 +746,6 @@ export const {
   useCreatePulseReportDraftMutation,
   useGetDraftQuery,
   useDeleteDraftMutation,
+  usePostUserActionMutation,
   useReportFrontendErrorMutation,
 } = buddyApi;
