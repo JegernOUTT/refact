@@ -12,8 +12,10 @@ use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
 use crate::buddy::actor::{
-    buddy_apply, make_runtime_event, redact_sensitive, validate_workflow_id, BuddyMutation,
+    buddy_apply, make_runtime_event, redact_sensitive, render_buddy_activity_title,
+    render_buddy_runtime_event, validate_workflow_id, BuddyMutation,
 };
+use crate::buddy::voice_service::VoiceIntent;
 use crate::buddy::autonomous_workflows::{
     autonomous_workflow_meta, is_autonomous_workflow_id, AutonomousWorkflowMeta,
     ARCHITECTURE_DRIFT_WORKFLOW_ID, BEHAVIOR_LEARNER_WORKFLOW_ID, DEPENDENCY_RADAR_WORKFLOW_ID,
@@ -417,41 +419,80 @@ fn build_spec(workflow_id: &str, evidence: AutonomousEvidence) -> AutonomousBudd
     )
 }
 
-fn autonomous_activity(
+async fn autonomous_activity(
+    gcx: Arc<ARwLock<GlobalContext>>,
     spec: &AutonomousBuddyChatSpec,
     chat_id: &str,
     identity_name: &str,
 ) -> BuddyActivity {
+    let fallback_title = format!("{} report saved", spec.title);
+    let description = format!(
+        "{} saved an autonomous {} report in chat {}.",
+        identity_name, spec.badge, chat_id
+    );
+    let title = match crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
+        Some(snapshot) => {
+            render_buddy_activity_title(
+                gcx,
+                snapshot.state.personality,
+                snapshot.state.identity.name,
+                snapshot.pulse,
+                Some(spec.workflow_id.clone()),
+                spec.title.clone(),
+                VoiceIntent::AutonomousReportSaved,
+                fallback_title,
+            )
+            .await
+        }
+        None => fallback_title,
+    };
     BuddyActivity {
         icon: spec.icon.clone(),
-        title: format!("{} report saved", spec.title),
-        description: format!(
-            "{} saved an autonomous {} report in chat {}.",
-            identity_name, spec.badge, chat_id
-        ),
+        title,
+        description,
         timestamp: Utc::now().to_rfc3339(),
         activity_type: spec.workflow_id.clone(),
         chat_id: Some(chat_id.to_string()),
     }
 }
 
-fn autonomous_runtime_event(
+async fn autonomous_runtime_event(
+    gcx: Arc<ARwLock<GlobalContext>>,
     spec: &AutonomousBuddyChatSpec,
     chat_id: &str,
     identity_name: &str,
 ) -> BuddyRuntimeEvent {
+    let fallback_title = format!("{} report ready", spec.title);
+    let fallback_description = format!(
+        "Open {}'s saved chat for {} details.",
+        identity_name, spec.title
+    );
+    let (title, description) = match crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
+        Some(snapshot) => {
+            render_buddy_runtime_event(
+                gcx,
+                snapshot.state.personality,
+                snapshot.state.identity.name,
+                snapshot.pulse,
+                Some(spec.workflow_id.clone()),
+                fallback_description.clone(),
+                "completed",
+                fallback_title,
+                Some(fallback_description.clone()),
+            )
+            .await
+        }
+        None => (fallback_title, Some(fallback_description.clone())),
+    };
     let mut event = make_runtime_event(
         &spec.workflow_id,
-        &format!("{} report ready", spec.title),
+        &title,
         "buddy",
         &format!("{}:{}", spec.workflow_id, spec.signal_hash),
         "completed",
         Some(&spec.priority),
     );
-    event.description = Some(format!(
-        "Open {}'s saved chat for {} details.",
-        identity_name, spec.title
-    ));
+    event.description = description.or(Some(fallback_description));
     event.chat_id = Some(chat_id.to_string());
     event
 }
@@ -503,7 +544,7 @@ async fn execute_autonomous_spec(
     if same_signal(ctx, &spec.signal_hash) {
         return preserve_last_result(ctx);
     }
-    let chat_id = match run_autonomous_buddy_chat(gcx, spec.clone()).await {
+    let chat_id = match run_autonomous_buddy_chat(gcx.clone(), spec.clone()).await {
         Ok(chat_id) => chat_id,
         Err(err) => {
             tracing::warn!("autonomous buddy job {} failed: {}", spec.workflow_id, err);
@@ -511,13 +552,11 @@ async fn execute_autonomous_spec(
         }
     };
     let last = AutonomousLastResult::new(spec.signal_hash.clone(), chat_id.clone());
+    let activity = autonomous_activity(gcx.clone(), &spec, &chat_id, &ctx.identity_name).await;
+    let runtime_event = autonomous_runtime_event(gcx, &spec, &chat_id, &ctx.identity_name).await;
     BuddyJobResult {
-        activity: Some(autonomous_activity(&spec, &chat_id, &ctx.identity_name)),
-        runtime_event: Some(autonomous_runtime_event(
-            &spec,
-            &chat_id,
-            &ctx.identity_name,
-        )),
+        activity: Some(activity),
+        runtime_event: Some(runtime_event),
         last_result: Some(serialize_last_autonomous_result(&last)),
         ..Default::default()
     }
@@ -3442,6 +3481,25 @@ mod tests {
         }
     }
 
+    async fn make_gcx_with_buddy() -> Arc<ARwLock<GlobalContext>> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut state = crate::buddy::state::default_buddy_state();
+        state.identity.name = "Pixel".to_string();
+        let service = crate::buddy::actor::BuddyService::new(
+            std::env::temp_dir().join(format!("buddy-voice-test-{}", uuid::Uuid::new_v4())),
+            state,
+            BuddySettings::default(),
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        let buddy_arc = gcx.read().await.buddy.clone();
+        *buddy_arc.lock().await = Some(service);
+        gcx
+    }
+
     fn write_behavior_trajectory(path: &Path, id: &str, modified_secs: i64) {
         std::fs::write(
             path,
@@ -3555,8 +3613,8 @@ mod tests {
         assert!(!dynamic.completed_at.is_empty());
     }
 
-    #[test]
-    fn autonomous_activity_links_to_generated_buddy_chat() {
+    #[tokio::test]
+    async fn autonomous_activity_links_to_generated_buddy_chat() {
         let spec = AutonomousBuddyChatSpec::new(
             MEMORY_GARDENER_WORKFLOW_ID,
             "Memory Gardener",
@@ -3565,11 +3623,58 @@ mod tests {
         )
         .with_display("🌱", "Memory", "normal");
 
-        let activity = autonomous_activity(&spec, "buddy-chat-1", "Buddy");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let activity = autonomous_activity(gcx, &spec, "buddy-chat-1", "Buddy").await;
 
         assert_eq!(activity.activity_type, MEMORY_GARDENER_WORKFLOW_ID);
         assert_eq!(activity.chat_id.as_deref(), Some("buddy-chat-1"));
         assert!(activity.description.contains("Buddy saved"));
+    }
+
+    #[tokio::test]
+    async fn voice_unavailable_falls_back_to_deterministic_string() {
+        let spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Memory Gardener",
+            "Review memory signals",
+            "memory evidence",
+        )
+        .with_display("🌱", "Memory", "normal");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+
+        let activity = autonomous_activity(gcx.clone(), &spec, "buddy-chat-1", "Pixel").await;
+        let event = autonomous_runtime_event(gcx, &spec, "buddy-chat-1", "Pixel").await;
+
+        assert_eq!(activity.title, "Memory Gardener report saved");
+        assert_eq!(event.title, "Memory Gardener report ready");
+        assert_eq!(
+            event.description.as_deref(),
+            Some("Open Pixel's saved chat for Memory Gardener details.")
+        );
+    }
+
+    #[tokio::test]
+    async fn autonomous_runtime_event_uses_voice_service_when_available() {
+        let (service, renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+            vec![Some("voice ready".to_string())],
+        );
+        let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+        let spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Memory Gardener",
+            "Review memory signals",
+            "memory evidence",
+        )
+        .with_display("🌱", "Memory", "normal");
+        let gcx = make_gcx_with_buddy().await;
+
+        let event = autonomous_runtime_event(gcx, &spec, "buddy-chat-1", "Pixel").await;
+
+        assert_eq!(event.title, "voice ready");
+        assert_eq!(
+            renderer.intent_kinds(),
+            vec!["runtime:completed".to_string()]
+        );
     }
 
     #[test]

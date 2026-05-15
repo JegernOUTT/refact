@@ -91,6 +91,7 @@ where
     };
 
     let buddy_arc = gcx.read().await.buddy.clone();
+    let voice_gcx = gcx.clone();
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     let project_root = project_dirs.into_iter().next();
     let workflow_id_owned = workflow_id.to_string();
@@ -106,18 +107,94 @@ where
             chat_id: None,
         };
 
-        let mut buddy = buddy_arc.lock().await;
-        if let Some(svc) = buddy.as_mut() {
-            let status = if success { "completed" } else { "failed" };
-            svc.complete_runtime_event(&dedupe_key, status);
-            if success {
-                svc.workflow_completed(&workflow_id_owned, xp, activity);
-            } else {
-                svc.workflow_failed(&workflow_id_owned, activity);
+        let mut completed_quest = None;
+        let mut quest_voice_state = None;
+        {
+            let mut buddy = buddy_arc.lock().await;
+            if let Some(svc) = buddy.as_mut() {
+                let status = if success { "completed" } else { "failed" };
+                svc.complete_runtime_event(&dedupe_key, status);
+                if success {
+                    svc.add_activity(activity);
+                    crate::buddy::state::grant_xp(&mut svc.state, xp);
+                    let now = Utc::now().to_rfc3339();
+                    if let Some(ws) = svc
+                        .state
+                        .workflow_summaries
+                        .iter_mut()
+                        .find(|ws| ws.workflow_id == workflow_id_owned)
+                    {
+                        ws.run_count = ws.run_count.saturating_add(1);
+                        ws.last_run = Some(now.clone());
+                        ws.last_outcome = Some("success".to_string());
+                    } else {
+                        svc.state.workflow_summaries.push(
+                            crate::buddy::types::BuddyWorkflowSummary {
+                                workflow_id: workflow_id_owned.clone(),
+                                last_run: Some(now.clone()),
+                                run_count: 1,
+                                last_outcome: Some("success".to_string()),
+                            },
+                        );
+                    }
+                    svc.refresh_active_quest();
+                    svc.dirty = true;
+                    let _ = svc
+                        .events_tx
+                        .send(crate::buddy::events::BuddyEvent::StateUpdated {
+                            state: svc.state.clone(),
+                        });
+                    let reward = svc
+                        .state
+                        .active_quest
+                        .as_ref()
+                        .filter(|quest| quest.status == "active" && quest.progress >= quest.goal)
+                        .map(|quest| quest.reward_xp);
+                    if let Some(reward) = reward {
+                        completed_quest =
+                            crate::buddy::state::complete_active_quest(&mut svc.state);
+                        quest_voice_state = Some((
+                            svc.state.personality.clone(),
+                            svc.state.identity.name.clone(),
+                            svc.pulse.clone(),
+                            reward,
+                        ));
+                        svc.dirty = true;
+                        let _ =
+                            svc.events_tx
+                                .send(crate::buddy::events::BuddyEvent::StateUpdated {
+                                    state: svc.state.clone(),
+                                });
+                    }
+                } else {
+                    svc.workflow_failed(&workflow_id_owned, activity);
+                }
+                if let Some(ref root) = project_root {
+                    svc.append_workflow_transcript(root, &workflow_id_owned, &summary, success)
+                        .await;
+                }
             }
-            if let Some(ref root) = project_root {
-                svc.append_workflow_transcript(root, &workflow_id_owned, &summary, success)
-                    .await;
+        }
+
+        if let (Some(quest), Some((persona, identity_name, pulse, reward))) =
+            (completed_quest, quest_voice_state)
+        {
+            let completed = crate::buddy::actor::complete_quest_with_voice(
+                voice_gcx.clone(),
+                quest,
+                persona,
+                identity_name,
+                pulse,
+            )
+            .await;
+            crate::buddy::actor::buddy_update_speech(voice_gcx.clone(), completed.speech).await;
+            crate::buddy::actor::buddy_apply(voice_gcx.clone(), completed.mutation).await;
+            if reward > 0 {
+                let buddy_arc = voice_gcx.read().await.buddy.clone();
+                let mut buddy = buddy_arc.lock().await;
+                if let Some(svc) = buddy.as_mut() {
+                    svc.grant_xp(reward);
+                }
             }
         }
     });

@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
 use tracing::debug;
-use uuid::Uuid;
 
-use crate::buddy::types::{BuddyFactKind, BuddyPulse};
+use crate::buddy::types::{BuddyFactKind, BuddyPersonalityProfile, BuddyPulse};
+use crate::buddy::voice_service::{SpeechIntent, VoiceCtx, voice_service};
 use crate::global_context::GlobalContext;
 
 pub const HUMOR_BUDGET_PER_HOUR: u32 = 3;
@@ -33,7 +33,6 @@ pub trait HumorGenerator: Send + Sync {
     ) -> Vec<String>;
 }
 
-/// Production generator — calls the configured `chat_buddy_model` via subchat.
 pub struct DefaultHumorGenerator;
 
 #[async_trait]
@@ -44,7 +43,7 @@ impl HumorGenerator for DefaultHumorGenerator {
         summary: String,
         gcx: Arc<RwLock<GlobalContext>>,
     ) -> Vec<String> {
-        generate_via_llm(kind, summary, gcx).await
+        generate_via_voice_service(kind, summary, gcx).await
     }
 }
 
@@ -197,105 +196,63 @@ impl Default for HumorService {
     }
 }
 
-async fn generate_via_llm(
+async fn generate_via_voice_service(
     kind: BuddyFactKind,
     pulse_summary: String,
     gcx: Arc<RwLock<GlobalContext>>,
 ) -> Vec<String> {
-    let buddy_model = {
-        let gcx_locked = gcx.read().await;
-        gcx_locked
-            .caps
-            .as_ref()
-            .map(|c| c.defaults.chat_buddy_model.clone())
-            .unwrap_or_default()
+    let (persona, identity_name, pulse_one_liner) =
+        match crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
+            Some(snapshot) => (
+                snapshot.state.personality,
+                snapshot.state.identity.name,
+                format!(
+                    "{} pending ops, {} stuck tasks",
+                    snapshot.pulse.memory.pending_ops, snapshot.pulse.tasks.stuck
+                ),
+            ),
+            None => (
+                BuddyPersonalityProfile::default(),
+                "Buddy".to_string(),
+                pulse_summary.clone(),
+            ),
+        };
+    let workflow_summary = format!("{:?}: {}", kind, pulse_summary);
+    let ctx = VoiceCtx {
+        persona: &persona,
+        identity_name: identity_name.as_str(),
+        pulse_one_liner,
+        workflow_id: Some("buddy_humor"),
+        workflow_summary: Some(workflow_summary.as_str()),
     };
-    if buddy_model.is_empty() {
-        return vec![];
+    let speech = voice_service()
+        .await
+        .render_speech(gcx, ctx, SpeechIntent::Humor)
+        .await;
+    if speech.text.trim().is_empty() {
+        vec![]
+    } else {
+        vec![speech.text]
     }
-
-    let prompt = format!(
-        "Generate 3 short, friendly, situational one-liners about: {:?} in a software project.\n\
-         Real state: {}. Keep each under 80 chars. No jargon. No fake events.\n\
-         Output as a JSON array of 3 strings.",
-        kind, pulse_summary
-    );
-
-    let messages = vec![crate::call_validation::ChatMessage::new(
-        "user".to_string(),
-        prompt,
-    )];
-
-    let config = match crate::subchat::resolve_subchat_config(
-        gcx.clone(),
-        "buddy_humor",
-        true,
-        Some(format!("buddy-humor-{}", Uuid::new_v4())),
-        Some(format!("Humor for {:?}", kind)),
-        None,
-        None,
-        None,
-        Some(vec![]),
-        1,
-        false,
-        None,
-        "agent".to_string(),
-    )
-    .await
-    {
-        Ok(mut config) => {
-            config.mode = "buddy".to_string();
-            config.buddy_meta = Some(crate::buddy::types::BuddyThreadMeta {
-                is_buddy_chat: true,
-                buddy_chat_kind: "system".to_string(),
-                workflow_id: Some("buddy_humor".to_string()),
-            });
-            config
-        }
-        Err(e) => {
-            debug!("buddy humor: failed to resolve subchat config: {}", e);
-            return vec![];
-        }
-    };
-
-    let result = match crate::subchat::run_subchat(gcx, messages, config).await {
-        Ok(r) => r,
-        Err(e) => {
-            debug!("buddy humor: LLM call failed: {}", e);
-            return vec![];
-        }
-    };
-
-    let text = match result.messages.last().and_then(|m| match &m.content {
-        crate::call_validation::ChatContent::SimpleText(t) => Some(t.clone()),
-        _ => None,
-    }) {
-        Some(t) => t,
-        None => return vec![],
-    };
-
-    let parsed: Vec<String> = parse_json_array(&text);
-    parsed
-        .into_iter()
-        .filter(|l| !l.is_empty() && l.len() <= 100)
-        .take(3)
-        .collect()
 }
 
-fn parse_json_array(text: &str) -> Vec<String> {
-    if let Ok(lines) = serde_json::from_str::<Vec<String>>(text) {
-        return lines;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn humor_generator_routes_through_voice_service() {
+        let (service, renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+            vec![Some("tiny joke".to_string())],
+        );
+        let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+
+        let lines = DefaultHumorGenerator
+            .generate(BuddyFactKind::TaskStuck, "tasks:1 stuck:1".to_string(), gcx)
+            .await;
+
+        assert_eq!(lines, vec!["tiny joke".to_string()]);
+        assert_eq!(renderer.intent_kinds(), vec!["speech:humor".to_string()]);
     }
-    let start = match text.find('[') {
-        Some(i) => i,
-        None => return vec![],
-    };
-    let end = match text.rfind(']') {
-        Some(i) => i,
-        None => return vec![],
-    };
-    if end <= start {
-        return vec![];
-    }
-    serde_json::from_str::<Vec<String>>(&text[start..=end]).unwrap_or_default()
 }

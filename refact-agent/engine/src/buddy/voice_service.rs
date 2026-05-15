@@ -4,9 +4,17 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+#[cfg(test)]
+use std::sync::OnceLock;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+#[cfg(test)]
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use tracing::debug;
 use uuid::Uuid;
@@ -114,6 +122,51 @@ trait VoiceRenderer: Send + Sync {
 
 struct SubchatVoiceRenderer;
 
+#[cfg(test)]
+pub struct TestVoiceRenderer {
+    responses: StdMutex<Vec<Option<String>>>,
+    calls: AtomicUsize,
+    intent_kinds: StdMutex<Vec<String>>,
+}
+
+#[cfg(test)]
+impl TestVoiceRenderer {
+    pub fn new(responses: Vec<Option<String>>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: StdMutex::new(responses),
+            calls: AtomicUsize::new(0),
+            intent_kinds: StdMutex::new(Vec::new()),
+        })
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    pub fn intent_kinds(&self) -> Vec<String> {
+        self.intent_kinds.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl VoiceRenderer for TestVoiceRenderer {
+    async fn render_voice(
+        &self,
+        _gcx: Arc<ARwLock<GlobalContext>>,
+        request: VoiceRenderRequest,
+    ) -> Option<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.intent_kinds.lock().unwrap().push(request.intent_kind);
+        let mut responses = self.responses.lock().unwrap();
+        if responses.is_empty() {
+            None
+        } else {
+            responses.remove(0)
+        }
+    }
+}
+
 #[async_trait]
 impl VoiceRenderer for SubchatVoiceRenderer {
     async fn render_voice(
@@ -126,8 +179,66 @@ impl VoiceRenderer for SubchatVoiceRenderer {
 }
 
 static VOICE_SERVICE: tokio::sync::OnceCell<Arc<VoiceService>> = tokio::sync::OnceCell::const_new();
+#[cfg(test)]
+static TEST_VOICE_SERVICE: OnceLock<StdMutex<Option<Arc<VoiceService>>>> = OnceLock::new();
+#[cfg(test)]
+static TEST_VOICE_SERVICE_LOCK: tokio::sync::OnceCell<Arc<AMutex<()>>> =
+    tokio::sync::OnceCell::const_new();
+
+#[cfg(test)]
+pub struct VoiceServiceTestGuard {
+    _guard: OwnedMutexGuard<()>,
+}
+
+#[cfg(test)]
+impl Drop for VoiceServiceTestGuard {
+    fn drop(&mut self) {
+        if let Some(service) = TEST_VOICE_SERVICE.get() {
+            *service.lock().unwrap() = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_voice_service_override() -> Option<Arc<VoiceService>> {
+    TEST_VOICE_SERVICE
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap()
+        .clone()
+}
+
+#[cfg(test)]
+pub fn test_voice_service_with_responses(
+    responses: Vec<Option<String>>,
+) -> (Arc<VoiceService>, Arc<TestVoiceRenderer>) {
+    let renderer = TestVoiceRenderer::new(responses);
+    (
+        Arc::new(VoiceService::new_with_renderer(renderer.clone())),
+        renderer,
+    )
+}
+
+#[cfg(test)]
+pub async fn install_test_voice_service(service: Arc<VoiceService>) -> VoiceServiceTestGuard {
+    let lock = TEST_VOICE_SERVICE_LOCK
+        .get_or_init(|| async { Arc::new(AMutex::new(())) })
+        .await
+        .clone();
+    let guard = lock.lock_owned().await;
+    *TEST_VOICE_SERVICE
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap() = Some(service);
+    VoiceServiceTestGuard { _guard: guard }
+}
 
 pub async fn voice_service() -> Arc<VoiceService> {
+    #[cfg(test)]
+    if let Some(service) = test_voice_service_override() {
+        return service;
+    }
+
     VOICE_SERVICE
         .get_or_init(|| async { Arc::new(VoiceService::new()) })
         .await
@@ -488,43 +599,6 @@ fn fallback_style(archetype_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
-
-    struct ScriptedRenderer {
-        responses: Mutex<Vec<Option<String>>>,
-        calls: AtomicUsize,
-    }
-
-    impl ScriptedRenderer {
-        fn new(responses: Vec<Option<String>>) -> Arc<Self> {
-            Arc::new(Self {
-                responses: Mutex::new(responses),
-                calls: AtomicUsize::new(0),
-            })
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait]
-    impl VoiceRenderer for ScriptedRenderer {
-        async fn render_voice(
-            &self,
-            _gcx: Arc<ARwLock<GlobalContext>>,
-            _request: VoiceRenderRequest,
-        ) -> Option<String> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().unwrap();
-            if responses.is_empty() {
-                None
-            } else {
-                responses.remove(0)
-            }
-        }
-    }
 
     fn persona(archetype_id: &str) -> BuddyPersonalityProfile {
         BuddyPersonalityProfile {
@@ -550,7 +624,7 @@ mod tests {
     #[tokio::test]
     async fn voice_returns_fallback_when_renderer_returns_none() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let renderer = ScriptedRenderer::new(vec![None]);
+        let renderer = TestVoiceRenderer::new(vec![None]);
         let service = VoiceService::new_with_renderer(renderer.clone());
         let persona = persona("helper_sprite");
         let ctx = voice_ctx(&persona);
@@ -565,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn voice_cache_hits_within_ttl_window() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let renderer = ScriptedRenderer::new(vec![Some("cached sparkle".to_string())]);
+        let renderer = TestVoiceRenderer::new(vec![Some("cached sparkle".to_string())]);
         let service = VoiceService::new_with_renderer(renderer.clone());
         let persona = persona("helper_sprite");
 
@@ -582,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn voice_caps_output_at_80_chars() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let renderer = ScriptedRenderer::new(vec![Some("a".repeat(120))]);
+        let renderer = TestVoiceRenderer::new(vec![Some("a".repeat(120))]);
         let service = VoiceService::new_with_renderer(renderer);
         let persona = persona("helper_sprite");
 
@@ -594,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn voice_strips_newlines() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let renderer = ScriptedRenderer::new(vec![Some("hello\nbuddy\r\nnow".to_string())]);
+        let renderer = TestVoiceRenderer::new(vec![Some("hello\nbuddy\r\nnow".to_string())]);
         let service = VoiceService::new_with_renderer(renderer);
         let persona = persona("helper_sprite");
 
@@ -607,7 +681,7 @@ mod tests {
 
     #[test]
     fn voice_returns_distinct_fallbacks_per_persona_archetype() {
-        let renderer = ScriptedRenderer::new(vec![]);
+        let renderer = TestVoiceRenderer::new(vec![]);
         let service = VoiceService::new_with_renderer(renderer);
         let first_persona = persona("helper_sprite");
         let second_persona = persona("quiet_guardian");

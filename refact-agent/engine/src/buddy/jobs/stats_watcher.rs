@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use super::super::types::{BuddyActivity, BuddySpeechItem, BuddySuggestion};
+use crate::buddy::voice_service::{SpeechIntent, VoiceCtx, voice_service};
 
 const WORKFLOW_MILESTONES: &[u64] = &[10, 50, 100, 500];
 const RECENT_ERROR_WINDOW_SECS: i64 = 3600;
@@ -36,7 +37,7 @@ impl BuddyJob for StatsWatcherJob {
 
     async fn execute(
         &self,
-        _gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+        gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
         ctx: BuddyJobContext,
     ) -> BuddyJobResult {
         let runs = ctx.total_workflow_runs;
@@ -82,18 +83,40 @@ impl BuddyJob for StatsWatcherJob {
 
         for &m in WORKFLOW_MILESTONES {
             if prev_runs < m && runs >= m {
-                let speech = BuddySpeechItem {
-                    id: format!("stats-milestone-{}", m),
-                    text: format!("We've completed {} tasks together!", m),
-                    mood: "happy".to_string(),
-                    scope: "global".to_string(),
-                    persistent: false,
-                    ttl_seconds: 12,
-                    dedupe_key: Some(format!("milestone_{}", m)),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    controls: vec![],
-                    chat_id: None,
+                let fallback_text = format!("We've completed {} tasks together!", m);
+                let mut speech = match crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
+                    Some(snapshot) => {
+                        let pulse_one_liner = format!(
+                            "{} pending ops, {} stuck tasks",
+                            snapshot.pulse.memory.pending_ops, snapshot.pulse.tasks.stuck
+                        );
+                        let voice_ctx = VoiceCtx {
+                            persona: &snapshot.state.personality,
+                            identity_name: snapshot.state.identity.name.as_str(),
+                            pulse_one_liner,
+                            workflow_id: Some("stats_watcher"),
+                            workflow_summary: Some(&fallback_text),
+                        };
+                        voice_service()
+                            .await
+                            .render_speech(gcx.clone(), voice_ctx, SpeechIntent::Milestone)
+                            .await
+                    }
+                    None => BuddySpeechItem {
+                        id: format!("stats-milestone-{}", m),
+                        text: fallback_text,
+                        mood: "happy".to_string(),
+                        scope: "global".to_string(),
+                        persistent: false,
+                        ttl_seconds: 12,
+                        dedupe_key: Some(format!("milestone_{}", m)),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        controls: vec![],
+                        chat_id: None,
+                    },
                 };
+                speech.ttl_seconds = 12;
+                speech.dedupe_key = Some(format!("milestone_{}", m));
                 let activity = BuddyActivity {
                     icon: "🎉".to_string(),
                     title: format!("Milestone: {} tasks completed!", m),

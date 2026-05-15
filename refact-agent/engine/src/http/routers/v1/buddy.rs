@@ -13,6 +13,7 @@ use crate::buddy::pulse_inject::build_buddy_pulse_payload;
 use crate::buddy::settings::MAX_PALETTE_INDEX;
 use crate::buddy::types::{BuddyActivity, BuddyCareAction, BuddyConversationEntry, BuddySuggestion};
 use crate::buddy::user_activity::{time_of_day_pattern, UserAction};
+use crate::buddy::voice_service::SpeechIntent;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 
@@ -207,6 +208,54 @@ pub struct BuddyQuestAcceptRequest {
     pub suggestion_id: String,
 }
 
+async fn refresh_completed_quest_with_voice(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    mut lock: tokio::sync::MutexGuard<'_, Option<crate::buddy::actor::BuddyService>>,
+) {
+    let Some(svc) = lock.as_mut() else {
+        return;
+    };
+    let completed = svc
+        .state
+        .active_quest
+        .as_ref()
+        .map(|quest| quest.status == "active" && quest.progress >= quest.goal)
+        .unwrap_or(false);
+    if !completed {
+        return;
+    }
+    let Some(quest) = crate::buddy::state::complete_active_quest(&mut svc.state) else {
+        return;
+    };
+    let persona = svc.state.personality.clone();
+    let identity_name = svc.state.identity.name.clone();
+    let pulse = svc.pulse.clone();
+    let reward = quest.reward_xp;
+    svc.dirty = true;
+    let _ = svc.events_tx.send(BuddyEvent::StateUpdated {
+        state: svc.state.clone(),
+    });
+    drop(lock);
+
+    let completed = crate::buddy::actor::complete_quest_with_voice(
+        gcx.clone(),
+        quest,
+        persona,
+        identity_name,
+        pulse,
+    )
+    .await;
+    crate::buddy::actor::buddy_update_speech(gcx.clone(), completed.speech).await;
+    crate::buddy::actor::buddy_apply(gcx.clone(), completed.mutation).await;
+    if reward > 0 {
+        let buddy_arc = gcx.read().await.buddy.clone();
+        let mut lock = buddy_arc.lock().await;
+        if let Some(svc) = lock.as_mut() {
+            svc.grant_xp(reward);
+        }
+    }
+}
+
 pub async fn handle_v1_buddy_care(
     Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
     axum::Json(req): axum::Json<BuddyCareRequest>,
@@ -220,7 +269,16 @@ pub async fn handle_v1_buddy_care(
         )
     })?;
 
-    let message = svc.apply_care_action(req.action.clone(), req.toy.as_deref());
+    let (_, message) = crate::buddy::state::apply_care_action(
+        &mut svc.state,
+        req.action.clone(),
+        req.toy.as_deref(),
+    );
+    svc.refresh_active_quest();
+    svc.dirty = true;
+    let _ = svc.events_tx.send(BuddyEvent::StateUpdated {
+        state: svc.state.clone(),
+    });
     let signal_type = format!("care_{}", req.action.as_str());
     let dedupe_key = format!("care_{}", req.action.as_str());
     svc.enqueue_runtime_event(crate::buddy::actor::make_runtime_event(
@@ -243,10 +301,12 @@ pub async fn handle_v1_buddy_care(
         controls: vec![],
         chat_id: None,
     });
+    refresh_completed_quest_with_voice(gcx.clone(), lock).await;
+    let snapshot = crate::buddy::actor::buddy_snapshot(gcx).await;
 
     Ok(axum::Json(serde_json::json!({
         "message": message,
-        "snapshot": svc.snapshot()
+        "snapshot": snapshot
     })))
 }
 
@@ -262,7 +322,18 @@ pub async fn handle_v1_buddy_personality_reroll(
         )
     })?;
 
-    svc.reroll_personality();
+    crate::buddy::state::reroll_personality(&mut svc.state);
+    svc.refresh_active_quest();
+    svc.dirty = true;
+    let _ = svc.events_tx.send(BuddyEvent::StateUpdated {
+        state: svc.state.clone(),
+    });
+    let should_refresh_completed_quest = svc
+        .state
+        .active_quest
+        .as_ref()
+        .map(|quest| quest.status == "active" && quest.progress >= quest.goal)
+        .unwrap_or(false);
     svc.update_speech(crate::buddy::types::BuddySpeechItem {
         id: uuid::Uuid::new_v4().to_string(),
         text: format!(
@@ -278,6 +349,14 @@ pub async fn handle_v1_buddy_personality_reroll(
         controls: vec![],
         chat_id: None,
     });
+
+    if should_refresh_completed_quest {
+        refresh_completed_quest_with_voice(gcx.clone(), lock).await;
+        let snapshot = crate::buddy::actor::buddy_snapshot(gcx).await;
+        return Ok(axum::Json(serde_json::json!({
+            "snapshot": snapshot
+        })));
+    }
 
     Ok(axum::Json(serde_json::json!({
         "snapshot": svc.snapshot()
@@ -334,11 +413,47 @@ pub async fn handle_v1_buddy_quest_accept(
         )
     })?;
 
-    svc.accept_quest(quest);
+    let title = quest.title.clone();
+    let fallback_text = format!("Quest accepted: {title}. I’ll keep score from here.");
+    let speech_id = format!("quest-accept-{}", quest.id);
+    let dedupe_key = format!("quest_accept_{}", quest.quest_type);
+    let controls = quest.controls.clone();
+    let persona = svc.state.personality.clone();
+    let identity_name = svc.state.identity.name.clone();
+    let pulse = svc.pulse.clone();
+    let workflow_id = quest.quest_type.clone();
+
     svc.dismiss_suggestion(&req.suggestion_id);
+    crate::buddy::state::activate_quest(&mut svc.state, quest);
+    svc.dirty = true;
+    let _ = svc.events_tx.send(BuddyEvent::StateUpdated {
+        state: svc.state.clone(),
+    });
+    let snapshot = svc.snapshot();
+    drop(lock);
+
+    let mut speech = crate::buddy::actor::render_buddy_speech(
+        gcx.clone(),
+        persona,
+        identity_name,
+        pulse,
+        Some(workflow_id),
+        fallback_text.clone(),
+        SpeechIntent::QuestAccept,
+        fallback_text,
+    )
+    .await;
+    speech.id = speech_id;
+    speech.ttl_seconds = 12;
+    speech.dedupe_key = Some(dedupe_key);
+    speech.controls = controls;
+    crate::buddy::actor::buddy_update_speech(gcx.clone(), speech).await;
+    let snapshot = crate::buddy::actor::buddy_snapshot(gcx)
+        .await
+        .unwrap_or(snapshot);
 
     Ok(axum::Json(serde_json::json!({
-        "snapshot": svc.snapshot(),
+        "snapshot": snapshot,
         "suggestion": serde_json::to_value::<BuddySuggestion>(suggestion)
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     })))

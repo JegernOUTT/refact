@@ -10,6 +10,7 @@ use indexmap::IndexMap;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::user_activity::UserAction;
+use crate::buddy::voice_service::{VoiceCtx, voice_service};
 use crate::call_validation::{
     ChatContent, ChatMessage, ChatToolCall, ContextFile, PostprocessSettings, SubchatParameters,
 };
@@ -921,6 +922,43 @@ source:
             UserAction::ToolApproved { tool_name, chat_id, .. }
                 if tool_name == "cat" && chat_id == "chat-1"
         )));
+    }
+
+    async fn make_gcx_with_buddy() -> Arc<ARwLock<GlobalContext>> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut state = crate::buddy::state::default_buddy_state();
+        state.identity.name = "Pixel".to_string();
+        let service = crate::buddy::actor::BuddyService::new(
+            std::env::temp_dir().join(format!("buddy-tool-voice-test-{}", uuid::Uuid::new_v4())),
+            state,
+            crate::buddy::settings::BuddySettings::default(),
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        let buddy_arc = gcx.read().await.buddy.clone();
+        *buddy_arc.lock().await = Some(service);
+        gcx
+    }
+
+    #[tokio::test]
+    async fn execute_tools_uses_voice_for_runtime_event_title() {
+        let (service, renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+            vec![Some("voice tool title".to_string())],
+        );
+        let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+        let gcx = make_gcx_with_buddy().await;
+
+        let (title, speech_text) = tool_runtime_event_lines(gcx, "cat", "Thread").await;
+
+        assert_eq!(title, "voice tool title");
+        assert_eq!(
+            speech_text.as_deref(),
+            Some("Using cat to help with 'Thread'...")
+        );
+        assert_eq!(renderer.intent_kinds(), vec!["runtime:started".to_string()]);
     }
 }
 
@@ -2023,6 +2061,38 @@ async fn execute_parallel_batch(
     join_all(futures).await
 }
 
+async fn tool_runtime_event_lines(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    tool_name: &str,
+    chat_label: &str,
+) -> (String, Option<String>) {
+    let fallback_title = format!("Running {} in '{}'", tool_name, chat_label);
+    let fallback_speech = Some(format!(
+        "Using {} to help with '{}'...",
+        tool_name, chat_label
+    ));
+    let Some(snapshot) = crate::buddy::actor::buddy_snapshot(gcx.clone()).await else {
+        return (fallback_title, fallback_speech);
+    };
+    let pulse_one_liner = format!(
+        "{} pending ops, {} stuck tasks",
+        snapshot.pulse.memory.pending_ops, snapshot.pulse.tasks.stuck
+    );
+    let workflow_summary = format!("Using {} to help with '{}'...", tool_name, chat_label);
+    let voice_ctx = VoiceCtx {
+        persona: &snapshot.state.personality,
+        identity_name: snapshot.state.identity.name.as_str(),
+        pulse_one_liner,
+        workflow_id: Some(tool_name),
+        workflow_summary: Some(workflow_summary.as_str()),
+    };
+    let (title, speech) = voice_service()
+        .await
+        .render_runtime_event(gcx, voice_ctx, "started")
+        .await;
+    (title, speech.or(fallback_speech))
+}
+
 pub async fn execute_tools(
     gcx: Arc<ARwLock<GlobalContext>>,
     tool_calls: &[ChatToolCall],
@@ -2089,18 +2159,17 @@ pub async fn execute_tools(
         .map(|tc| (tc.id.clone(), format!("tool_{}", tc.id)))
         .collect();
     for (tc, (_, dedupe_key)) in tool_calls.iter().zip(tool_meta.iter()) {
+        let (title, speech_text) =
+            tool_runtime_event_lines(gcx.clone(), &tc.function.name, &chat_label).await;
         let mut ev = crate::buddy::actor::make_runtime_event(
             "tool_used",
-            &format!("Running {} in '{}'", tc.function.name, chat_label),
+            &title,
             "tool",
             dedupe_key,
             "started",
             None,
         );
-        ev.speech_text = Some(format!(
-            "Using {} to help with '{}'...",
-            tc.function.name, chat_label
-        ));
+        ev.speech_text = speech_text;
         ev.scene = Some("working".to_string());
         ev.chat_id = Some(chat_id.to_string());
         crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;

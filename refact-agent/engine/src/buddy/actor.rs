@@ -29,9 +29,10 @@ use super::snapshot::BuddySnapshot;
 use super::storage::RuntimeQueueRecord;
 use super::types::{
     BuddyActivity, BuddyCareAction, BuddyDraft, BuddyFact, BuddyFactKind, BuddyOpportunity,
-    BuddyPulse, BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem, BuddyState, BuddySuggestion,
-    OpportunityStatus,
+    BuddyPersonalityProfile, BuddyPulse, BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem,
+    BuddyState, BuddySuggestion, OpportunityStatus,
 };
+use super::voice_service::{SpeechIntent, VoiceCtx, VoiceIntent, voice_service};
 
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
 const SUGGESTION_EXPIRY_SECS: i64 = 300;
@@ -300,6 +301,105 @@ pub struct BuddyService {
     pub draft_store: DraftStore,
     pub last_observer_tick: HashMap<&'static str, DateTime<Utc>>,
     pub observers: Vec<Arc<dyn BuddyObserver>>,
+}
+
+pub async fn render_buddy_speech(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    persona: BuddyPersonalityProfile,
+    identity_name: String,
+    pulse: BuddyPulse,
+    workflow_id: Option<String>,
+    workflow_summary: String,
+    intent: SpeechIntent,
+    fallback_text: String,
+) -> BuddySpeechItem {
+    let pulse_one_liner = format!(
+        "{} pending ops, {} stuck tasks",
+        pulse.memory.pending_ops, pulse.tasks.stuck
+    );
+    let voice_ctx = VoiceCtx {
+        persona: &persona,
+        identity_name: identity_name.as_str(),
+        pulse_one_liner,
+        workflow_id: workflow_id.as_deref(),
+        workflow_summary: Some(workflow_summary.as_str()),
+    };
+    let mut speech = voice_service()
+        .await
+        .render_speech(gcx, voice_ctx, intent)
+        .await;
+    if speech.text.trim().is_empty() {
+        speech.text = fallback_text;
+    }
+    speech
+}
+
+pub async fn render_buddy_runtime_event(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    persona: BuddyPersonalityProfile,
+    identity_name: String,
+    pulse: BuddyPulse,
+    workflow_id: Option<String>,
+    workflow_summary: String,
+    status: &str,
+    fallback_title: String,
+    fallback_description: Option<String>,
+) -> (String, Option<String>) {
+    let pulse_one_liner = format!(
+        "{} pending ops, {} stuck tasks",
+        pulse.memory.pending_ops, pulse.tasks.stuck
+    );
+    let voice_ctx = VoiceCtx {
+        persona: &persona,
+        identity_name: identity_name.as_str(),
+        pulse_one_liner,
+        workflow_id: workflow_id.as_deref(),
+        workflow_summary: Some(workflow_summary.as_str()),
+    };
+    let (title, description) = voice_service()
+        .await
+        .render_runtime_event(gcx, voice_ctx, status)
+        .await;
+    (
+        if title.trim().is_empty() {
+            fallback_title
+        } else {
+            title
+        },
+        description.or(fallback_description),
+    )
+}
+
+pub async fn render_buddy_activity_title(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    persona: BuddyPersonalityProfile,
+    identity_name: String,
+    pulse: BuddyPulse,
+    workflow_id: Option<String>,
+    workflow_summary: String,
+    intent: VoiceIntent,
+    fallback_title: String,
+) -> String {
+    let pulse_one_liner = format!(
+        "{} pending ops, {} stuck tasks",
+        pulse.memory.pending_ops, pulse.tasks.stuck
+    );
+    let voice_ctx = VoiceCtx {
+        persona: &persona,
+        identity_name: identity_name.as_str(),
+        pulse_one_liner,
+        workflow_id: workflow_id.as_deref(),
+        workflow_summary: Some(workflow_summary.as_str()),
+    };
+    let title = voice_service()
+        .await
+        .render_activity_title(gcx, voice_ctx, intent)
+        .await;
+    if title.trim().is_empty() {
+        fallback_title
+    } else {
+        title
+    }
 }
 
 impl BuddyService {
@@ -767,7 +867,7 @@ impl BuddyService {
         let _ = self.events_tx.send(BuddyEvent::ActivityAdded { activity });
     }
 
-    fn refresh_active_quest(&mut self) {
+    pub fn refresh_active_quest(&mut self) {
         let progressed = super::state::refresh_active_quest_progress(&mut self.state);
         let completed = self
             .state
@@ -850,6 +950,7 @@ impl BuddyService {
         });
     }
 
+    #[allow(dead_code)]
     pub fn accept_quest(&mut self, quest: BuddyQuest) {
         let title = quest.title.clone();
         super::state::activate_quest(&mut self.state, quest.clone());
@@ -880,6 +981,7 @@ impl BuddyService {
         });
     }
 
+    #[allow(dead_code)]
     pub fn apply_care_action(&mut self, action: BuddyCareAction, toy: Option<&str>) -> String {
         let (_, message) = super::state::apply_care_action(&mut self.state, action.clone(), toy);
         self.refresh_active_quest();
@@ -890,6 +992,7 @@ impl BuddyService {
         message
     }
 
+    #[allow(dead_code)]
     pub fn reroll_personality(&mut self) {
         super::state::reroll_personality(&mut self.state);
         self.refresh_active_quest();
@@ -955,6 +1058,7 @@ impl BuddyService {
         });
     }
 
+    #[allow(dead_code)]
     pub fn workflow_completed(
         &mut self,
         workflow_id: &str,
@@ -1272,6 +1376,93 @@ pub async fn buddy_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> Option<BuddySna
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
     lock.as_ref().map(|svc| svc.snapshot())
+}
+
+pub async fn buddy_update_speech(gcx: Arc<ARwLock<GlobalContext>>, speech: BuddySpeechItem) {
+    let buddy_arc = gcx.read().await.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    if let Some(svc) = lock.as_mut() {
+        svc.update_speech(speech);
+    }
+}
+
+pub struct CompletedQuestVoice {
+    pub mutation: BuddyMutation,
+    pub speech: BuddySpeechItem,
+}
+
+pub async fn complete_quest_with_voice(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    quest: BuddyQuest,
+    persona: BuddyPersonalityProfile,
+    identity_name: String,
+    pulse: BuddyPulse,
+) -> CompletedQuestVoice {
+    let title = quest.title.clone();
+    let fallback_speech = format!("Quest complete: {title}! Tiny victory dance?");
+    let fallback_event = format!("Quest complete: {title}");
+    let mut speech = render_buddy_speech(
+        gcx.clone(),
+        persona.clone(),
+        identity_name.clone(),
+        pulse.clone(),
+        Some(quest.quest_type.clone()),
+        fallback_speech.clone(),
+        SpeechIntent::QuestComplete,
+        fallback_speech,
+    )
+    .await;
+    speech.id = format!("quest-complete-{}", quest.id);
+    speech.ttl_seconds = 12;
+    speech.dedupe_key = Some(format!("quest_complete_{}", quest.quest_type));
+    speech.controls = vec![];
+
+    let (event_title, event_speech) = render_buddy_runtime_event(
+        gcx,
+        persona,
+        identity_name.clone(),
+        pulse,
+        Some(quest.quest_type.clone()),
+        fallback_event.clone(),
+        "completed",
+        fallback_event.clone(),
+        Some(fallback_event.clone()),
+    )
+    .await;
+
+    CompletedQuestVoice {
+        mutation: BuddyMutation {
+            activity: Some(BuddyActivity {
+                icon: quest.icon.clone(),
+                title: event_title.clone(),
+                description: format!(
+                    "{} wrapped up '{title}' and earned a growth boost.",
+                    identity_name
+                ),
+                timestamp: Utc::now().to_rfc3339(),
+                activity_type: "quest_completed".to_string(),
+                chat_id: None,
+            }),
+            runtime_event: Some(BuddyRuntimeEvent {
+                speech_text: event_speech,
+                scene: Some("celebrate".to_string()),
+                duration_hint: Some(10),
+                persistent: false,
+                controls: vec![],
+                chat_id: None,
+                ..make_runtime_event(
+                    "task_completed",
+                    &event_title,
+                    "buddy_quest",
+                    &format!("quest_complete_{}", quest.quest_type),
+                    "completed",
+                    Some("high"),
+                )
+            }),
+            ..Default::default()
+        },
+        speech,
+    }
 }
 
 pub async fn report_error_persisted(

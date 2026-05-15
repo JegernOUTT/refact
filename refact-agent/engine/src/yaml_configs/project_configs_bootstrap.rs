@@ -64,6 +64,13 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
         }
     }
 
+    remove_retired_default(
+        &config_dir.join("subagents").join("buddy_humor.yaml"),
+        "subagents/buddy_humor.yaml",
+        &existing_checksums,
+    )
+    .await;
+
     save_checksums(&checksums_path, &new_checksums).await;
 
     info!("Global configs created/updated in {:?}", config_dir);
@@ -205,6 +212,25 @@ async fn write_default_if_unchanged(
     }
 }
 
+async fn remove_retired_default(
+    path: &Path,
+    checksum_key: &str,
+    existing_checksums: &HashMap<String, String>,
+) {
+    if !path.exists() {
+        return;
+    }
+    let Some(old_default_checksum) = existing_checksums.get(checksum_key) else {
+        return;
+    };
+    let Ok(existing_content) = fs::read_to_string(path).await else {
+        return;
+    };
+    if compute_checksum(&existing_content) == *old_default_checksum {
+        let _ = fs::remove_file(path).await;
+    }
+}
+
 fn get_defaults_for_kind(kind: &str) -> Vec<(String, String)> {
     let prefix = format!("{}/", kind);
     DefaultConfigs::iter()
@@ -335,6 +361,26 @@ mod tests {
                 file_path
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_removes_unmodified_retired_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path();
+        let path = config_dir.join("subagents").join("buddy_humor.yaml");
+        fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        let content = "schema_version: 2\nid: buddy_humor\n";
+        fs::write(&path, content).await.unwrap();
+        let checksums_path = config_dir.join(CHECKSUM_FILE);
+        let checksums = HashMap::from([(
+            "subagents/buddy_humor.yaml".to_string(),
+            compute_checksum(content),
+        )]);
+        save_checksums(&checksums_path, &checksums).await;
+
+        global_configs_try_create_all(config_dir).await.unwrap();
+
+        assert!(!path.exists());
     }
 
     #[tokio::test]

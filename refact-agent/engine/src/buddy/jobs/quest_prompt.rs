@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use super::super::types::{BuddyControl, BuddyQuest, BuddySuggestion};
+use crate::buddy::voice_service::{SpeechIntent, VoiceCtx, voice_service};
 
 pub struct QuestPromptJob;
 
@@ -136,6 +137,33 @@ fn pick_quest(ctx: &BuddyJobContext) -> Option<&'static str> {
     None
 }
 
+async fn voice_quest_description(
+    gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    _ctx: &BuddyJobContext,
+    kind: &str,
+    fallback: &str,
+) -> String {
+    let Some(snapshot) = crate::buddy::actor::buddy_snapshot(gcx.clone()).await else {
+        return fallback.to_string();
+    };
+    let pulse_one_liner = format!(
+        "{} pending ops, {} stuck tasks",
+        snapshot.pulse.memory.pending_ops, snapshot.pulse.tasks.stuck
+    );
+    let voice_ctx = VoiceCtx {
+        persona: &snapshot.state.personality,
+        identity_name: snapshot.state.identity.name.as_str(),
+        pulse_one_liner,
+        workflow_id: Some(kind),
+        workflow_summary: Some(fallback),
+    };
+    voice_service()
+        .await
+        .render_speech(gcx, voice_ctx, SpeechIntent::QuestAccept)
+        .await
+        .text
+}
+
 #[async_trait::async_trait]
 impl BuddyJob for QuestPromptJob {
     fn id(&self) -> &str {
@@ -164,15 +192,18 @@ impl BuddyJob for QuestPromptJob {
 
     async fn execute(
         &self,
-        _gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+        gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
         ctx: BuddyJobContext,
     ) -> BuddyJobResult {
         let Some(kind) = pick_quest(&ctx) else {
             return BuddyJobResult::default();
         };
-        let Some(quest) = make_quest(&ctx, kind) else {
+        let Some(mut quest) = make_quest(&ctx, kind) else {
             return BuddyJobResult::default();
         };
+        let voiced_description =
+            voice_quest_description(gcx, &ctx, kind, quest.description.as_str()).await;
+        quest.description = voiced_description;
 
         let suggestion_id = format!(
             "quest-suggestion-{}-{}",
