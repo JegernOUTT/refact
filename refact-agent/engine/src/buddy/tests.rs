@@ -1719,18 +1719,17 @@ fn test_workflow_label_mapping() {
 }
 
 #[test]
-fn test_event_title_length_limit() {
+fn test_event_title_passthrough_for_overlong_title() {
     use super::actor::make_runtime_event;
-    let long_title = "A".repeat(200);
+    let long_title = "A".repeat(201);
     let ev = make_runtime_event("signal", &long_title, "src", "key", "started", None);
-    assert!(
-        ev.title.len() <= 200,
-        "make_runtime_event stores the title as-is"
+    assert_eq!(
+        ev.title, long_title,
+        "make_runtime_event stores overlong titles as-is"
     );
-    let truncated: String = long_title.chars().take(80).collect();
     assert!(
-        truncated.len() <= 80,
-        "truncated title must be at most 80 chars"
+        ev.title.len() > 200,
+        "test input must exercise overlong title passthrough"
     );
     let chat_label: String = "Some very long chat title that goes on and on and on and on and on"
         .chars()
@@ -3950,7 +3949,7 @@ fn chat_pattern_no_streak_for_normal_conversation() {
 }
 
 #[test]
-fn observer_registry_has_9_entries() {
+fn observer_registry_has_10_entries() {
     use super::observers::build_observer_registry;
     let registry = build_observer_registry();
     assert_eq!(
@@ -6018,6 +6017,22 @@ async fn pulse_populates_all_subpulse_counts() {
         gcx_w.caps = Some(Arc::new(caps));
     }
 
+    let config_dir = gcx.read().await.config_dir.clone();
+    let skill_dir = config_dir.join("skills/pulse_skill");
+    tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+    tokio::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: pulse_skill\ndescription: Pulse skill\n---\nBody\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        config_dir.join("hooks.yaml"),
+        "hooks:\n  SessionStart:\n    - hooks:\n        - type: command\n          command: echo pulse\n",
+    )
+    .await
+    .unwrap();
+
     // Inject stuck + abandoned facts into the FactStore.
     let mut store = FactStore::new();
     let now = chrono::Utc::now();
@@ -6040,8 +6055,8 @@ async fn pulse_populates_all_subpulse_counts() {
         gcx.read().await.integration_sessions.len() as u32,
         "mcp.total must match integration_sessions count"
     );
-    assert!(pulse.customization.skills >= 0, "skills must be populated");
-    assert!(pulse.customization.hooks >= 0, "hooks must be populated");
+    assert!(pulse.customization.skills > 0, "skills must be populated");
+    assert!(pulse.customization.hooks > 0, "hooks must be populated");
     assert_eq!(
         pulse.tasks.stuck, 1,
         "stuck count must reflect injected fact"
