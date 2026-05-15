@@ -1,16 +1,43 @@
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use indexmap::IndexMap;
 use async_trait::async_trait;
 
+pub type FileReader = Arc<dyn Fn(PathBuf) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync>;
+
 #[async_trait]
-pub trait VecdbSearch: Send {
+pub trait VecdbSearch: Send + Sync {
     async fn vecdb_search(
         &self,
         query: String,
         top_n: usize,
         filter_mb: Option<String>,
     ) -> Result<SearchResult, String>;
+    async fn get_status(&self) -> Result<VecDbStatus, String>;
+    async fn remove_file(&self, file_path: &PathBuf) -> Result<(), String>;
+    async fn vectorizer_enqueue_files(&self, documents: &[String], process_immediately: bool);
+    fn current_constants(&self) -> (EmbeddingModelConfig, usize);
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String>;
+    async fn vecdb_search_with_embedding(
+        &self,
+        embedding: &Vec<f32>,
+        top_n: usize,
+        filter_mb: Option<String>,
+    ) -> Result<Vec<VecdbRecord>, String>;
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct EmbeddingModelConfig {
+    pub endpoint: String,
+    pub endpoint_style: String,
+    pub api_key: String,
+    pub model_name: String,
+    pub embedding_size: i32,
+    pub rejection_threshold: f32,
+    pub embedding_batch: usize,
+    pub n_ctx: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

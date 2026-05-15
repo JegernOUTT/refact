@@ -6,6 +6,7 @@ use crate::Document;
 use crate::ast::treesitter::ast_instance_structs::SymbolInformation;
 use crate::ast::treesitter::file_ast_markup::FileASTMarkup;
 
+pub mod chunk_utils;
 pub mod treesitter;
 
 pub mod ast_db;

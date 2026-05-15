@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/refact-core", "crates/refact-ast"]
+members = [".", "crates/refact-core", "crates/refact-ast", "crates/refact-vecdb"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -79,6 +79,7 @@ winreg = "0.55.0"
 
 refact-core = { path = "crates/refact-core" }
 refact-ast = { path = "crates/refact-ast" }
+refact-vecdb = { path = "crates/refact-vecdb" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }

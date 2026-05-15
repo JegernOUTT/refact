@@ -1,13 +1,10 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use regex::Regex;
-use tokio::sync::RwLock as ARwLock;
 
-use crate::files_in_workspace::Document;
-use crate::global_context::GlobalContext;
-use crate::vecdb::vdb_structs::SplitResult;
 use refact_ast::ast::chunk_utils::official_text_hashing_function;
-pub use refact_core::knowledge_frontmatter::KnowledgeFrontmatter;
+use refact_core::knowledge_frontmatter::KnowledgeFrontmatter;
+use refact_core::vecdb_types::SplitResult;
+
 pub use refact_core::knowledge_frontmatter::KnowledgeFrontmatter as MarkdownFrontmatter;
 
 #[derive(Debug, Clone)]
@@ -25,22 +22,11 @@ pub struct MarkdownFileSplitter {
 
 impl MarkdownFileSplitter {
     pub fn new(max_tokens: usize) -> Self {
-        Self {
-            max_tokens,
-            overlap_lines: 3,
-        }
+        Self { max_tokens, overlap_lines: 3 }
     }
 
-    pub async fn split(
-        &self,
-        doc: &Document,
-        gcx: Arc<ARwLock<GlobalContext>>,
-    ) -> Result<Vec<SplitResult>, String> {
-        let text = crate::files_in_workspace::get_document_text_or_read_from_disk(&mut doc.clone(), gcx)
-            .await
-            .map_err(|e| e.to_string())?;
-        let path = doc.doc_path.clone();
-        let (frontmatter, content_start) = MarkdownFrontmatter::parse(&text);
+    pub async fn split(&self, text: &str, path: &PathBuf) -> Result<Vec<SplitResult>, String> {
+        let (frontmatter, content_start) = KnowledgeFrontmatter::parse(text);
         let frontmatter_lines = if content_start > 0 {
             text[..content_start].lines().count()
         } else {
@@ -66,7 +52,7 @@ impl MarkdownFileSplitter {
         }
 
         for section in sections {
-            results.extend(self.chunk_section(&section, &path));
+            results.extend(self.chunk_section(&section, path));
         }
         Ok(results)
     }
@@ -123,7 +109,6 @@ impl MarkdownFileSplitter {
                         end_line: absolute_line.saturating_sub(1),
                     });
                 }
-
                 let level = caps.get(1).unwrap().as_str().len();
                 let heading_text = caps.get(2).unwrap().as_str().to_string();
                 while current_heading_path.len() >= level {
@@ -151,7 +136,6 @@ impl MarkdownFileSplitter {
 
     fn chunk_section(&self, section: &MarkdownSection, file_path: &PathBuf) -> Vec<SplitResult> {
         let estimated_tokens = section.content.len() / 4;
-
         if estimated_tokens <= self.max_tokens {
             return vec![SplitResult {
                 file_path: file_path.clone(),
@@ -162,7 +146,6 @@ impl MarkdownFileSplitter {
                 symbol_path: section.heading_path.join(" > "),
             }];
         }
-
         self.split_large_content(&section.content, section.start_line)
             .into_iter()
             .map(|(chunk_text, start, end)| SplitResult {
@@ -186,11 +169,7 @@ impl MarkdownFileSplitter {
 
         for (idx, line) in lines.iter().enumerate() {
             if current_chunk.len() + line.len() + 1 > chars_per_chunk && !current_chunk.is_empty() {
-                chunks.push((
-                    current_chunk.trim().to_string(),
-                    chunk_start,
-                    current_line.saturating_sub(1),
-                ));
+                chunks.push((current_chunk.trim().to_string(), chunk_start, current_line.saturating_sub(1)));
                 let overlap_start = idx.saturating_sub(self.overlap_lines);
                 current_chunk = lines[overlap_start..idx].join("\n");
                 if !current_chunk.is_empty() {
@@ -204,47 +183,8 @@ impl MarkdownFileSplitter {
         }
 
         if !current_chunk.trim().is_empty() {
-            chunks.push((
-                current_chunk.trim().to_string(),
-                chunk_start,
-                start_line + lines.len().saturating_sub(1),
-            ));
+            chunks.push((current_chunk.trim().to_string(), chunk_start, start_line + lines.len().saturating_sub(1)));
         }
         chunks
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_frontmatter_parsing() {
-        let content = r#"---
-title: "Test Document"
-created: 2024-12-17
-tags: ["rust", "testing"]
-filenames: ["src/main.rs"]
-kind: code
----
-
-# Hello World
-"#;
-        let (fm, offset) = KnowledgeFrontmatter::parse(content);
-        assert_eq!(fm.title, Some("Test Document".to_string()));
-        assert_eq!(fm.tags, vec!["rust", "testing"]);
-        assert_eq!(fm.created, Some("2024-12-17".to_string()));
-        assert_eq!(fm.filenames, vec!["src/main.rs"]);
-        assert_eq!(fm.kind, Some("code".to_string()));
-        assert!(offset > 0);
-    }
-
-    #[test]
-    fn test_frontmatter_no_frontmatter() {
-        let content = "# Just a heading\n\nSome content";
-        let (fm, offset) = KnowledgeFrontmatter::parse(content);
-        assert!(fm.title.is_none());
-        assert!(fm.tags.is_empty());
-        assert_eq!(offset, 0);
     }
 }

@@ -10,7 +10,7 @@ use crate::nicer_logs::last_n_chars;
 use crate::at_commands::execute_at::AtCommandMember;
 use crate::call_validation::{ContextEnum, ContextFile};
 use crate::vecdb;
-use crate::vecdb::vdb_structs::VecdbSearch;
+
 
 pub fn text_on_clip(query: &String, from_tool_call: bool) -> String {
     if !from_tool_call {

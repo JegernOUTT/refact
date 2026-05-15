@@ -1,78 +1,14 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
-use tokio::task::JoinHandle;
-use async_trait::async_trait;
 use tracing::{error, info};
 
+use refact_core::vecdb_types::VecdbSearch;
+
 use crate::background_tasks::BackgroundTasksHolder;
-use crate::fetch_embedding;
-use crate::global_context::{CommandLine, GlobalContext};
-use crate::vecdb::vdb_sqlite::VecDBSqlite;
-use crate::vecdb::vdb_structs::{SearchResult, VecDbStatus, VecdbConstants, VecdbRecord, VecdbSearch};
-use crate::vecdb::vdb_thread::{
-    vecdb_start_background_tasks, vectorizer_enqueue_files, FileVectorizerService,
-};
+use crate::global_context::GlobalContext;
+use crate::vecdb::vdb_structs::{EmbeddingModelConfig, VecDbStatus, VecdbConstants};
 
-pub struct VecDb {
-    vecdb_emb_client: Arc<AMutex<reqwest::Client>>,
-    vecdb_handler: Arc<AMutex<VecDBSqlite>>,
-    pub vectorizer_service: Arc<AMutex<FileVectorizerService>>,
-    // cmdline: CommandLine,  // TODO: take from command line what's needed, don't store a copy
-    constants: VecdbConstants,
-}
-
-impl VecDb {
-    pub async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
-        let embedding_mb = fetch_embedding::get_embedding_with_retries(
-            self.vecdb_emb_client.clone(),
-            &self.constants.embedding_model,
-            vec![query.to_string()],
-            5,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-        embedding_mb
-            .into_iter()
-            .next()
-            .ok_or_else(|| "VecDB: empty embedding result".to_string())
-    }
-
-    fn compute_usefulness_and_filter(&self, mut results: Vec<VecdbRecord>) -> Vec<VecdbRecord> {
-        let mut dist0 = 0.0;
-        let mut filtered_results = Vec::new();
-        let rejection_threshold = self.constants.embedding_model.rejection_threshold;
-        for rec in results.iter_mut() {
-            if dist0 == 0.0 {
-                dist0 = rec.distance.abs();
-            }
-            rec.usefulness = 100.0
-                - 75.0
-                    * ((rec.distance.abs() - dist0) / (dist0 + 0.01))
-                        .max(0.0)
-                        .min(1.0);
-            if rec.distance.abs() < rejection_threshold {
-                filtered_results.push(rec.clone());
-            }
-        }
-        filtered_results
-    }
-
-    pub async fn vecdb_search_with_embedding(
-        &self,
-        embedding: &Vec<f32>,
-        top_n: usize,
-        vecdb_scope_filter_mb: Option<String>,
-    ) -> Result<Vec<VecdbRecord>, String> {
-        let mut handler_locked = self.vecdb_handler.lock().await;
-        let raw = handler_locked
-            .vecdb_search(embedding, top_n, vecdb_scope_filter_mb)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(self.compute_usefulness_and_filter(raw))
-    }
-}
+pub use refact_vecdb::vdb_highlev::VecDb;
 
 async fn do_i_need_to_reload_vecdb(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -81,54 +17,44 @@ async fn do_i_need_to_reload_vecdb(
         match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
             Ok(caps) => caps,
             Err(e) => {
-                // This branch makes caps error disappear, unless we print it right here:
-                info!(
-                    "vecdb: no caps, will not start or reload vecdb, the error was: {}",
-                    e
-                );
+                info!("vecdb: no caps, will not start or reload vecdb, the error was: {}", e);
                 return (false, None);
             }
         };
 
     let vecdb_max_files = gcx.read().await.cmdline.vecdb_max_files;
-    let mut consts = {
-        VecdbConstants {
-            embedding_model: caps.embedding_model.clone(),
-            tokenizer: None,
-            splitter_window_size: caps.embedding_model.base.n_ctx / 2,
-            vecdb_max_files: vecdb_max_files,
-        }
+    let embedding_config = EmbeddingModelConfig::from(&caps.embedding_model);
+    let splitter_window_size = caps.embedding_model.base.n_ctx / 2;
+
+    let mut consts = VecdbConstants {
+        embedding_model: embedding_config.clone(),
+        tokenizer: None,
+        splitter_window_size,
+        vecdb_max_files,
     };
 
     let vec_db = gcx.write().await.vec_db.clone();
     match *vec_db.lock().await {
         None => {}
         Some(ref db) => {
-            if db.constants.embedding_model == consts.embedding_model
-                && db.constants.splitter_window_size == consts.splitter_window_size
-            {
+            let (current_emb, current_splitter_window_size) = db.current_constants();
+            if current_emb == consts.embedding_model && current_splitter_window_size == consts.splitter_window_size {
                 return (false, None);
             }
         }
     }
 
-    if consts.embedding_model.base.name.is_empty()
-        || consts.embedding_model.base.endpoint.is_empty()
-    {
+    if consts.embedding_model.model_name.is_empty() || consts.embedding_model.endpoint.is_empty() {
         error!("command line says to launch vecdb, but this will not happen: embedding model name or endpoint are empty");
         return (true, None);
     }
 
-    let tokenizer_result =
-        crate::tokens::cached_tokenizer(gcx.clone(), &consts.embedding_model.base).await;
+    let tokenizer_result = crate::tokens::cached_tokenizer(gcx.clone(), &caps.embedding_model.base).await;
 
     consts.tokenizer = match tokenizer_result {
         Ok(tokenizer) => tokenizer,
         Err(err) => {
-            error!(
-                "vecdb launch failed, embedding model tokenizer didn't load: {}",
-                err
-            );
+            error!("vecdb launch failed, embedding model tokenizer didn't load: {}", err);
             return (false, None);
         }
     };
@@ -143,12 +69,7 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
 
     let mut background_tasks = BackgroundTasksHolder::new(vec![]);
     loop {
-        if gcx
-            .read()
-            .await
-            .shutdown_flag
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        if gcx.read().await.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
         let (need_reload, consts) = do_i_need_to_reload_vecdb(gcx.clone()).await;
@@ -158,7 +79,7 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
         if need_reload && consts.is_some() {
             background_tasks = BackgroundTasksHolder::new(vec![]);
 
-            let init_config = crate::vecdb::vdb_init::VecDbInitConfig {
+            let init_config = refact_vecdb::vdb_init::VecDbInitConfig {
                 max_attempts: 5,
                 initial_delay_ms: 10,
                 max_delay_ms: 1000,
@@ -176,13 +97,7 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
                 );
                 crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
             }
-            match crate::vecdb::vdb_init::initialize_vecdb_with_context(
-                gcx.clone(),
-                consts.unwrap(),
-                Some(init_config),
-            )
-            .await
-            {
+            match initialize_vecdb_with_context(gcx.clone(), consts.unwrap(), Some(init_config)).await {
                 Ok(_) => {
                     gcx.write().await.vec_db_error = "".to_string();
                     info!("vecdb: initialization successful");
@@ -196,7 +111,7 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
                     );
                     crate::buddy::actor::buddy_enqueue_event(gcx.clone(), ev).await;
                 }
-                Err(crate::vecdb::vdb_init::VecDbInitError::ShutdownRequested) => break,
+                Err(refact_vecdb::vdb_init::VecDbInitError::ShutdownRequested) => break,
                 Err(err) => {
                     let err_msg = err.to_string();
                     gcx.write().await.vec_db_error = err_msg.clone();
@@ -214,128 +129,73 @@ pub async fn vecdb_background_reload(gcx: Arc<ARwLock<GlobalContext>>) {
     }
 }
 
-impl VecDb {
-    pub async fn init(
-        vecdb_dir: &PathBuf,
-        legacy_cache_dir: &PathBuf,
-        cmdline: CommandLine,
-        constants: VecdbConstants,
-    ) -> Result<VecDb, String> {
-        let emb_table_name =
-            crate::vecdb::vdb_emb_aux::create_emb_table_name(&vec![cmdline.workspace_folder]);
-        let handler = VecDBSqlite::init(
-            vecdb_dir,
-            legacy_cache_dir,
-            &constants.embedding_model.base.name,
-            constants.embedding_model.embedding_size,
-            &emb_table_name,
-        )
-        .await?;
-        let vecdb_handler = Arc::new(AMutex::new(handler));
-        let vectorizer_service = Arc::new(AMutex::new(
-            FileVectorizerService::new(vecdb_handler.clone(), constants.clone()).await,
-        ));
-        let mut http_client_builder = reqwest::Client::builder();
-        if cmdline.insecure {
-            http_client_builder = http_client_builder.danger_accept_invalid_certs(true)
-        }
-        let vecdb_emb_client = Arc::new(AMutex::new(http_client_builder.build().unwrap()));
-        Ok(VecDb {
-            vecdb_emb_client,
-            vecdb_handler,
-            vectorizer_service,
-            constants: constants.clone(),
-        })
-    }
-
-    pub async fn vecdb_start_background_tasks(
-        &self,
-        gcx: Arc<ARwLock<GlobalContext>>,
-    ) -> Vec<JoinHandle<()>> {
-        info!("vecdb: start_background_tasks");
-        vecdb_start_background_tasks(
-            self.vecdb_emb_client.clone(),
-            self.vectorizer_service.clone(),
-            gcx.clone(),
-        )
-        .await
-    }
-
-    pub async fn vectorizer_enqueue_files(
-        &self,
-        documents: &Vec<String>,
-        process_immediately: bool,
-    ) {
-        vectorizer_enqueue_files(
-            self.vectorizer_service.clone(),
-            documents,
-            process_immediately,
-        )
-        .await;
-    }
-
-    pub async fn remove_file(&self, file_path: &PathBuf) -> Result<(), String> {
-        let mut handler_locked = self.vecdb_handler.lock().await;
-        let file_path_str = file_path.to_string_lossy().to_string();
-        handler_locked
-            .vecdb_records_remove(vec![file_path_str])
-            .await
+pub async fn get_status(vec_db: Arc<AMutex<Option<Arc<dyn VecdbSearch>>>>) -> Result<Option<VecDbStatus>, String> {
+    let db_locked = vec_db.lock().await;
+    match db_locked.as_ref() {
+        None => Ok(None),
+        Some(db) => Ok(Some(db.get_status().await?)),
     }
 }
 
-pub async fn get_status(vec_db: Arc<AMutex<Option<VecDb>>>) -> Result<Option<VecDbStatus>, String> {
-    let vectorizer_service = {
-        let vec_db_guard = vec_db.lock().await;
-        let vec_db = vec_db_guard.as_ref().ok_or("VecDb is not initialized")?;
-        vec_db.vectorizer_service.clone()
+async fn initialize_vecdb_with_context(
+    gcx: Arc<ARwLock<GlobalContext>>,
+    constants: VecdbConstants,
+    init_config: Option<refact_vecdb::vdb_init::VecDbInitConfig>,
+) -> Result<(), refact_vecdb::vdb_init::VecDbInitError> {
+    let (legacy_cache_dir, cmdline, shutdown_flag) = {
+        let gcx_locked = gcx.read().await;
+        (gcx_locked.cache_dir.clone(), gcx_locked.cmdline.clone(), gcx_locked.shutdown_flag.clone())
     };
-    let (vstatus, vecdb_handler) = {
-        let vectorizer_locked = vectorizer_service.lock().await;
-        (
-            vectorizer_locked.vstatus.clone(),
-            vectorizer_locked.vecdb_handler.clone(),
-        )
+
+    let vecdb_dir = if !cmdline.vecdb_force_path.is_empty() {
+        std::path::PathBuf::from(&cmdline.vecdb_force_path)
+    } else if let Some(dir) = get_default_vecdb_dir(gcx.clone()).await {
+        dir
+    } else {
+        legacy_cache_dir.join("vecdb")
     };
-    let mut vstatus_copy = vstatus.lock().await.clone();
-    vstatus_copy.db_size = match vecdb_handler.lock().await.size().await {
-        Ok(res) => res,
-        Err(err) => return Err(err),
-    };
-    vstatus_copy.db_cache_size = match vecdb_handler.lock().await.cache_size().await {
-        Ok(res) => res,
-        Err(err) => return Err(err.to_string()),
-    };
-    if vstatus_copy.state == "done" && vstatus_copy.queue_additions {
-        vstatus_copy.state = "cooldown".to_string();
+
+    let config = init_config.unwrap_or_default();
+    let vec_db = refact_vecdb::vdb_init::init_vecdb_fail_safe(
+        &vecdb_dir,
+        &legacy_cache_dir,
+        cmdline.workspace_folder.clone(),
+        cmdline.insecure,
+        constants,
+        config,
+        shutdown_flag,
+    )
+    .await?;
+
+    let shutdown_flag2 = gcx.read().await.shutdown_flag.clone();
+    let gcx_clone = gcx.clone();
+    let file_reader: refact_core::vecdb_types::FileReader = Arc::new(move |path| {
+        let gcx = gcx_clone.clone();
+        Box::pin(async move {
+            let mut doc = refact_ast::Document::new(&path);
+            crate::files_in_workspace::update_document_text_from_disk(&mut doc, gcx).await?;
+            doc.text_as_string()
+        })
+    });
+
+    let tasks = vec_db.vecdb_start_background_tasks(shutdown_flag2, file_reader).await;
+    let _background_tasks = BackgroundTasksHolder::new(tasks);
+
+    let vec_db_arc: Arc<dyn VecdbSearch> = Arc::new(vec_db);
+    {
+        let mut gcx_locked = gcx.write().await;
+        gcx_locked.vec_db = Arc::new(AMutex::new(Some(vec_db_arc)));
+        gcx_locked.vec_db_error = "".to_string();
     }
-    Ok(Some(vstatus_copy))
+
+    crate::files_in_workspace::enqueue_all_files_from_workspace_folders(gcx.clone(), true, true).await;
+    crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), true, true).await;
+
+    info!("VecDb initialization and setup complete");
+    Ok(())
 }
 
-#[async_trait]
-impl VecdbSearch for VecDb {
-    async fn vecdb_search(
-        &self,
-        query: String,
-        top_n: usize,
-        vecdb_scope_filter_mb: Option<String>,
-    ) -> Result<SearchResult, String> {
-        // TODO: move out of struct, replace self with Arc
-        let t0 = std::time::Instant::now();
-        let embedding = self.embed_query(&query).await?;
-        info!(
-            "search query {:?}, it took {:.3}s to vectorize the query",
-            query,
-            t0.elapsed().as_secs_f64()
-        );
-
-        let t1 = std::time::Instant::now();
-        let results = self
-            .vecdb_search_with_embedding(&embedding, top_n, vecdb_scope_filter_mb)
-            .await?;
-        info!("search itself {:.3}s", t1.elapsed().as_secs_f64());
-        Ok(SearchResult {
-            query_text: query,
-            results,
-        })
-    }
+async fn get_default_vecdb_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Option<std::path::PathBuf> {
+    let project_dirs = crate::files_correction::get_project_dirs(gcx).await;
+    project_dirs.first().map(|root| root.join(".refact").join("vecdb"))
 }
