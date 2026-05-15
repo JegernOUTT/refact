@@ -60,6 +60,13 @@ export interface FrontendErrorReport {
   chat_id?: string;
 }
 
+export type UserActionEntry = { type: string; ts: string };
+
+export type UserActivityResponse = {
+  actions: UserActionEntry[];
+  time_of_day_pattern: string;
+};
+
 export type UserActionPayload =
   | { type: "file_opened"; path: string; ts: string }
   | {
@@ -679,6 +686,19 @@ export const buddyApi = createApi({
         return { data: undefined };
       },
     }),
+    getUserActivity: builder.query<UserActivityResponse, { hours?: number }>({
+      queryFn: async (args, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const port = state.config.lspPort;
+        const result = await baseQuery(
+          `http://127.0.0.1:${port}/v1/buddy/user_activity?hours=${
+            args.hours ?? 24
+          }`,
+        );
+        if (result.error) return { error: result.error };
+        return { data: result.data as UserActivityResponse };
+      },
+    }),
     reportFrontendError: builder.mutation<undefined, FrontendErrorReport>({
       queryFn: async (body, api) => {
         const state = api.getState() as BuddyApiState;
@@ -747,5 +767,6 @@ export const {
   useGetDraftQuery,
   useDeleteDraftMutation,
   usePostUserActionMutation,
+  useGetUserActivityQuery,
   useReportFrontendErrorMutation,
 } = buddyApi;

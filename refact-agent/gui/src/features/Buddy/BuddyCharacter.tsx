@@ -26,6 +26,7 @@ interface BuddyCharacterProps {
   scenePose?: BuddyScenePose;
   speechText?: string | null;
   speechControls?: BuddyControl[];
+  speechIntent?: string;
   onCanvasEvent: (event: BuddyEvent) => void;
   onSpeechControl?: (control: BuddyControl) => void;
 }
@@ -67,6 +68,7 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
   scenePose = "idle",
   speechText,
   speechControls,
+  speechIntent,
   onCanvasEvent,
   onSpeechControl,
 }) => (
@@ -90,6 +92,7 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
         displaySize={displaySize}
         speechOverride={speechText}
         speechControls={speechControls}
+        speechIntent={speechIntent}
         onSpeechControlClick={onSpeechControl}
         bubblePosition={bubblePosition}
         randomizeBubblePosition={randomizeBubblePosition}

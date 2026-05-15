@@ -67,6 +67,7 @@ interface NotificationItem {
   timestamp: number;
   diagnostic?: DiagnosticContext | null;
   opportunity?: BuddyOpportunity;
+  speechIntent?: string;
 }
 
 function notificationTriggerSource(
@@ -169,6 +170,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         diagnostic: activeSpeech.chat_id
           ? diagnostics.find((d) => d.chat_id === activeSpeech.chat_id) ?? null
           : null,
+        speechIntent: activeSpeech.speech_intent,
       };
     }
 
@@ -509,6 +511,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         displaySize={160}
         speechOverride={actionError ?? notification.text}
         speechControls={notification.controls}
+        speechIntent={notification.speechIntent}
         onSpeechControlClick={(ctrl) => void handleControl(ctrl)}
         bubblePosition="left"
       />

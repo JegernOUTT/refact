@@ -1,0 +1,58 @@
+.card {
+  background: var(--gray-a2);
+  border: 1px solid var(--gray-a4);
+}
+
+.heatmap {
+  display: grid;
+  gap: var(--space-1);
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+}
+
+.cell {
+  aspect-ratio: 1;
+  background: var(--gray-a3);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-1);
+}
+
+.cell[data-level="1"] {
+  background: var(--accent-a3);
+}
+
+.cell[data-level="2"] {
+  background: var(--accent-a5);
+}
+
+.cell[data-level="3"] {
+  background: var(--accent-a7);
+}
+
+.cell[data-level="4"] {
+  background: var(--accent-a9);
+}
+
+.label {
+  letter-spacing: 0.06em;
+}
+
+.typeList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.typeChip {
+  background: var(--gray-a3);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-2);
+  color: var(--gray-12);
+  font-size: 11px;
+  padding: 2px var(--space-2);
+  text-transform: capitalize;
+}
+
+.caption {
+  border-top: 1px solid var(--gray-a4);
+  padding-top: var(--space-2);
+}

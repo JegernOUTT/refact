@@ -3,6 +3,8 @@ export { BuddyChatCompanion } from "./BuddyChatCompanion";
 export { BuddyHome } from "./BuddyHome";
 export { BuddyPanel } from "./BuddyPanel";
 export { BuddyRecentChats } from "./BuddyRecentChats";
+export { AutonomousChats } from "./AutonomousChats";
+export { UserActivityCard } from "./UserActivityCard";
 export { useBuddyState } from "./hooks/useBuddyState";
 export {
   createInitialSemanticState,

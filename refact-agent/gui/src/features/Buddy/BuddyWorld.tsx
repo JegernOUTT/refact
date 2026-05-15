@@ -56,6 +56,7 @@ interface BuddyWorldProps {
     text: string;
     controls: BuddyControl[];
     chat_id?: string;
+    speech_intent?: string;
   } | null;
   setupNeeded: boolean;
   compact?: boolean;
@@ -957,6 +958,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         scenePose={characterPose}
         speechText={speechOverride}
         speechControls={activeSpeech ? activeSpeech.controls : undefined}
+        speechIntent={activeSpeech?.speech_intent}
         onCanvasEvent={onCanvasEvent}
         onSpeechControl={activeSpeech ? onSpeechControl : undefined}
       />

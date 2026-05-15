@@ -376,6 +376,7 @@ export const BuddyHome: React.FC = () => {
           text: activeSpeech.text,
           controls: activeSpeech.controls,
           chat_id: activeSpeech.chat_id,
+          speech_intent: activeSpeech.speech_intent,
           source: "speech",
         } satisfies BuddySceneSpeech,
       ];

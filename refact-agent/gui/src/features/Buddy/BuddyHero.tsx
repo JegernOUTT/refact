@@ -74,6 +74,7 @@ export const BuddyHero: React.FC<BuddyHeroProps> = ({
               : nowPlaying?.speech_text ?? nowPlaying?.title ?? null
           }
           speechControls={activeSpeech ? activeSpeech.controls : undefined}
+          speechIntent={activeSpeech?.speech_intent}
           onSpeechControlClick={activeSpeech ? onSpeechControl : undefined}
         />
       </div>

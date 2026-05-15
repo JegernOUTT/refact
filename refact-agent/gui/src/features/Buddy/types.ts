@@ -294,6 +294,7 @@ export interface BuddySpeechItem {
   created_at: string;
   controls: BuddyControl[];
   chat_id?: string;
+  speech_intent?: string;
 }
 
 export interface BuddyAnimState {
@@ -452,6 +453,7 @@ export interface BuddyCanvasProps {
   speechOverride?: string | null;
   /** Buttons rendered inside the speech bubble */
   speechControls?: BuddyControl[];
+  speechIntent?: string;
   /** Called when a speech bubble button is clicked */
   onSpeechControlClick?: (ctrl: BuddyControl) => void;
   /** Where to position the speech bubble relative to the buddy. Default: "top" */
@@ -967,6 +969,7 @@ export interface BuddyConversationEntry {
   message_count: number;
   icon: string;
   badge: string | null;
+  workflow_id?: string | null;
 }
 
 export interface BuddyThreadMeta {

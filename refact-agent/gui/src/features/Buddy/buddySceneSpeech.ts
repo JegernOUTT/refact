@@ -22,6 +22,7 @@ export interface BuddySceneSpeech {
   text: string;
   controls: BuddyControl[];
   chat_id?: string;
+  speech_intent?: string;
   source: BuddySceneSpeechSource;
   runtimeEventId?: string;
   suggestionId?: string;
@@ -265,6 +266,7 @@ export function buildBuddySceneSpeech(args: {
       text: args.activeSpeech.text,
       controls: args.activeSpeech.controls,
       chat_id: args.activeSpeech.chat_id,
+      speech_intent: args.activeSpeech.speech_intent,
       source: "speech",
     };
   }

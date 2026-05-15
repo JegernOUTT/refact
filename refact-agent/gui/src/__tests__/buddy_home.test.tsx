@@ -21,6 +21,10 @@ import { BuddyDraftPreview } from "../features/Buddy/BuddyDraftPreview";
 import { BuddySettingsPanel } from "../features/Buddy/BuddySettingsPanel";
 import { BuddyPanel } from "../features/Buddy/BuddyPanel";
 import { BuddyWorld } from "../features/Buddy/BuddyWorld";
+import { AutonomousChats } from "../features/Buddy/AutonomousChats";
+import { UserActivityCard } from "../features/Buddy/UserActivityCard";
+import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
+import { BuddySpeechCloud } from "../features/Buddy/BuddySpeechCloud";
 import { bubblePositionForSceneX } from "../features/Buddy/buddyWorldUtils";
 import { buildBuddyWorldState } from "../features/Buddy/buddyWorldModel";
 import { buildBuddySceneSpeech } from "../features/Buddy/buddySceneSpeech";
@@ -35,6 +39,9 @@ import type {
   BuddyRuntimeEvent,
   BuddySemanticState,
   BuddySnapshot,
+  BuddyConversationEntry,
+  BuddyActivityEntry,
+  BuddySpeechItem,
 } from "../features/Buddy/types";
 import type React from "react";
 
@@ -96,6 +103,52 @@ const CONFIG_STATE = {
     host: "vscode" as const,
   },
 };
+
+function makeConversation(
+  overrides?: Partial<BuddyConversationEntry>,
+): BuddyConversationEntry {
+  return {
+    id: "conversation-1",
+    kind: "workflow",
+    title: "Workflow chat",
+    created_at: "2024-01-01T00:00:00Z",
+    updated_at: "2024-01-01T01:00:00Z",
+    status: "completed",
+    message_count: 3,
+    icon: "⚙️",
+    badge: "refact_self_critic",
+    workflow_id: "refact_self_critic",
+    ...overrides,
+  };
+}
+
+function makeActivity(
+  overrides?: Partial<BuddyActivityEntry>,
+): BuddyActivityEntry {
+  return {
+    icon: "⚙️",
+    title: "Activity",
+    description: "Activity description",
+    timestamp: "2024-01-01T00:00:00Z",
+    activity_type: "buddy_memory_garden",
+    chat_id: null,
+    ...overrides,
+  };
+}
+
+function makeSpeech(overrides?: Partial<BuddySpeechItem>): BuddySpeechItem {
+  return {
+    id: "speech-1",
+    text: "Hello from Buddy",
+    mood: "happy",
+    scope: "global",
+    persistent: false,
+    ttl_seconds: 60,
+    created_at: "2024-01-01T00:00:00Z",
+    controls: [],
+    ...overrides,
+  };
+}
 
 function makePulse(overrides?: Partial<BuddyPulse>): BuddyPulse {
   return {
@@ -292,6 +345,98 @@ function makeSnapshot(pulse?: BuddyPulse): BuddySnapshot {
     pulse,
   };
 }
+
+describe("AutonomousChats_groups_by_workflow_id", () => {
+  it("groups conversations by workflow id", () => {
+    render(
+      <AutonomousChats
+        conversations={[
+          makeConversation({ id: "refact-a", title: "Refact A" }),
+          makeConversation({ id: "refact-b", title: "Refact B" }),
+          makeConversation({
+            id: "buddy-a",
+            title: "Buddy A",
+            badge: "Buddy",
+            workflow_id: "buddy_memory_garden",
+          }),
+        ]}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    expect(screen.getByText("refact self critic")).toBeInTheDocument();
+    expect(screen.getByText("buddy memory garden")).toBeInTheDocument();
+    expect(screen.getByText("Refact A")).toBeInTheDocument();
+    expect(screen.getByText("Refact B")).toBeInTheDocument();
+    expect(screen.getByText("Buddy A")).toBeInTheDocument();
+  });
+});
+
+describe("UserActivityCard_renders_24h_heatmap_cells", () => {
+  it("renders one heatmap cell for each hour", () => {
+    render(
+      <UserActivityCard
+        activity={{
+          actions: [
+            { type: "file_opened", ts: "2024-01-01T01:00:00Z" },
+            { type: "file_opened", ts: "2024-01-01T01:20:00Z" },
+            { type: "tool_approved", ts: "2024-01-01T05:00:00Z" },
+          ],
+          time_of_day_pattern: "morning focus",
+        }}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    expect(screen.getAllByTestId("user-activity-hour-cell")).toHaveLength(24);
+    expect(screen.getByText("file opened · 2")).toBeInTheDocument();
+    expect(screen.getByText("morning focus")).toBeInTheDocument();
+  });
+});
+
+describe("ActivityFeed_filter_chips_filter_by_workflow_prefix", () => {
+  it("filters activities by workflow prefix", async () => {
+    const { user } = render(
+      <BuddyActivityPanel
+        activities={[
+          makeActivity({
+            title: "Compile sniffer",
+            activity_type: "refact_compile_sniffer",
+          }),
+          makeActivity({
+            title: "Memory garden",
+            activity_type: "buddy_memory_garden",
+          }),
+        ]}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    await user.click(screen.getByRole("radio", { name: "refact_* refact_*" }));
+
+    expect(screen.getByText("Compile sniffer")).toBeInTheDocument();
+    expect(screen.queryByText("Memory garden")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "buddy_* buddy_*" }));
+
+    expect(screen.queryByText("Compile sniffer")).not.toBeInTheDocument();
+    expect(screen.getByText("Memory garden")).toBeInTheDocument();
+  });
+});
+
+describe("Speech_shows_intent_badge_when_field_present", () => {
+  it("shows the speech intent badge", () => {
+    render(
+      <BuddySpeechCloud
+        speech={makeSpeech({ speech_intent: "Humor" })}
+        onControl={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    expect(screen.getByText("Humor")).toBeInTheDocument();
+  });
+});
 
 describe("BuddyPulseCard_renders_pulse", () => {
   it("shows pulse counts from store", async () => {

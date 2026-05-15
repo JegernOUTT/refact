@@ -1,5 +1,5 @@
 import React, { useCallback } from "react";
-import { Button } from "@radix-ui/themes";
+import { Badge, Button } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   clearActiveSpeech,
@@ -7,15 +7,20 @@ import {
   selectBuddyDiagnostics,
 } from "./buddySlice";
 import { executeBuddyAction } from "./executeBuddyAction";
-import type { BuddyControl } from "./types";
+import type { BuddyControl, BuddySpeechItem } from "./types";
 import styles from "./BuddySpeechCloud.module.css";
+
+type SpeechWithIntent = Pick<
+  BuddySpeechItem,
+  "text" | "controls" | "chat_id"
+> & {
+  speech_intent?: string;
+};
 
 interface Props {
   variant?: "block" | "overlay";
   tailSide?: "bottom" | "right";
-  /** Local speech to display, bypasses Redux activeSpeech */
-  speech?: { text: string; controls: BuddyControl[]; chat_id?: string };
-  /** Called for every button click when speech prop is provided; disables built-in ✕ */
+  speech?: SpeechWithIntent;
   onControl?: (ctrl: BuddyControl) => void | Promise<void>;
 }
 
@@ -55,6 +60,11 @@ export const BuddySpeechCloud: React.FC<Props> = ({
 
   return (
     <div className={isOverlay ? styles.cloudOverlay : styles.cloud}>
+      {speech.speech_intent && (
+        <Badge size="1" variant="soft" className={styles.intentBadge}>
+          {speech.speech_intent}
+        </Badge>
+      )}
       <p className={isOverlay ? styles.overlayText : styles.text}>
         {speech.text}
       </p>

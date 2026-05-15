@@ -33,6 +33,11 @@
   font-weight: 600;
 }
 
+.intentBadge {
+  margin-bottom: var(--space-1);
+  text-transform: capitalize;
+}
+
 .controls {
   display: flex;
   gap: var(--space-1);

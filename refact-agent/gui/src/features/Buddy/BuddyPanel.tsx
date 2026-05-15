@@ -226,6 +226,7 @@ export const BuddyPanel: React.FC = () => {
               displaySize={200}
               speechOverride={speechText}
               speechControls={speechControls}
+              speechIntent={activeSpeech?.speech_intent}
               onSpeechControlClick={speechHandler}
             />
           </div>

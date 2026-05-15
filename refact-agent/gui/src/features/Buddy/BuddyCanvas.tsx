@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
+import { Badge } from "@radix-ui/themes";
 import { createInitialAnimState } from "./state";
 import { renderFrame } from "./canvas/render";
 import {
@@ -171,6 +172,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   style,
   speechOverride,
   speechControls,
+  speechIntent,
   onSpeechControlClick,
   bubblePosition = "top",
   randomizeBubblePosition = false,
@@ -508,6 +510,11 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           };
           return (
             <div data-bubble-position={bubbleView.position} style={bubbleStyle}>
+              {speechIntent && (
+                <Badge size="1" variant="soft">
+                  {speechIntent}
+                </Badge>
+              )}
               <span>{bubbleView.text}</span>
               {speechControls?.length ? (
                 <div
