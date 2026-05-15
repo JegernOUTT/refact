@@ -10,3 +10,5 @@ tracing.workspace = true
 axum = { version = "0.6.20", features = ["default", "http2"] }
 hyper = { version = "0.14", features = ["server", "stream"] }
 serde_yaml = "0.9.31"
+indexmap.workspace = true
+async-trait = "0.1.73"
