@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
-use serde::{Serialize, Deserialize};
+
+use serde::{Deserialize, Serialize};
+
+use super::state::SpeechRotationState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuddyOnboarding {
@@ -291,6 +294,8 @@ pub struct BuddyState {
     pub onboarding: BuddyOnboarding,
     #[serde(default)]
     pub job_cooldowns: HashMap<String, BuddyJobState>,
+    #[serde(default)]
+    pub speech_rotation: SpeechRotationState,
     #[serde(default)]
     pub active_quest: Option<BuddyQuest>,
     #[serde(default)]

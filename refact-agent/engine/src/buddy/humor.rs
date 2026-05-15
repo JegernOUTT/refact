@@ -10,7 +10,7 @@ use crate::buddy::types::{BuddyFactKind, BuddyPersonalityProfile, BuddyPulse};
 use crate::buddy::voice_service::{SpeechIntent, VoiceCtx, voice_service};
 use crate::global_context::GlobalContext;
 
-pub const HUMOR_BUDGET_PER_HOUR: u32 = 3;
+pub const HUMOR_BUDGET_PER_HOUR: u32 = 5;
 pub const HUMOR_BATCH_TTL: Duration = Duration::hours(1);
 pub const HUMOR_TIMEOUT_SECS: u64 = 8;
 

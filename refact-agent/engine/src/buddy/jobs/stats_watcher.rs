@@ -126,6 +126,7 @@ impl BuddyJob for StatsWatcherJob {
                     chat_id: None,
                 };
                 return BuddyJobResult {
+                    speech_intent: Some(super::super::voice_service::SpeechIntent::Milestone),
                     speech: Some(speech),
                     activity: Some(activity),
                     last_result: Some(runs.to_string()),
@@ -199,10 +200,12 @@ mod tests {
             .collect();
         BuddyJobContext {
             identity_name: "Pixel".to_string(),
+            personality: Default::default(),
             onboarding: BuddyOnboarding::default(),
             recent_diagnostics,
             project_root: std::path::PathBuf::from("/tmp/project"),
             job_state,
+            workflow_summaries: vec![],
             total_workflow_runs: runs,
             suggestion_state: vec![],
             pet: BuddyPetState::default(),

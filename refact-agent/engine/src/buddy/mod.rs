@@ -18,6 +18,7 @@ pub mod runtime_queue;
 pub mod scheduler;
 pub mod settings;
 pub mod snapshot;
+pub mod speech_policy;
 pub mod state;
 pub mod storage;
 pub mod types;

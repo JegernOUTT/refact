@@ -3464,6 +3464,7 @@ mod tests {
     fn context_with_last_result(last_result: Option<String>) -> BuddyJobContext {
         BuddyJobContext {
             identity_name: "Pixel".to_string(),
+            personality: Default::default(),
             onboarding: BuddyOnboarding::default(),
             recent_diagnostics: vec![],
             project_root: std::path::PathBuf::from("/tmp/project"),
@@ -3471,6 +3472,7 @@ mod tests {
                 last_result,
                 ..Default::default()
             },
+            workflow_summaries: vec![],
             total_workflow_runs: 0,
             suggestion_state: vec![],
             pet: BuddyPetState::default(),

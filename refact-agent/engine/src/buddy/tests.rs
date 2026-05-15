@@ -1227,10 +1227,12 @@ fn make_job_context(
     }
     BuddyJobContext {
         identity_name: "Pixel".to_string(),
+        personality: Default::default(),
         onboarding,
         recent_diagnostics: diags,
         project_root: std::path::PathBuf::from("/tmp/test-project"),
         job_state,
+        workflow_summaries: vec![],
         total_workflow_runs: 0,
         suggestion_state: vec![],
         pet: Default::default(),
@@ -3085,17 +3087,19 @@ async fn humor_budget_enforced() {
         BuddyFactKind::TrajectoryClutter,
         BuddyFactKind::ChatRetryStreak,
         BuddyFactKind::MemoryOrphan,
+        BuddyFactKind::ModePromptOverlap,
+        BuddyFactKind::IntegrationFailing,
     ];
 
     for (i, &kind) in kinds.iter().enumerate() {
         let mut opp = make_opportunity(&format!("opp-b{}", i), &format!("ck-b{}", i));
         apply_humor_plan(&mut svc, &mut opp, kind, &pulse, gcx.clone()).await;
-        if i < 3 {
+        if i < 5 {
             assert!(opp.humor.is_some(), "call {} should have humor", i);
         } else {
             assert!(
                 opp.humor.is_none(),
-                "4th distinct kind must be blocked by budget"
+                "6th distinct kind must be blocked by budget"
             );
         }
     }

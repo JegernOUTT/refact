@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::warn;
 
@@ -13,6 +15,20 @@ use super::types::{
     BuddyPersonalityProfile, BuddyPersonalityTraits, BuddyPetState, BuddyProgression, BuddyQuest,
     BuddySemanticSnapshot, BuddySkillLedger, BuddyState,
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SpeechRotationState {
+    pub by_intent: HashMap<String, IntentBudgetState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IntentBudgetState {
+    pub last_emitted_at: Option<DateTime<Utc>>,
+    pub hour_count: u32,
+    pub day_count: u32,
+    pub hour_window_start: Option<DateTime<Utc>>,
+    pub day_window_start: Option<DateTime<Utc>>,
+}
 
 const BUDDY_NAMES: &[&str] = &[
     "Pixel", "Byte", "Spark", "Nova", "Echo", "Chip", "Flux", "Glow", "Dash", "Zen",
@@ -183,6 +199,7 @@ pub fn default_buddy_state() -> BuddyState {
             ..Default::default()
         },
         job_cooldowns: std::collections::HashMap::new(),
+        speech_rotation: SpeechRotationState::default(),
         active_quest: None,
         opportunities: vec![],
         dismissed_history: vec![],

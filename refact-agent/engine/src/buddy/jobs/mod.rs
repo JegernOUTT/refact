@@ -5,5 +5,8 @@ pub mod greeting;
 pub mod health_watcher;
 pub mod proactive_suggestions;
 pub mod quest_prompt;
+pub mod speaker_insight;
+pub mod speaker_memory_pulse_commentary;
+pub mod speaker_win;
 pub mod stats_watcher;
 pub mod tour;
