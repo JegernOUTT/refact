@@ -1,0 +1,14 @@
+[package]
+name = "refact-agentic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-core = { path = "../refact-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+lazy_static = { workspace = true }
+regex = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+dunce = "1.0.5"
