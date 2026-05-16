@@ -5,5 +5,7 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
+indexmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9.31"
