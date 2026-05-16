@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/refact-core",
     "crates/refact-ast",
+    "crates/refact-chat-api",
     "crates/refact-vecdb",
     "crates/refact-llm",
     "crates/refact-knowledge-graph",
@@ -92,6 +93,7 @@ winreg = "0.55.0"
 
 refact-core = { path = "crates/refact-core" }
 refact-ast = { path = "crates/refact-ast" }
+refact-chat-api = { path = "crates/refact-chat-api" }
 refact-vecdb = { path = "crates/refact-vecdb" }
 refact-llm = { path = "crates/refact-llm" }
 refact-knowledge-graph = { path = "crates/refact-knowledge-graph" }

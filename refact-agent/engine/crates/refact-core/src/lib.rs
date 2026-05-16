@@ -1,3 +1,4 @@
+pub mod buddy_meta;
 pub mod chat_types;
 pub mod custom_error;
 pub mod knowledge_frontmatter;
@@ -7,3 +8,4 @@ pub mod models_dev;
 pub mod provider_types;
 pub mod string_utils;
 pub mod vecdb_types;
+pub mod worktree_meta;

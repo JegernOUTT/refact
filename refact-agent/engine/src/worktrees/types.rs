@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use refact_core::worktree_meta::WorktreeMeta;
+
 fn serialize_path<S: serde::Serializer>(path: &PathBuf, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&path.to_string_lossy())
 }
@@ -10,10 +12,6 @@ fn deserialize_path<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<PathBuf, D::Error> {
     Ok(PathBuf::from(String::deserialize(deserializer)?))
-}
-
-fn default_enforce() -> bool {
-    false
 }
 
 fn default_registry_schema_version() -> u32 {
@@ -30,41 +28,6 @@ fn default_cleanup_min_age_hours() -> u64 {
 
 fn default_delete_after_merge() -> bool {
     true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorktreeMeta {
-    pub id: String,
-    pub kind: String,
-    #[serde(
-        serialize_with = "serialize_path",
-        deserialize_with = "deserialize_path"
-    )]
-    pub root: PathBuf,
-    #[serde(
-        serialize_with = "serialize_path",
-        deserialize_with = "deserialize_path"
-    )]
-    pub source_workspace_root: PathBuf,
-    #[serde(
-        serialize_with = "serialize_path",
-        deserialize_with = "deserialize_path"
-    )]
-    pub repo_root: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_branch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub card_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
-    #[serde(default = "default_enforce")]
-    pub enforce: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

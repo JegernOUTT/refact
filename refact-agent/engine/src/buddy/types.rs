@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use super::state::SpeechRotationState;
 
+pub use refact_core::buddy_meta::BuddyThreadMeta;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuddyOnboarding {
     pub greeted: bool,
@@ -308,13 +310,6 @@ pub struct BuddyState {
 pub struct DismissEntry {
     pub cooldown_key: String,
     pub dismissed_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuddyThreadMeta {
-    pub is_buddy_chat: bool,
-    pub buddy_chat_kind: String,
-    pub workflow_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
