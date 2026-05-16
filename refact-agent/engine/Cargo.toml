@@ -13,6 +13,7 @@ members = [
     "crates/refact-scratchpads",
     "crates/refact-providers",
     "crates/refact-tool-api",
+    "crates/refact-chat-history",
 ]
 resolver = "2"
 
@@ -103,6 +104,7 @@ refact-stats = { path = "crates/refact-stats" }
 refact-scratchpads = { path = "crates/refact-scratchpads" }
 refact-providers = { path = "crates/refact-providers" }
 refact-tool-api = { path = "crates/refact-tool-api" }
+refact-chat-history = { path = "crates/refact-chat-history" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }
