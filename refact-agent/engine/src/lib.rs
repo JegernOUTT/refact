@@ -21,6 +21,7 @@ use rusqlite::ffi::sqlite3_auto_extension;
 // mods roughly sorted by dependency ↓
 
 pub use refact_agentic;
+pub use refact_at_web;
 pub use refact_buddy_api;
 pub use refact_file_edit_core;
 pub use refact_files;

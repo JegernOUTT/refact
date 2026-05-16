@@ -1,0 +1,14 @@
+[package]
+name = "refact-at-web"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-core = { path = "../refact-core" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
+select = "0.6.0"
+percent-encoding = "2.3"
+url = "2.4.1"

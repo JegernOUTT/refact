@@ -23,6 +23,7 @@ members = [
     "crates/refact-tasks",
     "crates/refact-buddy-api",
     "crates/refact-file-edit-core",
+    "crates/refact-at-web",
 ]
 resolver = "2"
 
@@ -123,6 +124,7 @@ refact-files = { path = "crates/refact-files" }
 refact-tasks = { path = "crates/refact-tasks" }
 refact-buddy-api = { path = "crates/refact-buddy-api" }
 refact-file-edit-core = { path = "crates/refact-file-edit-core" }
+refact-at-web = { path = "crates/refact-at-web" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }
