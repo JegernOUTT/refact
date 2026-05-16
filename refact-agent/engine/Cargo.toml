@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/refact-core", "crates/refact-ast", "crates/refact-vecdb", "crates/refact-llm", "crates/refact-knowledge-graph", "crates/refact-git"]
+members = [".", "crates/refact-core", "crates/refact-ast", "crates/refact-vecdb", "crates/refact-llm", "crates/refact-knowledge-graph", "crates/refact-git", "crates/refact-postprocessing"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -83,6 +83,7 @@ refact-vecdb = { path = "crates/refact-vecdb" }
 refact-llm = { path = "crates/refact-llm" }
 refact-knowledge-graph = { path = "crates/refact-knowledge-graph" }
 refact-git = { path = "crates/refact-git" }
+refact-postprocessing = { path = "crates/refact-postprocessing" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }

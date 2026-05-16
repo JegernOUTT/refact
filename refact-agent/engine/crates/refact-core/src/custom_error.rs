@@ -66,6 +66,15 @@ pub fn last_n_chars(msg: &str, n: usize) -> String {
     result.replace("\n", "\\n")
 }
 
+pub fn first_n_chars(msg: &str, n: usize) -> String {
+    let mut result: String = msg.chars().take(n).collect();
+    if result.chars().count() == n {
+        result.push_str("...");
+    }
+    result.replace("\n", "\\n")
+}
+
+
 impl fmt::Display for YamlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

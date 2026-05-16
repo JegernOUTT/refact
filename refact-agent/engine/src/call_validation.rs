@@ -9,7 +9,8 @@ use crate::worktrees::types::WorktreeMeta;
 
 pub use refact_core::chat_types::{
     Checkpoint, ContextEnum, ContextFile, ChatContent, ChatMessage, ChatToolCall, ChatToolFunction,
-    ChatUsage, MeteringUsd, MultimodalElement, OutputFilter, deserialize_path, serialize_path,
+    ChatUsage, MeteringUsd, MultimodalElement, OutputFilter, PostprocessSettings, SearchResult,
+    deserialize_path, format_search_results, serialize_path,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -327,42 +328,6 @@ pub struct DiffChunk {
     pub application_details: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(default)]
-pub struct PostprocessSettings {
-    pub use_ast_based_pp: bool,
-    pub useful_background: f32, // first, fill usefulness of all lines with this
-    pub useful_symbol_default: f32, // when a symbol present, set usefulness higher
-    // search results fill usefulness as it passed from outside
-    pub downgrade_parent_coef: f32, // goto parent from search results and mark it useful, with this coef
-    pub downgrade_body_coef: f32, // multiply body usefulness by this, so it's less useful than the declaration
-    pub comments_propagate_up_coef: f32, // mark comments above a symbol as useful, with this coef
-    pub close_small_gaps: bool,
-    pub take_floor: f32,    // take/dont value
-    pub max_files_n: usize, // don't produce more than n files in output
-}
-
-impl Default for PostprocessSettings {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PostprocessSettings {
-    pub fn new() -> Self {
-        PostprocessSettings {
-            use_ast_based_pp: true,
-            downgrade_body_coef: 0.8,
-            downgrade_parent_coef: 0.6,
-            useful_background: 5.0,
-            useful_symbol_default: 10.0,
-            close_small_gaps: true,
-            comments_propagate_up_coef: 0.99,
-            take_floor: 0.0,
-            max_files_n: 0,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -9,14 +9,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SearchResult {
-    pub title: String,
-    pub url: String,
-    pub snippet: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-}
+pub use refact_core::chat_types::{SearchResult, format_search_results};
 
 const DDG_HTML_URL: &str = "https://html.duckduckgo.com/html/";
 const DDG_TIMEOUT_SECS: u64 = 10;
@@ -359,21 +352,6 @@ pub fn clean_ddg_url(href: &str) -> String {
     normalized
 }
 
-pub fn format_search_results(query: &str, results: &[SearchResult]) -> String {
-    if results.is_empty() {
-        return format!("No web search results found for \"{}\".", query);
-    }
-
-    let mut output = format!("Web search results for \"{}\":\n\n", query);
-    for (i, result) in results.iter().enumerate() {
-        output.push_str(&format!("{}. [{}]({})\n", i + 1, result.title, result.url));
-        if !result.snippet.is_empty() {
-            output.push_str(&format!("   {}\n", result.snippet));
-        }
-        output.push('\n');
-    }
-    output
-}
 
 fn parse_searxng_json(body: &str) -> Result<Vec<SearchResult>, String> {
     let value: Value = serde_json::from_str(body)

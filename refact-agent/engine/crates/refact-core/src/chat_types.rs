@@ -722,3 +722,64 @@ pub struct ChatMessage {
     #[serde(skip)]
     pub output_filter: Option<OutputFilter>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+pub fn format_search_results(query: &str, results: &[SearchResult]) -> String {
+    if results.is_empty() {
+        return format!("No web search results found for \"{}\".", query);
+    }
+    let mut output = format!("Web search results for \"{}\":\n\n", query);
+    for (i, result) in results.iter().enumerate() {
+        output.push_str(&format!("{}. [{}]({})\n", i + 1, result.title, result.url));
+        if !result.snippet.is_empty() {
+            output.push_str(&format!("   {}\n", result.snippet));
+        }
+        output.push('\n');
+    }
+    output
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+#[serde(default)]
+pub struct PostprocessSettings {
+    pub use_ast_based_pp: bool,
+    pub useful_background: f32,
+    pub useful_symbol_default: f32,
+    pub downgrade_parent_coef: f32,
+    pub downgrade_body_coef: f32,
+    pub comments_propagate_up_coef: f32,
+    pub close_small_gaps: bool,
+    pub take_floor: f32,
+    pub max_files_n: usize,
+}
+
+impl Default for PostprocessSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PostprocessSettings {
+    pub fn new() -> Self {
+        PostprocessSettings {
+            use_ast_based_pp: true,
+            downgrade_body_coef: 0.8,
+            downgrade_parent_coef: 0.6,
+            useful_background: 5.0,
+            useful_symbol_default: 10.0,
+            close_small_gaps: true,
+            comments_propagate_up_coef: 0.99,
+            take_floor: 0.0,
+            max_files_n: 0,
+        }
+    }
+}
+
