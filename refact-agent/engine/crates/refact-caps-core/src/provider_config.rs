@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,7 @@ use super::model_records::{
     ChatModelRecord, CompletionModelRecord, DefaultModels, normalize_string,
 };
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct CapsProvider {
     #[serde(default, deserialize_with = "normalize_string")]
     pub name: String,
@@ -89,6 +90,11 @@ impl CapsProvider {
     pub fn apply_override(&mut self, value: serde_yaml::Value) -> Result<(), String> {
         set_field_if_exists::<String>(&mut self.base_provider, "base_provider", &value)?;
         set_field_if_exists::<bool>(&mut self.enabled, "enabled", &value)?;
+        set_field_if_exists::<bool>(
+            &mut self.supports_completion,
+            "supports_completion",
+            &value,
+        )?;
         set_field_if_exists::<WireFormat>(&mut self.wire_format, "wire_format", &value)?;
         set_field_if_exists::<String>(&mut self.endpoint_style, "endpoint_style", &value)?;
         set_field_if_exists::<String>(
@@ -100,6 +106,11 @@ impl CapsProvider {
         set_field_if_exists::<String>(&mut self.embedding_endpoint, "embedding_endpoint", &value)?;
         set_field_if_exists::<String>(&mut self.api_key, "api_key", &value)?;
         set_field_if_exists::<String>(&mut self.tokenizer_api_key, "tokenizer_api_key", &value)?;
+        set_field_if_exists::<usize>(
+            &mut self.code_completion_n_ctx,
+            "code_completion_n_ctx",
+            &value,
+        )?;
         if let Some(extra_headers) = value.get("extra_headers") {
             let headers = parse_extra_headers_value(extra_headers)?;
             self.extra_headers = extra_headers_mapping_to_hash_map(None, &headers);
@@ -131,6 +142,11 @@ impl CapsProvider {
             &value,
             &self.running_models,
         )?;
+        extend_collection::<IndexMap<String, serde_json::Value>>(
+            &mut self.models_dict_patch,
+            "models_dict_patch",
+            &value,
+        )?;
 
         match serde_yaml::from_value::<DefaultModels>(value) {
             Ok(dm) => {
@@ -154,6 +170,74 @@ impl CapsProvider {
         }
 
         Ok(())
+    }
+}
+
+impl Default for CapsProvider {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            base_provider: String::new(),
+            enabled: default_true(),
+            supports_completion: default_true(),
+            wire_format: WireFormat::default(),
+            endpoint_style: default_endpoint_style(),
+            completion_endpoint: String::new(),
+            chat_endpoint: String::new(),
+            embedding_endpoint: String::new(),
+            api_key: String::new(),
+            tokenizer_api_key: String::new(),
+            extra_headers: HashMap::new(),
+            code_completion_n_ctx: 0,
+            completion_models: IndexMap::new(),
+            chat_models: IndexMap::new(),
+            embedding_model: EmbeddingModelRecord::default(),
+            models_dict_patch: IndexMap::new(),
+            completion_default_model: String::new(),
+            chat_default_model: String::new(),
+            chat_thinking_model: String::new(),
+            chat_light_model: String::new(),
+            chat_buddy_model: String::new(),
+            running_models: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Debug for CapsProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapsProvider")
+            .field("name", &self.name)
+            .field("base_provider", &self.base_provider)
+            .field("enabled", &self.enabled)
+            .field("supports_completion", &self.supports_completion)
+            .field("wire_format", &self.wire_format)
+            .field("endpoint_style", &self.endpoint_style)
+            .field("completion_endpoint", &self.completion_endpoint)
+            .field("chat_endpoint", &self.chat_endpoint)
+            .field("embedding_endpoint", &self.embedding_endpoint)
+            .field("api_key", &redacted_secret(&self.api_key))
+            .field("tokenizer_api_key", &redacted_secret(&self.tokenizer_api_key))
+            .field("extra_headers", &self.extra_headers)
+            .field("code_completion_n_ctx", &self.code_completion_n_ctx)
+            .field("completion_models", &self.completion_models)
+            .field("chat_models", &self.chat_models)
+            .field("embedding_model", &self.embedding_model)
+            .field("models_dict_patch", &self.models_dict_patch)
+            .field("completion_default_model", &self.completion_default_model)
+            .field("chat_default_model", &self.chat_default_model)
+            .field("chat_thinking_model", &self.chat_thinking_model)
+            .field("chat_light_model", &self.chat_light_model)
+            .field("chat_buddy_model", &self.chat_buddy_model)
+            .field("running_models", &self.running_models)
+            .finish()
+    }
+}
+
+fn redacted_secret(value: &str) -> &str {
+    if value.is_empty() {
+        ""
+    } else {
+        "<redacted>"
     }
 }
 
@@ -248,6 +332,7 @@ mod tests {
         let mut provider = CapsProvider {
             base_provider: "template".to_string(),
             enabled: true,
+            supports_completion: true,
             wire_format: WireFormat::OpenaiChatCompletions,
             endpoint_style: "openai".to_string(),
             completion_endpoint: "old-completion".to_string(),
@@ -255,7 +340,12 @@ mod tests {
             embedding_endpoint: "old-embedding".to_string(),
             api_key: "old-key".to_string(),
             tokenizer_api_key: "old-tokenizer".to_string(),
+            code_completion_n_ctx: 1024,
             running_models: vec!["template-model".to_string()],
+            models_dict_patch: IndexMap::from([(
+                "template-model".to_string(),
+                serde_json::json!({"n_ctx": 10}),
+            )]),
             completion_default_model: "old-completion-model".to_string(),
             chat_default_model: "old-chat-model".to_string(),
             ..Default::default()
@@ -265,6 +355,7 @@ mod tests {
             r#"
 base_provider: openai
 enabled: false
+supports_completion: false
 wire_format: anthropic_messages
 endpoint_style: anthropic
 completion_endpoint: new-completion
@@ -272,6 +363,7 @@ chat_endpoint: new-chat
 embedding_endpoint: new-embedding
 api_key: new-key
 tokenizer_api_key: new-tokenizer
+code_completion_n_ctx: 2048
 extra_headers:
   X-Test: value
 embedding_model:
@@ -287,6 +379,11 @@ chat_models:
 completion_models:
   custom-completion:
     n_ctx: 200
+models_dict_patch:
+  template-model:
+    n_ctx: 50
+  custom-chat:
+    supports_tools: true
 completion_model: completion-default
 chat_model: chat-default
 chat_thinking_model: thinking-default
@@ -300,6 +397,7 @@ chat_buddy_model: buddy-default
 
         assert_eq!(provider.base_provider, "openai");
         assert!(!provider.enabled);
+        assert!(!provider.supports_completion);
         assert_eq!(provider.wire_format, WireFormat::AnthropicMessages);
         assert_eq!(provider.endpoint_style, "anthropic");
         assert_eq!(provider.completion_endpoint, "new-completion");
@@ -307,6 +405,7 @@ chat_buddy_model: buddy-default
         assert_eq!(provider.embedding_endpoint, "new-embedding");
         assert_eq!(provider.api_key, "new-key");
         assert_eq!(provider.tokenizer_api_key, "new-tokenizer");
+        assert_eq!(provider.code_completion_n_ctx, 2048);
         assert_eq!(provider.extra_headers.get("X-Test").map(String::as_str), Some("value"));
         assert_eq!(provider.embedding_model.base.name, "embed");
         assert!(provider.embedding_model.base.removable);
@@ -314,6 +413,14 @@ chat_buddy_model: buddy-default
         assert_eq!(provider.running_models, vec!["enabled-one", "running-two"]);
         assert!(provider.chat_models.contains_key("custom-chat"));
         assert!(provider.completion_models.contains_key("custom-completion"));
+        assert_eq!(
+            provider.models_dict_patch["template-model"],
+            serde_json::json!({"n_ctx": 50})
+        );
+        assert_eq!(
+            provider.models_dict_patch["custom-chat"],
+            serde_json::json!({"supports_tools": true})
+        );
         assert_eq!(provider.completion_default_model, "completion-default");
         assert_eq!(provider.chat_default_model, "chat-default");
         assert_eq!(provider.chat_thinking_model, "thinking-default");
@@ -326,6 +433,34 @@ chat_buddy_model: buddy-default
         let provider: CapsProvider = serde_yaml::from_str("{}").unwrap();
 
         assert_eq!(provider.endpoint_style, "openai");
+    }
+
+    #[test]
+    fn provider_default_matches_empty_serde_defaults_for_non_trivial_fields() {
+        let default_provider = CapsProvider::default();
+        let decoded: CapsProvider = serde_yaml::from_str("{}").unwrap();
+
+        assert!(default_provider.enabled);
+        assert!(decoded.enabled);
+        assert!(default_provider.supports_completion);
+        assert!(decoded.supports_completion);
+        assert_eq!(default_provider.endpoint_style, "openai");
+        assert_eq!(decoded.endpoint_style, "openai");
+    }
+
+    #[test]
+    fn provider_debug_redacts_api_keys() {
+        let provider = CapsProvider {
+            api_key: "secret-api".to_string(),
+            tokenizer_api_key: "secret-tokenizer".to_string(),
+            ..Default::default()
+        };
+
+        let debug = format!("{provider:?}");
+
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("secret-api"));
+        assert!(!debug.contains("secret-tokenizer"));
     }
 
     #[test]

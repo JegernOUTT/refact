@@ -5,12 +5,12 @@ use indexmap::IndexMap;
 
 use crate::caps::{
     BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord,
-    EmbeddingModelRecord, HasBaseModelRecord, strip_model_from_finetune,
+    HasBaseModelRecord, strip_model_from_finetune,
 };
 use crate::custom_error::YamlError;
 
 #[cfg(test)]
-use refact_core::llm_types::WireFormat;
+use refact_core::llm_types::{EmbeddingModelRecord, WireFormat};
 use refact_providers::identity::provider_identity_from_yaml;
 
 pub use refact_caps_core::provider_config::{

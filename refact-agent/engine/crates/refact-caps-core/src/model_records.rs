@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use refact_core::llm_types::{BaseModelRecord, HasBaseModelRecord, default_true};
 
-#[derive(Debug, Serialize, Clone, Deserialize, Default)]
+#[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct ChatModelRecord {
     #[serde(flatten)]
     pub base: BaseModelRecord,
@@ -50,6 +50,33 @@ pub struct ChatModelRecord {
     pub selected_provider: Option<String>,
 }
 
+impl Default for ChatModelRecord {
+    fn default() -> Self {
+        Self {
+            base: default_base_model_record(),
+            scratchpad: default_chat_scratchpad(),
+            scratchpad_patch: serde_json::Value::Null,
+            supports_tools: false,
+            supports_multimodality: false,
+            supports_clicks: false,
+            supports_agent: false,
+            reasoning_effort_options: None,
+            supports_thinking_budget: false,
+            supports_adaptive_thinking_budget: false,
+            max_thinking_tokens: None,
+            default_temperature: None,
+            default_frequency_penalty: None,
+            default_max_tokens: None,
+            max_output_tokens: None,
+            supports_parallel_tools: false,
+            supports_strict_tools: false,
+            supports_temperature: default_true(),
+            available_providers: Vec::new(),
+            selected_provider: None,
+        }
+    }
+}
+
 pub fn default_chat_scratchpad() -> String {
     String::new()
 }
@@ -84,7 +111,7 @@ impl HasBaseModelRecord for ChatModelRecord {
     }
 }
 
-#[derive(Debug, Serialize, Clone, Deserialize, Default)]
+#[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct CompletionModelRecord {
     #[serde(flatten)]
     pub base: BaseModelRecord,
@@ -94,7 +121,27 @@ pub struct CompletionModelRecord {
     #[serde(default = "default_completion_scratchpad_patch")]
     pub scratchpad_patch: serde_json::Value,
 
+    #[serde(default)]
     pub model_family: Option<CompletionModelFamily>,
+}
+
+impl Default for CompletionModelRecord {
+    fn default() -> Self {
+        Self {
+            base: default_base_model_record(),
+            scratchpad: default_completion_scratchpad(),
+            scratchpad_patch: default_completion_scratchpad_patch(),
+            model_family: None,
+        }
+    }
+}
+
+fn default_base_model_record() -> BaseModelRecord {
+    BaseModelRecord {
+        enabled: default_true(),
+        supports_cache_control: default_true(),
+        ..Default::default()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn default_scratchpads_match_engine_contract() {
+    fn model_record_defaults_match_empty_serde_defaults_for_non_trivial_fields() {
         assert_eq!(default_chat_scratchpad(), "");
         assert_eq!(default_completion_scratchpad(), "FIM-PSM");
         assert_eq!(
@@ -312,16 +359,34 @@ mod tests {
             "https://huggingface.co/$HF_MODEL/resolve/main/tokenizer.json"
         );
 
+        let default_chat = ChatModelRecord::default();
         let chat: ChatModelRecord = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default_chat.scratchpad, "");
         assert_eq!(chat.scratchpad, "");
+        assert!(default_chat.base.enabled);
+        assert!(chat.base.enabled);
+        assert!(default_chat.base.supports_cache_control);
+        assert!(chat.base.supports_cache_control);
+        assert!(default_chat.supports_temperature);
         assert!(chat.supports_temperature);
 
-        let completion: CompletionModelRecord = serde_json::from_value(serde_json::json!({})).unwrap();
+        let default_completion = CompletionModelRecord::default();
+        let completion: CompletionModelRecord =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default_completion.scratchpad, "FIM-PSM");
         assert_eq!(completion.scratchpad, "FIM-PSM");
+        assert_eq!(
+            default_completion.scratchpad_patch,
+            serde_json::json!({"context_format": "chat", "rag_ratio": 0.5})
+        );
         assert_eq!(
             completion.scratchpad_patch,
             serde_json::json!({"context_format": "chat", "rag_ratio": 0.5})
         );
+        assert!(default_completion.base.enabled);
+        assert!(completion.base.enabled);
+        assert!(default_completion.base.supports_cache_control);
+        assert!(completion.base.supports_cache_control);
     }
 
     #[test]
