@@ -23,6 +23,7 @@ members = [
     "crates/refact-tasks",
     "crates/refact-buddy-api",
     "crates/refact-buddy-core",
+    "crates/refact-buddy-opportunity-core",
     "crates/refact-file-edit-core",
     "crates/refact-at-web",
     "crates/refact-pricing-core",
@@ -126,6 +127,7 @@ refact-files = { path = "crates/refact-files" }
 refact-tasks = { path = "crates/refact-tasks" }
 refact-buddy-api = { path = "crates/refact-buddy-api" }
 refact-buddy-core = { path = "crates/refact-buddy-core" }
+refact-buddy-opportunity-core = { path = "crates/refact-buddy-opportunity-core" }
 refact-file-edit-core = { path = "crates/refact-file-edit-core" }
 refact-at-web = { path = "crates/refact-at-web" }
 refact-pricing-core = { path = "crates/refact-pricing-core" }

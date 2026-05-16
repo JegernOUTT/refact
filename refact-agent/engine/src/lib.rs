@@ -24,6 +24,7 @@ pub use refact_agentic;
 pub use refact_at_web;
 pub use refact_buddy_api;
 pub use refact_buddy_core;
+pub use refact_buddy_opportunity_core;
 pub use refact_file_edit_core;
 pub use refact_files;
 pub use refact_pricing_core;

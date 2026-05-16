@@ -1,0 +1,8 @@
+[package]
+name = "refact-buddy-opportunity-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-buddy-core = { path = "../refact-buddy-core" }
+chrono = { version = "0.4.31", features = ["serde"] }
