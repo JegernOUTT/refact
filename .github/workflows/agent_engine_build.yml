@@ -97,6 +97,12 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: brew install llvm
 
+      - name: Install build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang mold lld
+
       - name: Add swap space (Linux cross-compilation needs extra RAM for LTO)
         if: matrix.cross
         run: |

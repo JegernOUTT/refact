@@ -1,5 +1,17 @@
 [workspace]
-members = [".", "crates/refact-core", "crates/refact-ast", "crates/refact-vecdb", "crates/refact-llm", "crates/refact-knowledge-graph", "crates/refact-git", "crates/refact-postprocessing", "crates/refact-stats", "crates/refact-scratchpads", "crates/refact-providers"]
+members = [
+    ".",
+    "crates/refact-core",
+    "crates/refact-ast",
+    "crates/refact-vecdb",
+    "crates/refact-llm",
+    "crates/refact-knowledge-graph",
+    "crates/refact-git",
+    "crates/refact-postprocessing",
+    "crates/refact-stats",
+    "crates/refact-scratchpads",
+    "crates/refact-providers",
+]
 resolver = "2"
 
 [workspace.dependencies]

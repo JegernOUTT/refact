@@ -14,7 +14,7 @@ passthrough = [
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
 pre-build = [
-    "apt-get update && apt-get install --assume-yes libssl-dev libclang-dev curl unzip",
+    "apt-get update && apt-get install --assume-yes libssl-dev libclang-dev curl unzip mold",
 ]
 [target.x86_64-unknown-linux-gnu.env]
 passthrough = [
