@@ -11,6 +11,7 @@ pub use refact_core::chat_types::{
     Checkpoint, ContextEnum, ContextFile, ChatContent, ChatMessage, ChatToolCall, ChatToolFunction,
     ChatUsage, MeteringUsd, MultimodalElement, OutputFilter, PostprocessSettings, SearchResult,
     deserialize_path, format_search_results, serialize_path,
+    normalize_mode_id, canonical_mode_id,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -208,37 +209,7 @@ impl Default for ChatMeta {
     }
 }
 
-/// Normalize a mode ID string (legacy enum values or dynamic mode IDs).
-/// Handles uppercase legacy values and returns lowercase mode IDs.
-/// Returns error if mode is empty or contains invalid characters.
-pub fn normalize_mode_id(mode: &str) -> Result<String, String> {
-    let trimmed = mode.trim();
 
-    if trimmed.is_empty() {
-        return Ok("agent".to_string());
-    }
-
-    // Validate characters: lowercase, digits, underscore, hyphen
-    if !trimmed
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-    {
-        // Try to normalize uppercase legacy values
-        let normalized = trimmed.to_lowercase();
-        if !normalized
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-        {
-            return Err(format!(
-                "Invalid mode ID: '{}' contains invalid characters",
-                trimmed
-            ));
-        }
-        return Ok(normalized);
-    }
-
-    Ok(trimmed.to_string())
-}
 
 /// Check if a mode ID is agentic (supports tool execution and knowledge enrichment).
 pub fn is_agentic_mode_id(mode_id: &str) -> bool {
@@ -263,51 +234,7 @@ pub async fn validate_mode_for_request(
     Ok(canonical)
 }
 
-/// Canonicalize a mode ID string with full validation and legacy mapping.
-///
-/// This function:
-/// 1. Normalizes format (lowercases, validates characters)
-/// 2. Maps legacy enum values to canonical mode IDs
-/// 3. Validates length (max 128 chars)
-/// 4. Returns error for invalid input
-///
-/// Examples:
-/// - "AGENT" → "agent"
-/// - "agent" → "agent"
-/// - "CONFIGURE" → "configurator"
-/// - "NO_TOOLS" → "explore"
-/// - "my_custom_mode" → "my_custom_mode"
-/// - "" → "agent" (default)
-/// - "invalid!mode" → Err
-pub fn canonical_mode_id(mode: &str) -> Result<String, String> {
-    let trimmed = mode.trim();
 
-    if trimmed.is_empty() {
-        return Ok("agent".to_string());
-    }
-
-    if trimmed.len() > 128 {
-        return Err(format!(
-            "Mode ID too long: {} chars (max 128)",
-            trimmed.len()
-        ));
-    }
-
-    let normalized = normalize_mode_id(trimmed)?;
-
-    let canonical = match normalized.to_uppercase().as_str() {
-        "NO_TOOLS" => "explore".to_string(),
-        "EXPLORE" => "explore".to_string(),
-        "AGENT" => "agent".to_string(),
-        "CONFIGURE" | "CONFIGURATOR" => "configurator".to_string(),
-        "PLAN" => "plan".to_string(),
-        "TASK_PLANNER" => "task_planner".to_string(),
-        "TASK_AGENT" => "task_agent".to_string(),
-        _ => normalized,
-    };
-
-    Ok(canonical)
-}
 
 fn default_true() -> bool {
     true

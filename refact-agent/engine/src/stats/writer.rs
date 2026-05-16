@@ -1,205 +1,25 @@
-use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock as ARwLock;
-use tracing::{info, warn};
 
 use crate::global_context::GlobalContext;
 use crate::stats::event::LlmCallEvent;
 
-const MAX_FILE_SIZE: u64 = 1024 * 1024;
-const BATCH_SIZE: usize = 32;
-const BATCH_TIMEOUT_MS: u64 = 100;
-
-struct StatsFileState {
-    stats_dir: PathBuf,
-    seq: u32,
-    file: fs::File,
-    current_size: u64,
-}
-
-async fn find_current_sequence(stats_dir: &PathBuf) -> u32 {
-    let mut max_seq: u32 = 0;
-    let mut rd = match fs::read_dir(stats_dir).await {
-        Ok(rd) => rd,
-        Err(_) => return 0,
-    };
-    while let Ok(Some(entry)) = rd.next_entry().await {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.ends_with(".jsonl") {
-            let stem = name_str.trim_end_matches(".jsonl");
-            if let Ok(n) = stem.parse::<u32>() {
-                if n > max_seq {
-                    max_seq = n;
-                }
-            }
-        }
-    }
-    max_seq
-}
-
-fn seq_filename(stats_dir: &PathBuf, seq: u32) -> PathBuf {
-    stats_dir.join(format!("{:08}.jsonl", seq))
-}
-
-async fn get_initial_file_size(path: &PathBuf) -> u64 {
-    fs::metadata(path).await.map(|m| m.len()).unwrap_or(0)
-}
-
-async fn resolve_stats_dir_for_write(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
-    crate::stats::get_stats_dir(gcx).await
-}
-
-async fn open_stats_file_state(stats_dir: PathBuf) -> Option<StatsFileState> {
-    if let Err(e) = fs::create_dir_all(&stats_dir).await {
-        warn!("stats: failed to create stats dir {:?}: {}", stats_dir, e);
-        return None;
-    }
-
-    let mut seq = find_current_sequence(&stats_dir).await;
-    if seq == 0 {
-        seq = 1;
-    }
-
-    let current_path = seq_filename(&stats_dir, seq);
-    let file = match open_append(&current_path).await {
-        Ok(file) => file,
-        Err(e) => {
-            warn!("stats: failed to open {:?}: {}", current_path, e);
-            return None;
-        }
-    };
-    let current_size = get_initial_file_size(&current_path).await;
-
-    info!("stats: writing to {:?}", stats_dir);
-    Some(StatsFileState {
-        stats_dir,
-        seq,
-        file,
-        current_size,
-    })
-}
-
-async fn rotate_stats_file(state: &mut StatsFileState) -> std::io::Result<()> {
-    state.file.flush().await?;
-
-    let next_seq = state.seq + 1;
-    let next_path = seq_filename(&state.stats_dir, next_seq);
-    let next_file = open_append(&next_path).await?;
-
-    state.seq = next_seq;
-    state.file = next_file;
-    state.current_size = 0;
-    Ok(())
-}
-
 pub async fn stats_writer_task(
     gcx: Arc<ARwLock<GlobalContext>>,
-    mut receiver: tokio::sync::mpsc::Receiver<LlmCallEvent>,
+    receiver: tokio::sync::mpsc::Receiver<LlmCallEvent>,
 ) {
-    let mut state: Option<StatsFileState> = None;
-
-    loop {
-        let mut batch = Vec::with_capacity(BATCH_SIZE);
-
-        let first = tokio::time::timeout(
-            std::time::Duration::from_millis(BATCH_TIMEOUT_MS),
-            receiver.recv(),
-        )
-        .await;
-
-        match first {
-            Ok(Some(event)) => {
-                batch.push(event);
-                while batch.len() < BATCH_SIZE {
-                    match receiver.try_recv() {
-                        Ok(e) => batch.push(e),
-                        Err(_) => break,
-                    }
-                }
-            }
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-
-        let desired_stats_dir = resolve_stats_dir_for_write(gcx.clone()).await;
-
-        let should_open_stats_file = state
-            .as_ref()
-            .map(|current| current.stats_dir != desired_stats_dir)
-            .unwrap_or(true);
-        if should_open_stats_file {
-            if let Some(new_state) = open_stats_file_state(desired_stats_dir.clone()).await {
-                let previous_state = std::mem::replace(&mut state, Some(new_state));
-                if let Some(mut previous_state) = previous_state {
-                    if previous_state.stats_dir != desired_stats_dir {
-                        info!(
-                            "stats: switching from {:?} to {:?}",
-                            previous_state.stats_dir, desired_stats_dir
-                        );
-                    }
-                    if let Err(e) = previous_state.file.flush().await {
-                        warn!("stats: flush failed while switching dirs: {}", e);
-                    }
-                }
-            }
-        }
-
-        let Some(state) = state.as_mut() else {
-            continue;
-        };
-
-        for event in batch {
-            let line = match serde_json::to_string(&event) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("stats: failed to serialize event: {}", e);
-                    continue;
-                }
-            };
-
-            let bytes = format!("{}\n", line);
-            let byte_len = bytes.len() as u64;
-
-            if state.current_size + byte_len > MAX_FILE_SIZE {
-                if let Err(e) = rotate_stats_file(state).await {
-                    warn!(
-                        "stats: failed to rotate file in {:?}: {}",
-                        state.stats_dir, e
-                    );
-                    break;
-                }
-            }
-
-            if let Err(e) = state.file.write_all(bytes.as_bytes()).await {
-                warn!("stats: write failed: {}", e);
-                continue;
-            }
-            state.current_size += byte_len;
-        }
-
-        if let Err(e) = state.file.flush().await {
-            warn!("stats: flush failed: {}", e);
-        }
-    }
-}
-
-async fn open_append(path: &PathBuf) -> std::io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
+    let stats_dir_fn = Arc::new(move || {
+        let gcx = gcx.clone();
+        Box::pin(async move { crate::stats::get_stats_dir(gcx).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = std::path::PathBuf> + Send>>
+    });
+    refact_stats::writer::stats_writer_task(stats_dir_fn, receiver).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::global_context::tests::make_test_gcx;
-    use crate::stats::event::LlmCallEvent;
-    use tokio::io::AsyncReadExt;
 
     fn make_event(i: u64) -> LlmCallEvent {
         LlmCallEvent {
@@ -235,116 +55,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_writer_creates_jsonl_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let stats_dir = dir.path().to_path_buf();
-
-        let (tx, rx) = tokio::sync::mpsc::channel::<LlmCallEvent>(1000);
-
-        let stats_dir_clone = stats_dir.clone();
-        let handle = tokio::spawn(async move {
-            let mut seq = find_current_sequence(&stats_dir_clone).await;
-            if seq == 0 {
-                seq = 1;
-            }
-            let path = seq_filename(&stats_dir_clone, seq);
-            let mut file = open_append(&path).await.unwrap();
-
-            let mut receiver = rx;
-            while let Some(event) = receiver.recv().await {
-                let line = serde_json::to_string(&event).unwrap();
-                file.write_all(format!("{}\n", line).as_bytes())
-                    .await
-                    .unwrap();
-                file.flush().await.unwrap();
-            }
-        });
-
-        tx.send(make_event(1)).await.unwrap();
-        tx.send(make_event(2)).await.unwrap();
-        drop(tx);
-        handle.await.unwrap();
-
-        let file_path = seq_filename(&stats_dir, 1);
-        assert!(file_path.exists(), "stats file should exist");
-
-        let mut contents = String::new();
-        fs::File::open(&file_path)
-            .await
-            .unwrap()
-            .read_to_string(&mut contents)
-            .await
-            .unwrap();
-        let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(lines.len(), 2, "should have 2 JSONL lines");
-
-        let parsed: LlmCallEvent = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(parsed.chat_id, "chat-1");
-    }
-
-    #[tokio::test]
-    async fn test_rotation_on_size_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        let stats_dir = dir.path().to_path_buf();
-
-        let file1_path = seq_filename(&stats_dir, 1);
-        let large_content = "x".repeat((MAX_FILE_SIZE) as usize);
-        fs::write(&file1_path, &large_content).await.unwrap();
-
-        let initial_size = get_initial_file_size(&file1_path).await;
-        assert!(
-            initial_size >= MAX_FILE_SIZE,
-            "file should be at/above limit"
-        );
-
-        let seq = find_current_sequence(&stats_dir).await;
-        assert_eq!(seq, 1);
-
-        let (tx, rx) = tokio::sync::mpsc::channel::<LlmCallEvent>(1000);
-        let stats_dir_clone = stats_dir.clone();
-
-        let handle = tokio::spawn(async move {
-            let mut current_seq = find_current_sequence(&stats_dir_clone).await;
-            if current_seq == 0 {
-                current_seq = 1;
-            }
-            let mut current_path = seq_filename(&stats_dir_clone, current_seq);
-            let mut file = open_append(&current_path).await.unwrap();
-            let mut current_size = get_initial_file_size(&current_path).await;
-
-            let mut receiver = rx;
-            while let Some(event) = receiver.recv().await {
-                let line = serde_json::to_string(&event).unwrap();
-                let bytes = format!("{}\n", line);
-                let byte_len = bytes.len() as u64;
-                if current_size + byte_len > MAX_FILE_SIZE {
-                    file.flush().await.unwrap();
-                    drop(file);
-                    current_seq += 1;
-                    current_path = seq_filename(&stats_dir_clone, current_seq);
-                    file = open_append(&current_path).await.unwrap();
-                    current_size = 0;
-                }
-                file.write_all(bytes.as_bytes()).await.unwrap();
-                current_size += byte_len;
-                file.flush().await.unwrap();
-            }
-        });
-
-        tx.send(make_event(42)).await.unwrap();
-        drop(tx);
-        handle.await.unwrap();
-
-        let file2_path = seq_filename(&stats_dir, 2);
-        assert!(
-            file2_path.exists(),
-            "rotated file 00000002.jsonl should exist"
-        );
-
-        let contents = fs::read_to_string(&file2_path).await.unwrap();
-        let parsed: LlmCallEvent = serde_json::from_str(contents.trim()).unwrap();
-        assert_eq!(parsed.chat_id, "chat-42");
+    fn seq_filename(stats_dir: &std::path::PathBuf, seq: u32) -> std::path::PathBuf {
+        stats_dir.join(format!("{:08}.jsonl", seq))
     }
 
     #[tokio::test]
@@ -379,7 +91,7 @@ mod tests {
             "config stats file should not be created when workspace becomes available before the first event"
         );
 
-        let contents = fs::read_to_string(&workspace_file_path).await.unwrap();
+        let contents = tokio::fs::read_to_string(&workspace_file_path).await.unwrap();
         let parsed: LlmCallEvent = serde_json::from_str(contents.trim()).unwrap();
         assert_eq!(parsed.chat_id, "chat-7");
     }

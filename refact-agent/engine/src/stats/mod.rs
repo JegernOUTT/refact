@@ -1,5 +1,5 @@
-pub mod event;
-pub mod reader;
+pub use refact_stats::event;
+pub use refact_stats::reader;
 pub mod writer;
 
 use std::path::PathBuf;

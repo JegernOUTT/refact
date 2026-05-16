@@ -41,7 +41,7 @@ pub fn split_model_provider(model_id: &str) -> (String, String) {
 }
 
 pub fn canonicalize_mode_for_stats(mode: &str) -> String {
-    crate::call_validation::canonical_mode_id(mode).unwrap_or_else(|_| mode.to_string())
+    refact_core::chat_types::canonical_mode_id(mode).unwrap_or_else(|_| mode.to_string())
 }
 
 #[cfg(test)]

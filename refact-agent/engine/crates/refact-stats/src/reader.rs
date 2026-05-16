@@ -4,7 +4,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-use crate::stats::event::{LlmCallEvent, canonicalize_mode_for_stats};
+use crate::event::{LlmCallEvent, canonicalize_mode_for_stats};
 
 const RECENT_STATS_MIN_TAIL_BYTES: u64 = 64 * 1024;
 const RECENT_STATS_MAX_TAIL_BYTES: u64 = 2 * 1024 * 1024;
@@ -673,7 +673,7 @@ pub fn aggregate_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::event::LlmCallEvent;
+    use crate::event::LlmCallEvent;
     use std::io::Write;
 
     fn make_event(i: u64, success: bool) -> LlmCallEvent {
