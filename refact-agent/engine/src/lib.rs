@@ -22,6 +22,7 @@ use rusqlite::ffi::sqlite3_auto_extension;
 
 pub use refact_chat_api;
 pub use refact_chat_history;
+pub use refact_ext;
 pub use refact_core::custom_error;
 pub use refact_integrations;
 pub use refact_scratchpads;

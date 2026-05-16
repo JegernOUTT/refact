@@ -1,4 +1,5 @@
 pub mod buddy_meta;
+pub mod subagent_config;
 pub mod chat_types;
 pub mod custom_error;
 pub mod knowledge_frontmatter;
