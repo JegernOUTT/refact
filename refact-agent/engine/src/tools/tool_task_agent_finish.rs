@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::process::Command;
+use std::sync::{Arc, OnceLock};
 use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
@@ -70,6 +69,108 @@ fn resolve_agent_worktree(
         })
 }
 
+static FINISH_LOCKS: OnceLock<AMutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
+
+fn get_finish_locks() -> &'static AMutex<HashMap<String, Arc<AMutex<()>>>> {
+    FINISH_LOCKS.get_or_init(|| AMutex::new(HashMap::new()))
+}
+
+async fn get_finish_lock(task_id: &str, card_id: &str) -> Arc<AMutex<()>> {
+    let mut locks = get_finish_locks().lock().await;
+    locks
+        .entry(format!("{}:{}", task_id, card_id))
+        .or_insert_with(|| Arc::new(AMutex::new(())))
+        .clone()
+}
+
+fn git_failure_details(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{}\n{}", stderr, stdout),
+        (false, true) => stderr,
+        (true, false) => stdout,
+        (true, true) => format!("exit status {}", output.status),
+    }
+}
+
+async fn git_output_checked(
+    worktree_path: &Path,
+    args: &[&str],
+    action: &str,
+) -> Result<std::process::Output, String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to run git {} in worktree '{}': {}",
+                action,
+                worktree_path.display(),
+                e
+            )
+        })?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed in worktree '{}': {}",
+            action,
+            worktree_path.display(),
+            git_failure_details(&output)
+        ));
+    }
+
+    Ok(output)
+}
+
+async fn validate_git_worktree(worktree_path: &Path) -> Result<(), String> {
+    if !worktree_path.exists() {
+        return Err(format!(
+            "Assigned worktree path '{}' does not exist",
+            worktree_path.display()
+        ));
+    }
+    if !worktree_path.is_dir() {
+        return Err(format!(
+            "Assigned worktree path '{}' is not a directory",
+            worktree_path.display()
+        ));
+    }
+
+    let output = tokio::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to validate git worktree '{}': {}",
+                worktree_path.display(),
+                e
+            )
+        })?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Assigned worktree path '{}' is not a git worktree/repo: {}",
+            worktree_path.display(),
+            git_failure_details(&output)
+        ));
+    }
+
+    let inside_work_tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if inside_work_tree != "true" {
+        return Err(format!(
+            "Assigned worktree path '{}' is not inside a git worktree",
+            worktree_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
 async fn auto_commit_worktree(
     gcx: Arc<ARwLock<GlobalContext>>,
     worktree_path: &Path,
@@ -86,71 +187,20 @@ async fn auto_commit_worktree_with_message(
     card_title: &str,
     commit_msg_override: Option<String>,
 ) -> Result<Option<String>, String> {
-    if !worktree_path.exists() {
-        return Ok(None);
-    }
+    validate_git_worktree(worktree_path).await?;
 
-    let git_dir = worktree_path.join(".git");
-    if !git_dir.exists() && !worktree_path.join("..").join(".git").exists() {
-        return Ok(None);
-    }
-
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| {
-            format!(
-                "Failed to check git status in worktree '{}': {}",
-                worktree_path.display(),
-                e
-            )
-        })?;
-
-    if !status_output.status.success() {
-        return Err(format!(
-            "git status failed in worktree '{}': {}",
-            worktree_path.display(),
-            String::from_utf8_lossy(&status_output.stderr)
-        ));
-    }
+    let status_output =
+        git_output_checked(worktree_path, &["status", "--porcelain"], "status").await?;
 
     let status = String::from_utf8_lossy(&status_output.stdout);
     if status.trim().is_empty() {
         return Ok(None);
     }
 
-    let add_output = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| {
-            format!(
-                "Failed to stage changes in worktree '{}': {}",
-                worktree_path.display(),
-                e
-            )
-        })?;
+    git_output_checked(worktree_path, &["add", "-A"], "add").await?;
 
-    if !add_output.status.success() {
-        return Err(format!(
-            "git add failed in worktree '{}': {}",
-            worktree_path.display(),
-            String::from_utf8_lossy(&add_output.stderr)
-        ));
-    }
-
-    let diff_output = Command::new("git")
-        .args(["diff", "--cached"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| {
-            format!(
-                "Failed to get diff in worktree '{}': {}",
-                worktree_path.display(),
-                e
-            )
-        })?;
+    let diff_output =
+        git_output_checked(worktree_path, &["diff", "--cached"], "diff --cached").await?;
     let diff = String::from_utf8_lossy(&diff_output.stdout).to_string();
 
     let commit_msg = match commit_msg_override {
@@ -162,7 +212,7 @@ async fn auto_commit_worktree_with_message(
         },
     };
 
-    let commit_output = Command::new("git")
+    let commit_output = tokio::process::Command::new("git")
         .args([
             "-c",
             "user.name=Refact Agent",
@@ -175,6 +225,7 @@ async fn auto_commit_worktree_with_message(
         ])
         .current_dir(worktree_path)
         .output()
+        .await
         .map_err(|e| {
             format!(
                 "Failed to commit in worktree '{}': {}",
@@ -191,25 +242,22 @@ async fn auto_commit_worktree_with_message(
         return Err(format!(
             "git commit failed in worktree '{}': {}",
             worktree_path.display(),
-            stderr
+            git_failure_details(&commit_output)
         ));
     }
 
-    let rev_output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| {
-            format!(
-                "Failed to get commit hash in worktree '{}': {}",
-                worktree_path.display(),
-                e
-            )
-        })?;
+    let rev_output =
+        git_output_checked(worktree_path, &["rev-parse", "HEAD"], "rev-parse HEAD").await?;
 
     let commit_hash = String::from_utf8_lossy(&rev_output.stdout)
         .trim()
         .to_string();
+    if commit_hash.is_empty() {
+        return Err(format!(
+            "git rev-parse HEAD returned empty output in worktree '{}'",
+            worktree_path.display()
+        ));
+    }
     Ok(Some(commit_hash))
 }
 
@@ -268,6 +316,8 @@ impl Tool for ToolTaskAgentFinish {
             .to_string();
 
         let gcx = ccx.lock().await.global_context.clone();
+        let finish_lock = get_finish_lock(&task_id, &card_id).await;
+        let _finish_guard = finish_lock.lock().await;
 
         let _ =
             crate::chat::task_agent_monitor::update_card_heartbeat(gcx.clone(), &task_id, &card_id)
@@ -277,6 +327,12 @@ impl Tool for ToolTaskAgentFinish {
         let card_pre = board_pre
             .get_card(&card_id)
             .ok_or(format!("Card {} not found", card_id))?;
+        if card_pre.column == "done" || card_pre.column == "failed" {
+            return Err(format!(
+                "Card {} is already in '{}' column. Cannot finish twice.",
+                card_id, card_pre.column
+            ));
+        }
         let thread_worktree = ccx.lock().await.execution_scope_worktree();
         let resolved_worktree = resolve_agent_worktree(thread_worktree, card_pre);
         let card_title_for_commit = card_pre.title.clone();
@@ -478,7 +534,7 @@ mod tests {
     use crate::tasks::types::BoardCard;
 
     fn run_git(cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = std::process::Command::new("git")
             .args(args)
             .current_dir(cwd)
             .output()
@@ -547,6 +603,10 @@ mod tests {
         }
     }
 
+    async fn test_gcx() -> Arc<ARwLock<GlobalContext>> {
+        crate::global_context::tests::make_test_gcx().await
+    }
+
     #[test]
     fn task_spawn_agent_finish_prefers_thread_worktree_over_board_mirror() {
         let temp = tempfile::tempdir().unwrap();
@@ -563,6 +623,62 @@ mod tests {
         assert_eq!(legacy.root, legacy_root);
         assert_eq!(legacy.branch.as_deref(), Some("legacy-branch"));
         assert_eq!(legacy.name.as_deref(), Some("legacy-id"));
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_finish_missing_worktree_returns_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing-worktree");
+        let result = auto_commit_worktree_with_message(
+            test_gcx().await,
+            &missing,
+            "T-1",
+            "Card T-1",
+            Some("test commit".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_finish_non_git_worktree_returns_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let non_git = temp.path().join("non-git");
+        std::fs::create_dir_all(&non_git).unwrap();
+        let result = auto_commit_worktree_with_message(
+            test_gcx().await,
+            &non_git,
+            "T-1",
+            "Card T-1",
+            Some("test commit".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a git worktree/repo"));
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_finish_clean_worktree_returns_no_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+
+        let commit = auto_commit_worktree_with_message(
+            test_gcx().await,
+            &repo,
+            "T-1",
+            "Card T-1",
+            Some("test commit".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert!(commit.is_none());
+        assert!(run_git(&repo, &["status", "--porcelain"]).trim().is_empty());
     }
 
     #[tokio::test]
