@@ -50,9 +50,13 @@ pub fn normalize_line_endings(content: &str) -> String {
     content.replace("\r\n", "\n")
 }
 
+fn normalize_all_line_endings(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 pub fn restore_line_endings(content: &str, original_had_crlf: bool) -> String {
     if original_had_crlf {
-        content.replace("\n", "\r\n")
+        normalize_all_line_endings(content).replace('\n', "\r\n")
     } else {
         content.to_string()
     }
@@ -96,6 +100,13 @@ pub fn replace_between_anchors(
     replacement: &str,
     multiple: bool,
 ) -> Result<String, String> {
+    if before.is_empty() {
+        return Err("⚠️ anchor_before cannot be empty. 💡 Provide unique text before the replacement".to_string());
+    }
+    if after.is_empty() {
+        return Err("⚠️ anchor_after cannot be empty. 💡 Provide unique text after the replacement".to_string());
+    }
+
     let before_positions: Vec<usize> = content.match_indices(before).map(|(i, _)| i).collect();
     if before_positions.is_empty() {
         return Err("⚠️ anchor_before not found. 💡 Use cat() to verify text exists".to_string());
@@ -162,6 +173,10 @@ pub fn insert_at_anchor(
     multiple: bool,
     after: bool,
 ) -> Result<String, String> {
+    if anchor.is_empty() {
+        return Err("⚠️ Anchor cannot be empty. 💡 Provide unique text to locate edit position".to_string());
+    }
+
     let positions: Vec<usize> = content.match_indices(anchor).map(|(i, _)| i).collect();
     if positions.is_empty() {
         return Err("⚠️ Anchor not found. 💡 Use cat() to verify text exists".to_string());
@@ -333,6 +348,8 @@ mod tests {
         assert_eq!(normalize_line_endings("a\nb\n"), "a\nb\n");
         assert_eq!(restore_line_endings("a\nb\n", true), "a\r\nb\r\n");
         assert_eq!(restore_line_endings("a\nb\n", false), "a\nb\n");
+        assert_eq!(restore_line_endings("a\r\nb\r\n", true), "a\r\nb\r\n");
+        assert_eq!(restore_line_endings("a\rb\r", true), "a\r\nb\r\n");
     }
 
     #[test]
@@ -368,7 +385,13 @@ mod tests {
     }
 
     #[test]
-    fn replace_between_anchors_reports_missing_repeated_and_overlapping_regions() {
+    fn replace_between_anchors_reports_empty_missing_repeated_and_overlapping_regions() {
+        assert!(replace_between_anchors("BEGIN\nold\nEND", "", "END", "x", false)
+            .unwrap_err()
+            .contains("anchor_before cannot be empty"));
+        assert!(replace_between_anchors("BEGIN\nold\nEND", "BEGIN", "", "x", false)
+            .unwrap_err()
+            .contains("anchor_after cannot be empty"));
         assert!(replace_between_anchors("no anchors here", "BEGIN", "END", "x", false).is_err());
         let repeated = "A\nBEGIN\nx\nEND\nB\nBEGIN\ny\nEND\nC";
         assert!(replace_between_anchors(repeated, "BEGIN\n", "END", "z\n", false)
@@ -391,7 +414,10 @@ mod tests {
     }
 
     #[test]
-    fn insert_at_anchor_reports_missing_or_repeated_unique_anchor() {
+    fn insert_at_anchor_reports_empty_missing_or_repeated_unique_anchor() {
+        assert!(insert_at_anchor("content", "", "x", false, true)
+            .unwrap_err()
+            .contains("Anchor cannot be empty"));
         assert!(insert_at_anchor("content", "MISSING", "x", false, true).is_err());
         assert!(insert_at_anchor("A\nA\nA", "A", "x", false, true)
             .unwrap_err()
