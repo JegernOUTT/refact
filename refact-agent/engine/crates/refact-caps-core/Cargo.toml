@@ -1,0 +1,9 @@
+[package]
+name = "refact-caps-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-core = { path = "../refact-core" }
+serde.workspace = true
+serde_json.workspace = true

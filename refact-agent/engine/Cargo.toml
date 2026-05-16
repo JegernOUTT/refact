@@ -28,6 +28,7 @@ members = [
     "crates/refact-at-web",
     "crates/refact-pricing-core",
     "crates/refact-scope-utils",
+    "crates/refact-caps-core",
 ]
 resolver = "2"
 
@@ -133,6 +134,7 @@ refact-file-edit-core = { path = "crates/refact-file-edit-core" }
 refact-at-web = { path = "crates/refact-at-web" }
 refact-pricing-core = { path = "crates/refact-pricing-core" }
 refact-scope-utils = { path = "crates/refact-scope-utils" }
+refact-caps-core = { path = "crates/refact-caps-core" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }

@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use tracing::{info, warn};
 
@@ -23,150 +22,11 @@ pub use refact_core::llm_types::{
     default_embedding_batch, default_rejection_threshold, default_true,
 };
 
-#[derive(Debug, Serialize, Clone, Deserialize, Default)]
-pub struct ChatModelRecord {
-    #[serde(flatten)]
-    pub base: BaseModelRecord,
-
-    #[allow(dead_code)] // Deserialized from API but not used internally
-    #[serde(default = "default_chat_scratchpad", skip_serializing)]
-    pub scratchpad: String,
-    #[allow(dead_code)] // Deserialized from API but not used internally
-    #[serde(default, skip_serializing)]
-    pub scratchpad_patch: serde_json::Value,
-
-    #[serde(default)]
-    pub supports_tools: bool,
-    #[serde(default)]
-    pub supports_multimodality: bool,
-    #[serde(default)]
-    pub supports_clicks: bool,
-    #[serde(default)]
-    pub supports_agent: bool,
-    #[serde(default)]
-    pub reasoning_effort_options: Option<Vec<String>>,
-    #[serde(default)]
-    pub supports_thinking_budget: bool,
-    #[serde(default)]
-    pub supports_adaptive_thinking_budget: bool,
-    #[serde(default)]
-    pub max_thinking_tokens: Option<usize>,
-    #[serde(default)]
-    pub default_temperature: Option<f32>,
-    #[serde(default)]
-    pub default_frequency_penalty: Option<f32>,
-    #[serde(default)]
-    pub default_max_tokens: Option<usize>,
-    #[serde(default)]
-    pub max_output_tokens: Option<usize>,
-    #[serde(default)]
-    pub supports_parallel_tools: bool,
-    #[serde(default)]
-    pub supports_strict_tools: bool,
-    #[serde(default = "default_true")]
-    pub supports_temperature: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_providers: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_provider: Option<String>,
-}
-
-pub fn default_chat_scratchpad() -> String {
-    String::new()
-}
-
-impl ChatModelRecord {
-    pub fn has_reasoning_support(&self) -> bool {
-        self.reasoning_effort_options.is_some()
-            || self.supports_thinking_budget
-            || self.supports_adaptive_thinking_budget
-    }
-
-    pub fn reasoning_type_string(&self) -> Option<String> {
-        if self.supports_adaptive_thinking_budget {
-            Some("anthropic_effort".to_string())
-        } else if self.supports_thinking_budget {
-            Some("anthropic_budget".to_string())
-        } else if self.reasoning_effort_options.is_some() {
-            Some("effort".to_string())
-        } else {
-            None
-        }
-    }
-}
-
-impl HasBaseModelRecord for ChatModelRecord {
-    fn base(&self) -> &BaseModelRecord {
-        &self.base
-    }
-    fn base_mut(&mut self) -> &mut BaseModelRecord {
-        &mut self.base
-    }
-}
-
-#[derive(Debug, Serialize, Clone, Deserialize, Default)]
-pub struct CompletionModelRecord {
-    #[serde(flatten)]
-    pub base: BaseModelRecord,
-
-    #[serde(default = "default_completion_scratchpad")]
-    pub scratchpad: String,
-    #[serde(default = "default_completion_scratchpad_patch")]
-    pub scratchpad_patch: serde_json::Value,
-
-    pub model_family: Option<CompletionModelFamily>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionModelFamily {
-    #[serde(rename = "qwen2.5-coder-base")]
-    Qwen2_5CoderBase,
-    #[serde(rename = "starcoder")]
-    Starcoder,
-    #[serde(rename = "deepseek-coder")]
-    DeepseekCoder,
-}
-
-pub fn default_completion_scratchpad() -> String {
-    "FIM-PSM".to_string()
-}
-
-pub fn default_completion_scratchpad_patch() -> serde_json::Value {
-    serde_json::json!({
-        "context_format": "chat",
-        "rag_ratio": 0.5
-    })
-}
-
-impl HasBaseModelRecord for CompletionModelRecord {
-    fn base(&self) -> &BaseModelRecord {
-        &self.base
-    }
-    fn base_mut(&mut self) -> &mut BaseModelRecord {
-        &mut self.base
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct CapsMetadata {
-    #[serde(default = "default_pricing")]
-    pub pricing: serde_json::Value,
-    #[serde(default)]
-    pub features: Vec<String>,
-}
-
-fn default_pricing() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-impl Default for CapsMetadata {
-    fn default() -> Self {
-        Self {
-            pricing: default_pricing(),
-            features: Vec::new(),
-        }
-    }
-}
+pub use refact_caps_core::model_records::{
+    CapsMetadata, ChatModelRecord, CompletionModelFamily, CompletionModelRecord, DefaultModels,
+    default_chat_scratchpad, default_completion_scratchpad, default_completion_scratchpad_patch,
+    default_hf_tokenizer_template, default_pricing, normalize_string,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CodeAssistantCaps {
@@ -216,79 +76,6 @@ impl Default for CodeAssistantCaps {
             model_caps: Arc::new(std::collections::HashMap::new()),
             user_defaults: crate::providers::config::ProviderDefaults::default(),
             provider_base_names: HashMap::new(),
-        }
-    }
-}
-
-pub fn default_hf_tokenizer_template() -> String {
-    "https://huggingface.co/$HF_MODEL/resolve/main/tokenizer.json".to_string()
-}
-
-pub fn normalize_string<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<String, D::Error> {
-    let s: String = String::deserialize(deserializer)?;
-    Ok(s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect())
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct DefaultModels {
-    #[serde(
-        default,
-        alias = "code_completion_default_model",
-        alias = "completion_model"
-    )]
-    pub completion_default_model: String,
-    #[serde(default, alias = "code_chat_default_model", alias = "chat_model")]
-    pub chat_default_model: String,
-    #[serde(default)]
-    pub chat_thinking_model: String,
-    #[serde(default)]
-    pub chat_light_model: String,
-    #[serde(default)]
-    pub chat_buddy_model: String,
-}
-
-impl DefaultModels {
-    fn qualify_model(model: &str, provider_name: Option<&str>) -> String {
-        let Some(provider) = provider_name else {
-            return model.to_string();
-        };
-        if model.is_empty() {
-            return String::new();
-        }
-        if model.starts_with(&format!("{}/", provider)) {
-            model.to_string()
-        } else {
-            format!("{}/{}", provider, model)
-        }
-    }
-
-    pub fn apply_override(&mut self, other: &DefaultModels, provider_name: Option<&str>) {
-        if !other.completion_default_model.is_empty() {
-            self.completion_default_model =
-                Self::qualify_model(&other.completion_default_model, provider_name);
-        }
-        if !other.chat_default_model.is_empty() {
-            self.chat_default_model = Self::qualify_model(&other.chat_default_model, provider_name);
-        }
-        if !other.chat_thinking_model.is_empty() {
-            self.chat_thinking_model =
-                Self::qualify_model(&other.chat_thinking_model, provider_name);
-        }
-        if !other.chat_light_model.is_empty() {
-            self.chat_light_model = Self::qualify_model(&other.chat_light_model, provider_name);
-        }
-        if !other.chat_buddy_model.is_empty() {
-            self.chat_buddy_model = Self::qualify_model(&other.chat_buddy_model, provider_name);
         }
     }
 }
