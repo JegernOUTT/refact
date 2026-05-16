@@ -7,7 +7,7 @@ use crate::global_context::GlobalContext;
 use crate::subchat::run_subchat_once;
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
-use super::kg_structs::KnowledgeDoc;
+use refact_knowledge_graph::kg_structs::KnowledgeDoc;
 
 const KG_ENRICH_SUBAGENT_ID: &str = "kg_enrich";
 const KG_DEPRECATE_SUBAGENT_ID: &str = "kg_deprecate";

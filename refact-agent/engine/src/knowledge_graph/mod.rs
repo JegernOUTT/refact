@@ -1,10 +1,70 @@
-pub mod kg_builder;
-pub mod kg_cleanup;
-pub mod kg_query;
-pub mod kg_staleness;
-pub mod kg_structs;
+pub use refact_knowledge_graph::kg_structs;
+pub use refact_knowledge_graph::kg_structs::KnowledgeFrontmatter;
+pub use refact_knowledge_graph::kg_cleanup::{KgFileDeleter, KgGraphBuilder};
+
 pub mod kg_subchat;
 
-pub use kg_structs::KnowledgeFrontmatter;
-pub use kg_builder::build_knowledge_graph;
-pub use kg_cleanup::knowledge_cleanup_background_task;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock as ARwLock;
+
+use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
+use crate::files_correction::get_project_dirs;
+use crate::global_context::GlobalContext;
+use refact_knowledge_graph::kg_structs::KnowledgeGraph;
+
+pub async fn build_knowledge_graph(gcx: Arc<ARwLock<GlobalContext>>) -> KnowledgeGraph {
+    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let mut knowledge_dirs: Vec<PathBuf> = project_dirs
+        .iter()
+        .map(|d| d.join(KNOWLEDGE_FOLDER_NAME))
+        .filter(|d| d.exists())
+        .collect();
+    let global_dir = crate::memories::get_global_knowledge_dir(gcx.clone()).await;
+    if global_dir.exists() {
+        knowledge_dirs.push(global_dir);
+    }
+    let workspace_files = collect_workspace_files(gcx).await;
+    refact_knowledge_graph::kg_builder::build_knowledge_graph(knowledge_dirs, workspace_files).await
+}
+
+pub async fn knowledge_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
+    let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+    let cache_dir = gcx.read().await.cache_dir.clone();
+    let gcx_for_build = gcx.clone();
+    let build_graph: KgGraphBuilder = Arc::new(move || {
+        let gcx = gcx_for_build.clone();
+        Box::pin(async move { build_knowledge_graph(gcx).await })
+    });
+    let gcx_for_delete = gcx.clone();
+    let delete_file: KgFileDeleter = Arc::new(move |path: PathBuf| {
+        let gcx = gcx_for_delete.clone();
+        Box::pin(async move { crate::memories::delete_document_from_disk(gcx, &path).await })
+    });
+    refact_knowledge_graph::kg_cleanup::knowledge_cleanup_background_task(
+        shutdown_flag,
+        cache_dir,
+        build_graph,
+        delete_file,
+    )
+    .await
+}
+
+async fn collect_workspace_files(gcx: Arc<ARwLock<GlobalContext>>) -> HashSet<String> {
+    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let mut files = HashSet::new();
+    for dir in project_dirs {
+        let indexing =
+            crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await;
+        if let Ok(paths) = crate::files_in_workspace::ls_files(&*indexing, &dir, true) {
+            for path in paths {
+                if let Ok(rel) = path.strip_prefix(&dir) {
+                    files.insert(rel.to_string_lossy().to_string());
+                }
+                files.insert(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    files
+}
