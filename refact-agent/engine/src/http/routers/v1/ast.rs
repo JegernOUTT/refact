@@ -1,14 +1,14 @@
 use std::collections::HashSet;
-use axum::Extension;
+use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use serde_json::json;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::files_in_workspace::{Document, get_file_text_from_memory_or_disk};
-use crate::global_context::SharedGlobalContext;
 use crate::postprocessing::pp_context_files::pp_color_lines;
 use crate::postprocessing::pp_utils::{context_msgs_from_paths, pp_ast_markup_files};
 use crate::call_validation::PostprocessSettings;
@@ -24,9 +24,10 @@ struct FileNameOnlyPost {
 }
 
 pub async fn handle_v1_ast_file_dump(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<FileNameOnlyPost>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
 
@@ -74,9 +75,10 @@ pub async fn handle_v1_ast_file_dump(
 }
 
 pub async fn handle_v1_ast_file_symbols(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<AstFileUrlPost>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
 
@@ -138,9 +140,10 @@ pub async fn handle_v1_ast_file_symbols(
 }
 
 pub async fn handle_v1_ast_status(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     _: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let ast_service_opt = global_context.read().await.ast_service.clone();
     match &ast_service_opt {
         Some(ast_service) => {

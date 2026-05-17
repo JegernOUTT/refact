@@ -5232,7 +5232,8 @@ async fn registry_validation_error_does_not_consume_draft() {
         "draft_id": draft_id.clone()
     }))
     .unwrap();
-    let app = crate::http::routers::v1::make_v1_router().layer(Extension(gcx.clone()));
+    let app_state = gcx.read().await.app_state(gcx.clone());
+    let app = crate::http::routers::v1::make_v1_router(gcx.clone(), app_state);
     let response = app
         .oneshot(
             Request::builder()
@@ -5277,7 +5278,8 @@ async fn customization_delegates_route_writes_subagent_storage_and_consumes() {
         "draft_id": draft_id.clone()
     }))
     .unwrap();
-    let app = crate::http::routers::v1::make_v1_router().layer(Extension(gcx.clone()));
+    let app_state = gcx.read().await.app_state(gcx.clone());
+    let app = crate::http::routers::v1::make_v1_router(gcx.clone(), app_state);
     let response = app
         .oneshot(
             Request::builder()
@@ -5334,7 +5336,8 @@ async fn customization_save_leaves_no_atomic_temp_file() {
         "scope": "global"
     }))
     .unwrap();
-    let app = crate::http::routers::v1::make_v1_router().layer(Extension(gcx));
+    let app_state = gcx.read().await.app_state(gcx.clone());
+    let app = crate::http::routers::v1::make_v1_router(gcx, app_state);
     let response = app
         .oneshot(
             Request::builder()

@@ -1,18 +1,15 @@
 use tracing::{error, info};
 use axum::middleware::Next;
-use axum::Extension;
 use axum::http::{Method, Request, Uri};
 use axum::response::Response;
 
 use crate::custom_error::ScratchError;
-use crate::global_context::SharedGlobalContext;
 
 const SPAM_HANDLERS: &[&str] = &["rag-status", "ping"];
 
 pub async fn request_logging_middleware<B>(
     path: Uri,
     _method: Method,
-    _ex: Extension<SharedGlobalContext>,
     request: Request<B>,
     next: Next<B>,
 ) -> Result<Response, ScratchError> {

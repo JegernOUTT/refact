@@ -2158,7 +2158,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_browser_action_route_rejects_invalid_json() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let router = crate::http::routers::make_refact_http_server().layer(Extension(gcx));
+        let app_state = gcx.read().await.app_state(gcx.clone());
+        let router = crate::http::routers::make_refact_http_server(gcx, app_state);
 
         let response = router
             .oneshot(
@@ -2183,7 +2184,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_browser_action_route_returns_not_found_without_runtime() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let router = crate::http::routers::make_refact_http_server().layer(Extension(gcx));
+        let app_state = gcx.read().await.app_state(gcx.clone());
+        let router = crate::http::routers::make_refact_http_server(gcx, app_state);
 
         let response = router
             .oneshot(

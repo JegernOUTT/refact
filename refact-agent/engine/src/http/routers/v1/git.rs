@@ -2,7 +2,7 @@ use chrono::{Utc, DateTime};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use axum::Extension;
+use axum::extract::State;
 use axum::http::{Response, StatusCode};
 use git2::Repository;
 use hyper::Body;
@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::call_validation::ChatMeta;
 use crate::files_correction::{deserialize_path, serialize_path};
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::git::{CommitInfo, FileChange};
 use crate::git::operations::{get_configured_author_email_and_name, stage_changes};
@@ -98,9 +99,10 @@ pub struct WorkspaceChanges {
 }
 
 pub async fn handle_v1_git_commit(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<GitCommitPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -206,9 +208,10 @@ pub async fn handle_v1_git_commit(
 }
 
 pub async fn handle_v1_checkpoints_preview(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<CheckpointsPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -267,9 +270,10 @@ pub async fn handle_v1_checkpoints_preview(
 }
 
 pub async fn handle_v1_checkpoints_restore(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<CheckpointsPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

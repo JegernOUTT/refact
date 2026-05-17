@@ -2,13 +2,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 use tokio::sync::Mutex as AMutex;
 
-use axum::Extension;
+use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use tracing::info;
 use crate::call_validation::{CodeCompletionPost, code_completion_post_validate};
 use crate::caps::resolve_completion_model;
 use crate::completion_cache;
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::privacy::{check_file_privacy, load_privacy_if_needed};
@@ -113,18 +114,20 @@ pub async fn handle_v1_code_completion(
 }
 
 pub async fn handle_v1_code_completion_web(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let mut code_completion_post = serde_json::from_slice::<CodeCompletionPost>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     handle_v1_code_completion(gcx.clone(), &mut code_completion_post).await
 }
 
 pub async fn handle_v1_code_completion_prompt(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     // Almost the same function, but only returns the prompt (good for generating data)
     let mut post = serde_json::from_slice::<CodeCompletionPost>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;

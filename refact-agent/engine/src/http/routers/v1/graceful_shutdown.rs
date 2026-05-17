@@ -1,15 +1,16 @@
-use axum::Extension;
+use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response};
 use serde_json::json;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::SharedGlobalContext;
 
 pub async fn handle_v1_graceful_shutdown(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     _: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let gcx_locked = global_context.read().await;
     gcx_locked
         .ask_shutdown_sender

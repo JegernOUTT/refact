@@ -1,4 +1,4 @@
-use axum::Extension;
+use axum::extract::State;
 use axum::extract::{Path, Query};
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::ext::config_dirs::{CommandSource, ExtDirs, get_ext_dirs};
 use crate::ext::hooks::{HookConfig, HookEvent, load_hooks};
@@ -619,8 +620,9 @@ pub struct ExtRegistryResponse {
 }
 
 pub async fn handle_v1_ext_registry(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let config_dir = gcx.read().await.config_dir.clone();
     let ext_dirs = get_ext_dirs(gcx.clone()).await;
 
@@ -718,10 +720,11 @@ pub struct SkillDetailResponse {
 }
 
 pub async fn handle_v1_ext_skill_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<ScopeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_name(&name) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -849,10 +852,11 @@ pub struct SaveSkillRequest {
 }
 
 pub async fn handle_v1_ext_skill_put(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_name(&name) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -1000,9 +1004,10 @@ pub struct CreateSkillRequest {
 }
 
 pub async fn handle_v1_ext_skill_post(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: CreateSkillRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -1066,10 +1071,11 @@ pub async fn handle_v1_ext_skill_post(
 }
 
 pub async fn handle_v1_ext_skill_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<ScopeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_name(&name) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -1117,10 +1123,11 @@ pub struct CommandDetailResponse {
 }
 
 pub async fn handle_v1_ext_command_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<ScopeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_name(&name) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -1229,10 +1236,11 @@ pub struct SaveCommandRequest {
 }
 
 pub async fn handle_v1_ext_command_put(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_name(&name) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -1357,9 +1365,10 @@ pub struct CreateCommandRequest {
 }
 
 pub async fn handle_v1_ext_command_post(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: CreateCommandRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -1410,10 +1419,11 @@ pub async fn handle_v1_ext_command_post(
 }
 
 pub async fn handle_v1_ext_command_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<ScopeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_name(&name) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -1455,9 +1465,10 @@ pub struct HooksResponse {
 }
 
 pub async fn handle_v1_ext_hooks_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<ScopeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Some(ref draft_id) = query.draft_id {
         let draft_data = {
             let buddy_arc = gcx.read().await.buddy.clone();
@@ -1544,10 +1555,11 @@ pub struct SaveHooksRequest {
 }
 
 pub async fn handle_v1_ext_hooks_put(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<ScopeQuery>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: SaveHooksRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -1621,10 +1633,11 @@ pub async fn handle_v1_ext_hooks_put(
 }
 
 pub async fn handle_v1_ext_hooks_delete_by_index(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(index): Path<usize>,
     Query(query): Query<ScopeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let scope_str_val = match query.scope.as_deref() {
         Some(s) => s,
         None => {

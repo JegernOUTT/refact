@@ -1,4 +1,4 @@
-use axum::Extension;
+use axum::extract::{Extension, State};
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::response::Result;
@@ -18,6 +18,7 @@ use crate::buddy::types::{
     BuddyAction, BuddyDraft, BuddyPulse, CustomizationKind, DefaultsKind, DraftKind,
     InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
 };
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::ext::config_dirs::get_ext_dirs;
 use crate::ext::extensions_marketplace::{
@@ -96,9 +97,10 @@ async fn validate_existing_draft(
 }
 
 pub async fn handle_v1_buddy_opportunities_list(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<OpportunitiesQuery>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
     let mut opps = match lock.as_ref() {
@@ -119,10 +121,11 @@ pub async fn handle_v1_buddy_opportunities_list(
 }
 
 pub async fn handle_v1_buddy_opportunity_accept(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
     body: Option<axum::extract::Json<AcceptRequest>>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = body.map(|b| b.0).unwrap_or_default();
 
     let buddy_arc = gcx.read().await.buddy.clone();
@@ -1057,9 +1060,10 @@ async fn create_investigation_chat(
 }
 
 pub async fn handle_v1_buddy_opportunity_dismiss(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {

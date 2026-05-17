@@ -1,12 +1,12 @@
-use axum::Extension;
+use axum::extract::State;
 use axum::extract::Query;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use serde::Serialize;
 use std::collections::HashMap;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::SharedGlobalContext;
 use crate::knowledge_graph::build_knowledge_graph;
 
 fn normalize_tag(tag: &str) -> String {
@@ -60,8 +60,9 @@ struct KnowledgeGraphJson {
 
 pub async fn handle_v1_knowledge_graph(
     Query(params): Query<HashMap<String, String>>,
-    Extension(gcx): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let include_content = params
         .get("include_content")
         .and_then(|v| v.parse::<u8>().ok())

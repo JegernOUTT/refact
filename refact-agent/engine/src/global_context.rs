@@ -268,8 +268,9 @@ pub struct GlobalContext {
 pub type SharedGlobalContext = Arc<ARwLock<GlobalContext>>; // TODO: remove this type alias, confusing
 
 impl GlobalContext {
-    pub fn app_state(&self) -> AppState {
+    pub fn app_state(&self, gcx: SharedGlobalContext) -> AppState {
         AppState {
+            gcx,
             runtime: RuntimeServices {
                 shutdown_flag: self.shutdown_flag.clone(),
                 cmdline: Arc::new(self.cmdline.clone()),
@@ -704,7 +705,7 @@ pub mod tests {
     #[tokio::test]
     async fn app_state_from_test_gcx_clones() {
         let gcx = make_test_gcx().await;
-        let app_state = gcx.read().await.app_state();
+        let app_state = gcx.read().await.app_state(gcx.clone());
         let cloned = app_state.clone();
 
         assert_eq!(cloned.paths.app_searchable_id, "test");

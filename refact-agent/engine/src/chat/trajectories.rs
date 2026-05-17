@@ -3,7 +3,7 @@ use std::sync::{Arc, Weak};
 use std::time::Instant;
 use axum::extract::Path as AxumPath;
 use axum::http::{Response, StatusCode};
-use axum::Extension;
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -14,6 +14,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::call_validation::{ChatMessage, ChatContent};
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
@@ -2322,9 +2323,10 @@ async fn trajectory_data_to_meta_validated(
 }
 
 pub async fn handle_v1_trajectories_list(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<TrajectoriesListQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let limit = params.limit.unwrap_or(50).min(200);
     let cursor_filter = match &params.cursor {
         Some(c) => {
@@ -2499,8 +2501,9 @@ pub async fn list_all_trajectories_meta(
 }
 
 pub async fn handle_v1_trajectories_all(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let result = list_all_trajectories_meta(gcx)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -2587,9 +2590,10 @@ async fn collect_task_trajectories(
 }
 
 pub async fn handle_v1_trajectories_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_trajectory_id(&id)?;
     let file_path = find_trajectory_path(gcx, &id).await.ok_or_else(|| {
         ScratchError::new(StatusCode::NOT_FOUND, "Trajectory not found".to_string())
@@ -2605,10 +2609,11 @@ pub async fn handle_v1_trajectories_get(
 }
 
 pub async fn handle_v1_trajectories_save(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     AxumPath(id): AxumPath<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_trajectory_id(&id)?;
     let data: TrajectoryData = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
@@ -2732,9 +2737,10 @@ pub async fn handle_v1_trajectories_save(
 }
 
 pub async fn handle_v1_trajectories_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_trajectory_id(&id)?;
     let file_path = find_trajectory_path(gcx.clone(), &id)
         .await
@@ -2782,8 +2788,9 @@ pub async fn handle_v1_trajectories_delete(
 }
 
 pub async fn handle_v1_trajectories_subscribe(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let rx = {
         let gcx_locked = gcx.read().await;
         match &gcx_locked.trajectory_events_tx {

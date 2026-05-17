@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::collections::HashMap;
-use axum::Extension;
+use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use url::Url;
 
-use crate::global_context::SharedGlobalContext;
 use crate::ast::ast_structs::AstDefinition;
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::ast::treesitter::structs::SymbolType;
 
@@ -49,9 +49,10 @@ impl CodeLensCache {
 }
 
 pub async fn handle_v1_code_lens(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<CodeLensPost>(&body_bytes).map_err(|e| {
         tracing::info!("chat handler cannot parse input:\n{:?}", body_bytes);
         ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e))

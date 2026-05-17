@@ -1,19 +1,17 @@
-use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
-
-use axum::Extension;
+use axum::extract::State;
 use axum::extract::Query;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use serde::Deserialize;
 
 use crate::caps::model_caps;
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 pub async fn handle_v1_ping(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Response<Body> {
+    let gcx = app.gcx.clone();
     let ping_message: String = gcx.read().await.cmdline.ping_message.clone();
     Response::builder()
         .header("Content-Type", "application/json")
@@ -22,8 +20,9 @@ pub async fn handle_v1_ping(
 }
 
 pub async fn handle_v1_caps(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let caps_result =
         crate::global_context::try_load_caps_quickly_if_not_present(global_context.clone(), 0)
             .await;
@@ -52,9 +51,10 @@ pub struct ModelCapsQuery {
 }
 
 pub async fn handle_v1_model_capabilities(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<ModelCapsQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let caps = model_caps::get_model_caps(gcx.clone(), query.refresh)
         .await
         .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
@@ -87,9 +87,10 @@ pub async fn handle_v1_model_capabilities(
 }
 
 pub async fn handle_v1_model_supported(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<ModelCapsQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let model_name = query.model.ok_or_else(|| {
         ScratchError::new(
             StatusCode::BAD_REQUEST,

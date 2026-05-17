@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
+use axum::extract::FromRef;
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock, Semaphore};
 
@@ -16,7 +17,7 @@ use crate::chat::SessionsMap;
 use crate::completion_cache::CompletionCache;
 use crate::files_blocklist::IndexingEverywhere;
 use crate::files_in_workspace::DocumentsState;
-use crate::global_context::{AtCommandsPreviewCache, CommandLine};
+use crate::global_context::{AtCommandsPreviewCache, CommandLine, SharedGlobalContext};
 use crate::http::routers::v1::code_lens::CodeLensCache;
 use crate::http::routers::v1::sidebar::NotificationEvent;
 use crate::integrations::browser_runtime::BrowserRuntime;
@@ -113,6 +114,7 @@ pub struct IntegrationServices {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub gcx: SharedGlobalContext,
     pub runtime: RuntimeServices,
     pub paths: PathServices,
     pub model: ModelServices,
@@ -120,4 +122,52 @@ pub struct AppState {
     pub chat: ChatServices,
     pub buddy: BuddyServices,
     pub integrations: IntegrationServices,
+}
+
+impl FromRef<AppState> for SharedGlobalContext {
+    fn from_ref(app: &AppState) -> Self {
+        app.gcx.clone()
+    }
+}
+
+impl FromRef<AppState> for RuntimeServices {
+    fn from_ref(app: &AppState) -> Self {
+        app.runtime.clone()
+    }
+}
+
+impl FromRef<AppState> for PathServices {
+    fn from_ref(app: &AppState) -> Self {
+        app.paths.clone()
+    }
+}
+
+impl FromRef<AppState> for ModelServices {
+    fn from_ref(app: &AppState) -> Self {
+        app.model.clone()
+    }
+}
+
+impl FromRef<AppState> for WorkspaceServices {
+    fn from_ref(app: &AppState) -> Self {
+        app.workspace.clone()
+    }
+}
+
+impl FromRef<AppState> for ChatServices {
+    fn from_ref(app: &AppState) -> Self {
+        app.chat.clone()
+    }
+}
+
+impl FromRef<AppState> for BuddyServices {
+    fn from_ref(app: &AppState) -> Self {
+        app.buddy.clone()
+    }
+}
+
+impl FromRef<AppState> for IntegrationServices {
+    fn from_ref(app: &AppState) -> Self {
+        app.integrations.clone()
+    }
 }

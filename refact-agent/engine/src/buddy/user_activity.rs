@@ -452,7 +452,8 @@ mod tests {
     #[tokio::test]
     async fn post_user_action_endpoint_writes_to_ring() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = crate::http::routers::v1::make_v1_router().layer(Extension(gcx.clone()));
+        let app_state = gcx.read().await.app_state(gcx.clone());
+        let app = crate::http::routers::v1::make_v1_router(gcx.clone(), app_state);
         let body = serde_json::to_vec(&UserAction::ChatStarted {
             chat_id: "chat-1".to_string(),
             first_user_text_preview: "hello".to_string(),

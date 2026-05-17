@@ -1,14 +1,13 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use axum::extract::Path;
 use axum::http::{Response, StatusCode};
-use axum::Extension;
+use axum::extract::State;
 use hyper::Body;
-use tokio::sync::{broadcast, RwLock as ARwLock};
+use tokio::sync::broadcast;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::worktrees::types::WorktreeMeta;
 
@@ -53,9 +52,10 @@ fn command_error_response(status: StatusCode, code: &str, error: String) -> Resp
 }
 
 pub async fn handle_v1_chat_subscribe(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let chat_id = params
         .get("chat_id")
         .ok_or_else(|| ScratchError::new(StatusCode::BAD_REQUEST, "chat_id required".to_string()))?
@@ -158,10 +158,11 @@ pub async fn handle_v1_chat_subscribe(
 }
 
 pub async fn handle_v1_chat_command(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(chat_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_trajectory_id(&chat_id)?;
 
     let request: CommandRequest = serde_json::from_slice(&body_bytes)
@@ -470,9 +471,10 @@ pub async fn handle_v1_chat_command(
 }
 
 pub async fn handle_v1_chat_cancel_queued(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path((chat_id, client_request_id)): Path<(String, String)>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_trajectory_id(&chat_id)?;
 
     let sessions = {

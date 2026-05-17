@@ -1,23 +1,22 @@
 use std::path::PathBuf;
-use std::sync::Arc;
-use axum::Extension;
+use axum::extract::State;
 use axum::http::{Response, StatusCode};
 use hyper::Body;
 use serde::Deserialize;
-use tokio::sync::RwLock as ARwLock;
 use regex::Regex;
 use axum::extract::Path;
 use axum::extract::Query;
 use rust_embed::RustEmbed;
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use crate::integrations::setting_up_integrations::split_path_into_project_and_integration;
 use crate::integrations::mcp::session_mcp::SessionMCP;
 
 pub async fn handle_v1_integrations(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     _: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let integrations =
         crate::integrations::setting_up_integrations::integrations_all(gcx.clone(), true).await;
     let payload = serde_json::to_string_pretty(&integrations).map_err(|e| {
@@ -34,9 +33,10 @@ pub async fn handle_v1_integrations(
 }
 
 pub async fn handle_v1_integrations_filtered(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(integr_name): Path<String>,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let integrations_result: crate::integrations::setting_up_integrations::IntegrationResult =
         crate::integrations::setting_up_integrations::integrations_all(gcx.clone(), true).await;
     let mut filtered_integrations = Vec::new();
@@ -111,9 +111,10 @@ struct IntegrationGetPost {
 }
 
 pub async fn handle_v1_integration_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<IntegrationGetPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -153,9 +154,10 @@ struct IntegrationSavePost {
 }
 
 pub async fn handle_v1_integration_save(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<IntegrationSavePost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -253,9 +255,10 @@ pub struct IntegrationsMcpLogsRequest {
 }
 
 pub async fn handle_v1_integrations_mcp_logs(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<IntegrationsMcpLogsRequest>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

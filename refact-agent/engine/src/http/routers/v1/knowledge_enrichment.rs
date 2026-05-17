@@ -1,9 +1,10 @@
+use crate::app_state::AppState;
 use std::collections::HashSet;
 use std::path::{Component, Path as FilePath, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock as ARwLock;
 use regex::Regex;
-use axum::extract::{Extension, Path};
+use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use hyper::StatusCode;
@@ -1062,9 +1063,10 @@ pub struct MemoryEnrichmentPreviewResponse {
 /// POST /v1/chats/:chat_id/memory-enrichment/preview
 pub async fn handle_v1_memory_enrichment_preview(
     Path(_chat_id): Path<String>,
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Json(payload): Json<MemoryEnrichmentPreviewRequest>,
 ) -> impl IntoResponse {
+    let gcx = app.gcx.clone();
     let text = payload.text.trim().to_string();
     if text.is_empty() {
         return (

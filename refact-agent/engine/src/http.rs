@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use axum::{
-    Extension,
     http::{StatusCode, Uri},
     response::IntoResponse,
 };
@@ -51,7 +50,8 @@ pub async fn start_server(
         match builder {
             Ok(builder) => {
                 info!("HTTP server listening on {}", addr);
-                let router = make_refact_http_server().layer(Extension(gcx.clone()));
+                let app_state = gcx.read().await.app_state(gcx.clone());
+                let router = make_refact_http_server(gcx.clone(), app_state);
                 let gcx_for_shutdown = gcx.clone();
                 let shutdown = async move {
                     crate::global_context::block_until_signal(ask_shutdown_receiver, shutdown_flag)

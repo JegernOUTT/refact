@@ -1,5 +1,5 @@
 use axum::response::Result;
-use axum::Extension;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::execute_at::{execute_at_commands_in_query, parse_words_from_line};
 use crate::call_validation::{ChatMeta, PostprocessSettings, SubchatParameters};
 use crate::caps::resolve_chat_model;
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::global_context::try_load_caps_quickly_if_not_present;
 use crate::global_context::GlobalContext;
@@ -235,9 +236,10 @@ pub struct CommandExecuteResponse {
 }
 
 pub async fn handle_v1_command_completion(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<CommandCompletionPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -347,9 +349,10 @@ async fn count_tokens(
 }
 
 pub async fn handle_v1_command_preview(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<CommandPreviewPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -503,9 +506,10 @@ pub async fn handle_v1_command_preview(
 }
 
 pub async fn handle_v1_at_command_execute(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     wait_for_indexing_if_needed(global_context.clone()).await;
 
     let post = serde_json::from_slice::<CommandExecutePost>(&body_bytes).map_err(|e| {
@@ -748,8 +752,9 @@ pub struct QueryLineArg {
 }
 
 pub async fn handle_v1_slash_commands(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let (commands, skills) = load_slash_commands_and_skills(global_context).await;
     let response = SlashCommandsListResponse {
         commands: commands

@@ -1,4 +1,4 @@
-use axum::Extension;
+use axum::extract::State;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::response::Result;
@@ -16,6 +16,7 @@ use crate::buddy::storage::{enqueue_memory_op, load_memory_ops};
 use crate::buddy::types::{BuddyActivity, BuddyCareAction, BuddyConversationEntry, BuddySuggestion};
 use crate::buddy::user_activity::{time_of_day_pattern, UserAction};
 use crate::buddy::voice_service::SpeechIntent;
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 
@@ -44,9 +45,10 @@ pub struct BuddyArtifactRequest {
 }
 
 pub async fn handle_v1_buddy_user_action(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(action): axum::Json<UserAction>,
 ) -> Result<StatusCode, ScratchError> {
+    let gcx = app.gcx.clone();
     let user_activity = gcx.read().await.user_activity.clone();
     let mut ring = user_activity.lock().await;
     ring.push(action);
@@ -57,9 +59,10 @@ pub async fn handle_v1_buddy_user_action(
 }
 
 pub async fn handle_v1_buddy_user_activity(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<UserActivityQuery>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let user_activity = gcx.read().await.user_activity.clone();
     let ring = user_activity.lock().await;
     let actions = ring.last_hours(query.hours.unwrap_or(24));
@@ -71,16 +74,18 @@ pub async fn handle_v1_buddy_user_activity(
 }
 
 pub async fn handle_v1_buddy_pulse_preview(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     Ok(axum::Json(serde_json::json!({
         "payload": build_buddy_pulse_payload(gcx).await
     })))
 }
 
 pub async fn handle_v1_buddy_artifacts(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<crate::buddy::memory_lifecycle::MemoryOpsState>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
     let state = lock
@@ -91,16 +96,18 @@ pub async fn handle_v1_buddy_artifacts(
 }
 
 pub async fn handle_v1_buddy_artifact_approve(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<BuddyArtifactRequest>,
 ) -> Result<StatusCode, ScratchError> {
+    let gcx = app.gcx.clone();
     update_buddy_artifact_status(gcx, req.op_id, MemoryOpStatus::Approved).await
 }
 
 pub async fn handle_v1_buddy_artifact_reject(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<BuddyArtifactRequest>,
 ) -> Result<StatusCode, ScratchError> {
+    let gcx = app.gcx.clone();
     update_buddy_artifact_status(gcx, req.op_id, MemoryOpStatus::Rejected).await
 }
 
@@ -160,8 +167,9 @@ async fn update_buddy_artifact_status(
 }
 
 pub async fn handle_v1_buddy_snapshot(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
     match lock.as_ref() {
@@ -182,8 +190,9 @@ pub async fn handle_v1_buddy_snapshot(
 }
 
 pub async fn handle_v1_buddy_settings_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
     match lock.as_ref() {
@@ -210,9 +219,10 @@ pub struct BuddySettingsRequest {
 }
 
 pub async fn handle_v1_buddy_settings_update(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<BuddySettingsRequest>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Some(pi) = req.palette_index {
         if pi > MAX_PALETTE_INDEX {
             return Err(ScratchError::new(
@@ -348,9 +358,10 @@ async fn refresh_completed_quest_with_voice(
 }
 
 pub async fn handle_v1_buddy_care(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<BuddyCareRequest>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
@@ -402,8 +413,9 @@ pub async fn handle_v1_buddy_care(
 }
 
 pub async fn handle_v1_buddy_personality_reroll(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
@@ -455,8 +467,9 @@ pub async fn handle_v1_buddy_personality_reroll(
 }
 
 pub async fn handle_v1_buddy_quest_dismiss(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<StatusCode, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     match lock.as_mut() {
@@ -472,9 +485,10 @@ pub async fn handle_v1_buddy_quest_dismiss(
 }
 
 pub async fn handle_v1_buddy_quest_accept(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<BuddyQuestAcceptRequest>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
@@ -551,8 +565,9 @@ pub async fn handle_v1_buddy_quest_accept(
 }
 
 pub async fn handle_v1_buddy_activities(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<Vec<BuddyActivity>>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
     let activities = lock
@@ -568,9 +583,10 @@ pub struct ConversationsListQuery {
 }
 
 pub async fn handle_v1_buddy_conversations_list(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<ConversationsListQuery>,
 ) -> Result<axum::Json<Vec<BuddyConversationEntry>>, ScratchError> {
+    let gcx = app.gcx.clone();
     let project_root = crate::files_correction::get_project_dirs(gcx.clone())
         .await
         .into_iter()
@@ -594,9 +610,10 @@ pub async fn handle_v1_buddy_conversations_list(
 }
 
 pub async fn handle_v1_buddy_conversations_create(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: axum::body::Bytes,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let chat_id = uuid::Uuid::new_v4().to_string();
     let created_at = chrono::Utc::now().to_rfc3339();
     let body = if body_bytes.is_empty() {
@@ -677,9 +694,10 @@ pub struct BuddyInvestigationContextResponse {
 }
 
 pub async fn handle_v1_buddy_investigation_context(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DiagnosticsCollectRequest>,
 ) -> Result<axum::Json<BuddyInvestigationContextResponse>, ScratchError> {
+    let gcx = app.gcx.clone();
     let log_lines = crate::buddy::issues::investigation_logs(
         gcx.clone(),
         &req.error,
@@ -706,9 +724,10 @@ pub struct CreateSetupRequest {
 }
 
 pub async fn handle_v1_buddy_conversations_create_setup(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<CreateSetupRequest>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let project_root = crate::files_correction::get_project_dirs(gcx.clone())
         .await
         .into_iter()
@@ -783,9 +802,10 @@ pub async fn handle_v1_buddy_conversations_create_setup(
 }
 
 pub async fn handle_v1_buddy_suggestion_dismiss(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     match lock.as_mut() {
@@ -803,9 +823,10 @@ pub async fn handle_v1_buddy_suggestion_dismiss(
 /// Dismiss a runtime event (e.g. a frontend window_error) by its id.
 /// Persists `dismissed: true` on the event so it stays hidden across reloads.
 pub async fn handle_v1_buddy_runtime_dismiss(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     match lock.as_mut() {
@@ -832,9 +853,10 @@ pub struct DiagnosticsCollectRequest {
 }
 
 pub async fn handle_v1_buddy_diagnostics_collect(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DiagnosticsCollectRequest>,
 ) -> Result<axum::Json<DiagnosticContext>, ScratchError> {
+    let gcx = app.gcx.clone();
     let mut ctx = crate::buddy::diagnostics::collect_diagnostics(gcx.clone(), &req.error).await;
     ctx.source_file = req
         .source_file
@@ -868,8 +890,9 @@ pub async fn handle_v1_buddy_diagnostics_collect(
 }
 
 pub async fn handle_v1_buddy_diagnostics_list(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<Vec<DiagnosticContext>>, ScratchError> {
+    let gcx = app.gcx.clone();
     let project_root = crate::buddy::actor::latest_project_root(gcx.clone())
         .await
         .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
@@ -889,9 +912,10 @@ pub struct IssueCreateRequest {
 }
 
 pub async fn handle_v1_buddy_issues_create(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<IssueCreateRequest>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let pre_diag = if req.diagnostic_index.is_none()
         && req.diagnostic_id.is_none()
         && req.collected_at.is_none()
